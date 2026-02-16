@@ -1,0 +1,320 @@
+"use client";
+
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ORG_USER_ROLE_LABELS,
+  ORG_USER_ROLES,
+  OrgUserRole,
+  EnterpriseOrg,
+  INDUSTRY_IDS,
+  INDUSTRY_LABELS,
+  IndustryId,
+  UserProfile,
+  UserStatus,
+  formatSecondsAsClock,
+} from "@voicepractice/shared";
+import { AdminShell } from "../../../../src/components/AdminShell";
+import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
+import { adminFetch } from "../../../../src/lib/api";
+
+interface OrgDashboardUserRow {
+  userId: string;
+  email: string;
+  status: UserStatus;
+  orgRole: OrgUserRole;
+  rawSecondsThisPeriod: number;
+  billedSecondsThisPeriod: number;
+}
+
+interface OrgDashboardResponse {
+  generatedAt: string;
+  org: EnterpriseOrg;
+  billingPeriod: {
+    periodStartAt: string;
+    periodEndAt: string;
+    nextRenewalAt: string;
+  };
+  users: OrgDashboardUserRow[];
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
+}
+
+export default function EnterpriseOrgPage() {
+  useRequireAdminToken();
+  const params = useParams();
+  const orgId = useMemo(() => {
+    const raw = params?.orgId;
+    return Array.isArray(raw) ? raw[0] : (raw as string | undefined) ?? "";
+  }, [params]);
+
+  const [dashboard, setDashboard] = useState<OrgDashboardResponse | null>(null);
+  const [selectedIndustryId, setSelectedIndustryId] = useState<IndustryId>("people_management");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [savingIndustries, setSavingIndustries] = useState(false);
+  const [savingUserId, setSavingUserId] = useState<string | null>(null);
+
+  const load = async () => {
+    if (!orgId) {
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`);
+      setDashboard(payload);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not load enterprise account.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId]);
+
+  const activeIndustries = dashboard?.org.activeIndustries ?? [];
+  const selectedIndustryActive = activeIndustries.includes(selectedIndustryId);
+
+  const segmentsActiveLabel =
+    activeIndustries.length > 0
+      ? activeIndustries.map((id) => INDUSTRY_LABELS[id]).join(", ")
+      : "-";
+
+  const setIndustryActive = async (nextActive: boolean) => {
+    if (!dashboard) {
+      return;
+    }
+
+    const org = dashboard.org;
+    const current = Array.isArray(org.activeIndustries) ? org.activeIndustries : [];
+    const isActive = current.includes(selectedIndustryId);
+    if (nextActive === isActive) {
+      return;
+    }
+
+    const nextIndustries = nextActive
+      ? Array.from(new Set([...current, selectedIndustryId]))
+      : current.filter((id) => id !== selectedIndustryId);
+
+    if (nextIndustries.length === 0) {
+      setError("At least one industry must remain active.");
+      return;
+    }
+
+    setSavingIndustries(true);
+    setError(null);
+    try {
+      const updatedOrg = await adminFetch<EnterpriseOrg>(`/orgs/${org.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ activeIndustries: nextIndustries }),
+      });
+
+      setDashboard((prev) => (prev ? { ...prev, org: updatedOrg } : prev));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update segments.");
+    } finally {
+      setSavingIndustries(false);
+    }
+  };
+
+  const patchEnterpriseUser = async (
+    userId: string,
+    patch: Partial<Pick<UserProfile, "orgRole" | "status">>,
+  ) => {
+    setSavingUserId(userId);
+    setError(null);
+
+    try {
+      const updated = await adminFetch<UserProfile>(`/users/${userId}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+
+      setDashboard((prev) => {
+        if (!prev) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          users: prev.users.map((row) =>
+            row.userId === userId
+              ? {
+                  ...row,
+                  status: updated.status,
+                  orgRole: updated.orgRole,
+                }
+              : row,
+          ),
+        };
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update user.");
+    } finally {
+      setSavingUserId(null);
+    }
+  };
+
+  return (
+    <AdminShell title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}>
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <div>
+            <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
+            <div className="small">{dashboard?.org.id ?? ""}</div>
+          </div>
+          <Link className="button" href="/users">
+            Back to Accounts
+          </Link>
+        </div>
+
+        {error ? <p className="error">{error}</p> : null}
+
+        {dashboard ? (
+          <div className="grid" style={{ marginTop: 10 }}>
+            <div>
+              <label>Date Established</label>
+              <div>{formatDate(dashboard.org.createdAt)}</div>
+            </div>
+            <div>
+              <label>Next Renewal Date</label>
+              <div>{formatDate(dashboard.billingPeriod.nextRenewalAt)}</div>
+            </div>
+            <div>
+              <label>Company Contact</label>
+              <div>{dashboard.org.contactName}</div>
+            </div>
+            <div>
+              <label>Contact Email</label>
+              <div>{dashboard.org.contactEmail}</div>
+            </div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <label>Segments Active</label>
+              <div>{segmentsActiveLabel}</div>
+              <div className="small">
+                Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
+                {formatDate(dashboard.billingPeriod.periodEndAt)}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card">
+        <h3>Segment Selection</h3>
+        <p className="small" style={{ marginTop: 0 }}>
+          Select an industry and toggle whether it is active for this company.
+        </p>
+        <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
+          <div style={{ minWidth: 260, flex: "1 1 260px" }}>
+            <label>Industry</label>
+            <select
+              value={selectedIndustryId}
+              onChange={(event) => setSelectedIndustryId(event.target.value as IndustryId)}
+            >
+              {INDUSTRY_IDS.map((id) => (
+                <option key={id} value={id}>
+                  {INDUSTRY_LABELS[id]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              className={selectedIndustryActive ? "primary" : undefined}
+              disabled={savingIndustries}
+              onClick={() => void setIndustryActive(true)}
+            >
+              Active
+            </button>
+            <button
+              type="button"
+              className={!selectedIndustryActive ? "primary" : undefined}
+              disabled={savingIndustries}
+              onClick={() => void setIndustryActive(false)}
+            >
+              Inactive
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Users</h3>
+        <p className="small" style={{ marginTop: 0 }}>
+          Usage shown is billed time within the current annual billing period.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Locked Out</th>
+              <th>Usage This Billing Period</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(dashboard?.users ?? []).length === 0 ? (
+              <tr>
+                <td colSpan={4} className="small">
+                  {loading ? "Loading..." : "No users found for this enterprise account."}
+                </td>
+              </tr>
+            ) : (
+              (dashboard?.users ?? []).map((user) => (
+                <tr key={user.userId}>
+                  <td>
+                    <div>{user.email}</div>
+                    <div className="small">{user.userId}</div>
+                  </td>
+                  <td>
+                    <select
+                      value={user.orgRole}
+                      disabled={savingUserId === user.userId}
+                      onChange={(event) => {
+                        void patchEnterpriseUser(user.userId, { orgRole: event.target.value as OrgUserRole });
+                      }}
+                    >
+                      {ORG_USER_ROLES.map((role) => (
+                        <option key={role} value={role}>
+                          {ORG_USER_ROLE_LABELS[role]}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    <select
+                      value={user.status}
+                      disabled={savingUserId === user.userId}
+                      onChange={(event) => {
+                        void patchEnterpriseUser(user.userId, { status: event.target.value as UserStatus });
+                      }}
+                    >
+                      <option value="active">Active</option>
+                      <option value="disabled">Locked</option>
+                    </select>
+                  </td>
+                  <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </AdminShell>
+  );
+}

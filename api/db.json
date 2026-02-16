@@ -1,0 +1,29 @@
+﻿{
+  "config": {
+    "activeSegmentId": "project_manager",
+    "defaultDifficulty": "medium",
+    "defaultPersonaStyle": "skeptical",
+    "segments": [],
+    "tiers": [],
+    "enterprise": {
+      "visibleInApp": true,
+      "contactEmail": "enterprise@example.com",
+      "contactUrl": "https://example.com/enterprise",
+      "defaultOrgDailySecondsQuota": 28800,
+      "defaultPerUserDailySecondsCap": 3600,
+      "allowManualBonusSeconds": true
+    },
+    "featureFlags": {
+      "scoringEnabled": true,
+      "customScenarioBuilder": false
+    },
+    "updatedAt": ""
+  },
+  "users": [],
+  "orgs": [],
+  "usageSessions": [],
+  "mobileAuthTokens": [],
+  "admin": {
+    "passwordHash": null
+  }
+}

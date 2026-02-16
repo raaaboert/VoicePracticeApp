@@ -1,0 +1,23 @@
+{
+  "name": "voicepracticeapp-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "mobile",
+    "admin-web",
+    "api",
+    "shared"
+  ],
+  "scripts": {
+    "start:mobile": "npm run build --workspace shared && npm run start --workspace mobile",
+    "start:api": "npm run build --workspace shared && npm run dev --workspace api",
+    "start:admin": "npm run build --workspace shared && npm run dev --workspace admin-web",
+    "start:api:prod": "npm run build --workspace shared && npm run build --workspace api && npm run start --workspace api",
+    "start:admin:prod": "npm run build --workspace shared && npm run build --workspace admin-web && npm run start --workspace admin-web",
+    "start:review": "powershell -ExecutionPolicy Bypass -File .\\scripts\\launch-review-stack.ps1",
+    "open:android": "scripts\\open-expo-on-emulator.cmd",
+    "build:api": "npm run build --workspace shared && npm run build --workspace api",
+    "build:shared": "npm run build --workspace shared",
+    "smoke:stack": "node scripts/smoke-stack.mjs"
+  }
+}
