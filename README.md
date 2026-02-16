@@ -100,3 +100,11 @@ Run startup/health checks for API + admin + mobile:
 ```bash
 npm run smoke:stack
 ```
+
+## Ops Helper
+
+Assign an existing user email to an enterprise org (creates org if needed):
+
+```bash
+node scripts/ops/assign-enterprise-user.mjs --apiBaseUrl http://localhost:4100 --adminPassword "<admin-password>"
+```

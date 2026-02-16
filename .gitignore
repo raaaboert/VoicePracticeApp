@@ -49,5 +49,3 @@ tmp-*.png
 
 # api data
 api/db.local.json
-!shared/dist/
-!shared/dist/**

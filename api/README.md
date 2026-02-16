@@ -33,7 +33,11 @@ Create `.env` from `.env.example`:
 
 ```bash
 PORT=4100
+NODE_ENV=development
+STORAGE_PROVIDER=file
 DB_PATH=./db.local.json
+DATABASE_URL=
+CORS_ALLOWED_ORIGINS=http://localhost:3000
 ADMIN_BOOTSTRAP_PASSWORD=admin
 ADMIN_TOKEN_SECRET=replace_me_for_production
 ADMIN_TOKEN_TTL_MINUTES=720
@@ -46,7 +50,10 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 
 ## Notes
 
-- Storage is file-based JSON (`db.local.json`) for Phase 1.
+- Storage supports two providers:
+  - `file` via `DB_PATH`
+  - `postgres` via `DATABASE_URL` (durable, recommended for hosted deployments)
+- In production, set `STORAGE_PROVIDER` explicitly and provide `CORS_ALLOWED_ORIGINS`.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - Usage billing increments are 15 seconds (round-down behavior).
 - Timezone changes are scheduled for next monthly renewal.

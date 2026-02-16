@@ -1,8 +1,6 @@
 ﻿import "dotenv/config";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
 import { v4 as uuid } from "uuid";
 import multer from "multer";
@@ -67,15 +65,22 @@ import {
 } from "./aiPrompts.js";
 import { requestChatCompletion, requestTranscription } from "./openaiClient.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
+import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
+import { loadRuntimeConfig } from "./runtimeConfig.js";
 
-const PORT = Number(process.env.PORT ?? 4100);
-const DB_PATH = path.resolve(process.cwd(), process.env.DB_PATH ?? "./db.local.json");
-const ADMIN_BOOTSTRAP_PASSWORD = process.env.ADMIN_BOOTSTRAP_PASSWORD ?? "admin";
-const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET ?? "replace_me_for_production";
-const ADMIN_TOKEN_TTL_MINUTES = Number(process.env.ADMIN_TOKEN_TTL_MINUTES ?? 720);
-const MOBILE_TOKEN_SECRET = process.env.MOBILE_TOKEN_SECRET ?? ADMIN_TOKEN_SECRET;
-const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o-mini";
-const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL ?? "whisper-1";
+const runtimeConfig = loadRuntimeConfig();
+const PORT = runtimeConfig.port;
+const STORAGE_PROVIDER = runtimeConfig.storageProvider;
+const DB_PATH = runtimeConfig.dbPath;
+const DATABASE_URL = runtimeConfig.databaseUrl;
+const ADMIN_BOOTSTRAP_PASSWORD = runtimeConfig.adminBootstrapPassword;
+const ADMIN_TOKEN_SECRET = runtimeConfig.adminTokenSecret;
+const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
+const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
+const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
+const OPENAI_TRANSCRIPTION_MODEL = runtimeConfig.openAiTranscriptionModel;
+const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
+const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
 
 interface AdminTokenPayload {
@@ -1087,35 +1092,34 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 }
 
 async function loadDatabase(): Promise<ApiDatabase> {
-  const readAndParse = async (): Promise<ApiDatabase> => {
-    const raw = await fs.readFile(DB_PATH, "utf8");
-    return ensureDatabaseShape(JSON.parse(raw));
-  };
-
-  try {
-    return await readAndParse();
-  } catch (error) {
-    const code = (error as { code?: string } | null)?.code;
-    if (code === "ENOENT") {
-      const created = createDefaultDatabase();
-      await fs.writeFile(DB_PATH, JSON.stringify(created, null, 2), "utf8");
-      return created;
-    }
-
-    // A partial or corrupted read should never wipe the database. Retry once then surface the error.
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      return await readAndParse();
-    } catch {
-      throw error;
-    }
+  if (!databaseStorage) {
+    databaseStorage = createDatabaseStorage({
+      provider: STORAGE_PROVIDER,
+      dbPath: DB_PATH,
+      databaseUrl: DATABASE_URL,
+      ensureDatabaseShape,
+      createDefaultDatabase
+    });
   }
+
+  return await databaseStorage.load();
 }
 
 async function saveDatabase(db: ApiDatabase): Promise<void> {
-  await fs.writeFile(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+  if (!databaseStorage) {
+    databaseStorage = createDatabaseStorage({
+      provider: STORAGE_PROVIDER,
+      dbPath: DB_PATH,
+      databaseUrl: DATABASE_URL,
+      ensureDatabaseShape,
+      createDefaultDatabase
+    });
+  }
+
+  await databaseStorage.save(db);
 }
 
+let databaseStorage: DatabaseStorage | null = null;
 let databaseOperationQueue: Promise<void> = Promise.resolve();
 
 async function withDatabase<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
@@ -1665,8 +1669,29 @@ function isRemoteAiConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
 }
 
+function normalizeOrigin(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Native mobile and server-to-server requests often omit Origin.
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (ALLOW_ALL_BROWSER_ORIGINS || CORS_ALLOWED_ORIGINS.has(normalizeOrigin(origin))) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS origin is not allowed: ${origin}`));
+    }
+  })
+);
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_request, response) => {
@@ -4192,6 +4217,6 @@ void (async () => {
   await loadDatabase();
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
-    console.log(`VoicePractice API running on http://localhost:${PORT}`);
+    console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
 })();

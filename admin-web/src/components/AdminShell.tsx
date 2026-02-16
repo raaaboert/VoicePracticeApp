@@ -18,6 +18,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
   const isUsage = pathname.startsWith("/usage");
   const isStats = pathname.startsWith("/stats");
   const isSupport = pathname.startsWith("/support");
+  const navClass = (isActive: boolean): string => (isActive ? "active" : "");
 
   return (
     <main>
@@ -25,19 +26,19 @@ export function AdminShell({ title, children }: AdminShellProps) {
         <div className="topbar">
           <div className="brand">VoicePractice Admin</div>
           <div className="nav">
-            <Link href="/users" style={isUsers ? { outline: "2px solid #39b8f6" } : undefined}>
+            <Link href="/users" className={navClass(isUsers)}>
               Accounts
             </Link>
-            <Link href="/config" style={isConfig ? { outline: "2px solid #39b8f6" } : undefined}>
+            <Link href="/config" className={navClass(isConfig)}>
               Config
             </Link>
-            <Link href="/usage" style={isUsage ? { outline: "2px solid #39b8f6" } : undefined}>
+            <Link href="/usage" className={navClass(isUsage)}>
               Usage
             </Link>
-            <Link href="/stats" style={isStats ? { outline: "2px solid #39b8f6" } : undefined}>
+            <Link href="/stats" className={navClass(isStats)}>
               Stats
             </Link>
-            <Link href="/support" style={isSupport ? { outline: "2px solid #39b8f6" } : undefined}>
+            <Link href="/support" className={navClass(isSupport)}>
               Support
             </Link>
             <button

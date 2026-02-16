@@ -9,13 +9,18 @@ interface EncryptedPayloadV1 {
 }
 
 function getTranscriptSecret(): string {
-  // For local prototyping, fall back to the admin token secret or a known placeholder.
-  // Production must override SUPPORT_TRANSCRIPT_SECRET with a strong, random value.
-  return (
-    process.env.SUPPORT_TRANSCRIPT_SECRET?.trim() ||
-    process.env.ADMIN_TOKEN_SECRET?.trim() ||
-    "replace_me_for_production"
-  );
+  const explicit = process.env.SUPPORT_TRANSCRIPT_SECRET?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase();
+  if (nodeEnv === "production") {
+    throw new Error("SUPPORT_TRANSCRIPT_SECRET is required in production.");
+  }
+
+  // Local fallback only.
+  return process.env.ADMIN_TOKEN_SECRET?.trim() || "replace_me_for_production";
 }
 
 function deriveKey(secret: string): Buffer {
@@ -64,4 +69,3 @@ export function decryptSupportTranscript(encoded: string): string {
   const plaintext = Buffer.concat([decipher.update(data), decipher.final()]);
   return plaintext.toString("utf8");
 }
-
