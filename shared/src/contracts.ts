@@ -15,6 +15,9 @@ export type OrgStatus = (typeof ORG_STATUSES)[number];
 export const ORG_USER_ROLES = ["org_admin", "user_admin", "user"] as const;
 export type OrgUserRole = (typeof ORG_USER_ROLES)[number];
 
+export const ORG_JOIN_REQUEST_STATUSES = ["pending", "approved", "rejected", "expired"] as const;
+export type OrgJoinRequestStatus = (typeof ORG_JOIN_REQUEST_STATUSES)[number];
+
 export const ORG_USER_ROLE_LABELS: Record<OrgUserRole, string> = {
   org_admin: "Org Admin",
   user_admin: "User Admin",
@@ -97,6 +100,8 @@ export interface EnterpriseOrg {
   status: OrgStatus;
   contactName: string;
   contactEmail: string;
+  emailDomain: string | null;
+  joinCode: string;
   activeIndustries: IndustryId[];
   dailySecondsQuota: number;
   perUserDailySecondsCap: number;
@@ -108,6 +113,7 @@ export interface EnterpriseOrg {
 export interface UserProfile {
   id: string;
   email: string;
+  emailVerifiedAt: string | null;
   accountType: AccountType;
   tier: TierId;
   status: UserStatus;
@@ -212,6 +218,39 @@ export interface MobileAuthRecord {
   updatedAt: string;
 }
 
+export interface EmailVerificationRecord {
+  id: string;
+  userId: string;
+  email: string;
+  codeHash: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+}
+
+export interface EnterpriseJoinRequestRecord {
+  id: string;
+  userId: string;
+  email: string;
+  emailDomain: string;
+  orgId: string;
+  orgNameSnapshot: string;
+  joinCodeSnapshot: string;
+  status: OrgJoinRequestStatus;
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decidedByUserId: string | null;
+  decisionReason: string | null;
+}
+
+export interface EnterpriseDomainMatch {
+  orgId: string;
+  orgName: string;
+  emailDomain: string;
+}
+
 export interface UsageSummary {
   rawSecondsToday: number;
   billedSecondsToday: number;
@@ -295,11 +334,27 @@ export interface MobileOnboardRequest {
 export interface MobileOnboardResponse {
   user: UserProfile;
   authToken: string;
+  verificationRequired: boolean;
+  verificationExpiresAt: string | null;
+  domainMatch: EnterpriseDomainMatch | null;
 }
 
 export interface MobileUpdateSettingsRequest {
   email?: string;
   timezone?: string;
+}
+
+export interface MobileVerifyEmailRequest {
+  userId: string;
+  code: string;
+}
+
+export interface MobileResendVerificationRequest {
+  userId: string;
+}
+
+export interface MobileSubmitOrgJoinRequest {
+  joinCode: string;
 }
 
 export interface RecordUsageSessionRequest {
@@ -333,6 +388,8 @@ export interface ApiDatabase {
   aiUsageEvents: AiUsageEvent[];
   supportCases: SupportCaseRecord[];
   mobileAuthTokens: MobileAuthRecord[];
+  emailVerifications: EmailVerificationRecord[];
+  enterpriseJoinRequests: EnterpriseJoinRequestRecord[];
   admin: {
     passwordHash: string | null;
   };
@@ -593,6 +650,10 @@ export function isIndustryId(value: string): value is IndustryId {
 
 export function isOrgUserRole(value: string): value is OrgUserRole {
   return ORG_USER_ROLES.includes(value as OrgUserRole);
+}
+
+export function isOrgJoinRequestStatus(value: string): value is OrgJoinRequestStatus {
+  return ORG_JOIN_REQUEST_STATUSES.includes(value as OrgJoinRequestStatus);
 }
 
 export function getRoleSegmentIdsForIndustries(industryIds: IndustryId[]): string[] {

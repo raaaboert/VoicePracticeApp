@@ -62,6 +62,9 @@ export default function EnterpriseOrgPage() {
   const [loading, setLoading] = useState(false);
   const [savingIndustries, setSavingIndustries] = useState(false);
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
+  const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
+  const [orgDomainInput, setOrgDomainInput] = useState("");
+  const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
 
   const load = async () => {
     if (!orgId) {
@@ -73,6 +76,8 @@ export default function EnterpriseOrgPage() {
     try {
       const payload = await adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`);
       setDashboard(payload);
+      setOrgDomainInput(payload.org.emailDomain ?? "");
+      setOrgJoinCodeInput(payload.org.joinCode ?? "");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load enterprise account.");
     } finally {
@@ -168,6 +173,31 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const saveOrgIdentity = async () => {
+    if (!dashboard) {
+      return;
+    }
+
+    setSavingOrgIdentity(true);
+    setError(null);
+    try {
+      const updated = await adminFetch<EnterpriseOrg>(`/orgs/${dashboard.org.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          emailDomain: orgDomainInput,
+          joinCode: orgJoinCodeInput,
+        }),
+      });
+      setDashboard((prev) => (prev ? { ...prev, org: updated } : prev));
+      setOrgDomainInput(updated.emailDomain ?? "");
+      setOrgJoinCodeInput(updated.joinCode ?? "");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update org identity.");
+    } finally {
+      setSavingOrgIdentity(false);
+    }
+  };
+
   return (
     <AdminShell title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}>
       <div className="card">
@@ -200,6 +230,19 @@ export default function EnterpriseOrgPage() {
             <div>
               <label>Contact Email</label>
               <div>{dashboard.org.contactEmail}</div>
+            </div>
+            <div>
+              <label>Email Domain</label>
+              <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
+            </div>
+            <div>
+              <label>Join Code</label>
+              <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
+            </div>
+            <div style={{ alignSelf: "end" }}>
+              <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
+                {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
+              </button>
             </div>
             <div style={{ gridColumn: "1 / -1" }}>
               <label>Segments Active</label>

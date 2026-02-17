@@ -1,9 +1,13 @@
 import {
   AppConfig,
   Difficulty,
+  EnterpriseDomainMatch,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  MobileResendVerificationRequest,
+  MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
+  MobileVerifyEmailRequest,
   PersonaStyle,
   RecordUsageSessionRequest,
   RecordSimulationScoreRequest,
@@ -248,6 +252,35 @@ export async function onboardMobileUser(input: MobileOnboardRequest): Promise<Mo
   });
 }
 
+export async function resendMobileVerificationEmail(
+  userId: string,
+  authToken: string,
+): Promise<{ ok: boolean; verificationExpiresAt: string }> {
+  const body: MobileResendVerificationRequest = { userId };
+  return requestJson("/mobile/onboard/resend-verification", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }, authToken);
+}
+
+export async function verifyMobileEmail(
+  userId: string,
+  code: string,
+  authToken: string,
+): Promise<{
+  user: UserProfile;
+  authToken: string;
+  verificationRequired: boolean;
+  verificationExpiresAt: string | null;
+  domainMatch: EnterpriseDomainMatch | null;
+}> {
+  const body: MobileVerifyEmailRequest = { userId, code };
+  return requestJson("/mobile/onboard/verify-email", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }, authToken);
+}
+
 export async function fetchMobileUser(userId: string, authToken: string): Promise<UserProfile> {
   return requestJson<UserProfile>(`/mobile/users/${encodeURIComponent(userId)}`, undefined, authToken);
 }
@@ -271,6 +304,61 @@ export async function fetchEntitlements(userId: string, authToken: string): Prom
   return requestJson<UserEntitlementsResponse>(
     `/mobile/users/${encodeURIComponent(userId)}/entitlements`,
     undefined,
+    authToken,
+  );
+}
+
+export async function fetchMyOrgAccessRequests(
+  userId: string,
+  authToken: string,
+): Promise<{
+  generatedAt: string;
+  requests: Array<{
+    id: string;
+    status: string;
+    email: string;
+    emailDomain: string;
+    orgId: string;
+    orgName: string;
+    joinCodeHint: string;
+    createdAt: string;
+    expiresAt: string;
+    updatedAt: string;
+    decidedAt: string | null;
+    decisionReason: string | null;
+  }>;
+}> {
+  return requestJson(
+    `/mobile/users/${encodeURIComponent(userId)}/org-access-requests`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function submitOrgAccessRequest(
+  userId: string,
+  joinCode: string,
+  authToken: string,
+): Promise<{
+  created: boolean;
+  request: {
+    id: string;
+    status: string;
+    orgId: string;
+    orgName: string;
+    emailDomain: string;
+    createdAt: string;
+    expiresAt: string;
+    updatedAt: string;
+  };
+}> {
+  const body: MobileSubmitOrgJoinRequest = { joinCode };
+  return requestJson(
+    `/mobile/users/${encodeURIComponent(userId)}/org-access-requests`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
     authToken,
   );
 }
@@ -561,6 +649,66 @@ export async function fetchOrgAdminUsers(
   return requestJson(
     `/mobile/users/${encodeURIComponent(userId)}/admin/org/users`,
     undefined,
+    authToken,
+  );
+}
+
+export async function fetchOrgAdminAccessRequests(
+  userId: string,
+  authToken: string,
+): Promise<{
+  generatedAt: string;
+  org: { id: string; name: string; emailDomain: string | null; joinCode: string };
+  requests: Array<{
+    id: string;
+    status: string;
+    userId: string;
+    email: string;
+    emailDomain: string;
+    createdAt: string;
+    expiresAt: string;
+    updatedAt: string;
+    decidedAt: string | null;
+    decisionReason: string | null;
+  }>;
+}> {
+  return requestJson(
+    `/mobile/users/${encodeURIComponent(userId)}/admin/org/access-requests`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function decideOrgAdminAccessRequest(
+  userId: string,
+  requestId: string,
+  action: "approve" | "reject",
+  authToken: string,
+  reason?: string,
+): Promise<{
+  ok: boolean;
+  request: {
+    id: string;
+    status: string;
+    userId: string;
+    email: string;
+    orgId: string;
+    createdAt: string;
+    expiresAt: string;
+    updatedAt: string;
+    decidedAt: string | null;
+    decisionReason: string | null;
+  };
+}> {
+  return requestJson(
+    `/mobile/users/${encodeURIComponent(userId)}/admin/org/access-requests/${encodeURIComponent(requestId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        action,
+        ...(reason ? { reason } : {}),
+      }),
+    },
     authToken,
   );
 }

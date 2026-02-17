@@ -48,17 +48,23 @@ import {
   fetchMobileUser,
   fetchScoreSummary,
   fetchOrgAdminAnalytics,
+  fetchOrgAdminAccessRequests,
   fetchOrgAdminDashboard,
   fetchOrgAdminUserDetail,
   fetchOrgAdminUsers,
+  fetchMyOrgAccessRequests,
   fetchTimezones,
   longPollMobileUpdates,
   onboardMobileUser,
+  resendMobileVerificationEmail,
   createSupportCase,
   recordSimulationScore,
   recordUsageSession,
+  submitOrgAccessRequest,
+  decideOrgAdminAccessRequest,
   setOrgAdminUserStatus,
   updateMobileSettings,
+  verifyMobileEmail,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
@@ -110,12 +116,15 @@ const loadSharingModule = async (): Promise<SharingModule | null> => {
 type Screen =
   | "home"
   | "onboarding"
+  | "verify_email"
+  | "domain_match"
   | "setup"
   | "simulation"
   | "scorecard"
   | "usage_dashboard"
   | "admin_home"
   | "admin_org_dashboard"
+  | "admin_org_requests"
   | "admin_user_list"
   | "admin_user_detail"
   | "settings"
@@ -570,6 +579,28 @@ export default function App() {
   const [onboardingTimezone, setOnboardingTimezone] = useState(detectedTimezone);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [isOnboardingSaving, setIsOnboardingSaving] = useState(false);
+  const [pendingVerificationUserId, setPendingVerificationUserId] = useState<string | null>(null);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [verificationExpiresAt, setVerificationExpiresAt] = useState<string | null>(null);
+  const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+  const [isVerificationSaving, setIsVerificationSaving] = useState(false);
+  const [domainMatch, setDomainMatch] = useState<{ orgId: string; orgName: string; emailDomain: string } | null>(null);
+  const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
+  const [orgRequestNotice, setOrgRequestNotice] = useState<string | null>(null);
+  const [orgRequestError, setOrgRequestError] = useState<string | null>(null);
+  const [isOrgRequestSaving, setIsOrgRequestSaving] = useState(false);
+  const [myOrgAccessRequests, setMyOrgAccessRequests] = useState<Array<{
+    id: string;
+    status: string;
+    orgName: string;
+    emailDomain: string;
+    createdAt: string;
+    expiresAt: string;
+    decidedAt: string | null;
+    decisionReason: string | null;
+  }>>([]);
+  const [orgAccessRequestsLoading, setOrgAccessRequestsLoading] = useState(false);
 
   const [settingsEmail, setSettingsEmail] = useState("");
   const [settingsTimezone, setSettingsTimezone] = useState(detectedTimezone);
@@ -599,11 +630,13 @@ export default function App() {
   type OrgAdminAnalyticsResponse = Awaited<ReturnType<typeof fetchOrgAdminAnalytics>>;
   type OrgAdminUsersResponse = Awaited<ReturnType<typeof fetchOrgAdminUsers>>;
   type OrgAdminUserDetailResponse = Awaited<ReturnType<typeof fetchOrgAdminUserDetail>>;
+  type OrgAdminAccessRequestsResponse = Awaited<ReturnType<typeof fetchOrgAdminAccessRequests>>;
 
   const [adminRangeDays, setAdminRangeDays] = useState(30);
   const [orgAdminDashboard, setOrgAdminDashboard] = useState<OrgAdminDashboardResponse | null>(null);
   const [orgAdminAnalytics, setOrgAdminAnalytics] = useState<OrgAdminAnalyticsResponse | null>(null);
   const [orgAdminUsers, setOrgAdminUsers] = useState<OrgAdminUsersResponse | null>(null);
+  const [orgAdminAccessRequests, setOrgAdminAccessRequests] = useState<OrgAdminAccessRequestsResponse | null>(null);
   const [adminUserStatusFilter, setAdminUserStatusFilter] = useState<"active" | "locked" | "all">("active");
   const [selectedAdminUserId, setSelectedAdminUserId] = useState<string>("");
   const [orgAdminUserDetail, setOrgAdminUserDetail] = useState<OrgAdminUserDetailResponse | null>(null);
@@ -833,6 +866,75 @@ export default function App() {
     }
   }, [mobileAuthToken, user]);
 
+  const refreshMyOrgAccessRequests = useCallback(async () => {
+    if (!user || !mobileAuthToken) {
+      return;
+    }
+
+    setOrgAccessRequestsLoading(true);
+    try {
+      const payload = await fetchMyOrgAccessRequests(user.id, mobileAuthToken);
+      setMyOrgAccessRequests(
+        (payload.requests ?? []).map((row) => ({
+          id: row.id,
+          status: row.status,
+          orgName: row.orgName,
+          emailDomain: row.emailDomain,
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt,
+          decidedAt: row.decidedAt,
+          decisionReason: row.decisionReason,
+        })),
+      );
+    } catch {
+      // Best-effort load for profile; keep existing rows.
+    } finally {
+      setOrgAccessRequestsLoading(false);
+    }
+  }, [mobileAuthToken, user]);
+
+  const refreshOrgAdminAccessRequests = useCallback(async () => {
+    if (!user || !mobileAuthToken) {
+      return;
+    }
+
+    const actorIsOrgAdmin = user.accountType === "enterprise" && user.orgRole === "org_admin";
+    if (!actorIsOrgAdmin) {
+      return;
+    }
+
+    setAdminLoading(true);
+    setAdminError(null);
+    try {
+      const payload = await fetchOrgAdminAccessRequests(user.id, mobileAuthToken);
+      setOrgAdminAccessRequests(payload);
+    } catch (caught) {
+      setAdminError(getErrorMessage(caught, "Could not load org access requests."));
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [mobileAuthToken, user]);
+
+  const decideOrgAccessRequest = useCallback(
+    async (requestId: string, action: "approve" | "reject") => {
+      if (!user || !mobileAuthToken) {
+        return;
+      }
+
+      setAdminLoading(true);
+      setAdminError(null);
+      try {
+        await decideOrgAdminAccessRequest(user.id, requestId, action, mobileAuthToken);
+        await Promise.all([refreshOrgAdminAccessRequests(), refreshOrgAdminUsers()]);
+      } catch (caught) {
+        setAdminError(getErrorMessage(caught, "Could not update request status."));
+      } finally {
+        setAdminLoading(false);
+      }
+    },
+    [mobileAuthToken, refreshOrgAdminAccessRequests, refreshOrgAdminUsers, user],
+  );
+
   const refreshOrgAdminUserDetail = useCallback(
     async (targetUserId: string) => {
       if (!user || !mobileAuthToken) {
@@ -918,14 +1020,56 @@ export default function App() {
       void refreshOrgAdminUsers();
     }
 
+    if (screen === "admin_org_requests") {
+      void refreshOrgAdminAccessRequests();
+    }
+
     if (screen === "admin_user_detail" && selectedAdminUserId.trim()) {
       void refreshOrgAdminUserDetail(selectedAdminUserId.trim());
     }
-  }, [orgAdminUsers, refreshOrgAdminDashboard, refreshOrgAdminUserDetail, refreshOrgAdminUsers, screen, selectedAdminUserId]);
+
+    if (screen === "profile") {
+      void refreshMyOrgAccessRequests();
+    }
+  }, [
+    orgAdminUsers,
+    refreshMyOrgAccessRequests,
+    refreshOrgAdminAccessRequests,
+    refreshOrgAdminDashboard,
+    refreshOrgAdminUserDetail,
+    refreshOrgAdminUsers,
+    screen,
+    selectedAdminUserId,
+  ]);
+
+  const resetSessionToOnboarding = useCallback(async (notice?: string) => {
+    await clearUserId();
+    setUser(null);
+    setEntitlements(null);
+    setMobileAuthToken(null);
+    setPendingVerificationUserId(null);
+    setVerificationCode("");
+    setVerificationExpiresAt(null);
+    setVerificationNotice(null);
+    setVerificationError(null);
+    setDomainMatch(null);
+    setOrgJoinCodeInput("");
+    setOrgRequestNotice(null);
+    setOrgRequestError(null);
+    setOnboardingEmail("");
+    setOnboardingTimezone(detectedTimezone);
+    setSettingsEmail("");
+    setSettingsTimezone(detectedTimezone);
+    setAppError(null);
+    setOnboardingError(notice ?? null);
+    setScreen("onboarding");
+  }, [detectedTimezone]);
 
   const initializeApp = useCallback(async () => {
     setIsBootLoading(true);
     setAppError(null);
+
+    let hadStoredSession = false;
 
     try {
       const [configPayload, timezonePayload, storedScheme, storedVoice, storedVoiceGender] = await Promise.all([
@@ -972,17 +1116,29 @@ export default function App() {
         return;
       }
 
+      hadStoredSession = true;
       setMobileAuthToken(storedMobileToken);
       const userPayload = await fetchMobileUser(storedUserId, storedMobileToken);
-      const entitlementsPayload = await fetchEntitlements(storedUserId, storedMobileToken);
-      const scopedConfig = await fetchMobileConfig(storedUserId, storedMobileToken).catch(() => configPayload);
-      setConfig(scopedConfig);
+
       setUser(userPayload);
-      setEntitlements(entitlementsPayload);
       setOnboardingEmail(userPayload.email);
       setOnboardingTimezone(userPayload.timezone);
       setSettingsEmail(userPayload.email);
       setSettingsTimezone(userPayload.timezone);
+
+      if (!userPayload.emailVerifiedAt) {
+        setPendingVerificationUserId(userPayload.id);
+        setVerificationCode("");
+        setVerificationNotice("Check your inbox for a 6-digit code, then verify to continue.");
+        setVerificationError(null);
+        setScreen("verify_email");
+        return;
+      }
+
+      const entitlementsPayload = await fetchEntitlements(storedUserId, storedMobileToken);
+      const scopedConfig = await fetchMobileConfig(storedUserId, storedMobileToken).catch(() => configPayload);
+      setConfig(scopedConfig);
+      setEntitlements(entitlementsPayload);
       setScreen("home");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not initialize app.");
@@ -992,21 +1148,23 @@ export default function App() {
         lower.includes("invalid mobile token") ||
         lower.includes("user not found") ||
         lower.includes("user doesn't exist");
+      const shouldSelfHeal =
+        hadStoredSession &&
+        (shouldResetSession ||
+          lower.includes("request timed out") ||
+          lower.includes("network request failed") ||
+          lower.includes("failed to fetch") ||
+          lower.includes("fetch failed"));
 
-      if (shouldResetSession) {
-        await clearUserId();
-        setUser(null);
-        setEntitlements(null);
-        setMobileAuthToken(null);
-        setAppError(null);
-        setScreen("onboarding");
+      if (shouldSelfHeal) {
+        await resetSessionToOnboarding("Session self-healed. Please sign in again.");
       } else {
         setAppError(message);
       }
     } finally {
       setIsBootLoading(false);
     }
-  }, []);
+  }, [detectedTimezone, resetSessionToOnboarding]);
 
   useEffect(() => {
     void initializeApp();
@@ -1065,11 +1223,7 @@ export default function App() {
             lower.includes("user doesn't exist");
 
           if (shouldResetSession) {
-            await clearUserId();
-            setUser(null);
-            setEntitlements(null);
-            setMobileAuthToken(null);
-            setScreen("onboarding");
+            await resetSessionToOnboarding("Session reset after account update. Please sign in again.");
             return;
           }
 
@@ -1088,7 +1242,23 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [mobileAuthToken, user?.id]);
+  }, [mobileAuthToken, resetSessionToOnboarding, user?.id]);
+
+  useEffect(() => {
+    if (!user || user.emailVerifiedAt) {
+      return;
+    }
+
+    if (screen === "onboarding" || screen === "verify_email") {
+      return;
+    }
+
+    setPendingVerificationUserId(user.id);
+    setVerificationCode("");
+    setVerificationNotice("Verify your email to continue.");
+    setVerificationError(null);
+    setScreen("verify_email");
+  }, [screen, user]);
 
   useEffect(() => {
     if (industryOptions.length === 0) {
@@ -1177,22 +1347,133 @@ export default function App() {
         saveUserId(onboarded.user.id),
         saveMobileAuthToken(onboarded.authToken),
       ]);
+      setUser(onboarded.user);
+      setMobileAuthToken(onboarded.authToken);
+      setDomainMatch(onboarded.domainMatch ?? null);
+      setSettingsEmail(onboarded.user.email);
+      setSettingsTimezone(onboarded.user.timezone);
+
+      if (onboarded.verificationRequired || !onboarded.user.emailVerifiedAt) {
+        setPendingVerificationUserId(onboarded.user.id);
+        setVerificationCode("");
+        setVerificationExpiresAt(onboarded.verificationExpiresAt);
+        setVerificationNotice("Verification email sent. Enter the 6-digit code to continue.");
+        setVerificationError(null);
+        setScreen("verify_email");
+        return;
+      }
+
       const nextEntitlements = await fetchEntitlements(onboarded.user.id, onboarded.authToken);
       const scopedConfig = await fetchMobileConfig(onboarded.user.id, onboarded.authToken).catch(
         async () => fetchAppConfig(),
       );
 
       setConfig(scopedConfig);
-      setUser(onboarded.user);
-      setMobileAuthToken(onboarded.authToken);
       setEntitlements(nextEntitlements);
-      setSettingsEmail(onboarded.user.email);
-      setSettingsTimezone(onboarded.user.timezone);
-      setScreen("home");
+      if (onboarded.domainMatch && onboarded.user.accountType === "individual") {
+        setScreen("domain_match");
+      } else {
+        setScreen("home");
+      }
     } catch (caught) {
       setOnboardingError(getErrorMessage(caught, "Could not complete onboarding."));
     } finally {
       setIsOnboardingSaving(false);
+    }
+  };
+
+  const submitVerificationCode = async () => {
+    if (!pendingVerificationUserId || !mobileAuthToken) {
+      setVerificationError("Session expired. Restart onboarding.");
+      return;
+    }
+
+    const code = verificationCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setVerificationError("Enter the 6-digit verification code.");
+      return;
+    }
+
+    setVerificationError(null);
+    setVerificationNotice(null);
+    setIsVerificationSaving(true);
+    try {
+      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken);
+      setUser(payload.user);
+      setMobileAuthToken(payload.authToken);
+      await saveMobileAuthToken(payload.authToken);
+      setDomainMatch(payload.domainMatch ?? null);
+      setVerificationCode("");
+      setPendingVerificationUserId(null);
+      setVerificationExpiresAt(null);
+      setVerificationNotice("Email verified.");
+      const nextEntitlements = await fetchEntitlements(payload.user.id, mobileAuthToken);
+      const scopedConfig = await fetchMobileConfig(payload.user.id, mobileAuthToken).catch(
+        async () => fetchAppConfig(),
+      );
+      setConfig(scopedConfig);
+      setEntitlements(nextEntitlements);
+
+      if (payload.domainMatch && payload.user.accountType === "individual") {
+        setScreen("domain_match");
+      } else {
+        setScreen("home");
+      }
+    } catch (caught) {
+      setVerificationError(getErrorMessage(caught, "Could not verify email."));
+    } finally {
+      setIsVerificationSaving(false);
+    }
+  };
+
+  const resendVerificationCode = async () => {
+    if (!pendingVerificationUserId || !mobileAuthToken) {
+      setVerificationError("Session expired. Restart onboarding.");
+      return;
+    }
+
+    setVerificationError(null);
+    setVerificationNotice(null);
+    setIsVerificationSaving(true);
+    try {
+      const payload = await resendMobileVerificationEmail(pendingVerificationUserId, mobileAuthToken);
+      setVerificationExpiresAt(payload.verificationExpiresAt ?? null);
+      setVerificationNotice("Verification code sent. Check your inbox.");
+    } catch (caught) {
+      setVerificationError(getErrorMessage(caught, "Could not resend verification email."));
+    } finally {
+      setIsVerificationSaving(false);
+    }
+  };
+
+  const submitOrgDomainRequest = async () => {
+    if (!user || !mobileAuthToken) {
+      setOrgRequestError("Session expired. Please sign in again.");
+      return;
+    }
+
+    const joinCode = orgJoinCodeInput.trim();
+    if (!joinCode) {
+      setOrgRequestError("Enter the join code from your org admin.");
+      return;
+    }
+
+    setOrgRequestError(null);
+    setOrgRequestNotice(null);
+    setIsOrgRequestSaving(true);
+    try {
+      const payload = await submitOrgAccessRequest(user.id, joinCode, mobileAuthToken);
+      setOrgRequestNotice(
+        payload.created
+          ? "Request submitted. Your org admin can approve it from the Admin section."
+          : "Request already pending. Your org admin can review it in Admin.",
+      );
+      setOrgJoinCodeInput("");
+      await refreshMyOrgAccessRequests();
+    } catch (caught) {
+      setOrgRequestError(getErrorMessage(caught, "Could not submit org access request."));
+    } finally {
+      setIsOrgRequestSaving(false);
     }
   };
 
@@ -1226,7 +1507,17 @@ export default function App() {
       setSettingsEmail(updated.email);
       setSettingsTimezone(updated.timezone);
       await refreshEntitlements();
-      setSettingsNotice("Settings saved. Timezone changes apply at the next cycle reset.");
+      if (!updated.emailVerifiedAt) {
+        setPendingVerificationUserId(updated.id);
+        setVerificationCode("");
+        setVerificationExpiresAt(null);
+        setVerificationNotice("Email changed. Enter the verification code sent to your new inbox.");
+        setVerificationError(null);
+        setSettingsNotice("Email updated. Verification required before continuing.");
+        setScreen("verify_email");
+      } else {
+        setSettingsNotice("Settings saved. Timezone changes apply at the next cycle reset.");
+      }
     } catch (caught) {
       setSettingsError(getErrorMessage(caught, "Could not save settings."));
     } finally {
@@ -1809,6 +2100,120 @@ export default function App() {
     </KeyboardAvoidingView>
   );
 
+  const renderVerifyEmail = () => (
+    <KeyboardAvoidingView
+      style={styles.fill}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={20}
+    >
+      <View style={styles.topRow}>
+        <View style={styles.spacer} />
+        <Text style={styles.topTitle}>Verify Email</Text>
+        <View style={styles.spacer} />
+      </View>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <View style={styles.card}>
+          <Text style={styles.title}>Enter Verification Code</Text>
+          <Text style={styles.body}>
+            We sent a 6-digit code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
+            {"\n"}
+            {verificationExpiresAt
+              ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
+              : "Use resend if the code has expired."}
+          </Text>
+          <TextInput
+            value={verificationCode}
+            onChangeText={setVerificationCode}
+            placeholder="6-digit code"
+            placeholderTextColor={theme.hint}
+            keyboardType="number-pad"
+            maxLength={6}
+            style={styles.input}
+          />
+          {verificationNotice ? <Text style={styles.successText}>{verificationNotice}</Text> : null}
+          {verificationError ? <Text style={styles.errorText}>{verificationError}</Text> : null}
+          <Pressable
+            style={[styles.primaryButton, isVerificationSaving ? styles.disabled : null]}
+            disabled={isVerificationSaving}
+            onPress={() => {
+              void submitVerificationCode();
+            }}
+          >
+            <Text style={styles.primaryButtonText}>{isVerificationSaving ? "Verifying..." : "Verify & Continue"}</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.linkButton, isVerificationSaving ? styles.disabled : null]}
+            disabled={isVerificationSaving}
+            onPress={() => {
+              void resendVerificationCode();
+            }}
+          >
+            <Text style={styles.linkButtonText}>Resend Code</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.ghostButton, isVerificationSaving ? styles.disabled : null]}
+            disabled={isVerificationSaving}
+            onPress={() => {
+              void resetSessionToOnboarding();
+            }}
+          >
+            <Text style={styles.ghostButtonText}>Start Over</Text>
+          </Pressable>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+
+  const renderDomainMatch = () => (
+    <KeyboardAvoidingView
+      style={styles.fill}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={20}
+    >
+      <View style={styles.topRow}>
+        <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
+          <Text style={styles.ghostButtonText}>Skip</Text>
+        </Pressable>
+        <Text style={styles.topTitle}>Org Access</Text>
+        <View style={styles.spacer} />
+      </View>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <View style={styles.card}>
+          <Text style={styles.title}>Organization Found</Text>
+          <Text style={styles.body}>
+            We found an enterprise account for {domainMatch?.emailDomain ?? "your domain"}:
+            {"\n"}
+            {domainMatch?.orgName ?? "Organization"}
+            {"\n\n"}
+            Enter the join code from your org admin to submit an approval request.
+          </Text>
+          <TextInput
+            value={orgJoinCodeInput}
+            onChangeText={setOrgJoinCodeInput}
+            placeholder="Join code"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="characters"
+            style={styles.input}
+          />
+          {orgRequestNotice ? <Text style={styles.successText}>{orgRequestNotice}</Text> : null}
+          {orgRequestError ? <Text style={styles.errorText}>{orgRequestError}</Text> : null}
+          <Pressable
+            style={[styles.primaryButton, isOrgRequestSaving ? styles.disabled : null]}
+            disabled={isOrgRequestSaving}
+            onPress={() => {
+              void submitOrgDomainRequest();
+            }}
+          >
+            <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Org Access"}</Text>
+          </Pressable>
+          <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
+            <Text style={styles.ghostButtonText}>Skip and Continue Individual</Text>
+          </Pressable>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+
   const renderSetup = () => (
     <View style={styles.fill}>
       <View style={styles.topRow}>
@@ -1964,20 +2369,67 @@ export default function App() {
           </Pressable>
         </View>
 
+        <View style={styles.card}>
+          <Text style={styles.title}>Enterprise Access</Text>
+          <Text style={styles.body}>
+            If your company has an enterprise subscription for your email domain, enter the org join code to request
+            access. Requests expire after 7 days and can be resent.
+          </Text>
+          <TextInput
+            value={orgJoinCodeInput}
+            onChangeText={setOrgJoinCodeInput}
+            placeholder="Join code"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="characters"
+            style={styles.input}
+          />
+          <Pressable
+            style={[styles.primaryButton, isOrgRequestSaving ? styles.disabled : null]}
+            disabled={isOrgRequestSaving}
+            onPress={() => {
+              void submitOrgDomainRequest();
+            }}
+          >
+            <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Access"}</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.ghostButton, orgAccessRequestsLoading ? styles.disabled : null]}
+            disabled={orgAccessRequestsLoading}
+            onPress={() => {
+              void refreshMyOrgAccessRequests();
+            }}
+          >
+            <Text style={styles.ghostButtonText}>{orgAccessRequestsLoading ? "Refreshing..." : "Refresh Requests"}</Text>
+          </Pressable>
+
+          {orgRequestNotice ? <Text style={styles.successText}>{orgRequestNotice}</Text> : null}
+          {orgRequestError ? <Text style={styles.errorText}>{orgRequestError}</Text> : null}
+
+          {myOrgAccessRequests.length === 0 ? (
+            <Text style={styles.body}>(No requests yet.)</Text>
+          ) : (
+            <View style={{ gap: 10, marginTop: 8 }}>
+              {myOrgAccessRequests.slice(0, 10).map((row) => (
+                <View key={row.id} style={styles.optionCard}>
+                  <Text style={styles.optionTitle}>
+                    {row.orgName} - {row.status}
+                  </Text>
+                  <Text style={styles.body}>
+                    Domain: {row.emailDomain}{"\n"}
+                    Requested: {formatDateLabel(row.createdAt)}{"\n"}
+                    Expires: {formatDateLabel(row.expiresAt)}{"\n"}
+                    {row.decisionReason ? `Note: ${row.decisionReason}` : "Note: -"}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
         <Pressable
           style={[styles.ghostButton, styles.signOutButton]}
           onPress={() => {
-            void (async () => {
-              await clearUserId();
-              setUser(null);
-              setMobileAuthToken(null);
-              setEntitlements(null);
-              setOnboardingEmail("");
-              setOnboardingTimezone(detectedTimezone);
-              setSettingsEmail("");
-              setSettingsTimezone(detectedTimezone);
-              setScreen("onboarding");
-            })();
+            void resetSessionToOnboarding();
           }}
         >
           <Text style={styles.ghostButtonText}>Reset Local User</Text>
@@ -2365,15 +2817,26 @@ export default function App() {
               Review account performance and manage who can access the app.
             </Text>
             {isOrgAdmin ? (
-              <Pressable
-                style={styles.menuItemButton}
-                onPress={() => {
-                  setAdminError(null);
-                  setScreen("admin_org_dashboard");
-                }}
-              >
-                <Text style={styles.menuItemText}>Org Dashboard</Text>
-              </Pressable>
+              <>
+                <Pressable
+                  style={styles.menuItemButton}
+                  onPress={() => {
+                    setAdminError(null);
+                    setScreen("admin_org_dashboard");
+                  }}
+                >
+                  <Text style={styles.menuItemText}>Org Dashboard</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.menuItemButton}
+                  onPress={() => {
+                    setAdminError(null);
+                    setScreen("admin_org_requests");
+                  }}
+                >
+                  <Text style={styles.menuItemText}>Access Requests</Text>
+                </Pressable>
+              </>
             ) : (
               <View style={styles.optionCard}>
                 <Text style={styles.optionTitle}>Limited Scope</Text>
@@ -2693,6 +3156,129 @@ export default function App() {
           <Pressable style={styles.primaryButton} onPress={() => setScreen("admin_user_list")}>
             <Text style={styles.primaryButtonText}>Manage Users</Text>
           </Pressable>
+        </ScrollView>
+      </View>
+    );
+  };
+
+  const renderAdminOrgRequests = () => {
+    if (!hasAdminAccess || !user) {
+      return (
+        <View style={styles.centered}>
+          <Text style={styles.errorText}>Admin access required.</Text>
+          <Pressable style={styles.primaryButton} onPress={() => setScreen("home")}>
+            <Text style={styles.primaryButtonText}>Back</Text>
+          </Pressable>
+        </View>
+      );
+    }
+
+    if (!isOrgAdmin) {
+      return (
+        <View style={styles.centered}>
+          <Text style={styles.errorText}>Org admin access required.</Text>
+          <Pressable style={styles.primaryButton} onPress={() => setScreen("admin_home")}>
+            <Text style={styles.primaryButtonText}>Back</Text>
+          </Pressable>
+        </View>
+      );
+    }
+
+    const rows = orgAdminAccessRequests?.requests ?? [];
+    const pendingRows = rows.filter((row) => row.status === "pending");
+
+    return (
+      <View style={styles.fill}>
+        <View style={styles.topRow}>
+          <Pressable style={styles.ghostButton} onPress={() => setScreen("admin_home")}>
+            <Text style={styles.ghostButtonText}>Back</Text>
+          </Pressable>
+          <Text style={styles.topTitle}>Access Requests</Text>
+          <Pressable
+            style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
+            disabled={adminLoading}
+            onPress={() => void refreshOrgAdminAccessRequests()}
+          >
+            <Text style={styles.ghostButtonText}>{adminLoading ? "Loading..." : "Refresh"}</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+          {adminError ? (
+            <View style={styles.errorCard}>
+              <Text style={styles.errorText}>{adminError}</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.card}>
+            <Text style={styles.title}>
+              Pending ({pendingRows.length}) - {orgAdminAccessRequests?.org?.name ?? "Organization"}
+            </Text>
+            <Text style={styles.body}>
+              Org domain: {orgAdminAccessRequests?.org?.emailDomain ?? "-"}{"\n"}
+              Join code: {orgAdminAccessRequests?.org?.joinCode ?? "-"}
+            </Text>
+
+            {pendingRows.length === 0 ? (
+              <Text style={styles.body}>(No pending requests.)</Text>
+            ) : (
+              <View style={{ gap: 10, marginTop: 6 }}>
+                {pendingRows.map((row) => (
+                  <View key={row.id} style={styles.optionCard}>
+                    <Text style={styles.optionTitle}>{row.email}</Text>
+                    <Text style={styles.body}>
+                      Requested: {formatDateLabel(row.createdAt)}{"\n"}
+                      Expires: {formatDateLabel(row.expiresAt)}
+                    </Text>
+                    <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
+                      <Pressable
+                        style={[styles.primaryButton, adminLoading ? styles.disabled : null]}
+                        disabled={adminLoading}
+                        onPress={() => {
+                          void decideOrgAccessRequest(row.id, "approve");
+                        }}
+                      >
+                        <Text style={styles.primaryButtonText}>Approve</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
+                        disabled={adminLoading}
+                        onPress={() => {
+                          void decideOrgAccessRequest(row.id, "reject");
+                        }}
+                      >
+                        <Text style={styles.ghostButtonText}>Reject</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+
+          <View style={styles.card}>
+            <Text style={styles.title}>Recent Decisions</Text>
+            {(rows.filter((row) => row.status !== "pending").slice(0, 20)).length === 0 ? (
+              <Text style={styles.body}>(No completed decisions yet.)</Text>
+            ) : (
+              <View style={{ gap: 10, marginTop: 6 }}>
+                {rows
+                  .filter((row) => row.status !== "pending")
+                  .slice(0, 20)
+                  .map((row) => (
+                    <View key={row.id} style={styles.optionCard}>
+                      <Text style={styles.optionTitle}>
+                        {row.email} - {row.status}
+                      </Text>
+                      <Text style={styles.body}>
+                        Updated: {formatDateLabel(row.updatedAt)}{"\n"}
+                        {row.decisionReason ? `Reason: ${row.decisionReason}` : "Reason: -"}
+                      </Text>
+                    </View>
+                  ))}
+              </View>
+            )}
+          </View>
         </ScrollView>
       </View>
     );
@@ -3024,12 +3610,23 @@ export default function App() {
           <Pressable style={styles.primaryButton} onPress={() => { void initializeApp(); }}>
             <Text style={styles.primaryButtonText}>Retry</Text>
           </Pressable>
+          <Pressable style={styles.ghostButton} onPress={() => { void resetSessionToOnboarding(); }}>
+            <Text style={styles.ghostButtonText}>Self-Heal Session</Text>
+          </Pressable>
         </View>
       );
     }
 
     if (screen === "onboarding") {
       return renderOnboarding();
+    }
+
+    if (screen === "verify_email") {
+      return renderVerifyEmail();
+    }
+
+    if (screen === "domain_match") {
+      return renderDomainMatch();
     }
 
     if (screen === "simulation" && simulationConfig && user && mobileAuthToken) {
@@ -3078,6 +3675,10 @@ export default function App() {
 
     if (screen === "admin_org_dashboard") {
       return renderAdminOrgDashboard();
+    }
+
+    if (screen === "admin_org_requests") {
+      return renderAdminOrgRequests();
     }
 
     if (screen === "admin_user_list") {

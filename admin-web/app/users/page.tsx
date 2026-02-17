@@ -5,13 +5,46 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   EnterpriseOrg,
   INDUSTRY_LABELS,
+  UserProfile,
   computeNextAnnualRenewalAt,
 } from "@voicepractice/shared";
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
 
-function formatDate(value: string): string {
+interface OrgJoinRequestRow {
+  id: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  email: string;
+  emailDomain: string;
+  user: {
+    id: string;
+    email: string;
+    accountType: string;
+    tier: string;
+    status: string;
+    orgId: string | null;
+    orgRole: string;
+  } | null;
+  org: {
+    id: string;
+    name: string;
+    emailDomain: string | null;
+    joinCode: string;
+    status: string;
+  } | null;
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return "-";
@@ -20,26 +53,56 @@ function formatDate(value: string): string {
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
 }
 
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return date.toLocaleString();
+}
+
 export default function UsersPage() {
   useRequireAdminToken();
   const [orgs, setOrgs] = useState<EnterpriseOrg[]>([]);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string }>({
+  const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
     name: "",
     contactName: "",
     contactEmail: "",
+    emailDomain: "",
   });
 
   const enterpriseOrgsSorted = useMemo(() => [...orgs].sort((a, b) => a.name.localeCompare(b.name)), [orgs]);
+  const personalUsers = useMemo(
+    () =>
+      users
+        .filter((user) => user.accountType === "individual")
+        .slice()
+        .sort((a, b) => a.email.localeCompare(b.email)),
+    [users],
+  );
 
   const load = async () => {
     try {
       setError(null);
-      const payload = await adminFetch<EnterpriseOrg[]>("/orgs");
-      setOrgs(payload);
+      const [orgPayload, userPayload, requestPayload] = await Promise.all([
+        adminFetch<EnterpriseOrg[]>("/orgs"),
+        adminFetch<UserProfile[]>("/users"),
+        adminFetch<{ rows: OrgJoinRequestRow[] }>("/org-join-requests"),
+      ]);
+      setOrgs(orgPayload);
+      setUsers(userPayload);
+      setJoinRequests(requestPayload.rows ?? []);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not load enterprise accounts.");
+      setError(caught instanceof Error ? caught.message : "Could not load account data.");
     }
   };
 
@@ -64,11 +127,12 @@ export default function UsersPage() {
           name,
           contactName: orgForm.contactName,
           contactEmail: orgForm.contactEmail,
+          emailDomain: orgForm.emailDomain,
           activeIndustries: ["people_management"],
         }),
       });
 
-      setOrgForm({ name: "", contactName: "", contactEmail: "" });
+      setOrgForm({ name: "", contactName: "", contactEmail: "", emailDomain: "" });
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create enterprise account.");
@@ -104,6 +168,14 @@ export default function UsersPage() {
               onChange={(event) => setOrgForm((prev) => ({ ...prev, contactEmail: event.target.value }))}
             />
           </div>
+          <div>
+            <label>Org Email Domain</label>
+            <input
+              value={orgForm.emailDomain}
+              onChange={(event) => setOrgForm((prev) => ({ ...prev, emailDomain: event.target.value }))}
+              placeholder="example.com"
+            />
+          </div>
           <div style={{ alignSelf: "end" }}>
             <button className="primary" disabled={creating}>
               {creating ? "Creating..." : "Create Enterprise Account"}
@@ -133,13 +205,15 @@ export default function UsersPage() {
               <th>Next Renewal Date</th>
               <th>Company Contact</th>
               <th>Contact Email</th>
+              <th>Domain</th>
+              <th>Join Code</th>
               <th>Segments Active</th>
             </tr>
           </thead>
           <tbody>
             {enterpriseOrgsSorted.length === 0 ? (
               <tr>
-                <td colSpan={6} className="small">
+                <td colSpan={8} className="small">
                   No enterprise accounts yet.
                 </td>
               </tr>
@@ -163,6 +237,10 @@ export default function UsersPage() {
                     <td>{formatDate(nextRenewalAt)}</td>
                     <td>{org.contactName}</td>
                     <td>{org.contactEmail}</td>
+                    <td>{org.emailDomain ?? "-"}</td>
+                    <td>
+                      <code>{org.joinCode}</code>
+                    </td>
                     <td>{segmentsActive}</td>
                   </tr>
                 );
@@ -171,7 +249,92 @@ export default function UsersPage() {
           </tbody>
         </table>
       </div>
+
+      <div className="card">
+        <h3 style={{ marginBottom: 10 }}>Personal Users ({personalUsers.length})</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Tier</th>
+              <th>Status</th>
+              <th>Verified</th>
+              <th>Created</th>
+              <th>User Id</th>
+            </tr>
+          </thead>
+          <tbody>
+            {personalUsers.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="small">
+                  No individual users yet.
+                </td>
+              </tr>
+            ) : (
+              personalUsers.map((user) => (
+                <tr key={user.id}>
+                  <td>{user.email}</td>
+                  <td>{user.tier}</td>
+                  <td>{user.status}</td>
+                  <td>{user.emailVerifiedAt ? "Yes" : "No"}</td>
+                  <td>{formatDateTime(user.createdAt)}</td>
+                  <td>
+                    <span className="small">{user.id}</span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginBottom: 10 }}>Org Access Requests ({joinRequests.length})</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Created</th>
+              <th>Email</th>
+              <th>Org</th>
+              <th>Status</th>
+              <th>Expires</th>
+              <th>Decision</th>
+            </tr>
+          </thead>
+          <tbody>
+            {joinRequests.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="small">
+                  No org access requests yet.
+                </td>
+              </tr>
+            ) : (
+              joinRequests.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <div>{formatDateTime(row.createdAt)}</div>
+                    <div className="small">{row.id}</div>
+                  </td>
+                  <td>
+                    <div>{row.email}</div>
+                    <div className="small">{row.emailDomain}</div>
+                  </td>
+                  <td>
+                    <div>{row.org?.name ?? row.org?.id ?? "-"}</div>
+                    <div className="small">{row.org?.joinCode ?? "-"}</div>
+                  </td>
+                  <td>{row.status}</td>
+                  <td>{formatDateTime(row.expiresAt)}</td>
+                  <td>
+                    <div>{formatDateTime(row.decidedAt)}</div>
+                    <div className="small">{row.decisionReason ?? "-"}</div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
     </AdminShell>
   );
 }
-

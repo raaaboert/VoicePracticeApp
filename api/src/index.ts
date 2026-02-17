@@ -16,13 +16,19 @@ import {
   DEFAULT_TIER_DEFINITIONS,
   Difficulty,
   EnterpriseOrg,
+  EnterpriseJoinRequestRecord,
+  EnterpriseDomainMatch,
+  EmailVerificationRecord,
   INDUSTRY_IDS,
   IndustryId,
   OrgUserRole,
   PersonaStyle,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  MobileResendVerificationRequest,
+  MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
+  MobileVerifyEmailRequest,
   RecordUsageSessionRequest,
   RecordSimulationScoreRequest,
   Scenario,
@@ -48,6 +54,7 @@ import {
   isAccountType,
   isIndustryId,
   isOrgUserRole,
+  isOrgJoinRequestStatus,
   isTierId,
   isUserStatus,
   secondsToWholeMinutes,
@@ -82,6 +89,9 @@ const OPENAI_TRANSCRIPTION_MODEL = runtimeConfig.openAiTranscriptionModel;
 const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
 const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
+const EMAIL_VERIFICATION_TTL_MINUTES = 15;
+const ORG_JOIN_REQUEST_TTL_DAYS = 7;
+const ORG_JOIN_CODE_LENGTH = 8;
 
 interface AdminTokenPayload {
   role: "admin";
@@ -256,6 +266,41 @@ function isEmailLike(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
+function normalizeEmailDomain(value: string | undefined | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withoutAt = trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
+  if (!withoutAt || withoutAt.includes(" ") || !withoutAt.includes(".")) {
+    return null;
+  }
+
+  return withoutAt;
+}
+
+function extractEmailDomain(email: string): string | null {
+  const atIndex = email.lastIndexOf("@");
+  if (atIndex < 0 || atIndex === email.length - 1) {
+    return null;
+  }
+
+  return normalizeEmailDomain(email.slice(atIndex + 1));
+}
+
+function normalizeJoinCode(value: string | undefined | null): string {
+  if (!value) {
+    return "";
+  }
+
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
 function isValidTimeZone(timeZone: string): boolean {
   try {
     Intl.DateTimeFormat("en-US", { timeZone }).format(new Date());
@@ -398,6 +443,8 @@ function createDefaultDatabase(): ApiDatabase {
         status: "active",
         contactName: "Starter Admin",
         contactEmail: "starter@example.com",
+        emailDomain: "example.com",
+        joinCode: "STARTER1",
         activeIndustries: [...INDUSTRY_IDS],
         dailySecondsQuota: 8 * 60 * 60,
         perUserDailySecondsCap: 60 * 60,
@@ -411,6 +458,8 @@ function createDefaultDatabase(): ApiDatabase {
     aiUsageEvents: [],
     supportCases: [],
     mobileAuthTokens: [],
+    emailVerifications: [],
+    enterpriseJoinRequests: [],
     admin: {
       passwordHash: null
     }
@@ -452,6 +501,9 @@ function ensureDemoEnterpriseData(db: {
     if (existing) {
       existing.contactName = demoOrg.contactName;
       existing.contactEmail = demoOrg.contactEmail;
+      existing.emailDomain = existing.emailDomain ?? extractEmailDomain(demoOrg.contactEmail);
+      existing.joinCode =
+        normalizeJoinCode(existing.joinCode) || normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH);
       existing.activeIndustries = normalizeIndustryIds(existing.activeIndustries);
       // Demo orgs use a stable established date so "renewal" and reporting are deterministic.
       existing.createdAt = demoOrg.establishedAt;
@@ -465,6 +517,8 @@ function ensureDemoEnterpriseData(db: {
       status: "active",
       contactName: demoOrg.contactName,
       contactEmail: demoOrg.contactEmail,
+      emailDomain: extractEmailDomain(demoOrg.contactEmail),
+      joinCode: normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH),
       activeIndustries: demoOrg.activeIndustries,
       dailySecondsQuota: db.config.enterprise.defaultOrgDailySecondsQuota,
       perUserDailySecondsCap: db.config.enterprise.defaultPerUserDailySecondsCap,
@@ -481,6 +535,7 @@ function ensureDemoEnterpriseData(db: {
     );
     const existingUser = duplicateById ?? duplicateByEmail;
     if (existingUser) {
+      existingUser.emailVerifiedAt = existingUser.emailVerifiedAt ?? existingUser.createdAt ?? now;
       existingUser.accountType = "enterprise";
       existingUser.tier = "enterprise";
       existingUser.orgId = demoUser.orgId;
@@ -494,6 +549,7 @@ function ensureDemoEnterpriseData(db: {
     db.users.push({
       id: demoUser.id,
       email: demoUser.email,
+      emailVerifiedAt: now,
       accountType: "enterprise",
       tier: "enterprise",
       status: "active",
@@ -988,6 +1044,88 @@ function mergeSegmentsWithDefaults(
   return [...mergedDefaults, ...customSegments];
 }
 
+function createJoinCodeSeed(input: string): string {
+  const cleaned = normalizeJoinCode(input);
+  return cleaned || "ORG";
+}
+
+function generateUniqueJoinCode(existingCodes: Set<string>, seed: string): string {
+  const base = createJoinCodeSeed(seed);
+  let candidate = base.slice(0, ORG_JOIN_CODE_LENGTH);
+  if (candidate.length < ORG_JOIN_CODE_LENGTH) {
+    candidate = (candidate + "ABCDEFGH").slice(0, ORG_JOIN_CODE_LENGTH);
+  }
+
+  if (!existingCodes.has(candidate)) {
+    existingCodes.add(candidate);
+    return candidate;
+  }
+
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const suffix = crypto.randomBytes(4).toString("hex").toUpperCase().slice(0, ORG_JOIN_CODE_LENGTH);
+    if (!existingCodes.has(suffix)) {
+      existingCodes.add(suffix);
+      return suffix;
+    }
+  }
+
+  const fallback = crypto.randomBytes(6).toString("hex").toUpperCase().slice(0, ORG_JOIN_CODE_LENGTH);
+  existingCodes.add(fallback);
+  return fallback;
+}
+
+function ensureOrgCodesAndDomains(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
+  const existingCodes = new Set<string>();
+  const seenDomains = new Set<string>();
+  return orgs.map((org) => {
+    const requestedDomain = normalizeEmailDomain(org.emailDomain) ?? extractEmailDomain(org.contactEmail);
+    let domain: string | null = requestedDomain;
+    if (domain) {
+      if (seenDomains.has(domain)) {
+        // Domain conflicts are left for manual resolution; keep access matching disabled until fixed.
+        domain = null;
+      } else {
+        seenDomains.add(domain);
+      }
+    }
+    const requestedCode = normalizeJoinCode(org.joinCode);
+    const joinCode = requestedCode && !existingCodes.has(requestedCode)
+      ? (existingCodes.add(requestedCode), requestedCode)
+      : generateUniqueJoinCode(existingCodes, org.id || org.name || org.contactEmail);
+
+    return {
+      ...org,
+      emailDomain: domain,
+      joinCode
+    };
+  });
+}
+
+function expireOrgJoinRequests(db: { enterpriseJoinRequests?: EnterpriseJoinRequestRecord[] }, now: Date): void {
+  const list = db.enterpriseJoinRequests;
+  if (!Array.isArray(list) || list.length === 0) {
+    return;
+  }
+
+  const nowMs = now.getTime();
+  for (const row of list) {
+    if (row.status !== "pending") {
+      continue;
+    }
+
+    const expiresMs = new Date(row.expiresAt).getTime();
+    if (Number.isNaN(expiresMs) || expiresMs > nowMs) {
+      continue;
+    }
+
+    row.status = "expired";
+    row.updatedAt = now.toISOString();
+    row.decidedAt = now.toISOString();
+    row.decidedByUserId = null;
+    row.decisionReason = "Request expired after 7 days.";
+  }
+}
+
 function ensureDatabaseShape(raw: unknown): ApiDatabase {
   const fallback = createDefaultDatabase();
   const candidate = (raw ?? {}) as Partial<ApiDatabase>;
@@ -1044,17 +1182,22 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     updatedAt: configCandidate?.updatedAt || now
   };
 
-  const normalizedOrgs = (
-    Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs
-  ).map((org) => ({
-    ...org,
-    contactName: normalizeContactName((org as Partial<EnterpriseOrg>).contactName),
-    contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
-    activeIndustries: normalizeIndustryIds((org as Partial<EnterpriseOrg>).activeIndustries)
-  }));
+  const normalizedOrgs = ensureOrgCodesAndDomains(
+    (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs).map((org) => ({
+      ...org,
+      contactName: normalizeContactName((org as Partial<EnterpriseOrg>).contactName),
+      contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
+      activeIndustries: normalizeIndustryIds((org as Partial<EnterpriseOrg>).activeIndustries)
+    }))
+  );
 
   const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
     ...user,
+    emailVerifiedAt:
+      typeof (user as Partial<UserProfile>).emailVerifiedAt === "string" ||
+      (user as Partial<UserProfile>).emailVerifiedAt === null
+        ? ((user as Partial<UserProfile>).emailVerifiedAt as string | null)
+        : (user as Partial<UserProfile>).createdAt ?? now,
     orgRole:
       (user as Partial<UserProfile>).accountType === "enterprise"
         ? normalizeOrgUserRole((user as Partial<UserProfile>).orgRole)
@@ -1077,6 +1220,12 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       : [],
     mobileAuthTokens:
       Array.isArray(candidate.mobileAuthTokens) ? candidate.mobileAuthTokens : fallback.mobileAuthTokens,
+    emailVerifications: Array.isArray(candidate.emailVerifications)
+      ? candidate.emailVerifications
+      : fallback.emailVerifications,
+    enterpriseJoinRequests: Array.isArray(candidate.enterpriseJoinRequests)
+      ? candidate.enterpriseJoinRequests
+      : fallback.enterpriseJoinRequests,
     admin: {
       passwordHash:
         candidate.admin && typeof candidate.admin.passwordHash === "string"
@@ -1088,6 +1237,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   ensureDemoEnterpriseData(normalized, now);
   ensureDemoSupportCases(normalized, now);
   purgeExpiredSupportTranscripts(normalized, now);
+  expireOrgJoinRequests(normalized, new Date(now));
   return normalized;
 }
 
@@ -1289,6 +1439,64 @@ function hasValidMobileTokenForUser(db: ApiDatabase, userId: string, token: stri
   }
 
   return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+function hashVerificationCode(userId: string, email: string, code: string): string {
+  return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(`${userId}:${email}:${code}`).digest("hex");
+}
+
+function createVerificationCode(): string {
+  const numeric = crypto.randomInt(0, 1_000_000);
+  return String(numeric).padStart(6, "0");
+}
+
+function buildDomainMatchForEmail(db: ApiDatabase, email: string): EnterpriseDomainMatch | null {
+  const emailDomain = extractEmailDomain(email);
+  if (!emailDomain) {
+    return null;
+  }
+
+  const org = db.orgs.find(
+    (candidate) =>
+      candidate.status === "active" && normalizeEmailDomain(candidate.emailDomain) === normalizeEmailDomain(emailDomain)
+  );
+
+  if (!org) {
+    return null;
+  }
+
+  return {
+    orgId: org.id,
+    orgName: org.name,
+    emailDomain
+  };
+}
+
+function sendVerificationEmail(email: string, code: string, expiresAt: string): void {
+  const expiresLocal = new Date(expiresAt).toLocaleString();
+  // TODO: wire SMTP or provider adapter. For now this logs the one-time code for operator visibility.
+  console.log(`[email-verification] ${email} code=${code} expiresAt=${expiresAt} (${expiresLocal})`);
+}
+
+function issueEmailVerification(db: ApiDatabase, user: UserProfile, now: Date): { expiresAt: string } {
+  const nowIsoValue = now.toISOString();
+  const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
+  const code = createVerificationCode();
+  const codeHash = hashVerificationCode(user.id, user.email, code);
+
+  const record: EmailVerificationRecord = {
+    id: `ver_${uuid()}`,
+    userId: user.id,
+    email: user.email,
+    codeHash,
+    createdAt: nowIsoValue,
+    expiresAt,
+    consumedAt: null
+  };
+
+  db.emailVerifications.push(record);
+  sendVerificationEmail(user.email, code, expiresAt);
+  return { expiresAt };
 }
 
 function requireAdmin(request: AdminAuthRequest, response: Response, next: NextFunction): void {
@@ -1782,6 +1990,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     name?: string;
     contactName?: string;
     contactEmail?: string;
+    emailDomain?: string;
+    joinCode?: string;
     dailySecondsQuota?: number;
     perUserDailySecondsCap?: number;
     activeIndustries?: IndustryId[];
@@ -1794,13 +2004,38 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
   }
 
   await withDatabase(async (db) => {
+    const contactEmail = normalizeContactEmail(body.contactEmail);
+    const emailDomain = normalizeEmailDomain(body.emailDomain) ?? extractEmailDomain(contactEmail);
+    if (!emailDomain) {
+      response.status(400).json({ error: "A valid email domain is required (e.g. company.com)." });
+      return;
+    }
+
+    const duplicateDomain = db.orgs.find(
+      (entry) => normalizeEmailDomain(entry.emailDomain) === emailDomain
+    );
+    if (duplicateDomain) {
+      response.status(409).json({ error: "That email domain is already assigned to another organization." });
+      return;
+    }
+
+    const existingCodes = new Set(db.orgs.map((org) => normalizeJoinCode(org.joinCode)).filter(Boolean));
+    const requestedJoinCode = normalizeJoinCode(body.joinCode);
+    if (requestedJoinCode && existingCodes.has(requestedJoinCode)) {
+      response.status(409).json({ error: "Join code already in use by another organization." });
+      return;
+    }
+
+    const joinCode = requestedJoinCode || generateUniqueJoinCode(existingCodes, name);
     const now = nowIso();
     const org: EnterpriseOrg = {
       id: `org_${uuid()}`,
       name,
       status: "active",
       contactName: normalizeContactName(body.contactName),
-      contactEmail: normalizeContactEmail(body.contactEmail),
+      contactEmail,
+      emailDomain,
+      joinCode,
       activeIndustries: normalizeIndustryIds(body.activeIndustries),
       dailySecondsQuota: clampNonNegativeInteger(
         body.dailySecondsQuota,
@@ -1843,6 +2078,53 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       org.contactEmail = normalizeContactEmail(patch.contactEmail);
     }
 
+    if (typeof patch.emailDomain === "string") {
+      const nextDomain = normalizeEmailDomain(patch.emailDomain);
+      if (!nextDomain) {
+        response.status(400).json({ error: "Invalid email domain." });
+        return;
+      }
+
+      const duplicateDomain = db.orgs.find(
+        (entry) => entry.id !== org.id && normalizeEmailDomain(entry.emailDomain) === nextDomain
+      );
+      if (duplicateDomain) {
+        response.status(409).json({ error: "That email domain is already assigned to another organization." });
+        return;
+      }
+      org.emailDomain = nextDomain;
+    } else if (!normalizeEmailDomain(org.emailDomain)) {
+      const derivedDomain = extractEmailDomain(org.contactEmail);
+      const duplicateDomain = db.orgs.find(
+        (entry) => entry.id !== org.id && normalizeEmailDomain(entry.emailDomain) === normalizeEmailDomain(derivedDomain)
+      );
+      if (duplicateDomain) {
+        response.status(409).json({ error: "That email domain is already assigned to another organization." });
+        return;
+      }
+      org.emailDomain = derivedDomain;
+    }
+
+    if (typeof patch.joinCode === "string") {
+      const requestedJoinCode = normalizeJoinCode(patch.joinCode);
+      const existingCodes = new Set(
+        db.orgs
+          .filter((entry) => entry.id !== org.id)
+          .map((entry) => normalizeJoinCode(entry.joinCode))
+          .filter(Boolean)
+      );
+
+      if (requestedJoinCode) {
+        if (existingCodes.has(requestedJoinCode)) {
+          response.status(409).json({ error: "Join code already in use by another organization." });
+          return;
+        }
+        org.joinCode = requestedJoinCode;
+      } else {
+        org.joinCode = generateUniqueJoinCode(existingCodes, org.name);
+      }
+    }
+
     if (typeof patch.status === "string" && (patch.status === "active" || patch.status === "disabled")) {
       org.status = patch.status;
     }
@@ -1864,6 +2146,16 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
 
     if (patch.manualBonusSeconds !== undefined) {
       org.manualBonusSeconds = clampNonNegativeInteger(patch.manualBonusSeconds, org.manualBonusSeconds);
+    }
+
+    if (!normalizeJoinCode(org.joinCode)) {
+      const existingCodes = new Set(
+        db.orgs
+          .filter((entry) => entry.id !== org.id)
+          .map((entry) => normalizeJoinCode(entry.joinCode))
+          .filter(Boolean)
+      );
+      org.joinCode = generateUniqueJoinCode(existingCodes, org.name);
     }
 
     org.updatedAt = nowIso();
@@ -2000,6 +2292,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      emailVerifiedAt: now,
       accountType: body.accountType,
       tier: body.tier,
       status: "active",
@@ -2032,6 +2325,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
 
     const now = new Date();
     materializeUserTimezone(user, now);
+    let emailChanged = false;
 
     if (typeof patch.email === "string") {
       const email = patch.email.trim().toLowerCase();
@@ -2046,7 +2340,11 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
         return;
       }
 
-      user.email = email;
+      if (email !== user.email) {
+        user.email = email;
+        user.emailVerifiedAt = null;
+        emailChanged = true;
+      }
     }
 
     if (patch.tier) {
@@ -2136,13 +2434,32 @@ app.post("/mobile/onboard", async (request: Request, response: Response) => {
   const timezone = resolveTimeZone(body.timezone);
 
   await withDatabase(async (db) => {
+    const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
       const issuedAt = nowIso();
+      existing.timezone = timezone;
+      existing.updatedAt = issuedAt;
       const authToken = upsertMobileAuthToken(db, existing.id, issuedAt);
+      if (existing.emailVerifiedAt) {
+        const payload: MobileOnboardResponse = {
+          user: existing,
+          authToken,
+          verificationRequired: false,
+          verificationExpiresAt: null,
+          domainMatch
+        };
+        response.json(payload);
+        return;
+      }
+
+      const verification = issueEmailVerification(db, existing, new Date(issuedAt));
       const payload: MobileOnboardResponse = {
         user: existing,
-        authToken
+        authToken,
+        verificationRequired: true,
+        verificationExpiresAt: verification.expiresAt,
+        domainMatch
       };
       response.json(payload);
       return;
@@ -2152,6 +2469,7 @@ app.post("/mobile/onboard", async (request: Request, response: Response) => {
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      emailVerifiedAt: null,
       accountType: "individual",
       tier: "free",
       status: "active",
@@ -2168,11 +2486,136 @@ app.post("/mobile/onboard", async (request: Request, response: Response) => {
 
     db.users.push(user);
     const authToken = upsertMobileAuthToken(db, user.id, now);
+    const verification = issueEmailVerification(db, user, new Date(now));
     const payload: MobileOnboardResponse = {
       user,
-      authToken
+      authToken,
+      verificationRequired: true,
+      verificationExpiresAt: verification.expiresAt,
+      domainMatch
     };
     response.status(201).json(payload);
+  });
+});
+
+app.post("/mobile/onboard/resend-verification", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const body = request.body as MobileResendVerificationRequest;
+  const userId = body.userId?.trim();
+  if (!userId) {
+    response.status(400).json({ error: "userId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (user.emailVerifiedAt) {
+      response.status(409).json({ error: "Email already verified." });
+      return;
+    }
+
+    const verification = issueEmailVerification(db, user, new Date());
+    response.json({
+      ok: true,
+      verificationExpiresAt: verification.expiresAt
+    });
+  });
+});
+
+app.post("/mobile/onboard/verify-email", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const body = request.body as MobileVerifyEmailRequest;
+  const userId = body.userId?.trim();
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+
+  if (!userId || !code) {
+    response.status(400).json({ error: "userId and code are required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (user.emailVerifiedAt) {
+      const payload: MobileOnboardResponse = {
+        user,
+        authToken,
+        verificationRequired: false,
+        verificationExpiresAt: null,
+        domainMatch: buildDomainMatchForEmail(db, user.email)
+      };
+      response.json(payload);
+      return;
+    }
+
+    const pending = db.emailVerifications
+      .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const latest = pending[0];
+    if (!latest) {
+      response.status(400).json({ error: "No pending verification code. Please resend verification email." });
+      return;
+    }
+
+    const now = new Date();
+    const expiresAtMs = new Date(latest.expiresAt).getTime();
+    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+      latest.consumedAt = now.toISOString();
+      response.status(400).json({ error: "Verification code expired. Please request a new code." });
+      return;
+    }
+
+    const expectedHash = Buffer.from(latest.codeHash, "hex");
+    const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
+    if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
+      response.status(400).json({ error: "Invalid verification code." });
+      return;
+    }
+
+    const nowIsoValue = now.toISOString();
+    latest.consumedAt = nowIsoValue;
+    user.emailVerifiedAt = nowIsoValue;
+    user.updatedAt = nowIsoValue;
+    emitMobileUpdateForUser(db, user.id, "user");
+
+    const payload: MobileOnboardResponse = {
+      user,
+      authToken,
+      verificationRequired: false,
+      verificationExpiresAt: null,
+      domainMatch: buildDomainMatchForEmail(db, user.email)
+    };
+    response.json(payload);
   });
 });
 
@@ -2220,6 +2663,347 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
     }
 
     response.json(resolveConfigForUser(db, user));
+  });
+});
+
+app.get("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    expireOrgJoinRequests(db, new Date());
+    const orgById = new Map(db.orgs.map((org) => [org.id, org]));
+    const requests = db.enterpriseJoinRequests
+      .filter((row) => row.userId === user.id)
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map((row) => ({
+        id: row.id,
+        status: row.status,
+        email: row.email,
+        emailDomain: row.emailDomain,
+        orgId: row.orgId,
+        orgName: orgById.get(row.orgId)?.name ?? row.orgNameSnapshot,
+        joinCodeHint: row.joinCodeSnapshot.slice(0, 2) + "****",
+        createdAt: row.createdAt,
+        expiresAt: row.expiresAt,
+        updatedAt: row.updatedAt,
+        decidedAt: row.decidedAt,
+        decisionReason: row.decisionReason
+      }));
+
+    response.json({
+      generatedAt: nowIso(),
+      requests
+    });
+  });
+});
+
+app.post("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const body = request.body as MobileSubmitOrgJoinRequest;
+  const joinCode = normalizeJoinCode(body.joinCode);
+  if (!joinCode) {
+    response.status(400).json({ error: "Join code is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (!user.emailVerifiedAt) {
+      response.status(403).json({ error: "Verify your email before requesting enterprise access." });
+      return;
+    }
+
+    const emailDomain = extractEmailDomain(user.email);
+    if (!emailDomain) {
+      response.status(400).json({ error: "Email domain could not be determined from your profile." });
+      return;
+    }
+
+    const org = db.orgs.find(
+      (entry) => entry.status === "active" && normalizeJoinCode(entry.joinCode) === joinCode
+    );
+    if (!org) {
+      response.status(404).json({ error: "Join code not found." });
+      return;
+    }
+
+    if (normalizeEmailDomain(org.emailDomain) !== normalizeEmailDomain(emailDomain)) {
+      response.status(400).json({
+        error:
+          "Join code does not match your email domain. Ask your org admin for the correct code for your domain."
+      });
+      return;
+    }
+
+    if (user.accountType === "enterprise" && user.orgId === org.id) {
+      response.status(409).json({ error: "You are already a member of this organization." });
+      return;
+    }
+
+    expireOrgJoinRequests(db, new Date());
+    const existingPending = db.enterpriseJoinRequests.find(
+      (row) => row.userId === user.id && row.orgId === org.id && row.status === "pending"
+    );
+    if (existingPending) {
+      response.json({
+        created: false,
+        request: {
+          id: existingPending.id,
+          status: existingPending.status,
+          orgId: existingPending.orgId,
+          orgName: org.name,
+          emailDomain: existingPending.emailDomain,
+          createdAt: existingPending.createdAt,
+          expiresAt: existingPending.expiresAt,
+          updatedAt: existingPending.updatedAt
+        }
+      });
+      return;
+    }
+
+    const now = new Date();
+    const createdAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + ORG_JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+    const record: EnterpriseJoinRequestRecord = {
+      id: `jr_${uuid()}`,
+      userId: user.id,
+      email: user.email,
+      emailDomain,
+      orgId: org.id,
+      orgNameSnapshot: org.name,
+      joinCodeSnapshot: joinCode,
+      status: "pending",
+      createdAt,
+      expiresAt,
+      updatedAt: createdAt,
+      decidedAt: null,
+      decidedByUserId: null,
+      decisionReason: null
+    };
+
+    db.enterpriseJoinRequests.push(record);
+    emitMobileUpdateForOrg(db, org.id, "org");
+
+    response.status(201).json({
+      created: true,
+      request: {
+        id: record.id,
+        status: record.status,
+        orgId: record.orgId,
+        orgName: org.name,
+        emailDomain: record.emailDomain,
+        createdAt: record.createdAt,
+        expiresAt: record.expiresAt,
+        updatedAt: record.updatedAt
+      }
+    });
+  });
+});
+
+app.get("/mobile/users/:userId/admin/org/access-requests", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const actor = getUserById(db, request.params.userId);
+    if (!actor) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, actor.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (actor.accountType !== "enterprise" || !actor.orgId) {
+      response.status(403).json({ error: "Enterprise access required." });
+      return;
+    }
+
+    if (actor.orgRole !== "org_admin") {
+      response.status(403).json({ error: "Org admin access required." });
+      return;
+    }
+
+    const org = getOrgById(db, actor.orgId);
+    if (!org || org.status !== "active") {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    expireOrgJoinRequests(db, new Date());
+    const requests = db.enterpriseJoinRequests
+      .filter((row) => row.orgId === org.id)
+      .slice()
+      .sort((a, b) => {
+        if (a.status === "pending" && b.status !== "pending") {
+          return -1;
+        }
+        if (a.status !== "pending" && b.status === "pending") {
+          return 1;
+        }
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      })
+      .map((row) => ({
+        id: row.id,
+        status: row.status,
+        userId: row.userId,
+        email: row.email,
+        emailDomain: row.emailDomain,
+        createdAt: row.createdAt,
+        expiresAt: row.expiresAt,
+        updatedAt: row.updatedAt,
+        decidedAt: row.decidedAt,
+        decisionReason: row.decisionReason
+      }));
+
+    response.json({
+      generatedAt: nowIso(),
+      org: {
+        id: org.id,
+        name: org.name,
+        emailDomain: org.emailDomain,
+        joinCode: org.joinCode
+      },
+      requests
+    });
+  });
+});
+
+app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const body = request.body as { action?: "approve" | "reject"; reason?: string };
+  if (body.action !== "approve" && body.action !== "reject") {
+    response.status(400).json({ error: "action must be approve or reject." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const actor = getUserById(db, request.params.userId);
+    if (!actor) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, actor.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (actor.accountType !== "enterprise" || !actor.orgId) {
+      response.status(403).json({ error: "Enterprise access required." });
+      return;
+    }
+
+    if (actor.orgRole !== "org_admin") {
+      response.status(403).json({ error: "Org admin access required." });
+      return;
+    }
+
+    expireOrgJoinRequests(db, new Date());
+    const requestRecord = db.enterpriseJoinRequests.find((row) => row.id === request.params.requestId);
+    if (!requestRecord || requestRecord.orgId !== actor.orgId) {
+      response.status(404).json({ error: "Join request not found." });
+      return;
+    }
+
+    if (requestRecord.status !== "pending") {
+      response.status(409).json({ error: `Join request is already ${requestRecord.status}.` });
+      return;
+    }
+
+    const targetUser = getUserById(db, requestRecord.userId);
+    if (!targetUser) {
+      requestRecord.status = "rejected";
+      requestRecord.updatedAt = nowIso();
+      requestRecord.decidedAt = requestRecord.updatedAt;
+      requestRecord.decidedByUserId = actor.id;
+      requestRecord.decisionReason = "Target user no longer exists.";
+      response.status(404).json({ error: "Target user not found." });
+      return;
+    }
+
+    const nowValue = nowIso();
+    if (body.action === "approve") {
+      targetUser.accountType = "enterprise";
+      targetUser.tier = "enterprise";
+      targetUser.orgId = actor.orgId;
+      targetUser.orgRole = "user";
+      targetUser.status = "active";
+      targetUser.updatedAt = nowValue;
+      requestRecord.status = "approved";
+      requestRecord.updatedAt = nowValue;
+      requestRecord.decidedAt = nowValue;
+      requestRecord.decidedByUserId = actor.id;
+      requestRecord.decisionReason = body.reason?.trim() || null;
+      emitMobileUpdateForUser(db, targetUser.id, "user");
+      emitMobileUpdateForOrg(db, actor.orgId, "org");
+    } else {
+      requestRecord.status = "rejected";
+      requestRecord.updatedAt = nowValue;
+      requestRecord.decidedAt = nowValue;
+      requestRecord.decidedByUserId = actor.id;
+      requestRecord.decisionReason = body.reason?.trim() || "Rejected by organization admin.";
+      emitMobileUpdateForUser(db, targetUser.id, "user");
+      emitMobileUpdateForOrg(db, actor.orgId, "org");
+    }
+
+    response.json({
+      ok: true,
+      request: {
+        id: requestRecord.id,
+        status: requestRecord.status,
+        userId: requestRecord.userId,
+        email: requestRecord.email,
+        orgId: requestRecord.orgId,
+        createdAt: requestRecord.createdAt,
+        expiresAt: requestRecord.expiresAt,
+        updatedAt: requestRecord.updatedAt,
+        decidedAt: requestRecord.decidedAt,
+        decisionReason: requestRecord.decisionReason
+      }
+    });
   });
 });
 
@@ -2452,6 +3236,7 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
 
     const now = new Date();
     materializeUserTimezone(user, now);
+    let emailChanged = false;
 
     if (typeof patch.email === "string") {
       const email = patch.email.trim().toLowerCase();
@@ -2466,7 +3251,11 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
         return;
       }
 
-      user.email = email;
+      if (email !== user.email) {
+        user.email = email;
+        user.emailVerifiedAt = null;
+        emailChanged = true;
+      }
     }
 
     if (typeof patch.timezone === "string") {
@@ -2478,6 +3267,9 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
     }
 
     user.updatedAt = now.toISOString();
+    if (emailChanged) {
+      issueEmailVerification(db, user, now);
+    }
     response.json(user);
   });
 });
@@ -3818,6 +4610,62 @@ app.get("/usage", requireAdmin, async (_request: Request, response: Response) =>
 
     response.json({
       generatedAt: now.toISOString(),
+      rows
+    });
+  });
+});
+
+app.get("/org-join-requests", requireAdmin, async (request: Request, response: Response) => {
+  const statusFilterRaw = typeof request.query.status === "string" ? request.query.status.trim() : "";
+  const statusFilter = statusFilterRaw && isOrgJoinRequestStatus(statusFilterRaw) ? statusFilterRaw : null;
+
+  await withDatabase(async (db) => {
+    expireOrgJoinRequests(db, new Date());
+
+    const orgById = new Map(db.orgs.map((org) => [org.id, org]));
+    const userById = new Map(db.users.map((user) => [user.id, user]));
+    const rows = db.enterpriseJoinRequests
+      .filter((row) => (statusFilter ? row.status === statusFilter : true))
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map((row) => {
+        const org = orgById.get(row.orgId);
+        const user = userById.get(row.userId);
+        return {
+          id: row.id,
+          status: row.status,
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt,
+          updatedAt: row.updatedAt,
+          decidedAt: row.decidedAt,
+          decisionReason: row.decisionReason,
+          email: row.email,
+          emailDomain: row.emailDomain,
+          user: user
+            ? {
+                id: user.id,
+                email: user.email,
+                accountType: user.accountType,
+                tier: user.tier,
+                status: user.status,
+                orgId: user.orgId,
+                orgRole: user.orgRole
+              }
+            : null,
+          org: org
+            ? {
+                id: org.id,
+                name: org.name,
+                emailDomain: org.emailDomain,
+                joinCode: org.joinCode,
+                status: org.status
+              }
+            : null
+        };
+      });
+
+    response.json({
+      generatedAt: nowIso(),
       rows
     });
   });
