@@ -4,6 +4,7 @@ const DEFAULT_API_BASE_URL = "http://localhost:4100";
 const DEFAULT_EMAIL = "rbdautel@gmail.com";
 const DEFAULT_ORG_NAME = "Rob's company";
 const DEFAULT_ORG_ROLE = "org_admin";
+const REQUEST_MAX_ATTEMPTS = 6;
 
 const ALLOWED_ORG_ROLES = new Set(["org_admin", "user_admin", "user"]);
 
@@ -34,32 +35,66 @@ function parseArgs(argv) {
   return parsed;
 }
 
+function createRequestError(message, retryable) {
+  const error = new Error(message);
+  error.retryable = retryable;
+  return error;
+}
+
 async function requestJson(baseUrl, path, init = {}, token = "") {
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init.headers || {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+  const retryableStatusCodes = new Set([429, 502, 503, 504]);
+
+  for (let attempt = 1; attempt <= REQUEST_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          ...(init.headers || {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        }
+      });
+
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        // ignore
+      }
+
+      if (!response.ok) {
+        const reason =
+          payload && typeof payload === "object" && typeof payload.error === "string"
+            ? payload.error
+            : `Request failed (${response.status})`;
+
+        const canRetry = retryableStatusCodes.has(response.status) && attempt < REQUEST_MAX_ATTEMPTS;
+        if (canRetry) {
+          const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 8000);
+          console.log(`${path}: transient ${response.status}; retrying in ${backoffMs}ms (attempt ${attempt + 1}/${REQUEST_MAX_ATTEMPTS})...`);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+
+        throw createRequestError(`${path}: ${reason}`, false);
+      }
+
+      return payload;
+    } catch (error) {
+      const retryable = !(error instanceof Error && "retryable" in error) || error.retryable === true;
+      const canRetry = retryable && attempt < REQUEST_MAX_ATTEMPTS;
+      if (!canRetry) {
+        throw error;
+      }
+
+      const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 8000);
+      const reason = error instanceof Error ? error.message : String(error);
+      console.log(`${path}: transient network error "${reason}"; retrying in ${backoffMs}ms (attempt ${attempt + 1}/${REQUEST_MAX_ATTEMPTS})...`);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
-  });
-
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {
-    // ignore
   }
 
-  if (!response.ok) {
-    const reason =
-      payload && typeof payload === "object" && typeof payload.error === "string"
-        ? payload.error
-        : `Request failed (${response.status})`;
-    throw new Error(`${path}: ${reason}`);
-  }
-
-  return payload;
+  throw new Error(`${path}: request failed after ${REQUEST_MAX_ATTEMPTS} attempts.`);
 }
 
 function printHelp() {

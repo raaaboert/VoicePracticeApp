@@ -987,11 +987,18 @@ export default function App() {
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not initialize app.");
       const lower = message.toLowerCase();
-      if (lower.includes("mobile token") || lower.includes("invalid mobile token")) {
+      const shouldResetSession =
+        lower.includes("mobile token") ||
+        lower.includes("invalid mobile token") ||
+        lower.includes("user not found") ||
+        lower.includes("user doesn't exist");
+
+      if (shouldResetSession) {
         await clearUserId();
         setUser(null);
         setEntitlements(null);
         setMobileAuthToken(null);
+        setAppError(null);
         setScreen("onboarding");
       } else {
         setAppError(message);
@@ -1051,7 +1058,13 @@ export default function App() {
 
           const message = getErrorMessage(caught, "");
           const lower = message.toLowerCase();
-          if (lower.includes("invalid mobile token") || lower.includes("missing mobile token")) {
+          const shouldResetSession =
+            lower.includes("invalid mobile token") ||
+            lower.includes("missing mobile token") ||
+            lower.includes("user not found") ||
+            lower.includes("user doesn't exist");
+
+          if (shouldResetSession) {
             await clearUserId();
             setUser(null);
             setEntitlements(null);
