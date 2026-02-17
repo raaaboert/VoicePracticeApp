@@ -2,20 +2,19 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getApiBaseUrl, setAdminToken } from "../../src/lib/api";
+import { adminFetch, getApiBaseUrl, setAdminToken } from "../../src/lib/api";
 
 interface LoginResponse {
   token: string;
   expiresAt: string;
 }
 
-const LOGIN_TIMEOUT_MS = 10_000;
-
 export default function LoginPage() {
   const router = useRouter();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [apiBase] = useState(() => getApiBaseUrl());
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -23,36 +22,25 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), LOGIN_TIMEOUT_MS);
-      const response = await fetch(`${getApiBaseUrl()}/auth/login`, {
+      const payload = await adminFetch<LoginResponse>("/auth/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
         body: JSON.stringify({ password }),
-        signal: controller.signal,
       });
-      clearTimeout(timeout);
-
-      const payload = (await safeJson(response)) as Partial<LoginResponse> & { error?: string };
-      if (!response.ok || !payload.token) {
-        throw new Error(payload.error ?? "Login failed.");
-      }
 
       setAdminToken(payload.token);
       router.push("/users");
     } catch (caught) {
-      if (caught instanceof Error && caught.name === "AbortError") {
-        setError("Login request timed out. Please retry.");
-        return;
-      }
-
       setError(caught instanceof Error ? caught.message : "Login failed.");
     } finally {
       setLoading(false);
     }
   };
+
+  const apiBaseLooksMisconfigured =
+    typeof window !== "undefined"
+    && window.location.hostname !== "localhost"
+    && window.location.hostname !== "127.0.0.1"
+    && apiBase.includes("localhost");
 
   return (
     <main>
@@ -62,6 +50,11 @@ export default function LoginPage() {
           <p className="small">
             Development login is backed by API password auth. Use the bootstrap password from API env until changed.
           </p>
+          {apiBaseLooksMisconfigured ? (
+            <p className="error">
+              Admin API base URL is set to localhost. Set `NEXT_PUBLIC_API_BASE_URL` in Vercel and redeploy.
+            </p>
+          ) : null}
           <form onSubmit={onSubmit}>
             <label htmlFor="password">Password</label>
             <input
@@ -80,12 +73,4 @@ export default function LoginPage() {
       </div>
     </main>
   );
-}
-
-async function safeJson(response: Response): Promise<{ error?: string; token?: string }>{
-  try {
-    return (await response.json()) as { error?: string; token?: string };
-  } catch {
-    return {};
-  }
 }
