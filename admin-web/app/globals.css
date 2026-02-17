@@ -68,6 +68,28 @@ main {
   flex-wrap: wrap;
 }
 
+.mode-toggle {
+  display: inline-flex;
+  gap: 6px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(4, 23, 11, 0.45);
+  border: 1px solid rgba(134, 217, 178, 0.35);
+}
+
+.mode-toggle button {
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.mode-toggle button.active {
+  background: rgba(18, 122, 61, 0.42);
+  border-color: rgba(155, 230, 191, 0.55);
+}
+
 .nav a,
 .button,
 button {

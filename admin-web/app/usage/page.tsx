@@ -5,6 +5,7 @@ import { EnterpriseOrg, UserProfile } from "@voicepractice/shared";
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
+import { useAdminMode } from "../../src/lib/adminMode";
 
 interface UsageRow {
   userId: string;
@@ -26,6 +27,8 @@ interface UsageResponse {
 
 export default function UsagePage() {
   useRequireAdminToken();
+  const mode = useAdminMode();
+  const isPersonalMode = mode === "personal";
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [orgs, setOrgs] = useState<EnterpriseOrg[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -38,14 +41,19 @@ export default function UsagePage() {
     setError(null);
 
     try {
-      const [usagePayload, usersPayload, orgsPayload] = await Promise.all([
-        adminFetch<UsageResponse>("/usage"),
-        adminFetch<UserProfile[]>("/users"),
-        adminFetch<EnterpriseOrg[]>("/orgs"),
-      ]);
+      const usagePayload = await adminFetch<UsageResponse>("/usage");
       setUsage(usagePayload);
-      setUsers(usersPayload);
-      setOrgs(orgsPayload);
+      if (isPersonalMode) {
+        setUsers([]);
+        setOrgs([]);
+      } else {
+        const [usersPayload, orgsPayload] = await Promise.all([
+          adminFetch<UserProfile[]>("/users"),
+          adminFetch<EnterpriseOrg[]>("/orgs"),
+        ]);
+        setUsers(usersPayload);
+        setOrgs(orgsPayload);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load usage.");
     } finally {
@@ -55,7 +63,13 @@ export default function UsagePage() {
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [isPersonalMode]);
+
+  useEffect(() => {
+    if (isPersonalMode) {
+      setOrgFilter("");
+    }
+  }, [isPersonalMode]);
 
   const selectedOrg = useMemo(() => {
     const query = orgFilter.trim().toLowerCase();
@@ -67,17 +81,20 @@ export default function UsagePage() {
   }, [orgFilter, orgs]);
 
   const filteredRows = useMemo(() => {
-    const rows = usage?.rows ?? [];
-    if (!selectedOrg) {
+    const rows = (usage?.rows ?? []).filter((row) =>
+      isPersonalMode ? row.accountType === "individual" : row.accountType === "enterprise"
+    );
+
+    if (isPersonalMode || !selectedOrg) {
       return rows;
     }
 
     const userById = new Map(users.map((user) => [user.id, user]));
     return rows.filter((row) => userById.get(row.userId)?.orgId === selectedOrg.id);
-  }, [selectedOrg, usage?.rows, users]);
+  }, [isPersonalMode, selectedOrg, usage?.rows, users]);
 
   return (
-    <AdminShell title="Usage">
+    <AdminShell title={isPersonalMode ? "Usage (Personal)" : "Usage (Enterprise)"}>
       <div className="card">
         <div
           style={{
@@ -94,33 +111,39 @@ export default function UsagePage() {
               {usage?.generatedAt ? new Date(usage.generatedAt).toLocaleString() : "-"}
             </p>
 
-            <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
-              <div style={{ flex: "1 1 320px", minWidth: 260 }}>
-                <label>Enterprise Account</label>
-                <input
-                  value={orgFilter}
-                  onChange={(event) => setOrgFilter(event.target.value)}
-                  placeholder="Start typing a company name..."
-                  list="enterprise-accounts"
-                />
-                <datalist id="enterprise-accounts">
-                  {orgs
-                    .slice()
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((org) => (
-                      <option key={org.id} value={org.name} />
-                    ))}
-                </datalist>
-                <div className="small" style={{ marginTop: 4 }}>
-                  {selectedOrg ? `Filtering to: ${selectedOrg.name}` : "No filter applied (showing all users)."}
+            {isPersonalMode ? (
+              <p className="small" style={{ marginBottom: 0 }}>
+                Showing individual/personal accounts only.
+              </p>
+            ) : (
+              <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 320px", minWidth: 260 }}>
+                  <label>Enterprise Account</label>
+                  <input
+                    value={orgFilter}
+                    onChange={(event) => setOrgFilter(event.target.value)}
+                    placeholder="Start typing a company name..."
+                    list="enterprise-accounts"
+                  />
+                  <datalist id="enterprise-accounts">
+                    {orgs
+                      .slice()
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map((org) => (
+                        <option key={org.id} value={org.name} />
+                      ))}
+                  </datalist>
+                  <div className="small" style={{ marginTop: 4 }}>
+                    {selectedOrg ? `Filtering to: ${selectedOrg.name}` : "No filter applied (showing all enterprise users)."}
+                  </div>
+                </div>
+                <div style={{ alignSelf: "end" }}>
+                  <button type="button" onClick={() => setOrgFilter("")} disabled={!orgFilter.trim()}>
+                    Clear
+                  </button>
                 </div>
               </div>
-              <div style={{ alignSelf: "end" }}>
-                <button type="button" onClick={() => setOrgFilter("")} disabled={!orgFilter.trim()}>
-                  Clear
-                </button>
-              </div>
-            </div>
+            )}
           </div>
 
           <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>

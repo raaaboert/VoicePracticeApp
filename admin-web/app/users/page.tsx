@@ -11,6 +11,7 @@ import {
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
+import { useAdminMode, withAdminMode } from "../../src/lib/adminMode";
 
 interface OrgJoinRequestRow {
   id: string;
@@ -68,10 +69,13 @@ function formatDateTime(value: string | null | undefined): string {
 
 export default function UsersPage() {
   useRequireAdminToken();
+  const mode = useAdminMode();
+  const isPersonalMode = mode === "personal";
   const [orgs, setOrgs] = useState<EnterpriseOrg[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
     name: "",
@@ -91,24 +95,33 @@ export default function UsersPage() {
   );
 
   const load = async () => {
+    setLoading(true);
     try {
       setError(null);
-      const [orgPayload, userPayload, requestPayload] = await Promise.all([
+      const userPayload = await adminFetch<UserProfile[]>("/users");
+      setUsers(userPayload);
+      if (isPersonalMode) {
+        setOrgs([]);
+        setJoinRequests([]);
+        return;
+      }
+
+      const [orgPayload, requestPayload] = await Promise.all([
         adminFetch<EnterpriseOrg[]>("/orgs"),
-        adminFetch<UserProfile[]>("/users"),
         adminFetch<{ rows: OrgJoinRequestRow[] }>("/org-join-requests"),
       ]);
       setOrgs(orgPayload);
-      setUsers(userPayload);
       setJoinRequests(requestPayload.rows ?? []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load account data.");
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [isPersonalMode]);
 
   const onCreateEnterpriseOrg = async (event: FormEvent) => {
     event.preventDefault();
@@ -143,115 +156,122 @@ export default function UsersPage() {
 
   return (
     <AdminShell title="Accounts">
-      <div className="card">
-        <h3>Create Enterprise Account</h3>
-        <form onSubmit={onCreateEnterpriseOrg} className="grid">
-          <div>
-            <label>Company Name</label>
-            <input
-              value={orgForm.name}
-              onChange={(event) => setOrgForm((prev) => ({ ...prev, name: event.target.value }))}
-              required
-            />
-          </div>
-          <div>
-            <label>Company Contact</label>
-            <input
-              value={orgForm.contactName}
-              onChange={(event) => setOrgForm((prev) => ({ ...prev, contactName: event.target.value }))}
-            />
-          </div>
-          <div>
-            <label>Contact Email</label>
-            <input
-              value={orgForm.contactEmail}
-              onChange={(event) => setOrgForm((prev) => ({ ...prev, contactEmail: event.target.value }))}
-            />
-          </div>
-          <div>
-            <label>Org Email Domain</label>
-            <input
-              value={orgForm.emailDomain}
-              onChange={(event) => setOrgForm((prev) => ({ ...prev, emailDomain: event.target.value }))}
-              placeholder="example.com"
-            />
-          </div>
-          <div style={{ alignSelf: "end" }}>
-            <button className="primary" disabled={creating}>
-              {creating ? "Creating..." : "Create Enterprise Account"}
-            </button>
-          </div>
-        </form>
-        <p className="small" style={{ marginBottom: 0 }}>
-          Default segment enabled: {INDUSTRY_LABELS.people_management}. Configure more on the account detail screen.
-        </p>
-        {error ? (
-          <p className="error" style={{ marginBottom: 0 }}>
-            {error}
+      {isPersonalMode ? null : (
+        <div className="card">
+          <h3>Create Enterprise Account</h3>
+          <form onSubmit={onCreateEnterpriseOrg} className="grid">
+            <div>
+              <label>Company Name</label>
+              <input
+                value={orgForm.name}
+                onChange={(event) => setOrgForm((prev) => ({ ...prev, name: event.target.value }))}
+                required
+              />
+            </div>
+            <div>
+              <label>Company Contact</label>
+              <input
+                value={orgForm.contactName}
+                onChange={(event) => setOrgForm((prev) => ({ ...prev, contactName: event.target.value }))}
+              />
+            </div>
+            <div>
+              <label>Contact Email</label>
+              <input
+                value={orgForm.contactEmail}
+                onChange={(event) => setOrgForm((prev) => ({ ...prev, contactEmail: event.target.value }))}
+              />
+            </div>
+            <div>
+              <label>Org Email Domain</label>
+              <input
+                value={orgForm.emailDomain}
+                onChange={(event) => setOrgForm((prev) => ({ ...prev, emailDomain: event.target.value }))}
+                placeholder="example.com"
+              />
+            </div>
+            <div style={{ alignSelf: "end" }}>
+              <button className="primary" disabled={creating}>
+                {creating ? "Creating..." : "Create Enterprise Account"}
+              </button>
+            </div>
+          </form>
+          <p className="small" style={{ marginBottom: 0 }}>
+            Default segment enabled: {INDUSTRY_LABELS.people_management}. Configure more on the account detail screen.
           </p>
-        ) : null}
-      </div>
+          {error ? (
+            <p className="error" style={{ marginBottom: 0 }}>
+              {error}
+            </p>
+          ) : null}
+        </div>
+      )}
+
+      {isPersonalMode ? null : (
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <h3 style={{ marginBottom: 0 }}>Enterprise Accounts ({orgs.length})</h3>
+            <button onClick={() => void load()}>Refresh</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Company Name</th>
+                <th>Date Established</th>
+                <th>Next Renewal Date</th>
+                <th>Company Contact</th>
+                <th>Contact Email</th>
+                <th>Domain</th>
+                <th>Join Code</th>
+                <th>Segments Active</th>
+              </tr>
+            </thead>
+            <tbody>
+              {enterpriseOrgsSorted.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="small">
+                    No enterprise accounts yet.
+                  </td>
+                </tr>
+              ) : (
+                enterpriseOrgsSorted.map((org) => {
+                  const nextRenewalAt = computeNextAnnualRenewalAt(org.createdAt, new Date());
+                  const segmentsActive =
+                    Array.isArray(org.activeIndustries) && org.activeIndustries.length > 0
+                      ? org.activeIndustries.map((id) => INDUSTRY_LABELS[id]).join(", ")
+                      : "-";
+
+                  return (
+                    <tr key={org.id}>
+                      <td>
+                        <Link href={withAdminMode(`/users/enterprise/${org.id}`, mode)} style={{ textDecoration: "underline" }}>
+                          {org.name}
+                        </Link>
+                        <div className="small">{org.id}</div>
+                      </td>
+                      <td>{formatDate(org.createdAt)}</td>
+                      <td>{formatDate(nextRenewalAt)}</td>
+                      <td>{org.contactName}</td>
+                      <td>{org.contactEmail}</td>
+                      <td>{org.emailDomain ?? "-"}</td>
+                      <td>
+                        <code>{org.joinCode}</code>
+                      </td>
+                      <td>{segmentsActive}</td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-          <h3 style={{ marginBottom: 0 }}>Enterprise Accounts ({orgs.length})</h3>
-          <button onClick={() => void load()}>Refresh</button>
+          <h3 style={{ marginBottom: 10 }}>Personal Users ({personalUsers.length})</h3>
+          <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Company Name</th>
-              <th>Date Established</th>
-              <th>Next Renewal Date</th>
-              <th>Company Contact</th>
-              <th>Contact Email</th>
-              <th>Domain</th>
-              <th>Join Code</th>
-              <th>Segments Active</th>
-            </tr>
-          </thead>
-          <tbody>
-            {enterpriseOrgsSorted.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="small">
-                  No enterprise accounts yet.
-                </td>
-              </tr>
-            ) : (
-              enterpriseOrgsSorted.map((org) => {
-                const nextRenewalAt = computeNextAnnualRenewalAt(org.createdAt, new Date());
-                const segmentsActive =
-                  Array.isArray(org.activeIndustries) && org.activeIndustries.length > 0
-                    ? org.activeIndustries.map((id) => INDUSTRY_LABELS[id]).join(", ")
-                    : "-";
-
-                return (
-                  <tr key={org.id}>
-                    <td>
-                      <Link href={`/users/enterprise/${org.id}`} style={{ textDecoration: "underline" }}>
-                        {org.name}
-                      </Link>
-                      <div className="small">{org.id}</div>
-                    </td>
-                    <td>{formatDate(org.createdAt)}</td>
-                    <td>{formatDate(nextRenewalAt)}</td>
-                    <td>{org.contactName}</td>
-                    <td>{org.contactEmail}</td>
-                    <td>{org.emailDomain ?? "-"}</td>
-                    <td>
-                      <code>{org.joinCode}</code>
-                    </td>
-                    <td>{segmentsActive}</td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="card">
-        <h3 style={{ marginBottom: 10 }}>Personal Users ({personalUsers.length})</h3>
         <table>
           <thead>
             <tr>
@@ -288,53 +308,55 @@ export default function UsersPage() {
         </table>
       </div>
 
-      <div className="card">
-        <h3 style={{ marginBottom: 10 }}>Org Access Requests ({joinRequests.length})</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Created</th>
-              <th>Email</th>
-              <th>Org</th>
-              <th>Status</th>
-              <th>Expires</th>
-              <th>Decision</th>
-            </tr>
-          </thead>
-          <tbody>
-            {joinRequests.length === 0 ? (
+      {isPersonalMode ? null : (
+        <div className="card">
+          <h3 style={{ marginBottom: 10 }}>Org Access Requests ({joinRequests.length})</h3>
+          <table>
+            <thead>
               <tr>
-                <td colSpan={6} className="small">
-                  No org access requests yet.
-                </td>
+                <th>Created</th>
+                <th>Email</th>
+                <th>Org</th>
+                <th>Status</th>
+                <th>Expires</th>
+                <th>Decision</th>
               </tr>
-            ) : (
-              joinRequests.map((row) => (
-                <tr key={row.id}>
-                  <td>
-                    <div>{formatDateTime(row.createdAt)}</div>
-                    <div className="small">{row.id}</div>
-                  </td>
-                  <td>
-                    <div>{row.email}</div>
-                    <div className="small">{row.emailDomain}</div>
-                  </td>
-                  <td>
-                    <div>{row.org?.name ?? row.org?.id ?? "-"}</div>
-                    <div className="small">{row.org?.joinCode ?? "-"}</div>
-                  </td>
-                  <td>{row.status}</td>
-                  <td>{formatDateTime(row.expiresAt)}</td>
-                  <td>
-                    <div>{formatDateTime(row.decidedAt)}</div>
-                    <div className="small">{row.decisionReason ?? "-"}</div>
+            </thead>
+            <tbody>
+              {joinRequests.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="small">
+                    No org access requests yet.
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+              ) : (
+                joinRequests.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <div>{formatDateTime(row.createdAt)}</div>
+                      <div className="small">{row.id}</div>
+                    </td>
+                    <td>
+                      <div>{row.email}</div>
+                      <div className="small">{row.emailDomain}</div>
+                    </td>
+                    <td>
+                      <div>{row.org?.name ?? row.org?.id ?? "-"}</div>
+                      <div className="small">{row.org?.joinCode ?? "-"}</div>
+                    </td>
+                    <td>{row.status}</td>
+                    <td>{formatDateTime(row.expiresAt)}</td>
+                    <td>
+                      <div>{formatDateTime(row.decidedAt)}</div>
+                      <div className="small">{row.decisionReason ?? "-"}</div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
     </AdminShell>
   );
 }

@@ -1,8 +1,9 @@
 ﻿"use client";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4100";
-const REQUEST_TIMEOUT_MS = 15_000;
-const REQUEST_MAX_ATTEMPTS = 3;
+const REQUEST_ATTEMPT_TIMEOUT_MS = 7_000;
+const REQUEST_TOTAL_TIMEOUT_MS = 14_000;
+const REQUEST_MAX_ATTEMPTS = 2;
 
 export function getApiBaseUrl(): string {
   return API_BASE;
@@ -34,11 +35,23 @@ export function clearAdminToken(): void {
 
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const retryableStatusCodes = new Set([429, 502, 503, 504]);
+  const startedAt = Date.now();
 
   for (let attempt = 1; attempt <= REQUEST_MAX_ATTEMPTS; attempt += 1) {
+    const elapsedMs = Date.now() - startedAt;
+    const remainingMs = REQUEST_TOTAL_TIMEOUT_MS - elapsedMs;
+    if (remainingMs <= 0) {
+      throw new Error("Request timed out. Please retry.");
+    }
+
     const token = getAdminToken();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const attemptTimeoutMs = Math.max(1_500, Math.min(REQUEST_ATTEMPT_TIMEOUT_MS, remainingMs));
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, attemptTimeoutMs);
 
     try {
       const response = await fetch(`${API_BASE}${path}`, {
@@ -57,7 +70,7 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
         const message = payload?.error ?? `Request failed (${response.status})`;
         const shouldRetry = retryableStatusCodes.has(response.status) && attempt < REQUEST_MAX_ATTEMPTS;
         if (shouldRetry) {
-          await sleep(attempt * 600);
+          await sleep(attempt * 400);
           continue;
         }
 
@@ -66,18 +79,17 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
 
       return (await response.json()) as T;
     } catch (error) {
-      const isAbort = error instanceof Error && error.name === "AbortError";
+      const isAbort = error instanceof Error && (error.name === "AbortError" || timedOut);
       const isNetwork = error instanceof TypeError;
       const shouldRetry = (isAbort || isNetwork) && attempt < REQUEST_MAX_ATTEMPTS;
       if (shouldRetry) {
-        await sleep(attempt * 600);
+        await sleep(attempt * 400);
         continue;
       }
 
       if (isAbort) {
         throw new Error(
-          `Request timed out after ${Math.floor(REQUEST_TIMEOUT_MS / 1000)} seconds. ` +
-            "If the API is on Render Free, it may be waking up. Try again."
+          "Request timed out. If this repeats, refresh once and retry."
         );
       }
 

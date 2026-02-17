@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
+import { useAdminMode } from "../../src/lib/adminMode";
 
 interface SupportCaseSummary {
   id: string;
@@ -37,6 +38,8 @@ interface SupportCaseDetail {
 
 export default function SupportPage() {
   useRequireAdminToken();
+  const mode = useAdminMode();
+  const isPersonalMode = mode === "personal";
   const [payload, setPayload] = useState<SupportCaseListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -63,7 +66,20 @@ export default function SupportPage() {
     void refresh();
   }, []);
 
-  const rows = useMemo(() => payload?.cases ?? [], [payload?.cases]);
+  useEffect(() => {
+    setSelectedCaseId(null);
+    setSelectedDetail(null);
+    setDetailError(null);
+    setDetailLoading(false);
+  }, [isPersonalMode]);
+
+  const rows = useMemo(
+    () =>
+      (payload?.cases ?? []).filter((row) =>
+        isPersonalMode ? row.org === null : row.org !== null
+      ),
+    [isPersonalMode, payload?.cases],
+  );
 
   const openCase = async (caseId: string) => {
     setSelectedCaseId(caseId);
@@ -89,7 +105,7 @@ export default function SupportPage() {
   };
 
   return (
-    <AdminShell title="Feedback / Error Support">
+    <AdminShell title={isPersonalMode ? "Feedback / Error Support (Personal)" : "Feedback / Error Support (Enterprise)"}>
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
           <div>
@@ -97,7 +113,9 @@ export default function SupportPage() {
               Generated: {payload?.generatedAt ? new Date(payload.generatedAt).toLocaleString() : "-"}
             </p>
             <p className="small" style={{ marginBottom: 0 }}>
-              Cases are created by mobile users when they opt in to share a transcript for support review.
+              {isPersonalMode
+                ? "Showing support cases submitted by individual users."
+                : "Showing support cases submitted by enterprise users."}
             </p>
           </div>
           <button className="primary" onClick={() => void refresh()} disabled={loading}>
@@ -110,7 +128,7 @@ export default function SupportPage() {
           <thead>
             <tr>
               <th>Created</th>
-              <th>Org</th>
+              {isPersonalMode ? null : <th>Org</th>}
               <th>User</th>
               <th>Scenario</th>
               <th>Status</th>
@@ -126,7 +144,7 @@ export default function SupportPage() {
                   <div>{new Date(row.createdAt).toLocaleString()}</div>
                   <div className="small">{row.id}</div>
                 </td>
-                <td>{row.org?.name ?? "-"}</td>
+                {isPersonalMode ? null : <td>{row.org?.name ?? "-"}</td>}
                 <td>
                   <div>{row.user.email}</div>
                   <div className="small">{row.user.id}</div>
@@ -160,7 +178,7 @@ export default function SupportPage() {
             ))}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="small">
+                <td colSpan={isPersonalMode ? 7 : 8} className="small">
                   No cases yet.
                 </td>
               </tr>
@@ -248,4 +266,3 @@ export default function SupportPage() {
     </AdminShell>
   );
 }
-

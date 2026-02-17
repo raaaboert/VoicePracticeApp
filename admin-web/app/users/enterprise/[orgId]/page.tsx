@@ -18,6 +18,7 @@ import {
 import { AdminShell } from "../../../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../../../src/lib/api";
+import { withAdminMode } from "../../../../src/lib/adminMode";
 
 interface OrgDashboardUserRow {
   userId: string;
@@ -50,6 +51,7 @@ function formatDate(value: string): string {
 
 export default function EnterpriseOrgPage() {
   useRequireAdminToken();
+  const mode = "enterprise";
   const params = useParams();
   const orgId = useMemo(() => {
     const raw = params?.orgId;
@@ -206,7 +208,7 @@ export default function EnterpriseOrgPage() {
             <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
             <div className="small">{dashboard?.org.id ?? ""}</div>
           </div>
-          <Link className="button" href="/users">
+          <Link className="button" href={withAdminMode("/users", mode)}>
             Back to Accounts
           </Link>
         </div>
