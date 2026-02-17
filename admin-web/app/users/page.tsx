@@ -267,46 +267,48 @@ export default function UsersPage() {
         </div>
       )}
 
-      <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-          <h3 style={{ marginBottom: 10 }}>Personal Users ({personalUsers.length})</h3>
-          <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Tier</th>
-              <th>Status</th>
-              <th>Verified</th>
-              <th>Created</th>
-              <th>User Id</th>
-            </tr>
-          </thead>
-          <tbody>
-            {personalUsers.length === 0 ? (
+      {isPersonalMode ? (
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <h3 style={{ marginBottom: 10 }}>Personal Users ({personalUsers.length})</h3>
+            <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
+          </div>
+          <table>
+            <thead>
               <tr>
-                <td colSpan={6} className="small">
-                  No individual users yet.
-                </td>
+                <th>Email</th>
+                <th>Tier</th>
+                <th>Status</th>
+                <th>Verified</th>
+                <th>Created</th>
+                <th>User Id</th>
               </tr>
-            ) : (
-              personalUsers.map((user) => (
-                <tr key={user.id}>
-                  <td>{user.email}</td>
-                  <td>{user.tier}</td>
-                  <td>{user.status}</td>
-                  <td>{user.emailVerifiedAt ? "Yes" : "No"}</td>
-                  <td>{formatDateTime(user.createdAt)}</td>
-                  <td>
-                    <span className="small">{user.id}</span>
+            </thead>
+            <tbody>
+              {personalUsers.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="small">
+                    No individual users yet.
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+              ) : (
+                personalUsers.map((user) => (
+                  <tr key={user.id}>
+                    <td>{user.email}</td>
+                    <td>{user.tier}</td>
+                    <td>{user.status}</td>
+                    <td>{user.emailVerifiedAt ? "Yes" : "No"}</td>
+                    <td>{formatDateTime(user.createdAt)}</td>
+                    <td>
+                      <span className="small">{user.id}</span>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
 
       {isPersonalMode ? null : (
         <div className="card">
