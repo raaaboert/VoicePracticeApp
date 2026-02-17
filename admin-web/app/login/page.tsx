@@ -9,6 +9,8 @@ interface LoginResponse {
   expiresAt: string;
 }
 
+const LOGIN_TIMEOUT_MS = 10_000;
+
 export default function LoginPage() {
   const router = useRouter();
   const [password, setPassword] = useState("");
@@ -21,15 +23,19 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), LOGIN_TIMEOUT_MS);
       const response = await fetch(`${getApiBaseUrl()}/auth/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ password })
+        body: JSON.stringify({ password }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
 
-      const payload = (await response.json()) as Partial<LoginResponse> & { error?: string };
+      const payload = (await safeJson(response)) as Partial<LoginResponse> & { error?: string };
       if (!response.ok || !payload.token) {
         throw new Error(payload.error ?? "Login failed.");
       }
@@ -37,6 +43,11 @@ export default function LoginPage() {
       setAdminToken(payload.token);
       router.push("/users");
     } catch (caught) {
+      if (caught instanceof Error && caught.name === "AbortError") {
+        setError("Login request timed out. Please retry.");
+        return;
+      }
+
       setError(caught instanceof Error ? caught.message : "Login failed.");
     } finally {
       setLoading(false);
@@ -69,4 +80,12 @@ export default function LoginPage() {
       </div>
     </main>
   );
+}
+
+async function safeJson(response: Response): Promise<{ error?: string; token?: string }>{
+  try {
+    return (await response.json()) as { error?: string; token?: string };
+  } catch {
+    return {};
+  }
 }
