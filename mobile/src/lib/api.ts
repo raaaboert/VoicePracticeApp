@@ -14,6 +14,13 @@ import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationScorecard } from "../types";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const TRANSIENT_ERROR_PATTERNS = [
+  "request timed out",
+  "request failed (429)",
+  "request failed (502)",
+  "request failed (503)",
+  "request failed (504)",
+];
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -186,6 +193,43 @@ async function requestFormData<T>(
 
 export function getApiBaseUrl(): string {
   return API_BASE_URL;
+}
+
+function isTransientRequestError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const lower = error.message.toLowerCase();
+  return TRANSIENT_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestJsonWithRetry<T>(
+  path: string,
+  init: RequestInit | undefined,
+  authToken: string | undefined,
+  options: { timeoutMs?: number; signal?: AbortSignal } | undefined,
+  retryOptions: { attempts: number; initialDelayMs: number },
+): Promise<T> {
+  for (let attempt = 1; attempt <= retryOptions.attempts; attempt += 1) {
+    try {
+      return await requestJson<T>(path, init, authToken, options);
+    } catch (error) {
+      const shouldRetry = isTransientRequestError(error) && attempt < retryOptions.attempts;
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      const delayMs = retryOptions.initialDelayMs * attempt;
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error("Request failed after multiple attempts.");
 }
 
 export async function fetchAppConfig(): Promise<AppConfig> {
@@ -400,7 +444,7 @@ export async function createSupportCase(params: {
   includeTranscript: boolean;
   transcript?: { text: string; fileName: string; meta: Record<string, unknown> };
 }): Promise<{ caseId: string; transcriptRetainedUntil: string | null }> {
-  return requestJson(
+  return requestJsonWithRetry(
     `/mobile/users/${encodeURIComponent(params.userId)}/support/cases`,
     {
       method: "POST",
@@ -411,7 +455,8 @@ export async function createSupportCase(params: {
       }),
     },
     params.authToken,
-    { timeoutMs: 20_000 },
+    { timeoutMs: 45_000 },
+    { attempts: 3, initialDelayMs: 900 },
   );
 }
 
