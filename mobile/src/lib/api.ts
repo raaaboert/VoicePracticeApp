@@ -18,6 +18,7 @@ import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationScorecard } from "../types";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_PRODUCTION_API_BASE_URL = "https://voicepractice-api-dev.onrender.com";
 const TRANSIENT_ERROR_PATTERNS = [
   "request timed out",
   "request failed (429)",
@@ -77,6 +78,10 @@ function inferApiBaseUrl(): string {
     } catch {
       // Falls through to platform defaults.
     }
+  }
+
+  if (!__DEV__) {
+    return DEFAULT_PRODUCTION_API_BASE_URL;
   }
 
   if (Platform.OS === "android") {
@@ -237,7 +242,13 @@ async function requestJsonWithRetry<T>(
 }
 
 export async function fetchAppConfig(): Promise<AppConfig> {
-  return requestJson<AppConfig>("/config");
+  return requestJsonWithRetry<AppConfig>(
+    "/config",
+    undefined,
+    undefined,
+    { timeoutMs: 15_000 },
+    { attempts: 3, initialDelayMs: 700 },
+  );
 }
 
 export async function fetchTimezones(): Promise<string[]> {
@@ -246,10 +257,16 @@ export async function fetchTimezones(): Promise<string[]> {
 }
 
 export async function onboardMobileUser(input: MobileOnboardRequest): Promise<MobileOnboardResponse> {
-  return requestJson<MobileOnboardResponse>("/mobile/onboard", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+  return requestJsonWithRetry<MobileOnboardResponse>(
+    "/mobile/onboard",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    undefined,
+    { timeoutMs: 20_000 },
+    { attempts: 3, initialDelayMs: 900 },
+  );
 }
 
 export async function resendMobileVerificationEmail(
