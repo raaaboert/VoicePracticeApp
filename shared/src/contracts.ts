@@ -163,7 +163,7 @@ export interface SimulationScoreRecord {
   createdAt: string;
 }
 
-export type AiUsageEventKind = "opening" | "turn" | "score";
+export type AiUsageEventKind = "opening" | "turn" | "score" | "transcribe";
 
 export interface AiUsageEvent {
   id: string;

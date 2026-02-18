@@ -84,8 +84,13 @@ const ADMIN_BOOTSTRAP_PASSWORD = runtimeConfig.adminBootstrapPassword;
 const ADMIN_TOKEN_SECRET = runtimeConfig.adminTokenSecret;
 const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
+const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
 const OPENAI_TRANSCRIPTION_MODEL = runtimeConfig.openAiTranscriptionModel;
+const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
+const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;
+const OPENAI_MAX_DAILY_TOKENS_PER_USER = runtimeConfig.openAiMaxDailyTokensPerUser;
+const OPENAI_MAX_DAILY_TOKENS_GLOBAL = runtimeConfig.openAiMaxDailyTokensGlobal;
 const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
 const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
@@ -299,6 +304,87 @@ function normalizeJoinCode(value: string | undefined | null): string {
   }
 
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+interface RateLimitState {
+  count: number;
+  windowStartMs: number;
+}
+
+interface RateLimiterOptions {
+  name: string;
+  windowMs: number;
+  max: number;
+  keySelector?: (request: Request) => string;
+}
+
+const rateLimitByKey = new Map<string, RateLimitState>();
+let rateLimitCleanupCounter = 0;
+
+function getClientIp(request: Request): string {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    const first = forwarded[0]?.trim();
+    if (first) {
+      return first;
+    }
+  }
+
+  const remoteAddress = request.socket.remoteAddress?.trim();
+  return remoteAddress || "unknown";
+}
+
+function cleanupRateLimitStore(nowMs: number): void {
+  rateLimitCleanupCounter += 1;
+  if (rateLimitCleanupCounter % 200 !== 0 && rateLimitByKey.size < 5_000) {
+    return;
+  }
+
+  const expireBeforeMs = nowMs - 2 * 60 * 60 * 1000;
+  for (const [key, value] of rateLimitByKey.entries()) {
+    if (value.windowStartMs < expireBeforeMs) {
+      rateLimitByKey.delete(key);
+    }
+  }
+}
+
+function createRateLimiter(options: RateLimiterOptions) {
+  const windowMs = Math.max(1_000, Math.floor(options.windowMs));
+  const max = Math.max(1, Math.floor(options.max));
+
+  return (request: Request, response: Response, next: NextFunction): void => {
+    const nowMs = Date.now();
+    cleanupRateLimitStore(nowMs);
+
+    const selectorValue = options.keySelector?.(request) || getClientIp(request);
+    const key = `${options.name}:${selectorValue || "unknown"}`;
+    const existing = rateLimitByKey.get(key);
+    const state =
+      existing && nowMs - existing.windowStartMs < windowMs
+        ? existing
+        : {
+            count: 0,
+            windowStartMs: nowMs
+          };
+
+    state.count += 1;
+    rateLimitByKey.set(key, state);
+
+    if (state.count > max) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
+      response.setHeader("Retry-After", String(retryAfterSeconds));
+      response.status(429).json({
+        error: "Too many requests. Please wait and retry."
+      });
+      return;
+    }
+
+    next();
+  };
 }
 
 function isValidTimeZone(timeZone: string): boolean {
@@ -1633,6 +1719,11 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
     }
   }
 
+  if (!user.emailVerifiedAt) {
+    lockReason = "Email verification required.";
+    dailySecondsRemaining = 0;
+  }
+
   if (user.status !== "active") {
     lockReason = "User account is disabled.";
     dailySecondsRemaining = 0;
@@ -1664,6 +1755,93 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
     canStartSimulation: user.status === "active" && !lockReason,
     lockReason
   };
+}
+
+interface AiBudgetSnapshot {
+  userCallsToday: number;
+  userTokensToday: number;
+  globalCallsToday: number;
+  globalTokensToday: number;
+}
+
+function computeAiBudgetSnapshot(db: ApiDatabase, user: UserProfile, now: Date): AiBudgetSnapshot {
+  const userTimezone = materializeUserTimezone(user, now);
+  const userDayKey = getDayKey(now, userTimezone);
+  const globalDayKey = getDayKey(now, "UTC");
+
+  let userCallsToday = 0;
+  let userTokensToday = 0;
+  let globalCallsToday = 0;
+  let globalTokensToday = 0;
+
+  for (const event of db.aiUsageEvents ?? []) {
+    const createdAt = parseIsoDateOrNull(event.createdAt);
+    if (!createdAt) {
+      continue;
+    }
+
+    const tokens = Math.max(0, clampNonNegativeInteger(event.totalTokens, 0));
+    const eventGlobalDayKey = getDayKey(createdAt, "UTC");
+    if (eventGlobalDayKey === globalDayKey) {
+      globalCallsToday += 1;
+      globalTokensToday += tokens;
+    }
+
+    if (event.userId !== user.id) {
+      continue;
+    }
+
+    const eventUserDayKey = getDayKey(createdAt, userTimezone);
+    if (eventUserDayKey === userDayKey) {
+      userCallsToday += 1;
+      userTokensToday += tokens;
+    }
+  }
+
+  return {
+    userCallsToday,
+    userTokensToday,
+    globalCallsToday,
+    globalTokensToday
+  };
+}
+
+function resolveAiBudgetLimitError(db: ApiDatabase, user: UserProfile, now: Date): string | null {
+  const budget = computeAiBudgetSnapshot(db, user, now);
+
+  if (
+    OPENAI_MAX_DAILY_CALLS_PER_USER !== null &&
+    OPENAI_MAX_DAILY_CALLS_PER_USER >= 0 &&
+    budget.userCallsToday >= OPENAI_MAX_DAILY_CALLS_PER_USER
+  ) {
+    return "Daily AI request limit reached for this account.";
+  }
+
+  if (
+    OPENAI_MAX_DAILY_TOKENS_PER_USER !== null &&
+    OPENAI_MAX_DAILY_TOKENS_PER_USER >= 0 &&
+    budget.userTokensToday >= OPENAI_MAX_DAILY_TOKENS_PER_USER
+  ) {
+    return "Daily AI token limit reached for this account.";
+  }
+
+  if (
+    OPENAI_MAX_DAILY_CALLS_GLOBAL !== null &&
+    OPENAI_MAX_DAILY_CALLS_GLOBAL >= 0 &&
+    budget.globalCallsToday >= OPENAI_MAX_DAILY_CALLS_GLOBAL
+  ) {
+    return "Daily AI request limit reached for this environment.";
+  }
+
+  if (
+    OPENAI_MAX_DAILY_TOKENS_GLOBAL !== null &&
+    OPENAI_MAX_DAILY_TOKENS_GLOBAL >= 0 &&
+    budget.globalTokensToday >= OPENAI_MAX_DAILY_TOKENS_GLOBAL
+  ) {
+    return "Daily AI token limit reached for this environment.";
+  }
+
+  return null;
 }
 
 function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
@@ -1873,6 +2051,35 @@ const upload = multer({
   }
 });
 
+const authLoginRateLimiter = createRateLimiter({
+  name: "auth-login",
+  windowMs: 15 * 60 * 1000,
+  max: 12
+});
+
+const mobileOnboardRateLimiter = createRateLimiter({
+  name: "mobile-onboard",
+  windowMs: 15 * 60 * 1000,
+  max: 30
+});
+
+const mobileVerificationRateLimiter = createRateLimiter({
+  name: "mobile-verify-email",
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keySelector: (request) => {
+    const bodyUserId = ((request.body as { userId?: unknown } | undefined)?.userId ?? "").toString().trim();
+    return `${getClientIp(request)}:${bodyUserId || "unknown"}`;
+  }
+});
+
+const aiRouteRateLimiter = createRateLimiter({
+  name: "mobile-ai",
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
+});
+
 function isRemoteAiConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
 }
@@ -1910,7 +2117,7 @@ app.get("/meta/timezones", (_request, response) => {
   response.json({ items: getSupportedTimezones() });
 });
 
-app.post("/auth/login", async (request: Request, response: Response) => {
+app.post("/auth/login", authLoginRateLimiter, async (request: Request, response: Response) => {
   const body = request.body as { password?: string };
   const password = body.password?.trim();
 
@@ -2422,7 +2629,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
   });
 });
 
-app.post("/mobile/onboard", async (request: Request, response: Response) => {
+app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, response: Response) => {
   const body = request.body as MobileOnboardRequest;
   const email = body.email?.trim().toLowerCase();
 
@@ -2441,7 +2648,14 @@ app.post("/mobile/onboard", async (request: Request, response: Response) => {
       existing.timezone = timezone;
       existing.updatedAt = issuedAt;
       const authToken = upsertMobileAuthToken(db, existing.id, issuedAt);
-      if (existing.emailVerifiedAt) {
+
+      const hadVerifiedEmail = Boolean(existing.emailVerifiedAt);
+      const shouldRequireVerification = REQUIRE_REVERIFY_ON_ONBOARD || !hadVerifiedEmail;
+      if (hadVerifiedEmail && REQUIRE_REVERIFY_ON_ONBOARD) {
+        existing.emailVerifiedAt = null;
+      }
+
+      if (!shouldRequireVerification) {
         const payload: MobileOnboardResponse = {
           user: existing,
           authToken,
@@ -2498,7 +2712,7 @@ app.post("/mobile/onboard", async (request: Request, response: Response) => {
   });
 });
 
-app.post("/mobile/onboard/resend-verification", async (request: Request, response: Response) => {
+app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -2537,7 +2751,7 @@ app.post("/mobile/onboard/resend-verification", async (request: Request, respons
   });
 });
 
-app.post("/mobile/onboard/verify-email", async (request: Request, response: Response) => {
+app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -3311,7 +3525,7 @@ app.get("/mobile/users/:userId/entitlements", async (request: Request, response:
   });
 });
 
-app.post("/mobile/users/:userId/ai/transcribe", upload.single("file"), async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.single("file"), async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -3348,7 +3562,13 @@ app.post("/mobile/users/:userId/ai/transcribe", upload.single("file"), async (re
       return null;
     }
 
-    return { userId: user.id };
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    if (aiBudgetError) {
+      response.status(429).json({ error: aiBudgetError });
+      return null;
+    }
+
+    return { user };
   });
 
   if (!context) {
@@ -3363,6 +3583,31 @@ app.post("/mobile/users/:userId/ai/transcribe", upload.single("file"), async (re
       mimeType: file.mimetype || "audio/m4a"
     });
 
+    await withDatabase(async (db) => {
+      const user = getUserById(db, context.user.id);
+      if (!user) {
+        return;
+      }
+
+      const event: AiUsageEvent = {
+        id: `ai_${uuid()}`,
+        kind: "transcribe",
+        userId: user.id,
+        orgId: user.orgId,
+        segmentId: null,
+        scenarioId: null,
+        model: OPENAI_TRANSCRIPTION_MODEL,
+        promptVersion: AI_PROMPT_VERSION,
+        rubricVersion: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        createdAt: nowIso()
+      };
+
+      db.aiUsageEvents.push(event);
+    });
+
     response.json({ text });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Transcription failed.";
@@ -3370,7 +3615,7 @@ app.post("/mobile/users/:userId/ai/transcribe", upload.single("file"), async (re
   }
 });
 
-app.post("/mobile/users/:userId/ai/opening", async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -3408,6 +3653,12 @@ app.post("/mobile/users/:userId/ai/opening", async (request: Request, response: 
     const entitlements = computeEntitlements(db, user, new Date());
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      return null;
+    }
+
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    if (aiBudgetError) {
+      response.status(429).json({ error: aiBudgetError });
       return null;
     }
 
@@ -3494,7 +3745,7 @@ app.post("/mobile/users/:userId/ai/opening", async (request: Request, response: 
   }
 });
 
-app.post("/mobile/users/:userId/ai/turn", async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -3544,6 +3795,12 @@ app.post("/mobile/users/:userId/ai/turn", async (request: Request, response: Res
     const entitlements = computeEntitlements(db, user, new Date());
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      return null;
+    }
+
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    if (aiBudgetError) {
+      response.status(429).json({ error: aiBudgetError });
       return null;
     }
 
@@ -3630,7 +3887,7 @@ app.post("/mobile/users/:userId/ai/turn", async (request: Request, response: Res
   }
 });
 
-app.post("/mobile/users/:userId/ai/score", async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -3694,6 +3951,12 @@ app.post("/mobile/users/:userId/ai/score", async (request: Request, response: Re
     const entitlements = computeEntitlements(db, user, new Date());
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      return null;
+    }
+
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    if (aiBudgetError) {
+      response.status(429).json({ error: aiBudgetError });
       return null;
     }
 

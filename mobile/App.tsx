@@ -1407,8 +1407,8 @@ export default function App() {
       setPendingVerificationUserId(null);
       setVerificationExpiresAt(null);
       setVerificationNotice("Email verified.");
-      const nextEntitlements = await fetchEntitlements(payload.user.id, mobileAuthToken);
-      const scopedConfig = await fetchMobileConfig(payload.user.id, mobileAuthToken).catch(
+      const nextEntitlements = await fetchEntitlements(payload.user.id, payload.authToken);
+      const scopedConfig = await fetchMobileConfig(payload.user.id, payload.authToken).catch(
         async () => fetchAppConfig(),
       );
       setConfig(scopedConfig);

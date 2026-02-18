@@ -14,8 +14,13 @@ export interface RuntimeConfig {
   adminTokenSecret: string;
   mobileTokenSecret: string;
   adminTokenTtlMinutes: number;
+  requireReverifyOnOnboard: boolean;
   openAiChatModel: string;
   openAiTranscriptionModel: string;
+  openAiMaxDailyCallsPerUser: number | null;
+  openAiMaxDailyCallsGlobal: number | null;
+  openAiMaxDailyTokensPerUser: number | null;
+  openAiMaxDailyTokensGlobal: number | null;
   supportTranscriptSecret: string;
 }
 
@@ -35,6 +40,41 @@ function toInt(value: string | undefined, fallback: number): number {
   }
 
   return Math.floor(parsed);
+}
+
+function parseOptionalNonNegativeInt(
+  envName: string,
+  rawValue: string | undefined,
+  fallback: number | null
+): number | null {
+  const trimmed = rawValue?.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${envName} must be a non-negative integer when provided.`);
+  }
+
+  return Math.floor(parsed);
+}
+
+function toBoolean(value: string | undefined, fallback: boolean): boolean {
+  const trimmed = value?.trim().toLowerCase();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  if (trimmed === "1" || trimmed === "true" || trimmed === "yes" || trimmed === "on") {
+    return true;
+  }
+
+  if (trimmed === "0" || trimmed === "false" || trimmed === "no" || trimmed === "off") {
+    return false;
+  }
+
+  throw new Error(`Expected boolean environment value, received "${value}".`);
 }
 
 function normalizeOrigin(value: string): string {
@@ -108,6 +148,7 @@ function assertNotPlaceholderSecret(
 export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   const nodeEnv = env.NODE_ENV?.trim() || "development";
   const isProduction = nodeEnv === "production";
+  const hasOpenAiApiKey = Boolean(env.OPENAI_API_KEY?.trim());
 
   const port = toInt(env.PORT, 4100);
   if (!Number.isFinite(port) || port <= 0) {
@@ -143,6 +184,20 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     minimumLength: 32
   });
 
+  const openAiDefaults = hasOpenAiApiKey && isProduction
+    ? {
+        perUserCalls: 120,
+        globalCalls: 1500,
+        perUserTokens: 250_000,
+        globalTokens: 2_000_000
+      }
+    : {
+        perUserCalls: null,
+        globalCalls: null,
+        perUserTokens: null,
+        globalTokens: null
+      };
+
   return {
     nodeEnv,
     isProduction,
@@ -155,8 +210,29 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     adminTokenSecret,
     mobileTokenSecret,
     adminTokenTtlMinutes: toInt(env.ADMIN_TOKEN_TTL_MINUTES, 720),
+    requireReverifyOnOnboard: toBoolean(env.MOBILE_REVERIFY_ON_ONBOARD, isProduction),
     openAiChatModel: env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
     openAiTranscriptionModel: env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1",
+    openAiMaxDailyCallsPerUser: parseOptionalNonNegativeInt(
+      "OPENAI_MAX_DAILY_CALLS_PER_USER",
+      env.OPENAI_MAX_DAILY_CALLS_PER_USER,
+      openAiDefaults.perUserCalls
+    ),
+    openAiMaxDailyCallsGlobal: parseOptionalNonNegativeInt(
+      "OPENAI_MAX_DAILY_CALLS_GLOBAL",
+      env.OPENAI_MAX_DAILY_CALLS_GLOBAL,
+      openAiDefaults.globalCalls
+    ),
+    openAiMaxDailyTokensPerUser: parseOptionalNonNegativeInt(
+      "OPENAI_MAX_DAILY_TOKENS_PER_USER",
+      env.OPENAI_MAX_DAILY_TOKENS_PER_USER,
+      openAiDefaults.perUserTokens
+    ),
+    openAiMaxDailyTokensGlobal: parseOptionalNonNegativeInt(
+      "OPENAI_MAX_DAILY_TOKENS_GLOBAL",
+      env.OPENAI_MAX_DAILY_TOKENS_GLOBAL,
+      openAiDefaults.globalTokens
+    ),
     supportTranscriptSecret
   };
 }

@@ -42,9 +42,14 @@ ADMIN_BOOTSTRAP_PASSWORD=admin
 ADMIN_TOKEN_SECRET=replace_me_for_production
 ADMIN_TOKEN_TTL_MINUTES=720
 MOBILE_TOKEN_SECRET=replace_me_for_mobile_tokens
+MOBILE_REVERIFY_ON_ONBOARD=false
 OPENAI_API_KEY=
 OPENAI_CHAT_MODEL=gpt-4o-mini
 OPENAI_TRANSCRIPTION_MODEL=whisper-1
+OPENAI_MAX_DAILY_CALLS_PER_USER=
+OPENAI_MAX_DAILY_CALLS_GLOBAL=
+OPENAI_MAX_DAILY_TOKENS_PER_USER=
+OPENAI_MAX_DAILY_TOKENS_GLOBAL=
 SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 ```
 
@@ -55,6 +60,8 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
   - `postgres` via `DATABASE_URL` (durable, recommended for hosted deployments)
 - In production, set `STORAGE_PROVIDER` explicitly and provide `CORS_ALLOWED_ORIGINS`.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
+- `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
+- AI budget caps default in production when `OPENAI_API_KEY` is set (`120` per-user calls/day, `1500` global calls/day, `250000` per-user tokens/day, `2000000` global tokens/day).
 - Usage billing increments are 15 seconds (round-down behavior).
 - Timezone changes are scheduled for next monthly renewal.
 - Remote AI is optional and API-owned. Mobile calls API AI routes; API calls OpenAI.
