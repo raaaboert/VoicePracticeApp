@@ -106,6 +106,7 @@ const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
+const WARNING_LOG_THROTTLE_MS = 60_000;
 const TRANSIENT_DATABASE_ERROR_CODES = new Set([
   "ETIMEDOUT",
   "ECONNRESET",
@@ -124,6 +125,7 @@ const TRANSIENT_DATABASE_ERROR_PATTERNS = [
   "could not connect to server",
   "self-signed certificate in certificate chain"
 ];
+const warningLogByKey = new Map<string, number>();
 
 interface AdminTokenPayload {
   role: "admin";
@@ -136,6 +138,22 @@ interface AdminAuthRequest extends Request {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function logWarn(message: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
+function logWarnThrottled(key: string, message: string, throttleMs = WARNING_LOG_THROTTLE_MS): void {
+  const now = Date.now();
+  const last = warningLogByKey.get(key) ?? 0;
+  if (now - last < throttleMs) {
+    return;
+  }
+
+  warningLogByKey.set(key, now);
+  logWarn(message);
 }
 
 function clampNonNegativeInteger(value: unknown, fallback = 0): number {
@@ -1419,6 +1437,7 @@ let databaseReadyCheckedAt: string | null = null;
 let databaseReadyError: string | null = null;
 let databaseReadyConsecutiveFailures = 0;
 let isReadinessRefreshInFlight = false;
+let lastReadinessLoggedError: string | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -1488,21 +1507,32 @@ async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T
 const withDatabase = withDatabaseWrite;
 
 async function refreshDatabaseReadiness(): Promise<void> {
+  const wasReady = isDatabaseReady;
   try {
     await loadDatabase({ forceStorageRead: true });
     isDatabaseReady = true;
     databaseReadyError = null;
     databaseReadyConsecutiveFailures = 0;
+    lastReadinessLoggedError = null;
+    if (!wasReady) {
+      logWarn("[readiness] database connectivity restored.");
+    }
   } catch (error) {
     databaseReadyError = error instanceof Error ? error.message : String(error);
     databaseReadyConsecutiveFailures += 1;
     if (!isDatabaseReady || databaseReadyConsecutiveFailures >= READINESS_FAILURE_THRESHOLD) {
       isDatabaseReady = false;
     }
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[readiness] database unavailable (${databaseReadyConsecutiveFailures}/${READINESS_FAILURE_THRESHOLD}): ${databaseReadyError}`
-    );
+    const shouldLog =
+      databaseReadyConsecutiveFailures === 1 ||
+      databaseReadyConsecutiveFailures % READINESS_FAILURE_THRESHOLD === 0 ||
+      databaseReadyError !== lastReadinessLoggedError;
+    if (shouldLog) {
+      logWarn(
+        `[readiness] database unavailable (${databaseReadyConsecutiveFailures}/${READINESS_FAILURE_THRESHOLD}): ${databaseReadyError}`
+      );
+      lastReadinessLoggedError = databaseReadyError;
+    }
   } finally {
     databaseReadyCheckedAt = nowIso();
   }
@@ -1702,7 +1732,7 @@ function buildDomainMatchForEmail(db: ApiDatabase, email: string): EnterpriseDom
 
 function sendVerificationEmail(email: string, code: string, expiresAt: string): void {
   const expiresLocal = new Date(expiresAt).toLocaleString();
-  // TODO: wire SMTP or provider adapter. For now this logs the one-time code for operator visibility.
+  // Temporary delivery path: emit one-time code to service logs until SMTP/provider integration is added.
   console.log(`[email-verification] ${email} code=${code} expiresAt=${expiresAt} (${expiresLocal})`);
 }
 
@@ -4024,8 +4054,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
-      // eslint-disable-next-line no-console
-      console.warn(`[ai-usage] failed to persist transcribe event: ${message}`);
+      logWarnThrottled("ai-usage:transcribe", `[ai-usage] failed to persist transcribe event: ${message}`);
     }
 
     response.json({ text });
@@ -4155,8 +4184,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
-      // eslint-disable-next-line no-console
-      console.warn(`[ai-usage] failed to persist opening event: ${message}`);
+      logWarnThrottled("ai-usage:opening", `[ai-usage] failed to persist opening event: ${message}`);
     }
 
     response.json({
@@ -4303,8 +4331,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
-      // eslint-disable-next-line no-console
-      console.warn(`[ai-usage] failed to persist turn event: ${message}`);
+      logWarnThrottled("ai-usage:turn", `[ai-usage] failed to persist turn event: ${message}`);
     }
 
     response.json({
@@ -4494,8 +4521,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
-      // eslint-disable-next-line no-console
-      console.warn(`[ai-usage] failed to persist score artifacts: ${message}`);
+      logWarnThrottled("ai-usage:score", `[ai-usage] failed to persist score artifacts: ${message}`);
     }
 
     response.status(201).json({
