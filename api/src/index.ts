@@ -1412,6 +1412,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 }
 
 let databaseStorage: DatabaseStorage | null = null;
+let databaseCache: ApiDatabase | null = null;
 let databaseOperationQueue: Promise<void> = Promise.resolve();
 let isDatabaseReady = false;
 let databaseReadyCheckedAt: string | null = null;
@@ -1419,7 +1420,7 @@ let databaseReadyError: string | null = null;
 let databaseReadyConsecutiveFailures = 0;
 let isReadinessRefreshInFlight = false;
 
-async function loadDatabase(): Promise<ApiDatabase> {
+function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
     databaseStorage = createDatabaseStorage({
       provider: STORAGE_PROVIDER,
@@ -1433,24 +1434,24 @@ async function loadDatabase(): Promise<ApiDatabase> {
     });
   }
 
-  return await databaseStorage.load();
+  return databaseStorage;
+}
+
+async function loadDatabase(options?: { forceStorageRead?: boolean }): Promise<ApiDatabase> {
+  if (!options?.forceStorageRead && databaseCache) {
+    return databaseCache;
+  }
+
+  const storage = getOrCreateDatabaseStorage();
+  const loaded = await storage.load();
+  databaseCache = loaded;
+  return loaded;
 }
 
 async function saveDatabase(db: ApiDatabase): Promise<void> {
-  if (!databaseStorage) {
-    databaseStorage = createDatabaseStorage({
-      provider: STORAGE_PROVIDER,
-      dbPath: DB_PATH,
-      databaseUrl: DATABASE_URL,
-      pgPoolMax: PG_POOL_MAX,
-      pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
-      pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
-      ensureDatabaseShape,
-      createDefaultDatabase
-    });
-  }
-
-  await databaseStorage.save(db);
+  databaseCache = db;
+  const storage = getOrCreateDatabaseStorage();
+  await storage.save(db);
 }
 
 async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
@@ -1488,7 +1489,7 @@ const withDatabase = withDatabaseWrite;
 
 async function refreshDatabaseReadiness(): Promise<void> {
   try {
-    await loadDatabase();
+    await loadDatabase({ forceStorageRead: true });
     isDatabaseReady = true;
     databaseReadyError = null;
     databaseReadyConsecutiveFailures = 0;
@@ -3996,30 +3997,36 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       mimeType: file.mimetype || "audio/m4a"
     });
 
-    await withDatabase(async (db) => {
-      const user = getUserById(db, context.user.id);
-      if (!user) {
-        return;
-      }
+    try {
+      await withDatabase(async (db) => {
+        const user = getUserById(db, context.user.id);
+        if (!user) {
+          return;
+        }
 
-      const event: AiUsageEvent = {
-        id: `ai_${uuid()}`,
-        kind: "transcribe",
-        userId: user.id,
-        orgId: user.orgId,
-        segmentId: null,
-        scenarioId: null,
-        model: OPENAI_TRANSCRIPTION_MODEL,
-        promptVersion: AI_PROMPT_VERSION,
-        rubricVersion: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-        createdAt: nowIso()
-      };
+        const event: AiUsageEvent = {
+          id: `ai_${uuid()}`,
+          kind: "transcribe",
+          userId: user.id,
+          orgId: user.orgId,
+          segmentId: null,
+          scenarioId: null,
+          model: OPENAI_TRANSCRIPTION_MODEL,
+          promptVersion: AI_PROMPT_VERSION,
+          rubricVersion: null,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          createdAt: nowIso()
+        };
 
-      db.aiUsageEvents.push(event);
-    });
+        db.aiUsageEvents.push(event);
+      });
+    } catch (persistError) {
+      const message = persistError instanceof Error ? persistError.message : String(persistError);
+      // eslint-disable-next-line no-console
+      console.warn(`[ai-usage] failed to persist transcribe event: ${message}`);
+    }
 
     response.json({ text });
   } catch (error) {
@@ -4121,30 +4128,36 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       temperature: 0.8
     });
 
-    await withDatabase(async (db) => {
-      const user = getUserById(db, context.user.id);
-      if (!user) {
-        return;
-      }
+    try {
+      await withDatabase(async (db) => {
+        const user = getUserById(db, context.user.id);
+        if (!user) {
+          return;
+        }
 
-      const event: AiUsageEvent = {
-        id: `ai_${uuid()}`,
-        kind: "opening",
-        userId: user.id,
-        orgId: user.orgId,
-        segmentId: context.segment.id,
-        scenarioId: context.scenario.id,
-        model: completion.model,
-        promptVersion: AI_PROMPT_VERSION,
-        rubricVersion: null,
-        inputTokens: completion.usage.inputTokens,
-        outputTokens: completion.usage.outputTokens,
-        totalTokens: completion.usage.totalTokens,
-        createdAt: nowIso()
-      };
+        const event: AiUsageEvent = {
+          id: `ai_${uuid()}`,
+          kind: "opening",
+          userId: user.id,
+          orgId: user.orgId,
+          segmentId: context.segment.id,
+          scenarioId: context.scenario.id,
+          model: completion.model,
+          promptVersion: AI_PROMPT_VERSION,
+          rubricVersion: null,
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+          totalTokens: completion.usage.totalTokens,
+          createdAt: nowIso()
+        };
 
-      db.aiUsageEvents.push(event);
-    });
+        db.aiUsageEvents.push(event);
+      });
+    } catch (persistError) {
+      const message = persistError instanceof Error ? persistError.message : String(persistError);
+      // eslint-disable-next-line no-console
+      console.warn(`[ai-usage] failed to persist opening event: ${message}`);
+    }
 
     response.json({
       assistantText: completion.text,
@@ -4263,30 +4276,36 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       temperature
     });
 
-    await withDatabase(async (db) => {
-      const user = getUserById(db, context.user.id);
-      if (!user) {
-        return;
-      }
+    try {
+      await withDatabase(async (db) => {
+        const user = getUserById(db, context.user.id);
+        if (!user) {
+          return;
+        }
 
-      const event: AiUsageEvent = {
-        id: `ai_${uuid()}`,
-        kind: "turn",
-        userId: user.id,
-        orgId: user.orgId,
-        segmentId: context.segment.id,
-        scenarioId: context.scenario.id,
-        model: completion.model,
-        promptVersion: AI_PROMPT_VERSION,
-        rubricVersion: null,
-        inputTokens: completion.usage.inputTokens,
-        outputTokens: completion.usage.outputTokens,
-        totalTokens: completion.usage.totalTokens,
-        createdAt: nowIso()
-      };
+        const event: AiUsageEvent = {
+          id: `ai_${uuid()}`,
+          kind: "turn",
+          userId: user.id,
+          orgId: user.orgId,
+          segmentId: context.segment.id,
+          scenarioId: context.scenario.id,
+          model: completion.model,
+          promptVersion: AI_PROMPT_VERSION,
+          rubricVersion: null,
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+          totalTokens: completion.usage.totalTokens,
+          createdAt: nowIso()
+        };
 
-      db.aiUsageEvents.push(event);
-    });
+        db.aiUsageEvents.push(event);
+      });
+    } catch (persistError) {
+      const message = persistError instanceof Error ? persistError.message : String(persistError);
+      // eslint-disable-next-line no-console
+      console.warn(`[ai-usage] failed to persist turn event: ${message}`);
+    }
 
     response.json({
       assistantText: completion.text,
@@ -4446,32 +4465,38 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       createdAt: now
     };
 
-    await withDatabase(async (db) => {
-      const user = getUserById(db, context.user.id);
-      if (!user) {
-        return;
-      }
+    try {
+      await withDatabase(async (db) => {
+        const user = getUserById(db, context.user.id);
+        if (!user) {
+          return;
+        }
 
-      db.scoreRecords.push(record);
+        db.scoreRecords.push(record);
 
-      const event: AiUsageEvent = {
-        id: `ai_${uuid()}`,
-        kind: "score",
-        userId: user.id,
-        orgId: user.orgId,
-        segmentId: context.segment.id,
-        scenarioId: context.scenario.id,
-        model: completion.model,
-        promptVersion: AI_PROMPT_VERSION,
-        rubricVersion: AI_RUBRIC_VERSION,
-        inputTokens: completion.usage.inputTokens,
-        outputTokens: completion.usage.outputTokens,
-        totalTokens: completion.usage.totalTokens,
-        createdAt: nowIso()
-      };
+        const event: AiUsageEvent = {
+          id: `ai_${uuid()}`,
+          kind: "score",
+          userId: user.id,
+          orgId: user.orgId,
+          segmentId: context.segment.id,
+          scenarioId: context.scenario.id,
+          model: completion.model,
+          promptVersion: AI_PROMPT_VERSION,
+          rubricVersion: AI_RUBRIC_VERSION,
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+          totalTokens: completion.usage.totalTokens,
+          createdAt: nowIso()
+        };
 
-      db.aiUsageEvents.push(event);
-    });
+        db.aiUsageEvents.push(event);
+      });
+    } catch (persistError) {
+      const message = persistError instanceof Error ? persistError.message : String(persistError);
+      // eslint-disable-next-line no-console
+      console.warn(`[ai-usage] failed to persist score artifacts: ${message}`);
+    }
 
     response.status(201).json({
       scorecard,
