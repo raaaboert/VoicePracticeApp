@@ -2629,6 +2629,62 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
   });
 });
 
+app.delete("/users/:userId", requireAdmin, async (request: Request, response: Response) => {
+  const userId = request.params.userId;
+
+  await withDatabase(async (db) => {
+    const userIndex = db.users.findIndex((entry) => entry.id === userId);
+    if (userIndex === -1) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    const user = db.users[userIndex];
+    if (user.accountType !== "enterprise") {
+      response.status(400).json({ error: "Only enterprise users can be deleted from this view." });
+      return;
+    }
+
+    db.users.splice(userIndex, 1);
+    db.usageSessions = db.usageSessions.filter((session) => session.userId !== user.id);
+    db.scoreRecords = db.scoreRecords.filter((record) => record.userId !== user.id);
+    db.aiUsageEvents = db.aiUsageEvents.filter((event) => event.userId !== user.id);
+    db.supportCases = db.supportCases.filter((supportCase) => supportCase.userId !== user.id);
+    db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
+    db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
+    db.enterpriseJoinRequests = db.enterpriseJoinRequests
+      .filter((record) => record.userId !== user.id)
+      .map((record) => (record.decidedByUserId === user.id ? { ...record, decidedByUserId: null } : record));
+
+    const waiters = mobileUpdateWaitersByUserId.get(user.id);
+    if (waiters && waiters.size > 0) {
+      for (const waiter of Array.from(waiters)) {
+        if (waiter.resolved) {
+          continue;
+        }
+        waiter.resolved = true;
+        clearTimeout(waiter.timeoutHandle);
+        try {
+          waiter.response.status(410).json({ error: "User account deleted." });
+        } catch {
+          // Ignore disconnected clients.
+        }
+      }
+    }
+
+    mobileUpdateWaitersByUserId.delete(user.id);
+    mobileUpdatePayloadByUserId.delete(user.id);
+    mobileUpdateCursorByUserId.delete(user.id);
+    mobileUpdateReasonByUserId.delete(user.id);
+
+    response.json({
+      deleted: true,
+      userId: user.id,
+      email: user.email
+    });
+  });
+});
+
 app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, response: Response) => {
   const body = request.body as MobileOnboardRequest;
   const email = body.email?.trim().toLowerCase();

@@ -64,9 +64,11 @@ export default function EnterpriseOrgPage() {
   const [loading, setLoading] = useState(false);
   const [savingIndustries, setSavingIndustries] = useState(false);
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
   const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
   const [orgDomainInput, setOrgDomainInput] = useState("");
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const load = async () => {
     if (!orgId) {
@@ -75,6 +77,7 @@ export default function EnterpriseOrgPage() {
 
     setLoading(true);
     setError(null);
+    setSuccessMessage(null);
     try {
       const payload = await adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`);
       setDashboard(payload);
@@ -143,6 +146,7 @@ export default function EnterpriseOrgPage() {
   ) => {
     setSavingUserId(userId);
     setError(null);
+    setSuccessMessage(null);
 
     try {
       const updated = await adminFetch<UserProfile>(`/users/${userId}`, {
@@ -182,6 +186,7 @@ export default function EnterpriseOrgPage() {
 
     setSavingOrgIdentity(true);
     setError(null);
+    setSuccessMessage(null);
     try {
       const updated = await adminFetch<EnterpriseOrg>(`/orgs/${dashboard.org.id}`, {
         method: "PATCH",
@@ -200,6 +205,43 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const deleteEnterpriseUser = async (userId: string, email: string) => {
+    const firstConfirm = window.confirm("Are you sure? This can not be reversed!");
+    if (!firstConfirm) {
+      return;
+    }
+
+    const typed = window.prompt("Please type DELETE and confirm", "");
+    if (typed !== "DELETE") {
+      setError("Deletion cancelled. Type DELETE exactly to confirm.");
+      return;
+    }
+
+    setDeletingUserId(userId);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      await adminFetch<{ deleted: boolean; userId: string; email: string }>(`/users/${userId}`, {
+        method: "DELETE",
+      });
+      setDashboard((prev) => {
+        if (!prev) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          users: prev.users.filter((row) => row.userId !== userId),
+        };
+      });
+      setSuccessMessage(`Deleted ${email}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete user.");
+    } finally {
+      setDeletingUserId(null);
+    }
+  };
+
   return (
     <AdminShell title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}>
       <div className="card">
@@ -214,6 +256,7 @@ export default function EnterpriseOrgPage() {
         </div>
 
         {error ? <p className="error">{error}</p> : null}
+        {successMessage ? <p className="success">{successMessage}</p> : null}
 
         {dashboard ? (
           <div className="grid" style={{ marginTop: 10 }}>
@@ -310,12 +353,13 @@ export default function EnterpriseOrgPage() {
               <th>Role</th>
               <th>Locked Out</th>
               <th>Usage This Billing Period</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {(dashboard?.users ?? []).length === 0 ? (
               <tr>
-                <td colSpan={4} className="small">
+                <td colSpan={5} className="small">
                   {loading ? "Loading..." : "No users found for this enterprise account."}
                 </td>
               </tr>
@@ -329,7 +373,7 @@ export default function EnterpriseOrgPage() {
                   <td>
                     <select
                       value={user.orgRole}
-                      disabled={savingUserId === user.userId}
+                      disabled={savingUserId === user.userId || deletingUserId === user.userId}
                       onChange={(event) => {
                         void patchEnterpriseUser(user.userId, { orgRole: event.target.value as OrgUserRole });
                       }}
@@ -344,7 +388,7 @@ export default function EnterpriseOrgPage() {
                   <td>
                     <select
                       value={user.status}
-                      disabled={savingUserId === user.userId}
+                      disabled={savingUserId === user.userId || deletingUserId === user.userId}
                       onChange={(event) => {
                         void patchEnterpriseUser(user.userId, { status: event.target.value as UserStatus });
                       }}
@@ -354,6 +398,16 @@ export default function EnterpriseOrgPage() {
                     </select>
                   </td>
                   <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="danger"
+                      disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                      onClick={() => void deleteEnterpriseUser(user.userId, user.email)}
+                    >
+                      {deletingUserId === user.userId ? "Deleting..." : "Delete"}
+                    </button>
+                  </td>
                 </tr>
               ))
             )}
