@@ -101,6 +101,14 @@ Run startup/health checks for API + admin + mobile:
 npm run smoke:stack
 ```
 
+## Critical-Flow Test
+
+Run an end-to-end API flow against an isolated local DB (admin login, org create, mobile onboard + verify, join request approval, user delete, audit checks):
+
+```bash
+npm run test:critical-flow
+```
+
 ## Ops Helper
 
 Assign an existing user email to an enterprise org (creates org if needed):

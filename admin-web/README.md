@@ -8,6 +8,9 @@ Next.js admin console for VoicePractice.
 - `/users`
 - `/config`
 - `/usage`
+- `/stats`
+- `/support`
+- `/logs`
 
 ## Features
 
@@ -17,6 +20,7 @@ Next.js admin console for VoicePractice.
 - Enterprise org create/edit (daily quota, per-user cap, bonus seconds)
 - Admin password change
 - Basic usage report
+- Audit log viewer with enterprise/account/date filters
 
 ## Environment
 

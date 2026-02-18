@@ -181,6 +181,20 @@ export interface AiUsageEvent {
   createdAt: string;
 }
 
+export type AuditActorType = "platform_admin" | "mobile_user" | "system";
+
+export interface AuditEvent {
+  id: string;
+  actorType: AuditActorType;
+  actorId: string | null;
+  action: string;
+  orgId: string | null;
+  userId: string | null;
+  message: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
 export type SupportCaseStatus = "open" | "closed";
 
 export interface SupportCaseRecord {
@@ -386,6 +400,7 @@ export interface ApiDatabase {
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
   aiUsageEvents: AiUsageEvent[];
+  auditEvents: AuditEvent[];
   supportCases: SupportCaseRecord[];
   mobileAuthTokens: MobileAuthRecord[];
   emailVerifications: EmailVerificationRecord[];

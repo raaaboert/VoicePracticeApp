@@ -18,6 +18,7 @@
     "open:android": "scripts\\open-expo-on-emulator.cmd",
     "build:api": "npm run build --workspace shared && npm run build --workspace api",
     "build:shared": "npm run build --workspace shared",
-    "smoke:stack": "node scripts/smoke-stack.mjs"
+    "smoke:stack": "node scripts/smoke-stack.mjs",
+    "test:critical-flow": "node scripts/test-critical-flow.mjs"
   }
 }

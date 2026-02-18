@@ -29,6 +29,7 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
       || pathname.startsWith("/usage")
       || pathname.startsWith("/support")
       || pathname.startsWith("/config")
+      || pathname.startsWith("/logs")
     );
   }
 
@@ -37,6 +38,7 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
     || pathname.startsWith("/usage")
     || pathname.startsWith("/support")
     || pathname.startsWith("/stats")
+    || pathname.startsWith("/logs")
   );
 }
 
@@ -54,6 +56,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
   const isUsage = pathname.startsWith("/usage");
   const isStats = pathname.startsWith("/stats");
   const isSupport = pathname.startsWith("/support");
+  const isLogs = pathname.startsWith("/logs");
   const navClass = (isActive: boolean): string => (isActive ? "active" : "");
 
   useEffect(() => {
@@ -110,6 +113,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
         { href: "/usage", label: "Usage", active: isUsage },
         { href: "/support", label: "Support", active: isSupport },
         { href: "/config", label: "Config", active: isConfig },
+        { href: "/logs", label: "Logs", active: isLogs },
       ];
     }
 
@@ -118,8 +122,9 @@ export function AdminShell({ title, children }: AdminShellProps) {
       { href: "/usage", label: "Usage", active: isUsage },
       { href: "/stats", label: "Stats", active: isStats },
       { href: "/support", label: "Support", active: isSupport },
+      { href: "/logs", label: "Logs", active: isLogs },
     ];
-  }, [isConfig, isStats, isSupport, isUsage, isUsers, mode]);
+  }, [isConfig, isLogs, isStats, isSupport, isUsage, isUsers, mode]);
 
   const switchMode = (nextMode: AdminMode) => {
     setMode(nextMode);

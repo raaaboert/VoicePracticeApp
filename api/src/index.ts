@@ -6,6 +6,7 @@ import { v4 as uuid } from "uuid";
 import multer from "multer";
 import {
   ACCOUNT_TYPES,
+  AuditEvent,
   ApiDatabase,
   AiUsageEvent,
   AppConfig,
@@ -97,6 +98,8 @@ const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
 const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
+const MAX_AUDIT_EVENTS = 20_000;
+const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 
 interface AdminTokenPayload {
   role: "admin";
@@ -304,6 +307,59 @@ function normalizeJoinCode(value: string | undefined | null): string {
   }
 
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+interface AppendAuditEventInput {
+  actorType: AuditEvent["actorType"];
+  actorId?: string | null;
+  action: string;
+  orgId?: string | null;
+  userId?: string | null;
+  message: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+function appendAuditEvent(db: ApiDatabase, input: AppendAuditEventInput): void {
+  const event: AuditEvent = {
+    id: `audit_${uuid()}`,
+    actorType: input.actorType,
+    actorId: input.actorId ?? null,
+    action: input.action.trim().slice(0, 80) || "unknown",
+    orgId: input.orgId ?? null,
+    userId: input.userId ?? null,
+    message: input.message.trim().slice(0, 300) || "Action recorded.",
+    metadata: input.metadata ?? null,
+    createdAt: nowIso()
+  };
+
+  db.auditEvents.push(event);
+  if (db.auditEvents.length > MAX_AUDIT_EVENTS) {
+    db.auditEvents.splice(0, db.auditEvents.length - MAX_AUDIT_EVENTS);
+  }
+}
+
+function appendPlatformAuditEvent(
+  db: ApiDatabase,
+  input: Omit<AppendAuditEventInput, "actorType" | "actorId">
+): void {
+  appendAuditEvent(db, {
+    ...input,
+    actorType: "platform_admin",
+    actorId: PLATFORM_ADMIN_ACTOR_ID
+  });
+}
+
+function appendMobileAuditEvent(
+  db: ApiDatabase,
+  actor: UserProfile,
+  input: Omit<AppendAuditEventInput, "actorType" | "actorId">
+): void {
+  appendAuditEvent(db, {
+    ...input,
+    actorType: "mobile_user",
+    actorId: actor.id,
+    orgId: input.orgId ?? actor.orgId
+  });
 }
 
 interface RateLimitState {
@@ -542,6 +598,7 @@ function createDefaultDatabase(): ApiDatabase {
     usageSessions: [],
     scoreRecords: [],
     aiUsageEvents: [],
+    auditEvents: [],
     supportCases: [],
     mobileAuthTokens: [],
     emailVerifications: [],
@@ -1301,6 +1358,9 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     aiUsageEvents: Array.isArray((candidate as Partial<ApiDatabase>).aiUsageEvents)
       ? (candidate as Partial<ApiDatabase>).aiUsageEvents ?? []
       : [],
+    auditEvents: Array.isArray((candidate as Partial<ApiDatabase>).auditEvents)
+      ? (candidate as Partial<ApiDatabase>).auditEvents ?? []
+      : [],
     supportCases: Array.isArray((candidate as Partial<ApiDatabase>).supportCases)
       ? (candidate as Partial<ApiDatabase>).supportCases ?? []
       : [],
@@ -1326,6 +1386,12 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   expireOrgJoinRequests(normalized, new Date(now));
   return normalized;
 }
+
+let databaseStorage: DatabaseStorage | null = null;
+let databaseOperationQueue: Promise<void> = Promise.resolve();
+let isDatabaseReady = false;
+let databaseReadyCheckedAt: string | null = null;
+let databaseReadyError: string | null = null;
 
 async function loadDatabase(): Promise<ApiDatabase> {
   if (!databaseStorage) {
@@ -1355,10 +1421,7 @@ async function saveDatabase(db: ApiDatabase): Promise<void> {
   await databaseStorage.save(db);
 }
 
-let databaseStorage: DatabaseStorage | null = null;
-let databaseOperationQueue: Promise<void> = Promise.resolve();
-
-async function withDatabase<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
   let releaseLock: () => void = () => {};
   const waitForTurn = databaseOperationQueue;
   databaseOperationQueue = new Promise<void>((resolve) => {
@@ -1366,14 +1429,41 @@ async function withDatabase<T>(handler: (db: ApiDatabase) => Promise<T> | T): Pr
   });
 
   await waitForTurn;
-
-  const db = await loadDatabase();
   try {
+    return await runner();
+  } finally {
+    releaseLock();
+  }
+}
+
+async function withDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    return await handler(db);
+  });
+}
+
+async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    const db = await loadDatabase();
     const result = await handler(db);
     await saveDatabase(db);
     return result;
+  });
+}
+
+const withDatabase = withDatabaseWrite;
+
+async function refreshDatabaseReadiness(): Promise<void> {
+  try {
+    await loadDatabase();
+    isDatabaseReady = true;
+    databaseReadyError = null;
+  } catch (error) {
+    isDatabaseReady = false;
+    databaseReadyError = error instanceof Error ? error.message : String(error);
   } finally {
-    releaseLock();
+    databaseReadyCheckedAt = nowIso();
   }
 }
 
@@ -2113,8 +2203,41 @@ app.get("/health", (_request, response) => {
   response.json({ ok: true, now: nowIso() });
 });
 
+app.get("/ready", (_request, response) => {
+  if (isDatabaseReady) {
+    response.json({ ok: true, now: nowIso(), checkedAt: databaseReadyCheckedAt });
+    return;
+  }
+
+  response.status(503).json({
+    ok: false,
+    now: nowIso(),
+    checkedAt: databaseReadyCheckedAt,
+    error: databaseReadyError || "Database is not ready."
+  });
+});
+
 app.get("/meta/timezones", (_request, response) => {
   response.json({ items: getSupportedTimezones() });
+});
+
+app.use((request: Request, response: Response, next: NextFunction) => {
+  if (request.method === "OPTIONS") {
+    next();
+    return;
+  }
+
+  if (request.path === "/health" || request.path === "/ready") {
+    next();
+    return;
+  }
+
+  if (!isDatabaseReady) {
+    response.status(503).json({ error: "Service unavailable. Database not ready." });
+    return;
+  }
+
+  next();
 });
 
 app.post("/auth/login", authLoginRateLimiter, async (request: Request, response: Response) => {
@@ -2126,20 +2249,21 @@ app.post("/auth/login", authLoginRateLimiter, async (request: Request, response:
     return;
   }
 
-  const db = await loadDatabase();
-  const valid = db.admin.passwordHash
-    ? verifyPassword(password, db.admin.passwordHash)
-    : password === ADMIN_BOOTSTRAP_PASSWORD;
+  await withDatabaseRead(async (db) => {
+    const valid = db.admin.passwordHash
+      ? verifyPassword(password, db.admin.passwordHash)
+      : password === ADMIN_BOOTSTRAP_PASSWORD;
 
-  if (!valid) {
-    response.status(401).json({ error: "Invalid admin password." });
-    return;
-  }
+    if (!valid) {
+      response.status(401).json({ error: "Invalid admin password." });
+      return;
+    }
 
-  const expiresAtMs = Date.now() + ADMIN_TOKEN_TTL_MINUTES * 60 * 1000;
-  const token = signAdminToken({ role: "admin", exp: expiresAtMs });
+    const expiresAtMs = Date.now() + ADMIN_TOKEN_TTL_MINUTES * 60 * 1000;
+    const token = signAdminToken({ role: "admin", exp: expiresAtMs });
 
-  response.json({ token, expiresAt: new Date(expiresAtMs).toISOString() });
+    response.json({ token, expiresAt: new Date(expiresAtMs).toISOString() });
+  });
 });
 
 app.post("/auth/change-password", requireAdmin, async (request: Request, response: Response) => {
@@ -2168,13 +2292,18 @@ app.post("/auth/change-password", requireAdmin, async (request: Request, respons
     }
 
     db.admin.passwordHash = hashPassword(newPassword);
+    appendPlatformAuditEvent(db, {
+      action: "admin.password_changed",
+      message: "Platform admin password was changed."
+    });
     response.json({ ok: true });
   });
 });
 
 app.get("/config", async (_request: Request, response: Response) => {
-  const db = await loadDatabase();
-  response.json(db.config);
+  await withDatabaseRead(async (db) => {
+    response.json(db.config);
+  });
 });
 
 app.patch("/config", requireAdmin, async (request: Request, response: Response) => {
@@ -2183,13 +2312,21 @@ app.patch("/config", requireAdmin, async (request: Request, response: Response) 
   await withDatabase(async (db) => {
     db.config = sanitizeConfigPatch(db.config, patch);
     emitMobileUpdateForAllUsers(db, "config");
+    appendPlatformAuditEvent(db, {
+      action: "config.updated",
+      message: "Platform configuration updated.",
+      metadata: {
+        fields: Object.keys(patch ?? {}).slice(0, 25)
+      }
+    });
     response.json(db.config);
   });
 });
 
 app.get("/orgs", requireAdmin, async (_request: Request, response: Response) => {
-  const db = await loadDatabase();
-  response.json(db.orgs);
+  await withDatabaseRead(async (db) => {
+    response.json(db.orgs);
+  });
 });
 
 app.post("/orgs", requireAdmin, async (request: Request, response: Response) => {
@@ -2258,6 +2395,16 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     };
 
     db.orgs.push(org);
+    appendPlatformAuditEvent(db, {
+      action: "org.created",
+      orgId: org.id,
+      message: `Created organization ${org.name}.`,
+      metadata: {
+        orgName: org.name,
+        emailDomain: org.emailDomain,
+        joinCode: org.joinCode
+      }
+    });
     response.status(201).json(org);
   });
 });
@@ -2367,6 +2514,17 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
 
     org.updatedAt = nowIso();
     emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.updated",
+      orgId: org.id,
+      message: `Updated organization ${org.name}.`,
+      metadata: {
+        fields: Object.keys(patch ?? {}).slice(0, 25),
+        status: org.status,
+        emailDomain: org.emailDomain,
+        joinCode: org.joinCode
+      }
+    });
     response.json(org);
   });
 });
@@ -2374,7 +2532,7 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
 app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const org = db.orgs.find((entry) => entry.id === orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -2438,19 +2596,21 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
 });
 
 app.get("/users", requireAdmin, async (_request: Request, response: Response) => {
-  const db = await loadDatabase();
-  response.json(db.users);
+  await withDatabaseRead(async (db) => {
+    response.json(db.users);
+  });
 });
 
 app.get("/users/:userId", requireAdmin, async (request: Request, response: Response) => {
-  const db = await loadDatabase();
-  const user = getUserById(db, request.params.userId);
-  if (!user) {
-    response.status(404).json({ error: "User not found." });
-    return;
-  }
+  await withDatabaseRead(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
 
-  response.json(user);
+    response.json(user);
+  });
 });
 
 app.post("/users", requireAdmin, async (request: Request, response: Response) => {
@@ -2515,6 +2675,18 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
     };
 
     db.users.push(user);
+    appendPlatformAuditEvent(db, {
+      action: "user.created",
+      orgId: user.orgId,
+      userId: user.id,
+      message: `Created user ${user.email}.`,
+      metadata: {
+        email: user.email,
+        accountType: user.accountType,
+        tier: user.tier,
+        orgRole: user.orgRole
+      }
+    });
     response.status(201).json(user);
   });
 });
@@ -2530,6 +2702,16 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       return;
     }
 
+    const before = {
+      email: user.email,
+      tier: user.tier,
+      accountType: user.accountType,
+      status: user.status,
+      orgId: user.orgId,
+      orgRole: user.orgRole,
+      manualBonusSeconds: user.manualBonusSeconds,
+      timezone: user.timezone
+    };
     const now = new Date();
     materializeUserTimezone(user, now);
     let emailChanged = false;
@@ -2625,6 +2807,25 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
 
     user.updatedAt = now.toISOString();
     emitMobileUpdateForUser(db, user.id, "user");
+    appendPlatformAuditEvent(db, {
+      action: "user.updated",
+      orgId: user.orgId,
+      userId: user.id,
+      message: `Updated user ${user.email}.`,
+      metadata: {
+        before,
+        after: {
+          email: user.email,
+          tier: user.tier,
+          accountType: user.accountType,
+          status: user.status,
+          orgId: user.orgId,
+          orgRole: user.orgRole,
+          manualBonusSeconds: user.manualBonusSeconds,
+          timezone: user.timezone
+        }
+      }
+    });
     response.json(user);
   });
 });
@@ -2677,6 +2878,17 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     mobileUpdateCursorByUserId.delete(user.id);
     mobileUpdateReasonByUserId.delete(user.id);
 
+    appendPlatformAuditEvent(db, {
+      action: "user.deleted",
+      orgId: user.orgId,
+      userId: user.id,
+      message: `Deleted enterprise user ${user.email}.`,
+      metadata: {
+        email: user.email,
+        orgRole: user.orgRole
+      }
+    });
+
     response.json({
       deleted: true,
       userId: user.id,
@@ -2719,6 +2931,14 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
           verificationExpiresAt: null,
           domainMatch
         };
+        appendMobileAuditEvent(db, existing, {
+          action: "mobile.onboard",
+          userId: existing.id,
+          message: `Mobile onboarding completed for ${existing.email}.`,
+          metadata: {
+            verificationRequired: false
+          }
+        });
         response.json(payload);
         return;
       }
@@ -2731,6 +2951,15 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
         verificationExpiresAt: verification.expiresAt,
         domainMatch
       };
+      appendMobileAuditEvent(db, existing, {
+        action: "mobile.onboard",
+        userId: existing.id,
+        message: `Mobile onboarding requested email verification for ${existing.email}.`,
+        metadata: {
+          verificationRequired: true,
+          verificationExpiresAt: verification.expiresAt
+        }
+      });
       response.json(payload);
       return;
     }
@@ -2757,6 +2986,14 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
     db.users.push(user);
     const authToken = upsertMobileAuthToken(db, user.id, now);
     const verification = issueEmailVerification(db, user, new Date(now));
+    appendMobileAuditEvent(db, user, {
+      action: "mobile.user_created",
+      userId: user.id,
+      message: `Created user from mobile onboarding (${user.email}).`,
+      metadata: {
+        verificationExpiresAt: verification.expiresAt
+      }
+    });
     const payload: MobileOnboardResponse = {
       user,
       authToken,
@@ -2800,6 +3037,14 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
     }
 
     const verification = issueEmailVerification(db, user, new Date());
+    appendMobileAuditEvent(db, user, {
+      action: "mobile.verification_resent",
+      userId: user.id,
+      message: `Resent verification code to ${user.email}.`,
+      metadata: {
+        verificationExpiresAt: verification.expiresAt
+      }
+    });
     response.json({
       ok: true,
       verificationExpiresAt: verification.expiresAt
@@ -2882,6 +3127,11 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
     user.emailVerifiedAt = nowIsoValue;
     user.updatedAt = nowIsoValue;
     emitMobileUpdateForUser(db, user.id, "user");
+    appendMobileAuditEvent(db, user, {
+      action: "mobile.email_verified",
+      userId: user.id,
+      message: `Email verified for ${user.email}.`
+    });
 
     const payload: MobileOnboardResponse = {
       user,
@@ -2925,7 +3175,7 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
     return;
   }
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const user = getUserById(db, request.params.userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -3051,6 +3301,15 @@ app.post("/mobile/users/:userId/org-access-requests", async (request: Request, r
       (row) => row.userId === user.id && row.orgId === org.id && row.status === "pending"
     );
     if (existingPending) {
+      appendMobileAuditEvent(db, user, {
+        action: "org_join.request_reused",
+        orgId: org.id,
+        userId: user.id,
+        message: `Existing org join request reused for ${org.name}.`,
+        metadata: {
+          requestId: existingPending.id
+        }
+      });
       response.json({
         created: false,
         request: {
@@ -3090,6 +3349,15 @@ app.post("/mobile/users/:userId/org-access-requests", async (request: Request, r
 
     db.enterpriseJoinRequests.push(record);
     emitMobileUpdateForOrg(db, org.id, "org");
+    appendMobileAuditEvent(db, user, {
+      action: "org_join.request_created",
+      orgId: org.id,
+      userId: user.id,
+      message: `Submitted org join request for ${org.name}.`,
+      metadata: {
+        requestId: record.id
+      }
+    });
 
     response.status(201).json({
       created: true,
@@ -3254,6 +3522,15 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       requestRecord.decisionReason = body.reason?.trim() || null;
       emitMobileUpdateForUser(db, targetUser.id, "user");
       emitMobileUpdateForOrg(db, actor.orgId, "org");
+      appendMobileAuditEvent(db, actor, {
+        action: "org_join.approved_by_org_admin",
+        orgId: actor.orgId,
+        userId: targetUser.id,
+        message: `Approved org join request for ${targetUser.email}.`,
+        metadata: {
+          requestId: requestRecord.id
+        }
+      });
     } else {
       requestRecord.status = "rejected";
       requestRecord.updatedAt = nowValue;
@@ -3262,6 +3539,16 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       requestRecord.decisionReason = body.reason?.trim() || "Rejected by organization admin.";
       emitMobileUpdateForUser(db, targetUser.id, "user");
       emitMobileUpdateForOrg(db, actor.orgId, "org");
+      appendMobileAuditEvent(db, actor, {
+        action: "org_join.rejected_by_org_admin",
+        orgId: actor.orgId,
+        userId: targetUser.id,
+        message: `Rejected org join request for ${targetUser.email}.`,
+        metadata: {
+          requestId: requestRecord.id,
+          reason: requestRecord.decisionReason
+        }
+      });
     }
 
     response.json({
@@ -3412,6 +3699,15 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
     }
 
     db.supportCases.push(record);
+    appendMobileAuditEvent(db, user, {
+      action: "support.case_created",
+      userId: user.id,
+      message: "Submitted support case.",
+      metadata: {
+        caseId: record.id,
+        includeTranscript
+      }
+    });
     response.status(201).json({
       caseId: record.id,
       transcriptRetainedUntil: record.transcriptExpiresAt
@@ -3545,6 +3841,15 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
     if (emailChanged) {
       issueEmailVerification(db, user, now);
     }
+    appendMobileAuditEvent(db, user, {
+      action: "mobile.settings_updated",
+      userId: user.id,
+      message: `Updated profile settings for ${user.email}.`,
+      metadata: {
+        emailChanged,
+        timezoneChanged: typeof patch.timezone === "string" && resolveTimeZone(patch.timezone) !== user.timezone
+      }
+    });
     response.json(user);
   });
 });
@@ -4237,7 +4542,7 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
   const segmentId = typeof request.query.segmentId === "string" ? request.query.segmentId.trim() : "";
   const days = Math.max(1, Math.min(3650, clampNonNegativeInteger(request.query.days, 30)));
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -4350,7 +4655,7 @@ app.get("/mobile/users/:userId/admin/org/dashboard", async (request: Request, re
 
   const actorUserId = request.params.userId;
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const actor = getUserById(db, actorUserId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -4431,7 +4736,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
 
   const actorUserId = request.params.userId;
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const actor = getUserById(db, actorUserId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -4488,7 +4793,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
   const targetUserId = request.params.targetUserId;
   const days = Math.max(1, Math.min(3650, clampNonNegativeInteger(request.query.days, 30)));
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const actor = getUserById(db, actorUserId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -4654,6 +4959,15 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     target.status = body.status;
     target.updatedAt = nowIso();
     emitMobileUpdateForUser(db, target.id, "user");
+    appendMobileAuditEvent(db, actor, {
+      action: "org_user.status_updated",
+      orgId: actor.orgId,
+      userId: target.id,
+      message: `Updated user status for ${target.email} to ${target.status}.`,
+      metadata: {
+        status: target.status
+      }
+    });
     response.json({
       userId: target.id,
       email: target.email,
@@ -4672,7 +4986,7 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
   const actorUserId = request.params.userId;
   const days = Math.max(1, Math.min(3650, clampNonNegativeInteger(request.query.days, 30)));
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const actor = getUserById(db, actorUserId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -4939,6 +5253,89 @@ app.get("/usage", requireAdmin, async (_request: Request, response: Response) =>
   });
 });
 
+app.get("/audit/events", requireAdmin, async (request: Request, response: Response) => {
+  const queryOrgId = typeof request.query.orgId === "string" ? request.query.orgId.trim() : "";
+  const queryActorId = typeof request.query.actorId === "string" ? request.query.actorId.trim() : "";
+  const queryActorType = typeof request.query.actorType === "string" ? request.query.actorType.trim() : "";
+  const queryAction = typeof request.query.action === "string" ? request.query.action.trim() : "";
+  const limit = Math.max(1, Math.min(500, clampNonNegativeInteger(request.query.limit, 200)));
+  const days = Math.max(1, Math.min(3650, clampNonNegativeInteger(request.query.days, 30)));
+  const from = parseIsoDateOrNull(typeof request.query.from === "string" ? request.query.from.trim() : null);
+  const to = parseIsoDateOrNull(typeof request.query.to === "string" ? request.query.to.trim() : null);
+
+  if (from && to && to.getTime() < from.getTime()) {
+    response.status(400).json({ error: "to must be greater than or equal to from." });
+    return;
+  }
+
+  if (queryActorType && queryActorType !== "platform_admin" && queryActorType !== "mobile_user" && queryActorType !== "system") {
+    response.status(400).json({ error: "actorType must be platform_admin, mobile_user, or system." });
+    return;
+  }
+
+  await withDatabaseRead(async (db) => {
+    const now = new Date();
+    const end = to ?? now;
+    const start = from ?? new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+    const startMs = start.getTime();
+    const endMs = end.getTime();
+
+    const orgById = new Map(db.orgs.map((org) => [org.id, org]));
+    const userById = new Map(db.users.map((user) => [user.id, user]));
+
+    const rows = (db.auditEvents ?? [])
+      .filter((event) => {
+        if (queryOrgId && event.orgId !== queryOrgId) {
+          return false;
+        }
+        if (queryActorId && event.actorId !== queryActorId) {
+          return false;
+        }
+        if (queryActorType && event.actorType !== queryActorType) {
+          return false;
+        }
+        if (queryAction && event.action !== queryAction) {
+          return false;
+        }
+
+        const createdAtMs = new Date(event.createdAt).getTime();
+        if (Number.isNaN(createdAtMs)) {
+          return false;
+        }
+
+        return createdAtMs >= startMs && createdAtMs <= endMs;
+      })
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit)
+      .map((event) => {
+        const org = event.orgId ? orgById.get(event.orgId) : null;
+        const actorUser = event.actorId ? userById.get(event.actorId) : null;
+        const targetUser = event.userId ? userById.get(event.userId) : null;
+        return {
+          ...event,
+          orgName: org?.name ?? null,
+          actorEmail: actorUser?.email ?? null,
+          userEmail: targetUser?.email ?? null
+        };
+      });
+
+    response.json({
+      generatedAt: now.toISOString(),
+      filters: {
+        orgId: queryOrgId || null,
+        actorId: queryActorId || null,
+        actorType: queryActorType || null,
+        action: queryAction || null,
+        from: start.toISOString(),
+        to: end.toISOString(),
+        limit
+      },
+      rows
+    });
+  });
+});
+
 app.get("/org-join-requests", requireAdmin, async (request: Request, response: Response) => {
   const statusFilterRaw = typeof request.query.status === "string" ? request.query.status.trim() : "";
   const statusFilter = statusFilterRaw && isOrgJoinRequestStatus(statusFilterRaw) ? statusFilterRaw : null;
@@ -5056,6 +5453,16 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
 
       emitMobileUpdateForUser(db, targetUser.id, "user");
       emitMobileUpdateForOrg(db, org.id, "org");
+      appendPlatformAuditEvent(db, {
+        action: "org_join.approved_by_platform_admin",
+        orgId: org.id,
+        userId: targetUser.id,
+        message: `Approved org join request for ${targetUser.email}.`,
+        metadata: {
+          requestId: requestRecord.id,
+          assignOrgAdmin
+        }
+      });
     } else {
       requestRecord.status = "rejected";
       requestRecord.updatedAt = nowValue;
@@ -5065,6 +5472,16 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
 
       emitMobileUpdateForUser(db, targetUser.id, "user");
       emitMobileUpdateForOrg(db, org.id, "org");
+      appendPlatformAuditEvent(db, {
+        action: "org_join.rejected_by_platform_admin",
+        orgId: org.id,
+        userId: targetUser.id,
+        message: `Rejected org join request for ${targetUser.email}.`,
+        metadata: {
+          requestId: requestRecord.id,
+          reason: requestRecord.decisionReason
+        }
+      });
     }
 
     response.json({
@@ -5086,7 +5503,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
 });
 
 app.get("/support/cases", requireAdmin, async (_request: Request, response: Response) => {
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const now = nowIso();
     const userById = new Map(db.users.map((user) => [user.id, user]));
     const orgById = new Map(db.orgs.map((org) => [org.id, org]));
@@ -5132,7 +5549,7 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
 
 app.get("/support/cases/:caseId", requireAdmin, async (request: Request, response: Response) => {
   const caseId = request.params.caseId;
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const entry = (db.supportCases ?? []).find((row) => row.id === caseId);
     if (!entry) {
       response.status(404).json({ error: "Support case not found." });
@@ -5168,7 +5585,7 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
   const querySegmentId = typeof request.query.segmentId === "string" ? request.query.segmentId.trim() : "";
   const days = Math.max(1, Math.min(3650, clampNonNegativeInteger(request.query.days, 30)));
 
-  await withDatabase(async (db) => {
+  await withDatabaseRead(async (db) => {
     const now = new Date();
     const periodEndAt = now.toISOString();
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -5476,9 +5893,14 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 });
 
 void (async () => {
-  await loadDatabase();
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
+
+  await refreshDatabaseReadiness();
+  const readinessInterval = setInterval(() => {
+    void refreshDatabaseReadiness();
+  }, 15_000);
+  readinessInterval.unref();
 })();

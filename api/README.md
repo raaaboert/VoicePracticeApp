@@ -4,6 +4,8 @@ Express API for Phase 1 development.
 
 ## Key Endpoints
 
+- `GET /health`
+- `GET /ready`
 - `POST /auth/login`
 - `POST /auth/change-password`
 - `GET /config`
@@ -23,6 +25,7 @@ Express API for Phase 1 development.
 - `POST /mobile/users/:userId/support/cases` (mobile auth)
 - `POST /usage/sessions`
 - `GET /usage` (admin)
+- `GET /audit/events` (admin)
 - `GET /support/cases` (admin)
 - `GET /support/cases/:caseId` (admin)
 - `GET /orgs` / `POST /orgs` / `PATCH /orgs/:orgId` (admin)
@@ -66,3 +69,5 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Timezone changes are scheduled for next monthly renewal.
 - Remote AI is optional and API-owned. Mobile calls API AI routes; API calls OpenAI.
 - Default support behavior stores no transcript. If a user explicitly consents in a support case, transcript data is retained for up to 10 days.
+- `/ready` returns `503` while database connectivity is unavailable. All non-health routes are gated behind readiness.
+- Audit events are stored in `auditEvents` and exposed via `GET /audit/events` with org/actor/date filters.
