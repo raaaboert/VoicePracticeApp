@@ -40,6 +40,9 @@ NODE_ENV=development
 STORAGE_PROVIDER=file
 DB_PATH=./db.local.json
 DATABASE_URL=
+PG_POOL_MAX=5
+PG_CONNECT_TIMEOUT_MS=8000
+PG_IDLE_TIMEOUT_MS=30000
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 ADMIN_BOOTSTRAP_PASSWORD=admin
 ADMIN_TOKEN_SECRET=replace_me_for_production
@@ -61,6 +64,10 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Storage supports two providers:
   - `file` via `DB_PATH`
   - `postgres` via `DATABASE_URL` (durable, recommended for hosted deployments)
+- For hosted production APIs, prefer direct Postgres (`:5432`) when available, or pooler session mode (`:5432`) if direct routing is unavailable.
+- Avoid transaction pooler (`:6543`) for long-lived always-on API instances.
+- URL-encode any special characters in `DATABASE_URL` passwords (`!` -> `%21`, `@` -> `%40`, etc.).
+- Postgres pool env defaults: `PG_POOL_MAX=5`, `PG_CONNECT_TIMEOUT_MS=8000`, `PG_IDLE_TIMEOUT_MS=30000`.
 - In production, set `STORAGE_PROVIDER` explicitly and provide `CORS_ALLOWED_ORIGINS`.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.

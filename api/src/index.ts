@@ -1,4 +1,5 @@
-﻿import "dotenv/config";
+import "dotenv/config";
+import "express-async-errors";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import crypto from "node:crypto";
@@ -81,6 +82,9 @@ const PORT = runtimeConfig.port;
 const STORAGE_PROVIDER = runtimeConfig.storageProvider;
 const DB_PATH = runtimeConfig.dbPath;
 const DATABASE_URL = runtimeConfig.databaseUrl;
+const PG_POOL_MAX = runtimeConfig.pgPoolMax;
+const PG_CONNECT_TIMEOUT_MS = runtimeConfig.pgConnectTimeoutMs;
+const PG_IDLE_TIMEOUT_MS = runtimeConfig.pgIdleTimeoutMs;
 const ADMIN_BOOTSTRAP_PASSWORD = runtimeConfig.adminBootstrapPassword;
 const ADMIN_TOKEN_SECRET = runtimeConfig.adminTokenSecret;
 const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
@@ -100,6 +104,24 @@ const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
+const TRANSIENT_DATABASE_ERROR_CODES = new Set([
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "SELF_SIGNED_CERT_IN_CHAIN"
+]);
+const TRANSIENT_DATABASE_ERROR_PATTERNS = [
+  "database is not ready",
+  "connect etimedout",
+  "request timed out",
+  "connection terminated unexpectedly",
+  "server closed the connection unexpectedly",
+  "failed to connect",
+  "could not connect to server",
+  "self-signed certificate in certificate chain"
+];
 
 interface AdminTokenPayload {
   role: "admin";
@@ -1399,6 +1421,9 @@ async function loadDatabase(): Promise<ApiDatabase> {
       provider: STORAGE_PROVIDER,
       dbPath: DB_PATH,
       databaseUrl: DATABASE_URL,
+      pgPoolMax: PG_POOL_MAX,
+      pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+      pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
       ensureDatabaseShape,
       createDefaultDatabase
     });
@@ -1413,6 +1438,9 @@ async function saveDatabase(db: ApiDatabase): Promise<void> {
       provider: STORAGE_PROVIDER,
       dbPath: DB_PATH,
       databaseUrl: DATABASE_URL,
+      pgPoolMax: PG_POOL_MAX,
+      pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+      pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
       ensureDatabaseShape,
       createDefaultDatabase
     });
@@ -1462,6 +1490,8 @@ async function refreshDatabaseReadiness(): Promise<void> {
   } catch (error) {
     isDatabaseReady = false;
     databaseReadyError = error instanceof Error ? error.message : String(error);
+    // eslint-disable-next-line no-console
+    console.warn(`[readiness] database unavailable: ${databaseReadyError}`);
   } finally {
     databaseReadyCheckedAt = nowIso();
   }
@@ -5887,7 +5917,65 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
   });
 });
 
+function isTransientDatabaseError(error: unknown): boolean {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current == null || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (typeof current === "string") {
+      const lower = current.toLowerCase();
+      if (TRANSIENT_DATABASE_ERROR_PATTERNS.some((pattern) => lower.includes(pattern))) {
+        return true;
+      }
+      continue;
+    }
+
+    if (typeof current !== "object") {
+      continue;
+    }
+
+    const candidate = current as {
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+
+    if (typeof candidate.code === "string" && TRANSIENT_DATABASE_ERROR_CODES.has(candidate.code.toUpperCase())) {
+      return true;
+    }
+
+    if (typeof candidate.message === "string") {
+      const lowerMessage = candidate.message.toLowerCase();
+      if (TRANSIENT_DATABASE_ERROR_PATTERNS.some((pattern) => lowerMessage.includes(pattern))) {
+        return true;
+      }
+    }
+
+    if (candidate.cause) {
+      queue.push(candidate.cause);
+    }
+
+    if (Array.isArray(candidate.errors)) {
+      queue.push(...candidate.errors);
+    }
+  }
+
+  return false;
+}
+
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  if (isTransientDatabaseError(error)) {
+    response.status(503).json({ error: "Database temporarily unavailable. Please retry." });
+    return;
+  }
+
   const message = error instanceof Error ? error.message : "Unknown API error.";
   response.status(500).json({ error: message });
 });

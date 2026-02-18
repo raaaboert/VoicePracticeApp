@@ -12,6 +12,9 @@ interface CreateDatabaseStorageParams {
   provider: StorageProvider;
   dbPath: string;
   databaseUrl: string | null;
+  pgPoolMax: number;
+  pgConnectTimeoutMs: number;
+  pgIdleTimeoutMs: number;
   ensureDatabaseShape: (candidate: unknown) => ApiDatabase;
   createDefaultDatabase: () => ApiDatabase;
 }
@@ -62,12 +65,16 @@ class PostgresDatabaseStorage implements DatabaseStorage {
 
   constructor(
     databaseUrl: string,
+    options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number },
     private readonly ensureDatabaseShape: (candidate: unknown) => ApiDatabase,
     private readonly createDefaultDatabase: () => ApiDatabase
   ) {
     this.pool = new Pool({
       connectionString: databaseUrl,
-      max: 5
+      max: options.pgPoolMax,
+      connectionTimeoutMillis: options.pgConnectTimeoutMs,
+      idleTimeoutMillis: options.pgIdleTimeoutMs,
+      keepAlive: true
     });
   }
 
@@ -134,6 +141,11 @@ export function createDatabaseStorage(params: CreateDatabaseStorageParams): Data
 
     return new PostgresDatabaseStorage(
       params.databaseUrl,
+      {
+        pgPoolMax: params.pgPoolMax,
+        pgConnectTimeoutMs: params.pgConnectTimeoutMs,
+        pgIdleTimeoutMs: params.pgIdleTimeoutMs
+      },
       params.ensureDatabaseShape,
       params.createDefaultDatabase
     );

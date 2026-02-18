@@ -9,6 +9,9 @@ export interface RuntimeConfig {
   storageProvider: StorageProvider;
   dbPath: string;
   databaseUrl: string | null;
+  pgPoolMax: number;
+  pgConnectTimeoutMs: number;
+  pgIdleTimeoutMs: number;
   corsAllowedOrigins: string[];
   adminBootstrapPassword: string;
   adminTokenSecret: string;
@@ -40,6 +43,15 @@ function toInt(value: string | undefined, fallback: number): number {
   }
 
   return Math.floor(parsed);
+}
+
+function parsePositiveInt(envName: string, value: string | undefined, fallback: number): number {
+  const parsed = toInt(value, fallback);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${envName} must be a positive integer.`);
+  }
+
+  return parsed;
 }
 
 function parseOptionalNonNegativeInt(
@@ -160,6 +172,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   if (storageProvider === "postgres" && !databaseUrl) {
     throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
   }
+  const pgPoolMax = parsePositiveInt("PG_POOL_MAX", env.PG_POOL_MAX, 5);
+  const pgConnectTimeoutMs = parsePositiveInt("PG_CONNECT_TIMEOUT_MS", env.PG_CONNECT_TIMEOUT_MS, 8000);
+  const pgIdleTimeoutMs = parsePositiveInt("PG_IDLE_TIMEOUT_MS", env.PG_IDLE_TIMEOUT_MS, 30000);
 
   const dbPath = path.resolve(process.cwd(), env.DB_PATH ?? "./db.local.json");
   const corsAllowedOrigins = parseCorsAllowedOrigins(env.CORS_ALLOWED_ORIGINS);
@@ -205,6 +220,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     storageProvider,
     dbPath,
     databaseUrl,
+    pgPoolMax,
+    pgConnectTimeoutMs,
+    pgIdleTimeoutMs,
     corsAllowedOrigins,
     adminBootstrapPassword,
     adminTokenSecret,
