@@ -104,6 +104,8 @@ const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
+const READINESS_REFRESH_MS = 15_000;
+const READINESS_FAILURE_THRESHOLD = 3;
 const TRANSIENT_DATABASE_ERROR_CODES = new Set([
   "ETIMEDOUT",
   "ECONNRESET",
@@ -1414,6 +1416,8 @@ let databaseOperationQueue: Promise<void> = Promise.resolve();
 let isDatabaseReady = false;
 let databaseReadyCheckedAt: string | null = null;
 let databaseReadyError: string | null = null;
+let databaseReadyConsecutiveFailures = 0;
+let isReadinessRefreshInFlight = false;
 
 async function loadDatabase(): Promise<ApiDatabase> {
   if (!databaseStorage) {
@@ -1487,14 +1491,31 @@ async function refreshDatabaseReadiness(): Promise<void> {
     await loadDatabase();
     isDatabaseReady = true;
     databaseReadyError = null;
+    databaseReadyConsecutiveFailures = 0;
   } catch (error) {
-    isDatabaseReady = false;
     databaseReadyError = error instanceof Error ? error.message : String(error);
+    databaseReadyConsecutiveFailures += 1;
+    if (!isDatabaseReady || databaseReadyConsecutiveFailures >= READINESS_FAILURE_THRESHOLD) {
+      isDatabaseReady = false;
+    }
     // eslint-disable-next-line no-console
-    console.warn(`[readiness] database unavailable: ${databaseReadyError}`);
+    console.warn(
+      `[readiness] database unavailable (${databaseReadyConsecutiveFailures}/${READINESS_FAILURE_THRESHOLD}): ${databaseReadyError}`
+    );
   } finally {
     databaseReadyCheckedAt = nowIso();
   }
+}
+
+function queueDatabaseReadinessRefresh(): void {
+  if (isReadinessRefreshInFlight) {
+    return;
+  }
+
+  isReadinessRefreshInFlight = true;
+  void refreshDatabaseReadiness().finally(() => {
+    isReadinessRefreshInFlight = false;
+  });
 }
 
 function hashPassword(password: string): string {
@@ -2235,7 +2256,12 @@ app.get("/health", (_request, response) => {
 
 app.get("/ready", (_request, response) => {
   if (isDatabaseReady) {
-    response.json({ ok: true, now: nowIso(), checkedAt: databaseReadyCheckedAt });
+    response.json({
+      ok: true,
+      now: nowIso(),
+      checkedAt: databaseReadyCheckedAt,
+      consecutiveFailures: databaseReadyConsecutiveFailures
+    });
     return;
   }
 
@@ -2243,7 +2269,9 @@ app.get("/ready", (_request, response) => {
     ok: false,
     now: nowIso(),
     checkedAt: databaseReadyCheckedAt,
-    error: databaseReadyError || "Database is not ready."
+    error: databaseReadyError || "Database is not ready.",
+    consecutiveFailures: databaseReadyConsecutiveFailures,
+    failureThreshold: READINESS_FAILURE_THRESHOLD
   });
 });
 
@@ -2256,17 +2284,6 @@ app.use((request: Request, response: Response, next: NextFunction) => {
     next();
     return;
   }
-
-  if (request.path === "/health" || request.path === "/ready") {
-    next();
-    return;
-  }
-
-  if (!isDatabaseReady) {
-    response.status(503).json({ error: "Service unavailable. Database not ready." });
-    return;
-  }
-
   next();
 });
 
@@ -5988,7 +6005,7 @@ void (async () => {
 
   await refreshDatabaseReadiness();
   const readinessInterval = setInterval(() => {
-    void refreshDatabaseReadiness();
-  }, 15_000);
+    queueDatabaseReadinessRefresh();
+  }, READINESS_REFRESH_MS);
   readinessInterval.unref();
 })();
