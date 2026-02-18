@@ -41,6 +41,8 @@ interface OrgJoinRequestRow {
   } | null;
 }
 
+type OrgJoinAction = "approve" | "reject";
+
 function formatDate(value: string | null | undefined): string {
   if (!value) {
     return "-";
@@ -75,8 +77,10 @@ export default function UsersPage() {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [actingJoinRequestId, setActingJoinRequestId] = useState<string | null>(null);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
     name: "",
     contactName: "",
@@ -127,6 +131,7 @@ export default function UsersPage() {
     event.preventDefault();
     setCreating(true);
     setError(null);
+    setNotice(null);
 
     try {
       const name = orgForm.name.trim();
@@ -151,6 +156,59 @@ export default function UsersPage() {
       setError(caught instanceof Error ? caught.message : "Could not create enterprise account.");
     } finally {
       setCreating(false);
+    }
+  };
+
+  const decideJoinRequest = async (
+    row: OrgJoinRequestRow,
+    action: OrgJoinAction,
+    options?: { assignOrgAdmin?: boolean }
+  ) => {
+    if (row.status !== "pending") {
+      return;
+    }
+
+    const assignOrgAdmin = Boolean(options?.assignOrgAdmin);
+    const confirmMessage =
+      action === "approve"
+        ? assignOrgAdmin
+          ? `Approve ${row.email} and set org role to Org Admin?`
+          : `Approve ${row.email} into ${row.org?.name ?? "this org"}?`
+        : `Reject access request for ${row.email}?`;
+    const confirmed = window.confirm(confirmMessage);
+    if (!confirmed) {
+      return;
+    }
+
+    const reasonInput = window.prompt("Optional reason (leave blank for default):", "");
+    if (reasonInput === null) {
+      return;
+    }
+
+    setActingJoinRequestId(row.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await adminFetch<{ ok: true }>("/org-join-requests/" + row.id, {
+        method: "PATCH",
+        body: JSON.stringify({
+          action,
+          reason: reasonInput.trim() || undefined,
+          assignOrgAdmin: action === "approve" ? assignOrgAdmin : undefined
+        })
+      });
+      setNotice(
+        action === "approve"
+          ? assignOrgAdmin
+            ? `Approved ${row.email} as org admin.`
+            : `Approved ${row.email}.`
+          : `Rejected ${row.email}.`
+      );
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update request.");
+    } finally {
+      setActingJoinRequestId(null);
     }
   };
 
@@ -202,6 +260,11 @@ export default function UsersPage() {
           {error ? (
             <p className="error" style={{ marginBottom: 0 }}>
               {error}
+            </p>
+          ) : null}
+          {notice ? (
+            <p className="success" style={{ marginBottom: 0 }}>
+              {notice}
             </p>
           ) : null}
         </div>
@@ -322,12 +385,13 @@ export default function UsersPage() {
                 <th>Status</th>
                 <th>Expires</th>
                 <th>Decision</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {joinRequests.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="small">
+                  <td colSpan={7} className="small">
                     No org access requests yet.
                   </td>
                 </tr>
@@ -351,6 +415,35 @@ export default function UsersPage() {
                     <td>
                       <div>{formatDateTime(row.decidedAt)}</div>
                       <div className="small">{row.decisionReason ?? "-"}</div>
+                    </td>
+                    <td>
+                      {row.status === "pending" ? (
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            className="primary"
+                            disabled={actingJoinRequestId === row.id}
+                            onClick={() => void decideJoinRequest(row, "approve")}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            className="primary"
+                            disabled={actingJoinRequestId === row.id}
+                            onClick={() => void decideJoinRequest(row, "approve", { assignOrgAdmin: true })}
+                          >
+                            Approve as Org Admin
+                          </button>
+                          <button
+                            className="danger"
+                            disabled={actingJoinRequestId === row.id}
+                            onClick={() => void decideJoinRequest(row, "reject")}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="small">-</span>
+                      )}
                     </td>
                   </tr>
                 ))

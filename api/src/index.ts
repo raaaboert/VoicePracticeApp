@@ -4995,6 +4995,96 @@ app.get("/org-join-requests", requireAdmin, async (request: Request, response: R
   });
 });
 
+app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request, response: Response) => {
+  const body = request.body as { action?: "approve" | "reject"; reason?: string; assignOrgAdmin?: boolean };
+  if (body.action !== "approve" && body.action !== "reject") {
+    response.status(400).json({ error: "action must be approve or reject." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    expireOrgJoinRequests(db, new Date());
+    const requestRecord = db.enterpriseJoinRequests.find((row) => row.id === request.params.requestId);
+    if (!requestRecord) {
+      response.status(404).json({ error: "Join request not found." });
+      return;
+    }
+
+    if (requestRecord.status !== "pending") {
+      response.status(409).json({ error: `Join request is already ${requestRecord.status}.` });
+      return;
+    }
+
+    const org = getOrgById(db, requestRecord.orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const targetUser = getUserById(db, requestRecord.userId);
+    if (!targetUser) {
+      const nowValue = nowIso();
+      requestRecord.status = "rejected";
+      requestRecord.updatedAt = nowValue;
+      requestRecord.decidedAt = nowValue;
+      requestRecord.decidedByUserId = null;
+      requestRecord.decisionReason = "Target user no longer exists.";
+      response.status(404).json({ error: "Target user not found." });
+      return;
+    }
+
+    const nowValue = nowIso();
+    if (body.action === "approve") {
+      if (org.status !== "active") {
+        response.status(400).json({ error: "Organization is not active." });
+        return;
+      }
+
+      const assignOrgAdmin = Boolean(body.assignOrgAdmin);
+      targetUser.accountType = "enterprise";
+      targetUser.tier = "enterprise";
+      targetUser.orgId = org.id;
+      targetUser.orgRole = assignOrgAdmin ? "org_admin" : "user";
+      targetUser.status = "active";
+      targetUser.updatedAt = nowValue;
+
+      requestRecord.status = "approved";
+      requestRecord.updatedAt = nowValue;
+      requestRecord.decidedAt = nowValue;
+      requestRecord.decidedByUserId = null;
+      requestRecord.decisionReason = body.reason?.trim() || (assignOrgAdmin ? "Approved as org admin." : null);
+
+      emitMobileUpdateForUser(db, targetUser.id, "user");
+      emitMobileUpdateForOrg(db, org.id, "org");
+    } else {
+      requestRecord.status = "rejected";
+      requestRecord.updatedAt = nowValue;
+      requestRecord.decidedAt = nowValue;
+      requestRecord.decidedByUserId = null;
+      requestRecord.decisionReason = body.reason?.trim() || "Rejected by platform admin.";
+
+      emitMobileUpdateForUser(db, targetUser.id, "user");
+      emitMobileUpdateForOrg(db, org.id, "org");
+    }
+
+    response.json({
+      ok: true,
+      request: {
+        id: requestRecord.id,
+        status: requestRecord.status,
+        userId: requestRecord.userId,
+        email: requestRecord.email,
+        orgId: requestRecord.orgId,
+        createdAt: requestRecord.createdAt,
+        expiresAt: requestRecord.expiresAt,
+        updatedAt: requestRecord.updatedAt,
+        decidedAt: requestRecord.decidedAt,
+        decisionReason: requestRecord.decisionReason
+      }
+    });
+  });
+});
+
 app.get("/support/cases", requireAdmin, async (_request: Request, response: Response) => {
   await withDatabase(async (db) => {
     const now = nowIso();
