@@ -39,6 +39,7 @@ yarn-error.*
 *.log
 mobile/.expo-start.log
 tmp-*.png
+tmp_app_bundle.js
 
 # typescript
 *.tsbuildinfo
