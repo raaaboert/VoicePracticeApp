@@ -1357,7 +1357,7 @@ export default function App() {
         setPendingVerificationUserId(onboarded.user.id);
         setVerificationCode("");
         setVerificationExpiresAt(onboarded.verificationExpiresAt);
-        setVerificationNotice("Verification email sent. Enter the 6-digit code to continue.");
+        setVerificationNotice("Verification email sent. Enter the 6-digit email code (numbers only).");
         setVerificationError(null);
         setScreen("verify_email");
         return;
@@ -1390,7 +1390,7 @@ export default function App() {
 
     const code = verificationCode.trim();
     if (!/^\d{6}$/.test(code)) {
-      setVerificationError("Enter the 6-digit verification code.");
+      setVerificationError("Enter the 6-digit email verification code (numbers only).");
       return;
     }
 
@@ -1511,7 +1511,7 @@ export default function App() {
         setPendingVerificationUserId(updated.id);
         setVerificationCode("");
         setVerificationExpiresAt(null);
-        setVerificationNotice("Email changed. Enter the verification code sent to your new inbox.");
+        setVerificationNotice("Email changed. Enter the 6-digit email code sent to your new inbox.");
         setVerificationError(null);
         setSettingsNotice("Email updated. Verification required before continuing.");
         setScreen("verify_email");
@@ -2115,7 +2115,9 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.title}>Enter Verification Code</Text>
           <Text style={styles.body}>
-            We sent a 6-digit code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
+            We sent a 6-digit email code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
+            {"\n"}
+            This is not the org join code.
             {"\n"}
             {verificationExpiresAt
               ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`

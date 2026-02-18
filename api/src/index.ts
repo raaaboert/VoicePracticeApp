@@ -2823,6 +2823,11 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
     return;
   }
 
+  if (!/^\d{6}$/.test(code)) {
+    response.status(400).json({ error: "Enter the 6-digit email verification code (numbers only)." });
+    return;
+  }
+
   await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
