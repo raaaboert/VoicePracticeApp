@@ -13,6 +13,7 @@ import {
   createLocalAssistantReply,
   createLocalOpeningLine,
 } from "../lib/mockAi";
+import { createSupportCase } from "../lib/api";
 import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
 import { DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
@@ -33,6 +34,8 @@ const MIN_TURN_DURATION_MS = 1200;
 const SILENCE_CUTOFF_MS = 1200;
 const STATUS_POLL_INTERVAL_MS = 250;
 const VOICE_METER_THRESHOLD_DB = -45;
+const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
+const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
 const COLORS = {
   panel: "rgba(17, 37, 64, 0.84)",
@@ -80,6 +83,20 @@ function isApiError(error: unknown): boolean {
 
 function buildLocalCapturedText(turnDurationSeconds: number): string {
   return `Voice input captured (${turnDurationSeconds}s) in local test mode.`;
+}
+
+function shouldAutoReportMessage(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const ignoreFragments = [
+    "microphone permission is required",
+    "no clear speech detected",
+  ];
+
+  return !ignoreFragments.some((fragment) => normalized.includes(fragment));
 }
 
 function formatDurationClock(totalSeconds: number): string {
@@ -130,6 +147,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const meteringSeenRef = useRef(false);
   const kickoffSentRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
+  const autoErrorReportByKeyRef = useRef(new Map<string, number>());
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -152,6 +170,57 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       monitorIntervalRef.current = null;
     }
   };
+
+  const submitAutoErrorReport = useCallback(
+    async (context: string, error: unknown, details?: Record<string, unknown>) => {
+      const message = getErrorMessage(error, "Unexpected simulation error.");
+      if (!shouldAutoReportMessage(message)) {
+        return;
+      }
+
+      const key = `${context}::${message}`.slice(0, 512);
+      const nowMs = Date.now();
+      const lastReportedAt = autoErrorReportByKeyRef.current.get(key) ?? 0;
+      if (nowMs - lastReportedAt < AUTO_ERROR_REPORT_THROTTLE_MS) {
+        return;
+      }
+      autoErrorReportByKeyRef.current.set(key, nowMs);
+
+      const lines = [
+        "[AUTO-ERROR] Simulation runtime report",
+        `Context: ${context}`,
+        `Platform: ${Platform.OS}`,
+        `User ID: ${userId}`,
+        `Segment ID: ${config.scenario.segmentId}`,
+        `Scenario ID: ${config.scenario.id}`,
+        `Scenario: ${config.scenario.title}`,
+        `Difficulty: ${config.difficulty}`,
+        `Persona: ${config.personaStyle}`,
+        `Timestamp: ${new Date(nowMs).toISOString()}`,
+        `Error: ${message}`,
+      ];
+
+      if (details && Object.keys(details).length > 0) {
+        try {
+          lines.push(`Details: ${JSON.stringify(details)}`);
+        } catch {
+          lines.push("Details: (unserializable)");
+        }
+      }
+
+      try {
+        await createSupportCase({
+          userId,
+          authToken,
+          message: lines.join("\n").slice(0, MAX_AUTO_ERROR_MESSAGE_LENGTH),
+          includeTranscript: false,
+        });
+      } catch {
+        // Best-effort only.
+      }
+    },
+    [authToken, config.difficulty, config.personaStyle, config.scenario.id, config.scenario.segmentId, config.scenario.title, userId],
+  );
 
   const appendMessage = (message: DialogueMessage) => {
     messagesRef.current = [...messagesRef.current, message];
@@ -314,6 +383,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       }, MAX_TURN_DURATION_MS + 500);
     } catch (recordingError) {
       setError(getErrorMessage(recordingError, "Could not start recording."));
+      void submitAutoErrorReport("simulation.recording_start", recordingError);
       sessionActiveRef.current = false;
       setSessionActive(false);
       setMode("idle");
@@ -422,6 +492,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       continueLoop = sessionActiveRef.current;
     } catch (turnError) {
       setError(getErrorMessage(turnError, "Could not process voice response."));
+      void submitAutoErrorReport("simulation.turn_finalize", turnError);
       continueLoop = sessionActiveRef.current;
     } finally {
       processingRef.current = false;
@@ -469,6 +540,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
             } else {
               setError(getErrorMessage(openingError, "Could not initialize simulation."));
+              void submitAutoErrorReport("simulation.opening_line", openingError);
               return;
             }
           }
@@ -609,6 +681,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           setMode("idle");
           setStatus("Ready.");
           setError(getErrorMessage(initError, "Could not initialize simulation."));
+          void submitAutoErrorReport("simulation.initialize", initError);
         }
       } finally {
         if (!cancelled && !unmountedRef.current) {
@@ -628,7 +701,16 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       void stopRecordingSafely();
       sessionCompletionInProgressRef.current = false;
     };
-  }, [apiConfigured, authToken, config.difficulty, config.personaStyle, config.scenario, config.segmentLabel, userId]);
+  }, [
+    apiConfigured,
+    authToken,
+    config.difficulty,
+    config.personaStyle,
+    config.scenario,
+    config.segmentLabel,
+    submitAutoErrorReport,
+    userId,
+  ]);
 
   useEffect(() => {
     if (!sessionActive) {

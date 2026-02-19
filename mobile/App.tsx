@@ -242,12 +242,41 @@ interface SelectOption {
   label: string;
 }
 
+const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
+const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
+
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
   }
 
   return fallback;
+}
+
+function shouldAutoReportErrorMessage(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const ignorePrefixes = ["please ", "enter ", "select "];
+  if (ignorePrefixes.some((prefix) => normalized.startsWith(prefix))) {
+    return false;
+  }
+
+  const ignoreFragments = [
+    "org admin access required",
+    "admin access required",
+    "email verification required",
+    "daily limit reached",
+    "daily plan limit reached",
+    "organization daily quota reached",
+    "user daily quota reached",
+    "you cannot lock or unlock your own account",
+    "user admins cannot lock or unlock org admins",
+  ];
+
+  return !ignoreFragments.some((fragment) => normalized.includes(fragment));
 }
 
 function isEmailLike(value: string): boolean {
@@ -556,6 +585,7 @@ export default function App() {
   const [isHomeMenuMounted, setIsHomeMenuMounted] = useState(false);
   const homeMenuSlide = useRef(new Animated.Value(0)).current;
   const mobileUpdatesCursorRef = useRef(0);
+  const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -851,6 +881,68 @@ export default function App() {
     [homeMenuSlide, isHomeMenuMounted],
   );
 
+  const submitAutoErrorReport = useCallback(
+    async (
+      context: string,
+      error: unknown,
+      extras?: {
+        screen?: Screen;
+        details?: Record<string, unknown>;
+      },
+    ) => {
+      if (!user || !mobileAuthToken) {
+        return;
+      }
+
+      const message = getErrorMessage(error, "Unexpected app error.");
+      if (!shouldAutoReportErrorMessage(message)) {
+        return;
+      }
+
+      const key = `${context}::${message}`.slice(0, 512);
+      const nowMs = Date.now();
+      const lastReportedAt = autoErrorReportByKeyRef.current.get(key) ?? 0;
+      if (nowMs - lastReportedAt < AUTO_ERROR_REPORT_THROTTLE_MS) {
+        return;
+      }
+      autoErrorReportByKeyRef.current.set(key, nowMs);
+
+      const lines = [
+        "[AUTO-ERROR] Mobile runtime report",
+        `Context: ${context}`,
+        `Screen: ${extras?.screen ?? screen}`,
+        `Platform: ${Platform.OS}`,
+        `User ID: ${user.id}`,
+        `Account: ${user.accountType}`,
+        `Org ID: ${user.orgId ?? "none"}`,
+        `Org Role: ${user.orgRole}`,
+        `Timestamp: ${new Date(nowMs).toISOString()}`,
+        `Error: ${message}`,
+      ];
+
+      if (extras?.details && Object.keys(extras.details).length > 0) {
+        try {
+          lines.push(`Details: ${JSON.stringify(extras.details)}`);
+        } catch {
+          lines.push("Details: (unserializable)");
+        }
+      }
+
+      const payloadMessage = lines.join("\n").slice(0, MAX_AUTO_ERROR_MESSAGE_LENGTH);
+      try {
+        await createSupportCase({
+          userId: user.id,
+          authToken: mobileAuthToken,
+          message: payloadMessage,
+          includeTranscript: false,
+        });
+      } catch {
+        // Best-effort only; user-facing flow should not fail because reporting failed.
+      }
+    },
+    [mobileAuthToken, screen, user],
+  );
+
   const refreshScoreDashboard = useCallback(async () => {
     if (!user || !mobileAuthToken) {
       return;
@@ -866,11 +958,19 @@ export default function App() {
       });
       setScoreSummary(payload);
     } catch (caught) {
-      setDashboardError(getErrorMessage(caught, "Could not load dashboard stats."));
+      const message = getErrorMessage(caught, "Could not load dashboard stats.");
+      setDashboardError(message);
+      void submitAutoErrorReport("usage_dashboard.refresh", caught, {
+        screen: "usage_dashboard",
+        details: {
+          days: dashboardDays,
+          segmentId: dashboardSegmentId.trim() || null,
+        },
+      });
     } finally {
       setDashboardLoading(false);
     }
-  }, [dashboardDays, dashboardSegmentId, mobileAuthToken, user]);
+  }, [dashboardDays, dashboardSegmentId, mobileAuthToken, submitAutoErrorReport, user]);
 
   const refreshOrgAdminDashboard = useCallback(async () => {
     if (!user || !mobileAuthToken) {
@@ -895,11 +995,16 @@ export default function App() {
       setAdminMaxSimulationMinutesInput(String(Math.max(1, dashboardPayload.org.maxSimulationMinutes ?? 1)));
       setOrgAdminAnalytics(analyticsPayload);
     } catch (caught) {
-      setAdminError(getErrorMessage(caught, "Could not load org admin dashboard."));
+      const message = getErrorMessage(caught, "Could not load org admin dashboard.");
+      setAdminError(message);
+      void submitAutoErrorReport("admin_org_dashboard.refresh", caught, {
+        screen: "admin_org_dashboard",
+        details: { days: adminRangeDays },
+      });
     } finally {
       setAdminLoading(false);
     }
-  }, [adminRangeDays, mobileAuthToken, user]);
+  }, [adminRangeDays, mobileAuthToken, submitAutoErrorReport, user]);
 
   const refreshOrgAdminUsers = useCallback(async () => {
     if (!user || !mobileAuthToken) {
@@ -919,11 +1024,15 @@ export default function App() {
       const payload = await fetchOrgAdminUsers(user.id, mobileAuthToken);
       setOrgAdminUsers(payload);
     } catch (caught) {
-      setAdminError(getErrorMessage(caught, "Could not load organization users."));
+      const message = getErrorMessage(caught, "Could not load organization users.");
+      setAdminError(message);
+      void submitAutoErrorReport("admin_users.refresh", caught, {
+        screen: "admin_user_list",
+      });
     } finally {
       setAdminLoading(false);
     }
-  }, [mobileAuthToken, user]);
+  }, [mobileAuthToken, submitAutoErrorReport, user]);
 
   const refreshMyOrgAccessRequests = useCallback(async () => {
     if (!user || !mobileAuthToken) {
@@ -968,11 +1077,15 @@ export default function App() {
       const payload = await fetchOrgAdminAccessRequests(user.id, mobileAuthToken);
       setOrgAdminAccessRequests(payload);
     } catch (caught) {
-      setAdminError(getErrorMessage(caught, "Could not load org access requests."));
+      const message = getErrorMessage(caught, "Could not load org access requests.");
+      setAdminError(message);
+      void submitAutoErrorReport("admin_access_requests.refresh", caught, {
+        screen: "admin_org_requests",
+      });
     } finally {
       setAdminLoading(false);
     }
-  }, [mobileAuthToken, user]);
+  }, [mobileAuthToken, submitAutoErrorReport, user]);
 
   const decideOrgAccessRequest = useCallback(
     async (requestId: string, action: "approve" | "reject") => {
@@ -986,12 +1099,17 @@ export default function App() {
         await decideOrgAdminAccessRequest(user.id, requestId, action, mobileAuthToken);
         await Promise.all([refreshOrgAdminAccessRequests(), refreshOrgAdminUsers()]);
       } catch (caught) {
-        setAdminError(getErrorMessage(caught, "Could not update request status."));
+        const message = getErrorMessage(caught, "Could not update request status.");
+        setAdminError(message);
+        void submitAutoErrorReport("admin_access_requests.decide", caught, {
+          screen: "admin_org_requests",
+          details: { requestId, action },
+        });
       } finally {
         setAdminLoading(false);
       }
     },
-    [mobileAuthToken, refreshOrgAdminAccessRequests, refreshOrgAdminUsers, user],
+    [mobileAuthToken, refreshOrgAdminAccessRequests, refreshOrgAdminUsers, submitAutoErrorReport, user],
   );
 
   const refreshOrgAdminUserDetail = useCallback(
@@ -1014,12 +1132,17 @@ export default function App() {
         const payload = await fetchOrgAdminUserDetail(user.id, targetUserId, mobileAuthToken, { days: 30 });
         setOrgAdminUserDetail(payload);
       } catch (caught) {
-        setAdminError(getErrorMessage(caught, "Could not load user details."));
+        const message = getErrorMessage(caught, "Could not load user details.");
+        setAdminError(message);
+        void submitAutoErrorReport("admin_user_detail.refresh", caught, {
+          screen: "admin_user_detail",
+          details: { targetUserId },
+        });
       } finally {
         setAdminLoading(false);
       }
     },
-    [mobileAuthToken, user],
+    [mobileAuthToken, submitAutoErrorReport, user],
   );
 
   const setOrgUserLocked = useCallback(
@@ -1042,12 +1165,17 @@ export default function App() {
         await setOrgAdminUserStatus(user.id, targetUserId, mobileAuthToken, locked ? "disabled" : "active");
         await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
       } catch (caught) {
-        setAdminError(getErrorMessage(caught, "Could not update user status."));
+        const message = getErrorMessage(caught, "Could not update user status.");
+        setAdminError(message);
+        void submitAutoErrorReport("admin_user_status.update", caught, {
+          screen: "admin_user_detail",
+          details: { targetUserId, locked },
+        });
       } finally {
         setAdminLoading(false);
       }
     },
-    [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, user],
+    [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
   );
 
   const saveOrgAdminSettings = useCallback(async () => {
@@ -1082,11 +1210,16 @@ export default function App() {
       setAdminNotice(`Saved. Max simulation length is ${payload.org.maxSimulationMinutes} minute(s).`);
       await refreshOrgAdminDashboard();
     } catch (caught) {
-      setAdminError(getErrorMessage(caught, "Could not save org settings."));
+      const message = getErrorMessage(caught, "Could not save org settings.");
+      setAdminError(message);
+      void submitAutoErrorReport("admin_org_settings.save", caught, {
+        screen: "admin_org_dashboard",
+        details: { maxSimulationMinutes },
+      });
     } finally {
       setIsSavingOrgAdminSettings(false);
     }
-  }, [adminMaxSimulationMinutesInput, mobileAuthToken, refreshOrgAdminDashboard, user]);
+  }, [adminMaxSimulationMinutesInput, mobileAuthToken, refreshOrgAdminDashboard, submitAutoErrorReport, user]);
 
   useEffect(() => {
     if (screen !== "home" && isHomeMenuMounted) {
@@ -1261,11 +1394,17 @@ export default function App() {
         await resetSessionToOnboarding("Session self-healed. Please sign in again.");
       } else {
         setAppError(message);
+        void submitAutoErrorReport("app.initialize", caught, {
+          screen: "home",
+          details: {
+            hadStoredSession,
+          },
+        });
       }
     } finally {
       setIsBootLoading(false);
     }
-  }, [detectedTimezone, resetSessionToOnboarding]);
+  }, [detectedTimezone, resetSessionToOnboarding, submitAutoErrorReport]);
 
   useEffect(() => {
     void initializeApp();
@@ -1332,6 +1471,13 @@ export default function App() {
             return;
           }
 
+          void submitAutoErrorReport("mobile_updates.long_poll", caught, {
+            screen,
+            details: {
+              cursor: mobileUpdatesCursorRef.current,
+            },
+          });
+
           await new Promise((resolve) => setTimeout(resolve, 1500));
         }
       }
@@ -1343,7 +1489,7 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [mobileAuthToken, resetSessionToOnboarding, user?.id]);
+  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user?.id]);
 
   useEffect(() => {
     if (!user || user.emailVerifiedAt) {
@@ -1477,7 +1623,11 @@ export default function App() {
         setScreen("home");
       }
     } catch (caught) {
-      setOnboardingError(getErrorMessage(caught, "Could not complete onboarding."));
+      const message = getErrorMessage(caught, "Could not complete onboarding.");
+      setOnboardingError(message);
+      void submitAutoErrorReport("onboarding.submit", caught, {
+        screen: "onboarding",
+      });
     } finally {
       setIsOnboardingSaving(false);
     }
@@ -1521,7 +1671,11 @@ export default function App() {
         setScreen("home");
       }
     } catch (caught) {
-      setVerificationError(getErrorMessage(caught, "Could not verify email."));
+      const message = getErrorMessage(caught, "Could not verify email.");
+      setVerificationError(message);
+      void submitAutoErrorReport("verification.submit_code", caught, {
+        screen: "verify_email",
+      });
     } finally {
       setIsVerificationSaving(false);
     }
@@ -1541,7 +1695,11 @@ export default function App() {
       setVerificationExpiresAt(payload.verificationExpiresAt ?? null);
       setVerificationNotice("Verification code sent. Check your inbox.");
     } catch (caught) {
-      setVerificationError(getErrorMessage(caught, "Could not resend verification email."));
+      const message = getErrorMessage(caught, "Could not resend verification email.");
+      setVerificationError(message);
+      void submitAutoErrorReport("verification.resend_code", caught, {
+        screen: "verify_email",
+      });
     } finally {
       setIsVerificationSaving(false);
     }
@@ -1572,7 +1730,11 @@ export default function App() {
       setOrgJoinCodeInput("");
       await refreshMyOrgAccessRequests();
     } catch (caught) {
-      setOrgRequestError(getErrorMessage(caught, "Could not submit org access request."));
+      const message = getErrorMessage(caught, "Could not submit org access request.");
+      setOrgRequestError(message);
+      void submitAutoErrorReport("org_access_request.submit", caught, {
+        screen: "domain_match",
+      });
     } finally {
       setIsOrgRequestSaving(false);
     }
@@ -1620,7 +1782,11 @@ export default function App() {
         setSettingsNotice("Settings saved. Timezone changes apply at the next cycle reset.");
       }
     } catch (caught) {
-      setSettingsError(getErrorMessage(caught, "Could not save settings."));
+      const message = getErrorMessage(caught, "Could not save settings.");
+      setSettingsError(message);
+      void submitAutoErrorReport("settings.save", caught, {
+        screen: "settings",
+      });
     } finally {
       setIsSettingsSaving(false);
     }
@@ -1660,7 +1826,11 @@ export default function App() {
         AI_VOICE_GENDER_OPTIONS.find((option) => option.id === voiceGender)?.label ?? "Female";
       setSettingsNotice(`Played sample using ${selectedGenderLabel} ${sample.label} voice style.`);
     } catch (caught) {
-      setSettingsError(getErrorMessage(caught, "Could not play voice sample on this device."));
+      const message = getErrorMessage(caught, "Could not play voice sample on this device.");
+      setSettingsError(message);
+      void submitAutoErrorReport("settings.voice_sample", caught, {
+        screen: "settings",
+      });
     } finally {
       setIsVoiceSamplePlaying(false);
     }
@@ -1697,7 +1867,15 @@ export default function App() {
       setScorecardError(null);
       setScreen("simulation");
     } catch (caught) {
-      setSetupError(getErrorMessage(caught, "Could not start simulation."));
+      const message = getErrorMessage(caught, "Could not start simulation.");
+      setSetupError(message);
+      void submitAutoErrorReport("simulation.start", caught, {
+        screen: "setup",
+        details: {
+          segmentId: activeSegment?.id ?? null,
+          scenarioId: activeScenario?.id ?? null,
+        },
+      });
     }
   };
 
@@ -1774,7 +1952,15 @@ export default function App() {
           }, mobileAuthToken);
           setEntitlements(payload.entitlements);
         } catch (caught) {
-          setScorecardError(getErrorMessage(caught, "Usage update failed after session."));
+          const message = getErrorMessage(caught, "Usage update failed after session.");
+          setScorecardError(message);
+          void submitAutoErrorReport("simulation.usage_record", caught, {
+            screen: "scorecard",
+            details: {
+              segmentId: completedConfig.scenario.segmentId,
+              scenarioId: completedConfig.scenario.id,
+            },
+          });
         }
       })();
     }
@@ -1850,6 +2036,13 @@ export default function App() {
       } catch (evaluationError) {
         finalScorecard = fallbackScorecard(history);
         scoreError = getErrorMessage(evaluationError, "Score generation failed. Fallback scoring used.");
+        void submitAutoErrorReport("simulation.score_generation", evaluationError, {
+          screen: "scorecard",
+          details: {
+            segmentId: completedConfig.scenario.segmentId,
+            scenarioId: completedConfig.scenario.id,
+          },
+        });
       } finally {
         setIsScoring(false);
       }
@@ -1879,6 +2072,13 @@ export default function App() {
           );
         } catch (caught) {
           setScorecardError((prev) => prev ?? getErrorMessage(caught, "Could not sync score history."));
+          void submitAutoErrorReport("simulation.score_sync", caught, {
+            screen: "scorecard",
+            details: {
+              segmentId: completedConfig.scenario.segmentId,
+              scenarioId: completedConfig.scenario.id,
+            },
+          });
         }
       }
     })();

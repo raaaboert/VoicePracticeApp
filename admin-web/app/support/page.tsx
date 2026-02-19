@@ -36,6 +36,10 @@ interface SupportCaseDetail {
   meta: Record<string, unknown> | null;
 }
 
+function isAutoErrorCase(message: string): boolean {
+  return message.trim().toUpperCase().startsWith("[AUTO-ERROR]");
+}
+
 export default function SupportPage() {
   useRequireAdminToken();
   const mode = useAdminMode();
@@ -128,6 +132,7 @@ export default function SupportPage() {
           <thead>
             <tr>
               <th>Created</th>
+              <th>Type</th>
               {isPersonalMode ? null : <th>Org</th>}
               <th>User</th>
               <th>Scenario</th>
@@ -144,6 +149,7 @@ export default function SupportPage() {
                   <div>{new Date(row.createdAt).toLocaleString()}</div>
                   <div className="small">{row.id}</div>
                 </td>
+                <td>{isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback"}</td>
                 {isPersonalMode ? null : <td>{row.org?.name ?? "-"}</td>}
                 <td>
                   <div>{row.user.email}</div>
@@ -178,7 +184,7 @@ export default function SupportPage() {
             ))}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={isPersonalMode ? 7 : 8} className="small">
+                <td colSpan={isPersonalMode ? 8 : 9} className="small">
                   No cases yet.
                 </td>
               </tr>
@@ -224,6 +230,7 @@ export default function SupportPage() {
             {selectedDetail ? (
               <>
                 <div className="small" style={{ marginTop: 8 }}>
+                  Type: {isAutoErrorCase(selectedDetail.message) ? "Auto Error" : "User Feedback"}{"\n"}
                   Org: {selectedDetail.org?.name ?? "-"}{"\n"}
                   User: {selectedDetail.user.email}{"\n"}
                   Status: {selectedDetail.status}{"\n"}
