@@ -275,9 +275,14 @@ export default function EnterpriseOrgPage() {
             <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
             <div className="small">{dashboard?.org.id ?? ""}</div>
           </div>
-          <Link className="button" href={withAdminMode("/users", mode)}>
-            Back to Accounts
-          </Link>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Link className="button" href={withAdminMode("/users", mode)}>
+              Back to Accounts
+            </Link>
+            <Link className="button" href={withAdminMode(`/users/enterprise/${orgId}/billing`, mode)}>
+              Usage/Billing
+            </Link>
+          </div>
         </div>
 
         {error ? <p className="error">{error}</p> : null}
@@ -369,7 +374,7 @@ export default function EnterpriseOrgPage() {
       <div className="card">
         <h3>Users</h3>
         <p className="small" style={{ marginTop: 0 }}>
-          Usage shown is billed time within the current annual billing period.
+          Usage shown is billed time within the current monthly billing period.
         </p>
         <table>
           <thead>

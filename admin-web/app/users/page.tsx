@@ -5,8 +5,9 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   AppConfig,
   EnterpriseOrg,
+  OrgAccountsExportResponse,
   UserProfile,
-  computeNextAnnualRenewalAt,
+  computeNextRenewalAt,
 } from "@voicepractice/shared";
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
@@ -81,6 +82,7 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(false);
   const [contentIndustries, setContentIndustries] = useState<AppConfig["industries"]>([]);
   const [creating, setCreating] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [actingJoinRequestId, setActingJoinRequestId] = useState<string | null>(null);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
     name: "",
@@ -231,11 +233,70 @@ export default function UsersPage() {
     }
   };
 
+  const downloadAccountsCsv = async () => {
+    setExporting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload = await adminFetch<OrgAccountsExportResponse>("/orgs/accounts-export");
+      const headers = [
+        "Org Id",
+        "Account/Company Name",
+        "Date Established",
+        "Date Signed",
+        "Next Renewal Date",
+        "Company Contact",
+        "Contact Email",
+        "Org Admin",
+        "Active Segments",
+        "Current Usage Minutes",
+        "Monthly Allotment Minutes",
+        "Renewal Total (USD)"
+      ];
+      const rows = payload.rows.map((row) => [
+        row.orgId,
+        row.companyName,
+        row.dateEstablished,
+        row.contractSignedAt,
+        row.nextRenewalAt,
+        row.companyContact,
+        row.contactEmail,
+        row.orgAdmins,
+        row.activeSegments,
+        String(row.currentUsageMinutes),
+        String(row.monthlyAllotmentMinutes),
+        String(row.renewalTotalUsd)
+      ]);
+
+      const csv = [headers, ...rows]
+        .map((line) => line.map((cell) => `"${String(cell ?? "").replace(/"/g, "\"\"")}"`).join(","))
+        .join("\n");
+
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `voicepractice-accounts-export-${new Date().toISOString().slice(0, 10)}.csv`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setNotice("Accounts data CSV downloaded.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not export accounts CSV.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <AdminShell title="Accounts">
       {isPersonalMode ? null : (
         <div className="card">
-          <h3>Create Enterprise Account</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <h3 style={{ marginBottom: 0 }}>Create Enterprise Account</h3>
+            <button onClick={() => void downloadAccountsCsv()} disabled={exporting}>
+              {exporting ? "Exporting..." : "Download Accounts Data CSV"}
+            </button>
+          </div>
           <form onSubmit={onCreateEnterpriseOrg} className="grid">
             <div>
               <label>Company Name</label>
@@ -317,7 +378,7 @@ export default function UsersPage() {
                 </tr>
               ) : (
                 enterpriseOrgsSorted.map((org) => {
-                  const nextRenewalAt = computeNextAnnualRenewalAt(org.createdAt, new Date());
+                  const nextRenewalAt = computeNextRenewalAt(org.contractSignedAt || org.createdAt, new Date());
                   const segmentsActive =
                     Array.isArray(org.activeIndustries) && org.activeIndustries.length > 0
                       ? org.activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")

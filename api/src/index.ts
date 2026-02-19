@@ -31,6 +31,9 @@ import {
   PersonaStyle,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  OrgAccountsExportResponse,
+  OrgAccountsExportRow,
+  OrgUsageBillingResponse,
   MobileResendVerificationRequest,
   MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
@@ -66,6 +69,7 @@ import {
   secondsToWholeMinutes,
   sumRawSeconds,
   computeAnnualPeriodBounds,
+  computeMonthlyPeriodBounds,
   computeNextRenewalAt
 } from "@voicepractice/shared";
 import {
@@ -241,6 +245,63 @@ function normalizeIndustryIds(
 
   const unique = uniqueStrings(value, allowed);
   return unique.length > 0 ? (unique as IndustryId[]) : [...fallback];
+}
+
+function isValidIsoDate(value: unknown): value is string {
+  if (typeof value !== "string" || !value.trim()) {
+    return false;
+  }
+
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime());
+}
+
+function normalizeContractSignedAt(value: unknown, fallbackIso: string): string {
+  if (isValidIsoDate(value)) {
+    return new Date(value).toISOString();
+  }
+
+  return fallbackIso;
+}
+
+function deriveDefaultMonthlyMinutesAllotted(org: Pick<EnterpriseOrg, "dailySecondsQuota">): number {
+  const dailyQuota = clampNonNegativeInteger(org.dailySecondsQuota, 8 * 60 * 60);
+  return Math.max(0, Math.floor((dailyQuota * 30) / 60));
+}
+
+function normalizeMonthlyMinutesAllotted(value: unknown, fallbackMinutes: number): number {
+  return clampNonNegativeInteger(value, clampNonNegativeInteger(fallbackMinutes, 0));
+}
+
+function normalizeRenewalTotalUsd(value: unknown, fallbackUsd: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return Math.max(0, Number(fallbackUsd) || 0);
+  }
+
+  return Math.round(parsed * 100) / 100;
+}
+
+function normalizeSoftLimitPercentTriggers(value: unknown, fallback: number[] = []): number[] {
+  const source = Array.isArray(value) ? value : fallback;
+  const unique = new Set<number>();
+  for (const entry of source) {
+    const parsed = Number(entry);
+    if (!Number.isFinite(parsed)) {
+      continue;
+    }
+
+    const rounded = Math.round(parsed);
+    if (rounded < 1 || rounded > 100) {
+      continue;
+    }
+
+    unique.add(rounded);
+  }
+
+  return Array.from(unique)
+    .sort((a, b) => a - b)
+    .slice(0, 2);
 }
 
 function normalizeScenarioEntry(raw: unknown, segmentId: string, index: number): Scenario | null {
@@ -434,6 +495,18 @@ function normalizeOrgUserRole(value: unknown): OrgUserRole {
   }
 
   return "user";
+}
+
+function ensureOrgContractFields(org: EnterpriseOrg): EnterpriseOrg {
+  const signedAtFallback = isValidIsoDate(org.createdAt) ? org.createdAt : nowIso();
+  const monthlyFallback = deriveDefaultMonthlyMinutesAllotted(org);
+  return {
+    ...org,
+    contractSignedAt: normalizeContractSignedAt(org.contractSignedAt, signedAtFallback),
+    monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(org.monthlyMinutesAllotted, monthlyFallback),
+    renewalTotalUsd: normalizeRenewalTotalUsd(org.renewalTotalUsd, 0),
+    softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers)
+  };
 }
 
 const DEMO_ENTERPRISE_ORGS: Array<{
@@ -854,6 +927,10 @@ function createDefaultDatabase(): ApiDatabase {
         dailySecondsQuota: 8 * 60 * 60,
         perUserDailySecondsCap: 60 * 60,
         manualBonusSeconds: 0,
+        contractSignedAt: now,
+        monthlyMinutesAllotted: Math.floor((8 * 60 * 60 * 30) / 60),
+        renewalTotalUsd: 0,
+        softLimitPercentTriggers: [75, 90],
         createdAt: now,
         updatedAt: now
       }
@@ -917,6 +994,13 @@ function ensureDemoEnterpriseData(db: {
       // Demo orgs use a stable established date so "renewal" and reporting are deterministic.
       existing.createdAt = demoOrg.establishedAt;
       existing.updatedAt = existing.updatedAt || existing.createdAt || demoOrg.establishedAt;
+      existing.contractSignedAt = normalizeContractSignedAt(existing.contractSignedAt, demoOrg.establishedAt);
+      existing.monthlyMinutesAllotted = normalizeMonthlyMinutesAllotted(
+        existing.monthlyMinutesAllotted,
+        deriveDefaultMonthlyMinutesAllotted(existing)
+      );
+      existing.renewalTotalUsd = normalizeRenewalTotalUsd(existing.renewalTotalUsd, 0);
+      existing.softLimitPercentTriggers = normalizeSoftLimitPercentTriggers(existing.softLimitPercentTriggers, [75, 90]);
       continue;
     }
 
@@ -932,6 +1016,10 @@ function ensureDemoEnterpriseData(db: {
       dailySecondsQuota: db.config.enterprise.defaultOrgDailySecondsQuota,
       perUserDailySecondsCap: db.config.enterprise.defaultPerUserDailySecondsCap,
       manualBonusSeconds: 0,
+      contractSignedAt: demoOrg.establishedAt,
+      monthlyMinutesAllotted: Math.floor((db.config.enterprise.defaultOrgDailySecondsQuota * 30) / 60),
+      renewalTotalUsd: 0,
+      softLimitPercentTriggers: [75, 90],
       createdAt: demoOrg.establishedAt,
       updatedAt: demoOrg.establishedAt
     });
@@ -1613,16 +1701,19 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   const fallbackOrgIndustryIds = getConfiguredActiveIndustryIds(config);
 
   const normalizedOrgs = ensureOrgCodesAndDomains(
-    (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs).map((org) => ({
-      ...org,
-      contactName: normalizeContactName((org as Partial<EnterpriseOrg>).contactName),
-      contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
-      activeIndustries: normalizeIndustryIds(
-        (org as Partial<EnterpriseOrg>).activeIndustries,
-        fallbackOrgIndustryIds,
-        configuredIndustryIds
+    (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs)
+      .map((org) =>
+        ensureOrgContractFields({
+          ...org,
+          contactName: normalizeContactName((org as Partial<EnterpriseOrg>).contactName),
+          contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
+          activeIndustries: normalizeIndustryIds(
+            (org as Partial<EnterpriseOrg>).activeIndustries,
+            fallbackOrgIndustryIds,
+            configuredIndustryIds
+          )
+        } as EnterpriseOrg)
       )
-    }))
   );
 
   const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
@@ -2482,6 +2573,144 @@ function validateContentDeletes(
   return issues;
 }
 
+interface OrgUsageSnapshot {
+  periodStartAt: string;
+  periodEndAt: string;
+  nextRenewalAt: string;
+  usedSeconds: number;
+  usedMinutes: number;
+  allottedMinutes: number;
+  allottedSeconds: number;
+  remainingMinutes: number;
+  usagePercent: number;
+}
+
+function resolveOrgBillingAnchorAt(org: EnterpriseOrg, now: Date): string {
+  if (isValidIsoDate(org.contractSignedAt)) {
+    return new Date(org.contractSignedAt).toISOString();
+  }
+
+  if (isValidIsoDate(org.createdAt)) {
+    return new Date(org.createdAt).toISOString();
+  }
+
+  return now.toISOString();
+}
+
+function buildOrgUsageSnapshot(db: ApiDatabase, org: EnterpriseOrg, now: Date): OrgUsageSnapshot {
+  const anchorAt = resolveOrgBillingAnchorAt(org, now);
+  const period = computeMonthlyPeriodBounds(anchorAt, now);
+  const periodStartMs = new Date(period.periodStartAt).getTime();
+  const periodEndMs = new Date(period.periodEndAt).getTime();
+
+  const sessions = db.usageSessions.filter((session) => {
+    if (session.orgId !== org.id) {
+      return false;
+    }
+
+    const startedAtMs = new Date(session.startedAt).getTime();
+    if (Number.isNaN(startedAtMs)) {
+      return false;
+    }
+
+    return startedAtMs >= periodStartMs && startedAtMs < periodEndMs;
+  });
+
+  const usedSeconds = sessions.reduce(
+    (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
+    0
+  );
+  const usedMinutes = usedSeconds / 60;
+  const allottedMinutes = normalizeMonthlyMinutesAllotted(
+    org.monthlyMinutesAllotted,
+    deriveDefaultMonthlyMinutesAllotted(org)
+  );
+  const allottedSeconds = allottedMinutes * 60;
+  const usagePercent = allottedSeconds > 0 ? (usedSeconds / allottedSeconds) * 100 : 0;
+  const remainingMinutes = Math.max(0, allottedMinutes - usedMinutes);
+
+  return {
+    periodStartAt: period.periodStartAt,
+    periodEndAt: period.periodEndAt,
+    nextRenewalAt: period.nextRenewalAt,
+    usedSeconds,
+    usedMinutes,
+    allottedMinutes,
+    allottedSeconds,
+    remainingMinutes,
+    usagePercent
+  };
+}
+
+function getOrgAdmins(db: ApiDatabase, orgId: string): Array<{ id: string; email: string; status: UserStatus }> {
+  return db.users
+    .filter((user) => user.accountType === "enterprise" && user.orgId === orgId && user.orgRole === "org_admin")
+    .map((user) => ({
+      id: user.id,
+      email: user.email,
+      status: user.status
+    }))
+    .sort((a, b) => a.email.localeCompare(b.email));
+}
+
+function findSoftLimitNotificationAudit(
+  db: ApiDatabase,
+  orgId: string,
+  thresholdPercent: number,
+  periodStartAt: string
+): string | null {
+  const match = db.auditEvents.find((event) => {
+    if (event.action !== "org.soft_limit.threshold_reached" || event.orgId !== orgId) {
+      return false;
+    }
+
+    const metadata = event.metadata as Record<string, unknown> | null;
+    const threshold = Number(metadata?.thresholdPercent ?? NaN);
+    const periodStart = typeof metadata?.periodStartAt === "string" ? metadata.periodStartAt : "";
+    return Number.isFinite(threshold) && threshold === thresholdPercent && periodStart === periodStartAt;
+  });
+
+  return match?.createdAt ?? null;
+}
+
+function ensureSoftLimitNotificationAudit(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  thresholdPercent: number,
+  usage: OrgUsageSnapshot,
+  orgAdminEmails: string[]
+): string {
+  const existingCreatedAt = findSoftLimitNotificationAudit(db, org.id, thresholdPercent, usage.periodStartAt);
+  if (existingCreatedAt) {
+    return existingCreatedAt;
+  }
+
+  const now = nowIso();
+  appendPlatformAuditEvent(db, {
+    action: "org.soft_limit.threshold_reached",
+    orgId: org.id,
+    message:
+      `Soft limit ${thresholdPercent}% reached for ${org.name}. ` +
+      (orgAdminEmails.length > 0
+        ? `Notification target: ${orgAdminEmails.join(", ")}.`
+        : "No org admin email target available."),
+    metadata: {
+      thresholdPercent,
+      usagePercent: Math.round(usage.usagePercent * 10) / 10,
+      periodStartAt: usage.periodStartAt,
+      periodEndAt: usage.periodEndAt,
+      nextRenewalAt: usage.nextRenewalAt,
+      orgAdminEmails
+    }
+  });
+  return now;
+}
+
+function getActiveIndustryLabelsForOrg(org: EnterpriseOrg, config: AppConfig): string[] {
+  const labelById = new Map((config.industries ?? []).map((industry) => [industry.id, industry.label]));
+  return (org.activeIndustries ?? []).map((id) => labelById.get(id) ?? id);
+}
+
 type MobileUpdateReason = "user" | "org" | "config" | "resync" | "unknown";
 
 interface MobileUpdatesResponse {
@@ -2842,6 +3071,10 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     dailySecondsQuota?: number;
     perUserDailySecondsCap?: number;
     activeIndustries?: IndustryId[];
+    contractSignedAt?: string;
+    monthlyMinutesAllotted?: number;
+    renewalTotalUsd?: number;
+    softLimitPercentTriggers?: number[];
   };
   const name = body.name?.trim();
 
@@ -2877,6 +3110,15 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
 
     const joinCode = requestedJoinCode || generateUniqueJoinCode(existingCodes, name);
     const now = nowIso();
+    const dailySecondsQuota = clampNonNegativeInteger(
+      body.dailySecondsQuota,
+      db.config.enterprise.defaultOrgDailySecondsQuota
+    );
+    const perUserDailySecondsCap = clampNonNegativeInteger(
+      body.perUserDailySecondsCap,
+      db.config.enterprise.defaultPerUserDailySecondsCap
+    );
+    const monthlyMinutesFallback = Math.floor((dailySecondsQuota * 30) / 60);
     const org: EnterpriseOrg = {
       id: `org_${uuid()}`,
       name,
@@ -2886,15 +3128,13 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       emailDomain,
       joinCode,
       activeIndustries: normalizeIndustryIds(body.activeIndustries, fallbackIndustryIds, allowedIndustryIds),
-      dailySecondsQuota: clampNonNegativeInteger(
-        body.dailySecondsQuota,
-        db.config.enterprise.defaultOrgDailySecondsQuota
-      ),
-      perUserDailySecondsCap: clampNonNegativeInteger(
-        body.perUserDailySecondsCap,
-        db.config.enterprise.defaultPerUserDailySecondsCap
-      ),
+      dailySecondsQuota,
+      perUserDailySecondsCap,
       manualBonusSeconds: 0,
+      contractSignedAt: normalizeContractSignedAt(body.contractSignedAt, now),
+      monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(body.monthlyMinutesAllotted, monthlyMinutesFallback),
+      renewalTotalUsd: normalizeRenewalTotalUsd(body.renewalTotalUsd, 0),
+      softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(body.softLimitPercentTriggers, [75, 90]),
       createdAt: now,
       updatedAt: now
     };
@@ -3009,6 +3249,28 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       org.manualBonusSeconds = clampNonNegativeInteger(patch.manualBonusSeconds, org.manualBonusSeconds);
     }
 
+    if (patch.contractSignedAt !== undefined) {
+      org.contractSignedAt = normalizeContractSignedAt(patch.contractSignedAt, org.contractSignedAt || org.createdAt);
+    }
+
+    if (patch.monthlyMinutesAllotted !== undefined) {
+      org.monthlyMinutesAllotted = normalizeMonthlyMinutesAllotted(
+        patch.monthlyMinutesAllotted,
+        org.monthlyMinutesAllotted
+      );
+    }
+
+    if (patch.renewalTotalUsd !== undefined) {
+      org.renewalTotalUsd = normalizeRenewalTotalUsd(patch.renewalTotalUsd, org.renewalTotalUsd);
+    }
+
+    if (patch.softLimitPercentTriggers !== undefined) {
+      org.softLimitPercentTriggers = normalizeSoftLimitPercentTriggers(
+        patch.softLimitPercentTriggers,
+        org.softLimitPercentTriggers
+      );
+    }
+
     if (!normalizeJoinCode(org.joinCode)) {
       const existingCodes = new Set(
         db.orgs
@@ -3047,9 +3309,7 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
     }
 
     const now = new Date();
-    const anchorAt =
-      org.createdAt && !Number.isNaN(new Date(org.createdAt).getTime()) ? org.createdAt : now.toISOString();
-    const billing = computeAnnualPeriodBounds(anchorAt, now);
+    const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, now), now);
     const periodStartMs = new Date(billing.periodStartAt).getTime();
     const periodEndMs = new Date(billing.periodEndAt).getTime();
 
@@ -3099,6 +3359,102 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
       },
       users
     });
+  });
+});
+
+app.get("/orgs/:orgId/usage-billing", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+
+  await withDatabase(async (db) => {
+    const org = db.orgs.find((entry) => entry.id === orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const normalized = ensureOrgContractFields(org);
+    Object.assign(org, normalized);
+
+    const now = new Date();
+    const usage = buildOrgUsageSnapshot(db, org, now);
+    const orgAdmins = getOrgAdmins(db, org.id);
+    const orgAdminEmails = orgAdmins.map((entry) => entry.email);
+    const thresholds = normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers);
+    const softLimits = thresholds.map((thresholdPercent) => {
+      const reached = usage.usagePercent >= thresholdPercent;
+      const notifiedAt = reached
+        ? ensureSoftLimitNotificationAudit(db, org, thresholdPercent, usage, orgAdminEmails)
+        : findSoftLimitNotificationAudit(db, org.id, thresholdPercent, usage.periodStartAt);
+
+      return {
+        thresholdPercent,
+        reached,
+        notifiedAt
+      };
+    });
+
+    const payload: OrgUsageBillingResponse = {
+      generatedAt: now.toISOString(),
+      org,
+      orgAdmins,
+      billingPeriod: {
+        periodStartAt: usage.periodStartAt,
+        periodEndAt: usage.periodEndAt,
+        nextRenewalAt: usage.nextRenewalAt
+      },
+      usage: {
+        usedSeconds: usage.usedSeconds,
+        usedMinutes: Math.round(usage.usedMinutes * 10) / 10,
+        allottedMinutes: usage.allottedMinutes,
+        allottedSeconds: usage.allottedSeconds,
+        remainingMinutes: Math.round(usage.remainingMinutes * 10) / 10,
+        usagePercent: Math.round(usage.usagePercent * 10) / 10
+      },
+      softLimits,
+      requestPolicy: {
+        maxTriggersAllowed: 2,
+        selectedTriggers: thresholds.length
+      }
+    };
+
+    response.json(payload);
+  });
+});
+
+app.get("/orgs/accounts-export", requireAdmin, async (_request: Request, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const now = new Date();
+
+    const rows: OrgAccountsExportRow[] = db.orgs
+      .map((org) => ensureOrgContractFields(org))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((org) => {
+        const usage = buildOrgUsageSnapshot(db, org, now);
+        const orgAdmins = getOrgAdmins(db, org.id)
+          .map((entry) => entry.email)
+          .join("; ");
+        const activeSegments = getActiveIndustryLabelsForOrg(org, db.config).join(", ");
+        return {
+          orgId: org.id,
+          companyName: org.name,
+          dateEstablished: org.createdAt,
+          contractSignedAt: org.contractSignedAt,
+          nextRenewalAt: usage.nextRenewalAt,
+          companyContact: org.contactName,
+          contactEmail: org.contactEmail,
+          orgAdmins,
+          activeSegments,
+          currentUsageMinutes: Math.round(usage.usedMinutes * 10) / 10,
+          monthlyAllotmentMinutes: org.monthlyMinutesAllotted,
+          renewalTotalUsd: Math.round(org.renewalTotalUsd * 100) / 100
+        };
+      });
+
+    const payload: OrgAccountsExportResponse = {
+      generatedAt: now.toISOString(),
+      rows
+    };
+    response.json(payload);
   });
 });
 

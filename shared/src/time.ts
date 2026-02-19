@@ -45,6 +45,20 @@ export function computeNextRenewalAt(planAnchorAt: string, now: Date): string {
   return candidate;
 }
 
+export function computeMonthlyPeriodBounds(anchorAt: string, now: Date): {
+  periodStartAt: string;
+  periodEndAt: string;
+  nextRenewalAt: string;
+} {
+  const nextRenewalAt = computeNextRenewalAt(anchorAt, now);
+  const periodStartAt = addMonthsKeepingUtcAnchor(nextRenewalAt, -1);
+  return {
+    periodStartAt,
+    periodEndAt: nextRenewalAt,
+    nextRenewalAt
+  };
+}
+
 export function computeNextAnnualRenewalAt(anchorAt: string, now: Date): string {
   let candidate = anchorAt;
 

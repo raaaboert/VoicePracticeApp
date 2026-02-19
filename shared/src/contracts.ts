@@ -121,6 +121,10 @@ export interface EnterpriseOrg {
   dailySecondsQuota: number;
   perUserDailySecondsCap: number;
   manualBonusSeconds: number;
+  contractSignedAt: string;
+  monthlyMinutesAllotted: number;
+  renewalTotalUsd: number;
+  softLimitPercentTriggers: number[];
   createdAt: string;
   updatedAt: string;
 }
@@ -141,6 +145,58 @@ export interface UserProfile {
   manualBonusSeconds: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface OrgUsageBillingResponse {
+  generatedAt: string;
+  org: EnterpriseOrg;
+  orgAdmins: Array<{
+    id: string;
+    email: string;
+    status: UserStatus;
+  }>;
+  billingPeriod: {
+    periodStartAt: string;
+    periodEndAt: string;
+    nextRenewalAt: string;
+  };
+  usage: {
+    usedSeconds: number;
+    usedMinutes: number;
+    allottedMinutes: number;
+    allottedSeconds: number;
+    remainingMinutes: number;
+    usagePercent: number;
+  };
+  softLimits: Array<{
+    thresholdPercent: number;
+    reached: boolean;
+    notifiedAt: string | null;
+  }>;
+  requestPolicy: {
+    maxTriggersAllowed: number;
+    selectedTriggers: number;
+  };
+}
+
+export interface OrgAccountsExportRow {
+  orgId: string;
+  companyName: string;
+  dateEstablished: string;
+  contractSignedAt: string;
+  nextRenewalAt: string;
+  companyContact: string;
+  contactEmail: string;
+  orgAdmins: string;
+  activeSegments: string;
+  currentUsageMinutes: number;
+  monthlyAllotmentMinutes: number;
+  renewalTotalUsd: number;
+}
+
+export interface OrgAccountsExportResponse {
+  generatedAt: string;
+  rows: OrgAccountsExportRow[];
 }
 
 export interface UsageSessionRecord {
