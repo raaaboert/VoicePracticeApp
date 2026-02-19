@@ -556,174 +556,178 @@ export default function ContentPage() {
 
   return (
     <AdminShell title="Content">
-      <div className="card">
-        <h3 style={{ marginBottom: 6 }}>App Content</h3>
-        <p className="small" style={{ marginTop: 0 }}>
-          Manage industries, roles, role industries, and scenarios used by the entire app.
-        </p>
-        {loading ? <p className="small">Loading content...</p> : null}
-        {error ? <p className="error">{error}</p> : null}
-        {notice ? <p className="success">{notice}</p> : null}
-      </div>
+      <div className="content-page">
+        <div className="card content-intro-card">
+          <h3>App Content</h3>
+          <p className="small content-intro-copy">
+            Manage industries, roles, role industries, and scenarios used by the entire app.
+          </p>
+          {loading ? <p className="small">Loading content...</p> : null}
+          {error ? <p className="error">{error}</p> : null}
+          {notice ? <p className="success">{notice}</p> : null}
+        </div>
 
-      <div className="card">
-        <h3 style={{ marginBottom: 10 }}>Industry</h3>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
-          <div style={{ minWidth: 240, flex: "1 1 260px" }}>
-            <label>Search Industries</label>
-            <input
-              value={industrySearch}
-              onChange={(event) => setIndustrySearch(event.target.value)}
-              placeholder="Type to filter industries"
-            />
+        <div className="card content-section-card">
+          <h3>Industry</h3>
+          <div className="content-grid content-grid-two">
+            <div>
+              <label>Search Industries</label>
+              <input
+                value={industrySearch}
+                onChange={(event) => setIndustrySearch(event.target.value)}
+                placeholder="Type to filter industries"
+              />
+            </div>
+            <div>
+              <label>Industry</label>
+              <select
+                value={selectedIndustryId}
+                onChange={(event) => setSelectedIndustryId(event.target.value)}
+                disabled={filteredIndustries.length === 0}
+              >
+                {filteredIndustries.map((industry) => (
+                  <option key={industry.id} value={industry.id}>
+                    {industry.label} {industry.enabled ? "" : "(inactive)"}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div style={{ minWidth: 280, flex: "2 1 380px" }}>
-            <label>Industry</label>
-            <select
-              value={selectedIndustryId}
-              onChange={(event) => setSelectedIndustryId(event.target.value)}
-              disabled={filteredIndustries.length === 0}
-            >
-              {filteredIndustries.map((industry) => (
-                <option key={industry.id} value={industry.id}>
-                  {industry.label} {industry.enabled ? "" : "(inactive)"}
-                </option>
-              ))}
-            </select>
+          <div className="content-grid content-grid-input-action">
+            <div>
+              <label>Add Industry</label>
+              <input
+                value={newIndustryLabel}
+                onChange={(event) => setNewIndustryLabel(event.target.value)}
+                placeholder="Industry name"
+              />
+            </div>
+            <div className="content-actions">
+              <button
+                type="button"
+                className="primary"
+                disabled={saving || !newIndustryLabel.trim()}
+                onClick={() => void addIndustry()}
+              >
+                Add Industry
+              </button>
+            </div>
           </div>
-          <div style={{ minWidth: 220, flex: "1 1 240px" }}>
-            <label>Add Industry</label>
-            <input
-              value={newIndustryLabel}
-              onChange={(event) => setNewIndustryLabel(event.target.value)}
-              placeholder="Industry name"
-            />
+          <div className="content-grid content-grid-input-action">
+            <div>
+              <label>Edit Industry Name</label>
+              <input
+                value={editingIndustryLabel}
+                onChange={(event) => setEditingIndustryLabel(event.target.value)}
+                disabled={!selectedIndustry}
+              />
+            </div>
+            <div className="content-actions content-actions-wrap">
+              <button
+                type="button"
+                disabled={saving || !selectedIndustry}
+                onClick={() => void saveIndustryEdit()}
+              >
+                Save Industry
+              </button>
+              <button
+                type="button"
+                className={selectedIndustry?.enabled ? "primary" : undefined}
+                disabled={saving || !selectedIndustry}
+                onClick={() => void setIndustryActive(true)}
+              >
+                Active
+              </button>
+              <button
+                type="button"
+                className={!selectedIndustry?.enabled ? "primary" : undefined}
+                disabled={saving || !selectedIndustry}
+                onClick={() => void setIndustryActive(false)}
+              >
+                Inactive
+              </button>
+              <button
+                type="button"
+                className="danger"
+                disabled={saving || !selectedIndustry}
+                onClick={() =>
+                  selectedIndustry
+                    ? openDelete({ kind: "industry", id: selectedIndustry.id, label: selectedIndustry.label })
+                    : undefined
+                }
+              >
+                Delete
+              </button>
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              className="primary"
-              disabled={saving || !newIndustryLabel.trim()}
-              onClick={() => void addIndustry()}
-            >
-              Add Industry
-            </button>
-          </div>
+          <p className="small content-hint">Rename, deactivate, or delete the selected industry.</p>
         </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap", alignItems: "end" }}>
-          <div style={{ minWidth: 280, flex: "2 1 380px" }}>
-            <label>Edit Industry Name</label>
-            <input
-              value={editingIndustryLabel}
-              onChange={(event) => setEditingIndustryLabel(event.target.value)}
-              disabled={!selectedIndustry}
-            />
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              disabled={saving || !selectedIndustry}
-              onClick={() => void saveIndustryEdit()}
-            >
-              Save Industry
-            </button>
-            <button
-              type="button"
-              className={selectedIndustry?.enabled ? "primary" : undefined}
-              disabled={saving || !selectedIndustry}
-              onClick={() => void setIndustryActive(true)}
-            >
-              Active
-            </button>
-            <button
-              type="button"
-              className={!selectedIndustry?.enabled ? "primary" : undefined}
-              disabled={saving || !selectedIndustry}
-              onClick={() => void setIndustryActive(false)}
-            >
-              Inactive
-            </button>
-            <button
-              type="button"
-              className="danger"
-              disabled={saving || !selectedIndustry}
-              onClick={() =>
-                selectedIndustry
-                  ? openDelete({ kind: "industry", id: selectedIndustry.id, label: selectedIndustry.label })
-                  : undefined
-              }
-            >
-              Delete
-            </button>
-          </div>
-        </div>
-        <div style={{ marginTop: 8 }} className="small">
-          Rename, deactivate, or delete the selected industry.
-        </div>
-      </div>
 
-      <div className="card">
-        <h3 style={{ marginBottom: 10 }}>Role</h3>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
-          <div style={{ minWidth: 240, flex: "1 1 260px" }}>
-            <label>Search Roles</label>
-            <input
-              value={roleSearch}
-              onChange={(event) => setRoleSearch(event.target.value)}
-              placeholder="Type to filter roles"
-            />
+        <div className="card content-section-card">
+          <h3>Role</h3>
+          <div className="content-grid content-grid-two">
+            <div>
+              <label>Search Roles</label>
+              <input
+                value={roleSearch}
+                onChange={(event) => setRoleSearch(event.target.value)}
+                placeholder="Type to filter roles"
+              />
+            </div>
+            <div>
+              <label>Role</label>
+              <select
+                value={selectedRoleId}
+                onChange={(event) => setSelectedRoleId(event.target.value)}
+                disabled={filteredRoles.length === 0}
+              >
+                {filteredRoles.map((role) => (
+                  <option key={role.id} value={role.id}>
+                    {role.label} {role.enabled ? "" : "(inactive)"}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div style={{ minWidth: 280, flex: "2 1 380px" }}>
-            <label>Role</label>
-            <select
-              value={selectedRoleId}
-              onChange={(event) => setSelectedRoleId(event.target.value)}
-              disabled={filteredRoles.length === 0}
-            >
-              {filteredRoles.map((role) => (
-                <option key={role.id} value={role.id}>
-                  {role.label} {role.enabled ? "" : "(inactive)"}
-                </option>
-              ))}
-            </select>
+          <div className="content-grid content-grid-input-action">
+            <div>
+              <label>Add Role</label>
+              <input
+                value={newRoleLabel}
+                onChange={(event) => setNewRoleLabel(event.target.value)}
+                placeholder="Role name"
+              />
+            </div>
+            <div className="content-actions">
+              <button
+                type="button"
+                className="primary"
+                disabled={saving || !newRoleLabel.trim()}
+                onClick={() => void addRole()}
+              >
+                Add Role
+              </button>
+            </div>
           </div>
-          <div style={{ minWidth: 220, flex: "1 1 240px" }}>
-            <label>Add Role</label>
-            <input
-              value={newRoleLabel}
-              onChange={(event) => setNewRoleLabel(event.target.value)}
-              placeholder="Role name"
-            />
+          <div className="content-grid content-grid-two">
+            <div>
+              <label>Edit Role Name</label>
+              <input
+                value={editingRoleLabel}
+                onChange={(event) => setEditingRoleLabel(event.target.value)}
+                disabled={!selectedRole}
+              />
+            </div>
+            <div>
+              <label>Role Summary</label>
+              <input
+                value={editingRoleSummary}
+                onChange={(event) => setEditingRoleSummary(event.target.value)}
+                disabled={!selectedRole}
+              />
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              className="primary"
-              disabled={saving || !newRoleLabel.trim()}
-              onClick={() => void addRole()}
-            >
-              Add Role
-            </button>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap", alignItems: "end" }}>
-          <div style={{ minWidth: 220, flex: "1 1 260px" }}>
-            <label>Edit Role Name</label>
-            <input
-              value={editingRoleLabel}
-              onChange={(event) => setEditingRoleLabel(event.target.value)}
-              disabled={!selectedRole}
-            />
-          </div>
-          <div style={{ minWidth: 260, flex: "1 1 300px" }}>
-            <label>Role Summary</label>
-            <input
-              value={editingRoleSummary}
-              onChange={(event) => setEditingRoleSummary(event.target.value)}
-              disabled={!selectedRole}
-            />
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="content-actions content-actions-wrap content-actions-row">
             <button
               type="button"
               disabled={saving || !selectedRole}
@@ -761,37 +765,37 @@ export default function ContentPage() {
             </button>
           </div>
         </div>
-      </div>
 
-      <div className="card">
-        <h3 style={{ marginBottom: 10 }}>Role Industries</h3>
-        <div className="small" style={{ marginBottom: 10 }}>
-          Active Industries for role: {activeRoleIndustryLabels.length > 0 ? activeRoleIndustryLabels.join(", ") : "(none)"}
-        </div>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
-          <div style={{ minWidth: 240, flex: "1 1 260px" }}>
-            <label>Search Industries</label>
-            <input
-              value={roleIndustrySearch}
-              onChange={(event) => setRoleIndustrySearch(event.target.value)}
-              placeholder="Type to filter industries"
-            />
+        <div className="card content-section-card">
+          <h3>Role Industries</h3>
+          <p className="small content-pill">
+            Active Industries for role: {activeRoleIndustryLabels.length > 0 ? activeRoleIndustryLabels.join(", ") : "(none)"}
+          </p>
+          <div className="content-grid content-grid-two">
+            <div>
+              <label>Search Industries</label>
+              <input
+                value={roleIndustrySearch}
+                onChange={(event) => setRoleIndustrySearch(event.target.value)}
+                placeholder="Type to filter industries"
+              />
+            </div>
+            <div>
+              <label>Industry</label>
+              <select
+                value={selectedRoleIndustryId}
+                onChange={(event) => setSelectedRoleIndustryId(event.target.value)}
+                disabled={!selectedRoleId || filteredRoleIndustryRows.length === 0}
+              >
+                {filteredRoleIndustryRows.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    {row.label} {row.active ? "(active)" : "(inactive)"} {row.industryEnabled ? "" : "(industry disabled)"}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div style={{ minWidth: 280, flex: "2 1 380px" }}>
-            <label>Industry</label>
-            <select
-              value={selectedRoleIndustryId}
-              onChange={(event) => setSelectedRoleIndustryId(event.target.value)}
-              disabled={!selectedRoleId || filteredRoleIndustryRows.length === 0}
-            >
-              {filteredRoleIndustryRows.map((row) => (
-                <option key={row.id} value={row.id}>
-                  {row.label} {row.active ? "(active)" : "(inactive)"} {row.industryEnabled ? "" : "(industry disabled)"}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="content-actions content-actions-wrap content-actions-row">
             <button
               type="button"
               className="primary"
@@ -809,21 +813,21 @@ export default function ContentPage() {
             </button>
           </div>
         </div>
-      </div>
 
-      <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <h3 style={{ marginBottom: 0 }}>Scenarios For Role</h3>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={downloadScenariosCsv}>
-              Download CSV
-            </button>
-            <button type="button" className="primary" onClick={() => setAddScenarioMode((prev) => !prev)} disabled={!selectedRole}>
-              {addScenarioMode ? "Cancel Add" : "Add Scenario"}
-            </button>
+        <div className="card content-section-card">
+          <div className="content-section-header content-header-actions">
+            <h3>Scenarios For Role</h3>
+            <div className="content-actions content-actions-wrap">
+              <button type="button" onClick={downloadScenariosCsv}>
+                Download CSV
+              </button>
+              <button type="button" className="primary" onClick={() => setAddScenarioMode((prev) => !prev)} disabled={!selectedRole}>
+                {addScenarioMode ? "Cancel Add" : "Add Scenario"}
+              </button>
+            </div>
           </div>
-        </div>
-        <table style={{ marginTop: 10 }}>
+          <div className="content-table-wrap">
+            <table className="content-table">
           <thead>
             <tr>
               <th>Scenario</th>
@@ -888,7 +892,7 @@ export default function ContentPage() {
                         scenario.title
                       )}
                     </td>
-                    <td style={{ maxWidth: 420 }}>
+                    <td className="content-long-cell">
                       {editing ? (
                         <textarea
                           rows={3}
@@ -901,7 +905,7 @@ export default function ContentPage() {
                         scenario.description
                       )}
                     </td>
-                    <td style={{ maxWidth: 420 }}>
+                    <td className="content-long-cell">
                       {editing ? (
                         <textarea
                           rows={3}
@@ -935,7 +939,7 @@ export default function ContentPage() {
                       )}
                     </td>
                     <td>
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <div className="content-actions content-actions-wrap">
                         {editing ? (
                           <>
                             <button type="button" className="primary" onClick={() => void saveScenarioEdit()} disabled={saving}>
@@ -980,41 +984,31 @@ export default function ContentPage() {
                 );
               })
             )}
-          </tbody>
-        </table>
-      </div>
+            </tbody>
+          </table>
+          </div>
+        </div>
 
-      {deleteTarget ? (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.55)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-            padding: 14
-          }}
-        >
-          <div className="card" style={{ width: "100%", maxWidth: 520, margin: 0 }}>
+        {deleteTarget ? (
+          <div className="content-modal-backdrop">
+            <div className="card content-modal-card">
             <h3>Confirm Delete</h3>
-            <p style={{ marginTop: 0 }}>
+            <p className="content-modal-copy">
               Delete <strong>{deleteTarget.label}</strong>?
             </p>
             {deleteStep === 1 ? (
-              <p className="small" style={{ marginTop: 0 }}>
+              <p className="small content-modal-copy">
                 This action can permanently remove content. Click Continue to confirm.
               </p>
             ) : (
               <>
-                <p className="small" style={{ marginTop: 0 }}>
+                <p className="small content-modal-copy">
                   Type <code>Delete</code> exactly, then confirm.
                 </p>
                 <input value={deleteText} onChange={(event) => setDeleteText(event.target.value)} />
               </>
             )}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+              <div className="content-modal-actions">
               <button
                 type="button"
                 onClick={() => {
@@ -1035,8 +1029,9 @@ export default function ContentPage() {
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
+          </div>
+        ) : null}
+      </div>
     </AdminShell>
   );
 }

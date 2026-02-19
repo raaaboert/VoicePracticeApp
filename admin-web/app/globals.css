@@ -235,7 +235,167 @@ td {
   vertical-align: top;
 }
 
+.content-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.content-page .card {
+  margin-bottom: 0;
+  padding: 18px;
+}
+
+.content-intro-card h3 {
+  margin-bottom: 6px;
+}
+
+.content-intro-copy {
+  margin-top: 0;
+  margin-bottom: 0;
+  max-width: 760px;
+}
+
+.content-section-card h3 {
+  margin-bottom: 0;
+}
+
+.content-section-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.content-header-actions {
+  align-items: center;
+}
+
+.content-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.content-grid + .content-grid {
+  margin-top: 12px;
+}
+
+.content-grid-two {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.content-grid-input-action {
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: end;
+}
+
+.content-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.content-actions-wrap {
+  flex-wrap: wrap;
+}
+
+.content-actions-row {
+  margin-top: 12px;
+}
+
+.content-hint {
+  margin: 10px 0 0;
+}
+
+.content-pill {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(129, 206, 166, 0.22);
+  background: rgba(5, 30, 18, 0.7);
+  line-height: 1.4;
+}
+
+.content-table-wrap {
+  margin-top: 10px;
+  overflow-x: auto;
+  border: 1px solid rgba(129, 206, 166, 0.22);
+  border-radius: 10px;
+}
+
+.content-table {
+  min-width: 940px;
+}
+
+.content-table th {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: rgba(5, 30, 18, 0.88);
+}
+
+.content-table td {
+  line-height: 1.42;
+}
+
+.content-long-cell {
+  max-width: 420px;
+  min-width: 280px;
+}
+
+.content-table td .content-actions {
+  justify-content: flex-start;
+}
+
+.content-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.content-modal-card {
+  width: 100%;
+  max-width: 520px;
+  margin: 0;
+}
+
+.content-modal-copy {
+  margin-top: 0;
+}
+
+.content-modal-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 700px) {
+  .content-page .card {
+    padding: 14px;
+  }
+
+  .content-grid-input-action {
+    grid-template-columns: 1fr;
+  }
+
+  .content-actions {
+    justify-content: flex-start;
+  }
+
+  .content-table {
+    min-width: 760px;
+  }
+
   th,
   td {
     font-size: 12px;
