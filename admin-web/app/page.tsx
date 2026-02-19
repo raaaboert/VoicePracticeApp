@@ -6,17 +6,10 @@ export default function HomePage() {
       <div className="shell" style={{ maxWidth: 560, paddingTop: 60 }}>
         <div className="card">
           <h2>VoicePractice Admin</h2>
-          <p className="small">
-            Use login for authenticated admin actions, or open accounts directly if your token is already stored.
-          </p>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Link className="button primary" href="/login">
-              Open Login
-            </Link>
-            <Link className="button" href="/users">
-              Open Accounts
-            </Link>
-          </div>
+          <p className="small">Use login for authenticated admin actions.</p>
+          <Link className="button primary" href="/login">
+            Open Login
+          </Link>
         </div>
       </div>
     </main>
