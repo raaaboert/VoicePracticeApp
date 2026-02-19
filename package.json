@@ -19,6 +19,8 @@
     "build:api": "npm run build --workspace shared && npm run build --workspace api",
     "build:shared": "npm run build --workspace shared",
     "smoke:stack": "node scripts/smoke-stack.mjs",
-    "test:critical-flow": "node scripts/test-critical-flow.mjs"
+    "test:critical-flow": "node scripts/test-critical-flow.mjs",
+    "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run build --workspace admin-web && npx tsc --noEmit -p mobile/tsconfig.json",
+    "verify:all": "npm run verify:fast && npm run smoke:stack && npm run test:critical-flow"
   }
 }

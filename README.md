@@ -109,6 +109,31 @@ Run an end-to-end API flow against an isolated local DB (admin login, org create
 npm run test:critical-flow
 ```
 
+## Release Verification
+
+Before every production deploy, run:
+
+```bash
+npm run verify:all
+```
+
+This runs:
+
+- package builds (`shared`, `api`, `admin-web`)
+- mobile TypeScript check
+- stack smoke test (`api`, `admin-web`, Metro startup)
+- end-to-end critical flow test
+
+## CI Automation
+
+GitHub Actions now runs the same verification gates on every push/PR to `main`:
+
+- `.github/workflows/ci.yml`
+
+Dependency update PRs are scheduled weekly:
+
+- `.github/dependabot.yml`
+
 ## Ops Helper
 
 Assign an existing user email to an enterprise org (creates org if needed):
