@@ -4,13 +4,11 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
+  AppConfig,
   ORG_USER_ROLE_LABELS,
   ORG_USER_ROLES,
   OrgUserRole,
   EnterpriseOrg,
-  INDUSTRY_IDS,
-  INDUSTRY_LABELS,
-  IndustryId,
   UserProfile,
   UserStatus,
   formatSecondsAsClock,
@@ -59,7 +57,8 @@ export default function EnterpriseOrgPage() {
   }, [params]);
 
   const [dashboard, setDashboard] = useState<OrgDashboardResponse | null>(null);
-  const [selectedIndustryId, setSelectedIndustryId] = useState<IndustryId>("people_management");
+  const [industries, setIndustries] = useState<AppConfig["industries"]>([]);
+  const [selectedIndustryId, setSelectedIndustryId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [savingIndustries, setSavingIndustries] = useState(false);
@@ -79,8 +78,12 @@ export default function EnterpriseOrgPage() {
     setError(null);
     setSuccessMessage(null);
     try {
-      const payload = await adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`);
+      const [payload, configPayload] = await Promise.all([
+        adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`),
+        adminFetch<AppConfig>("/config")
+      ]);
       setDashboard(payload);
+      setIndustries(configPayload.industries ?? []);
       setOrgDomainInput(payload.org.emailDomain ?? "");
       setOrgJoinCodeInput(payload.org.joinCode ?? "");
     } catch (caught) {
@@ -97,14 +100,36 @@ export default function EnterpriseOrgPage() {
 
   const activeIndustries = dashboard?.org.activeIndustries ?? [];
   const selectedIndustryActive = activeIndustries.includes(selectedIndustryId);
+  const industryLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const industry of industries) {
+      map.set(industry.id, industry.label);
+    }
+    return map;
+  }, [industries]);
 
   const segmentsActiveLabel =
     activeIndustries.length > 0
-      ? activeIndustries.map((id) => INDUSTRY_LABELS[id]).join(", ")
+      ? activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")
       : "-";
+
+  useEffect(() => {
+    if (industries.length === 0) {
+      setSelectedIndustryId("");
+      return;
+    }
+
+    if (!industries.some((entry) => entry.id === selectedIndustryId)) {
+      setSelectedIndustryId(industries[0].id);
+    }
+  }, [industries, selectedIndustryId]);
 
   const setIndustryActive = async (nextActive: boolean) => {
     if (!dashboard) {
+      return;
+    }
+    if (!selectedIndustryId) {
+      setError("Select an industry first.");
       return;
     }
 
@@ -311,11 +336,11 @@ export default function EnterpriseOrgPage() {
             <label>Industry</label>
             <select
               value={selectedIndustryId}
-              onChange={(event) => setSelectedIndustryId(event.target.value as IndustryId)}
+              onChange={(event) => setSelectedIndustryId(event.target.value)}
             >
-              {INDUSTRY_IDS.map((id) => (
-                <option key={id} value={id}>
-                  {INDUSTRY_LABELS[id]}
+              {industries.map((industry) => (
+                <option key={industry.id} value={industry.id}>
+                  {industry.label}
                 </option>
               ))}
             </select>
@@ -324,7 +349,7 @@ export default function EnterpriseOrgPage() {
             <button
               type="button"
               className={selectedIndustryActive ? "primary" : undefined}
-              disabled={savingIndustries}
+              disabled={savingIndustries || !selectedIndustryId}
               onClick={() => void setIndustryActive(true)}
             >
               Active
@@ -332,7 +357,7 @@ export default function EnterpriseOrgPage() {
             <button
               type="button"
               className={!selectedIndustryActive ? "primary" : undefined}
-              disabled={savingIndustries}
+              disabled={savingIndustries || !selectedIndustryId}
               onClick={() => void setIndustryActive(false)}
             >
               Inactive

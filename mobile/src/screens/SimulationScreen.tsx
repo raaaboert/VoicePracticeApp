@@ -12,7 +12,6 @@ import { DIFFICULTY_LABELS, PERSONA_LABELS } from "../data/prompts";
 import {
   createLocalAssistantReply,
   createLocalOpeningLine,
-  createLocalSessionKickoffLine,
 } from "../lib/mockAi";
 import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
 import { DialogueMessage, SessionTiming, SimulationConfig } from "../types";
@@ -112,6 +111,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const unmountedRef = useRef(false);
   const turnStartedAtRef = useRef(0);
   const sessionStartedAtRef = useRef<Date | null>(null);
+  const pendingOpeningLineRef = useRef<string | null>(null);
   const lastVoiceAtRef = useRef(0);
   const heardVoiceRef = useRef(false);
   const meteringSeenRef = useRef(false);
@@ -425,12 +425,44 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     setError(null);
 
     if (!kickoffSentRef.current) {
-      appendMessage({
-        id: createMessageId(),
-        role: "assistant",
-        content: createLocalSessionKickoffLine(config.scenario, config.personaStyle),
-      });
-      kickoffSentRef.current = true;
+      let openingLine = pendingOpeningLineRef.current;
+      if (!openingLine) {
+        if (localTestMode) {
+          openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+        } else {
+          try {
+            openingLine = await createOpeningLine({
+              userId,
+              authToken,
+              scenario: config.scenario,
+              difficulty: config.difficulty,
+              segmentLabel: config.segmentLabel,
+              personaStyle: config.personaStyle,
+            });
+          } catch (openingError) {
+            if (isApiError(openingError)) {
+              setUseLocalMockMode(true);
+              openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+            } else {
+              setError(getErrorMessage(openingError, "Could not initialize simulation."));
+              return;
+            }
+          }
+        }
+      }
+
+      if (openingLine) {
+        appendMessage({
+          id: createMessageId(),
+          role: "assistant",
+          content: openingLine,
+        });
+        pendingOpeningLineRef.current = null;
+        kickoffSentRef.current = true;
+        setMode("speaking");
+        setStatus("AI is speaking...");
+        await speak(openingLine);
+      }
     }
 
     sessionActiveRef.current = true;
@@ -495,15 +527,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       setMessages([]);
       setError(null);
       kickoffSentRef.current = false;
+      pendingOpeningLineRef.current = null;
 
       if (localTestMode) {
-        appendMessage({
-          id: createMessageId(),
-          role: "assistant",
-          content: createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle),
-        });
+        pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
         setMode("idle");
-        setStatus("Local test mode ready. Press Start Continuous Mode.");
+        setStatus("Scenario ready. Press Start Continuous Mode.");
         setIsInitializing(false);
         return;
       }
@@ -522,25 +551,15 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           return;
         }
 
-        appendMessage({ id: createMessageId(), role: "assistant", content: openingLine });
-        setMode("speaking");
-        setStatus("AI is speaking...");
-        await speak(openingLine);
-
-        if (!cancelled && !unmountedRef.current) {
-          setMode("idle");
-          setStatus("Press Start Continuous Mode.");
-        }
+        pendingOpeningLineRef.current = openingLine;
+        setMode("idle");
+        setStatus("Scenario ready. Press Start Continuous Mode.");
       } catch (initError) {
         if (isApiError(initError)) {
           setUseLocalMockMode(true);
-          appendMessage({
-            id: createMessageId(),
-            role: "assistant",
-            content: createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle),
-          });
+          pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
           setMode("idle");
-          setStatus("Live AI unavailable. Local test mode is active.");
+          setStatus("Local test mode ready. Press Start Continuous Mode.");
           setError(null);
         } else {
           setMode("idle");
@@ -564,7 +583,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       Speech.stop();
       void stopRecordingSafely();
     };
-  }, [apiConfigured, config.difficulty, config.scenario, config.segmentLabel]);
+  }, [apiConfigured, authToken, config.difficulty, config.personaStyle, config.scenario, config.segmentLabel, userId]);
 
   useEffect(() => {
     let cancelled = false;

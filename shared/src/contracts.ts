@@ -25,19 +25,31 @@ export const ORG_USER_ROLE_LABELS: Record<OrgUserRole, string> = {
 };
 
 export const INDUSTRY_IDS = ["people_management", "sales", "medical"] as const;
-export type IndustryId = (typeof INDUSTRY_IDS)[number];
+export type IndustryId = string;
 
-export const INDUSTRY_LABELS: Record<IndustryId, string> = {
+export const INDUSTRY_LABELS: Record<string, string> = {
   people_management: "People Management",
   sales: "Sales",
   medical: "Medical"
 };
 
-export const INDUSTRY_ROLE_SEGMENT_IDS: Record<IndustryId, string[]> = {
+export const INDUSTRY_ROLE_SEGMENT_IDS: Record<string, string[]> = {
   people_management: ["solution_manager", "project_manager"],
   sales: ["sales_representative", "sales_engineer"],
   medical: ["nurse", "doctor"]
 };
+
+export interface IndustryDefinition {
+  id: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface RoleIndustryDefinition {
+  roleId: string;
+  industryId: string;
+  active: boolean;
+}
 
 export type Difficulty = "easy" | "medium" | "hard";
 export type PersonaStyle = "defensive" | "frustrated" | "skeptical";
@@ -46,6 +58,7 @@ export interface Scenario {
   id: string;
   segmentId: string;
   title: string;
+  summary?: string;
   description: string;
   aiRole: string;
   enabled?: boolean;
@@ -87,6 +100,8 @@ export interface AppConfig {
   activeSegmentId: string;
   defaultDifficulty: Difficulty;
   defaultPersonaStyle: PersonaStyle;
+  industries: IndustryDefinition[];
+  roleIndustries: RoleIndustryDefinition[];
   segments: SegmentDefinition[];
   tiers: TierDefinition[];
   enterprise: EnterpriseConfig;
@@ -336,6 +351,9 @@ export interface UpdateUserRequest {
 export interface UpdateConfigRequest {
   activeSegmentId?: string;
   defaultDifficulty?: Difficulty;
+  industries?: IndustryDefinition[];
+  roleIndustries?: RoleIndustryDefinition[];
+  segments?: SegmentDefinition[];
   tiers?: TierDefinition[];
   enterprise?: Partial<EnterpriseConfig>;
 }
@@ -476,6 +494,20 @@ export const DEFAULT_TIER_DEFINITIONS: TierDefinition[] = [
     description: "Enterprise licensing is available by request."
   }
 ];
+
+export const DEFAULT_INDUSTRIES: IndustryDefinition[] = INDUSTRY_IDS.map((id) => ({
+  id,
+  label: INDUSTRY_LABELS[id] ?? id,
+  enabled: true
+}));
+
+export const DEFAULT_ROLE_INDUSTRIES: RoleIndustryDefinition[] = INDUSTRY_IDS.flatMap((industryId) =>
+  (INDUSTRY_ROLE_SEGMENT_IDS[industryId] ?? []).map((roleId) => ({
+    roleId,
+    industryId,
+    active: true
+  }))
+);
 
 export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
   {
@@ -629,6 +661,8 @@ export function createDefaultConfig(nowIso: string): AppConfig {
     activeSegmentId: "project_manager",
     defaultDifficulty: "medium",
     defaultPersonaStyle: "skeptical",
+    industries: DEFAULT_INDUSTRIES,
+    roleIndustries: DEFAULT_ROLE_INDUSTRIES,
     segments: DEFAULT_SEGMENTS,
     tiers: DEFAULT_TIER_DEFINITIONS,
     enterprise: {
@@ -660,7 +694,7 @@ export function isUserStatus(value: string): value is UserStatus {
 }
 
 export function isIndustryId(value: string): value is IndustryId {
-  return INDUSTRY_IDS.includes(value as IndustryId);
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 export function isOrgUserRole(value: string): value is OrgUserRole {
@@ -671,7 +705,25 @@ export function isOrgJoinRequestStatus(value: string): value is OrgJoinRequestSt
   return ORG_JOIN_REQUEST_STATUSES.includes(value as OrgJoinRequestStatus);
 }
 
-export function getRoleSegmentIdsForIndustries(industryIds: IndustryId[]): string[] {
+export function getRoleSegmentIdsForIndustries(
+  industryIds: IndustryId[],
+  roleIndustries?: RoleIndustryDefinition[]
+): string[] {
+  if (Array.isArray(roleIndustries) && roleIndustries.length > 0) {
+    const allowedIndustries = new Set(industryIds);
+    const ids = new Set<string>();
+    for (const entry of roleIndustries) {
+      if (!entry.active || !allowedIndustries.has(entry.industryId)) {
+        continue;
+      }
+      if (entry.roleId.trim()) {
+        ids.add(entry.roleId.trim());
+      }
+    }
+
+    return Array.from(ids);
+  }
+
   const ids = new Set<string>();
   for (const industryId of industryIds) {
     const roleSegmentIds = INDUSTRY_ROLE_SEGMENT_IDS[industryId] ?? [];
@@ -685,6 +737,25 @@ export function getRoleSegmentIdsForIndustries(industryIds: IndustryId[]): strin
 
 export function getTierById(tiers: TierDefinition[], id: TierId): TierDefinition | undefined {
   return tiers.find((tier) => tier.id === id);
+}
+
+export function buildScenarioSummary(description: string, maxLength = 110): string {
+  const normalized = description
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const trimmed = normalized.slice(0, Math.max(20, maxLength - 1)).trim();
+  const lastSpace = trimmed.lastIndexOf(" ");
+  const clipped = lastSpace >= 20 ? trimmed.slice(0, lastSpace) : trimmed;
+  return `${clipped}...`;
 }
 
 export function secondsToWholeMinutes(seconds: number): number {

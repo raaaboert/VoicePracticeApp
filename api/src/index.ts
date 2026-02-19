@@ -11,9 +11,12 @@ import {
   ApiDatabase,
   AiUsageEvent,
   AppConfig,
+  buildScenarioSummary,
   ChangeAdminPasswordRequest,
   COMMON_TIMEZONES,
   CreateUserRequest,
+  DEFAULT_INDUSTRIES,
+  DEFAULT_ROLE_INDUSTRIES,
   DEFAULT_SEGMENTS,
   DEFAULT_TIER_DEFINITIONS,
   Difficulty,
@@ -22,6 +25,7 @@ import {
   EnterpriseDomainMatch,
   EmailVerificationRecord,
   INDUSTRY_IDS,
+  IndustryDefinition,
   IndustryId,
   OrgUserRole,
   PersonaStyle,
@@ -39,6 +43,7 @@ import {
   SimulationScoreRecord,
   TIER_IDS,
   TierDefinition,
+  RoleIndustryDefinition,
   UpdateConfigRequest,
   UpdateUserRequest,
   UserEntitlementsResponse,
@@ -54,7 +59,6 @@ import {
   getTierById,
   humanDailyResetLabel,
   isAccountType,
-  isIndustryId,
   isOrgUserRole,
   isOrgJoinRequestStatus,
   isTierId,
@@ -102,6 +106,7 @@ const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
 const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
+const CONTENT_DELETE_RETENTION_DAYS = 60;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const READINESS_REFRESH_MS = 15_000;
@@ -178,18 +183,233 @@ function parseIsoDateOrNull(value: string | undefined | null): Date | null {
   return parsed;
 }
 
-function normalizeIndustryIds(value: unknown): IndustryId[] {
-  if (!Array.isArray(value)) {
-    return [...INDUSTRY_IDS];
+function normalizeIdentifier(value: unknown, fallbackPrefix: string): string {
+  if (typeof value === "string" && value.trim()) {
+    const normalized = value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (normalized) {
+      return normalized;
+    }
   }
 
-  const unique = Array.from(
-    new Set(
-      value.filter((entry): entry is IndustryId => typeof entry === "string" && isIndustryId(entry))
-    )
-  );
+  return `${fallbackPrefix}_${uuid().slice(0, 8)}`;
+}
 
-  return unique.length > 0 ? unique : [...INDUSTRY_IDS];
+function uniqueStrings(values: unknown[], allowed?: Set<string>): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of values) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+
+    const value = entry.trim();
+    if (!value || (allowed && !allowed.has(value)) || seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    normalized.push(value);
+  }
+
+  return normalized;
+}
+
+function getConfiguredIndustryIds(config: AppConfig): IndustryId[] {
+  const ids = uniqueStrings((config.industries ?? []).map((entry) => entry.id));
+  return ids.length > 0 ? ids : [...INDUSTRY_IDS];
+}
+
+function getConfiguredActiveIndustryIds(config: AppConfig): IndustryId[] {
+  const activeIds = uniqueStrings(
+    (config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id)
+  );
+  return activeIds.length > 0 ? activeIds : getConfiguredIndustryIds(config);
+}
+
+function normalizeIndustryIds(
+  value: unknown,
+  fallback: IndustryId[] = [...INDUSTRY_IDS],
+  allowed?: Set<string>
+): IndustryId[] {
+  if (!Array.isArray(value)) {
+    return [...fallback];
+  }
+
+  const unique = uniqueStrings(value, allowed);
+  return unique.length > 0 ? (unique as IndustryId[]) : [...fallback];
+}
+
+function normalizeScenarioEntry(raw: unknown, segmentId: string, index: number): Scenario | null {
+  const candidate = (raw ?? {}) as Partial<Scenario>;
+  const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+  if (!title) {
+    return null;
+  }
+
+  const description = typeof candidate.description === "string" && candidate.description.trim()
+    ? candidate.description.trim()
+    : title;
+  const aiRole = typeof candidate.aiRole === "string" && candidate.aiRole.trim()
+    ? candidate.aiRole.trim()
+    : "a conversation partner";
+
+  return {
+    id: normalizeIdentifier(candidate.id, `${segmentId}_scenario_${index + 1}`),
+    segmentId,
+    title,
+    summary: buildScenarioSummary(description),
+    description,
+    aiRole,
+    enabled: candidate.enabled !== false
+  };
+}
+
+function sortScenariosByTitle(scenarios: Scenario[]): Scenario[] {
+  return [...scenarios].sort((a, b) =>
+    a.title.localeCompare(b.title, undefined, { sensitivity: "base" })
+  );
+}
+
+function normalizeSegmentDefinitions(
+  value: unknown,
+  fallback: SegmentDefinition[]
+): SegmentDefinition[] {
+  if (!Array.isArray(value)) {
+    return fallback.map((segment) => ({
+      ...segment,
+      scenarios: sortScenariosByTitle(
+        (segment.scenarios ?? [])
+          .map((scenario, index) => normalizeScenarioEntry(scenario, segment.id, index))
+          .filter((scenario): scenario is Scenario => Boolean(scenario))
+      )
+    }));
+  }
+
+  const seen = new Set<string>();
+  const normalized: SegmentDefinition[] = [];
+  for (let i = 0; i < value.length; i += 1) {
+    const candidate = (value[i] ?? {}) as Partial<SegmentDefinition>;
+    const label = typeof candidate.label === "string" ? candidate.label.trim() : "";
+    if (!label) {
+      continue;
+    }
+
+    const id = normalizeIdentifier(candidate.id ?? label, "role");
+    if (seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+
+    const summary = typeof candidate.summary === "string" && candidate.summary.trim()
+      ? candidate.summary.trim()
+      : `Conversations for ${label}.`;
+    const rawScenarios = Array.isArray(candidate.scenarios) ? candidate.scenarios : [];
+    const scenarios = sortScenariosByTitle(
+      rawScenarios
+        .map((scenario, index) => normalizeScenarioEntry(scenario, id, index))
+        .filter((scenario): scenario is Scenario => Boolean(scenario))
+    );
+
+    normalized.push({
+      id,
+      label,
+      summary,
+      enabled: candidate.enabled !== false,
+      scenarios
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeIndustryDefinitions(
+  value: unknown,
+  fallback: IndustryDefinition[]
+): IndustryDefinition[] {
+  const source = Array.isArray(value) ? value : fallback;
+  const seen = new Set<string>();
+  const normalized: IndustryDefinition[] = [];
+
+  for (let i = 0; i < source.length; i += 1) {
+    const candidate = (source[i] ?? {}) as Partial<IndustryDefinition>;
+    const id = normalizeIdentifier(candidate.id, "industry");
+    if (seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+
+    const label = typeof candidate.label === "string" && candidate.label.trim()
+      ? candidate.label.trim()
+      : id;
+
+    normalized.push({
+      id,
+      label,
+      enabled: candidate.enabled !== false
+    });
+  }
+
+  if (normalized.length === 0) {
+    return fallback.map((entry) => ({ ...entry }));
+  }
+
+  if (!normalized.some((entry) => entry.enabled)) {
+    normalized[0].enabled = true;
+  }
+
+  return normalized.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+}
+
+function normalizeRoleIndustryDefinitions(
+  value: unknown,
+  industries: IndustryDefinition[],
+  segments: SegmentDefinition[],
+  fallback: RoleIndustryDefinition[],
+  allowEmpty = false
+): RoleIndustryDefinition[] {
+  const source = Array.isArray(value) ? value : fallback;
+  const allowedIndustryIds = new Set(industries.map((entry) => entry.id));
+  const allowedRoleIds = new Set(segments.map((entry) => entry.id));
+  const deduped = new Map<string, RoleIndustryDefinition>();
+
+  for (const raw of source) {
+    const candidate = (raw ?? {}) as Partial<RoleIndustryDefinition>;
+    if (typeof candidate.industryId !== "string" || typeof candidate.roleId !== "string") {
+      continue;
+    }
+
+    const industryId = candidate.industryId.trim();
+    const roleId = candidate.roleId.trim();
+    if (!industryId || !roleId || !allowedIndustryIds.has(industryId) || !allowedRoleIds.has(roleId)) {
+      continue;
+    }
+
+    deduped.set(`${roleId}::${industryId}`, {
+      roleId,
+      industryId,
+      active: candidate.active !== false
+    });
+  }
+
+  let normalized = Array.from(deduped.values());
+  if (!allowEmpty && normalized.length === 0) {
+    normalized = fallback.filter(
+      (entry) => allowedIndustryIds.has(entry.industryId) && allowedRoleIds.has(entry.roleId)
+    );
+  }
+
+  return normalized.sort((a, b) => {
+    const byRole = a.roleId.localeCompare(b.roleId, undefined, { sensitivity: "base" });
+    if (byRole !== 0) {
+      return byRole;
+    }
+
+    return a.industryId.localeCompare(b.industryId, undefined, { sensitivity: "base" });
+  });
 }
 
 function normalizeContactName(value: unknown): string {
@@ -617,8 +837,9 @@ function normalizeScorecard(raw: unknown): SimulationScorecard {
 
 function createDefaultDatabase(): ApiDatabase {
   const now = nowIso();
+  const config = createDefaultConfig(now);
   return {
-    config: createDefaultConfig(now),
+    config,
     users: [],
     orgs: [
       {
@@ -629,7 +850,7 @@ function createDefaultDatabase(): ApiDatabase {
         contactEmail: "starter@example.com",
         emailDomain: "example.com",
         joinCode: "STARTER1",
-        activeIndustries: [...INDUSTRY_IDS],
+        activeIndustries: getConfiguredActiveIndustryIds(config),
         dailySecondsQuota: 8 * 60 * 60,
         perUserDailySecondsCap: 60 * 60,
         manualBonusSeconds: 0,
@@ -681,6 +902,9 @@ function ensureDemoEnterpriseData(db: {
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
 }, now: string): void {
+  const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
+  const defaultIndustryIds = getConfiguredActiveIndustryIds(db.config);
+
   for (const demoOrg of DEMO_ENTERPRISE_ORGS) {
     const existing = db.orgs.find((org) => org.id === demoOrg.id);
     if (existing) {
@@ -689,7 +913,7 @@ function ensureDemoEnterpriseData(db: {
       existing.emailDomain = existing.emailDomain ?? extractEmailDomain(demoOrg.contactEmail);
       existing.joinCode =
         normalizeJoinCode(existing.joinCode) || normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH);
-      existing.activeIndustries = normalizeIndustryIds(existing.activeIndustries);
+      existing.activeIndustries = normalizeIndustryIds(existing.activeIndustries, defaultIndustryIds, allowedIndustryIds);
       // Demo orgs use a stable established date so "renewal" and reporting are deterministic.
       existing.createdAt = demoOrg.establishedAt;
       existing.updatedAt = existing.updatedAt || existing.createdAt || demoOrg.establishedAt;
@@ -704,7 +928,7 @@ function ensureDemoEnterpriseData(db: {
       contactEmail: demoOrg.contactEmail,
       emailDomain: extractEmailDomain(demoOrg.contactEmail),
       joinCode: normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH),
-      activeIndustries: demoOrg.activeIndustries,
+      activeIndustries: normalizeIndustryIds(demoOrg.activeIndustries, defaultIndustryIds, allowedIndustryIds),
       dailySecondsQuota: db.config.enterprise.defaultOrgDailySecondsQuota,
       perUserDailySecondsCap: db.config.enterprise.defaultPerUserDailySecondsCap,
       manualBonusSeconds: 0,
@@ -1192,7 +1416,11 @@ function mergeScenariosWithDefaults(
     .filter((scenario) => !defaultScenarioIds.has(scenario.id))
     .map((scenario) => ({ ...scenario, segmentId }));
 
-  return [...mergedDefaults, ...customScenarios];
+  return sortScenariosByTitle(
+    [...mergedDefaults, ...customScenarios]
+      .map((scenario, index) => normalizeScenarioEntry(scenario, segmentId, index))
+      .filter((scenario): scenario is Scenario => Boolean(scenario))
+  );
 }
 
 function mergeSegmentsWithDefaults(
@@ -1220,10 +1448,11 @@ function mergeSegmentsWithDefaults(
     .filter((segment) => !defaultSegmentIds.has(segment.id))
     .map((segment) => ({
       ...segment,
-      scenarios: (segment.scenarios ?? []).map((scenario) => ({
-        ...scenario,
-        segmentId: segment.id
-      }))
+      scenarios: sortScenariosByTitle(
+        (segment.scenarios ?? [])
+          .map((scenario, index) => normalizeScenarioEntry({ ...scenario, segmentId: segment.id }, segment.id, index))
+          .filter((scenario): scenario is Scenario => Boolean(scenario))
+      )
     }));
 
   return [...mergedDefaults, ...customSegments];
@@ -1317,11 +1546,22 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   const now = nowIso();
 
   const configCandidate = candidate.config;
-  const mergedSegments = mergeSegmentsWithDefaults(
+  const mergedSegmentsWithDefaults = mergeSegmentsWithDefaults(
     Array.isArray(configCandidate?.segments) && configCandidate.segments.length > 0
       ? configCandidate.segments
       : DEFAULT_SEGMENTS,
     DEFAULT_SEGMENTS
+  );
+  const mergedSegments = normalizeSegmentDefinitions(mergedSegmentsWithDefaults, DEFAULT_SEGMENTS);
+  const mergedIndustries = normalizeIndustryDefinitions(
+    configCandidate?.industries,
+    fallback.config.industries ?? DEFAULT_INDUSTRIES
+  );
+  const mergedRoleIndustries = normalizeRoleIndustryDefinitions(
+    configCandidate?.roleIndustries,
+    mergedIndustries,
+    mergedSegments,
+    fallback.config.roleIndustries ?? DEFAULT_ROLE_INDUSTRIES
   );
 
   const candidateActiveSegmentId =
@@ -1338,6 +1578,8 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     activeSegmentId: resolvedActiveSegmentId,
     defaultDifficulty: configCandidate?.defaultDifficulty ?? fallback.config.defaultDifficulty,
     defaultPersonaStyle: configCandidate?.defaultPersonaStyle ?? fallback.config.defaultPersonaStyle,
+    industries: mergedIndustries,
+    roleIndustries: mergedRoleIndustries,
     segments: mergedSegments,
     tiers:
       Array.isArray(configCandidate?.tiers) && configCandidate?.tiers.length > 0
@@ -1367,12 +1609,19 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     updatedAt: configCandidate?.updatedAt || now
   };
 
+  const configuredIndustryIds = new Set(getConfiguredIndustryIds(config));
+  const fallbackOrgIndustryIds = getConfiguredActiveIndustryIds(config);
+
   const normalizedOrgs = ensureOrgCodesAndDomains(
     (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs).map((org) => ({
       ...org,
       contactName: normalizeContactName((org as Partial<EnterpriseOrg>).contactName),
       contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
-      activeIndustries: normalizeIndustryIds((org as Partial<EnterpriseOrg>).activeIndustries)
+      activeIndustries: normalizeIndustryIds(
+        (org as Partial<EnterpriseOrg>).activeIndustries,
+        fallbackOrgIndustryIds,
+        configuredIndustryIds
+      )
     }))
   );
 
@@ -2026,11 +2275,34 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
     return db.config;
   }
 
-  const allowedRoleSegmentIds = new Set(getRoleSegmentIdsForIndustries(org.activeIndustries));
+  const enabledIndustryIds = new Set(
+    (db.config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id)
+  );
+  const scopedIndustryIds = normalizeIndustryIds(
+    org.activeIndustries,
+    getConfiguredActiveIndustryIds(db.config),
+    enabledIndustryIds
+  );
+  const scopedIndustryIdSet = new Set(scopedIndustryIds);
+  const allowedRoleSegmentIds = new Set(
+    getRoleSegmentIdsForIndustries(scopedIndustryIds, db.config.roleIndustries)
+  );
   const filteredSegments = db.config.segments.filter((segment) => allowedRoleSegmentIds.has(segment.id));
+  const filteredIndustries = (db.config.industries ?? []).filter(
+    (entry) => entry.enabled && scopedIndustryIdSet.has(entry.id)
+  );
+  const filteredRoleIndustries = (db.config.roleIndustries ?? []).filter(
+    (entry) =>
+      entry.active &&
+      scopedIndustryIdSet.has(entry.industryId) &&
+      allowedRoleSegmentIds.has(entry.roleId)
+  );
+
   if (filteredSegments.length === 0) {
     return {
       ...db.config,
+      industries: filteredIndustries,
+      roleIndustries: filteredRoleIndustries,
       segments: []
     };
   }
@@ -2042,16 +2314,37 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
 
   return {
     ...db.config,
+    industries: filteredIndustries,
+    roleIndustries: filteredRoleIndustries,
     activeSegmentId: hasActiveSegment ? db.config.activeSegmentId : fallbackSegment.id,
     segments: filteredSegments
   };
 }
 
 function sanitizeConfigPatch(current: AppConfig, patch: UpdateConfigRequest): AppConfig {
+  const nextSegments = normalizeSegmentDefinitions(
+    patch.segments ?? current.segments,
+    current.segments ?? DEFAULT_SEGMENTS
+  );
+  const nextIndustries = normalizeIndustryDefinitions(
+    patch.industries ?? current.industries,
+    current.industries ?? DEFAULT_INDUSTRIES
+  );
+  const nextRoleIndustries = normalizeRoleIndustryDefinitions(
+    patch.roleIndustries ?? current.roleIndustries,
+    nextIndustries,
+    nextSegments,
+    current.roleIndustries ?? DEFAULT_ROLE_INDUSTRIES,
+    patch.roleIndustries !== undefined
+  );
+
   const merged: AppConfig = {
     ...current,
     activeSegmentId: patch.activeSegmentId ?? current.activeSegmentId,
     defaultDifficulty: patch.defaultDifficulty ?? current.defaultDifficulty,
+    industries: nextIndustries,
+    roleIndustries: nextRoleIndustries,
+    segments: nextSegments,
     tiers: patch.tiers ?? current.tiers,
     enterprise: patch.enterprise ? { ...current.enterprise, ...patch.enterprise } : current.enterprise,
     updatedAt: nowIso()
@@ -2065,6 +2358,128 @@ function sanitizeConfigPatch(current: AppConfig, patch: UpdateConfigRequest): Ap
   }
 
   return merged;
+}
+
+interface ContentDeleteValidationIssue {
+  field: "industry" | "role" | "scenario";
+  ids: string[];
+  reason: string;
+}
+
+function toEpochMs(value: string | undefined | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function validateContentDeletes(
+  db: ApiDatabase,
+  current: AppConfig,
+  next: AppConfig
+): ContentDeleteValidationIssue[] {
+  const issues: ContentDeleteValidationIssue[] = [];
+  const cutoffMs = Date.now() - CONTENT_DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+  const currentRoleIds = new Set(current.segments.map((segment) => segment.id));
+  const nextRoleIds = new Set(next.segments.map((segment) => segment.id));
+  const removedRoleIds = Array.from(currentRoleIds).filter((id) => !nextRoleIds.has(id));
+
+  const currentScenarioIds = new Set(
+    current.segments.flatMap((segment) => (segment.scenarios ?? []).map((scenario) => scenario.id))
+  );
+  const nextScenarioIds = new Set(
+    next.segments.flatMap((segment) => (segment.scenarios ?? []).map((scenario) => scenario.id))
+  );
+  const removedScenarioIds = Array.from(currentScenarioIds).filter((id) => !nextScenarioIds.has(id));
+
+  const currentIndustryIds = new Set((current.industries ?? []).map((industry) => industry.id));
+  const nextIndustryIds = new Set((next.industries ?? []).map((industry) => industry.id));
+  const removedIndustryIds = Array.from(currentIndustryIds).filter((id) => !nextIndustryIds.has(id));
+
+  const removedRoleIdSet = new Set(removedRoleIds);
+  const removedScenarioIdSet = new Set(removedScenarioIds);
+  const removedIndustryIdSet = new Set(removedIndustryIds);
+  const currentRoleByIndustry = new Map<string, Set<string>>();
+  for (const mapping of current.roleIndustries ?? []) {
+    const roleIds = currentRoleByIndustry.get(mapping.industryId) ?? new Set<string>();
+    roleIds.add(mapping.roleId);
+    currentRoleByIndustry.set(mapping.industryId, roleIds);
+  }
+
+  if (removedRoleIdSet.size > 0 || removedScenarioIdSet.size > 0 || removedIndustryIdSet.size > 0) {
+    const recentUsageHits = new Set<string>();
+    const recentScoreHits = new Set<string>();
+    const allRecords = [
+      ...db.usageSessions.map((entry) => ({ segmentId: entry.segmentId, scenarioId: entry.scenarioId, endedAt: entry.endedAt })),
+      ...db.scoreRecords.map((entry) => ({ segmentId: entry.segmentId, scenarioId: entry.scenarioId, endedAt: entry.endedAt }))
+    ];
+
+    for (const row of allRecords) {
+      const endedAtMs = toEpochMs(row.endedAt);
+      if (endedAtMs === null || endedAtMs < cutoffMs) {
+        continue;
+      }
+
+      if (removedRoleIdSet.has(row.segmentId)) {
+        recentUsageHits.add(row.segmentId);
+      }
+      if (removedScenarioIdSet.has(row.scenarioId)) {
+        recentScoreHits.add(row.scenarioId);
+      }
+      if (removedIndustryIdSet.size > 0) {
+        for (const industryId of removedIndustryIdSet) {
+          const roleIds = currentRoleByIndustry.get(industryId);
+          if (roleIds && roleIds.has(row.segmentId)) {
+            recentUsageHits.add(industryId);
+          }
+        }
+      }
+    }
+
+    if (removedRoleIds.length > 0) {
+      const blocked = removedRoleIds.filter((id) => recentUsageHits.has(id));
+      if (blocked.length > 0) {
+        issues.push({
+          field: "role",
+          ids: blocked,
+          reason: `Cannot delete roles used in the last ${CONTENT_DELETE_RETENTION_DAYS} days. Deactivate instead.`
+        });
+      }
+    }
+
+    if (removedScenarioIds.length > 0) {
+      const blocked = removedScenarioIds.filter((id) => recentScoreHits.has(id));
+      if (blocked.length > 0) {
+        issues.push({
+          field: "scenario",
+          ids: blocked,
+          reason: `Cannot delete scenarios used in the last ${CONTENT_DELETE_RETENTION_DAYS} days. Deactivate instead.`
+        });
+      }
+    }
+
+    if (removedIndustryIds.length > 0) {
+      const blockedByUsage = removedIndustryIds.filter((id) => recentUsageHits.has(id));
+      const blockedByOrg = removedIndustryIds.filter((industryId) =>
+        db.orgs.some((org) => (org.activeIndustries ?? []).includes(industryId))
+      );
+      const blocked = Array.from(new Set([...blockedByUsage, ...blockedByOrg]));
+      if (blocked.length > 0) {
+        issues.push({
+          field: "industry",
+          ids: blocked,
+          reason:
+            `Cannot delete industries still in use or used in the last ${CONTENT_DELETE_RETENTION_DAYS} days. ` +
+            "Deactivate instead."
+        });
+      }
+    }
+  }
+
+  return issues;
 }
 
 type MobileUpdateReason = "user" | "org" | "config" | "resync" | "unknown";
@@ -2388,7 +2803,17 @@ app.patch("/config", requireAdmin, async (request: Request, response: Response) 
   const patch = request.body as UpdateConfigRequest;
 
   await withDatabase(async (db) => {
-    db.config = sanitizeConfigPatch(db.config, patch);
+    const nextConfig = sanitizeConfigPatch(db.config, patch);
+    const deleteIssues = validateContentDeletes(db, db.config, nextConfig);
+    if (deleteIssues.length > 0) {
+      response.status(409).json({
+        error: deleteIssues[0]?.reason ?? "Content delete blocked.",
+        details: deleteIssues
+      });
+      return;
+    }
+
+    db.config = nextConfig;
     emitMobileUpdateForAllUsers(db, "config");
     appendPlatformAuditEvent(db, {
       action: "config.updated",
@@ -2426,6 +2851,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
   }
 
   await withDatabase(async (db) => {
+    const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
+    const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     const contactEmail = normalizeContactEmail(body.contactEmail);
     const emailDomain = normalizeEmailDomain(body.emailDomain) ?? extractEmailDomain(contactEmail);
     if (!emailDomain) {
@@ -2458,7 +2885,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       contactEmail,
       emailDomain,
       joinCode,
-      activeIndustries: normalizeIndustryIds(body.activeIndustries),
+      activeIndustries: normalizeIndustryIds(body.activeIndustries, fallbackIndustryIds, allowedIndustryIds),
       dailySecondsQuota: clampNonNegativeInteger(
         body.dailySecondsQuota,
         db.config.enterprise.defaultOrgDailySecondsQuota
@@ -2492,6 +2919,8 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
   const patch = request.body as Partial<EnterpriseOrg>;
 
   await withDatabase(async (db) => {
+    const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
+    const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     const org = db.orgs.find((entry) => entry.id === orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -2562,7 +2991,7 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
     }
 
     if (patch.activeIndustries !== undefined) {
-      org.activeIndustries = normalizeIndustryIds(patch.activeIndustries);
+      org.activeIndustries = normalizeIndustryIds(patch.activeIndustries, fallbackIndustryIds, allowedIndustryIds);
     }
 
     if (patch.dailySecondsQuota !== undefined) {

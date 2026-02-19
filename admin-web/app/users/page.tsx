@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  AppConfig,
   EnterpriseOrg,
-  INDUSTRY_LABELS,
   UserProfile,
   computeNextAnnualRenewalAt,
 } from "@voicepractice/shared";
@@ -79,6 +79,7 @@ export default function UsersPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [contentIndustries, setContentIndustries] = useState<AppConfig["industries"]>([]);
   const [creating, setCreating] = useState(false);
   const [actingJoinRequestId, setActingJoinRequestId] = useState<string | null>(null);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
@@ -97,6 +98,21 @@ export default function UsersPage() {
         .sort((a, b) => a.email.localeCompare(b.email)),
     [users],
   );
+  const defaultIndustryId = useMemo(() => {
+    const enabled = contentIndustries.find((industry) => industry.enabled);
+    return (enabled ?? contentIndustries[0])?.id ?? "";
+  }, [contentIndustries]);
+  const defaultIndustryLabel = useMemo(() => {
+    const enabled = contentIndustries.find((industry) => industry.enabled);
+    return (enabled ?? contentIndustries[0])?.label ?? "-";
+  }, [contentIndustries]);
+  const industryLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const industry of contentIndustries) {
+      map.set(industry.id, industry.label);
+    }
+    return map;
+  }, [contentIndustries]);
 
   const load = async () => {
     setLoading(true);
@@ -107,15 +123,18 @@ export default function UsersPage() {
       if (isPersonalMode) {
         setOrgs([]);
         setJoinRequests([]);
+        setContentIndustries([]);
         return;
       }
 
-      const [orgPayload, requestPayload] = await Promise.all([
+      const [orgPayload, requestPayload, configPayload] = await Promise.all([
         adminFetch<EnterpriseOrg[]>("/orgs"),
         adminFetch<{ rows: OrgJoinRequestRow[] }>("/org-join-requests"),
+        adminFetch<AppConfig>("/config"),
       ]);
       setOrgs(orgPayload);
       setJoinRequests(requestPayload.rows ?? []);
+      setContentIndustries(configPayload.industries ?? []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load account data.");
     } finally {
@@ -146,7 +165,7 @@ export default function UsersPage() {
           contactName: orgForm.contactName,
           contactEmail: orgForm.contactEmail,
           emailDomain: orgForm.emailDomain,
-          activeIndustries: ["people_management"],
+          activeIndustries: defaultIndustryId ? [defaultIndustryId] : undefined,
         }),
       });
 
@@ -255,7 +274,7 @@ export default function UsersPage() {
             </div>
           </form>
           <p className="small" style={{ marginBottom: 0 }}>
-            Default segment enabled: {INDUSTRY_LABELS.people_management}. Configure more on the account detail screen.
+            Default industry enabled: {defaultIndustryLabel}. Configure more on the account detail screen.
           </p>
           {error ? (
             <p className="error" style={{ marginBottom: 0 }}>
@@ -301,7 +320,7 @@ export default function UsersPage() {
                   const nextRenewalAt = computeNextAnnualRenewalAt(org.createdAt, new Date());
                   const segmentsActive =
                     Array.isArray(org.activeIndustries) && org.activeIndustries.length > 0
-                      ? org.activeIndustries.map((id) => INDUSTRY_LABELS[id]).join(", ")
+                      ? org.activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")
                       : "-";
 
                   return (

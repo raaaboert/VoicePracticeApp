@@ -21,10 +21,6 @@ import {
   COMMON_TIMEZONES,
   formatSecondsAsClock,
   ORG_USER_ROLE_LABELS,
-  INDUSTRY_IDS,
-  INDUSTRY_LABELS,
-  INDUSTRY_ROLE_SEGMENT_IDS,
-  IndustryId,
   secondsToWholeMinutes,
 } from "@voicepractice/shared";
 import {
@@ -569,7 +565,7 @@ export default function App() {
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
   const [entitlements, setEntitlements] = useState<UserEntitlementsResponse | null>(null);
 
-  const [selectedIndustryId, setSelectedIndustryId] = useState<IndustryId | "">("");
+  const [selectedIndustryId, setSelectedIndustryId] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState<string>("");
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>("");
   const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty>("medium");
@@ -650,16 +646,64 @@ export default function App() {
     [config],
   );
 
+  const allIndustries = useMemo(() => config?.industries ?? [], [config]);
+  const enabledIndustries = useMemo(
+    () => allIndustries.filter((industry) => industry.enabled),
+    [allIndustries]
+  );
+  const activeRoleIndustryLinks = useMemo(
+    () => (config?.roleIndustries ?? []).filter((entry) => entry.active),
+    [config]
+  );
+  const industryLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const industry of allIndustries) {
+      map.set(industry.id, industry.label);
+    }
+    return map;
+  }, [allIndustries]);
+
   const industryOptions = useMemo(
-    () =>
-      INDUSTRY_IDS.map((industryId) => ({
-        id: industryId,
-        label: INDUSTRY_LABELS[industryId],
-        roles: INDUSTRY_ROLE_SEGMENT_IDS[industryId]
-          .map((segmentId) => enabledSegments.find((segment) => segment.id === segmentId))
-          .filter((segment): segment is (typeof enabledSegments)[number] => Boolean(segment)),
-      })).filter((industry) => industry.roles.length > 0),
-    [enabledSegments],
+    () => {
+      const byId = new Map(enabledSegments.map((segment) => [segment.id, segment]));
+      const roleIdsByIndustryId = new Map<string, Set<string>>();
+      for (const entry of activeRoleIndustryLinks) {
+        const ids = roleIdsByIndustryId.get(entry.industryId) ?? new Set<string>();
+        ids.add(entry.roleId);
+        roleIdsByIndustryId.set(entry.industryId, ids);
+      }
+
+      const options = enabledIndustries
+        .map((industry) => {
+          const roleIds = Array.from(roleIdsByIndustryId.get(industry.id) ?? []);
+          const roles = roleIds
+            .map((roleId) => byId.get(roleId))
+            .filter((segment): segment is (typeof enabledSegments)[number] => Boolean(segment));
+          return {
+            id: industry.id,
+            label: industry.label,
+            roles,
+          };
+        })
+        .filter((industry) => industry.roles.length > 0);
+
+      if (options.length > 0) {
+        return options;
+      }
+
+      if (enabledSegments.length === 0 || enabledIndustries.length === 0) {
+        return [];
+      }
+
+      return [
+        {
+          id: enabledIndustries[0].id,
+          label: enabledIndustries[0].label,
+          roles: enabledSegments
+        }
+      ];
+    },
+    [activeRoleIndustryLinks, enabledIndustries, enabledSegments],
   );
 
   const activeIndustry = useMemo(() => {
@@ -742,16 +786,26 @@ export default function App() {
     }
     return map;
   }, [enabledSegments]);
-  const industryIdByRoleSegmentId = useMemo(() => {
-    const map = new Map<string, IndustryId>();
-    for (const industryId of INDUSTRY_IDS) {
-      const roleIds = INDUSTRY_ROLE_SEGMENT_IDS[industryId] ?? [];
-      for (const roleId of roleIds) {
-        map.set(roleId, industryId);
+  const industryIdsByRoleSegmentId = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const entry of activeRoleIndustryLinks) {
+      const current = map.get(entry.roleId) ?? [];
+      if (!current.includes(entry.industryId)) {
+        current.push(entry.industryId);
+      }
+      map.set(entry.roleId, current);
+    }
+    return map;
+  }, [activeRoleIndustryLinks]);
+  const primaryIndustryIdByRoleSegmentId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const [roleId, industryIds] of industryIdsByRoleSegmentId.entries()) {
+      if (industryIds.length > 0) {
+        map.set(roleId, industryIds[0]);
       }
     }
     return map;
-  }, []);
+  }, [industryIdsByRoleSegmentId]);
 
   const openHomeMenu = useCallback(() => {
     if (isHomeMenuMounted) {
@@ -1094,10 +1148,14 @@ export default function App() {
         configPayload.segments.find((segment) => segment.enabled);
 
       if (validSegment) {
-        const matchingIndustry = INDUSTRY_IDS.find((industryId) =>
-          INDUSTRY_ROLE_SEGMENT_IDS[industryId].includes(validSegment.id),
-        );
-        setSelectedIndustryId(matchingIndustry ?? INDUSTRY_IDS[0]);
+        const matchingIndustry = (configPayload.roleIndustries ?? []).find(
+          (entry) => entry.active && entry.roleId === validSegment.id
+        )?.industryId;
+        const fallbackIndustry =
+          configPayload.industries?.find((industry) => industry.enabled)?.id ??
+          configPayload.industries?.[0]?.id ??
+          "";
+        setSelectedIndustryId(matchingIndustry ?? fallbackIndustry);
         setSelectedRoleId(validSegment.id);
         const firstScenario = validSegment.scenarios.find((scenario) => scenario.enabled !== false);
         setSelectedScenarioId(firstScenario?.id ?? "");
@@ -2235,7 +2293,7 @@ export default function App() {
             title="Industry"
             value={selectedIndustryId}
             options={industrySelectOptions}
-            onChange={(value) => setSelectedIndustryId(value as IndustryId)}
+            onChange={setSelectedIndustryId}
             placeholder="Select industry"
             styles={styles}
           />
@@ -2261,7 +2319,7 @@ export default function App() {
           />
 
           {activeSegment ? <Text style={styles.body}>{activeSegment.summary}</Text> : null}
-          {activeScenario ? <Text style={styles.body}>{activeScenario.description}</Text> : null}
+          {activeScenario ? <Text style={styles.body}>{activeScenario.summary ?? activeScenario.description}</Text> : null}
         </View>
 
         <Text style={styles.sectionTitle}>Difficulty</Text>
@@ -2893,7 +2951,7 @@ export default function App() {
 
     const industriesLabel = Array.isArray(org?.activeIndustries) && org?.activeIndustries.length > 0
       ? org.activeIndustries
-          .map((industryId) => INDUSTRY_LABELS[industryId as IndustryId] ?? String(industryId))
+          .map((industryId) => industryLabelById.get(industryId) ?? String(industryId))
           .join(", ")
       : "-";
 
@@ -2909,23 +2967,25 @@ export default function App() {
       }
       const grouped = new Map<string, { sessions: number; totalScore: number }>();
       for (const row of orgAdminAnalytics.bySegment) {
-        const industryId = industryIdByRoleSegmentId.get(row.segmentId as unknown as string);
-        if (!industryId) {
+        const industryIds = industryIdsByRoleSegmentId.get(row.segmentId as unknown as string) ?? [];
+        if (industryIds.length === 0) {
           continue;
         }
-        const current = grouped.get(industryId) ?? { sessions: 0, totalScore: 0 };
-        const sessions = row.sessions ?? 0;
-        const avg = row.avgOverallScore ?? 0;
-        grouped.set(industryId, {
-          sessions: current.sessions + sessions,
-          totalScore: current.totalScore + avg * sessions,
-        });
+        for (const industryId of industryIds) {
+          const current = grouped.get(industryId) ?? { sessions: 0, totalScore: 0 };
+          const sessions = row.sessions ?? 0;
+          const avg = row.avgOverallScore ?? 0;
+          grouped.set(industryId, {
+            sessions: current.sessions + sessions,
+            totalScore: current.totalScore + avg * sessions,
+          });
+        }
       }
 
       return Array.from(grouped.entries())
         .map(([industryId, row]) => ({
           industryId,
-          industryLabel: INDUSTRY_LABELS[industryId as IndustryId] ?? industryId,
+          industryLabel: industryLabelById.get(industryId) ?? industryId,
           sessions: row.sessions,
           avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null,
         }))
@@ -3117,8 +3177,8 @@ export default function App() {
             ) : (
               <View style={{ gap: 10, marginTop: 6 }}>
                 {(orgAdminAnalytics?.bySegment ?? []).map((row) => {
-                  const industryId = industryIdByRoleSegmentId.get(row.segmentId as unknown as string);
-                  const industryLabel = industryId ? INDUSTRY_LABELS[industryId] : null;
+                  const industryId = primaryIndustryIdByRoleSegmentId.get(row.segmentId as unknown as string);
+                  const industryLabel = industryId ? (industryLabelById.get(industryId) ?? industryId) : null;
                   return (
                     <View key={row.segmentId} style={styles.optionCard}>
                       <Text style={styles.optionTitle}>
