@@ -14,36 +14,6 @@ import { useRequireAdminToken } from "../../src/components/useRequireAdminToken"
 import { adminFetch } from "../../src/lib/api";
 import { useAdminMode, withAdminMode } from "../../src/lib/adminMode";
 
-interface OrgJoinRequestRow {
-  id: string;
-  status: string;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-  decidedAt: string | null;
-  decisionReason: string | null;
-  email: string;
-  emailDomain: string;
-  user: {
-    id: string;
-    email: string;
-    accountType: string;
-    tier: string;
-    status: string;
-    orgId: string | null;
-    orgRole: string;
-  } | null;
-  org: {
-    id: string;
-    name: string;
-    emailDomain: string | null;
-    joinCode: string;
-    status: string;
-  } | null;
-}
-
-type OrgJoinAction = "approve" | "reject";
-
 function formatDate(value: string | null | undefined): string {
   if (!value) {
     return "-";
@@ -76,14 +46,12 @@ export default function UsersPage() {
   const isPersonalMode = mode === "personal";
   const [orgs, setOrgs] = useState<EnterpriseOrg[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
-  const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [contentIndustries, setContentIndustries] = useState<AppConfig["industries"]>([]);
   const [creating, setCreating] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [actingJoinRequestId, setActingJoinRequestId] = useState<string | null>(null);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
     name: "",
     contactName: "",
@@ -124,18 +92,15 @@ export default function UsersPage() {
       setUsers(userPayload);
       if (isPersonalMode) {
         setOrgs([]);
-        setJoinRequests([]);
         setContentIndustries([]);
         return;
       }
 
-      const [orgPayload, requestPayload, configPayload] = await Promise.all([
+      const [orgPayload, configPayload] = await Promise.all([
         adminFetch<EnterpriseOrg[]>("/orgs"),
-        adminFetch<{ rows: OrgJoinRequestRow[] }>("/org-join-requests"),
         adminFetch<AppConfig>("/config"),
       ]);
       setOrgs(orgPayload);
-      setJoinRequests(requestPayload.rows ?? []);
       setContentIndustries(configPayload.industries ?? []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load account data.");
@@ -177,59 +142,6 @@ export default function UsersPage() {
       setError(caught instanceof Error ? caught.message : "Could not create enterprise account.");
     } finally {
       setCreating(false);
-    }
-  };
-
-  const decideJoinRequest = async (
-    row: OrgJoinRequestRow,
-    action: OrgJoinAction,
-    options?: { assignOrgAdmin?: boolean }
-  ) => {
-    if (row.status !== "pending") {
-      return;
-    }
-
-    const assignOrgAdmin = Boolean(options?.assignOrgAdmin);
-    const confirmMessage =
-      action === "approve"
-        ? assignOrgAdmin
-          ? `Approve ${row.email} and set org role to Org Admin?`
-          : `Approve ${row.email} into ${row.org?.name ?? "this org"}?`
-        : `Reject access request for ${row.email}?`;
-    const confirmed = window.confirm(confirmMessage);
-    if (!confirmed) {
-      return;
-    }
-
-    const reasonInput = window.prompt("Optional reason (leave blank for default):", "");
-    if (reasonInput === null) {
-      return;
-    }
-
-    setActingJoinRequestId(row.id);
-    setError(null);
-    setNotice(null);
-    try {
-      await adminFetch<{ ok: true }>("/org-join-requests/" + row.id, {
-        method: "PATCH",
-        body: JSON.stringify({
-          action,
-          reason: reasonInput.trim() || undefined,
-          assignOrgAdmin: action === "approve" ? assignOrgAdmin : undefined
-        })
-      });
-      setNotice(
-        action === "approve"
-          ? assignOrgAdmin
-            ? `Approved ${row.email} as org admin.`
-            : `Approved ${row.email}.`
-          : `Rejected ${row.email}.`
-      );
-      await load();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update request.");
-    } finally {
-      setActingJoinRequestId(null);
     }
   };
 
@@ -453,85 +365,6 @@ export default function UsersPage() {
         </div>
       ) : null}
 
-      {isPersonalMode ? null : (
-        <div className="card">
-          <h3 style={{ marginBottom: 10 }}>Org Access Requests ({joinRequests.length})</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Created</th>
-                <th>Email</th>
-                <th>Org</th>
-                <th>Status</th>
-                <th>Expires</th>
-                <th>Decision</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {joinRequests.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="small">
-                    No org access requests yet.
-                  </td>
-                </tr>
-              ) : (
-                joinRequests.map((row) => (
-                  <tr key={row.id}>
-                    <td>
-                      <div>{formatDateTime(row.createdAt)}</div>
-                      <div className="small">{row.id}</div>
-                    </td>
-                    <td>
-                      <div>{row.email}</div>
-                      <div className="small">{row.emailDomain}</div>
-                    </td>
-                    <td>
-                      <div>{row.org?.name ?? row.org?.id ?? "-"}</div>
-                      <div className="small">{row.org?.joinCode ?? "-"}</div>
-                    </td>
-                    <td>{row.status}</td>
-                    <td>{formatDateTime(row.expiresAt)}</td>
-                    <td>
-                      <div>{formatDateTime(row.decidedAt)}</div>
-                      <div className="small">{row.decisionReason ?? "-"}</div>
-                    </td>
-                    <td>
-                      {row.status === "pending" ? (
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button
-                            className="primary"
-                            disabled={actingJoinRequestId === row.id}
-                            onClick={() => void decideJoinRequest(row, "approve")}
-                          >
-                            Approve
-                          </button>
-                          <button
-                            className="primary"
-                            disabled={actingJoinRequestId === row.id}
-                            onClick={() => void decideJoinRequest(row, "approve", { assignOrgAdmin: true })}
-                          >
-                            Approve as Org Admin
-                          </button>
-                          <button
-                            className="danger"
-                            disabled={actingJoinRequestId === row.id}
-                            onClick={() => void decideJoinRequest(row, "reject")}
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="small">-</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
     </AdminShell>
   );
 }

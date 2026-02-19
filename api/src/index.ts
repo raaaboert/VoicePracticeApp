@@ -107,6 +107,7 @@ const OPENAI_MAX_DAILY_TOKENS_GLOBAL = runtimeConfig.openAiMaxDailyTokensGlobal;
 const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
 const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
+const SUPPORT_MESSAGE_MAX_LENGTH = 5_000;
 const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
@@ -2995,6 +2996,12 @@ const mobileVerificationRateLimiter = createRateLimiter({
   }
 });
 
+const mobilePublicErrorReportRateLimiter = createRateLimiter({
+  name: "mobile-public-error-report",
+  windowMs: 60 * 60 * 1000,
+  max: 30
+});
+
 const aiRouteRateLimiter = createRateLimiter({
   name: "mobile-ai",
   windowMs: 15 * 60 * 1000,
@@ -3058,6 +3065,91 @@ app.get("/ready", (_request, response) => {
 
 app.get("/meta/timezones", (_request, response) => {
   response.json({ items: getSupportedTimezones() });
+});
+
+app.post("/mobile/public/support/errors", mobilePublicErrorReportRateLimiter, async (request: Request, response: Response) => {
+  const body = request.body as {
+    message?: unknown;
+    context?: unknown;
+    screen?: unknown;
+    platform?: unknown;
+    appVersion?: unknown;
+    details?: unknown;
+  };
+
+  const message = typeof body.message === "string" ? body.message.trim() : "";
+  if (!message) {
+    response.status(400).json({ error: "message is required." });
+    return;
+  }
+
+  if (!message.toUpperCase().startsWith("[AUTO-ERROR]")) {
+    response.status(400).json({ error: "message must start with [AUTO-ERROR]." });
+    return;
+  }
+
+  const context = typeof body.context === "string" ? body.context.trim().slice(0, 120) : "";
+  const screen = typeof body.screen === "string" ? body.screen.trim().slice(0, 120) : "";
+  const platform = typeof body.platform === "string" ? body.platform.trim().slice(0, 80) : "";
+  const appVersion = typeof body.appVersion === "string" ? body.appVersion.trim().slice(0, 80) : "";
+  const detailsText = (() => {
+    if (!body.details || typeof body.details !== "object") {
+      return "";
+    }
+
+    try {
+      return JSON.stringify(body.details).slice(0, 800);
+    } catch {
+      return "";
+    }
+  })();
+
+  const supplementalLines = [
+    context ? `Context: ${context}` : "",
+    screen ? `Screen: ${screen}` : "",
+    platform ? `Platform: ${platform}` : "",
+    appVersion ? `App Version: ${appVersion}` : "",
+    detailsText ? `Details: ${detailsText}` : ""
+  ].filter(Boolean);
+
+  const formattedMessage = [message, ...supplementalLines].join("\n").slice(0, SUPPORT_MESSAGE_MAX_LENGTH);
+  const now = nowIso();
+
+  await withDatabase(async (db) => {
+    const record: SupportCaseRecord = {
+      id: `case_${uuid()}`,
+      status: "open",
+      userId: "public_mobile_reporter",
+      orgId: null,
+      segmentId: null,
+      scenarioId: null,
+      message: formattedMessage,
+      transcriptEncrypted: null,
+      transcriptExpiresAt: null,
+      transcriptFileName: null,
+      transcriptMeta: null,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    db.supportCases.push(record);
+    appendAuditEvent(db, {
+      actorType: "system",
+      actorId: null,
+      action: "support.public_auto_error_created",
+      orgId: null,
+      userId: null,
+      message: "Captured public mobile auto-error report.",
+      metadata: {
+        caseId: record.id,
+        context: context || null,
+        screen: screen || null,
+        platform: platform || null
+      }
+    });
+
+    response.status(201).json({ caseId: record.id });
+  });
 });
 
 app.use((request: Request, response: Response, next: NextFunction) => {
@@ -4670,7 +4762,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       orgId: user.orgId,
       segmentId: null,
       scenarioId: null,
-      message: message.slice(0, 5_000),
+      message: message.slice(0, SUPPORT_MESSAGE_MAX_LENGTH),
       transcriptEncrypted: includeTranscript ? encryptSupportTranscript(transcriptText) : null,
       transcriptExpiresAt: includeTranscript
         ? new Date(Date.now() + SUPPORT_TRANSCRIPT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()

@@ -53,6 +53,7 @@ import {
   longPollMobileUpdates,
   onboardMobileUser,
   resendMobileVerificationEmail,
+  createPublicSupportErrorCase,
   createSupportCase,
   recordSimulationScore,
   recordUsageSession,
@@ -890,10 +891,6 @@ export default function App() {
         details?: Record<string, unknown>;
       },
     ) => {
-      if (!user || !mobileAuthToken) {
-        return;
-      }
-
       const message = getErrorMessage(error, "Unexpected app error.");
       if (!shouldAutoReportErrorMessage(message)) {
         return;
@@ -912,10 +909,10 @@ export default function App() {
         `Context: ${context}`,
         `Screen: ${extras?.screen ?? screen}`,
         `Platform: ${Platform.OS}`,
-        `User ID: ${user.id}`,
-        `Account: ${user.accountType}`,
-        `Org ID: ${user.orgId ?? "none"}`,
-        `Org Role: ${user.orgRole}`,
+        `User ID: ${user?.id ?? "pre-login"}`,
+        `Account: ${user?.accountType ?? "unknown"}`,
+        `Org ID: ${user?.orgId ?? "none"}`,
+        `Org Role: ${user?.orgRole ?? "unknown"}`,
         `Timestamp: ${new Date(nowMs).toISOString()}`,
         `Error: ${message}`,
       ];
@@ -930,12 +927,22 @@ export default function App() {
 
       const payloadMessage = lines.join("\n").slice(0, MAX_AUTO_ERROR_MESSAGE_LENGTH);
       try {
-        await createSupportCase({
-          userId: user.id,
-          authToken: mobileAuthToken,
-          message: payloadMessage,
-          includeTranscript: false,
-        });
+        if (user && mobileAuthToken) {
+          await createSupportCase({
+            userId: user.id,
+            authToken: mobileAuthToken,
+            message: payloadMessage,
+            includeTranscript: false,
+          });
+        } else {
+          await createPublicSupportErrorCase({
+            message: payloadMessage,
+            context,
+            screen: extras?.screen ?? screen,
+            platform: Platform.OS,
+            details: extras?.details,
+          });
+        }
       } catch {
         // Best-effort only; user-facing flow should not fail because reporting failed.
       }

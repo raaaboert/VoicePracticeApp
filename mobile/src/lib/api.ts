@@ -574,6 +574,26 @@ export async function createSupportCase(params: {
   );
 }
 
+export async function createPublicSupportErrorCase(params: {
+  message: string;
+  context?: string;
+  screen?: string;
+  platform?: string;
+  appVersion?: string;
+  details?: Record<string, unknown>;
+}): Promise<{ caseId: string }> {
+  return requestJsonWithRetry(
+    "/mobile/public/support/errors",
+    {
+      method: "POST",
+      body: JSON.stringify(params),
+    },
+    undefined,
+    { timeoutMs: 30_000 },
+    { attempts: 2, initialDelayMs: 600 },
+  );
+}
+
 export async function fetchScoreSummary(
   userId: string,
   authToken: string,
