@@ -37,6 +37,9 @@ interface SupportCaseDetail {
   meta: Record<string, unknown> | null;
 }
 
+type SortDirection = "asc" | "desc";
+type SortKey = "createdAt" | "type" | "org" | "user" | "scenario" | "status" | "transcript" | "message";
+
 function isAutoErrorCase(message: string): boolean {
   return message.trim().toUpperCase().startsWith("[AUTO-ERROR]");
 }
@@ -88,45 +91,61 @@ function withinDateRange(value: string, fromDate: string, toDate: string): boole
   return true;
 }
 
-function includesIgnoreCase(value: string | null | undefined, needle: string): boolean {
-  const normalizedNeedle = needle.trim().toLowerCase();
-  if (!normalizedNeedle) {
-    return true;
-  }
-  return (value ?? "").toLowerCase().includes(normalizedNeedle);
-}
-
 function csvCell(value: unknown): string {
   return `"${String(value ?? "").replace(/"/g, "\"\"")}"`;
+}
+
+function compareText(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base" });
+}
+
+function getSortText(row: SupportCaseSummary, key: SortKey): string {
+  if (key === "type") {
+    return isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback";
+  }
+
+  if (key === "org") {
+    return row.org?.name ?? row.org?.id ?? "";
+  }
+
+  if (key === "user") {
+    return `${row.user.email} ${row.user.id}`;
+  }
+
+  if (key === "scenario") {
+    return `${row.scenarioTitle ?? ""} ${row.segmentLabel ?? ""}`;
+  }
+
+  if (key === "status") {
+    return row.status;
+  }
+
+  if (key === "transcript") {
+    return row.transcript.available ? "available" : "none";
+  }
+
+  return row.message;
+}
+
+function getCreatedAtMs(row: SupportCaseSummary): number {
+  const value = new Date(row.createdAt).getTime();
+  return Number.isNaN(value) ? 0 : value;
 }
 
 export default function SupportPage() {
   useRequireAdminToken();
   const mode = useAdminMode();
   const isPersonalMode = mode === "personal";
-  const initialFilters = useMemo(
-    () => ({
-      createdFrom: "",
-      createdTo: "",
-      type: "all" as "all" | "auto_error" | "user_feedback",
-      status: "all",
-      transcript: "all" as "all" | "available" | "none",
-      org: "",
-      user: "",
-      scenario: "",
-      message: "",
-    }),
-    [],
-  );
   const [payload, setPayload] = useState<SupportCaseListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [tableFilters, setTableFilters] = useState(initialFilters);
   const [exportFromDate, setExportFromDate] = useState("");
   const [exportToDate, setExportToDate] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("createdAt");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<SupportCaseDetail | null>(null);
@@ -155,12 +174,13 @@ export default function SupportPage() {
     setSelectedDetail(null);
     setDetailError(null);
     setDetailLoading(false);
-    setTableFilters(initialFilters);
     setExportFromDate("");
     setExportToDate("");
     setExportError(null);
     setExportNotice(null);
-  }, [initialFilters, isPersonalMode]);
+    setSortKey("createdAt");
+    setSortDirection("desc");
+  }, [isPersonalMode]);
 
   const rowsByMode = useMemo(
     () =>
@@ -170,57 +190,36 @@ export default function SupportPage() {
     [isPersonalMode, payload],
   );
 
-  const statusOptions = useMemo(() => {
-    return Array.from(new Set(rowsByMode.map((row) => row.status).filter(Boolean))).sort((a, b) =>
-      a.localeCompare(b),
-    );
-  }, [rowsByMode]);
-
-  const filteredRows = useMemo(() => {
-    return rowsByMode.filter((row) => {
-      if (!withinDateRange(row.createdAt, tableFilters.createdFrom, tableFilters.createdTo)) {
-        return false;
+  const rows = useMemo(() => {
+    const sorted = [...rowsByMode];
+    sorted.sort((a, b) => {
+      if (sortKey === "createdAt") {
+        const diff = getCreatedAtMs(a) - getCreatedAtMs(b);
+        if (diff !== 0) {
+          return sortDirection === "asc" ? diff : -diff;
+        }
+        return b.id.localeCompare(a.id);
       }
 
-      const isAuto = isAutoErrorCase(row.message);
-      if (tableFilters.type === "auto_error" && !isAuto) {
-        return false;
-      }
-      if (tableFilters.type === "user_feedback" && isAuto) {
-        return false;
+      const textDiff = compareText(getSortText(a, sortKey), getSortText(b, sortKey));
+      if (textDiff !== 0) {
+        return sortDirection === "asc" ? textDiff : -textDiff;
       }
 
-      if (tableFilters.status !== "all" && row.status !== tableFilters.status) {
-        return false;
-      }
-
-      if (tableFilters.transcript === "available" && !row.transcript.available) {
-        return false;
-      }
-      if (tableFilters.transcript === "none" && row.transcript.available) {
-        return false;
-      }
-
-      if (!includesIgnoreCase(row.user.email, tableFilters.user) && !includesIgnoreCase(row.user.id, tableFilters.user)) {
-        return false;
-      }
-
-      const scenarioCombined = [row.scenarioTitle ?? "", row.segmentLabel ?? ""].join(" ");
-      if (!includesIgnoreCase(scenarioCombined, tableFilters.scenario)) {
-        return false;
-      }
-
-      if (!includesIgnoreCase(row.message, tableFilters.message)) {
-        return false;
-      }
-
-      if (!isPersonalMode && !includesIgnoreCase(row.org?.name, tableFilters.org) && !includesIgnoreCase(row.org?.id, tableFilters.org)) {
-        return false;
-      }
-
-      return true;
+      return getCreatedAtMs(b) - getCreatedAtMs(a);
     });
-  }, [isPersonalMode, rowsByMode, tableFilters]);
+    return sorted;
+  }, [rowsByMode, sortDirection, sortKey]);
+
+  const setSort = (nextKey: SortKey) => {
+    if (sortKey === nextKey) {
+      setSortDirection((previous) => (previous === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortKey(nextKey);
+    setSortDirection(nextKey === "createdAt" ? "desc" : "asc");
+  };
 
   const downloadCsv = () => {
     setExporting(true);
@@ -290,10 +289,6 @@ export default function SupportPage() {
     }
   };
 
-  const clearFilters = () => {
-    setTableFilters(initialFilters);
-  };
-
   const openCase = async (caseId: string) => {
     setSelectedCaseId(caseId);
     setSelectedDetail(null);
@@ -317,12 +312,19 @@ export default function SupportPage() {
     setDetailLoading(false);
   };
 
+  const renderSortButton = (label: string, key: SortKey) => (
+    <button type="button" className="sort-button" onClick={() => setSort(key)}>
+      {label}
+      <span className="sort-indicator">{sortKey === key ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+    </button>
+  );
+
   return (
     <AdminShell title={isPersonalMode ? "Feedback / Error Support (Personal)" : "Feedback / Error Support (Enterprise)"}>
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div className="card-header">
           <div>
-            <p className="small" style={{ marginTop: 0 }}>
+            <p className="small">
               Generated: {payload?.generatedAt ? new Date(payload.generatedAt).toLocaleString() : "-"}
             </p>
             <p className="small" style={{ marginBottom: 0 }}>
@@ -331,8 +333,8 @@ export default function SupportPage() {
                 : "Showing support cases submitted by enterprise users."}
             </p>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-            <div style={{ minWidth: 140 }}>
+          <div className="card-actions">
+            <div style={{ minWidth: 150 }}>
               <label>Export From</label>
               <input
                 type="date"
@@ -340,7 +342,7 @@ export default function SupportPage() {
                 onChange={(event) => setExportFromDate(event.target.value)}
               />
             </div>
-            <div style={{ minWidth: 140 }}>
+            <div style={{ minWidth: 150 }}>
               <label>Export To</label>
               <input
                 type="date"
@@ -360,195 +362,77 @@ export default function SupportPage() {
         {exportError ? <p className="error">{exportError}</p> : null}
         {exportNotice ? <p className="success">{exportNotice}</p> : null}
 
-        <div
-          style={{
-            marginBottom: 12,
-            border: "1px solid rgba(129, 206, 166, 0.2)",
-            borderRadius: 10,
-            padding: 10,
-            background: "rgba(5, 30, 18, 0.42)",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <h4 style={{ margin: 0 }}>Table Filters</h4>
-            <button type="button" onClick={clearFilters}>
-              Clear Filters
-            </button>
-          </div>
-          <div className="grid" style={{ marginTop: 10 }}>
-            <div>
-              <label>Created From</label>
-              <input
-                type="date"
-                value={tableFilters.createdFrom}
-                onChange={(event) =>
-                  setTableFilters((previous) => ({ ...previous, createdFrom: event.target.value }))
-                }
-              />
-            </div>
-            <div>
-              <label>Created To</label>
-              <input
-                type="date"
-                value={tableFilters.createdTo}
-                onChange={(event) =>
-                  setTableFilters((previous) => ({ ...previous, createdTo: event.target.value }))
-                }
-              />
-            </div>
-            <div>
-              <label>Type</label>
-              <select
-                value={tableFilters.type}
-                onChange={(event) =>
-                  setTableFilters((previous) => ({
-                    ...previous,
-                    type: event.target.value as "all" | "auto_error" | "user_feedback",
-                  }))
-                }
-              >
-                <option value="all">All</option>
-                <option value="auto_error">Auto Error</option>
-                <option value="user_feedback">User Feedback</option>
-              </select>
-            </div>
-            <div>
-              <label>Status</label>
-              <select
-                value={tableFilters.status}
-                onChange={(event) => setTableFilters((previous) => ({ ...previous, status: event.target.value }))}
-              >
-                <option value="all">All</option>
-                {statusOptions.map((status) => (
-                  <option key={status} value={status}>
-                    {status}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label>Transcript</label>
-              <select
-                value={tableFilters.transcript}
-                onChange={(event) =>
-                  setTableFilters((previous) => ({
-                    ...previous,
-                    transcript: event.target.value as "all" | "available" | "none",
-                  }))
-                }
-              >
-                <option value="all">All</option>
-                <option value="available">Available</option>
-                <option value="none">None</option>
-              </select>
-            </div>
-            {!isPersonalMode ? (
-              <div>
-                <label>Org</label>
-                <input
-                  value={tableFilters.org}
-                  onChange={(event) => setTableFilters((previous) => ({ ...previous, org: event.target.value }))}
-                  placeholder="Name or ID"
-                />
-              </div>
-            ) : null}
-            <div>
-              <label>User</label>
-              <input
-                value={tableFilters.user}
-                onChange={(event) => setTableFilters((previous) => ({ ...previous, user: event.target.value }))}
-                placeholder="Email or ID"
-              />
-            </div>
-            <div>
-              <label>Scenario</label>
-              <input
-                value={tableFilters.scenario}
-                onChange={(event) =>
-                  setTableFilters((previous) => ({ ...previous, scenario: event.target.value }))
-                }
-                placeholder="Title or segment"
-              />
-            </div>
-            <div>
-              <label>Message</label>
-              <input
-                value={tableFilters.message}
-                onChange={(event) => setTableFilters((previous) => ({ ...previous, message: event.target.value }))}
-                placeholder="Contains text..."
-              />
-            </div>
-          </div>
-          <p className="small" style={{ marginBottom: 0 }}>
-            Showing {filteredRows.length} of {rowsByMode.length} case(s).
-          </p>
-        </div>
+        <p className="small" style={{ marginBottom: 0 }}>
+          Click column headers to sort.
+        </p>
 
-        <table>
-          <thead>
-            <tr>
-              <th>Created</th>
-              <th>Type</th>
-              {isPersonalMode ? null : <th>Org</th>}
-              <th>User</th>
-              <th>Scenario</th>
-              <th>Status</th>
-              <th>Transcript</th>
-              <th>Message</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {filteredRows.map((row) => (
-              <tr key={row.id}>
-                <td>
-                  <div>{new Date(row.createdAt).toLocaleString()}</div>
-                  <div className="small">{row.id}</div>
-                </td>
-                <td>{isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback"}</td>
-                {isPersonalMode ? null : <td>{row.org?.name ?? "-"}</td>}
-                <td>
-                  <div>{row.user.email}</div>
-                  <div className="small">{row.user.id}</div>
-                </td>
-                <td>
-                  <div>{row.scenarioTitle ?? "-"}</div>
-                  <div className="small">{row.segmentLabel ?? ""}</div>
-                </td>
-                <td>{row.status}</td>
-                <td>
-                  {row.transcript.available ? (
-                    <div>
-                      <div>available</div>
-                      <div className="small">
-                        Expires: {row.transcript.expiresAt ? new Date(row.transcript.expiresAt).toLocaleString() : "-"}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="small">none</div>
-                  )}
-                </td>
-                <td style={{ maxWidth: 360 }}>
-                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.message}>
-                    {row.message}
-                  </div>
-                </td>
-                <td>
-                  <button type="button" onClick={() => void openCase(row.id)}>
-                    View
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {filteredRows.length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={isPersonalMode ? 8 : 9} className="small">
-                  {rowsByMode.length === 0 ? "No cases yet." : "No cases match current filters."}
-                </td>
+                <th>{renderSortButton("Created", "createdAt")}</th>
+                <th>{renderSortButton("Type", "type")}</th>
+                {isPersonalMode ? null : <th>{renderSortButton("Org", "org")}</th>}
+                <th>{renderSortButton("User", "user")}</th>
+                <th>{renderSortButton("Scenario", "scenario")}</th>
+                <th>{renderSortButton("Status", "status")}</th>
+                <th>{renderSortButton("Transcript", "transcript")}</th>
+                <th>{renderSortButton("Message", "message")}</th>
+                <th>Actions</th>
               </tr>
-            ) : null}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <div>{new Date(row.createdAt).toLocaleString()}</div>
+                    <div className="small">{row.id}</div>
+                  </td>
+                  <td>{isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback"}</td>
+                  {isPersonalMode ? null : <td>{row.org?.name ?? "-"}</td>}
+                  <td>
+                    <div>{row.user.email}</div>
+                    <div className="small">{row.user.id}</div>
+                  </td>
+                  <td>
+                    <div>{row.scenarioTitle ?? "-"}</div>
+                    <div className="small">{row.segmentLabel ?? ""}</div>
+                  </td>
+                  <td>{row.status}</td>
+                  <td>
+                    {row.transcript.available ? (
+                      <div>
+                        <div>available</div>
+                        <div className="small">
+                          Expires: {row.transcript.expiresAt ? new Date(row.transcript.expiresAt).toLocaleString() : "-"}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="small">none</div>
+                    )}
+                  </td>
+                  <td style={{ maxWidth: 380 }}>
+                    <div className="truncate" title={row.message}>
+                      {row.message}
+                    </div>
+                  </td>
+                  <td>
+                    <button type="button" onClick={() => void openCase(row.id)}>
+                      View
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={isPersonalMode ? 8 : 9} className="small">
+                    No cases yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {selectedCaseId ? (
@@ -577,9 +461,11 @@ export default function SupportPage() {
             }}
             onClick={(event) => event.stopPropagation()}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-              <h3 style={{ margin: 0 }}>Case {selectedCaseId}</h3>
-              <button onClick={() => closeModal()}>Close</button>
+            <div className="card-header">
+              <h3>Case {selectedCaseId}</h3>
+              <div className="card-actions">
+                <button onClick={() => closeModal()}>Close</button>
+              </div>
             </div>
 
             {detailLoading ? <p className="small">Loading case details...</p> : null}

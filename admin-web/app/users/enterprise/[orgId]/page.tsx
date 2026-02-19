@@ -270,12 +270,12 @@ export default function EnterpriseOrgPage() {
   return (
     <AdminShell title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}>
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div className="card-header">
           <div>
             <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
             <div className="small">{dashboard?.org.id ?? ""}</div>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="card-actions">
             <Link className="button" href={withAdminMode("/users", mode)}>
               Back to Accounts
             </Link>
@@ -289,45 +289,47 @@ export default function EnterpriseOrgPage() {
         {successMessage ? <p className="success">{successMessage}</p> : null}
 
         {dashboard ? (
-          <div className="grid" style={{ marginTop: 10 }}>
-            <div>
-              <label>Date Established</label>
-              <div>{formatDate(dashboard.org.createdAt)}</div>
+          <>
+            <div className="grid" style={{ marginTop: 10 }}>
+              <div>
+                <label>Date Established</label>
+                <div>{formatDate(dashboard.org.createdAt)}</div>
+              </div>
+              <div>
+                <label>Next Renewal Date</label>
+                <div>{formatDate(dashboard.billingPeriod.nextRenewalAt)}</div>
+              </div>
+              <div>
+                <label>Company Contact</label>
+                <div>{dashboard.org.contactName}</div>
+              </div>
+              <div>
+                <label>Contact Email</label>
+                <div>{dashboard.org.contactEmail}</div>
+              </div>
+              <div>
+                <label>Email Domain</label>
+                <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
+              </div>
+              <div>
+                <label>Join Code</label>
+                <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <label>Segments Active</label>
+                <div>{segmentsActiveLabel}</div>
+                <div className="small">
+                  Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
+                  {formatDate(dashboard.billingPeriod.periodEndAt)}
+                </div>
+              </div>
             </div>
-            <div>
-              <label>Next Renewal Date</label>
-              <div>{formatDate(dashboard.billingPeriod.nextRenewalAt)}</div>
-            </div>
-            <div>
-              <label>Company Contact</label>
-              <div>{dashboard.org.contactName}</div>
-            </div>
-            <div>
-              <label>Contact Email</label>
-              <div>{dashboard.org.contactEmail}</div>
-            </div>
-            <div>
-              <label>Email Domain</label>
-              <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
-            </div>
-            <div>
-              <label>Join Code</label>
-              <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
-            </div>
-            <div style={{ alignSelf: "end" }}>
+            <div className="form-actions">
               <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
                 {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
               </button>
             </div>
-            <div style={{ gridColumn: "1 / -1" }}>
-              <label>Segments Active</label>
-              <div>{segmentsActiveLabel}</div>
-              <div className="small">
-                Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
-                {formatDate(dashboard.billingPeriod.periodEndAt)}
-              </div>
-            </div>
-          </div>
+          </>
         ) : null}
       </div>
 
@@ -376,73 +378,75 @@ export default function EnterpriseOrgPage() {
         <p className="small" style={{ marginTop: 0 }}>
           Usage shown is billed time within the current monthly billing period.
         </p>
-        <table>
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Locked Out</th>
-              <th>Usage This Billing Period</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(dashboard?.users ?? []).length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={5} className="small">
-                  {loading ? "Loading..." : "No users found for this enterprise account."}
-                </td>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Locked Out</th>
+                <th>Usage This Billing Period</th>
+                <th>Actions</th>
               </tr>
-            ) : (
-              (dashboard?.users ?? []).map((user) => (
-                <tr key={user.userId}>
-                  <td>
-                    <div>{user.email}</div>
-                    <div className="small">{user.userId}</div>
-                  </td>
-                  <td>
-                    <select
-                      value={user.orgRole}
-                      disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                      onChange={(event) => {
-                        void patchEnterpriseUser(user.userId, { orgRole: event.target.value as OrgUserRole });
-                      }}
-                    >
-                      {ORG_USER_ROLES.map((role) => (
-                        <option key={role} value={role}>
-                          {ORG_USER_ROLE_LABELS[role]}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <select
-                      value={user.status}
-                      disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                      onChange={(event) => {
-                        void patchEnterpriseUser(user.userId, { status: event.target.value as UserStatus });
-                      }}
-                    >
-                      <option value="active">Active</option>
-                      <option value="disabled">Locked</option>
-                    </select>
-                  </td>
-                  <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="danger"
-                      disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                      onClick={() => void deleteEnterpriseUser(user.userId, user.email)}
-                    >
-                      {deletingUserId === user.userId ? "Deleting..." : "Delete"}
-                    </button>
+            </thead>
+            <tbody>
+              {(dashboard?.users ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="small">
+                    {loading ? "Loading..." : "No users found for this enterprise account."}
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                (dashboard?.users ?? []).map((user) => (
+                  <tr key={user.userId}>
+                    <td>
+                      <div>{user.email}</div>
+                      <div className="small">{user.userId}</div>
+                    </td>
+                    <td>
+                      <select
+                        value={user.orgRole}
+                        disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                        onChange={(event) => {
+                          void patchEnterpriseUser(user.userId, { orgRole: event.target.value as OrgUserRole });
+                        }}
+                      >
+                        {ORG_USER_ROLES.map((role) => (
+                          <option key={role} value={role}>
+                            {ORG_USER_ROLE_LABELS[role]}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={user.status}
+                        disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                        onChange={(event) => {
+                          void patchEnterpriseUser(user.userId, { status: event.target.value as UserStatus });
+                        }}
+                      >
+                        <option value="active">Active</option>
+                        <option value="disabled">Locked</option>
+                      </select>
+                    </td>
+                    <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                        onClick={() => void deleteEnterpriseUser(user.userId, user.email)}
+                      >
+                        {deletingUserId === user.userId ? "Deleting..." : "Delete"}
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </AdminShell>
   );

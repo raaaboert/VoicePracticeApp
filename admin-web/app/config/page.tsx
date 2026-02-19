@@ -119,77 +119,83 @@ export default function ConfigPage() {
         <h3>Tier Limits and Pricing</h3>
         {error ? <p className="error">{error}</p> : null}
         {success ? <p className="success">{success}</p> : null}
-        <table>
-          <thead>
-            <tr>
-              <th>Tier</th>
-              <th>Price (USD/mo)</th>
-              <th>Daily Limit (minutes)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {config.tiers.map((tier) => (
-              <tr key={tier.id}>
-                <td>{tier.label}</td>
-                <td>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min={0}
-                    value={tier.priceUsdMonthly}
-                    onChange={(event) => updateTierPrice(tier.id, Math.max(0, Number(event.target.value) || 0))}
-                    disabled={tier.id === "enterprise"}
-                  />
-                </td>
-                <td>
-                  {tier.dailySecondsLimit === null ? (
-                    <span className="small">Managed by enterprise org quota</span>
-                  ) : (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Price (USD/mo)</th>
+                <th>Daily Limit (minutes)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {config.tiers.map((tier) => (
+                <tr key={tier.id}>
+                  <td>{tier.label}</td>
+                  <td>
                     <input
                       type="number"
+                      step="0.01"
                       min={0}
-                      value={Math.floor(tier.dailySecondsLimit / 60)}
-                      onChange={(event) =>
-                        updateTierDailyLimit(tier.id, Math.max(0, Number(event.target.value) || 0) * 60)
-                      }
+                      value={tier.priceUsdMonthly}
+                      onChange={(event) => updateTierPrice(tier.id, Math.max(0, Number(event.target.value) || 0))}
+                      disabled={tier.id === "enterprise"}
                     />
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                  </td>
+                  <td>
+                    {tier.dailySecondsLimit === null ? (
+                      <span className="small">Managed by enterprise org quota</span>
+                    ) : (
+                      <input
+                        type="number"
+                        min={0}
+                        value={Math.floor(tier.dailySecondsLimit / 60)}
+                        onChange={(event) =>
+                          updateTierDailyLimit(tier.id, Math.max(0, Number(event.target.value) || 0) * 60)
+                        }
+                      />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
-        <button className="primary" onClick={() => void saveConfig()} disabled={saving} style={{ marginTop: 12 }}>
-          {saving ? "Saving..." : "Save Config"}
-        </button>
+        <div className="form-actions">
+          <button className="primary" onClick={() => void saveConfig()} disabled={saving}>
+            {saving ? "Saving..." : "Save Config"}
+          </button>
+        </div>
       </div>
 
       <div className="card">
         <h3>Admin Password</h3>
         <p className="small">Set the API-admin password used for admin login. Dev only in Phase 1.</p>
-        <form onSubmit={onChangePassword} className="grid">
-          <div>
-            <label>Current Password</label>
-            <input
-              type="password"
-              value={currentPassword}
-              onChange={(event) => setCurrentPassword(event.target.value)}
-              required
-            />
+        <form onSubmit={onChangePassword}>
+          <div className="grid">
+            <div>
+              <label>Current Password</label>
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <label>New Password</label>
+              <input
+                type="password"
+                minLength={8}
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                required
+              />
+            </div>
           </div>
-          <div>
-            <label>New Password</label>
-            <input
-              type="password"
-              minLength={8}
-              value={newPassword}
-              onChange={(event) => setNewPassword(event.target.value)}
-              required
-            />
-          </div>
-          <div style={{ alignSelf: "end" }}>
-            <button className="primary">Change Password</button>
+          <div className="form-actions">
+            <button className="primary" type="submit">Change Password</button>
           </div>
         </form>
         {passwordStatus ? <p className="small">{passwordStatus}</p> : null}

@@ -203,11 +203,13 @@ export default function UsersPage() {
     <AdminShell title="Accounts">
       {isPersonalMode ? null : (
         <div className="card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <h3 style={{ marginBottom: 0 }}>Create Enterprise Account</h3>
-            <button onClick={() => void downloadAccountsCsv()} disabled={exporting}>
-              {exporting ? "Exporting..." : "Download Accounts Data CSV"}
-            </button>
+          <div className="card-header">
+            <h3>Create Enterprise Account</h3>
+            <div className="card-actions">
+              <button onClick={() => void downloadAccountsCsv()} disabled={exporting}>
+                {exporting ? "Exporting..." : "Download Accounts Data CSV"}
+              </button>
+            </div>
           </div>
           <form onSubmit={onCreateEnterpriseOrg} className="grid">
             <div>
@@ -240,12 +242,14 @@ export default function UsersPage() {
                 placeholder="example.com"
               />
             </div>
-            <div style={{ alignSelf: "end" }}>
+          </form>
+          <div className="form-actions">
+            <div>
               <button className="primary" disabled={creating}>
                 {creating ? "Creating..." : "Create Enterprise Account"}
               </button>
             </div>
-          </form>
+          </div>
           <p className="small" style={{ marginBottom: 0 }}>
             Default industry enabled: {defaultIndustryLabel}. Configure more on the account detail screen.
           </p>
@@ -264,104 +268,112 @@ export default function UsersPage() {
 
       {isPersonalMode ? null : (
         <div className="card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-            <h3 style={{ marginBottom: 0 }}>Enterprise Accounts ({orgs.length})</h3>
-            <button onClick={() => void load()}>Refresh</button>
+          <div className="card-header">
+            <h3>Enterprise Accounts ({orgs.length})</h3>
+            <div className="card-actions">
+              <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
+            </div>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Company Name</th>
-                <th>Date Established</th>
-                <th>Next Renewal Date</th>
-                <th>Company Contact</th>
-                <th>Contact Email</th>
-                <th>Domain</th>
-                <th>Join Code</th>
-                <th>Segments Active</th>
-              </tr>
-            </thead>
-            <tbody>
-              {enterpriseOrgsSorted.length === 0 ? (
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
                 <tr>
-                  <td colSpan={8} className="small">
-                    No enterprise accounts yet.
-                  </td>
+                  <th>Company Name</th>
+                  <th>Date Established</th>
+                  <th>Next Renewal Date</th>
+                  <th>Company Contact</th>
+                  <th>Contact Email</th>
+                  <th>Domain</th>
+                  <th>Join Code</th>
+                  <th>Segments Active</th>
                 </tr>
-              ) : (
-                enterpriseOrgsSorted.map((org) => {
-                  const nextRenewalAt = computeNextRenewalAt(org.contractSignedAt || org.createdAt, new Date());
-                  const segmentsActive =
-                    Array.isArray(org.activeIndustries) && org.activeIndustries.length > 0
-                      ? org.activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")
-                      : "-";
+              </thead>
+              <tbody>
+                {enterpriseOrgsSorted.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="small">
+                      No enterprise accounts yet.
+                    </td>
+                  </tr>
+                ) : (
+                  enterpriseOrgsSorted.map((org) => {
+                    const nextRenewalAt = computeNextRenewalAt(org.contractSignedAt || org.createdAt, new Date());
+                    const segmentsActive =
+                      Array.isArray(org.activeIndustries) && org.activeIndustries.length > 0
+                        ? org.activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")
+                        : "-";
 
-                  return (
-                    <tr key={org.id}>
-                      <td>
-                        <Link href={withAdminMode(`/users/enterprise/${org.id}`, mode)} style={{ textDecoration: "underline" }}>
-                          {org.name}
-                        </Link>
-                        <div className="small">{org.id}</div>
-                      </td>
-                      <td>{formatDate(org.createdAt)}</td>
-                      <td>{formatDate(nextRenewalAt)}</td>
-                      <td>{org.contactName}</td>
-                      <td>{org.contactEmail}</td>
-                      <td>{org.emailDomain ?? "-"}</td>
-                      <td>
-                        <code>{org.joinCode}</code>
-                      </td>
-                      <td>{segmentsActive}</td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+                    return (
+                      <tr key={org.id}>
+                        <td>
+                          <Link href={withAdminMode(`/users/enterprise/${org.id}`, mode)} style={{ textDecoration: "underline" }}>
+                            {org.name}
+                          </Link>
+                          <div className="small">{org.id}</div>
+                        </td>
+                        <td>{formatDate(org.createdAt)}</td>
+                        <td>{formatDate(nextRenewalAt)}</td>
+                        <td>{org.contactName}</td>
+                        <td>{org.contactEmail}</td>
+                        <td>{org.emailDomain ?? "-"}</td>
+                        <td>
+                          <code>{org.joinCode}</code>
+                        </td>
+                        <td>{segmentsActive}</td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
       {isPersonalMode ? (
         <div className="card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-            <h3 style={{ marginBottom: 10 }}>Personal Users ({personalUsers.length})</h3>
-            <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
+          <div className="card-header">
+            <h3>Personal Users ({personalUsers.length})</h3>
+            <div className="card-actions">
+              <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
+            </div>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Tier</th>
-                <th>Status</th>
-                <th>Verified</th>
-                <th>Created</th>
-                <th>User Id</th>
-              </tr>
-            </thead>
-            <tbody>
-              {personalUsers.length === 0 ? (
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
                 <tr>
-                  <td colSpan={6} className="small">
-                    No individual users yet.
-                  </td>
+                  <th>Email</th>
+                  <th>Tier</th>
+                  <th>Status</th>
+                  <th>Verified</th>
+                  <th>Created</th>
+                  <th>User Id</th>
                 </tr>
-              ) : (
-                personalUsers.map((user) => (
-                  <tr key={user.id}>
-                    <td>{user.email}</td>
-                    <td>{user.tier}</td>
-                    <td>{user.status}</td>
-                    <td>{user.emailVerifiedAt ? "Yes" : "No"}</td>
-                    <td>{formatDateTime(user.createdAt)}</td>
-                    <td>
-                      <span className="small">{user.id}</span>
+              </thead>
+              <tbody>
+                {personalUsers.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="small">
+                      No individual users yet.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  personalUsers.map((user) => (
+                    <tr key={user.id}>
+                      <td>{user.email}</td>
+                      <td>{user.tier}</td>
+                      <td>{user.status}</td>
+                      <td>{user.emailVerifiedAt ? "Yes" : "No"}</td>
+                      <td>{formatDateTime(user.createdAt)}</td>
+                      <td>
+                        <span className="small">{user.id}</span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : null}
 

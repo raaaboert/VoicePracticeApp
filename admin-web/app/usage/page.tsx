@@ -96,15 +96,7 @@ export default function UsagePage() {
   return (
     <AdminShell title={isPersonalMode ? "Usage (Personal)" : "Usage (Enterprise)"}>
       <div className="card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="card-header">
           <div style={{ flex: "1 1 520px", minWidth: 280 }}>
             <p className="small" style={{ marginTop: 0 }}>
               Basic monthly usage rollup. Generated:{" "}
@@ -146,44 +138,48 @@ export default function UsagePage() {
             )}
           </div>
 
-          <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
+          <div className="card-actions">
+            <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
+          </div>
         </div>
         {error ? <p className="error">{error}</p> : null}
-        <table>
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Tier</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Minutes Today</th>
-              <th>Minutes This Month</th>
-              <th>Tokens Today</th>
-              <th>Tokens This Month</th>
-              <th>Daily Remaining</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredRows.map((row) => (
-              <tr key={row.userId}>
-                <td>
-                  <div>{row.email}</div>
-                  <div className="small">{row.userId}</div>
-                </td>
-                <td>{row.tier}</td>
-                <td>{row.accountType}</td>
-                <td>{row.status}</td>
-                <td>{row.minutesUsedToday}</td>
-                <td>{row.minutesUsedThisMonth}</td>
-                <td>{row.tokensUsedToday}</td>
-                <td>{row.tokensUsedThisMonth}</td>
-                <td>
-                  {row.dailySecondsRemaining === null ? "unlimited" : `${Math.floor(row.dailySecondsRemaining / 60)}m`}
-                </td>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Tier</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Minutes Today</th>
+                <th>Minutes This Month</th>
+                <th>Tokens Today</th>
+                <th>Tokens This Month</th>
+                <th>Daily Remaining</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filteredRows.map((row) => (
+                <tr key={row.userId}>
+                  <td>
+                    <div>{row.email}</div>
+                    <div className="small">{row.userId}</div>
+                  </td>
+                  <td>{row.tier}</td>
+                  <td>{row.accountType}</td>
+                  <td>{row.status}</td>
+                  <td>{row.minutesUsedToday}</td>
+                  <td>{row.minutesUsedThisMonth}</td>
+                  <td>{row.tokensUsedToday}</td>
+                  <td>{row.tokensUsedThisMonth}</td>
+                  <td>
+                    {row.dailySecondsRemaining === null ? "unlimited" : `${Math.floor(row.dailySecondsRemaining / 60)}m`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </AdminShell>
   );

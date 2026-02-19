@@ -159,13 +159,15 @@ export default function StatsPage() {
             </select>
           </div>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 10 }}>
+        <div className="card-header" style={{ marginTop: 10, marginBottom: 0 }}>
           <p className="small" style={{ margin: 0 }}>
             Generated: {stats?.generatedAt ? formatDateTime(stats.generatedAt) : "-"}
           </p>
-          <button onClick={() => void load()} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh"}
-          </button>
+          <div className="card-actions">
+            <button onClick={() => void load()} disabled={loading}>
+              {loading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
         {error ? <p className="error">{error}</p> : null}
       </div>
@@ -199,142 +201,150 @@ export default function StatsPage() {
         <p className="small" style={{ marginTop: 0 }}>
           Shows sessions, billed usage, and average score by day.
         </p>
-        <table>
-          <thead>
-            <tr>
-              <th>Day</th>
-              <th>Sessions</th>
-              <th>Billed</th>
-              <th>Avg Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(stats?.trendByDay ?? []).length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={4} className="small">
-                  No data in this period.
-                </td>
+                <th>Day</th>
+                <th>Sessions</th>
+                <th>Billed</th>
+                <th>Avg Score</th>
               </tr>
-            ) : (
-              (stats?.trendByDay ?? []).map((row) => (
-                <tr key={row.dayKey}>
-                  <td>{row.dayKey}</td>
-                  <td>{row.sessions}</td>
-                  <td>{formatSecondsAsClock(row.billedSeconds)}</td>
-                  <td>{formatScore(row.avgOverallScore)}</td>
+            </thead>
+            <tbody>
+              {(stats?.trendByDay ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="small">
+                    No data in this period.
+                  </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                (stats?.trendByDay ?? []).map((row) => (
+                  <tr key={row.dayKey}>
+                    <td>{row.dayKey}</td>
+                    <td>{row.sessions}</td>
+                    <td>{formatSecondsAsClock(row.billedSeconds)}</td>
+                    <td>{formatScore(row.avgOverallScore)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">
         <h3>By Enterprise Account</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Account</th>
-              <th>Sessions</th>
-              <th>Billed</th>
-              <th>Avg Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(stats?.byOrg ?? []).length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={4} className="small">
-                  No data in this period.
-                </td>
+                <th>Account</th>
+                <th>Sessions</th>
+                <th>Billed</th>
+                <th>Avg Score</th>
               </tr>
-            ) : (
-              (stats?.byOrg ?? []).map((row) => (
-                <tr key={row.orgId}>
-                  <td>
-                    <div>{row.orgName}</div>
-                    <div className="small">{row.orgId}</div>
+            </thead>
+            <tbody>
+              {(stats?.byOrg ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="small">
+                    No data in this period.
                   </td>
-                  <td>{row.sessions}</td>
-                  <td>{formatSecondsAsClock(row.billedSeconds)}</td>
-                  <td>{formatScore(row.avgOverallScore)}</td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                (stats?.byOrg ?? []).map((row) => (
+                  <tr key={row.orgId}>
+                    <td>
+                      <div>{row.orgName}</div>
+                      <div className="small">{row.orgId}</div>
+                    </td>
+                    <td>{row.sessions}</td>
+                    <td>{formatSecondsAsClock(row.billedSeconds)}</td>
+                    <td>{formatScore(row.avgOverallScore)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">
         <h3>By Segment</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Segment</th>
-              <th>Sessions</th>
-              <th>Billed</th>
-              <th>Avg Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(stats?.bySegment ?? []).length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={4} className="small">
-                  No data in this period.
-                </td>
+                <th>Segment</th>
+                <th>Sessions</th>
+                <th>Billed</th>
+                <th>Avg Score</th>
               </tr>
-            ) : (
-              (stats?.bySegment ?? []).map((row) => (
-                <tr key={row.segmentId}>
-                  <td>
-                    <div>{row.segmentLabel}</div>
-                    <div className="small">{row.segmentId}</div>
+            </thead>
+            <tbody>
+              {(stats?.bySegment ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="small">
+                    No data in this period.
                   </td>
-                  <td>{row.sessions}</td>
-                  <td>{formatSecondsAsClock(row.billedSeconds)}</td>
-                  <td>{formatScore(row.avgOverallScore)}</td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                (stats?.bySegment ?? []).map((row) => (
+                  <tr key={row.segmentId}>
+                    <td>
+                      <div>{row.segmentLabel}</div>
+                      <div className="small">{row.segmentId}</div>
+                    </td>
+                    <td>{row.sessions}</td>
+                    <td>{formatSecondsAsClock(row.billedSeconds)}</td>
+                    <td>{formatScore(row.avgOverallScore)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">
         <h3>Top Users (By Avg Score)</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Enterprise Account</th>
-              <th>Sessions</th>
-              <th>Avg Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(stats?.topUsers ?? []).length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={4} className="small">
-                  No score data in this period.
-                </td>
+                <th>User</th>
+                <th>Enterprise Account</th>
+                <th>Sessions</th>
+                <th>Avg Score</th>
               </tr>
-            ) : (
-              (stats?.topUsers ?? []).map((row) => (
-                <tr key={row.userId}>
-                  <td>
-                    <div>{row.email}</div>
-                    <div className="small">{row.userId}</div>
+            </thead>
+            <tbody>
+              {(stats?.topUsers ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="small">
+                    No score data in this period.
                   </td>
-                  <td>
-                    <div>{row.orgName ?? "-"}</div>
-                    <div className="small">{row.orgId ?? ""}</div>
-                  </td>
-                  <td>{row.sessions}</td>
-                  <td>{formatScore(row.avgOverallScore)}</td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                (stats?.topUsers ?? []).map((row) => (
+                  <tr key={row.userId}>
+                    <td>
+                      <div>{row.email}</div>
+                      <div className="small">{row.userId}</div>
+                    </td>
+                    <td>
+                      <div>{row.orgName ?? "-"}</div>
+                      <div className="small">{row.orgId ?? ""}</div>
+                    </td>
+                    <td>{row.sessions}</td>
+                    <td>{formatScore(row.avgOverallScore)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </AdminShell>
   );

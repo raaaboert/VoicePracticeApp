@@ -182,18 +182,20 @@ export function AdminShell({ title, children }: AdminShellProps) {
     <main>
       <div className="shell">
         <div className="topbar">
-          <div className="brand">VoicePractice Admin</div>
-          <div className="mode-toggle" role="tablist" aria-label="Admin mode">
-            <button type="button" className={mode === "personal" ? "active" : ""} onClick={() => switchMode("personal")}>
-              Personal
-            </button>
-            <button
-              type="button"
-              className={mode === "enterprise" ? "active" : ""}
-              onClick={() => switchMode("enterprise")}
-            >
-              Enterprise
-            </button>
+          <div className="topbar-main">
+            <div className="brand">VoicePractice Admin</div>
+            <div className="mode-toggle" role="tablist" aria-label="Admin mode">
+              <button type="button" className={mode === "personal" ? "active" : ""} onClick={() => switchMode("personal")}>
+                Personal
+              </button>
+              <button
+                type="button"
+                className={mode === "enterprise" ? "active" : ""}
+                onClick={() => switchMode("enterprise")}
+              >
+                Enterprise
+              </button>
+            </div>
           </div>
           <div className="nav">
             {navItems.map((item) => (

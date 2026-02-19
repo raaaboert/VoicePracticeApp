@@ -227,13 +227,15 @@ export default function LogsPage() {
           </div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginTop: 12 }}>
+        <div className="card-header" style={{ marginTop: 12, marginBottom: 0 }}>
           <p className="small" style={{ margin: 0 }}>
             Generated: {payload?.generatedAt ? formatDateTime(payload.generatedAt) : "-"}
           </p>
-          <button onClick={() => void load()} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh"}
-          </button>
+          <div className="card-actions">
+            <button onClick={() => void load()} disabled={loading}>
+              {loading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
 
         {error ? <p className="error">{error}</p> : null}
@@ -241,63 +243,65 @@ export default function LogsPage() {
 
       <div className="card">
         <h3 style={{ marginBottom: 8 }}>Audit Events ({rows.length})</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>When</th>
-              <th>Actor</th>
-              <th>Action</th>
-              <th>Enterprise Account</th>
-              <th>Target User</th>
-              <th>Message</th>
-              <th>Metadata</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan={7} className="small">
-                  No matching events.
-                </td>
+                <th>When</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Enterprise Account</th>
+                <th>Target User</th>
+                <th>Message</th>
+                <th>Metadata</th>
               </tr>
-            ) : (
-              rows.map((row) => (
-                <tr key={row.id}>
-                  <td>
-                    <div>{formatDateTime(row.createdAt)}</div>
-                    <div className="small">{row.id}</div>
-                  </td>
-                  <td>
-                    <div>{row.actorEmail ?? row.actorId ?? "-"}</div>
-                    <div className="small">{row.actorType}</div>
-                  </td>
-                  <td>
-                    <code>{row.action}</code>
-                  </td>
-                  <td>
-                    <div>{row.orgName ?? "-"}</div>
-                    <div className="small">{row.orgId ?? ""}</div>
-                  </td>
-                  <td>
-                    <div>{row.userEmail ?? "-"}</div>
-                    <div className="small">{row.userId ?? ""}</div>
-                  </td>
-                  <td style={{ maxWidth: 360 }}>{row.message}</td>
-                  <td>
-                    {row.metadata ? (
-                      <details>
-                        <summary>View</summary>
-                        <pre style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>{formatMetadata(row.metadata)}</pre>
-                      </details>
-                    ) : (
-                      <span className="small">-</span>
-                    )}
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="small">
+                    No matching events.
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                rows.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <div>{formatDateTime(row.createdAt)}</div>
+                      <div className="small">{row.id}</div>
+                    </td>
+                    <td>
+                      <div>{row.actorEmail ?? row.actorId ?? "-"}</div>
+                      <div className="small">{row.actorType}</div>
+                    </td>
+                    <td>
+                      <code>{row.action}</code>
+                    </td>
+                    <td>
+                      <div>{row.orgName ?? "-"}</div>
+                      <div className="small">{row.orgId ?? ""}</div>
+                    </td>
+                    <td>
+                      <div>{row.userEmail ?? "-"}</div>
+                      <div className="small">{row.userId ?? ""}</div>
+                    </td>
+                    <td style={{ maxWidth: 360 }}>{row.message}</td>
+                    <td>
+                      {row.metadata ? (
+                        <details>
+                          <summary>View</summary>
+                          <pre style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>{formatMetadata(row.metadata)}</pre>
+                        </details>
+                      ) : (
+                        <span className="small">-</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </AdminShell>
   );

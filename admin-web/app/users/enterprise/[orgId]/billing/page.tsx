@@ -158,12 +158,12 @@ export default function EnterpriseUsageBillingPage() {
   return (
     <AdminShell title={payload?.org.name ? `Usage/Billing: ${payload.org.name}` : "Usage/Billing"}>
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div className="card-header">
           <div>
             <h3 style={{ marginBottom: 6 }}>{payload?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
             <div className="small">{payload?.org.id ?? ""}</div>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="card-actions">
             <Link className="button" href={withAdminMode(`/users/enterprise/${orgId}`, mode)}>
               Back to Enterprise
             </Link>
@@ -224,32 +224,34 @@ export default function EnterpriseUsageBillingPage() {
               Current usage: <strong>{payload.usage.usagePercent.toFixed(1)}%</strong> (
               {formatMinutes(payload.usage.usedMinutes)} / {formatMinutes(payload.usage.allottedMinutes)} minutes)
             </div>
-            <table>
-              <thead>
-                <tr>
-                  <th>Threshold</th>
-                  <th>Reached</th>
-                  <th>Notified At</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payload.softLimits.length === 0 ? (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
                   <tr>
-                    <td colSpan={3} className="small">
-                      No soft-limit thresholds configured.
-                    </td>
+                    <th>Threshold</th>
+                    <th>Reached</th>
+                    <th>Notified At</th>
                   </tr>
-                ) : (
-                  payload.softLimits.map((limit) => (
-                    <tr key={limit.thresholdPercent}>
-                      <td>{limit.thresholdPercent}%</td>
-                      <td>{limit.reached ? "Yes" : "No"}</td>
-                      <td>{formatDateTime(limit.notifiedAt)}</td>
+                </thead>
+                <tbody>
+                  {payload.softLimits.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="small">
+                        No soft-limit thresholds configured.
+                      </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    payload.softLimits.map((limit) => (
+                      <tr key={limit.thresholdPercent}>
+                        <td>{limit.thresholdPercent}%</td>
+                        <td>{limit.reached ? "Yes" : "No"}</td>
+                        <td>{formatDateTime(limit.notifiedAt)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="card">
@@ -308,9 +310,11 @@ export default function EnterpriseUsageBillingPage() {
             <div className="small" style={{ marginTop: 8 }}>
               Usage is auto-generated and cannot be manually edited.
             </div>
-            <button className="primary" disabled={saving} onClick={() => void saveContractDetails()} style={{ marginTop: 12 }}>
-              {saving ? "Saving..." : "Save Usage/Billing Settings"}
-            </button>
+            <div className="form-actions">
+              <button className="primary" disabled={saving} onClick={() => void saveContractDetails()}>
+                {saving ? "Saving..." : "Save Usage/Billing Settings"}
+              </button>
+            </div>
           </div>
         </>
       ) : null}
