@@ -111,6 +111,10 @@ const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
 const CONTENT_DELETE_RETENTION_DAYS = 60;
+const DEFAULT_MAX_SIMULATION_MINUTES = 20;
+const MIN_MAX_SIMULATION_MINUTES = 1;
+const MAX_MAX_SIMULATION_MINUTES = 240;
+const MAX_ACTIVE_ADMIN_SESSIONS = 100;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const READINESS_REFRESH_MS = 15_000;
@@ -139,10 +143,12 @@ const warningLogByKey = new Map<string, number>();
 interface AdminTokenPayload {
   role: "admin";
   exp: number;
+  sid: string;
 }
 
 interface AdminAuthRequest extends Request {
   admin?: AdminTokenPayload;
+  adminToken?: string;
 }
 
 function nowIso(): string {
@@ -302,6 +308,13 @@ function normalizeSoftLimitPercentTriggers(value: unknown, fallback: number[] = 
   return Array.from(unique)
     .sort((a, b) => a - b)
     .slice(0, 2);
+}
+
+function normalizeMaxSimulationMinutes(value: unknown, fallbackMinutes = DEFAULT_MAX_SIMULATION_MINUTES): number {
+  const fallback = clampNonNegativeInteger(fallbackMinutes, DEFAULT_MAX_SIMULATION_MINUTES);
+  const parsed = clampNonNegativeInteger(value, fallback);
+  const bounded = Math.max(MIN_MAX_SIMULATION_MINUTES, Math.min(MAX_MAX_SIMULATION_MINUTES, parsed));
+  return bounded;
 }
 
 function normalizeScenarioEntry(raw: unknown, segmentId: string, index: number): Scenario | null {
@@ -505,7 +518,8 @@ function ensureOrgContractFields(org: EnterpriseOrg): EnterpriseOrg {
     contractSignedAt: normalizeContractSignedAt(org.contractSignedAt, signedAtFallback),
     monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(org.monthlyMinutesAllotted, monthlyFallback),
     renewalTotalUsd: normalizeRenewalTotalUsd(org.renewalTotalUsd, 0),
-    softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers)
+    softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers),
+    maxSimulationMinutes: normalizeMaxSimulationMinutes(org.maxSimulationMinutes)
   };
 }
 
@@ -713,19 +727,66 @@ const rateLimitByKey = new Map<string, RateLimitState>();
 let rateLimitCleanupCounter = 0;
 
 function getClientIp(request: Request): string {
-  const forwarded = request.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.trim()) {
-    return forwarded.split(",")[0].trim();
-  }
+  const normalizeIp = (value: string | null | undefined): string | null => {
+    if (!value) {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (trimmed.startsWith("::ffff:")) {
+      return trimmed.slice(7);
+    }
+    if (trimmed === "::1") {
+      return "127.0.0.1";
+    }
+    return trimmed;
+  };
 
-  if (Array.isArray(forwarded) && forwarded.length > 0) {
-    const first = forwarded[0]?.trim();
-    if (first) {
-      return first;
+  const isPrivateOrLoopbackIp = (ip: string): boolean => {
+    const lower = ip.toLowerCase();
+    if (
+      lower === "127.0.0.1" ||
+      lower === "localhost" ||
+      lower.startsWith("10.") ||
+      lower.startsWith("192.168.") ||
+      lower.startsWith("169.254.") ||
+      lower.startsWith("fc") ||
+      lower.startsWith("fd") ||
+      lower.startsWith("fe80:")
+    ) {
+      return true;
+    }
+
+    if (lower.startsWith("172.")) {
+      const secondOctet = Number(lower.split(".")[1]);
+      return Number.isFinite(secondOctet) && secondOctet >= 16 && secondOctet <= 31;
+    }
+
+    return false;
+  };
+
+  const remoteAddress = normalizeIp(request.socket.remoteAddress);
+  const canTrustForwarded = remoteAddress ? isPrivateOrLoopbackIp(remoteAddress) : false;
+
+  if (canTrustForwarded) {
+    const forwarded = request.headers["x-forwarded-for"];
+    const firstForwarded = (() => {
+      if (typeof forwarded === "string" && forwarded.trim()) {
+        return forwarded.split(",")[0] ?? null;
+      }
+      if (Array.isArray(forwarded) && forwarded.length > 0) {
+        return forwarded[0] ?? null;
+      }
+      return null;
+    })();
+    const forwardedIp = normalizeIp(firstForwarded);
+    if (forwardedIp) {
+      return forwardedIp;
     }
   }
 
-  const remoteAddress = request.socket.remoteAddress?.trim();
   return remoteAddress || "unknown";
 }
 
@@ -931,6 +992,7 @@ function createDefaultDatabase(): ApiDatabase {
         monthlyMinutesAllotted: Math.floor((8 * 60 * 60 * 30) / 60),
         renewalTotalUsd: 0,
         softLimitPercentTriggers: [75, 90],
+        maxSimulationMinutes: DEFAULT_MAX_SIMULATION_MINUTES,
         createdAt: now,
         updatedAt: now
       }
@@ -944,7 +1006,8 @@ function createDefaultDatabase(): ApiDatabase {
     emailVerifications: [],
     enterpriseJoinRequests: [],
     admin: {
-      passwordHash: null
+      passwordHash: null,
+      activeSessionIds: []
     }
   };
 }
@@ -1001,6 +1064,7 @@ function ensureDemoEnterpriseData(db: {
       );
       existing.renewalTotalUsd = normalizeRenewalTotalUsd(existing.renewalTotalUsd, 0);
       existing.softLimitPercentTriggers = normalizeSoftLimitPercentTriggers(existing.softLimitPercentTriggers, [75, 90]);
+      existing.maxSimulationMinutes = normalizeMaxSimulationMinutes(existing.maxSimulationMinutes);
       continue;
     }
 
@@ -1020,6 +1084,7 @@ function ensureDemoEnterpriseData(db: {
       monthlyMinutesAllotted: Math.floor((db.config.enterprise.defaultOrgDailySecondsQuota * 30) / 60),
       renewalTotalUsd: 0,
       softLimitPercentTriggers: [75, 90],
+      maxSimulationMinutes: DEFAULT_MAX_SIMULATION_MINUTES,
       createdAt: demoOrg.establishedAt,
       updatedAt: demoOrg.establishedAt
     });
@@ -1758,7 +1823,14 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       passwordHash:
         candidate.admin && typeof candidate.admin.passwordHash === "string"
           ? candidate.admin.passwordHash
-          : null
+          : null,
+      activeSessionIds:
+        candidate.admin && Array.isArray(candidate.admin.activeSessionIds)
+          ? candidate.admin.activeSessionIds
+              .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+              .filter((entry) => entry.length > 0)
+              .slice(-MAX_ACTIVE_ADMIN_SESSIONS)
+          : []
     }
   };
 
@@ -1960,11 +2032,35 @@ function verifyAdminToken(token: string): AdminTokenPayload | null {
     return null;
   }
 
-  if (payload.role !== "admin") {
+  if (payload.role !== "admin" || typeof payload.sid !== "string" || !payload.sid.trim()) {
     return null;
   }
 
   return payload;
+}
+
+function addActiveAdminSession(db: ApiDatabase, sessionId: string): void {
+  const next: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...(db.admin.activeSessionIds ?? []), sessionId]) {
+    const normalized = typeof entry === "string" ? entry.trim() : "";
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    next.push(normalized);
+  }
+
+  db.admin.activeSessionIds = next.slice(-MAX_ACTIVE_ADMIN_SESSIONS);
+}
+
+function removeActiveAdminSession(db: ApiDatabase, sessionId: string): void {
+  const target = sessionId.trim();
+  if (!target) {
+    return;
+  }
+
+  db.admin.activeSessionIds = (db.admin.activeSessionIds ?? []).filter((entry) => entry !== target);
 }
 
 function getIncomingAdminToken(request: Request): string | null {
@@ -2097,7 +2193,7 @@ function issueEmailVerification(db: ApiDatabase, user: UserProfile, now: Date): 
   return { expiresAt };
 }
 
-function requireAdmin(request: AdminAuthRequest, response: Response, next: NextFunction): void {
+async function requireAdmin(request: AdminAuthRequest, response: Response, next: NextFunction): Promise<void> {
   const token = getIncomingAdminToken(request);
   if (!token) {
     response.status(401).json({ error: "Missing admin token." });
@@ -2110,7 +2206,14 @@ function requireAdmin(request: AdminAuthRequest, response: Response, next: NextF
     return;
   }
 
+  const db = await loadDatabase();
+  if (!(db.admin.activeSessionIds ?? []).includes(payload.sid)) {
+    response.status(401).json({ error: "Invalid or expired admin token." });
+    return;
+  }
+
   request.admin = payload;
+  request.adminToken = token;
   next();
 }
 
@@ -2198,6 +2301,7 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
   let dailySecondsLimit: number | null = tierDefinition.dailySecondsLimit;
   let orgDailySecondsQuota: number | null = null;
   let perUserDailySecondsCap: number | null = null;
+  let maxSimulationMinutes: number | null = null;
   let dailySecondsRemaining: number | null = null;
   let lockReason: string | null = null;
 
@@ -2209,6 +2313,7 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
     } else {
       orgDailySecondsQuota = org.dailySecondsQuota + org.manualBonusSeconds;
       perUserDailySecondsCap = org.perUserDailySecondsCap + user.manualBonusSeconds;
+      maxSimulationMinutes = normalizeMaxSimulationMinutes(org.maxSimulationMinutes);
       const orgBilledToday = computeOrgBilledToday(db, org.id, now, timezone);
       const orgRemaining = Math.max(0, orgDailySecondsQuota - orgBilledToday);
       const perUserRemaining = Math.max(0, perUserDailySecondsCap - usage.billedSecondsToday);
@@ -2254,6 +2359,7 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
       dailySecondsLimit,
       orgDailySecondsQuota,
       perUserDailySecondsCap,
+      maxSimulationMinutes,
       manualBonusSeconds: user.manualBonusSeconds,
       billingIncrementSeconds: USAGE_BILLING_INCREMENT_SECONDS
     },
@@ -2971,7 +3077,7 @@ app.post("/auth/login", authLoginRateLimiter, async (request: Request, response:
     return;
   }
 
-  await withDatabaseRead(async (db) => {
+  await withDatabase(async (db) => {
     const valid = db.admin.passwordHash
       ? verifyPassword(password, db.admin.passwordHash)
       : password === ADMIN_BOOTSTRAP_PASSWORD;
@@ -2982,9 +3088,31 @@ app.post("/auth/login", authLoginRateLimiter, async (request: Request, response:
     }
 
     const expiresAtMs = Date.now() + ADMIN_TOKEN_TTL_MINUTES * 60 * 1000;
-    const token = signAdminToken({ role: "admin", exp: expiresAtMs });
+    const sid = `adm_${uuid()}`;
+    addActiveAdminSession(db, sid);
+    const token = signAdminToken({ role: "admin", exp: expiresAtMs, sid });
 
     response.json({ token, expiresAt: new Date(expiresAtMs).toISOString() });
+  });
+});
+
+app.post("/auth/logout", requireAdmin, async (request: AdminAuthRequest, response: Response) => {
+  const sid = request.admin?.sid;
+  if (!sid) {
+    response.status(400).json({ error: "Admin session not found." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    removeActiveAdminSession(db, sid);
+    appendPlatformAuditEvent(db, {
+      action: "admin.logout",
+      message: "Platform admin session signed out.",
+      metadata: {
+        sid
+      }
+    });
+    response.json({ ok: true });
   });
 });
 
@@ -3075,6 +3203,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     monthlyMinutesAllotted?: number;
     renewalTotalUsd?: number;
     softLimitPercentTriggers?: number[];
+    maxSimulationMinutes?: number;
   };
   const name = body.name?.trim();
 
@@ -3135,6 +3264,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(body.monthlyMinutesAllotted, monthlyMinutesFallback),
       renewalTotalUsd: normalizeRenewalTotalUsd(body.renewalTotalUsd, 0),
       softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(body.softLimitPercentTriggers, [75, 90]),
+      maxSimulationMinutes: normalizeMaxSimulationMinutes(body.maxSimulationMinutes),
       createdAt: now,
       updatedAt: now
     };
@@ -3268,6 +3398,13 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       org.softLimitPercentTriggers = normalizeSoftLimitPercentTriggers(
         patch.softLimitPercentTriggers,
         org.softLimitPercentTriggers
+      );
+    }
+
+    if (patch.maxSimulationMinutes !== undefined) {
+      org.maxSimulationMinutes = normalizeMaxSimulationMinutes(
+        patch.maxSimulationMinutes,
+        org.maxSimulationMinutes
       );
     }
 
@@ -5610,6 +5747,73 @@ app.get("/mobile/users/:userId/admin/org/dashboard", async (request: Request, re
   });
 });
 
+app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const actorUserId = request.params.userId;
+  const body = request.body as { maxSimulationMinutes?: unknown };
+
+  if (body.maxSimulationMinutes === undefined) {
+    response.status(400).json({ error: "maxSimulationMinutes is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const actor = getUserById(db, actorUserId);
+    if (!actor) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, actor.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (actor.accountType !== "enterprise" || !actor.orgId) {
+      response.status(403).json({ error: "Enterprise admin access is not available for this account." });
+      return;
+    }
+
+    if (actor.orgRole !== "org_admin") {
+      response.status(403).json({ error: "Org admin access required." });
+      return;
+    }
+
+    const org = getOrgById(db, actor.orgId);
+    if (!org || org.status !== "active") {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    org.maxSimulationMinutes = normalizeMaxSimulationMinutes(body.maxSimulationMinutes, org.maxSimulationMinutes);
+    org.updatedAt = nowIso();
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendMobileAuditEvent(db, actor, {
+      action: "org.settings_updated",
+      userId: actor.id,
+      orgId: org.id,
+      message: `Updated org settings for ${org.name}.`,
+      metadata: {
+        maxSimulationMinutes: org.maxSimulationMinutes
+      }
+    });
+
+    response.json({
+      ok: true,
+      org: {
+        id: org.id,
+        maxSimulationMinutes: org.maxSimulationMinutes,
+        updatedAt: org.updatedAt
+      }
+    });
+  });
+});
+
 app.get("/mobile/users/:userId/admin/org/users", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
@@ -6056,7 +6260,11 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       return;
     }
 
-    const rawDurationSeconds = clampNonNegativeInteger(body.rawDurationSeconds, 0);
+    let rawDurationSeconds = clampNonNegativeInteger(body.rawDurationSeconds, 0);
+    const maxSimulationMinutes = entitlements.limits.maxSimulationMinutes;
+    if (maxSimulationMinutes !== null) {
+      rawDurationSeconds = Math.min(rawDurationSeconds, maxSimulationMinutes * 60);
+    }
 
     db.usageSessions.push({
       id: `sess_${uuid()}`,

@@ -53,6 +53,7 @@ export interface SimulationConfig {
   personaStyle: PersonaStyle;
   voiceProfile: AiVoiceProfile;
   voiceGender: AiVoiceGender;
+  maxSimulationMinutes: number | null;
 }
 
 export interface SessionTiming {

@@ -1,9 +1,12 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 import { AiVoiceGender, AiVoiceProfile, AppColorScheme, TrainingSegmentId } from "../types";
 
 const ACTIVE_SEGMENT_STORAGE_KEY = "@voice_practice_active_segment";
 const USER_ID_STORAGE_KEY = "@voice_practice_user_id";
 const MOBILE_AUTH_TOKEN_STORAGE_KEY = "@voice_practice_mobile_auth_token";
+const MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY = "voice_practice_mobile_auth_token";
 const COLOR_SCHEME_STORAGE_KEY = "@voice_practice_color_scheme";
 const VOICE_PROFILE_STORAGE_KEY = "@voice_practice_voice_profile";
 const VOICE_GENDER_STORAGE_KEY = "@voice_practice_voice_gender";
@@ -11,6 +14,19 @@ const VOICE_GENDER_STORAGE_KEY = "@voice_practice_voice_gender";
 const COLOR_SCHEME_VALUES = ["soft_light", "classic_blue"] as const;
 const VOICE_PROFILE_VALUES = ["balanced", "warm", "bright"] as const;
 const VOICE_GENDER_VALUES = ["female", "male"] as const;
+
+function canUseSecureStore(): boolean {
+  return Platform.OS === "android" || Platform.OS === "ios";
+}
+
+async function loadLegacyMobileAuthToken(): Promise<string | null> {
+  try {
+    const stored = await AsyncStorage.getItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
+    return stored && stored.trim() ? stored : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function loadActiveSegment(defaultSegmentId: TrainingSegmentId): Promise<TrainingSegmentId> {
   try {
@@ -43,24 +59,59 @@ export async function saveUserId(userId: string): Promise<void> {
 }
 
 export async function loadMobileAuthToken(): Promise<string | null> {
-  try {
-    const stored = await AsyncStorage.getItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
-    return stored && stored.trim() ? stored : null;
-  } catch {
-    return null;
+  if (canUseSecureStore()) {
+    try {
+      const secureValue = await SecureStore.getItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY);
+      if (secureValue && secureValue.trim()) {
+        return secureValue;
+      }
+    } catch {
+      // Falls back to legacy AsyncStorage lookup.
+    }
+
+    const legacy = await loadLegacyMobileAuthToken();
+    if (!legacy) {
+      return null;
+    }
+
+    try {
+      await SecureStore.setItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY, legacy);
+      await AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
+    } catch {
+      // If migration fails, still return the legacy value for this session.
+    }
+
+    return legacy;
   }
+
+  return loadLegacyMobileAuthToken();
 }
 
 export async function saveMobileAuthToken(token: string): Promise<void> {
+  if (canUseSecureStore()) {
+    await SecureStore.setItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY, token);
+    await AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
+    return;
+  }
+
   await AsyncStorage.setItem(MOBILE_AUTH_TOKEN_STORAGE_KEY, token);
 }
 
 export async function clearMobileAuthToken(): Promise<void> {
+  if (canUseSecureStore()) {
+    await Promise.allSettled([
+      SecureStore.deleteItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY),
+      AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY)
+    ]);
+    return;
+  }
+
   await AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
 }
 
 export async function clearUserId(): Promise<void> {
-  await AsyncStorage.multiRemove([USER_ID_STORAGE_KEY, MOBILE_AUTH_TOKEN_STORAGE_KEY]);
+  await AsyncStorage.removeItem(USER_ID_STORAGE_KEY);
+  await clearMobileAuthToken();
 }
 
 export async function loadColorScheme(defaultValue: AppColorScheme = "soft_light"): Promise<AppColorScheme> {

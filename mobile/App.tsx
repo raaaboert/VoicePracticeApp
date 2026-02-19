@@ -59,6 +59,7 @@ import {
   submitOrgAccessRequest,
   decideOrgAdminAccessRequest,
   setOrgAdminUserStatus,
+  updateOrgAdminOrgSettings,
   updateMobileSettings,
   verifyMobileEmail,
 } from "./src/lib/api";
@@ -638,6 +639,9 @@ export default function App() {
   const [orgAdminUserDetail, setOrgAdminUserDetail] = useState<OrgAdminUserDetailResponse | null>(null);
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
+  const [adminNotice, setAdminNotice] = useState<string | null>(null);
+  const [adminMaxSimulationMinutesInput, setAdminMaxSimulationMinutesInput] = useState<string>("");
+  const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
 
@@ -888,6 +892,7 @@ export default function App() {
         fetchOrgAdminAnalytics(user.id, mobileAuthToken, { days: adminRangeDays }),
       ]);
       setOrgAdminDashboard(dashboardPayload);
+      setAdminMaxSimulationMinutesInput(String(Math.max(1, dashboardPayload.org.maxSimulationMinutes ?? 1)));
       setOrgAdminAnalytics(analyticsPayload);
     } catch (caught) {
       setAdminError(getErrorMessage(caught, "Could not load org admin dashboard."));
@@ -1044,6 +1049,44 @@ export default function App() {
     },
     [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, user],
   );
+
+  const saveOrgAdminSettings = useCallback(async () => {
+    if (!user || !mobileAuthToken) {
+      return;
+    }
+
+    const actorIsOrgAdmin = user.accountType === "enterprise" && user.orgRole === "org_admin";
+    if (!actorIsOrgAdmin) {
+      setAdminError("Org admin access required.");
+      return;
+    }
+
+    const parsedMinutes = Number(adminMaxSimulationMinutesInput.trim());
+    if (!Number.isFinite(parsedMinutes)) {
+      setAdminError("Enter a valid max session length in minutes.");
+      return;
+    }
+
+    const maxSimulationMinutes = Math.floor(parsedMinutes);
+    if (maxSimulationMinutes < 1 || maxSimulationMinutes > 240) {
+      setAdminError("Max session length must be between 1 and 240 minutes.");
+      return;
+    }
+
+    setAdminError(null);
+    setAdminNotice(null);
+    setIsSavingOrgAdminSettings(true);
+    try {
+      const payload = await updateOrgAdminOrgSettings(user.id, mobileAuthToken, { maxSimulationMinutes });
+      setAdminMaxSimulationMinutesInput(String(payload.org.maxSimulationMinutes));
+      setAdminNotice(`Saved. Max simulation length is ${payload.org.maxSimulationMinutes} minute(s).`);
+      await refreshOrgAdminDashboard();
+    } catch (caught) {
+      setAdminError(getErrorMessage(caught, "Could not save org settings."));
+    } finally {
+      setIsSavingOrgAdminSettings(false);
+    }
+  }, [adminMaxSimulationMinutesInput, mobileAuthToken, refreshOrgAdminDashboard, user]);
 
   useEffect(() => {
     if (screen !== "home" && isHomeMenuMounted) {
@@ -1648,6 +1691,7 @@ export default function App() {
         personaStyle: selectedPersonaStyle,
         voiceProfile,
         voiceGender,
+        maxSimulationMinutes: entitlements?.limits?.maxSimulationMinutes ?? null,
       });
       setScorecard(null);
       setScorecardError(null);
@@ -2274,8 +2318,10 @@ export default function App() {
     </KeyboardAvoidingView>
   );
 
-  const renderSetup = () => (
-    <View style={styles.fill}>
+  const renderSetup = () => {
+    const orgMaxSimulationMinutes = entitlements?.limits?.maxSimulationMinutes ?? null;
+    return (
+      <View style={styles.fill}>
       <View style={styles.topRow}>
         <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
           <Text style={styles.ghostButtonText}>Back</Text>
@@ -2320,6 +2366,9 @@ export default function App() {
 
           {activeSegment ? <Text style={styles.body}>{activeSegment.summary}</Text> : null}
           {activeScenario ? <Text style={styles.body}>{activeScenario.summary ?? activeScenario.description}</Text> : null}
+          {orgMaxSimulationMinutes !== null ? (
+            <Text style={styles.hintText}>Max session length for your organization: {orgMaxSimulationMinutes} minute(s).</Text>
+          ) : null}
         </View>
 
         <Text style={styles.sectionTitle}>Difficulty</Text>
@@ -2363,7 +2412,8 @@ export default function App() {
         <Text style={styles.primaryButtonText}>Start Simulation</Text>
       </Pressable>
     </View>
-  );
+    );
+  };
 
   const renderProfile = () => (
     <KeyboardAvoidingView
@@ -3014,6 +3064,11 @@ export default function App() {
               <Text style={styles.errorText}>{adminError}</Text>
             </View>
           ) : null}
+          {adminNotice ? (
+            <View style={styles.successCard}>
+              <Text style={styles.successText}>{adminNotice}</Text>
+            </View>
+          ) : null}
 
           <View style={styles.card}>
             <Text style={styles.label}>Contract & Usage</Text>
@@ -3060,6 +3115,33 @@ export default function App() {
                 </Text>
               </View>
             </View>
+          </View>
+
+          <View style={styles.card}>
+            <Text style={styles.title}>Simulation Controls</Text>
+            <Text style={styles.body}>
+              Set the max session length for every simulation run in your organization.
+            </Text>
+            <Text style={styles.hintText}>Max session length (minutes)</Text>
+            <TextInput
+              value={adminMaxSimulationMinutesInput}
+              onChangeText={setAdminMaxSimulationMinutesInput}
+              keyboardType="numeric"
+              placeholder="20"
+              placeholderTextColor={theme.hint}
+              style={styles.input}
+            />
+            <Pressable
+              style={[styles.primaryButton, isSavingOrgAdminSettings ? styles.disabled : null]}
+              disabled={isSavingOrgAdminSettings}
+              onPress={() => {
+                void saveOrgAdminSettings();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>
+                {isSavingOrgAdminSettings ? "Saving..." : "Save Simulation Settings"}
+              </Text>
+            </Pressable>
           </View>
 
           <View style={styles.card}>
@@ -3888,6 +3970,7 @@ function createStyles(theme: ThemeTokens) {
     warningCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.warningBorder, backgroundColor: theme.warningBg, padding: 12, marginBottom: 12 },
     warningText: { color: theme.warningText, fontSize: 13.5, lineHeight: 19 },
     errorCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.errorCardBorder, backgroundColor: theme.errorCardBg, padding: 12, marginBottom: 12 },
+    successCard: { borderRadius: 14, borderWidth: 1, borderColor: "rgba(29, 154, 95, 0.45)", backgroundColor: "rgba(29, 154, 95, 0.12)", padding: 12, marginBottom: 12 },
     errorText: { color: theme.danger, fontSize: 13, marginBottom: 6 },
     successText: { color: theme.success, fontSize: 13, marginBottom: 6 },
     primaryButton: { minHeight: 52, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as Speech from "expo-speech";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -82,6 +82,18 @@ function buildLocalCapturedText(turnDurationSeconds: number): string {
   return `Voice input captured (${turnDurationSeconds}s) in local test mode.`;
 }
 
+function formatDurationClock(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 export function SimulationScreen({ config, userId, authToken, onExit, onSessionComplete }: SimulationScreenProps) {
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [mode, setMode] = useState<OrbMode>("thinking");
@@ -90,6 +102,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const [sessionActive, setSessionActive] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [useLocalMockMode, setUseLocalMockMode] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
   const voiceOption = useMemo(() => getAiVoiceOption(config.voiceProfile), [config.voiceProfile]);
@@ -116,6 +129,17 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const heardVoiceRef = useRef(false);
   const meteringSeenRef = useRef(false);
   const kickoffSentRef = useRef(false);
+  const sessionCompletionInProgressRef = useRef(false);
+
+  const maxSessionSeconds = useMemo(() => {
+    const maxMinutes = Number(config.maxSimulationMinutes);
+    if (!Number.isFinite(maxMinutes) || maxMinutes <= 0) {
+      return null;
+    }
+    return Math.floor(maxMinutes * 60);
+  }, [config.maxSimulationMinutes]);
+  const remainingSeconds = maxSessionSeconds === null ? null : Math.max(0, maxSessionSeconds - elapsedSeconds);
+  const inFinalMinute = Boolean(sessionActive && remainingSeconds !== null && remainingSeconds <= 60);
 
   const clearTurnMonitoring = () => {
     if (safetyTimerRef.current) {
@@ -467,6 +491,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
     sessionActiveRef.current = true;
     sessionStartedAtRef.current = new Date();
+    sessionCompletionInProgressRef.current = false;
+    setElapsedSeconds(0);
     setSessionActive(true);
     setStatus("Continuous mode active.");
     void startListeningTurn();
@@ -485,12 +511,13 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     }
   };
 
-  const onPrimaryButton = async () => {
-    if (isInitializing) {
+  const completeSessionAndScore = useCallback(async () => {
+    if (!sessionActiveRef.current || sessionCompletionInProgressRef.current) {
       return;
     }
 
-    if (sessionActiveRef.current) {
+    sessionCompletionInProgressRef.current = true;
+    try {
       const startedAt = sessionStartedAtRef.current ?? new Date();
       const endedAt = new Date();
       const rawDurationSeconds = Math.max(
@@ -499,11 +526,24 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       );
       await endSession(false);
       sessionStartedAtRef.current = null;
+      setElapsedSeconds(rawDurationSeconds);
       onSessionComplete([...messagesRef.current], config, {
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         rawDurationSeconds,
       });
+    } finally {
+      sessionCompletionInProgressRef.current = false;
+    }
+  }, [config, onSessionComplete]);
+
+  const onPrimaryButton = async () => {
+    if (isInitializing) {
+      return;
+    }
+
+    if (sessionActiveRef.current) {
+      await completeSessionAndScore();
       return;
     }
 
@@ -513,6 +553,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const onExitPress = async () => {
     await endSession(false);
     sessionStartedAtRef.current = null;
+    setElapsedSeconds(0);
+    sessionCompletionInProgressRef.current = false;
     onExit();
   };
 
@@ -528,6 +570,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       setError(null);
       kickoffSentRef.current = false;
       pendingOpeningLineRef.current = null;
+      setElapsedSeconds(0);
+      sessionCompletionInProgressRef.current = false;
 
       if (localTestMode) {
         pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
@@ -582,8 +626,39 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       clearTurnMonitoring();
       Speech.stop();
       void stopRecordingSafely();
+      sessionCompletionInProgressRef.current = false;
     };
   }, [apiConfigured, authToken, config.difficulty, config.personaStyle, config.scenario, config.segmentLabel, userId]);
+
+  useEffect(() => {
+    if (!sessionActive) {
+      return;
+    }
+
+    const tick = () => {
+      const startedAt = sessionStartedAtRef.current;
+      if (!startedAt) {
+        setElapsedSeconds(0);
+        return;
+      }
+
+      const nextElapsed = Math.max(0, Math.floor((Date.now() - startedAt.getTime()) / 1000));
+      setElapsedSeconds(nextElapsed);
+
+      if (
+        maxSessionSeconds !== null
+        && nextElapsed >= maxSessionSeconds
+        && !sessionCompletionInProgressRef.current
+      ) {
+        setStatus("Session max length reached. Ending and scoring...");
+        void completeSessionAndScore();
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, 500);
+    return () => clearInterval(interval);
+  }, [completeSessionAndScore, maxSessionSeconds, sessionActive]);
 
   useEffect(() => {
     let cancelled = false;
@@ -640,6 +715,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         <Text style={styles.cardBody}>{config.scenario.description}</Text>
         <Text style={styles.cardBody}>Difficulty: {DIFFICULTY_LABELS[config.difficulty]}</Text>
         <Text style={styles.cardBody}>Persona: {PERSONA_LABELS[config.personaStyle]}</Text>
+        {config.maxSimulationMinutes !== null ? (
+          <Text style={styles.cardBody}>
+            Org max session length: {config.maxSimulationMinutes} minute(s)
+          </Text>
+        ) : null}
         <Text style={styles.cardBody}>
           AI voice: {config.voiceGender === "male" ? "Male" : "Female"} {voiceOption.label}
         </Text>
@@ -652,6 +732,20 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           ? "Local test mode: no API key needed. Replies are mocked."
           : "Auto-cutoff runs on silence detection (with max-turn fallback)."}
       </Text>
+      <View style={styles.timerCard}>
+        <Text style={styles.timerLabel}>
+          Session Timer
+          {maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}
+        </Text>
+        <Text style={[styles.timerValue, inFinalMinute ? styles.timerValueDanger : null]}>
+          {formatDurationClock(elapsedSeconds)}
+        </Text>
+        {remainingSeconds !== null ? (
+          <Text style={[styles.timerRemaining, inFinalMinute ? styles.timerValueDanger : null]}>
+            Remaining: {formatDurationClock(remainingSeconds)}
+          </Text>
+        ) : null}
+      </View>
 
       {error ? (
         <View style={styles.errorCard}>
@@ -765,6 +859,35 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontSize: 12.5,
     marginBottom: 10,
+  },
+  timerCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: "rgba(9, 26, 45, 0.62)",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 10,
+    alignItems: "center",
+    gap: 2,
+  },
+  timerLabel: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  timerValue: {
+    color: COLORS.text,
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  timerRemaining: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  timerValueDanger: {
+    color: COLORS.danger,
   },
   errorCard: {
     borderRadius: 12,

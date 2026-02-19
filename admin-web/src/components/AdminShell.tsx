@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useState } from "react";
-import { clearAdminToken } from "../lib/api";
+import { logoutAdminSession } from "../lib/api";
 import {
   AdminMode,
   emitAdminModeChanged,
@@ -17,6 +17,8 @@ interface AdminShellProps {
   title: string;
   children: ReactNode;
 }
+
+const ADMIN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 
 function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
   if (mode === "personal") {
@@ -109,6 +111,41 @@ export function AdminShell({ title, children }: AdminShellProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const events: Array<keyof WindowEventMap> = ["pointerdown", "keydown", "scroll", "touchstart", "mousemove"];
+    const resetInactivityTimer = () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+
+      timeoutHandle = setTimeout(() => {
+        void (async () => {
+          await logoutAdminSession();
+          router.replace("/login");
+        })();
+      }, ADMIN_INACTIVITY_TIMEOUT_MS);
+    };
+
+    events.forEach((eventName) => {
+      window.addEventListener(eventName, resetInactivityTimer, { passive: true });
+    });
+    resetInactivityTimer();
+
+    return () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      events.forEach((eventName) => {
+        window.removeEventListener(eventName, resetInactivityTimer);
+      });
+    };
+  }, [router]);
+
   const navItems = useMemo(() => {
     if (mode === "personal") {
       return [
@@ -166,8 +203,10 @@ export function AdminShell({ title, children }: AdminShellProps) {
             ))}
             <button
               onClick={() => {
-                clearAdminToken();
-                router.push("/login");
+                void (async () => {
+                  await logoutAdminSession();
+                  router.push("/login");
+                })();
               }}
             >
               Sign Out

@@ -18,7 +18,6 @@ import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationScorecard } from "../types";
 
 const REQUEST_TIMEOUT_MS = 10_000;
-const DEFAULT_PRODUCTION_API_BASE_URL = "https://voicepractice-api-dev.onrender.com";
 const TRANSIENT_ERROR_PATTERNS = [
   "request timed out",
   "request failed (429)",
@@ -81,7 +80,7 @@ function inferApiBaseUrl(): string {
   }
 
   if (!__DEV__) {
-    return DEFAULT_PRODUCTION_API_BASE_URL;
+    return "";
   }
 
   if (Platform.OS === "android") {
@@ -103,6 +102,11 @@ async function requestJson<T>(
   authToken?: string,
   options?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<T> {
+  const apiBase = API_BASE_URL.trim();
+  if (!apiBase) {
+    throw new Error("API base URL is not configured. Set EXPO_PUBLIC_API_BASE_URL for this build.");
+  }
+
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -111,7 +115,7 @@ async function requestJson<T>(
   let response: Response;
 
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetch(`${apiBase}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -155,6 +159,11 @@ async function requestFormData<T>(
   authToken: string,
   options?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<T> {
+  const apiBase = API_BASE_URL.trim();
+  if (!apiBase) {
+    throw new Error("API base URL is not configured. Set EXPO_PUBLIC_API_BASE_URL for this build.");
+  }
+
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -163,7 +172,7 @@ async function requestFormData<T>(
 
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetch(`${apiBase}${path}`, {
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -632,6 +641,7 @@ export async function fetchOrgAdminDashboard(
     dailySecondsQuota: number;
     perUserDailySecondsCap: number;
     manualBonusSeconds: number;
+    maxSimulationMinutes: number;
     createdAt: string;
     updatedAt: string;
   };
@@ -651,6 +661,28 @@ export async function fetchOrgAdminDashboard(
   return requestJson(
     `/mobile/users/${encodeURIComponent(userId)}/admin/org/dashboard`,
     undefined,
+    authToken,
+  );
+}
+
+export async function updateOrgAdminOrgSettings(
+  userId: string,
+  authToken: string,
+  patch: { maxSimulationMinutes: number },
+): Promise<{
+  ok: boolean;
+  org: {
+    id: string;
+    maxSimulationMinutes: number;
+    updatedAt: string;
+  };
+}> {
+  return requestJson(
+    `/mobile/users/${encodeURIComponent(userId)}/admin/org/settings`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    },
     authToken,
   );
 }

@@ -125,6 +125,7 @@ export interface EnterpriseOrg {
   monthlyMinutesAllotted: number;
   renewalTotalUsd: number;
   softLimitPercentTriggers: number[];
+  maxSimulationMinutes: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -362,6 +363,7 @@ export interface UserEntitlementsResponse {
     dailySecondsLimit: number | null;
     orgDailySecondsQuota: number | null;
     perUserDailySecondsCap: number | null;
+    maxSimulationMinutes: number | null;
     manualBonusSeconds: number;
     billingIncrementSeconds: number;
   };
@@ -481,6 +483,7 @@ export interface ApiDatabase {
   enterpriseJoinRequests: EnterpriseJoinRequestRecord[];
   admin: {
     passwordHash: string | null;
+    activeSessionIds: string[];
   };
 }
 

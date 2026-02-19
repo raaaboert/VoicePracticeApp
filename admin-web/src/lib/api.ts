@@ -33,6 +33,26 @@ export function clearAdminToken(): void {
   localStorage.removeItem("vp_admin_token");
 }
 
+export async function logoutAdminSession(): Promise<void> {
+  const token = getAdminToken();
+  try {
+    if (token) {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        cache: "no-store",
+      });
+    }
+  } catch {
+    // Ignore network/logout errors; local token clear still signs out this browser.
+  } finally {
+    clearAdminToken();
+  }
+}
+
 export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const retryableStatusCodes = new Set([429, 502, 503, 504]);
   const startedAt = Date.now();
@@ -66,6 +86,11 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
       });
 
       if (!response.ok) {
+        if (response.status === 401) {
+          clearAdminToken();
+          throw new Error("Session expired. Please sign in again.");
+        }
+
         const payload = await safeJson(response);
         const message = payload?.error ?? `Request failed (${response.status})`;
         const shouldRetry = retryableStatusCodes.has(response.status) && attempt < REQUEST_MAX_ATTEMPTS;
