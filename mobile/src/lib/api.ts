@@ -300,15 +300,14 @@ export async function fetchTimezones(): Promise<string[]> {
 }
 
 export async function onboardMobileUser(input: MobileOnboardRequest): Promise<MobileOnboardResponse> {
-  return requestJsonWithRetry<MobileOnboardResponse>(
+  return requestJson<MobileOnboardResponse>(
     "/mobile/onboard",
     {
       method: "POST",
       body: JSON.stringify(input),
     },
     undefined,
-    { timeoutMs: 20_000 },
-    { attempts: 3, initialDelayMs: 900 },
+    { timeoutMs: 12_000 },
   );
 }
 
