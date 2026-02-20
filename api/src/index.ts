@@ -1036,6 +1036,10 @@ function purgeExpiredSupportTranscripts(db: { supportCases?: SupportCaseRecord[]
   }
 }
 
+function hasPrefixedId(value: string | null | undefined, prefix: string): boolean {
+  return typeof value === "string" && value.startsWith(prefix);
+}
+
 function ensureDemoEnterpriseData(db: {
   users: UserProfile[];
   orgs: EnterpriseOrg[];
@@ -1544,6 +1548,63 @@ function ensureDemoSupportCases(db: { supportCases: SupportCaseRecord[] }, nowIs
   );
 }
 
+function purgeDemoSeedData(db: ApiDatabase): void {
+  const demoOrgIds = new Set(
+    db.orgs.filter((org) => hasPrefixedId(org.id, "org_demo_")).map((org) => org.id)
+  );
+
+  const demoUserIds = new Set(
+    db.users
+      .filter(
+        (user) => hasPrefixedId(user.id, "usr_demo_") || (user.orgId !== null && demoOrgIds.has(user.orgId))
+      )
+      .map((user) => user.id)
+  );
+
+  db.orgs = db.orgs.filter((org) => !demoOrgIds.has(org.id));
+  db.users = db.users.filter(
+    (user) => !demoUserIds.has(user.id) && (user.orgId === null || !demoOrgIds.has(user.orgId))
+  );
+
+  db.usageSessions = db.usageSessions.filter(
+    (session) =>
+      !hasPrefixedId(session.id, "sess_demo_") &&
+      !demoUserIds.has(session.userId) &&
+      (session.orgId === null || !demoOrgIds.has(session.orgId))
+  );
+
+  db.scoreRecords = db.scoreRecords.filter(
+    (record) =>
+      !hasPrefixedId(record.id, "score_demo_") &&
+      !demoUserIds.has(record.userId) &&
+      (record.orgId === null || !demoOrgIds.has(record.orgId))
+  );
+
+  db.aiUsageEvents = db.aiUsageEvents.filter(
+    (event) => !demoUserIds.has(event.userId) && (event.orgId === null || !demoOrgIds.has(event.orgId))
+  );
+
+  db.auditEvents = db.auditEvents.filter(
+    (event) =>
+      (event.userId === null || !demoUserIds.has(event.userId)) &&
+      (event.orgId === null || !demoOrgIds.has(event.orgId)) &&
+      (event.actorType !== "mobile_user" || event.actorId === null || !demoUserIds.has(event.actorId))
+  );
+
+  db.supportCases = db.supportCases.filter(
+    (row) =>
+      !hasPrefixedId(row.id, "case_demo_") &&
+      !demoUserIds.has(row.userId) &&
+      (row.orgId === null || !demoOrgIds.has(row.orgId))
+  );
+
+  db.mobileAuthTokens = db.mobileAuthTokens.filter((row) => !demoUserIds.has(row.userId));
+  db.emailVerifications = db.emailVerifications.filter((row) => !demoUserIds.has(row.userId));
+  db.enterpriseJoinRequests = db.enterpriseJoinRequests.filter(
+    (row) => !demoUserIds.has(row.userId) && !demoOrgIds.has(row.orgId)
+  );
+}
+
 function mergeScenariosWithDefaults(
   existing: Scenario[],
   defaults: Scenario[],
@@ -1835,8 +1896,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     }
   };
 
-  ensureDemoEnterpriseData(normalized, now);
-  ensureDemoSupportCases(normalized, now);
+  purgeDemoSeedData(normalized);
   purgeExpiredSupportTranscripts(normalized, now);
   expireOrgJoinRequests(normalized, new Date(now));
   return normalized;
