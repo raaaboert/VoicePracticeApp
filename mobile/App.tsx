@@ -587,6 +587,7 @@ export default function App() {
   const homeMenuSlide = useRef(new Animated.Value(0)).current;
   const mobileUpdatesCursorRef = useRef(0);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
+  const hasInitializedRef = useRef(false);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -1414,6 +1415,10 @@ export default function App() {
   }, [detectedTimezone, resetSessionToOnboarding, submitAutoErrorReport]);
 
   useEffect(() => {
+    if (hasInitializedRef.current) {
+      return;
+    }
+    hasInitializedRef.current = true;
     void initializeApp();
   }, [initializeApp]);
 
