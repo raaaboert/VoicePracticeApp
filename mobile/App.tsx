@@ -1597,7 +1597,7 @@ export default function App() {
         email: normalizedEmail,
         timezone: onboardingTimezone.trim(),
       });
-      await Promise.all([
+      void Promise.allSettled([
         saveUserId(onboarded.user.id),
         saveMobileAuthToken(onboarded.authToken),
       ]);
@@ -1659,7 +1659,7 @@ export default function App() {
       const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken);
       setUser(payload.user);
       setMobileAuthToken(payload.authToken);
-      await saveMobileAuthToken(payload.authToken);
+      void saveMobileAuthToken(payload.authToken);
       setDomainMatch(payload.domainMatch ?? null);
       setVerificationCode("");
       setPendingVerificationUserId(null);

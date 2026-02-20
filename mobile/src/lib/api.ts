@@ -109,13 +109,14 @@ async function requestJson<T>(
 
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const forwardAbort = () => controller.abort();
   options?.signal?.addEventListener("abort", forwardAbort);
   let response: Response;
 
   try {
-    response = await fetch(`${apiBase}${path}`, {
+    const fetchPromise = fetch(`${apiBase}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -124,7 +125,21 @@ async function requestJson<T>(
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
     });
+
+    const timeoutPromise = new Promise<Response>((_resolve, reject) => {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`));
+      }, timeoutMs);
+    });
+
+    response = await Promise.race([fetchPromise, timeoutPromise]);
   } catch (error) {
+    if (timedOut) {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+    }
+
     if (error instanceof Error && error.name === "AbortError") {
       if (options?.signal?.aborted) {
         throw error;
@@ -133,7 +148,9 @@ async function requestJson<T>(
     }
     throw error;
   } finally {
-    clearTimeout(timeout);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
     options?.signal?.removeEventListener("abort", forwardAbort);
   }
 
@@ -166,13 +183,14 @@ async function requestFormData<T>(
 
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const forwardAbort = () => controller.abort();
   options?.signal?.addEventListener("abort", forwardAbort);
 
   let response: Response;
   try {
-    response = await fetch(`${apiBase}${path}`, {
+    const fetchPromise = fetch(`${apiBase}${path}`, {
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -180,7 +198,21 @@ async function requestFormData<T>(
       },
       body: formData,
     });
+
+    const timeoutPromise = new Promise<Response>((_resolve, reject) => {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`));
+      }, timeoutMs);
+    });
+
+    response = await Promise.race([fetchPromise, timeoutPromise]);
   } catch (error) {
+    if (timedOut) {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+    }
+
     if (error instanceof Error && error.name === "AbortError") {
       if (options?.signal?.aborted) {
         throw error;
@@ -189,7 +221,9 @@ async function requestFormData<T>(
     }
     throw error;
   } finally {
-    clearTimeout(timeout);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
     options?.signal?.removeEventListener("abort", forwardAbort);
   }
 
