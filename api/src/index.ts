@@ -4868,10 +4868,14 @@ app.get("/mobile/users/:userId/updates", async (request: Request, response: Resp
   }
 
   const currentCursor = getMobileUpdateCursor(user.id);
+  const hasCachedPayload = mobileUpdatePayloadByUserId.has(user.id);
 
-  if (since > currentCursor) {
+  if (since > currentCursor || (since === 0 && currentCursor === 0 && !hasCachedPayload)) {
+    const resyncCursor = bumpMobileUpdateCursor(user.id, "resync");
+    const payload = buildMobileUpdatesPayload(db, user, resyncCursor, "resync");
+    mobileUpdatePayloadByUserId.set(user.id, payload);
     response.setHeader("Cache-Control", "no-store");
-    response.json(buildMobileUpdatesPayload(db, user, currentCursor, "resync"));
+    response.json(payload);
     return;
   }
 

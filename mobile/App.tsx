@@ -1520,6 +1520,20 @@ export default function App() {
   }, [screen, user]);
 
   useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    if (screen === "domain_match" && user.accountType === "enterprise" && user.orgId) {
+      setOrgRequestError(null);
+      setOrgRequestNotice("Access approved. Your enterprise account is active.");
+      setDomainMatch(null);
+      setOrgJoinCodeInput("");
+      setScreen("home");
+    }
+  }, [screen, user]);
+
+  useEffect(() => {
     if (industryOptions.length === 0) {
       setSelectedIndustryId("");
       return;
