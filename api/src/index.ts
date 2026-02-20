@@ -3974,10 +3974,6 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     }
 
     const user = db.users[userIndex];
-    if (user.accountType !== "enterprise") {
-      response.status(400).json({ error: "Only enterprise users can be deleted from this view." });
-      return;
-    }
 
     db.users.splice(userIndex, 1);
     db.usageSessions = db.usageSessions.filter((session) => session.userId !== user.id);
@@ -4015,10 +4011,11 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
       action: "user.deleted",
       orgId: user.orgId,
       userId: user.id,
-      message: `Deleted enterprise user ${user.email}.`,
+      message: `Deleted ${user.accountType} user ${user.email}.`,
       metadata: {
         email: user.email,
-        orgRole: user.orgRole
+        orgRole: user.orgRole,
+        accountType: user.accountType
       }
     });
 
