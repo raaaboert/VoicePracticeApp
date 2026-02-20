@@ -52,6 +52,7 @@ export default function UsersPage() {
   const [contentIndustries, setContentIndustries] = useState<AppConfig["industries"]>([]);
   const [creating, setCreating] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [deletingPersonalUserId, setDeletingPersonalUserId] = useState<string | null>(null);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
     name: "",
     contactName: "",
@@ -196,6 +197,34 @@ export default function UsersPage() {
       setError(caught instanceof Error ? caught.message : "Could not export accounts CSV.");
     } finally {
       setExporting(false);
+    }
+  };
+
+  const deletePersonalUser = async (userId: string, email: string) => {
+    const firstConfirm = window.confirm("Are you sure? This can not be reversed!");
+    if (!firstConfirm) {
+      return;
+    }
+
+    const typed = window.prompt("Please type DELETE and confirm", "");
+    if (typed !== "DELETE") {
+      setError("Deletion cancelled. Type DELETE exactly to confirm.");
+      return;
+    }
+
+    setDeletingPersonalUserId(userId);
+    setError(null);
+    setNotice(null);
+    try {
+      await adminFetch<{ deleted: boolean; userId: string; email: string }>(`/users/${userId}`, {
+        method: "DELETE",
+      });
+      setUsers((prev) => prev.filter((row) => row.id !== userId));
+      setNotice(`Deleted ${email}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete personal user.");
+    } finally {
+      setDeletingPersonalUserId(null);
     }
   };
 
@@ -353,12 +382,13 @@ export default function UsersPage() {
                   <th>Verified</th>
                   <th>Created</th>
                   <th>User Id</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {personalUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="small">
+                    <td colSpan={7} className="small">
                       No individual users yet.
                     </td>
                   </tr>
@@ -372,6 +402,16 @@ export default function UsersPage() {
                       <td>{formatDateTime(user.createdAt)}</td>
                       <td>
                         <span className="small">{user.id}</span>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="danger"
+                          disabled={deletingPersonalUserId === user.id}
+                          onClick={() => void deletePersonalUser(user.id, user.email)}
+                        >
+                          {deletingPersonalUserId === user.id ? "Deleting..." : "Delete"}
+                        </button>
                       </td>
                     </tr>
                   ))

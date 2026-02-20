@@ -38,6 +38,39 @@ interface OrgDashboardResponse {
   users: OrgDashboardUserRow[];
 }
 
+interface OrgJoinRequestRow {
+  id: string;
+  status: "pending" | "approved" | "rejected" | "expired";
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  email: string;
+  emailDomain: string;
+  user: {
+    id: string;
+    email: string;
+    accountType: string;
+    tier: string;
+    status: string;
+    orgId: string | null;
+    orgRole: string | null;
+  } | null;
+  org: {
+    id: string;
+    name: string;
+    emailDomain: string | null;
+    joinCode: string;
+    status: string;
+  } | null;
+}
+
+interface OrgJoinRequestsResponse {
+  generatedAt: string;
+  rows: OrgJoinRequestRow[];
+}
+
 function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -45,6 +78,21 @@ function formatDate(value: string): string {
   }
 
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export default function EnterpriseOrgPage() {
@@ -68,6 +116,9 @@ export default function EnterpriseOrgPage() {
   const [orgDomainInput, setOrgDomainInput] = useState("");
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
+  const [joinRequestsGeneratedAt, setJoinRequestsGeneratedAt] = useState<string | null>(null);
+  const [actingJoinRequestId, setActingJoinRequestId] = useState<string | null>(null);
 
   const load = async () => {
     if (!orgId) {
@@ -78,14 +129,19 @@ export default function EnterpriseOrgPage() {
     setError(null);
     setSuccessMessage(null);
     try {
-      const [payload, configPayload] = await Promise.all([
+      const [payload, configPayload, joinRequestsPayload] = await Promise.all([
         adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`),
-        adminFetch<AppConfig>("/config")
+        adminFetch<AppConfig>("/config"),
+        adminFetch<OrgJoinRequestsResponse>("/org-join-requests?status=pending"),
       ]);
       setDashboard(payload);
       setIndustries(configPayload.industries ?? []);
       setOrgDomainInput(payload.org.emailDomain ?? "");
       setOrgJoinCodeInput(payload.org.joinCode ?? "");
+      setJoinRequestsGeneratedAt(joinRequestsPayload.generatedAt);
+      setJoinRequests(
+        (joinRequestsPayload.rows ?? []).filter((row) => row.status === "pending" && row.org?.id === payload.org.id),
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load enterprise account.");
     } finally {
@@ -267,6 +323,56 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const decideJoinRequest = async (
+    requestId: string,
+    action: "approve" | "reject",
+    options?: { assignOrgAdmin?: boolean },
+  ) => {
+    const payload: {
+      action: "approve" | "reject";
+      assignOrgAdmin?: boolean;
+      reason?: string;
+    } = { action };
+
+    if (action === "reject") {
+      const reasonInput = window.prompt("Optional rejection reason (leave blank for default):", "");
+      if (reasonInput === null) {
+        return;
+      }
+
+      const normalizedReason = reasonInput.trim();
+      if (normalizedReason) {
+        payload.reason = normalizedReason;
+      }
+    }
+
+    if (options?.assignOrgAdmin) {
+      payload.assignOrgAdmin = true;
+    }
+
+    setActingJoinRequestId(requestId);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      await adminFetch<{ ok: boolean }>(`/org-join-requests/${requestId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      setSuccessMessage(
+        action === "approve"
+          ? options?.assignOrgAdmin
+            ? "Request approved as org admin."
+            : "Request approved."
+          : "Request rejected.",
+      );
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update request.");
+    } finally {
+      setActingJoinRequestId(null);
+    }
+  };
+
   return (
     <AdminShell title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}>
       <div className="card">
@@ -331,6 +437,84 @@ export default function EnterpriseOrgPage() {
             </div>
           </>
         ) : null}
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h3 style={{ marginBottom: 6 }}>Org Access Requests</h3>
+            <div className="small">
+              Pending requests for this account: {joinRequests.length}
+              {joinRequestsGeneratedAt ? ` | Refreshed ${formatDateTime(joinRequestsGeneratedAt)}` : ""}
+            </div>
+          </div>
+          <div className="card-actions">
+            <button type="button" onClick={() => void load()} disabled={loading}>
+              Refresh
+            </button>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Email Domain</th>
+                <th>Submitted</th>
+                <th>Expires</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {joinRequests.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="small">
+                    {loading ? "Loading..." : "No pending requests for this enterprise account."}
+                  </td>
+                </tr>
+              ) : (
+                joinRequests.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <div>{row.email}</div>
+                      <div className="small">{row.user?.id ?? row.id}</div>
+                    </td>
+                    <td>{row.emailDomain}</td>
+                    <td>{formatDateTime(row.createdAt)}</td>
+                    <td>{formatDateTime(row.expiresAt)}</td>
+                    <td>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={actingJoinRequestId === row.id}
+                          onClick={() => void decideJoinRequest(row.id, "approve")}
+                        >
+                          {actingJoinRequestId === row.id ? "Saving..." : "Approve"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actingJoinRequestId === row.id}
+                          onClick={() => void decideJoinRequest(row.id, "approve", { assignOrgAdmin: true })}
+                        >
+                          Approve as Org Admin
+                        </button>
+                        <button
+                          type="button"
+                          className="danger"
+                          disabled={actingJoinRequestId === row.id}
+                          onClick={() => void decideJoinRequest(row.id, "reject")}
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">
