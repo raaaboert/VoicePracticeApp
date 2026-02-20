@@ -211,7 +211,7 @@ export default function UsersPage() {
               </button>
             </div>
           </div>
-          <form onSubmit={onCreateEnterpriseOrg} className="grid">
+          <form id="create-enterprise-account-form" onSubmit={onCreateEnterpriseOrg} className="grid">
             <div>
               <label>Company Name</label>
               <input
@@ -245,7 +245,12 @@ export default function UsersPage() {
           </form>
           <div className="form-actions">
             <div>
-              <button className="primary" disabled={creating}>
+              <button
+                className="primary"
+                type="submit"
+                form="create-enterprise-account-form"
+                disabled={creating}
+              >
                 {creating ? "Creating..." : "Create Enterprise Account"}
               </button>
             </div>

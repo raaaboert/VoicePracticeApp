@@ -10,6 +10,7 @@ const MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY = "voice_practice_mobile_auth_token";
 const COLOR_SCHEME_STORAGE_KEY = "@voice_practice_color_scheme";
 const VOICE_PROFILE_STORAGE_KEY = "@voice_practice_voice_profile";
 const VOICE_GENDER_STORAGE_KEY = "@voice_practice_voice_gender";
+const SECURE_STORE_TIMEOUT_MS = 4_000;
 
 const COLOR_SCHEME_VALUES = ["soft_light", "classic_blue"] as const;
 const VOICE_PROFILE_VALUES = ["balanced", "warm", "bright"] as const;
@@ -17,6 +18,22 @@ const VOICE_GENDER_VALUES = ["female", "male"] as const;
 
 function canUseSecureStore(): boolean {
   return Platform.OS === "android" || Platform.OS === "ios";
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race<T>([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error("Secure storage timed out.")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 async function loadLegacyMobileAuthToken(): Promise<string | null> {
@@ -61,7 +78,10 @@ export async function saveUserId(userId: string): Promise<void> {
 export async function loadMobileAuthToken(): Promise<string | null> {
   if (canUseSecureStore()) {
     try {
-      const secureValue = await SecureStore.getItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY);
+      const secureValue = await withTimeout(
+        SecureStore.getItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY),
+        SECURE_STORE_TIMEOUT_MS
+      );
       if (secureValue && secureValue.trim()) {
         return secureValue;
       }
@@ -75,7 +95,10 @@ export async function loadMobileAuthToken(): Promise<string | null> {
     }
 
     try {
-      await SecureStore.setItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY, legacy);
+      await withTimeout(
+        SecureStore.setItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY, legacy),
+        SECURE_STORE_TIMEOUT_MS
+      );
       await AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
     } catch {
       // If migration fails, still return the legacy value for this session.
@@ -89,9 +112,16 @@ export async function loadMobileAuthToken(): Promise<string | null> {
 
 export async function saveMobileAuthToken(token: string): Promise<void> {
   if (canUseSecureStore()) {
-    await SecureStore.setItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY, token);
-    await AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
-    return;
+    try {
+      await withTimeout(
+        SecureStore.setItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY, token),
+        SECURE_STORE_TIMEOUT_MS
+      );
+      await AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY);
+      return;
+    } catch {
+      // Falls back to AsyncStorage when secure storage is unavailable or unresponsive.
+    }
   }
 
   await AsyncStorage.setItem(MOBILE_AUTH_TOKEN_STORAGE_KEY, token);
@@ -100,7 +130,10 @@ export async function saveMobileAuthToken(token: string): Promise<void> {
 export async function clearMobileAuthToken(): Promise<void> {
   if (canUseSecureStore()) {
     await Promise.allSettled([
-      SecureStore.deleteItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY),
+      withTimeout(
+        SecureStore.deleteItemAsync(MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY),
+        SECURE_STORE_TIMEOUT_MS
+      ),
       AsyncStorage.removeItem(MOBILE_AUTH_TOKEN_STORAGE_KEY)
     ]);
     return;
