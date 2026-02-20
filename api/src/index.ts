@@ -976,28 +976,7 @@ function createDefaultDatabase(): ApiDatabase {
   return {
     config,
     users: [],
-    orgs: [
-      {
-        id: "org_starter",
-        name: "Starter Enterprise Org",
-        status: "active",
-        contactName: "Starter Admin",
-        contactEmail: "starter@example.com",
-        emailDomain: "example.com",
-        joinCode: "STARTER1",
-        activeIndustries: getConfiguredActiveIndustryIds(config),
-        dailySecondsQuota: 8 * 60 * 60,
-        perUserDailySecondsCap: 60 * 60,
-        manualBonusSeconds: 0,
-        contractSignedAt: now,
-        monthlyMinutesAllotted: Math.floor((8 * 60 * 60 * 30) / 60),
-        renewalTotalUsd: 0,
-        softLimitPercentTriggers: [75, 90],
-        maxSimulationMinutes: DEFAULT_MAX_SIMULATION_MINUTES,
-        createdAt: now,
-        updatedAt: now
-      }
-    ],
+    orgs: [],
     usageSessions: [],
     scoreRecords: [],
     aiUsageEvents: [],
@@ -1550,7 +1529,9 @@ function ensureDemoSupportCases(db: { supportCases: SupportCaseRecord[] }, nowIs
 
 function purgeDemoSeedData(db: ApiDatabase): void {
   const demoOrgIds = new Set(
-    db.orgs.filter((org) => hasPrefixedId(org.id, "org_demo_")).map((org) => org.id)
+    db.orgs
+      .filter((org) => hasPrefixedId(org.id, "org_demo_") || org.id === "org_starter")
+      .map((org) => org.id)
   );
 
   const demoUserIds = new Set(
