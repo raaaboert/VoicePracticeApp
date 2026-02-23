@@ -43,6 +43,7 @@ export interface IndustryDefinition {
   id: string;
   label: string;
   enabled: boolean;
+  aiBaseline?: string;
 }
 
 export interface RoleIndustryDefinition {
@@ -557,7 +558,8 @@ export const DEFAULT_TIER_DEFINITIONS: TierDefinition[] = [
 export const DEFAULT_INDUSTRIES: IndustryDefinition[] = INDUSTRY_IDS.map((id) => ({
   id,
   label: INDUSTRY_LABELS[id] ?? id,
-  enabled: true
+  enabled: true,
+  aiBaseline: ""
 }));
 
 export const DEFAULT_ROLE_INDUSTRIES: RoleIndustryDefinition[] = INDUSTRY_IDS.flatMap((industryId) =>

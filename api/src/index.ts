@@ -118,6 +118,7 @@ const MAX_MAX_SIMULATION_MINUTES = 240;
 const MAX_ACTIVE_ADMIN_SESSIONS = 100;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
+const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
 const WARNING_LOG_THROTTLE_MS = 60_000;
@@ -420,11 +421,15 @@ function normalizeIndustryDefinitions(
     const label = typeof candidate.label === "string" && candidate.label.trim()
       ? candidate.label.trim()
       : id;
+    const aiBaseline = typeof candidate.aiBaseline === "string"
+      ? candidate.aiBaseline.trim()
+      : "";
 
     normalized.push({
       id,
       label,
-      enabled: candidate.enabled !== false
+      enabled: candidate.enabled !== false,
+      aiBaseline
     });
   }
 
@@ -2557,6 +2562,65 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
     roleIndustries: filteredRoleIndustries,
     activeSegmentId: hasActiveSegment ? db.config.activeSegmentId : fallbackSegment.id,
     segments: filteredSegments
+  };
+}
+
+function normalizeAiIndustryBaselineForPrompt(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.slice(0, MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS);
+}
+
+function resolveAiIndustryPromptContext(
+  configForUser: AppConfig,
+  segment: SegmentDefinition,
+  selectedIndustryIdRaw: unknown,
+  selectedIndustryBaselineRaw: unknown
+): {
+  industryId: string | null;
+  industryLabel: string | null;
+  industryBaseline: string | null;
+} {
+  const activeLinkedIndustryIds = new Set(
+    (configForUser.roleIndustries ?? [])
+      .filter((entry) => entry.active && entry.roleId === segment.id)
+      .map((entry) => entry.industryId)
+  );
+  const linkedIndustries = (configForUser.industries ?? []).filter(
+    (industry) => industry.enabled && activeLinkedIndustryIds.has(industry.id)
+  );
+
+  let selectedIndustry: IndustryDefinition | null = null;
+  if (typeof selectedIndustryIdRaw === "string" && selectedIndustryIdRaw.trim()) {
+    const requestedIndustryId = selectedIndustryIdRaw.trim();
+    selectedIndustry = linkedIndustries.find((industry) => industry.id === requestedIndustryId) ?? null;
+  } else if (linkedIndustries.length === 1) {
+    selectedIndustry = linkedIndustries[0] ?? null;
+  }
+
+  if (!selectedIndustry) {
+    return {
+      industryId: null,
+      industryLabel: null,
+      industryBaseline: null
+    };
+  }
+
+  const configuredBaseline = normalizeAiIndustryBaselineForPrompt(selectedIndustry.aiBaseline);
+  const cachedBaseline = normalizeAiIndustryBaselineForPrompt(selectedIndustryBaselineRaw);
+  const hasCachedBaselineSnapshot = typeof selectedIndustryBaselineRaw === "string";
+
+  return {
+    industryId: selectedIndustry.id,
+    industryLabel: selectedIndustry.label,
+    industryBaseline: hasCachedBaselineSnapshot ? cachedBaseline : (cachedBaseline ?? configuredBaseline)
   };
 }
 
@@ -5133,7 +5197,13 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
   }
 
   const userId = request.params.userId;
-  const body = request.body as { scenarioId?: string; difficulty?: unknown; personaStyle?: unknown };
+  const body = request.body as {
+    scenarioId?: string;
+    difficulty?: unknown;
+    personaStyle?: unknown;
+    industryId?: unknown;
+    industryBaseline?: unknown;
+  };
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
@@ -5182,12 +5252,22 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       return null;
     }
 
+    const industryPromptContext = resolveAiIndustryPromptContext(
+      configForUser,
+      segment,
+      body.industryId,
+      body.industryBaseline
+    );
+
     return {
       user,
       segment,
       scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
-      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle
+      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
+      industryId: industryPromptContext.industryId,
+      industryLabel: industryPromptContext.industryLabel,
+      industryBaseline: industryPromptContext.industryBaseline
     };
   });
 
@@ -5200,7 +5280,9 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       scenario: context.scenario,
       difficulty: context.difficulty,
       segmentLabel: context.segment.label,
-      personaStyle: context.personaStyle
+      personaStyle: context.personaStyle,
+      industryLabel: context.industryLabel,
+      industryBaseline: context.industryBaseline
     });
 
     const openingPrompt = buildOpeningPrompt(context.scenario);
@@ -5272,6 +5354,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     scenarioId?: string;
     difficulty?: unknown;
     personaStyle?: unknown;
+    industryId?: unknown;
+    industryBaseline?: unknown;
     history?: unknown;
   };
 
@@ -5329,12 +5413,22 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
+    const industryPromptContext = resolveAiIndustryPromptContext(
+      configForUser,
+      segment,
+      body.industryId,
+      body.industryBaseline
+    );
+
     return {
       user,
       segment,
       scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
-      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle
+      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
+      industryId: industryPromptContext.industryId,
+      industryLabel: industryPromptContext.industryLabel,
+      industryBaseline: industryPromptContext.industryBaseline
     };
   });
 
@@ -5347,7 +5441,9 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       scenario: context.scenario,
       difficulty: context.difficulty,
       segmentLabel: context.segment.label,
-      personaStyle: context.personaStyle
+      personaStyle: context.personaStyle,
+      industryLabel: context.industryLabel,
+      industryBaseline: context.industryBaseline
     });
 
     const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
@@ -5419,6 +5515,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     scenarioId?: string;
     difficulty?: unknown;
     personaStyle?: unknown;
+    industryId?: unknown;
+    industryBaseline?: unknown;
     startedAt?: string;
     endedAt?: string;
     history?: unknown;
@@ -5490,12 +5588,22 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
+    const industryPromptContext = resolveAiIndustryPromptContext(
+      configForUser,
+      segment,
+      body.industryId,
+      body.industryBaseline
+    );
+
     return {
       user,
       segment,
       scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
-      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle
+      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
+      industryId: industryPromptContext.industryId,
+      industryLabel: industryPromptContext.industryLabel,
+      industryBaseline: industryPromptContext.industryBaseline
     };
   });
 
@@ -5508,7 +5616,9 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       scenario: context.scenario,
       difficulty: context.difficulty,
       segmentLabel: context.segment.label,
-      personaStyle: context.personaStyle
+      personaStyle: context.personaStyle,
+      industryLabel: context.industryLabel,
+      industryBaseline: context.industryBaseline
     });
 
     const transcript = formatDialogueForEvaluation(history);

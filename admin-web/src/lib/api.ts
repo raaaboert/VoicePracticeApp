@@ -4,6 +4,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4100"
 const REQUEST_ATTEMPT_TIMEOUT_MS = 7_000;
 const REQUEST_TOTAL_TIMEOUT_MS = 14_000;
 const REQUEST_MAX_ATTEMPTS = 2;
+const ADMIN_CONTENT_SECTION_STATE_STORAGE_KEY = "vp_admin_content_sections_expanded";
 
 export function getApiBaseUrl(): string {
   return API_BASE;
@@ -49,6 +50,9 @@ export async function logoutAdminSession(): Promise<void> {
   } catch {
     // Ignore network/logout errors; local token clear still signs out this browser.
   } finally {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(ADMIN_CONTENT_SECTION_STATE_STORAGE_KEY);
+    }
     clearAdminToken();
   }
 }

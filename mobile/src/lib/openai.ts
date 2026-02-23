@@ -14,6 +14,8 @@ export async function createOpeningLine(params: {
   userId: string;
   authToken: string;
   scenario: Scenario;
+  industryId?: string;
+  industryBaseline?: string;
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
@@ -22,6 +24,8 @@ export async function createOpeningLine(params: {
     userId: params.userId,
     authToken: params.authToken,
     scenarioId: params.scenario.id,
+    industryId: params.industryId,
+    industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
     personaStyle: params.personaStyle,
   });
@@ -33,6 +37,8 @@ export async function generateAssistantReply(params: {
   userId: string;
   authToken: string;
   scenario: Scenario;
+  industryId?: string;
+  industryBaseline?: string;
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
@@ -42,6 +48,8 @@ export async function generateAssistantReply(params: {
     userId: params.userId,
     authToken: params.authToken,
     scenarioId: params.scenario.id,
+    industryId: params.industryId,
+    industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
     personaStyle: params.personaStyle,
     history: params.history,
@@ -71,6 +79,8 @@ export async function evaluateSimulation(params: {
   userId: string;
   authToken: string;
   scenario: Scenario;
+  industryId?: string;
+  industryBaseline?: string;
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
@@ -92,6 +102,8 @@ export async function evaluateSimulation(params: {
     userId: params.userId,
     authToken: params.authToken,
     scenarioId: params.scenario.id,
+    industryId: params.industryId,
+    industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
     personaStyle: params.personaStyle,
     startedAt: params.startedAt,
@@ -99,4 +111,3 @@ export async function evaluateSimulation(params: {
     history: params.history,
   });
 }
-

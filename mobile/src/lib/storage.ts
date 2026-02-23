@@ -7,6 +7,7 @@ const ACTIVE_SEGMENT_STORAGE_KEY = "@voice_practice_active_segment";
 const USER_ID_STORAGE_KEY = "@voice_practice_user_id";
 const MOBILE_AUTH_TOKEN_STORAGE_KEY = "@voice_practice_mobile_auth_token";
 const MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY = "voice_practice_mobile_auth_token";
+const ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY = "@voice_practice_active_industry_baseline";
 const COLOR_SCHEME_STORAGE_KEY = "@voice_practice_color_scheme";
 const VOICE_PROFILE_STORAGE_KEY = "@voice_practice_voice_profile";
 const VOICE_GENDER_STORAGE_KEY = "@voice_practice_voice_gender";
@@ -144,7 +145,63 @@ export async function clearMobileAuthToken(): Promise<void> {
 
 export async function clearUserId(): Promise<void> {
   await AsyncStorage.removeItem(USER_ID_STORAGE_KEY);
+  await AsyncStorage.removeItem(ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY);
   await clearMobileAuthToken();
+}
+
+export async function loadActiveIndustryBaselineContext(): Promise<{
+  industryId: string;
+  industryBaseline: string;
+  cachedAt: string | null;
+} | null> {
+  try {
+    const raw = await AsyncStorage.getItem(ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<{
+      industryId: string;
+      industryBaseline: string;
+      cachedAt: string;
+    }>;
+    const industryId = typeof parsed.industryId === "string" ? parsed.industryId.trim() : "";
+    if (!industryId) {
+      return null;
+    }
+
+    const industryBaseline = typeof parsed.industryBaseline === "string" ? parsed.industryBaseline : "";
+    const cachedAt = typeof parsed.cachedAt === "string" && parsed.cachedAt.trim() ? parsed.cachedAt : null;
+    return {
+      industryId,
+      industryBaseline,
+      cachedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveActiveIndustryBaselineContext(input: {
+  industryId: string;
+  industryBaseline: string;
+}): Promise<void> {
+  const industryId = input.industryId.trim();
+  if (!industryId) {
+    await AsyncStorage.removeItem(ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY);
+    return;
+  }
+
+  const payload = {
+    industryId,
+    industryBaseline: input.industryBaseline ?? "",
+    cachedAt: new Date().toISOString(),
+  };
+  await AsyncStorage.setItem(ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY, JSON.stringify(payload));
+}
+
+export async function clearActiveIndustryBaselineContext(): Promise<void> {
+  await AsyncStorage.removeItem(ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY);
 }
 
 export async function loadColorScheme(defaultValue: AppColorScheme = "soft_light"): Promise<AppColorScheme> {

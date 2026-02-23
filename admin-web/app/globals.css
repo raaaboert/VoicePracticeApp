@@ -366,6 +366,15 @@ td {
   margin-bottom: 12px;
 }
 
+.content-collapsible-header {
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.content-collapse-button {
+  min-width: 92px;
+}
+
 .content-header-actions {
   align-items: center;
 }
@@ -405,6 +414,11 @@ td {
 
 .content-hint {
   margin: 10px 0 0;
+}
+
+.content-word-counter {
+  margin: 6px 0 0;
+  line-height: 1.35;
 }
 
 .content-pill {

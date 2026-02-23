@@ -120,14 +120,16 @@ export default function EnterpriseOrgPage() {
   const [joinRequestsGeneratedAt, setJoinRequestsGeneratedAt] = useState<string | null>(null);
   const [actingJoinRequestId, setActingJoinRequestId] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = async (options?: { preserveSuccessMessage?: boolean }) => {
     if (!orgId) {
       return;
     }
 
     setLoading(true);
     setError(null);
-    setSuccessMessage(null);
+    if (!options?.preserveSuccessMessage) {
+      setSuccessMessage(null);
+    }
     try {
       const [payload, configPayload, joinRequestsPayload] = await Promise.all([
         adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`),
@@ -365,7 +367,7 @@ export default function EnterpriseOrgPage() {
             : "Request approved."
           : "Request rejected.",
       );
-      await load();
+      await load({ preserveSuccessMessage: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update request.");
     } finally {

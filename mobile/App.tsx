@@ -66,6 +66,7 @@ import {
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
+  saveActiveIndustryBaselineContext,
   clearUserId,
   loadActiveSegment,
   loadColorScheme,
@@ -718,6 +719,7 @@ export default function App() {
           return {
             id: industry.id,
             label: industry.label,
+            aiBaseline: industry.aiBaseline ?? "",
             roles,
           };
         })
@@ -735,6 +737,7 @@ export default function App() {
         {
           id: enabledIndustries[0].id,
           label: enabledIndustries[0].label,
+          aiBaseline: enabledIndustries[0].aiBaseline ?? "",
           roles: enabledSegments
         }
       ];
@@ -1863,7 +1866,7 @@ export default function App() {
   };
 
   const startSimulation = async () => {
-    if (!activeSegment || !activeScenario || !user || !mobileAuthToken) {
+    if (!activeSegment || !activeScenario || !activeIndustry || !user || !mobileAuthToken) {
       setSetupError("Missing setup context. Please refresh and try again.");
       return;
     }
@@ -1880,8 +1883,23 @@ export default function App() {
         throw new Error("No scenario available for this segment.");
       }
 
+      const industryId = activeIndustry.id;
+      const industryLabel = activeIndustry.label;
+      const industryBaseline = (activeIndustry.aiBaseline ?? "").trim();
+      try {
+        await saveActiveIndustryBaselineContext({
+          industryId,
+          industryBaseline,
+        });
+      } catch {
+        // Do not block simulation start on local cache persistence issues.
+      }
+
       setSimulationConfig({
         scenario,
+        industryId,
+        industryLabel,
+        industryBaseline,
         difficulty: selectedDifficulty,
         segmentLabel: activeSegment.label,
         personaStyle: selectedPersonaStyle,
@@ -2022,6 +2040,8 @@ export default function App() {
             userId: user.id,
             authToken: mobileAuthToken,
             scenario: completedConfig.scenario,
+            industryId: completedConfig.industryId,
+            industryBaseline: completedConfig.industryBaseline,
             difficulty: completedConfig.difficulty,
             segmentLabel: completedConfig.segmentLabel,
             personaStyle: completedConfig.personaStyle,

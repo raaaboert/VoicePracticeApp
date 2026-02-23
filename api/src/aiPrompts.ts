@@ -1,6 +1,6 @@
 import { Difficulty, PersonaStyle, Scenario } from "@voicepractice/shared";
 
-export const AI_PROMPT_VERSION = "2026-02-16.v1";
+export const AI_PROMPT_VERSION = "2026-02-23.v2";
 export const AI_RUBRIC_VERSION = "2026-02-16.v1";
 
 const DIFFICULTY_BEHAVIOR: Record<Difficulty, string> = {
@@ -26,11 +26,25 @@ export function buildRoleplaySystemPrompt(params: {
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
+  industryLabel?: string | null;
+  industryBaseline?: string | null;
 }): string {
   const { scenario, difficulty, segmentLabel, personaStyle } = params;
-  return [
+  const industryBaseline = params.industryBaseline?.trim() ?? "";
+  const lines = [
     "You are a role-play opponent in a voice-based professional simulation.",
     `The user is acting as a ${segmentLabel}.`,
+  ];
+
+  if (params.industryLabel?.trim()) {
+    lines.push(`Selected industry: ${params.industryLabel.trim()}`);
+  }
+
+  if (industryBaseline) {
+    lines.push(`Industry baseline guidance for this conversation:\n${industryBaseline}`);
+  }
+
+  lines.push(
     `You are playing the role of ${scenario.aiRole}.`,
     `Scenario context: ${scenario.description}`,
     `Difficulty behavior: ${DIFFICULTY_BEHAVIOR[difficulty]}`,
@@ -39,7 +53,9 @@ export function buildRoleplaySystemPrompt(params: {
     "Respond in 1-3 concise spoken sentences each turn.",
     "Keep the conversation realistic, emotionally believable, and professional.",
     "Only become convinced when the user's reasoning and communication quality deserve it for the selected difficulty."
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 export function buildOpeningPrompt(scenario: Scenario): string {
@@ -55,10 +71,25 @@ export function buildEvaluationSystemPrompt(params: {
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
+  industryLabel?: string | null;
+  industryBaseline?: string | null;
 }): string {
-  return [
+  const lines = [
     "You are an expert communication coach evaluating a role-play simulation.",
     `Segment: ${params.segmentLabel}`,
+  ];
+
+  if (params.industryLabel?.trim()) {
+    lines.push(`Industry: ${params.industryLabel.trim()}`);
+  }
+
+  if ((params.industryBaseline?.trim() ?? "").length > 0) {
+    lines.push(
+      `Industry baseline guidance (soft reference only; prioritize communication quality over domain specifics):\n${params.industryBaseline?.trim()}`
+    );
+  }
+
+  lines.push(
     `Scenario: ${params.scenario.title}`,
     `Difficulty: ${params.difficulty}`,
     `Persona style: ${params.personaStyle}`,
@@ -67,7 +98,9 @@ export function buildEvaluationSystemPrompt(params: {
     '{"overallScore":number(0-100),"persuasion":number(1-10),"clarity":number(1-10),"empathy":number(1-10),"assertiveness":number(1-10),"strengths":[string,string,string],"improvements":[string,string,string],"summary":string}',
     "Use higher standards for hard difficulty.",
     "Keep strengths and improvements concrete and actionable."
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 export function formatDialogueForEvaluation(history: Array<{ role: "user" | "assistant"; content: string }>): string {
@@ -75,4 +108,3 @@ export function formatDialogueForEvaluation(history: Array<{ role: "user" | "ass
     .map((message) => `${message.role === "user" ? "User" : "AI"}: ${message.content}`)
     .join("\n");
 }
-

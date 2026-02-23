@@ -18,6 +18,49 @@ type DeleteTarget =
   | { kind: "role"; id: string; label: string }
   | { kind: "scenario"; id: string; label: string; roleId: string };
 
+type ContentSectionKey = "industry" | "role" | "roleIndustries" | "scenarios";
+type ContentSectionExpandedState = Record<ContentSectionKey, boolean>;
+
+const CONTENT_PAGE_SECTION_STATE_STORAGE_KEY = "vp_admin_content_sections_expanded";
+const DEFAULT_CONTENT_SECTION_EXPANDED: ContentSectionExpandedState = {
+  industry: false,
+  role: false,
+  roleIndustries: false,
+  scenarios: false
+};
+
+function loadStoredContentSectionExpandedState(): ContentSectionExpandedState {
+  if (typeof window === "undefined") {
+    return { ...DEFAULT_CONTENT_SECTION_EXPANDED };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(CONTENT_PAGE_SECTION_STATE_STORAGE_KEY);
+    if (!raw) {
+      return { ...DEFAULT_CONTENT_SECTION_EXPANDED };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<ContentSectionExpandedState>;
+    return {
+      industry: parsed.industry === true,
+      role: parsed.role === true,
+      roleIndustries: parsed.roleIndustries === true,
+      scenarios: parsed.scenarios === true
+    };
+  } catch {
+    return { ...DEFAULT_CONTENT_SECTION_EXPANDED };
+  }
+}
+
+function countWords(value: string): number {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return 0;
+  }
+
+  return trimmed.split(/\s+/).length;
+}
+
 function createIdFromLabel(label: string, prefix: string, existingIds: Set<string>): string {
   const base = label
     .trim()
@@ -71,6 +114,7 @@ export default function ContentPage() {
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
   const [newIndustryLabel, setNewIndustryLabel] = useState("");
   const [editingIndustryLabel, setEditingIndustryLabel] = useState("");
+  const [editingIndustryAiBaseline, setEditingIndustryAiBaseline] = useState("");
 
   const [roleSearch, setRoleSearch] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState("");
@@ -92,6 +136,9 @@ export default function ContentPage() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleteStep, setDeleteStep] = useState<1 | 2>(1);
   const [deleteText, setDeleteText] = useState("");
+  const [contentSectionExpanded, setContentSectionExpanded] = useState<ContentSectionExpandedState>(
+    () => loadStoredContentSectionExpandedState()
+  );
 
   const load = async () => {
     setLoading(true);
@@ -109,6 +156,21 @@ export default function ContentPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(
+        CONTENT_PAGE_SECTION_STATE_STORAGE_KEY,
+        JSON.stringify(contentSectionExpanded)
+      );
+    } catch {
+      // Ignore local storage failures and keep in-memory state only.
+    }
+  }, [contentSectionExpanded]);
 
   const savePatch = async (patch: UpdateConfigRequest, successMessage: string) => {
     setSaving(true);
@@ -184,7 +246,20 @@ export default function ContentPage() {
 
   useEffect(() => {
     setEditingIndustryLabel(selectedIndustry?.label ?? "");
-  }, [selectedIndustry?.id, selectedIndustry?.label]);
+    setEditingIndustryAiBaseline(selectedIndustry?.aiBaseline ?? "");
+  }, [selectedIndustry?.aiBaseline, selectedIndustry?.id, selectedIndustry?.label]);
+
+  const toggleSection = (section: ContentSectionKey) => {
+    setContentSectionExpanded((prev) => ({
+      ...prev,
+      [section]: !prev[section]
+    }));
+  };
+
+  const industryAiBaselineWordCount = useMemo(
+    () => countWords(editingIndustryAiBaseline),
+    [editingIndustryAiBaseline]
+  );
 
   useEffect(() => {
     setEditingRoleLabel(selectedRole?.label ?? "");
@@ -249,7 +324,7 @@ export default function ContentPage() {
 
     const existingIds = new Set((config.industries ?? []).map((industry) => industry.id));
     const id = createIdFromLabel(label, "industry", existingIds);
-    const nextIndustries = sortIndustries([...(config.industries ?? []), { id, label, enabled: true }]);
+    const nextIndustries = sortIndustries([...(config.industries ?? []), { id, label, enabled: true, aiBaseline: "" }]);
 
     await savePatch({ industries: nextIndustries }, "Industry added.");
     setNewIndustryLabel("");
@@ -273,6 +348,20 @@ export default function ContentPage() {
       )
     );
     await savePatch({ industries: nextIndustries }, "Industry updated.");
+  };
+
+  const saveIndustryAiBaseline = async () => {
+    if (!config || !selectedIndustry) {
+      return;
+    }
+
+    const aiBaseline = editingIndustryAiBaseline.trim();
+    const nextIndustries = sortIndustries(
+      (config.industries ?? []).map((industry) =>
+        industry.id === selectedIndustry.id ? { ...industry, aiBaseline } : industry
+      )
+    );
+    await savePatch({ industries: nextIndustries }, "Industry AI baseline updated.");
   };
 
   const setIndustryActive = async (active: boolean) => {
@@ -568,425 +657,513 @@ export default function ContentPage() {
         </div>
 
         <div className="card content-section-card">
-          <h3>Industry</h3>
-          <div className="content-grid content-grid-two">
-            <div>
-              <label>Search Industries</label>
-              <input
-                value={industrySearch}
-                onChange={(event) => setIndustrySearch(event.target.value)}
-                placeholder="Type to filter industries"
-              />
-            </div>
-            <div>
-              <label>Industry</label>
-              <select
-                value={selectedIndustryId}
-                onChange={(event) => setSelectedIndustryId(event.target.value)}
-                disabled={filteredIndustries.length === 0}
-              >
-                {filteredIndustries.map((industry) => (
-                  <option key={industry.id} value={industry.id}>
-                    {industry.label} {industry.enabled ? "" : "(inactive)"}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="content-grid content-grid-input-action">
-            <div>
-              <label>Add Industry</label>
-              <input
-                value={newIndustryLabel}
-                onChange={(event) => setNewIndustryLabel(event.target.value)}
-                placeholder="Industry name"
-              />
-            </div>
-            <div className="content-actions">
-              <button
-                type="button"
-                className="primary"
-                disabled={saving || !newIndustryLabel.trim()}
-                onClick={() => void addIndustry()}
-              >
-                Add Industry
-              </button>
-            </div>
-          </div>
-          <div className="content-grid content-grid-input-action">
-            <div>
-              <label>Edit Industry Name</label>
-              <input
-                value={editingIndustryLabel}
-                onChange={(event) => setEditingIndustryLabel(event.target.value)}
-                disabled={!selectedIndustry}
-              />
-            </div>
-            <div className="content-actions content-actions-wrap">
-              <button
-                type="button"
-                disabled={saving || !selectedIndustry}
-                onClick={() => void saveIndustryEdit()}
-              >
-                Save Industry
-              </button>
-              <button
-                type="button"
-                className={selectedIndustry?.enabled ? "primary" : undefined}
-                disabled={saving || !selectedIndustry}
-                onClick={() => void setIndustryActive(true)}
-              >
-                Active
-              </button>
-              <button
-                type="button"
-                className={!selectedIndustry?.enabled ? "primary" : undefined}
-                disabled={saving || !selectedIndustry}
-                onClick={() => void setIndustryActive(false)}
-              >
-                Inactive
-              </button>
-              <button
-                type="button"
-                className="danger"
-                disabled={saving || !selectedIndustry}
-                onClick={() =>
-                  selectedIndustry
-                    ? openDelete({ kind: "industry", id: selectedIndustry.id, label: selectedIndustry.label })
-                    : undefined
-                }
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-          <p className="small content-hint">Rename, deactivate, or delete the selected industry.</p>
-        </div>
-
-        <div className="card content-section-card">
-          <h3>Role</h3>
-          <div className="content-grid content-grid-two">
-            <div>
-              <label>Search Roles</label>
-              <input
-                value={roleSearch}
-                onChange={(event) => setRoleSearch(event.target.value)}
-                placeholder="Type to filter roles"
-              />
-            </div>
-            <div>
-              <label>Role</label>
-              <select
-                value={selectedRoleId}
-                onChange={(event) => setSelectedRoleId(event.target.value)}
-                disabled={filteredRoles.length === 0}
-              >
-                {filteredRoles.map((role) => (
-                  <option key={role.id} value={role.id}>
-                    {role.label} {role.enabled ? "" : "(inactive)"}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="content-grid content-grid-input-action">
-            <div>
-              <label>Add Role</label>
-              <input
-                value={newRoleLabel}
-                onChange={(event) => setNewRoleLabel(event.target.value)}
-                placeholder="Role name"
-              />
-            </div>
-            <div className="content-actions">
-              <button
-                type="button"
-                className="primary"
-                disabled={saving || !newRoleLabel.trim()}
-                onClick={() => void addRole()}
-              >
-                Add Role
-              </button>
-            </div>
-          </div>
-          <div className="content-grid content-grid-two">
-            <div>
-              <label>Edit Role Name</label>
-              <input
-                value={editingRoleLabel}
-                onChange={(event) => setEditingRoleLabel(event.target.value)}
-                disabled={!selectedRole}
-              />
-            </div>
-            <div>
-              <label>Role Summary</label>
-              <input
-                value={editingRoleSummary}
-                onChange={(event) => setEditingRoleSummary(event.target.value)}
-                disabled={!selectedRole}
-              />
-            </div>
-          </div>
-          <div className="content-actions content-actions-wrap content-actions-row">
+          <div className="content-section-header content-collapsible-header">
+            <h3>Industry</h3>
             <button
               type="button"
-              disabled={saving || !selectedRole}
-              onClick={() => void saveRoleEdit()}
+              className="content-collapse-button"
+              onClick={() => toggleSection("industry")}
+              aria-expanded={contentSectionExpanded.industry}
             >
-              Save Role
-            </button>
-            <button
-              type="button"
-              className={selectedRole?.enabled ? "primary" : undefined}
-              disabled={saving || !selectedRole}
-              onClick={() => void setRoleActive(true)}
-            >
-              Active
-            </button>
-            <button
-              type="button"
-              className={!selectedRole?.enabled ? "primary" : undefined}
-              disabled={saving || !selectedRole}
-              onClick={() => void setRoleActive(false)}
-            >
-              Inactive
-            </button>
-            <button
-              type="button"
-              className="danger"
-              disabled={saving || !selectedRole}
-              onClick={() =>
-                selectedRole
-                  ? openDelete({ kind: "role", id: selectedRole.id, label: selectedRole.label })
-                  : undefined
-              }
-            >
-              Delete
+              {contentSectionExpanded.industry ? "Collapse" : "Expand"}
             </button>
           </div>
-        </div>
-
-        <div className="card content-section-card">
-          <h3>Role Industries</h3>
-          <p className="small content-pill">
-            Active Industries for role: {activeRoleIndustryLabels.length > 0 ? activeRoleIndustryLabels.join(", ") : "(none)"}
-          </p>
-          <div className="content-grid content-grid-two">
-            <div>
-              <label>Search Industries</label>
-              <input
-                value={roleIndustrySearch}
-                onChange={(event) => setRoleIndustrySearch(event.target.value)}
-                placeholder="Type to filter industries"
-              />
-            </div>
-            <div>
-              <label>Industry</label>
-              <select
-                value={selectedRoleIndustryId}
-                onChange={(event) => setSelectedRoleIndustryId(event.target.value)}
-                disabled={!selectedRoleId || filteredRoleIndustryRows.length === 0}
-              >
-                {filteredRoleIndustryRows.map((row) => (
-                  <option key={row.id} value={row.id}>
-                    {row.label} {row.active ? "(active)" : "(inactive)"} {row.industryEnabled ? "" : "(industry disabled)"}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="content-actions content-actions-wrap content-actions-row">
-            <button
-              type="button"
-              className="primary"
-              disabled={saving || !selectedRoleId || !selectedRoleIndustryId}
-              onClick={() => void setRoleIndustryActive(selectedRoleIndustryId, true)}
-            >
-              Active
-            </button>
-            <button
-              type="button"
-              disabled={saving || !selectedRoleId || !selectedRoleIndustryId}
-              onClick={() => void setRoleIndustryActive(selectedRoleIndustryId, false)}
-            >
-              Inactive
-            </button>
-          </div>
-        </div>
-
-        <div className="card content-section-card">
-          <div className="content-section-header content-header-actions">
-            <h3>Scenarios For Role</h3>
-            <div className="content-actions content-actions-wrap">
-              <button type="button" onClick={downloadScenariosCsv}>
-                Download CSV
-              </button>
-              <button type="button" className="primary" onClick={() => setAddScenarioMode((prev) => !prev)} disabled={!selectedRole}>
-                {addScenarioMode ? "Cancel Add" : "Add Scenario"}
-              </button>
-            </div>
-          </div>
-          <div className="content-table-wrap">
-            <table className="content-table">
-          <thead>
-            <tr>
-              <th>Scenario</th>
-              <th>Description</th>
-              <th>AI Role</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {addScenarioMode ? (
-              <tr>
-                <td>
-                  <input value={newScenarioTitle} onChange={(event) => setNewScenarioTitle(event.target.value)} />
-                </td>
-                <td>
-                  <textarea
-                    rows={3}
-                    value={newScenarioDescription}
-                    onChange={(event) => setNewScenarioDescription(event.target.value)}
+          {contentSectionExpanded.industry ? (
+            <>
+              <div className="content-grid content-grid-two">
+                <div>
+                  <label>Search Industries</label>
+                  <input
+                    value={industrySearch}
+                    onChange={(event) => setIndustrySearch(event.target.value)}
+                    placeholder="Type to filter industries"
                   />
-                </td>
-                <td>
-                  <textarea rows={3} value={newScenarioAiRole} onChange={(event) => setNewScenarioAiRole(event.target.value)} />
-                </td>
-                <td>
+                </div>
+                <div>
+                  <label>Industry</label>
                   <select
-                    value={newScenarioEnabled ? "active" : "inactive"}
-                    onChange={(event) => setNewScenarioEnabled(event.target.value === "active")}
+                    value={selectedIndustryId}
+                    onChange={(event) => setSelectedIndustryId(event.target.value)}
+                    disabled={filteredIndustries.length === 0}
                   >
-                    <option value="active">active</option>
-                    <option value="inactive">inactive</option>
+                    {filteredIndustries.map((industry) => (
+                      <option key={industry.id} value={industry.id}>
+                        {industry.label} {industry.enabled ? "" : "(inactive)"}
+                      </option>
+                    ))}
                   </select>
-                </td>
-                <td>
-                  <button type="button" className="primary" disabled={saving || !selectedRole} onClick={() => void saveNewScenario()}>
-                    Save
+                </div>
+              </div>
+              <div className="content-grid content-grid-input-action">
+                <div>
+                  <label>Add Industry</label>
+                  <input
+                    value={newIndustryLabel}
+                    onChange={(event) => setNewIndustryLabel(event.target.value)}
+                    placeholder="Industry name"
+                  />
+                </div>
+                <div className="content-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={saving || !newIndustryLabel.trim()}
+                    onClick={() => void addIndustry()}
+                  >
+                    Add Industry
                   </button>
-                </td>
-              </tr>
-            ) : null}
-            {scenariosForRole.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="small">
-                  {selectedRole ? "No scenarios for this role yet." : "Select a role to manage scenarios."}
-                </td>
-              </tr>
-            ) : (
-              scenariosForRole.map((scenario) => {
-                const editing = scenario.id === editingScenarioId && editingScenarioDraft;
-                return (
-                  <tr key={scenario.id}>
-                    <td>
-                      {editing ? (
-                        <input
-                          value={editingScenarioDraft.title}
-                          onChange={(event) =>
-                            setEditingScenarioDraft({ ...editingScenarioDraft, title: event.target.value })
-                          }
-                        />
-                      ) : (
-                        scenario.title
-                      )}
-                    </td>
-                    <td className="content-long-cell">
-                      {editing ? (
-                        <textarea
-                          rows={3}
-                          value={editingScenarioDraft.description}
-                          onChange={(event) =>
-                            setEditingScenarioDraft({ ...editingScenarioDraft, description: event.target.value })
-                          }
-                        />
-                      ) : (
-                        scenario.description
-                      )}
-                    </td>
-                    <td className="content-long-cell">
-                      {editing ? (
-                        <textarea
-                          rows={3}
-                          value={editingScenarioDraft.aiRole}
-                          onChange={(event) =>
-                            setEditingScenarioDraft({ ...editingScenarioDraft, aiRole: event.target.value })
-                          }
-                        />
-                      ) : (
-                        scenario.aiRole
-                      )}
-                    </td>
-                    <td>
-                      {editing ? (
-                        <select
-                          value={editingScenarioDraft.enabled === false ? "inactive" : "active"}
-                          onChange={(event) =>
-                            setEditingScenarioDraft({
-                              ...editingScenarioDraft,
-                              enabled: event.target.value === "active"
-                            })
-                          }
-                        >
-                          <option value="active">active</option>
-                          <option value="inactive">inactive</option>
-                        </select>
-                      ) : scenario.enabled === false ? (
-                        "inactive"
-                      ) : (
-                        "active"
-                      )}
-                    </td>
-                    <td>
-                      <div className="content-actions content-actions-wrap">
-                        {editing ? (
-                          <>
-                            <button type="button" className="primary" onClick={() => void saveScenarioEdit()} disabled={saving}>
-                              Save
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingScenarioId("");
-                                setEditingScenarioDraft(null);
-                              }}
-                              disabled={saving}
-                            >
-                              Cancel
-                            </button>
-                          </>
-                        ) : (
-                          <button type="button" onClick={() => startScenarioEdit(scenario)} disabled={saving}>
-                            Edit
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="danger"
-                          disabled={saving}
-                          onClick={() =>
-                            selectedRole
-                              ? openDelete({
-                                  kind: "scenario",
-                                  id: scenario.id,
-                                  roleId: selectedRole.id,
-                                  label: scenario.title
-                                })
-                              : undefined
-                          }
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-            </tbody>
-          </table>
+                </div>
+              </div>
+              <div className="content-grid content-grid-input-action">
+                <div>
+                  <label>Edit Industry Name</label>
+                  <input
+                    value={editingIndustryLabel}
+                    onChange={(event) => setEditingIndustryLabel(event.target.value)}
+                    disabled={!selectedIndustry}
+                  />
+                </div>
+                <div className="content-actions content-actions-wrap">
+                  <button
+                    type="button"
+                    disabled={saving || !selectedIndustry}
+                    onClick={() => void saveIndustryEdit()}
+                  >
+                    Save Industry
+                  </button>
+                  <button
+                    type="button"
+                    className={selectedIndustry?.enabled ? "primary" : undefined}
+                    disabled={saving || !selectedIndustry}
+                    onClick={() => void setIndustryActive(true)}
+                  >
+                    Active
+                  </button>
+                  <button
+                    type="button"
+                    className={!selectedIndustry?.enabled ? "primary" : undefined}
+                    disabled={saving || !selectedIndustry}
+                    onClick={() => void setIndustryActive(false)}
+                  >
+                    Inactive
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={saving || !selectedIndustry}
+                    onClick={() =>
+                      selectedIndustry
+                        ? openDelete({ kind: "industry", id: selectedIndustry.id, label: selectedIndustry.label })
+                        : undefined
+                    }
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+              <div className="content-grid">
+                <div>
+                  <label>AI Industry Baseline</label>
+                  <textarea
+                    rows={7}
+                    value={editingIndustryAiBaseline}
+                    onChange={(event) => setEditingIndustryAiBaseline(event.target.value)}
+                    disabled={!selectedIndustry}
+                    placeholder="General industry context, norms, regulations, practices, and guidance the AI should use across scenarios in this industry."
+                  />
+                  <p className="small content-word-counter">
+                    {industryAiBaselineWordCount} words | Recommended: 300 or fewer (avoid going over 1000 unless necessary)
+                  </p>
+                </div>
+              </div>
+              <div className="content-actions content-actions-wrap content-actions-row">
+                <button
+                  type="button"
+                  disabled={saving || !selectedIndustry}
+                  onClick={() => void saveIndustryAiBaseline()}
+                >
+                  Save AI Industry Baseline
+                </button>
+              </div>
+              <p className="small content-hint">Rename, deactivate, or delete the selected industry.</p>
+            </>
+          ) : null}
+        </div>
+
+        <div className="card content-section-card">
+          <div className="content-section-header content-collapsible-header">
+            <h3>Role</h3>
+            <button
+              type="button"
+              className="content-collapse-button"
+              onClick={() => toggleSection("role")}
+              aria-expanded={contentSectionExpanded.role}
+            >
+              {contentSectionExpanded.role ? "Collapse" : "Expand"}
+            </button>
           </div>
+          {contentSectionExpanded.role ? (
+            <>
+              <div className="content-grid content-grid-two">
+                <div>
+                  <label>Search Roles</label>
+                  <input
+                    value={roleSearch}
+                    onChange={(event) => setRoleSearch(event.target.value)}
+                    placeholder="Type to filter roles"
+                  />
+                </div>
+                <div>
+                  <label>Role</label>
+                  <select
+                    value={selectedRoleId}
+                    onChange={(event) => setSelectedRoleId(event.target.value)}
+                    disabled={filteredRoles.length === 0}
+                  >
+                    {filteredRoles.map((role) => (
+                      <option key={role.id} value={role.id}>
+                        {role.label} {role.enabled ? "" : "(inactive)"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="content-grid content-grid-input-action">
+                <div>
+                  <label>Add Role</label>
+                  <input
+                    value={newRoleLabel}
+                    onChange={(event) => setNewRoleLabel(event.target.value)}
+                    placeholder="Role name"
+                  />
+                </div>
+                <div className="content-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={saving || !newRoleLabel.trim()}
+                    onClick={() => void addRole()}
+                  >
+                    Add Role
+                  </button>
+                </div>
+              </div>
+              <div className="content-grid content-grid-two">
+                <div>
+                  <label>Edit Role Name</label>
+                  <input
+                    value={editingRoleLabel}
+                    onChange={(event) => setEditingRoleLabel(event.target.value)}
+                    disabled={!selectedRole}
+                  />
+                </div>
+                <div>
+                  <label>Role Summary</label>
+                  <input
+                    value={editingRoleSummary}
+                    onChange={(event) => setEditingRoleSummary(event.target.value)}
+                    disabled={!selectedRole}
+                  />
+                </div>
+              </div>
+              <div className="content-actions content-actions-wrap content-actions-row">
+                <button
+                  type="button"
+                  disabled={saving || !selectedRole}
+                  onClick={() => void saveRoleEdit()}
+                >
+                  Save Role
+                </button>
+                <button
+                  type="button"
+                  className={selectedRole?.enabled ? "primary" : undefined}
+                  disabled={saving || !selectedRole}
+                  onClick={() => void setRoleActive(true)}
+                >
+                  Active
+                </button>
+                <button
+                  type="button"
+                  className={!selectedRole?.enabled ? "primary" : undefined}
+                  disabled={saving || !selectedRole}
+                  onClick={() => void setRoleActive(false)}
+                >
+                  Inactive
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={saving || !selectedRole}
+                  onClick={() =>
+                    selectedRole
+                      ? openDelete({ kind: "role", id: selectedRole.id, label: selectedRole.label })
+                      : undefined
+                  }
+                >
+                  Delete
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+
+        <div className="card content-section-card">
+          <div className="content-section-header content-collapsible-header">
+            <h3>Role Industries</h3>
+            <button
+              type="button"
+              className="content-collapse-button"
+              onClick={() => toggleSection("roleIndustries")}
+              aria-expanded={contentSectionExpanded.roleIndustries}
+            >
+              {contentSectionExpanded.roleIndustries ? "Collapse" : "Expand"}
+            </button>
+          </div>
+          {contentSectionExpanded.roleIndustries ? (
+            <>
+              <p className="small content-pill">
+                Active Industries for role: {activeRoleIndustryLabels.length > 0 ? activeRoleIndustryLabels.join(", ") : "(none)"}
+              </p>
+              <div className="content-grid content-grid-two">
+                <div>
+                  <label>Search Industries</label>
+                  <input
+                    value={roleIndustrySearch}
+                    onChange={(event) => setRoleIndustrySearch(event.target.value)}
+                    placeholder="Type to filter industries"
+                  />
+                </div>
+                <div>
+                  <label>Industry</label>
+                  <select
+                    value={selectedRoleIndustryId}
+                    onChange={(event) => setSelectedRoleIndustryId(event.target.value)}
+                    disabled={!selectedRoleId || filteredRoleIndustryRows.length === 0}
+                  >
+                    {filteredRoleIndustryRows.map((row) => (
+                      <option key={row.id} value={row.id}>
+                        {row.label} {row.active ? "(active)" : "(inactive)"} {row.industryEnabled ? "" : "(industry disabled)"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="content-actions content-actions-wrap content-actions-row">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={saving || !selectedRoleId || !selectedRoleIndustryId}
+                  onClick={() => void setRoleIndustryActive(selectedRoleIndustryId, true)}
+                >
+                  Active
+                </button>
+                <button
+                  type="button"
+                  disabled={saving || !selectedRoleId || !selectedRoleIndustryId}
+                  onClick={() => void setRoleIndustryActive(selectedRoleIndustryId, false)}
+                >
+                  Inactive
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+
+        <div className="card content-section-card">
+          <div className="content-section-header content-collapsible-header">
+            <h3>Scenarios For Role</h3>
+            <button
+              type="button"
+              className="content-collapse-button"
+              onClick={() => toggleSection("scenarios")}
+              aria-expanded={contentSectionExpanded.scenarios}
+            >
+              {contentSectionExpanded.scenarios ? "Collapse" : "Expand"}
+            </button>
+          </div>
+          {contentSectionExpanded.scenarios ? (
+            <>
+              <div className="content-section-header content-header-actions">
+                <div className="small">
+                  {selectedRole ? `Managing scenarios for ${selectedRole.label}` : "Select a role to manage scenarios."}
+                </div>
+                <div className="content-actions content-actions-wrap">
+                  <button type="button" onClick={downloadScenariosCsv}>
+                    Download CSV
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => setAddScenarioMode((prev) => !prev)}
+                    disabled={!selectedRole}
+                  >
+                    {addScenarioMode ? "Cancel Add" : "Add Scenario"}
+                  </button>
+                </div>
+              </div>
+              <div className="content-table-wrap">
+                <table className="content-table">
+                  <thead>
+                    <tr>
+                      <th>Scenario</th>
+                      <th>Description</th>
+                      <th>AI Role</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {addScenarioMode ? (
+                      <tr>
+                        <td>
+                          <input value={newScenarioTitle} onChange={(event) => setNewScenarioTitle(event.target.value)} />
+                        </td>
+                        <td>
+                          <textarea
+                            rows={3}
+                            value={newScenarioDescription}
+                            onChange={(event) => setNewScenarioDescription(event.target.value)}
+                          />
+                        </td>
+                        <td>
+                          <textarea rows={3} value={newScenarioAiRole} onChange={(event) => setNewScenarioAiRole(event.target.value)} />
+                        </td>
+                        <td>
+                          <select
+                            value={newScenarioEnabled ? "active" : "inactive"}
+                            onChange={(event) => setNewScenarioEnabled(event.target.value === "active")}
+                          >
+                            <option value="active">active</option>
+                            <option value="inactive">inactive</option>
+                          </select>
+                        </td>
+                        <td>
+                          <button type="button" className="primary" disabled={saving || !selectedRole} onClick={() => void saveNewScenario()}>
+                            Save
+                          </button>
+                        </td>
+                      </tr>
+                    ) : null}
+                    {scenariosForRole.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="small">
+                          {selectedRole ? "No scenarios for this role yet." : "Select a role to manage scenarios."}
+                        </td>
+                      </tr>
+                    ) : (
+                      scenariosForRole.map((scenario) => {
+                        const editing = scenario.id === editingScenarioId && editingScenarioDraft;
+                        return (
+                          <tr key={scenario.id}>
+                            <td>
+                              {editing ? (
+                                <input
+                                  value={editingScenarioDraft.title}
+                                  onChange={(event) =>
+                                    setEditingScenarioDraft({ ...editingScenarioDraft, title: event.target.value })
+                                  }
+                                />
+                              ) : (
+                                scenario.title
+                              )}
+                            </td>
+                            <td className="content-long-cell">
+                              {editing ? (
+                                <textarea
+                                  rows={3}
+                                  value={editingScenarioDraft.description}
+                                  onChange={(event) =>
+                                    setEditingScenarioDraft({ ...editingScenarioDraft, description: event.target.value })
+                                  }
+                                />
+                              ) : (
+                                scenario.description
+                              )}
+                            </td>
+                            <td className="content-long-cell">
+                              {editing ? (
+                                <textarea
+                                  rows={3}
+                                  value={editingScenarioDraft.aiRole}
+                                  onChange={(event) =>
+                                    setEditingScenarioDraft({ ...editingScenarioDraft, aiRole: event.target.value })
+                                  }
+                                />
+                              ) : (
+                                scenario.aiRole
+                              )}
+                            </td>
+                            <td>
+                              {editing ? (
+                                <select
+                                  value={editingScenarioDraft.enabled === false ? "inactive" : "active"}
+                                  onChange={(event) =>
+                                    setEditingScenarioDraft({
+                                      ...editingScenarioDraft,
+                                      enabled: event.target.value === "active"
+                                    })
+                                  }
+                                >
+                                  <option value="active">active</option>
+                                  <option value="inactive">inactive</option>
+                                </select>
+                              ) : scenario.enabled === false ? (
+                                "inactive"
+                              ) : (
+                                "active"
+                              )}
+                            </td>
+                            <td>
+                              <div className="content-actions content-actions-wrap">
+                                {editing ? (
+                                  <>
+                                    <button type="button" className="primary" onClick={() => void saveScenarioEdit()} disabled={saving}>
+                                      Save
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingScenarioId("");
+                                        setEditingScenarioDraft(null);
+                                      }}
+                                      disabled={saving}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button type="button" onClick={() => startScenarioEdit(scenario)} disabled={saving}>
+                                    Edit
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="danger"
+                                  disabled={saving}
+                                  onClick={() =>
+                                    selectedRole
+                                      ? openDelete({
+                                          kind: "scenario",
+                                          id: scenario.id,
+                                          roleId: selectedRole.id,
+                                          label: scenario.title
+                                        })
+                                      : undefined
+                                  }
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
         </div>
 
         {deleteTarget ? (

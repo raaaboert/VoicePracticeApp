@@ -48,6 +48,9 @@ export interface SimulationScorecard {
 
 export interface SimulationConfig {
   scenario: Scenario;
+  industryId: string;
+  industryLabel: string;
+  industryBaseline: string;
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
