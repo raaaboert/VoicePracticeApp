@@ -9,13 +9,13 @@
   },
   "dependencies": {
     "@voicepractice/shared": "file:../shared",
-    "next": "15.5.12",
-    "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "next": "16.1.6",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
-    "@types/react": "^19.1.11",
+    "@types/node": "^25.3.0",
+    "@types/react": "^19.2.14",
     "typescript": "~5.9.2"
   }
 }
