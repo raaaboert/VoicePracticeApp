@@ -145,8 +145,6 @@ function toGenerationInputsPayload(value: GenerationInputsForm): OrgCustomScenar
   if (keyObjections.length > 0) payload.keyObjections = keyObjections;
   const tone = value.tone.trim();
   if (tone) payload.tone = tone;
-  const difficulty = value.difficulty.trim();
-  if (difficulty) payload.difficulty = difficulty;
   const mustInclude = value.mustInclude.trim();
   if (mustInclude) payload.mustInclude = mustInclude;
   const mustAvoid = value.mustAvoid.trim();
@@ -670,6 +668,10 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
       const preview = await adminFetch<GenerateOrgCustomScenarioResponse>(`/orgs/${orgId}/custom-scenarios/generate`, {
         method: "POST",
         body: JSON.stringify(payload),
+        // AI preview can exceed standard admin request timeouts (Render cold start + model latency).
+        requestAttemptTimeoutMs: 25_000,
+        requestTotalTimeoutMs: 75_000,
+        requestMaxAttempts: 3,
       });
       setGenerationPreview(preview);
     } catch (caught) {
@@ -798,7 +800,7 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
     if (!editorOpen) return null;
 
     return (
-      <div className="content-modal-backdrop">
+      <div className="content-modal-backdrop" style={{ alignItems: "flex-start", paddingTop: 92, paddingBottom: 20 }}>
         <div className="card content-modal-card" style={{ maxWidth: 1100, maxHeight: "92vh", overflowY: "auto" }}>
           <div className="content-section-header content-header-actions" style={{ alignItems: "flex-start" }}>
             <div>
@@ -1094,18 +1096,6 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                     }
                   />
                 </div>
-                <div>
-                  <label>Difficulty</label>
-                  <input
-                    value={editorForm.generationInputs.difficulty}
-                    onChange={(event) =>
-                      setEditorForm((prev) => ({
-                        ...prev,
-                        generationInputs: { ...prev.generationInputs, difficulty: event.target.value },
-                      }))
-                    }
-                  />
-                </div>
                 <div style={{ gridColumn: "1 / -1" }}>
                   <label>Key Objections (one per line or comma separated)</label>
                   <textarea
@@ -1120,7 +1110,10 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                   />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Must Include</label>
+                  <label>
+                    Must Include (specific talking points, product/training details, or moments that must appear in the
+                    generated scenario)
+                  </label>
                   <textarea
                     rows={3}
                     value={editorForm.generationInputs.mustInclude}
@@ -1133,7 +1126,9 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                   />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Must Avoid</label>
+                  <label>
+                    Must Avoid (claims, topics, wording, or behaviors the AI should keep out of the scenario and role)
+                  </label>
                   <textarea
                     rows={3}
                     value={editorForm.generationInputs.mustAvoid}
@@ -1146,7 +1141,9 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                   />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Compliance Constraints</label>
+                  <label>
+                    Compliance Constraints (required boundaries/disclaimers; these limit what the AI can say or imply)
+                  </label>
                   <textarea
                     rows={3}
                     value={editorForm.generationInputs.complianceConstraints}
@@ -1159,7 +1156,10 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                   />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Special Instructions</label>
+                  <label>
+                    Special Instructions (extra scenario goals, training focus, or output style guidance not covered
+                    above)
+                  </label>
                   <textarea
                     rows={3}
                     value={editorForm.generationInputs.specialInstructions}

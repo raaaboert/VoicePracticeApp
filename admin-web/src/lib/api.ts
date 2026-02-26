@@ -57,20 +57,36 @@ export async function logoutAdminSession(): Promise<void> {
   }
 }
 
-export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+export interface AdminFetchRequestInit extends RequestInit {
+  requestAttemptTimeoutMs?: number;
+  requestTotalTimeoutMs?: number;
+  requestMaxAttempts?: number;
+}
+
+export async function adminFetch<T>(path: string, init?: AdminFetchRequestInit): Promise<T> {
   const retryableStatusCodes = new Set([429, 502, 503, 504]);
+  const requestAttemptTimeoutMs = Math.max(1_500, init?.requestAttemptTimeoutMs ?? REQUEST_ATTEMPT_TIMEOUT_MS);
+  const requestTotalTimeoutMs = Math.max(requestAttemptTimeoutMs, init?.requestTotalTimeoutMs ?? REQUEST_TOTAL_TIMEOUT_MS);
+  const requestMaxAttempts = Math.max(1, Math.floor(init?.requestMaxAttempts ?? REQUEST_MAX_ATTEMPTS));
   const startedAt = Date.now();
 
-  for (let attempt = 1; attempt <= REQUEST_MAX_ATTEMPTS; attempt += 1) {
+  const {
+    requestAttemptTimeoutMs: _requestAttemptTimeoutMs,
+    requestTotalTimeoutMs: _requestTotalTimeoutMs,
+    requestMaxAttempts: _requestMaxAttempts,
+    ...fetchInit
+  } = init ?? {};
+
+  for (let attempt = 1; attempt <= requestMaxAttempts; attempt += 1) {
     const elapsedMs = Date.now() - startedAt;
-    const remainingMs = REQUEST_TOTAL_TIMEOUT_MS - elapsedMs;
+    const remainingMs = requestTotalTimeoutMs - elapsedMs;
     if (remainingMs <= 0) {
       throw new Error("Request timed out. Please retry.");
     }
 
     const token = getAdminToken();
     const controller = new AbortController();
-    const attemptTimeoutMs = Math.max(1_500, Math.min(REQUEST_ATTEMPT_TIMEOUT_MS, remainingMs));
+    const attemptTimeoutMs = Math.max(1_500, Math.min(requestAttemptTimeoutMs, remainingMs));
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -79,10 +95,10 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
 
     try {
       const response = await fetch(`${API_BASE}${path}`, {
-        ...init,
+        ...fetchInit,
         headers: {
           "Content-Type": "application/json",
-          ...(init?.headers ?? {}),
+          ...(fetchInit.headers ?? {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         cache: "no-store",
@@ -97,7 +113,7 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
 
         const payload = await safeJson(response);
         const message = payload?.error ?? `Request failed (${response.status})`;
-        const shouldRetry = retryableStatusCodes.has(response.status) && attempt < REQUEST_MAX_ATTEMPTS;
+        const shouldRetry = retryableStatusCodes.has(response.status) && attempt < requestMaxAttempts;
         if (shouldRetry) {
           await sleep(attempt * 400);
           continue;
@@ -110,7 +126,7 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
     } catch (error) {
       const isAbort = error instanceof Error && (error.name === "AbortError" || timedOut);
       const isNetwork = error instanceof TypeError;
-      const shouldRetry = (isAbort || isNetwork) && attempt < REQUEST_MAX_ATTEMPTS;
+      const shouldRetry = (isAbort || isNetwork) && attempt < requestMaxAttempts;
       if (shouldRetry) {
         await sleep(attempt * 400);
         continue;
