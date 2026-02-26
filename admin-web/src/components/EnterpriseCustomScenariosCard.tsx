@@ -800,8 +800,11 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
     if (!editorOpen) return null;
 
     return (
-      <div className="content-modal-backdrop" style={{ alignItems: "flex-start", paddingTop: 92, paddingBottom: 20 }}>
-        <div className="card content-modal-card" style={{ maxWidth: 1100, maxHeight: "92vh", overflowY: "auto" }}>
+      <div className="content-modal-backdrop" style={{ alignItems: "flex-start", paddingTop: 110, paddingBottom: 20 }}>
+        <div
+          className="card content-modal-card"
+          style={{ maxWidth: 1100, maxHeight: "calc(100vh - 140px)", overflowY: "auto" }}
+        >
           <div className="content-section-header content-header-actions" style={{ alignItems: "flex-start" }}>
             <div>
               <h3 style={{ marginBottom: 6 }}>
@@ -1097,7 +1100,10 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                   />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Key Objections (one per line or comma separated)</label>
+                  <label>
+                    Key Objections (objections the AI role/persona should raise to challenge the user; one per line or
+                    comma separated)
+                  </label>
                   <textarea
                     rows={3}
                     value={editorForm.generationInputs.keyObjectionsText}
@@ -1111,8 +1117,8 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
                   <label>
-                    Must Include (specific talking points, product/training details, or moments that must appear in the
-                    generated scenario)
+                    Must Include (what the AI role/scenario should include: required talking points, behaviors, product
+                    details, or moments the user should encounter)
                   </label>
                   <textarea
                     rows={3}
@@ -1127,7 +1133,8 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
                   <label>
-                    Must Avoid (claims, topics, wording, or behaviors the AI should keep out of the scenario and role)
+                    Must Avoid (what the AI role/scenario should avoid: claims, topics, wording, or behaviors the user
+                    should not encounter)
                   </label>
                   <textarea
                     rows={3}
@@ -1142,7 +1149,8 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
                   <label>
-                    Compliance Constraints (required boundaries/disclaimers; these limit what the AI can say or imply)
+                    Compliance Constraints (rules/limits for the AI role's wording and claims, e.g. no guarantees, no
+                    medical/legal claims, required disclaimers)
                   </label>
                   <textarea
                     rows={3}
@@ -1257,7 +1265,16 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
   return (
     <div
       className="card content-section-card"
-      style={editorOpen || Boolean(deleteTargetId) ? { position: "relative", zIndex: 1200 } : undefined}
+      style={
+        editorOpen || Boolean(deleteTargetId)
+          ? {
+              position: "relative",
+              zIndex: 1200,
+              backdropFilter: "none",
+              WebkitBackdropFilter: "none",
+            }
+          : undefined
+      }
     >
       <div className="content-section-header content-header-actions">
         <div>
