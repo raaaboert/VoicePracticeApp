@@ -1255,7 +1255,10 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
   };
 
   return (
-    <div className="card content-section-card">
+    <div
+      className="card content-section-card"
+      style={editorOpen || Boolean(deleteTargetId) ? { position: "relative", zIndex: 1200 } : undefined}
+    >
       <div className="content-section-header content-header-actions">
         <div>
           <h3 style={{ marginBottom: 6 }}>Custom Scenarios</h3>
