@@ -15,6 +15,7 @@ import {
   ChangeAdminPasswordRequest,
   COMMON_TIMEZONES,
   CreateUserRequest,
+  CreateOrgCustomScenarioRequest,
   DEFAULT_INDUSTRIES,
   DEFAULT_ROLE_INDUSTRIES,
   DEFAULT_SEGMENTS,
@@ -24,9 +25,15 @@ import {
   EnterpriseJoinRequestRecord,
   EnterpriseDomainMatch,
   EmailVerificationRecord,
+  GenerateOrgCustomScenarioRequest,
+  GenerateOrgCustomScenarioResponse,
   INDUSTRY_IDS,
   IndustryDefinition,
   IndustryId,
+  OrgCustomScenario,
+  OrgCustomScenarioCreationMethod,
+  OrgCustomScenarioGenerationInputs,
+  OrgCustomScenarioSourceMode,
   OrgUserRole,
   PersonaStyle,
   MobileOnboardRequest,
@@ -47,6 +54,7 @@ import {
   TIER_IDS,
   TierDefinition,
   RoleIndustryDefinition,
+  UpdateOrgCustomScenarioRequest,
   UpdateConfigRequest,
   UpdateUserRequest,
   UserEntitlementsResponse,
@@ -342,6 +350,222 @@ function normalizeScenarioEntry(raw: unknown, segmentId: string, index: number):
     aiRole,
     enabled: candidate.enabled !== false
   };
+}
+
+function isOrgCustomScenarioSourceMode(value: unknown): value is OrgCustomScenarioSourceMode {
+  return value === "scratch" || value === "standard_base";
+}
+
+function isOrgCustomScenarioCreationMethod(value: unknown): value is OrgCustomScenarioCreationMethod {
+  return value === "manual" || value === "ai";
+}
+
+function sanitizeOptionalText(value: unknown, maxChars = 4_000): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.slice(0, Math.max(1, maxChars));
+}
+
+function sanitizeOptionalTextArray(value: unknown, maxItems = 12, maxCharsPerItem = 240): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const cleaned = uniqueStrings(
+    value
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim().slice(0, maxCharsPerItem)),
+  ).slice(0, maxItems);
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function normalizeOrgCustomScenarioGenerationInputs(value: unknown): OrgCustomScenarioGenerationInputs | null {
+  const candidate = (value ?? {}) as Partial<OrgCustomScenarioGenerationInputs>;
+  const normalized: OrgCustomScenarioGenerationInputs = {};
+
+  const companyName = sanitizeOptionalText(candidate.companyName, 200);
+  if (companyName) {
+    normalized.companyName = companyName;
+  }
+  const productOrService = sanitizeOptionalText(candidate.productOrService, 500);
+  if (productOrService) {
+    normalized.productOrService = productOrService;
+  }
+  const targetPersona = sanitizeOptionalText(candidate.targetPersona, 400);
+  if (targetPersona) {
+    normalized.targetPersona = targetPersona;
+  }
+  const keyObjections = sanitizeOptionalTextArray(candidate.keyObjections, 12, 240);
+  if (keyObjections) {
+    normalized.keyObjections = keyObjections;
+  }
+  const tone = sanitizeOptionalText(candidate.tone, 100);
+  if (tone) {
+    normalized.tone = tone;
+  }
+  const difficulty = sanitizeOptionalText(candidate.difficulty, 100);
+  if (difficulty) {
+    normalized.difficulty = difficulty;
+  }
+  const mustInclude = sanitizeOptionalText(candidate.mustInclude, 2_000);
+  if (mustInclude) {
+    normalized.mustInclude = mustInclude;
+  }
+  const mustAvoid = sanitizeOptionalText(candidate.mustAvoid, 2_000);
+  if (mustAvoid) {
+    normalized.mustAvoid = mustAvoid;
+  }
+  const complianceConstraints = sanitizeOptionalText(candidate.complianceConstraints, 2_000);
+  if (complianceConstraints) {
+    normalized.complianceConstraints = complianceConstraints;
+  }
+  const specialInstructions = sanitizeOptionalText(candidate.specialInstructions, 4_000);
+  if (specialInstructions) {
+    normalized.specialInstructions = specialInstructions;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function normalizeOrgCustomScenarioProvenance(
+  value: unknown,
+  fallback: {
+    sourceMode?: OrgCustomScenarioSourceMode;
+    creationMethod?: OrgCustomScenarioCreationMethod;
+    baseScenarioId?: string | null;
+    baseScenarioTitle?: string | null;
+    baseScenarioSegmentId?: string | null;
+    baseScenarioVersion?: string | null;
+    customizationParams?: OrgCustomScenarioGenerationInputs | null;
+    generatedPrompt?: string | null;
+    modelUsed?: string | null;
+    generatedAt?: string | null;
+  } = {},
+): OrgCustomScenario["provenance"] {
+  const candidate = (value ?? {}) as Partial<OrgCustomScenario["provenance"]>;
+  const sourceMode = isOrgCustomScenarioSourceMode(candidate.sourceMode)
+    ? candidate.sourceMode
+    : (fallback.sourceMode ?? "scratch");
+  const creationMethod = isOrgCustomScenarioCreationMethod(candidate.creationMethod)
+    ? candidate.creationMethod
+    : (fallback.creationMethod ?? "manual");
+  const baseScenarioId = sanitizeOptionalText(candidate.baseScenarioId, 200) ?? fallback.baseScenarioId ?? null;
+  const baseScenarioTitle = sanitizeOptionalText(candidate.baseScenarioTitle, 300) ?? fallback.baseScenarioTitle ?? null;
+  const baseScenarioSegmentId =
+    sanitizeOptionalText(candidate.baseScenarioSegmentId, 200) ?? fallback.baseScenarioSegmentId ?? null;
+  const baseScenarioVersion =
+    sanitizeOptionalText(candidate.baseScenarioVersion, 200) ?? fallback.baseScenarioVersion ?? null;
+  const customizationParams =
+    normalizeOrgCustomScenarioGenerationInputs(candidate.customizationParams) ??
+    fallback.customizationParams ??
+    null;
+  const generatedPrompt = sanitizeOptionalText(candidate.generatedPrompt, 20_000) ?? fallback.generatedPrompt ?? null;
+  const modelUsed = sanitizeOptionalText(candidate.modelUsed, 200) ?? fallback.modelUsed ?? null;
+
+  let generatedAt: string | null = fallback.generatedAt ?? null;
+  if (isValidIsoDate(candidate.generatedAt)) {
+    generatedAt = new Date(candidate.generatedAt).toISOString();
+  } else if (candidate.generatedAt === null) {
+    generatedAt = null;
+  }
+
+  return {
+    sourceMode,
+    creationMethod,
+    baseScenarioId,
+    baseScenarioTitle,
+    baseScenarioSegmentId,
+    baseScenarioVersion,
+    customizationParams,
+    generatedPrompt,
+    modelUsed,
+    generatedAt,
+  };
+}
+
+function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: number, now: string): OrgCustomScenario | null {
+  const candidate = (raw ?? {}) as Partial<OrgCustomScenario>;
+  const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+  if (!title) {
+    return null;
+  }
+
+  const segmentId = typeof candidate.segmentId === "string" ? candidate.segmentId.trim() : "";
+  if (!segmentId) {
+    return null;
+  }
+
+  const applicableIndustryIds = uniqueStrings(
+    Array.isArray(candidate.applicableIndustryIds) ? candidate.applicableIndustryIds : [],
+  );
+  if (applicableIndustryIds.length === 0) {
+    return null;
+  }
+
+  const description = typeof candidate.description === "string" && candidate.description.trim()
+    ? candidate.description.trim()
+    : title;
+  const aiRole = typeof candidate.aiRole === "string" && candidate.aiRole.trim()
+    ? candidate.aiRole.trim()
+    : "a conversation partner";
+  const scoringGuidance = typeof candidate.scoringGuidance === "string" ? candidate.scoringGuidance.trim() : "";
+  const createdAt = isValidIsoDate(candidate.createdAt) ? new Date(candidate.createdAt).toISOString() : now;
+  const updatedAt = isValidIsoDate(candidate.updatedAt) ? new Date(candidate.updatedAt).toISOString() : createdAt;
+
+  const fallbackProvenance = {
+    sourceMode: "scratch" as OrgCustomScenarioSourceMode,
+    creationMethod: "manual" as OrgCustomScenarioCreationMethod,
+  };
+
+  return {
+    id: normalizeIdentifier(candidate.id, `${segmentId}_custom_${index + 1}`),
+    orgId: typeof candidate.orgId === "string" && candidate.orgId.trim() ? candidate.orgId.trim() : orgId,
+    segmentId,
+    title,
+    summary:
+      typeof candidate.summary === "string" && candidate.summary.trim()
+        ? candidate.summary.trim()
+        : buildScenarioSummary(description),
+    description,
+    aiRole,
+    scoringGuidance,
+    applicableIndustryIds: applicableIndustryIds as IndustryId[],
+    enabled: candidate.enabled === true,
+    provenance: normalizeOrgCustomScenarioProvenance(candidate.provenance, fallbackProvenance),
+    createdBy:
+      typeof candidate.createdBy === "string" && candidate.createdBy.trim()
+        ? candidate.createdBy.trim()
+        : PLATFORM_ADMIN_ACTOR_ID,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function sortOrgCustomScenariosByTitle(items: OrgCustomScenario[]): OrgCustomScenario[] {
+  return [...items].sort((a, b) => {
+    const byTitle = a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+    if (byTitle !== 0) {
+      return byTitle;
+    }
+    return a.id.localeCompare(b.id, undefined, { sensitivity: "base" });
+  });
+}
+
+function normalizeOrgCustomScenarioList(value: unknown, orgId: string, now: string): OrgCustomScenario[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized = value
+    .map((entry, index) => normalizeOrgCustomScenarioEntry(entry, orgId, index, now))
+    .filter((entry): entry is OrgCustomScenario => Boolean(entry));
+
+  return sortOrgCustomScenariosByTitle(normalized);
 }
 
 function sortScenariosByTitle(scenarios: Scenario[]): Scenario[] {
@@ -1054,6 +1278,7 @@ function ensureDemoEnterpriseData(db: {
       existing.renewalTotalUsd = normalizeRenewalTotalUsd(existing.renewalTotalUsd, 0);
       existing.softLimitPercentTriggers = normalizeSoftLimitPercentTriggers(existing.softLimitPercentTriggers, [75, 90]);
       existing.maxSimulationMinutes = normalizeMaxSimulationMinutes(existing.maxSimulationMinutes);
+      existing.customScenarios = Array.isArray(existing.customScenarios) ? existing.customScenarios : [];
       continue;
     }
 
@@ -1074,6 +1299,7 @@ function ensureDemoEnterpriseData(db: {
       renewalTotalUsd: 0,
       softLimitPercentTriggers: [75, 90],
       maxSimulationMinutes: DEFAULT_MAX_SIMULATION_MINUTES,
+      customScenarios: [],
       createdAt: demoOrg.establishedAt,
       updatedAt: demoOrg.establishedAt
     });
@@ -1815,8 +2041,8 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
   const normalizedOrgs = ensureOrgCodesAndDomains(
     (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs)
-      .map((org) =>
-        ensureOrgContractFields({
+      .map((org) => {
+        const normalizedOrg = ensureOrgContractFields({
           ...org,
           contactName: normalizeContactName((org as Partial<EnterpriseOrg>).contactName),
           contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
@@ -1825,8 +2051,17 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
             fallbackOrgIndustryIds,
             configuredIndustryIds
           )
-        } as EnterpriseOrg)
-      )
+        } as EnterpriseOrg);
+
+        return {
+          ...normalizedOrg,
+          customScenarios: normalizeOrgCustomScenarioList(
+            (org as Partial<EnterpriseOrg>).customScenarios,
+            normalizedOrg.id,
+            now
+          )
+        };
+      })
   );
 
   const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
@@ -2296,6 +2531,184 @@ function getOrgById(db: ApiDatabase, orgId: string | null): EnterpriseOrg | unde
   }
 
   return db.orgs.find((org) => org.id === orgId);
+}
+
+function ensureOrgCustomScenarioCollection(org: EnterpriseOrg): OrgCustomScenario[] {
+  if (!Array.isArray(org.customScenarios)) {
+    org.customScenarios = [];
+  }
+  org.customScenarios = sortOrgCustomScenariosByTitle(
+    normalizeOrgCustomScenarioList(org.customScenarios, org.id, nowIso())
+  );
+  return org.customScenarios;
+}
+
+function getConfigSegmentById(config: AppConfig, segmentId: string): SegmentDefinition | undefined {
+  return config.segments.find((segment) => segment.id === segmentId);
+}
+
+function getConfigScenarioById(
+  config: AppConfig,
+  scenarioId: string,
+): { segment: SegmentDefinition; scenario: Scenario } | null {
+  for (const segment of config.segments) {
+    const scenario = (segment.scenarios ?? []).find((entry) => entry.id === scenarioId);
+    if (scenario) {
+      return { segment, scenario };
+    }
+  }
+  return null;
+}
+
+function buildCustomScenarioGenerationPromptPreview(input: {
+  org: EnterpriseOrg;
+  segment: SegmentDefinition;
+  industries: IndustryDefinition[];
+  sourceMode: OrgCustomScenarioSourceMode;
+  base?: { segment: SegmentDefinition; scenario: Scenario } | null;
+  draft: { title?: string; description?: string; aiRole?: string; scoringGuidance?: string };
+  generationInputs: OrgCustomScenarioGenerationInputs | null;
+}): string {
+  const industrySummary = input.industries
+    .map((industry) => {
+      const baseline = (industry.aiBaseline ?? "").trim();
+      return baseline
+        ? `- ${industry.label} (${industry.id}) baseline: ${baseline}`
+        : `- ${industry.label} (${industry.id}) baseline: (none provided)`;
+    })
+    .join("\n");
+
+  const baseSummary = input.base
+    ? [
+        `Base Role: ${input.base.segment.label} (${input.base.segment.id})`,
+        `Base Scenario Title: ${input.base.scenario.title}`,
+        `Base Scenario Description: ${input.base.scenario.description}`,
+        `Base Scenario AI Role: ${input.base.scenario.aiRole}`,
+      ].join("\n")
+    : "No base scenario selected (scratch mode).";
+
+  const customizationLines: string[] = [];
+  const params = input.generationInputs;
+  if (params) {
+    if (params.companyName) {
+      customizationLines.push(`Company Name: ${params.companyName}`);
+    }
+    if (params.productOrService) {
+      customizationLines.push(`Product/Service: ${params.productOrService}`);
+    }
+    if (params.targetPersona) {
+      customizationLines.push(`Target Persona: ${params.targetPersona}`);
+    }
+    if (params.keyObjections && params.keyObjections.length > 0) {
+      customizationLines.push(`Key Objections: ${params.keyObjections.join("; ")}`);
+    }
+    if (params.tone) {
+      customizationLines.push(`Tone: ${params.tone}`);
+    }
+    if (params.difficulty) {
+      customizationLines.push(`Difficulty: ${params.difficulty}`);
+    }
+    if (params.mustInclude) {
+      customizationLines.push(`Must Include: ${params.mustInclude}`);
+    }
+    if (params.mustAvoid) {
+      customizationLines.push(`Must Avoid: ${params.mustAvoid}`);
+    }
+    if (params.complianceConstraints) {
+      customizationLines.push(`Compliance Constraints: ${params.complianceConstraints}`);
+    }
+    if (params.specialInstructions) {
+      customizationLines.push(`Special Instructions: ${params.specialInstructions}`);
+    }
+  }
+
+  const draftLines = [
+    `Draft Title (optional): ${(input.draft.title ?? "").trim() || "(blank)"}`,
+    `Draft Description (optional): ${(input.draft.description ?? "").trim() || "(blank)"}`,
+    `Draft AI Role (optional): ${(input.draft.aiRole ?? "").trim() || "(blank)"}`,
+    `Draft Scoring Guidance (optional): ${(input.draft.scoringGuidance ?? "").trim() || "(blank)"}`,
+  ];
+
+  return [
+    `Org: ${input.org.name} (${input.org.id})`,
+    `Target Role: ${input.segment.label} (${input.segment.id})`,
+    `Source Mode: ${input.sourceMode}`,
+    "",
+    "Selected Industries:",
+    industrySummary || "- (none)",
+    "",
+    "Base Scenario Context:",
+    baseSummary,
+    "",
+    "Customization Inputs:",
+    customizationLines.length > 0 ? customizationLines.map((line) => `- ${line}`).join("\n") : "- (none)",
+    "",
+    "Current Draft Inputs:",
+    draftLines.map((line) => `- ${line}`).join("\n"),
+    "",
+    "Output Requirements:",
+    "- Return JSON only (no markdown).",
+    '- Keys: "title", "description", "aiRole", "scoringGuidance".',
+    "- Keep the scenario applicable to the selected role and selected industries.",
+    "- Do not invent regulated claims, guarantees, or unsupported product details.",
+    "- Scoring guidance should focus on what the client wants measured and what good performance looks like.",
+  ].join("\n");
+}
+
+function extractFirstJsonObject(rawText: string): Record<string, unknown> | null {
+  const text = rawText.trim();
+  if (!text) {
+    return null;
+  }
+
+  const direct = (() => {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (direct) {
+    return direct;
+  }
+
+  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch?.[1]) {
+    try {
+      const parsed = JSON.parse(fencedMatch[1].trim()) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // ignore and fall through
+    }
+  }
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const slice = text.slice(firstBrace, lastBrace + 1);
+    try {
+      const parsed = JSON.parse(slice) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function toMultilineText(value: unknown, maxChars: number): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, Math.max(1, maxChars));
 }
 
 function computeUserUsage(db: ApiDatabase, user: UserProfile, now: Date, timezone: string) {
@@ -3462,6 +3875,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       renewalTotalUsd: normalizeRenewalTotalUsd(body.renewalTotalUsd, 0),
       softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(body.softLimitPercentTriggers, [75, 90]),
       maxSimulationMinutes: normalizeMaxSimulationMinutes(body.maxSimulationMinutes),
+      customScenarios: [],
       createdAt: now,
       updatedAt: now
     };
@@ -3629,6 +4043,502 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       }
     });
     response.json(org);
+  });
+});
+
+app.get("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    response.json({
+      generatedAt: nowIso(),
+      orgId: org.id,
+      scenarios: ensureOrgCustomScenarioCollection(org),
+    });
+  });
+});
+
+app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request: Request, response: Response) => {
+  if (!isRemoteAiConfigured()) {
+    response.status(503).json({ error: "Remote AI is disabled for this environment." });
+    return;
+  }
+
+  const orgId = request.params.orgId;
+  const body = request.body as GenerateOrgCustomScenarioRequest;
+  const sourceMode: OrgCustomScenarioSourceMode = isOrgCustomScenarioSourceMode(body.sourceMode)
+    ? body.sourceMode
+    : "scratch";
+
+  const context = await withDatabaseRead(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return null;
+    }
+
+    const allowedIndustryMap = new Map((db.config.industries ?? []).map((industry) => [industry.id, industry]));
+    const requestedIndustryIds = uniqueStrings(Array.isArray(body.applicableIndustryIds) ? body.applicableIndustryIds : []);
+    const selectedIndustries = requestedIndustryIds
+      .map((id) => allowedIndustryMap.get(id))
+      .filter((entry): entry is IndustryDefinition => Boolean(entry));
+    if (selectedIndustries.length === 0) {
+      response.status(400).json({ error: "Select at least one valid applicable industry." });
+      return null;
+    }
+
+    let base: { segment: SegmentDefinition; scenario: Scenario } | null = null;
+    if (sourceMode === "standard_base") {
+      const baseScenarioId = typeof body.baseScenarioId === "string" ? body.baseScenarioId.trim() : "";
+      if (!baseScenarioId) {
+        response.status(400).json({ error: "baseScenarioId is required when using a standard scenario as base." });
+        return null;
+      }
+      base = getConfigScenarioById(db.config, baseScenarioId);
+      if (!base) {
+        response.status(404).json({ error: "Base scenario not found in the standard content catalog." });
+        return null;
+      }
+    }
+
+    const requestedSegmentId = typeof body.segmentId === "string" ? body.segmentId.trim() : "";
+    const segmentId = requestedSegmentId || base?.segment.id || "";
+    if (!segmentId) {
+      response.status(400).json({ error: "A role is required before generating a custom scenario." });
+      return null;
+    }
+
+    const segment = getConfigSegmentById(db.config, segmentId);
+    if (!segment) {
+      response.status(400).json({ error: "Selected role is not valid." });
+      return null;
+    }
+
+    const generationInputs = normalizeOrgCustomScenarioGenerationInputs(body.generationInputs) ?? null;
+    const draft = {
+      title: sanitizeOptionalText(body.draft?.title, 300),
+      description: sanitizeOptionalText(body.draft?.description, 8_000),
+      aiRole: sanitizeOptionalText(body.draft?.aiRole, 8_000),
+      scoringGuidance: sanitizeOptionalText(body.draft?.scoringGuidance, 8_000),
+    };
+
+    return {
+      org,
+      configUpdatedAt: db.config.updatedAt,
+      segment,
+      base,
+      sourceMode,
+      selectedIndustries,
+      generationInputs,
+      draft,
+    };
+  });
+
+  if (!context) {
+    return;
+  }
+
+  const promptPreview = buildCustomScenarioGenerationPromptPreview({
+    org: context.org,
+    segment: context.segment,
+    industries: context.selectedIndustries,
+    sourceMode: context.sourceMode,
+    base: context.base,
+    draft: context.draft,
+    generationInputs: context.generationInputs,
+  });
+
+  const systemPrompt = [
+    "You are a training-scenario content writer for enterprise roleplay simulations.",
+    "Return ONLY valid JSON with keys: title, description, aiRole, scoringGuidance.",
+    "Do not wrap the JSON in markdown fences.",
+    "Keep the scenario realistic, role-appropriate, and suitable for spoken simulation practice.",
+    "Avoid illegal/defamatory claims, guarantees, fabricated product specs, or compliance violations.",
+    "If draft content is supplied, improve and adapt it rather than discarding useful details.",
+  ].join(" ");
+
+  try {
+    const completion = await requestChatCompletion({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: promptPreview },
+      ],
+      temperature: 0.4,
+    });
+
+    const parsed = extractFirstJsonObject(completion.text);
+    if (!parsed) {
+      response.status(502).json({ error: "AI response could not be parsed into JSON. Please retry." });
+      return;
+    }
+
+    const fallbackTitle = context.draft.title ?? context.base?.scenario.title ?? `${context.org.name} Custom Scenario`;
+    const fallbackDescription =
+      context.draft.description ??
+      context.base?.scenario.description ??
+      `Create a roleplay scenario for ${context.segment.label} at ${context.org.name}.`;
+    const fallbackAiRole = context.draft.aiRole ?? context.base?.scenario.aiRole ?? "a realistic conversation partner";
+    const fallbackScoring =
+      context.draft.scoringGuidance ??
+      "Score communication quality, objection handling, clarity, and alignment to the stated training objective.";
+
+    const generatedTitle = toMultilineText(parsed.title, 300) || fallbackTitle;
+    const generatedDescription = toMultilineText(parsed.description, 8_000) || fallbackDescription;
+    const generatedAiRole = toMultilineText(parsed.aiRole, 8_000) || fallbackAiRole;
+    const generatedScoringGuidance = toMultilineText(parsed.scoringGuidance, 8_000) || fallbackScoring;
+
+    const payload: GenerateOrgCustomScenarioResponse = {
+      generated: {
+        title: generatedTitle,
+        description: generatedDescription,
+        aiRole: generatedAiRole,
+        scoringGuidance: generatedScoringGuidance,
+        summary: buildScenarioSummary(generatedDescription),
+      },
+      source: {
+        sourceMode: context.sourceMode,
+        creationMethod: "ai",
+        baseScenarioId: context.base?.scenario.id ?? null,
+        baseScenarioTitle: context.base?.scenario.title ?? null,
+        baseScenarioSegmentId: context.base?.segment.id ?? null,
+        baseScenarioVersion: context.base ? context.configUpdatedAt || null : null,
+      },
+      promptPreview,
+      model: completion.model,
+      usage: {
+        inputTokens: completion.usage.inputTokens,
+        outputTokens: completion.usage.outputTokens,
+        totalTokens: completion.usage.totalTokens,
+      },
+    };
+
+    response.json(payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "AI request failed.";
+    response.status(503).json({ error: message });
+  }
+});
+
+app.post("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const body = request.body as CreateOrgCustomScenarioRequest;
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const description = typeof body.description === "string" ? body.description.trim() : "";
+    const aiRole = typeof body.aiRole === "string" ? body.aiRole.trim() : "";
+    const scoringGuidance = typeof body.scoringGuidance === "string" ? body.scoringGuidance.trim() : "";
+    const segmentId = typeof body.segmentId === "string" ? body.segmentId.trim() : "";
+    if (!title || !description || !aiRole || !scoringGuidance || !segmentId) {
+      response.status(400).json({
+        error: "title, description, aiRole, scoringGuidance, and segmentId are required.",
+      });
+      return;
+    }
+
+    const segment = getConfigSegmentById(db.config, segmentId);
+    if (!segment) {
+      response.status(400).json({ error: "Selected role is not valid." });
+      return;
+    }
+
+    const allowedIndustryIds = new Set((db.config.industries ?? []).map((industry) => industry.id));
+    const applicableIndustryIds = uniqueStrings(
+      Array.isArray(body.applicableIndustryIds) ? body.applicableIndustryIds : [],
+      allowedIndustryIds,
+    ) as IndustryId[];
+    if (applicableIndustryIds.length === 0) {
+      response.status(400).json({ error: "Select at least one valid applicable industry." });
+      return;
+    }
+
+    const requestedProvenance = body.provenance ?? {};
+    const sourceMode: OrgCustomScenarioSourceMode = isOrgCustomScenarioSourceMode(requestedProvenance.sourceMode)
+      ? requestedProvenance.sourceMode
+      : "scratch";
+
+    let resolvedBase: { segment: SegmentDefinition; scenario: Scenario } | null = null;
+    const requestedBaseScenarioId =
+      typeof requestedProvenance.baseScenarioId === "string" ? requestedProvenance.baseScenarioId.trim() : "";
+    if (sourceMode === "standard_base") {
+      if (!requestedBaseScenarioId) {
+        response.status(400).json({ error: "Base scenario is required when source mode is standard_base." });
+        return;
+      }
+      resolvedBase = getConfigScenarioById(db.config, requestedBaseScenarioId);
+      if (!resolvedBase) {
+        response.status(404).json({ error: "Base scenario not found in the standard content catalog." });
+        return;
+      }
+    }
+
+    const scenarios = ensureOrgCustomScenarioCollection(org);
+    const existingIds = new Set(scenarios.map((entry) => entry.id));
+    let id = normalizeIdentifier(title, `${segmentId}_custom_scenario`);
+    if (existingIds.has(id)) {
+      let attempt = 2;
+      while (existingIds.has(`${id}_${attempt}`)) {
+        attempt += 1;
+      }
+      id = `${id}_${attempt}`;
+    }
+
+    const now = nowIso();
+    const provenance = normalizeOrgCustomScenarioProvenance(requestedProvenance, {
+      sourceMode,
+      creationMethod: isOrgCustomScenarioCreationMethod(requestedProvenance.creationMethod)
+        ? requestedProvenance.creationMethod
+        : "manual",
+      baseScenarioId: resolvedBase?.scenario.id ?? null,
+      baseScenarioTitle: resolvedBase?.scenario.title ?? null,
+      baseScenarioSegmentId: resolvedBase?.segment.id ?? null,
+      baseScenarioVersion: resolvedBase ? db.config.updatedAt : null,
+    });
+
+    const customScenario: OrgCustomScenario = {
+      id,
+      orgId: org.id,
+      segmentId,
+      title,
+      summary: buildScenarioSummary(description),
+      description,
+      aiRole,
+      scoringGuidance,
+      applicableIndustryIds,
+      enabled: body.enabled === true,
+      provenance,
+      createdBy: PLATFORM_ADMIN_ACTOR_ID,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    scenarios.push(customScenario);
+    org.customScenarios = sortOrgCustomScenariosByTitle(scenarios);
+    org.updatedAt = now;
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.custom_scenario.created",
+      orgId: org.id,
+      message: `Created custom scenario "${customScenario.title}" for ${org.name}.`,
+      metadata: {
+        customScenarioId: customScenario.id,
+        segmentId: customScenario.segmentId,
+        industries: customScenario.applicableIndustryIds,
+        enabled: customScenario.enabled === true,
+        sourceMode: customScenario.provenance.sourceMode,
+        creationMethod: customScenario.provenance.creationMethod,
+      },
+    });
+
+    response.status(201).json(customScenario);
+  });
+});
+
+app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const scenarioId = request.params.scenarioId?.trim();
+  const patch = request.body as UpdateOrgCustomScenarioRequest;
+
+  if (!scenarioId) {
+    response.status(400).json({ error: "scenarioId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const scenarios = ensureOrgCustomScenarioCollection(org);
+    const current = scenarios.find((entry) => entry.id === scenarioId);
+    if (!current) {
+      response.status(404).json({ error: "Custom scenario not found." });
+      return;
+    }
+
+    if (patch.segmentId !== undefined) {
+      const nextSegmentId = typeof patch.segmentId === "string" ? patch.segmentId.trim() : "";
+      if (!nextSegmentId || !getConfigSegmentById(db.config, nextSegmentId)) {
+        response.status(400).json({ error: "Selected role is not valid." });
+        return;
+      }
+      current.segmentId = nextSegmentId;
+    }
+
+    if (patch.applicableIndustryIds !== undefined) {
+      const allowedIndustryIds = new Set((db.config.industries ?? []).map((industry) => industry.id));
+      const nextIndustryIds = uniqueStrings(
+        Array.isArray(patch.applicableIndustryIds) ? patch.applicableIndustryIds : [],
+        allowedIndustryIds,
+      ) as IndustryId[];
+      if (nextIndustryIds.length === 0) {
+        response.status(400).json({ error: "Select at least one valid applicable industry." });
+        return;
+      }
+      current.applicableIndustryIds = nextIndustryIds;
+    }
+
+    if (patch.title !== undefined) {
+      const nextTitle = typeof patch.title === "string" ? patch.title.trim() : "";
+      if (!nextTitle) {
+        response.status(400).json({ error: "title cannot be empty." });
+        return;
+      }
+      current.title = nextTitle;
+    }
+
+    if (patch.description !== undefined) {
+      const nextDescription = typeof patch.description === "string" ? patch.description.trim() : "";
+      if (!nextDescription) {
+        response.status(400).json({ error: "description cannot be empty." });
+        return;
+      }
+      current.description = nextDescription;
+    }
+
+    if (patch.aiRole !== undefined) {
+      const nextAiRole = typeof patch.aiRole === "string" ? patch.aiRole.trim() : "";
+      if (!nextAiRole) {
+        response.status(400).json({ error: "aiRole cannot be empty." });
+        return;
+      }
+      current.aiRole = nextAiRole;
+    }
+
+    if (patch.scoringGuidance !== undefined) {
+      const nextScoringGuidance = typeof patch.scoringGuidance === "string" ? patch.scoringGuidance.trim() : "";
+      if (!nextScoringGuidance) {
+        response.status(400).json({ error: "scoringGuidance cannot be empty." });
+        return;
+      }
+      current.scoringGuidance = nextScoringGuidance;
+    }
+
+    if (typeof patch.enabled === "boolean") {
+      current.enabled = patch.enabled;
+    }
+
+    if (patch.provenance !== undefined) {
+      const incoming = patch.provenance ?? {};
+      const nextSourceMode = isOrgCustomScenarioSourceMode(incoming.sourceMode)
+        ? incoming.sourceMode
+        : current.provenance.sourceMode;
+
+      let resolvedBase: { segment: SegmentDefinition; scenario: Scenario } | null = null;
+      const explicitBaseScenarioId =
+        typeof incoming.baseScenarioId === "string" ? incoming.baseScenarioId.trim() : undefined;
+      const effectiveBaseScenarioId =
+        explicitBaseScenarioId !== undefined ? explicitBaseScenarioId : (current.provenance.baseScenarioId ?? "");
+
+      if (nextSourceMode === "standard_base") {
+        if (!effectiveBaseScenarioId) {
+          response.status(400).json({ error: "Base scenario is required when source mode is standard_base." });
+          return;
+        }
+        resolvedBase = getConfigScenarioById(db.config, effectiveBaseScenarioId);
+        if (!resolvedBase) {
+          response.status(404).json({ error: "Base scenario not found in the standard content catalog." });
+          return;
+        }
+      }
+
+      const fallbackForProvenance =
+        nextSourceMode === "scratch"
+          ? {
+              ...current.provenance,
+              sourceMode: "scratch" as OrgCustomScenarioSourceMode,
+              baseScenarioId: null,
+              baseScenarioTitle: null,
+              baseScenarioSegmentId: null,
+              baseScenarioVersion: null,
+            }
+          : {
+              ...current.provenance,
+              sourceMode: nextSourceMode,
+              baseScenarioId: resolvedBase?.scenario.id ?? current.provenance.baseScenarioId ?? null,
+              baseScenarioTitle: resolvedBase?.scenario.title ?? current.provenance.baseScenarioTitle ?? null,
+              baseScenarioSegmentId: resolvedBase?.segment.id ?? current.provenance.baseScenarioSegmentId ?? null,
+              baseScenarioVersion: resolvedBase ? db.config.updatedAt : current.provenance.baseScenarioVersion ?? null,
+            };
+
+      current.provenance = normalizeOrgCustomScenarioProvenance(incoming, fallbackForProvenance);
+    }
+
+    current.summary = buildScenarioSummary(current.description);
+    current.orgId = org.id;
+    current.updatedAt = nowIso();
+    org.customScenarios = sortOrgCustomScenariosByTitle(scenarios);
+    org.updatedAt = current.updatedAt;
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.custom_scenario.updated",
+      orgId: org.id,
+      message: `Updated custom scenario "${current.title}" for ${org.name}.`,
+      metadata: {
+        customScenarioId: current.id,
+        enabled: current.enabled === true,
+        fields: Object.keys(patch ?? {}).slice(0, 25),
+      },
+    });
+
+    response.json(current);
+  });
+});
+
+app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const scenarioId = request.params.scenarioId?.trim();
+  if (!scenarioId) {
+    response.status(400).json({ error: "scenarioId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const scenarios = ensureOrgCustomScenarioCollection(org);
+    const existing = scenarios.find((entry) => entry.id === scenarioId);
+    if (!existing) {
+      response.status(404).json({ error: "Custom scenario not found." });
+      return;
+    }
+
+    org.customScenarios = scenarios.filter((entry) => entry.id !== scenarioId);
+    org.updatedAt = nowIso();
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.custom_scenario.deleted",
+      orgId: org.id,
+      message: `Deleted custom scenario "${existing.title}" from ${org.name}.`,
+      metadata: {
+        customScenarioId: existing.id,
+        title: existing.title,
+      },
+    });
+
+    response.json({
+      deleted: true,
+      id: existing.id,
+      title: existing.title,
+    });
   });
 });
 

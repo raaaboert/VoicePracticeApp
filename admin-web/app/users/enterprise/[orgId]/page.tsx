@@ -14,6 +14,7 @@ import {
   formatSecondsAsClock,
 } from "@voicepractice/shared";
 import { AdminShell } from "../../../../src/components/AdminShell";
+import { EnterpriseCustomScenariosCard } from "../../../../src/components/EnterpriseCustomScenariosCard";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../../../src/lib/api";
 import { withAdminMode } from "../../../../src/lib/adminMode";
@@ -105,6 +106,7 @@ export default function EnterpriseOrgPage() {
   }, [params]);
 
   const [dashboard, setDashboard] = useState<OrgDashboardResponse | null>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [industries, setIndustries] = useState<AppConfig["industries"]>([]);
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -137,6 +139,7 @@ export default function EnterpriseOrgPage() {
         adminFetch<OrgJoinRequestsResponse>("/org-join-requests?status=pending"),
       ]);
       setDashboard(payload);
+      setConfig(configPayload);
       setIndustries(configPayload.industries ?? []);
       setOrgDomainInput(payload.org.emailDomain ?? "");
       setOrgJoinCodeInput(payload.org.joinCode ?? "");
@@ -558,6 +561,8 @@ export default function EnterpriseOrgPage() {
           </div>
         </div>
       </div>
+
+      <EnterpriseCustomScenariosCard orgId={orgId} orgName={dashboard?.org.name} config={config} />
 
       <div className="card">
         <h3>Users</h3>

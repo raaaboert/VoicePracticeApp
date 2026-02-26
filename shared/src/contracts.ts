@@ -65,6 +65,55 @@ export interface Scenario {
   enabled?: boolean;
 }
 
+export const ORG_CUSTOM_SCENARIO_SOURCE_MODES = ["scratch", "standard_base"] as const;
+export type OrgCustomScenarioSourceMode = (typeof ORG_CUSTOM_SCENARIO_SOURCE_MODES)[number];
+
+export const ORG_CUSTOM_SCENARIO_CREATION_METHODS = ["manual", "ai"] as const;
+export type OrgCustomScenarioCreationMethod = (typeof ORG_CUSTOM_SCENARIO_CREATION_METHODS)[number];
+
+export interface OrgCustomScenarioGenerationInputs {
+  companyName?: string;
+  productOrService?: string;
+  targetPersona?: string;
+  keyObjections?: string[];
+  tone?: string;
+  difficulty?: string;
+  mustInclude?: string;
+  mustAvoid?: string;
+  complianceConstraints?: string;
+  specialInstructions?: string;
+}
+
+export interface OrgCustomScenarioProvenance {
+  sourceMode: OrgCustomScenarioSourceMode;
+  creationMethod: OrgCustomScenarioCreationMethod;
+  baseScenarioId?: string | null;
+  baseScenarioTitle?: string | null;
+  baseScenarioSegmentId?: string | null;
+  baseScenarioVersion?: string | null;
+  customizationParams?: OrgCustomScenarioGenerationInputs | null;
+  generatedPrompt?: string | null;
+  modelUsed?: string | null;
+  generatedAt?: string | null;
+}
+
+export interface OrgCustomScenario {
+  id: string;
+  orgId: string;
+  segmentId: string;
+  title: string;
+  summary?: string;
+  description: string;
+  aiRole: string;
+  scoringGuidance: string;
+  applicableIndustryIds: IndustryId[];
+  enabled?: boolean;
+  provenance: OrgCustomScenarioProvenance;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface SegmentDefinition {
   id: string;
   label: string;
@@ -127,6 +176,7 @@ export interface EnterpriseOrg {
   renewalTotalUsd: number;
   softLimitPercentTriggers: number[];
   maxSimulationMinutes: number;
+  customScenarios?: OrgCustomScenario[];
   createdAt: string;
   updatedAt: string;
 }
@@ -415,6 +465,70 @@ export interface UpdateConfigRequest {
   segments?: SegmentDefinition[];
   tiers?: TierDefinition[];
   enterprise?: Partial<EnterpriseConfig>;
+}
+
+export interface GenerateOrgCustomScenarioRequest {
+  sourceMode: OrgCustomScenarioSourceMode;
+  creationMethod?: OrgCustomScenarioCreationMethod;
+  baseScenarioId?: string | null;
+  segmentId?: string;
+  applicableIndustryIds?: IndustryId[];
+  draft?: {
+    title?: string;
+    description?: string;
+    aiRole?: string;
+    scoringGuidance?: string;
+  };
+  generationInputs?: OrgCustomScenarioGenerationInputs;
+}
+
+export interface GenerateOrgCustomScenarioResponse {
+  generated: {
+    title: string;
+    description: string;
+    aiRole: string;
+    scoringGuidance: string;
+    summary: string;
+  };
+  source: {
+    sourceMode: OrgCustomScenarioSourceMode;
+    creationMethod: OrgCustomScenarioCreationMethod;
+    baseScenarioId: string | null;
+    baseScenarioTitle: string | null;
+    baseScenarioSegmentId: string | null;
+    baseScenarioVersion: string | null;
+  };
+  promptPreview: string;
+  model: string;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
+}
+
+export interface CreateOrgCustomScenarioRequest {
+  title?: string;
+  description?: string;
+  aiRole?: string;
+  scoringGuidance?: string;
+  segmentId?: string;
+  applicableIndustryIds?: IndustryId[];
+  enabled?: boolean;
+  provenance?: Partial<OrgCustomScenarioProvenance>;
+}
+
+export interface UpdateOrgCustomScenarioRequest {
+  title?: string;
+  description?: string;
+  aiRole?: string;
+  scoringGuidance?: string;
+  segmentId?: string;
+  applicableIndustryIds?: IndustryId[];
+  enabled?: boolean;
+  provenance?: Partial<OrgCustomScenarioProvenance> & {
+    customizationParams?: OrgCustomScenarioGenerationInputs | null;
+  };
 }
 
 export interface MobileOnboardRequest {
