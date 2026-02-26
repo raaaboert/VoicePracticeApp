@@ -1,6 +1,7 @@
 import {
   AppConfig,
   Difficulty,
+  OrgCustomScenario,
   PersonaStyle,
   Scenario,
   SegmentDefinition,
@@ -13,6 +14,7 @@ import {
 export type {
   AppConfig,
   Difficulty,
+  OrgCustomScenario,
   PersonaStyle,
   Scenario,
   SegmentDefinition,

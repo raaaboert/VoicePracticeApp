@@ -90,8 +90,10 @@ import {
   AppConfig,
   Difficulty,
   DialogueMessage,
+  OrgCustomScenario,
   PersonaStyle,
   Scenario,
+  SegmentDefinition,
   SessionTiming,
   SimulationConfig,
   SimulationScorecard,
@@ -244,6 +246,15 @@ interface SelectOption {
   label: string;
 }
 
+type ScenarioCatalogTab = "standard" | "custom";
+
+type ScenarioIndustryOption = {
+  id: string;
+  label: string;
+  aiBaseline: string;
+  roles: SegmentDefinition[];
+};
+
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
@@ -328,6 +339,18 @@ function fallbackScorecard(history: DialogueMessage[]): SimulationScorecard {
 
 function dedupeTimezones(list: string[]): string[] {
   return Array.from(new Set(list));
+}
+
+function toRuntimeScenarioFromCustomScenario(customScenario: OrgCustomScenario): Scenario {
+  return {
+    id: customScenario.id,
+    segmentId: customScenario.segmentId,
+    title: customScenario.title,
+    summary: customScenario.summary ?? customScenario.description,
+    description: customScenario.description,
+    aiRole: customScenario.aiRole,
+    enabled: customScenario.enabled === true,
+  };
 }
 
 function resolveDeviceTimezone(): string {
@@ -602,6 +625,7 @@ export default function App() {
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState<string>("");
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>("");
+  const [scenarioCatalogTab, setScenarioCatalogTab] = useState<ScenarioCatalogTab>("standard");
   const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty>("medium");
   const [selectedPersonaStyle, setSelectedPersonaStyle] = useState<PersonaStyle>("skeptical");
 
@@ -700,9 +724,22 @@ export default function App() {
     return map;
   }, [allIndustries]);
 
-  const industryOptions = useMemo(
+  const activeOrgCustomScenarios = useMemo(
+    () => (config?.orgCustomScenarios ?? []).filter((scenario) => scenario.enabled === true),
+    [config],
+  );
+
+  const segmentsWithEnabledStandardScenarios = useMemo(
+    () =>
+      enabledSegments.filter((segment) =>
+        (segment.scenarios ?? []).some((scenario) => scenario.enabled !== false),
+      ),
+    [enabledSegments],
+  );
+
+  const standardIndustryOptions = useMemo<ScenarioIndustryOption[]>(
     () => {
-      const byId = new Map(enabledSegments.map((segment) => [segment.id, segment]));
+      const byId = new Map(segmentsWithEnabledStandardScenarios.map((segment) => [segment.id, segment]));
       const roleIdsByIndustryId = new Map<string, Set<string>>();
       for (const entry of activeRoleIndustryLinks) {
         const ids = roleIdsByIndustryId.get(entry.industryId) ?? new Set<string>();
@@ -715,7 +752,7 @@ export default function App() {
           const roleIds = Array.from(roleIdsByIndustryId.get(industry.id) ?? []);
           const roles = roleIds
             .map((roleId) => byId.get(roleId))
-            .filter((segment): segment is (typeof enabledSegments)[number] => Boolean(segment));
+            .filter((segment): segment is SegmentDefinition => Boolean(segment));
           return {
             id: industry.id,
             label: industry.label,
@@ -729,7 +766,7 @@ export default function App() {
         return options;
       }
 
-      if (enabledSegments.length === 0 || enabledIndustries.length === 0) {
+      if (segmentsWithEnabledStandardScenarios.length === 0 || enabledIndustries.length === 0) {
         return [];
       }
 
@@ -738,11 +775,89 @@ export default function App() {
           id: enabledIndustries[0].id,
           label: enabledIndustries[0].label,
           aiBaseline: enabledIndustries[0].aiBaseline ?? "",
-          roles: enabledSegments
+          roles: segmentsWithEnabledStandardScenarios
         }
       ];
     },
-    [activeRoleIndustryLinks, enabledIndustries, enabledSegments],
+    [activeRoleIndustryLinks, enabledIndustries, segmentsWithEnabledStandardScenarios],
+  );
+
+  const customIndustryOptions = useMemo<ScenarioIndustryOption[]>(
+    () => {
+      if (activeOrgCustomScenarios.length === 0 || enabledIndustries.length === 0 || enabledSegments.length === 0) {
+        return [];
+      }
+
+      const enabledSegmentById = new Map(enabledSegments.map((segment) => [segment.id, segment]));
+      const enabledIndustryById = new Map(enabledIndustries.map((industry) => [industry.id, industry]));
+      const scenariosByIndustryRole = new Map<string, Scenario[]>();
+      const roleIdsByIndustryId = new Map<string, Set<string>>();
+
+      for (const customScenario of activeOrgCustomScenarios) {
+        const baseSegment = enabledSegmentById.get(customScenario.segmentId);
+        if (!baseSegment) {
+          continue;
+        }
+
+        const runtimeScenario = toRuntimeScenarioFromCustomScenario(customScenario);
+        for (const industryId of customScenario.applicableIndustryIds ?? []) {
+          if (!enabledIndustryById.has(industryId)) {
+            continue;
+          }
+
+          const roleIds = roleIdsByIndustryId.get(industryId) ?? new Set<string>();
+          roleIds.add(baseSegment.id);
+          roleIdsByIndustryId.set(industryId, roleIds);
+
+          const key = `${industryId}::${baseSegment.id}`;
+          const current = scenariosByIndustryRole.get(key) ?? [];
+          current.push(runtimeScenario);
+          scenariosByIndustryRole.set(key, current);
+        }
+      }
+
+      return enabledIndustries
+        .map((industry) => {
+          const roleIds = Array.from(roleIdsByIndustryId.get(industry.id) ?? []);
+          const roles = roleIds
+            .map((roleId) => {
+              const segment = enabledSegmentById.get(roleId);
+              if (!segment) {
+                return null;
+              }
+
+              const key = `${industry.id}::${roleId}`;
+              const scenarios = [...(scenariosByIndustryRole.get(key) ?? [])].sort((a, b) =>
+                a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+              );
+              if (scenarios.length === 0) {
+                return null;
+              }
+
+              return {
+                ...segment,
+                scenarios,
+              };
+            })
+            .filter((segment): segment is SegmentDefinition => Boolean(segment));
+
+          return {
+            id: industry.id,
+            label: industry.label,
+            aiBaseline: industry.aiBaseline ?? "",
+            roles,
+          };
+        })
+        .filter((industry) => industry.roles.length > 0);
+    },
+    [activeOrgCustomScenarios, enabledIndustries, enabledSegments],
+  );
+
+  const hasCustomScenarioOptions = customIndustryOptions.length > 0;
+
+  const industryOptions = useMemo<ScenarioIndustryOption[]>(
+    () => (scenarioCatalogTab === "custom" ? customIndustryOptions : standardIndustryOptions),
+    [customIndustryOptions, scenarioCatalogTab, standardIndustryOptions],
   );
 
   const activeIndustry = useMemo(() => {
@@ -823,8 +938,11 @@ export default function App() {
         map.set(scenario.id, scenario.title);
       }
     }
+    for (const customScenario of activeOrgCustomScenarios) {
+      map.set(customScenario.id, customScenario.title);
+    }
     return map;
-  }, [enabledSegments]);
+  }, [activeOrgCustomScenarios, enabledSegments]);
   const industryIdsByRoleSegmentId = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const entry of activeRoleIndustryLinks) {
@@ -1330,7 +1448,12 @@ export default function App() {
       setSelectedPersonaStyle(configPayload.defaultPersonaStyle);
 
       const preferredSegment = await loadActiveSegment(configPayload.activeSegmentId);
+      const enabledSegmentsWithScenarios = configPayload.segments.filter(
+        (segment) => segment.enabled && (segment.scenarios ?? []).some((scenario) => scenario.enabled !== false),
+      );
       const validSegment =
+        enabledSegmentsWithScenarios.find((segment) => segment.id === preferredSegment) ??
+        enabledSegmentsWithScenarios[0] ??
         configPayload.segments.find((segment) => segment.id === preferredSegment && segment.enabled) ??
         configPayload.segments.find((segment) => segment.enabled);
 
@@ -1537,6 +1660,17 @@ export default function App() {
   }, [screen, user]);
 
   useEffect(() => {
+    if (scenarioCatalogTab === "custom" && !hasCustomScenarioOptions) {
+      setScenarioCatalogTab("standard");
+      return;
+    }
+
+    if (scenarioCatalogTab === "standard" && industryOptions.length === 0 && hasCustomScenarioOptions) {
+      setScenarioCatalogTab("custom");
+    }
+  }, [hasCustomScenarioOptions, industryOptions.length, scenarioCatalogTab]);
+
+  useEffect(() => {
     if (industryOptions.length === 0) {
       setSelectedIndustryId("");
       return;
@@ -1576,6 +1710,10 @@ export default function App() {
 
     void saveActiveSegment(selectedRoleId);
   }, [selectedRoleId]);
+
+  useEffect(() => {
+    setSetupError(null);
+  }, [scenarioCatalogTab]);
 
   useEffect(() => {
     void saveColorScheme(colorScheme);
@@ -2579,6 +2717,38 @@ export default function App() {
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Session Selection</Text>
+
+          <Text style={styles.hintText}>Scenario Library</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+            <Pressable
+              style={[styles.timezoneChip, scenarioCatalogTab === "standard" ? styles.selectedChip : null]}
+              onPress={() => setScenarioCatalogTab("standard")}
+            >
+              <Text style={styles.chipText}>Standard Scenarios</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.timezoneChip,
+                scenarioCatalogTab === "custom" ? styles.selectedChip : null,
+                !hasCustomScenarioOptions ? styles.disabled : null,
+              ]}
+              disabled={!hasCustomScenarioOptions}
+              onPress={() => setScenarioCatalogTab("custom")}
+            >
+              <Text style={styles.chipText}>Custom Scenarios</Text>
+            </Pressable>
+          </ScrollView>
+          {scenarioCatalogTab === "custom" ? (
+            <Text style={styles.hintText}>
+              {hasCustomScenarioOptions
+                ? "Custom scenarios are account-specific and use the same industry baseline + AI role runtime flow."
+                : "No active custom scenarios are available for this account yet."}
+            </Text>
+          ) : (
+            <Text style={styles.hintText}>
+              Standard scenarios show only industries/roles that currently have active scenarios available.
+            </Text>
+          )}
 
           <Text style={styles.hintText}>Industry</Text>
           <SelectionDropdown

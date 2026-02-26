@@ -73,6 +73,7 @@ export function buildEvaluationSystemPrompt(params: {
   personaStyle: PersonaStyle;
   industryLabel?: string | null;
   industryBaseline?: string | null;
+  scoringGuidance?: string | null;
 }): string {
   const lines = [
     "You are an expert communication coach evaluating a role-play simulation.",
@@ -93,6 +94,15 @@ export function buildEvaluationSystemPrompt(params: {
     `Scenario: ${params.scenario.title}`,
     `Difficulty: ${params.difficulty}`,
     `Persona style: ${params.personaStyle}`,
+  );
+
+  if ((params.scoringGuidance?.trim() ?? "").length > 0) {
+    lines.push(
+      `Scenario-specific scoring guidance (prioritize when evaluating the USER):\n${params.scoringGuidance?.trim()}`
+    );
+  }
+
+  lines.push(
     "Grade only the USER performance.",
     "Return ONLY strict JSON with this exact schema:",
     '{"overallScore":number(0-100),"persuasion":number(1-10),"clarity":number(1-10),"empathy":number(1-10),"assertiveness":number(1-10),"strengths":[string,string,string],"improvements":[string,string,string],"summary":string}',

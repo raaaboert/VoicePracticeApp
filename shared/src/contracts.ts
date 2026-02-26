@@ -153,6 +153,8 @@ export interface AppConfig {
   industries: IndustryDefinition[];
   roleIndustries: RoleIndustryDefinition[];
   segments: SegmentDefinition[];
+  // Mobile-scoped config responses may include active org-specific custom scenarios.
+  orgCustomScenarios?: OrgCustomScenario[];
   tiers: TierDefinition[];
   enterprise: EnterpriseConfig;
   featureFlags: AppFeatureFlags;

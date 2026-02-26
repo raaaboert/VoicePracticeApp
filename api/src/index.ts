@@ -2560,6 +2560,108 @@ function getConfigScenarioById(
   return null;
 }
 
+function buildRuntimeScenarioFromOrgCustomScenario(customScenario: OrgCustomScenario): Scenario {
+  return {
+    id: customScenario.id,
+    segmentId: customScenario.segmentId,
+    title: customScenario.title,
+    summary: customScenario.summary ?? buildScenarioSummary(customScenario.description),
+    description: customScenario.description,
+    aiRole: customScenario.aiRole,
+    enabled: customScenario.enabled === true,
+  };
+}
+
+function getMobileReadyOrgCustomScenarios(
+  org: EnterpriseOrg,
+  config: AppConfig,
+): OrgCustomScenario[] {
+  const raw = normalizeOrgCustomScenarioList(org.customScenarios, org.id, nowIso());
+  if (raw.length === 0) {
+    return [];
+  }
+
+  const enabledIndustryIds = new Set((config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id));
+  const enabledSegmentIds = new Set(config.segments.filter((segment) => segment.enabled).map((segment) => segment.id));
+
+  const filtered = raw
+    .filter((scenario) => scenario.enabled === true && enabledSegmentIds.has(scenario.segmentId))
+    .map((scenario) => {
+      const applicableIndustryIds = uniqueStrings(scenario.applicableIndustryIds, enabledIndustryIds);
+      if (applicableIndustryIds.length === 0) {
+        return null;
+      }
+
+      return {
+        ...scenario,
+        applicableIndustryIds: applicableIndustryIds as IndustryId[],
+      };
+    })
+    .filter((scenario): scenario is OrgCustomScenario => Boolean(scenario));
+
+  return sortOrgCustomScenariosByTitle(filtered);
+}
+
+interface ResolvedMobileScenarioContext {
+  source: "standard" | "custom";
+  segment: SegmentDefinition;
+  scenario: Scenario;
+  allowedIndustryIds: IndustryId[];
+  scoringGuidance: string | null;
+}
+
+function resolveMobileScenarioForUser(
+  configForUser: AppConfig,
+  scenarioId: string,
+): ResolvedMobileScenarioContext | null {
+  for (const segment of configForUser.segments) {
+    if (segment.enabled !== true) {
+      continue;
+    }
+
+    const scenario = (segment.scenarios ?? []).find((entry) => entry.id === scenarioId && entry.enabled !== false);
+    if (!scenario) {
+      continue;
+    }
+
+    const allowedIndustryIds = uniqueStrings(
+      (configForUser.roleIndustries ?? [])
+        .filter((entry) => entry.active && entry.roleId === segment.id)
+        .map((entry) => entry.industryId),
+    ) as IndustryId[];
+
+    return {
+      source: "standard",
+      segment,
+      scenario,
+      allowedIndustryIds,
+      scoringGuidance: null,
+    };
+  }
+
+  const customScenario = (configForUser.orgCustomScenarios ?? []).find(
+    (entry) => entry.id === scenarioId && entry.enabled === true,
+  );
+  if (!customScenario) {
+    return null;
+  }
+
+  const segment = configForUser.segments.find(
+    (entry) => entry.id === customScenario.segmentId && entry.enabled === true,
+  );
+  if (!segment) {
+    return null;
+  }
+
+  return {
+    source: "custom",
+    segment,
+    scenario: buildRuntimeScenarioFromOrgCustomScenario(customScenario),
+    allowedIndustryIds: uniqueStrings(customScenario.applicableIndustryIds) as IndustryId[],
+    scoringGuidance: customScenario.scoringGuidance?.trim() || null,
+  };
+}
+
 function buildCustomScenarioGenerationPromptPreview(input: {
   org: EnterpriseOrg;
   segment: SegmentDefinition;
@@ -2941,12 +3043,19 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
     enabledIndustryIds
   );
   const scopedIndustryIdSet = new Set(scopedIndustryIds);
+  const mobileCustomScenarios = getMobileReadyOrgCustomScenarios(org, db.config);
+  const customIndustryIdSet = new Set(
+    mobileCustomScenarios.flatMap((scenario) => scenario.applicableIndustryIds ?? []),
+  );
   const allowedRoleSegmentIds = new Set(
     getRoleSegmentIdsForIndustries(scopedIndustryIds, db.config.roleIndustries)
   );
+  for (const customScenario of mobileCustomScenarios) {
+    allowedRoleSegmentIds.add(customScenario.segmentId);
+  }
   const filteredSegments = db.config.segments.filter((segment) => allowedRoleSegmentIds.has(segment.id));
   const filteredIndustries = (db.config.industries ?? []).filter(
-    (entry) => entry.enabled && scopedIndustryIdSet.has(entry.id)
+    (entry) => entry.enabled && (scopedIndustryIdSet.has(entry.id) || customIndustryIdSet.has(entry.id))
   );
   const filteredRoleIndustries = (db.config.roleIndustries ?? []).filter(
     (entry) =>
@@ -2960,7 +3069,8 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
       ...db.config,
       industries: filteredIndustries,
       roleIndustries: filteredRoleIndustries,
-      segments: []
+      segments: [],
+      orgCustomScenarios: mobileCustomScenarios,
     };
   }
 
@@ -2974,7 +3084,8 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
     industries: filteredIndustries,
     roleIndustries: filteredRoleIndustries,
     activeSegmentId: hasActiveSegment ? db.config.activeSegmentId : fallbackSegment.id,
-    segments: filteredSegments
+    segments: filteredSegments,
+    orgCustomScenarios: mobileCustomScenarios,
   };
 }
 
@@ -2991,9 +3102,9 @@ function normalizeAiIndustryBaselineForPrompt(value: unknown): string | null {
   return trimmed.slice(0, MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS);
 }
 
-function resolveAiIndustryPromptContext(
+function resolveAiIndustryPromptContextForAllowedIndustries(
   configForUser: AppConfig,
-  segment: SegmentDefinition,
+  allowedIndustryIdsInput: Iterable<string>,
   selectedIndustryIdRaw: unknown,
   selectedIndustryBaselineRaw: unknown
 ): {
@@ -3001,11 +3112,7 @@ function resolveAiIndustryPromptContext(
   industryLabel: string | null;
   industryBaseline: string | null;
 } {
-  const activeLinkedIndustryIds = new Set(
-    (configForUser.roleIndustries ?? [])
-      .filter((entry) => entry.active && entry.roleId === segment.id)
-      .map((entry) => entry.industryId)
-  );
+  const activeLinkedIndustryIds = new Set(uniqueStrings(Array.from(allowedIndustryIdsInput)));
   const linkedIndustries = (configForUser.industries ?? []).filter(
     (industry) => industry.enabled && activeLinkedIndustryIds.has(industry.id)
   );
@@ -3035,6 +3142,28 @@ function resolveAiIndustryPromptContext(
     industryLabel: selectedIndustry.label,
     industryBaseline: hasCachedBaselineSnapshot ? cachedBaseline : (cachedBaseline ?? configuredBaseline)
   };
+}
+
+function resolveAiIndustryPromptContext(
+  configForUser: AppConfig,
+  segment: SegmentDefinition,
+  selectedIndustryIdRaw: unknown,
+  selectedIndustryBaselineRaw: unknown
+): {
+  industryId: string | null;
+  industryLabel: string | null;
+  industryBaseline: string | null;
+} {
+  const activeLinkedIndustryIds = (configForUser.roleIndustries ?? [])
+    .filter((entry) => entry.active && entry.roleId === segment.id)
+    .map((entry) => entry.industryId);
+
+  return resolveAiIndustryPromptContextForAllowedIndustries(
+    configForUser,
+    activeLinkedIndustryIds,
+    selectedIndustryIdRaw,
+    selectedIndustryBaselineRaw,
+  );
 }
 
 function sanitizeConfigPatch(current: AppConfig, patch: UpdateConfigRequest): AppConfig {
@@ -6148,31 +6277,23 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     }
 
     const configForUser = resolveConfigForUser(db, user);
-    const segment = configForUser.segments.find(
-      (entry) => entry.enabled && (entry.scenarios ?? []).some((scenario) => scenario.id === scenarioId && scenario.enabled !== false)
-    );
-    if (!segment) {
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
 
-    const scenario = (segment.scenarios ?? []).find((entry) => entry.id === scenarioId && entry.enabled !== false);
-    if (!scenario) {
-      response.status(400).json({ error: "Scenario not found." });
-      return null;
-    }
-
-    const industryPromptContext = resolveAiIndustryPromptContext(
+    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
-      segment,
+      resolvedScenario.allowedIndustryIds,
       body.industryId,
       body.industryBaseline
     );
 
     return {
       user,
-      segment,
-      scenario,
+      segment: resolvedScenario.segment,
+      scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
@@ -6309,31 +6430,23 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     }
 
     const configForUser = resolveConfigForUser(db, user);
-    const segment = configForUser.segments.find(
-      (entry) => entry.enabled && (entry.scenarios ?? []).some((scenario) => scenario.id === scenarioId && scenario.enabled !== false)
-    );
-    if (!segment) {
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
 
-    const scenario = (segment.scenarios ?? []).find((entry) => entry.id === scenarioId && entry.enabled !== false);
-    if (!scenario) {
-      response.status(400).json({ error: "Scenario not found." });
-      return null;
-    }
-
-    const industryPromptContext = resolveAiIndustryPromptContext(
+    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
-      segment,
+      resolvedScenario.allowedIndustryIds,
       body.industryId,
       body.industryBaseline
     );
 
     return {
       user,
-      segment,
-      scenario,
+      segment: resolvedScenario.segment,
+      scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
@@ -6484,36 +6597,29 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     }
 
     const configForUser = resolveConfigForUser(db, user);
-    const segment = configForUser.segments.find(
-      (entry) => entry.enabled && (entry.scenarios ?? []).some((scenario) => scenario.id === scenarioId && scenario.enabled !== false)
-    );
-    if (!segment) {
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
 
-    const scenario = (segment.scenarios ?? []).find((entry) => entry.id === scenarioId && entry.enabled !== false);
-    if (!scenario) {
-      response.status(400).json({ error: "Scenario not found." });
-      return null;
-    }
-
-    const industryPromptContext = resolveAiIndustryPromptContext(
+    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
-      segment,
+      resolvedScenario.allowedIndustryIds,
       body.industryId,
       body.industryBaseline
     );
 
     return {
       user,
-      segment,
-      scenario,
+      segment: resolvedScenario.segment,
+      scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
-      industryBaseline: industryPromptContext.industryBaseline
+      industryBaseline: industryPromptContext.industryBaseline,
+      scoringGuidance: resolvedScenario.scoringGuidance,
     };
   });
 
@@ -6528,7 +6634,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       segmentLabel: context.segment.label,
       personaStyle: context.personaStyle,
       industryLabel: context.industryLabel,
-      industryBaseline: context.industryBaseline
+      industryBaseline: context.industryBaseline,
+      scoringGuidance: context.scoringGuidance,
     });
 
     const transcript = formatDialogueForEvaluation(history);
@@ -6663,15 +6770,13 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     }
 
     const configForUser = resolveConfigForUser(db, user);
-    const segment = configForUser.segments.find((entry) => entry.id === segmentId && entry.enabled);
-    if (!segment) {
-      response.status(400).json({ error: "Invalid segment for score record." });
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    if (!resolvedScenario) {
+      response.status(400).json({ error: "Invalid scenario for score record." });
       return;
     }
-
-    const scenario = (segment.scenarios ?? []).find((entry) => entry.id === scenarioId && entry.enabled !== false);
-    if (!scenario) {
-      response.status(400).json({ error: "Invalid scenario for score record." });
+    if (resolvedScenario.segment.id !== segmentId) {
+      response.status(400).json({ error: "Scenario does not match the submitted segment." });
       return;
     }
 
