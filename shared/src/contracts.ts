@@ -178,7 +178,29 @@ export interface EnterpriseOrg {
   renewalTotalUsd: number;
   softLimitPercentTriggers: number[];
   maxSimulationMinutes: number;
+  enableModularPromptArchitecture?: boolean;
   customScenarios?: OrgCustomScenario[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const TRAINING_PACK_SCORING_KEYS = ["persuasion", "clarity", "empathy", "assertiveness"] as const;
+export type TrainingPackScoringKey = (typeof TRAINING_PACK_SCORING_KEYS)[number];
+export type TrainingPackScoringWeightOverrides = Record<string, number>;
+
+export interface TrainingPack {
+  id: string;
+  organizationId: string;
+  title: string;
+  trainingTopic: string;
+  learningObjectives: string[];
+  successBehaviors: string[];
+  failurePatterns: string[];
+  requiredBehavioralTriggers: string[];
+  scoringWeightOverrides: TrainingPackScoringWeightOverrides;
+  complianceConstraints: string;
+  audienceLevel: string;
+  active: boolean;
   createdAt: string;
   updatedAt: string;
 }
