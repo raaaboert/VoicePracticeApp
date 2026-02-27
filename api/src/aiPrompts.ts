@@ -46,6 +46,8 @@ export function buildRoleplaySystemPrompt(params: {
 
   lines.push(
     `You are playing the role of ${scenario.aiRole}.`,
+    `The trainee role is ${segmentLabel}. You must not speak as ${segmentLabel}.`,
+    "If scenario context uses 'you/your' for trainee instructions, treat those as instructions for the USER (trainee), not for you.",
     `Scenario context: ${scenario.description}`,
     `Difficulty behavior: ${DIFFICULTY_BEHAVIOR[difficulty]}`,
     `Persona behavior: ${PERSONA_BEHAVIOR[personaStyle]}`,

@@ -2560,14 +2560,22 @@ function getConfigScenarioById(
   return null;
 }
 
-function buildRuntimeScenarioFromOrgCustomScenario(customScenario: OrgCustomScenario): Scenario {
+function buildRuntimeScenarioFromOrgCustomScenario(
+  customScenario: OrgCustomScenario,
+  traineeSegmentLabel: string,
+): Scenario {
+  const rawAiRole = customScenario.aiRole?.trim() || "a realistic conversation partner";
+  const safeAiRole = aiRoleMatchesTraineeRole(rawAiRole, traineeSegmentLabel)
+    ? `a realistic counterpart who is interacting with a ${traineeSegmentLabel}`
+    : rawAiRole;
+
   return {
     id: customScenario.id,
     segmentId: customScenario.segmentId,
     title: customScenario.title,
     summary: customScenario.summary ?? buildScenarioSummary(customScenario.description),
     description: customScenario.description,
-    aiRole: customScenario.aiRole,
+    aiRole: safeAiRole,
     enabled: customScenario.enabled === true,
   };
 }
@@ -2656,7 +2664,7 @@ function resolveMobileScenarioForUser(
   return {
     source: "custom",
     segment,
-    scenario: buildRuntimeScenarioFromOrgCustomScenario(customScenario),
+    scenario: buildRuntimeScenarioFromOrgCustomScenario(customScenario, segment.label),
     allowedIndustryIds: uniqueStrings(customScenario.applicableIndustryIds) as IndustryId[],
     scoringGuidance: customScenario.scoringGuidance?.trim() || null,
   };
@@ -2751,6 +2759,9 @@ function buildCustomScenarioGenerationPromptPreview(input: {
     "Output Requirements:",
     "- Return JSON only (no markdown).",
     '- Keys: "title", "description", "aiRole", "scoringGuidance".',
+    `- The user/trainee plays the target role (${input.segment.label}); aiRole must be the COUNTERPART the user practices against.`,
+    `- Never set aiRole to the trainee role (${input.segment.label}) or a synonym of it.`,
+    "- Write description as scenario context/objective, not as instructions for the AI role to become the trainee.",
     "- Keep the scenario applicable to the selected role and selected industries.",
     "- Do not invent regulated claims, guarantees, or unsupported product details.",
     "- Scoring guidance should focus on what the client wants measured and what good performance looks like.",
@@ -2811,6 +2822,34 @@ function toMultilineText(value: unknown, maxChars: number): string {
     return "";
   }
   return value.trim().slice(0, Math.max(1, maxChars));
+}
+
+function normalizeRoleIdentityText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function aiRoleMatchesTraineeRole(aiRole: string, traineeSegmentLabel: string): boolean {
+  const normalizedAiRole = normalizeRoleIdentityText(aiRole);
+  const normalizedTrainee = normalizeRoleIdentityText(traineeSegmentLabel);
+  if (!normalizedAiRole || !normalizedTrainee) {
+    return false;
+  }
+
+  if (normalizedAiRole.includes(normalizedTrainee) || normalizedTrainee.includes(normalizedAiRole)) {
+    return true;
+  }
+
+  const traineeTokens = normalizedTrainee.split(" ").filter((token) => token.length > 2);
+  if (traineeTokens.length === 0) {
+    return false;
+  }
+
+  return traineeTokens.every((token) => normalizedAiRole.includes(token));
 }
 
 function computeUserUsage(db: ApiDatabase, user: UserProfile, now: Date, timezone: string) {
@@ -4287,6 +4326,8 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
     "Return ONLY valid JSON with keys: title, description, aiRole, scoringGuidance.",
     "Do not wrap the JSON in markdown fences.",
     "Keep the scenario realistic, role-appropriate, and suitable for spoken simulation practice.",
+    `The USER is the trainee in the target role (${context.segment.label}).`,
+    "aiRole must be the opposing/conversation counterpart, never the trainee role.",
     "Avoid illegal/defamatory claims, guarantees, fabricated product specs, or compliance violations.",
     "If draft content is supplied, improve and adapt it rather than discarding useful details.",
   ].join(" ");
@@ -4312,14 +4353,24 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
       context.draft.description ??
       context.base?.scenario.description ??
       `Create a roleplay scenario for ${context.segment.label} at ${context.org.name}.`;
-    const fallbackAiRole = context.draft.aiRole ?? context.base?.scenario.aiRole ?? "a realistic conversation partner";
+    const fallbackAiRole =
+      context.draft.aiRole ??
+      context.base?.scenario.aiRole ??
+      `a realistic counterpart who is interacting with a ${context.segment.label}`;
     const fallbackScoring =
       context.draft.scoringGuidance ??
       "Score communication quality, objection handling, clarity, and alignment to the stated training objective.";
 
     const generatedTitle = toMultilineText(parsed.title, 300) || fallbackTitle;
     const generatedDescription = toMultilineText(parsed.description, 8_000) || fallbackDescription;
-    const generatedAiRole = toMultilineText(parsed.aiRole, 8_000) || fallbackAiRole;
+    const parsedAiRole = toMultilineText(parsed.aiRole, 8_000);
+    const safeFallbackAiRole = aiRoleMatchesTraineeRole(fallbackAiRole, context.segment.label)
+      ? `a realistic counterpart with objections and constraints for a ${context.segment.label}`
+      : fallbackAiRole;
+    let generatedAiRole = parsedAiRole || safeFallbackAiRole;
+    if (aiRoleMatchesTraineeRole(generatedAiRole, context.segment.label)) {
+      generatedAiRole = safeFallbackAiRole;
+    }
     const generatedScoringGuidance = toMultilineText(parsed.scoringGuidance, 8_000) || fallbackScoring;
 
     const payload: GenerateOrgCustomScenarioResponse = {
@@ -7482,19 +7533,14 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       return;
     }
 
-    const segment = db.config.segments.find(
-      (entry) => entry.id === body.segmentId && entry.enabled
-    );
-    if (!segment) {
-      response.status(400).json({ error: "Invalid segment for usage session." });
+    const configForUser = resolveConfigForUser(db, user);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId);
+    if (!resolvedScenario) {
+      response.status(400).json({ error: "Invalid scenario for usage session." });
       return;
     }
-
-    const scenario = segment.scenarios.find(
-      (entry) => entry.id === body.scenarioId && entry.enabled !== false
-    );
-    if (!scenario) {
-      response.status(400).json({ error: "Invalid scenario for usage session." });
+    if (resolvedScenario.segment.id !== body.segmentId) {
+      response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
 
