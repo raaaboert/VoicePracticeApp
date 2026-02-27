@@ -25,6 +25,8 @@ export interface RuntimeConfig {
   openAiMaxDailyTokensPerUser: number | null;
   openAiMaxDailyTokensGlobal: number | null;
   supportTranscriptSecret: string;
+  useModularPromptArchitecture: boolean;
+  enableInternalDebugEndpoints: boolean;
 }
 
 const PLACEHOLDER_VALUES = new Set([
@@ -251,6 +253,8 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
       env.OPENAI_MAX_DAILY_TOKENS_GLOBAL,
       openAiDefaults.globalTokens
     ),
-    supportTranscriptSecret
+    supportTranscriptSecret,
+    useModularPromptArchitecture: toBoolean(env.USE_MODULAR_PROMPT_ARCHITECTURE, false),
+    enableInternalDebugEndpoints: toBoolean(env.ENABLE_INTERNAL_DEBUG_ENDPOINTS, false),
   };
 }

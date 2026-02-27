@@ -51,6 +51,7 @@ import {
   SegmentDefinition,
   SupportCaseRecord,
   SimulationScoreRecord,
+  TrainingPack,
   TIER_IDS,
   TierDefinition,
   RoleIndustryDefinition,
@@ -92,6 +93,12 @@ import { requestChatCompletion, requestTranscription } from "./openaiClient.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
+import { createTrainingPackStore } from "./storage/trainingPackStore.js";
+import {
+  buildEvaluationPromptWithOrchestrator,
+  buildRoleplayPromptsWithOrchestrator
+} from "./services/promptOrchestrator.js";
+import { computeWeightedOverallScore } from "./services/trainingPackRuntime.js";
 
 const runtimeConfig = loadRuntimeConfig();
 const PORT = runtimeConfig.port;
@@ -112,6 +119,8 @@ const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser
 const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;
 const OPENAI_MAX_DAILY_TOKENS_PER_USER = runtimeConfig.openAiMaxDailyTokensPerUser;
 const OPENAI_MAX_DAILY_TOKENS_GLOBAL = runtimeConfig.openAiMaxDailyTokensGlobal;
+const USE_MODULAR_PROMPT_ARCHITECTURE_ENV = runtimeConfig.useModularPromptArchitecture;
+const ENABLE_INTERNAL_DEBUG_ENDPOINTS = runtimeConfig.enableInternalDebugEndpoints;
 const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
 const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
@@ -149,6 +158,14 @@ const TRANSIENT_DATABASE_ERROR_PATTERNS = [
   "self-signed certificate in certificate chain"
 ];
 const warningLogByKey = new Map<string, number>();
+const trainingPackStore = createTrainingPackStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+  logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
+});
 
 interface AdminTokenPayload {
   role: "admin";
@@ -181,6 +198,23 @@ function logWarnThrottled(key: string, message: string, throttleMs = WARNING_LOG
   logWarn(message);
 }
 
+async function getActiveTrainingPackForOrg(
+  orgId: string | null | undefined,
+  useModularPromptArchitecture: boolean
+): Promise<TrainingPack | null> {
+  if (!useModularPromptArchitecture) {
+    return null;
+  }
+
+  try {
+    return await trainingPackStore.getActiveTrainingPackForOrg(orgId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarnThrottled("training-pack:lookup", `[training-pack] failed to load active training pack: ${message}`);
+    return null;
+  }
+}
+
 function clampNonNegativeInteger(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -201,6 +235,35 @@ function parseIsoDateOrNull(value: string | undefined | null): Date | null {
   }
 
   return parsed;
+}
+
+function getSingleQueryParam(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === "string") {
+        const trimmed = entry.trim();
+        if (trimmed.length > 0) {
+          return trimmed;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseBooleanQueryFlag(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 function normalizeIdentifier(value: unknown, fallbackPrefix: string): string {
@@ -749,7 +812,8 @@ function ensureOrgContractFields(org: EnterpriseOrg): EnterpriseOrg {
     monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(org.monthlyMinutesAllotted, monthlyFallback),
     renewalTotalUsd: normalizeRenewalTotalUsd(org.renewalTotalUsd, 0),
     softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers),
-    maxSimulationMinutes: normalizeMaxSimulationMinutes(org.maxSimulationMinutes)
+    maxSimulationMinutes: normalizeMaxSimulationMinutes(org.maxSimulationMinutes),
+    enableModularPromptArchitecture: org.enableModularPromptArchitecture === true
   };
 }
 
@@ -3146,7 +3210,11 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
   configForUser: AppConfig,
   allowedIndustryIdsInput: Iterable<string>,
   selectedIndustryIdRaw: unknown,
-  selectedIndustryBaselineRaw: unknown
+  selectedIndustryBaselineRaw: unknown,
+  options?: {
+    preferClientBaselineSnapshot?: boolean;
+    canonicalIndustryDefinitions?: IndustryDefinition[];
+  }
 ): {
   industryId: string | null;
   industryLabel: string | null;
@@ -3174,6 +3242,28 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
   }
 
   const configuredBaseline = normalizeAiIndustryBaselineForPrompt(selectedIndustry.aiBaseline);
+  const preferClientBaselineSnapshot = options?.preferClientBaselineSnapshot ?? true;
+  if (!preferClientBaselineSnapshot) {
+    const canonicalIndustry = (options?.canonicalIndustryDefinitions ?? []).find(
+      (industry) => industry.id === selectedIndustry.id
+    );
+    const canonicalServerBaseline = normalizeAiIndustryBaselineForPrompt(canonicalIndustry?.aiBaseline);
+    const defaultIndustryBaseline = normalizeAiIndustryBaselineForPrompt(
+      DEFAULT_INDUSTRIES.find((industry) => industry.id === selectedIndustry.id)?.aiBaseline
+    );
+    const serverAuthoritativeBaseline =
+      configuredBaseline ??
+      canonicalServerBaseline ??
+      defaultIndustryBaseline ??
+      `No specific industry baseline is configured for ${selectedIndustry.label}.`;
+
+    return {
+      industryId: selectedIndustry.id,
+      industryLabel: selectedIndustry.label,
+      industryBaseline: serverAuthoritativeBaseline
+    };
+  }
+
   const cachedBaseline = normalizeAiIndustryBaselineForPrompt(selectedIndustryBaselineRaw);
   const hasCachedBaselineSnapshot = typeof selectedIndustryBaselineRaw === "string";
 
@@ -3188,7 +3278,10 @@ function resolveAiIndustryPromptContext(
   configForUser: AppConfig,
   segment: SegmentDefinition,
   selectedIndustryIdRaw: unknown,
-  selectedIndustryBaselineRaw: unknown
+  selectedIndustryBaselineRaw: unknown,
+  options?: {
+    preferClientBaselineSnapshot?: boolean;
+  }
 ): {
   industryId: string | null;
   industryLabel: string | null;
@@ -3203,6 +3296,7 @@ function resolveAiIndustryPromptContext(
     activeLinkedIndustryIds,
     selectedIndustryIdRaw,
     selectedIndustryBaselineRaw,
+    options,
   );
 }
 
@@ -6275,6 +6369,222 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
   }
 });
 
+app.get("/internal/ai/debug-prompt", async (request: Request, response: Response) => {
+  if (!ENABLE_INTERNAL_DEBUG_ENDPOINTS) {
+    response.status(404).json({ error: "Not found." });
+    return;
+  }
+
+  const userId = getSingleQueryParam(request.query.userId);
+  const scenarioId = getSingleQueryParam(request.query.scenarioId);
+  const industryId = getSingleQueryParam(request.query.industryId);
+  const difficultyRaw = getSingleQueryParam(request.query.difficulty);
+  const personaStyleQuery = getSingleQueryParam(request.query.personaStyle);
+  const personaIdQuery = getSingleQueryParam(request.query.personaId);
+  const clientIndustryBaselineSnapshot = getSingleQueryParam(request.query.industryBaseline);
+  const includeFull = parseBooleanQueryFlag(getSingleQueryParam(request.query.includeFull));
+  const warnings: string[] = [];
+
+  if (!userId) {
+    response.status(400).json({ error: "userId is required." });
+    return;
+  }
+
+  if (!scenarioId) {
+    response.status(400).json({ error: "scenarioId is required." });
+    return;
+  }
+
+  if (!industryId) {
+    response.status(400).json({ error: "industryId is required." });
+    return;
+  }
+
+  if (!difficultyRaw || !isDifficulty(difficultyRaw)) {
+    response.status(400).json({ error: "difficulty must be one of: easy, medium, hard." });
+    return;
+  }
+
+  const requestedPersonaStyleRaw = personaStyleQuery ?? personaIdQuery;
+  const requestedPersonaStyle = requestedPersonaStyleRaw && isPersonaStyle(requestedPersonaStyleRaw)
+    ? requestedPersonaStyleRaw
+    : null;
+  if (requestedPersonaStyleRaw && !requestedPersonaStyle) {
+    warnings.push(`Ignoring unsupported persona style "${requestedPersonaStyleRaw}". Falling back to user default.`);
+  }
+
+  const context = await withDatabaseRead(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
+
+    const configForUser = resolveConfigForUser(db, user);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    if (!resolvedScenario) {
+      response.status(400).json({ error: "Invalid scenario for this account." });
+      return null;
+    }
+
+    const org = getOrgById(db, user.orgId);
+    const orgFlag = org?.enableModularPromptArchitecture === true;
+    const useModularPromptArchitecture = USE_MODULAR_PROMPT_ARCHITECTURE_ENV && orgFlag;
+
+    if (useModularPromptArchitecture && clientIndustryBaselineSnapshot) {
+      warnings.push("Ignoring client-provided industry baseline snapshot because modular prompt architecture is enabled.");
+    }
+
+    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
+      configForUser,
+      resolvedScenario.allowedIndustryIds,
+      industryId,
+      clientIndustryBaselineSnapshot,
+      {
+        preferClientBaselineSnapshot: !useModularPromptArchitecture,
+        canonicalIndustryDefinitions: db.config.industries
+      }
+    );
+
+    if (!industryPromptContext.industryId) {
+      warnings.push(`Industry "${industryId}" is not available for this scenario/user context.`);
+    }
+
+    return {
+      user,
+      scenario: resolvedScenario.scenario,
+      scenarioSource: resolvedScenario.source,
+      segmentLabel: resolvedScenario.segment.label,
+      difficulty: difficultyRaw,
+      personaStyle: requestedPersonaStyle ?? configForUser.defaultPersonaStyle,
+      industryId: industryPromptContext.industryId,
+      industryLabel: industryPromptContext.industryLabel,
+      industryBaseline: industryPromptContext.industryBaseline,
+      scoringGuidance: resolvedScenario.scoringGuidance,
+      orgFlag,
+      useModularPromptArchitecture
+    };
+  });
+
+  if (!context) {
+    return;
+  }
+
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+  if (context.useModularPromptArchitecture && !activeTrainingPack) {
+    warnings.push("No active training pack is available for this org. Orchestrator is running without training-pack additions.");
+  }
+
+  const roleplayConfig = context.useModularPromptArchitecture
+    ? buildRoleplayPromptsWithOrchestrator({
+        scenario: context.scenario,
+        difficulty: context.difficulty,
+        segmentLabel: context.segmentLabel,
+        personaStyle: context.personaStyle,
+        industryLabel: context.industryLabel,
+        industryBaseline: context.industryBaseline,
+        trainingPack: activeTrainingPack
+      })
+    : {
+        systemPrompt: buildRoleplaySystemPrompt({
+          scenario: context.scenario,
+          difficulty: context.difficulty,
+          segmentLabel: context.segmentLabel,
+          personaStyle: context.personaStyle,
+          industryLabel: context.industryLabel,
+          industryBaseline: context.industryBaseline
+        }),
+        openingPrompt: buildOpeningPrompt(context.scenario)
+      };
+
+  const evaluationConfig = context.useModularPromptArchitecture
+    ? buildEvaluationPromptWithOrchestrator({
+        scenario: context.scenario,
+        difficulty: context.difficulty,
+        segmentLabel: context.segmentLabel,
+        personaStyle: context.personaStyle,
+        industryLabel: context.industryLabel,
+        industryBaseline: context.industryBaseline,
+        scoringGuidance: context.scoringGuidance,
+        trainingPack: activeTrainingPack,
+        logger: (message) => warnings.push(message)
+      })
+    : null;
+  const evaluationPrompt =
+    evaluationConfig?.evaluationPrompt ??
+    buildEvaluationSystemPrompt({
+      scenario: context.scenario,
+      difficulty: context.difficulty,
+      segmentLabel: context.segmentLabel,
+      personaStyle: context.personaStyle,
+      industryLabel: context.industryLabel,
+      industryBaseline: context.industryBaseline,
+      scoringGuidance: context.scoringGuidance,
+    });
+
+  const roleplaySections = ["Base Roleplay System Prompt"];
+  if (context.useModularPromptArchitecture && activeTrainingPack) {
+    roleplaySections.push("Training Pack Brief");
+    if ((activeTrainingPack.requiredBehavioralTriggers ?? []).length > 0) {
+      roleplaySections.push("Required Behavioral Triggers");
+    }
+  }
+
+  const baselineSource: "client" | "server" =
+    !context.useModularPromptArchitecture && clientIndustryBaselineSnapshot !== null
+      ? "client"
+      : "server";
+
+  response.json({
+    effectiveFlags: {
+      envFlag: USE_MODULAR_PROMPT_ARCHITECTURE_ENV,
+      orgFlag: context.orgFlag,
+      useModularPromptArchitecture: context.useModularPromptArchitecture,
+      debugEnabled: ENABLE_INTERNAL_DEBUG_ENDPOINTS
+    },
+    resolvedScenario: {
+      source: context.scenarioSource,
+      scenarioId: context.scenario.id,
+      title: context.scenario.title
+    },
+    resolvedIndustry: {
+      industryId: context.industryId,
+      label: context.industryLabel,
+      baselineSource,
+      baselinePreview: (context.industryBaseline ?? "").slice(0, 300),
+      ...(includeFull ? { baseline: context.industryBaseline ?? "" } : {})
+    },
+    trainingPack: activeTrainingPack && context.useModularPromptArchitecture
+      ? {
+          applied: true,
+          id: activeTrainingPack.id,
+          title: activeTrainingPack.title
+        }
+      : { applied: false },
+    roleplayPrompt: {
+      systemPromptPreview: roleplayConfig.systemPrompt.slice(0, 1200),
+      includedSections: roleplaySections,
+      ...(includeFull
+        ? {
+            systemPrompt: roleplayConfig.systemPrompt,
+            openingPrompt: roleplayConfig.openingPrompt
+          }
+        : {})
+    },
+    evaluationPrompt: {
+      systemPromptPreview: evaluationPrompt.slice(0, 1200),
+      ...(evaluationConfig
+        ? {
+            scoringWeights: evaluationConfig.scoringWeights,
+            usesOverrides: evaluationConfig.usesTrainingPackScoringOverrides
+          }
+        : { usesOverrides: false }),
+      ...(includeFull ? { systemPrompt: evaluationPrompt } : {})
+    },
+    warnings
+  });
+});
+
 app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
@@ -6334,23 +6644,32 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
+    const org = getOrgById(db, user.orgId);
+    const useModularPromptArchitecture =
+      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
     const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
       resolvedScenario.allowedIndustryIds,
       body.industryId,
-      body.industryBaseline
+      body.industryBaseline,
+      {
+        preferClientBaselineSnapshot: !useModularPromptArchitecture,
+        canonicalIndustryDefinitions: db.config.industries
+      }
     );
 
     return {
       user,
+      org,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
-      industryBaseline: industryPromptContext.industryBaseline
+      industryBaseline: industryPromptContext.industryBaseline,
+      useModularPromptArchitecture
     };
   });
 
@@ -6358,22 +6677,35 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     return;
   }
 
-  try {
-    const systemPrompt = buildRoleplaySystemPrompt({
-      scenario: context.scenario,
-      difficulty: context.difficulty,
-      segmentLabel: context.segment.label,
-      personaStyle: context.personaStyle,
-      industryLabel: context.industryLabel,
-      industryBaseline: context.industryBaseline
-    });
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
 
-    const openingPrompt = buildOpeningPrompt(context.scenario);
+  try {
+    const prompts = context.useModularPromptArchitecture
+      ? buildRoleplayPromptsWithOrchestrator({
+          scenario: context.scenario,
+          difficulty: context.difficulty,
+          segmentLabel: context.segment.label,
+          personaStyle: context.personaStyle,
+          industryLabel: context.industryLabel,
+          industryBaseline: context.industryBaseline,
+          trainingPack: activeTrainingPack
+        })
+      : {
+          systemPrompt: buildRoleplaySystemPrompt({
+            scenario: context.scenario,
+            difficulty: context.difficulty,
+            segmentLabel: context.segment.label,
+            personaStyle: context.personaStyle,
+            industryLabel: context.industryLabel,
+            industryBaseline: context.industryBaseline
+          }),
+          openingPrompt: buildOpeningPrompt(context.scenario)
+        };
     const completion = await requestChatCompletion({
       model: OPENAI_CHAT_MODEL,
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: openingPrompt }
+        { role: "system", content: prompts.systemPrompt },
+        { role: "user", content: prompts.openingPrompt }
       ],
       temperature: 0.8
     });
@@ -6487,23 +6819,32 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
+    const org = getOrgById(db, user.orgId);
+    const useModularPromptArchitecture =
+      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
     const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
       resolvedScenario.allowedIndustryIds,
       body.industryId,
-      body.industryBaseline
+      body.industryBaseline,
+      {
+        preferClientBaselineSnapshot: !useModularPromptArchitecture,
+        canonicalIndustryDefinitions: db.config.industries
+      }
     );
 
     return {
       user,
+      org,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
-      industryBaseline: industryPromptContext.industryBaseline
+      industryBaseline: industryPromptContext.industryBaseline,
+      useModularPromptArchitecture
     };
   });
 
@@ -6511,15 +6852,27 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     return;
   }
 
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+
   try {
-    const systemPrompt = buildRoleplaySystemPrompt({
-      scenario: context.scenario,
-      difficulty: context.difficulty,
-      segmentLabel: context.segment.label,
-      personaStyle: context.personaStyle,
-      industryLabel: context.industryLabel,
-      industryBaseline: context.industryBaseline
-    });
+    const systemPrompt = context.useModularPromptArchitecture
+      ? buildRoleplayPromptsWithOrchestrator({
+          scenario: context.scenario,
+          difficulty: context.difficulty,
+          segmentLabel: context.segment.label,
+          personaStyle: context.personaStyle,
+          industryLabel: context.industryLabel,
+          industryBaseline: context.industryBaseline,
+          trainingPack: activeTrainingPack
+        }).systemPrompt
+      : buildRoleplaySystemPrompt({
+          scenario: context.scenario,
+          difficulty: context.difficulty,
+          segmentLabel: context.segment.label,
+          personaStyle: context.personaStyle,
+          industryLabel: context.industryLabel,
+          industryBaseline: context.industryBaseline
+        });
 
     const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
     const completion = await requestChatCompletion({
@@ -6654,16 +7007,24 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
+    const org = getOrgById(db, user.orgId);
+    const useModularPromptArchitecture =
+      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
     const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
       resolvedScenario.allowedIndustryIds,
       body.industryId,
-      body.industryBaseline
+      body.industryBaseline,
+      {
+        preferClientBaselineSnapshot: !useModularPromptArchitecture,
+        canonicalIndustryDefinitions: db.config.industries
+      }
     );
 
     return {
       user,
+      org,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
@@ -6672,6 +7033,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
       scoringGuidance: resolvedScenario.scoringGuidance,
+      useModularPromptArchitecture
     };
   });
 
@@ -6679,16 +7041,33 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     return;
   }
 
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+
   try {
-    const evaluationPrompt = buildEvaluationSystemPrompt({
-      scenario: context.scenario,
-      difficulty: context.difficulty,
-      segmentLabel: context.segment.label,
-      personaStyle: context.personaStyle,
-      industryLabel: context.industryLabel,
-      industryBaseline: context.industryBaseline,
-      scoringGuidance: context.scoringGuidance,
-    });
+    const evaluationConfig = context.useModularPromptArchitecture
+      ? buildEvaluationPromptWithOrchestrator({
+          scenario: context.scenario,
+          difficulty: context.difficulty,
+          segmentLabel: context.segment.label,
+          personaStyle: context.personaStyle,
+          industryLabel: context.industryLabel,
+          industryBaseline: context.industryBaseline,
+          scoringGuidance: context.scoringGuidance,
+          trainingPack: activeTrainingPack,
+          logger: (message) => logWarnThrottled("training-pack:weights", message)
+        })
+      : null;
+    const evaluationPrompt =
+      evaluationConfig?.evaluationPrompt ??
+      buildEvaluationSystemPrompt({
+        scenario: context.scenario,
+        difficulty: context.difficulty,
+        segmentLabel: context.segment.label,
+        personaStyle: context.personaStyle,
+        industryLabel: context.industryLabel,
+        industryBaseline: context.industryBaseline,
+        scoringGuidance: context.scoringGuidance,
+      });
 
     const transcript = formatDialogueForEvaluation(history);
     const completion = await requestChatCompletion({
@@ -6702,6 +7081,9 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
 
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
     const scorecard = normalizeScorecard(parsed);
+    if (evaluationConfig?.usesTrainingPackScoringOverrides) {
+      scorecard.overallScore = computeWeightedOverallScore(scorecard, evaluationConfig.scoringWeights);
+    }
 
     const now = nowIso();
     const record: SimulationScoreRecord = {
