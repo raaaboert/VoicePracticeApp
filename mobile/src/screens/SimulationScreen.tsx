@@ -33,8 +33,9 @@ const MAX_TURN_DURATION_MS = 15000;
 const MIN_TURN_DURATION_MS = 1200;
 const SILENCE_CUTOFF_MS = 1200;
 const STATUS_POLL_INTERVAL_MS = 250;
-const VOICE_METER_THRESHOLD_DB = -34;
+const VOICE_METER_THRESHOLD_DB = -38;
 const MIN_VOICE_HIT_COUNT = 3;
+const POST_TTS_LISTEN_DELAY_MS = 260;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
@@ -59,6 +60,12 @@ function getErrorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function isApiError(error: unknown): boolean {
@@ -836,7 +843,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     isInitializing || (!sessionActive && (mode === "thinking" || mode === "speaking"));
 
   return (
-    <View style={styles.fill}>
+    <ScrollView
+      style={styles.fill}
+      contentContainerStyle={styles.screenContent}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
       <View style={styles.topRow}>
         <Pressable style={styles.ghostButton} onPress={() => void onExitPress()}>
           <Text style={styles.ghostButtonText}>Exit</Text>
@@ -890,7 +902,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       ) : null}
 
       <View style={styles.chatCard}>
-        <ScrollView ref={scrollRef} style={styles.chatScroll} contentContainerStyle={styles.chatContent}>
+        <ScrollView
+          ref={scrollRef}
+          style={styles.chatScroll}
+          contentContainerStyle={styles.chatContent}
+          nestedScrollEnabled
+        >
           {messages.map((message) => (
             <View
               key={message.id}
@@ -921,13 +938,17 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           {sessionActive ? "End Session and Score" : "Start Continuous Mode"}
         </Text>
       </Pressable>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   fill: {
     flex: 1,
+  },
+  screenContent: {
+    flexGrow: 1,
+    paddingBottom: 8,
   },
   topRow: {
     flexDirection: "row",
@@ -1038,7 +1059,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   chatCard: {
-    flex: 1,
+    minHeight: 230,
+    height: 320,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: COLORS.border,
