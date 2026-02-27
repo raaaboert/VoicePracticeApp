@@ -101,6 +101,16 @@ import {
 import { computeWeightedOverallScore } from "./services/trainingPackRuntime.js";
 
 const runtimeConfig = loadRuntimeConfig();
+console.log("[BOOT][ENV CHECK]", {
+  NODE_ENV: process.env.NODE_ENV,
+  USE_MODULAR_PROMPT_ARCHITECTURE: process.env.USE_MODULAR_PROMPT_ARCHITECTURE,
+  ENABLE_INTERNAL_DEBUG_ENDPOINTS: process.env.ENABLE_INTERNAL_DEBUG_ENDPOINTS,
+});
+
+console.log("[BOOT][RUNTIME CONFIG FLAGS]", {
+  useModularPromptArchitecture: runtimeConfig.useModularPromptArchitecture,
+  enableInternalDebugEndpoints: runtimeConfig.enableInternalDebugEndpoints,
+});
 const PORT = runtimeConfig.port;
 const STORAGE_PROVIDER = runtimeConfig.storageProvider;
 const DB_PATH = runtimeConfig.dbPath;
