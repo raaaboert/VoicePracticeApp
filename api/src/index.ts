@@ -2568,6 +2568,7 @@ function buildRuntimeScenarioFromOrgCustomScenario(
   const safeAiRole = aiRoleMatchesTraineeRole(rawAiRole, traineeSegmentLabel)
     ? `a realistic counterpart who is interacting with a ${traineeSegmentLabel}`
     : rawAiRole;
+  const reinforcedAiRole = `${safeAiRole}. Counterpart rule: you are speaking with a ${traineeSegmentLabel}; do not act as ${traineeSegmentLabel}.`;
 
   return {
     id: customScenario.id,
@@ -2575,7 +2576,7 @@ function buildRuntimeScenarioFromOrgCustomScenario(
     title: customScenario.title,
     summary: customScenario.summary ?? buildScenarioSummary(customScenario.description),
     description: customScenario.description,
-    aiRole: safeAiRole,
+    aiRole: reinforcedAiRole,
     enabled: customScenario.enabled === true,
   };
 }

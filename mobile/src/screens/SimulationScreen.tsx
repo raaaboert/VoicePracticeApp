@@ -33,7 +33,8 @@ const MAX_TURN_DURATION_MS = 15000;
 const MIN_TURN_DURATION_MS = 1200;
 const SILENCE_CUTOFF_MS = 1200;
 const STATUS_POLL_INTERVAL_MS = 250;
-const VOICE_METER_THRESHOLD_DB = -45;
+const VOICE_METER_THRESHOLD_DB = -34;
+const MIN_VOICE_HIT_COUNT = 3;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
@@ -83,6 +84,41 @@ function isApiError(error: unknown): boolean {
 
 function buildLocalCapturedText(turnDurationSeconds: number): string {
   return `Voice input captured (${turnDurationSeconds}s) in local test mode.`;
+}
+
+function normalizeTranscriptForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function appearsToEchoAssistantReply(userText: string, history: DialogueMessage[]): boolean {
+  const normalizedUser = normalizeTranscriptForComparison(userText);
+  if (!normalizedUser || normalizedUser.length < 24) {
+    return false;
+  }
+
+  const assistantMessages = history
+    .filter((message) => message.role === "assistant")
+    .slice(-2)
+    .map((message) => normalizeTranscriptForComparison(message.content))
+    .filter(Boolean);
+
+  return assistantMessages.some((assistantText) => {
+    if (!assistantText) {
+      return false;
+    }
+    if (assistantText.includes(normalizedUser) || normalizedUser.includes(assistantText)) {
+      return true;
+    }
+
+    const assistantTokens = new Set(assistantText.split(" "));
+    const userTokens = normalizedUser.split(" ");
+    const overlap = userTokens.filter((token) => assistantTokens.has(token)).length;
+    return userTokens.length >= 6 && overlap / userTokens.length >= 0.72;
+  });
 }
 
 function shouldAutoReportMessage(message: string): boolean {
@@ -145,6 +181,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const lastVoiceAtRef = useRef(0);
   const heardVoiceRef = useRef(false);
   const meteringSeenRef = useRef(false);
+  const voiceHitCountRef = useRef(0);
   const kickoffSentRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
@@ -328,8 +365,13 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         meteringSeenRef.current = true;
 
         if (status.metering > VOICE_METER_THRESHOLD_DB) {
-          heardVoiceRef.current = true;
+          voiceHitCountRef.current += 1;
+          if (voiceHitCountRef.current >= MIN_VOICE_HIT_COUNT) {
+            heardVoiceRef.current = true;
+          }
           lastVoiceAtRef.current = now;
+        } else if (voiceHitCountRef.current > 0) {
+          voiceHitCountRef.current = Math.max(0, voiceHitCountRef.current - 1);
         }
       }
 
@@ -370,6 +412,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       lastVoiceAtRef.current = turnStartedAtRef.current;
       heardVoiceRef.current = false;
       meteringSeenRef.current = false;
+      voiceHitCountRef.current = 0;
 
       setMode("recording");
       setStatus("Listening...");
@@ -421,11 +464,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         Math.round((Date.now() - turnStartedAtRef.current) / 1000),
       );
       const inferredVoiceWithoutMeter =
-        !meteringSeenRef.current && turnDurationSeconds >= 2;
+        !meteringSeenRef.current && turnDurationSeconds >= 3;
+      const shouldAttemptTranscription = heardVoiceRef.current || inferredVoiceWithoutMeter;
 
       let userText = "";
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
-      if (useLiveApiThisTurn) {
+      if (useLiveApiThisTurn && shouldAttemptTranscription) {
         try {
           userText = (
             await transcribeAudio({
@@ -448,8 +492,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             throw transcriptionError;
           }
         }
-      } else if (heardVoiceRef.current || inferredVoiceWithoutMeter) {
+      } else if (!useLiveApiThisTurn && shouldAttemptTranscription) {
         userText = buildLocalCapturedText(turnDurationSeconds);
+      }
+
+      if (userText && appearsToEchoAssistantReply(userText, messagesRef.current)) {
+        userText = "";
       }
 
       if (userText) {

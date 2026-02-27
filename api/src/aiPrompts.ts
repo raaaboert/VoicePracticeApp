@@ -48,6 +48,7 @@ export function buildRoleplaySystemPrompt(params: {
     `You are playing the role of ${scenario.aiRole}.`,
     `The trainee role is ${segmentLabel}. You must not speak as ${segmentLabel}.`,
     "If scenario context uses 'you/your' for trainee instructions, treat those as instructions for the USER (trainee), not for you.",
+    "You are always the counterpart/opposing party in this simulation.",
     `Scenario context: ${scenario.description}`,
     `Difficulty behavior: ${DIFFICULTY_BEHAVIOR[difficulty]}`,
     `Persona behavior: ${PERSONA_BEHAVIOR[personaStyle]}`,
@@ -63,6 +64,8 @@ export function buildRoleplaySystemPrompt(params: {
 export function buildOpeningPrompt(scenario: Scenario): string {
   return [
     "Start the role-play now with your first line.",
+    "Your first line must be from the counterpart/opponent perspective.",
+    "Do NOT speak as the trainee role and do NOT open by pitching as the trainee's representative.",
     `Set the scene for this scenario in natural dialogue: ${scenario.title}.`,
     "Keep the opening to 1-2 short sentences."
   ].join(" ");
