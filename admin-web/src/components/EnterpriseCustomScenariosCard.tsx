@@ -19,6 +19,8 @@ interface EnterpriseCustomScenariosCardProps {
   orgId: string;
   orgName?: string;
   config: AppConfig | null;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 interface OrgCustomScenariosListResponse {
@@ -219,7 +221,13 @@ function editorFormFromScenario(scenario: OrgCustomScenario): EditorFormState {
   };
 }
 
-export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: EnterpriseCustomScenariosCardProps) {
+export function EnterpriseCustomScenariosCard({
+  orgId,
+  orgName,
+  config,
+  collapsed = false,
+  onToggleCollapse,
+}: EnterpriseCustomScenariosCardProps) {
   const [scenarios, setScenarios] = useState<OrgCustomScenario[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1284,6 +1292,11 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
           </div>
         </div>
         <div className="content-actions content-actions-wrap">
+          {onToggleCollapse ? (
+            <button type="button" onClick={onToggleCollapse}>
+              {collapsed ? "Expand" : "Collapse"}
+            </button>
+          ) : null}
           <button type="button" onClick={downloadAllScenariosCsv} disabled={scenarios.length === 0}>
             Download CSV
           </button>
@@ -1298,108 +1311,114 @@ export function EnterpriseCustomScenariosCard({ orgId, orgName, config }: Enterp
       {loading ? <p className="small">Loading custom scenarios...</p> : null}
       {error ? <p className="error">{error}</p> : null}
       {notice ? <p className="success">{notice}</p> : null}
-      <div className="content-grid content-grid-two">
-        <div>
-          <label>Search Custom Scenarios</label>
-          <input
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="Search title, description, AI role, scoring guidance"
-          />
-        </div>
-        <div>
-          <label>Filter By Role</label>
-          <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
-            <option value="">All Roles</option>
-            {roles.map((role) => (
-              <option key={role.id} value={role.id}>
-                {role.label} {role.enabled === false ? "(inactive role)" : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+      {collapsed ? (
+        <p className="small">Custom scenarios are collapsed. Total: {scenarios.length}</p>
+      ) : (
+        <>
+          <div className="content-grid content-grid-two">
+            <div>
+              <label>Search Custom Scenarios</label>
+              <input
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Search title, description, AI role, scoring guidance"
+              />
+            </div>
+            <div>
+              <label>Filter By Role</label>
+              <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
+                <option value="">All Roles</option>
+                {roles.map((role) => (
+                  <option key={role.id} value={role.id}>
+                    {role.label} {role.enabled === false ? "(inactive role)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
 
-      <div className="content-table-wrap">
-        <table className="content-table">
-          <thead>
-            <tr>
-              <th>Scenario</th>
-              <th>Role</th>
-              <th>Industries</th>
-              <th>Status</th>
-              <th>Updated</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredScenarios.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="small">
-                  {loading ? "Loading..." : "No custom scenarios found for this account."}
-                </td>
-              </tr>
-            ) : (
-              filteredScenarios.map((scenario) => {
-                const busy = togglingScenarioId === scenario.id || (deleting && deleteTargetId === scenario.id);
-                return (
-                  <tr key={scenario.id}>
-                    <td className="content-long-cell">
-                      <div>{scenario.title}</div>
-                      <div className="small">{scenario.id}</div>
-                    </td>
-                    <td>
-                      <div>{roleLabelById.get(scenario.segmentId) ?? scenario.segmentId}</div>
-                      <div className="small">{scenario.segmentId}</div>
-                    </td>
-                    <td>
-                      {(scenario.applicableIndustryIds ?? [])
-                        .map((id) => industryById.get(id)?.label ?? id)
-                        .join(", ") || "-"}
-                    </td>
-                    <td>
-                      <select
-                        value={scenario.enabled === true ? "active" : "inactive"}
-                        disabled={busy}
-                        onChange={(event) => void toggleScenarioStatus(scenario, event.target.value === "active")}
-                      >
-                        <option value="active">active</option>
-                        <option value="inactive">inactive</option>
-                      </select>
-                    </td>
-                    <td>{formatDateTime(scenario.updatedAt)}</td>
-                    <td>
-                      <div className="content-actions content-actions-wrap">
-                        <button type="button" onClick={() => openEditEditor(scenario)} disabled={busy}>
-                          Edit
-                        </button>
-                        <button type="button" onClick={() => downloadSingleScenarioCsv(scenario)} disabled={busy}>
-                          Download
-                        </button>
-                        <button
-                          type="button"
-                          className="danger"
-                          disabled={busy}
-                          onClick={() => {
-                            setDeleteTargetId(scenario.id);
-                            setDeleteStep(1);
-                            setDeleteText("");
-                            setError(null);
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
+          <div className="content-table-wrap">
+            <table className="content-table">
+              <thead>
+                <tr>
+                  <th>Scenario</th>
+                  <th>Role</th>
+                  <th>Industries</th>
+                  <th>Status</th>
+                  <th>Updated</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredScenarios.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="small">
+                      {loading ? "Loading..." : "No custom scenarios found for this account."}
                     </td>
                   </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-      {renderEditorModal()}
-      {renderDeleteModal()}
+                ) : (
+                  filteredScenarios.map((scenario) => {
+                    const busy = togglingScenarioId === scenario.id || (deleting && deleteTargetId === scenario.id);
+                    return (
+                      <tr key={scenario.id}>
+                        <td className="content-long-cell">
+                          <div>{scenario.title}</div>
+                          <div className="small">{scenario.id}</div>
+                        </td>
+                        <td>
+                          <div>{roleLabelById.get(scenario.segmentId) ?? scenario.segmentId}</div>
+                          <div className="small">{scenario.segmentId}</div>
+                        </td>
+                        <td>
+                          {(scenario.applicableIndustryIds ?? [])
+                            .map((id) => industryById.get(id)?.label ?? id)
+                            .join(", ") || "-"}
+                        </td>
+                        <td>
+                          <select
+                            value={scenario.enabled === true ? "active" : "inactive"}
+                            disabled={busy}
+                            onChange={(event) => void toggleScenarioStatus(scenario, event.target.value === "active")}
+                          >
+                            <option value="active">active</option>
+                            <option value="inactive">inactive</option>
+                          </select>
+                        </td>
+                        <td>{formatDateTime(scenario.updatedAt)}</td>
+                        <td>
+                          <div className="content-actions content-actions-wrap">
+                            <button type="button" onClick={() => openEditEditor(scenario)} disabled={busy}>
+                              Edit
+                            </button>
+                            <button type="button" onClick={() => downloadSingleScenarioCsv(scenario)} disabled={busy}>
+                              Download
+                            </button>
+                            <button
+                              type="button"
+                              className="danger"
+                              disabled={busy}
+                              onClick={() => {
+                                setDeleteTargetId(scenario.id);
+                                setDeleteStep(1);
+                                setDeleteText("");
+                                setError(null);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+          {renderEditorModal()}
+          {renderDeleteModal()}
+        </>
+      )}
     </div>
   );
 }

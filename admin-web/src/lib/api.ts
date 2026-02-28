@@ -114,8 +114,13 @@ export async function adminFetch<T>(path: string, init?: AdminFetchRequestInit):
           throw new Error("Session expired. Please sign in again.");
         }
 
-        const payload = await safeJson(response);
-        const message = payload?.error ?? `Request failed (${response.status})`;
+        const statusLabel = `${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+        const payload = await readErrorPayload(response);
+        const message = payload?.error
+          ? `Request failed (${statusLabel}): ${payload.error}`
+          : payload?.snippet
+            ? `Request failed (${statusLabel}). Response: ${payload.snippet}`
+            : `Request failed (${statusLabel})`;
         const shouldRetry = retryableStatusCodes.has(response.status) && attempt < requestMaxAttempts;
         if (shouldRetry) {
           await sleep(attempt * 400);
@@ -150,9 +155,28 @@ export async function adminFetch<T>(path: string, init?: AdminFetchRequestInit):
   throw new Error("Request failed after multiple attempts. Please retry.");
 }
 
-async function safeJson(response: Response): Promise<{ error?: string } | null> {
+async function readErrorPayload(response: Response): Promise<{ error?: string; snippet?: string } | null> {
   try {
-    return (await response.json()) as { error?: string };
+    const raw = await response.text();
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.toLowerCase().includes("application/json")) {
+      try {
+        const parsed = JSON.parse(trimmed) as { error?: string };
+        if (parsed && typeof parsed.error === "string" && parsed.error.trim()) {
+          return { error: parsed.error.trim() };
+        }
+        return { snippet: trimmed.slice(0, 240) };
+      } catch {
+        return { snippet: trimmed.slice(0, 240) };
+      }
+    }
+
+    return { snippet: trimmed.replace(/\s+/g, " ").slice(0, 240) };
   } catch {
     return null;
   }
