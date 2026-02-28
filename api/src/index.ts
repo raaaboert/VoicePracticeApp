@@ -149,6 +149,7 @@ const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
 const WARNING_LOG_THROTTLE_MS = 60_000;
+const TRAINING_PACK_SCENARIO_OPT_IN_PREFIX = "scenario:";
 const TRANSIENT_DATABASE_ERROR_CODES = new Set([
   "ETIMEDOUT",
   "ECONNRESET",
@@ -210,14 +211,51 @@ function logWarnThrottled(key: string, message: string, throttleMs = WARNING_LOG
 
 async function getActiveTrainingPackForOrg(
   orgId: string | null | undefined,
-  useModularPromptArchitecture: boolean
+  useModularPromptArchitecture: boolean,
+  options?: {
+    scenarioId?: string | null;
+    onSkip?: (message: string) => void;
+  }
 ): Promise<TrainingPack | null> {
   if (!useModularPromptArchitecture) {
     return null;
   }
 
   try {
-    return await trainingPackStore.getActiveTrainingPackForOrg(orgId);
+    const pack = await trainingPackStore.getActiveTrainingPackForOrg(orgId);
+    if (!pack) {
+      return null;
+    }
+
+    const requestedScenarioId = options?.scenarioId?.trim().toLowerCase();
+    if (!requestedScenarioId) {
+      options?.onSkip?.(`[training-pack] skipping pack "${pack.title}" (${pack.id}) because scenario context is missing.`);
+      return null;
+    }
+
+    const scopedScenarioIds = new Set(
+      (pack.requiredBehavioralTriggers ?? [])
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.toLowerCase().startsWith(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX))
+        .map((entry) => entry.slice(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX.length).trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    if (scopedScenarioIds.size === 0) {
+      options?.onSkip?.(
+        `[training-pack] skipping pack "${pack.title}" (${pack.id}) for scenario "${requestedScenarioId}" because no explicit opt-in was found. Add "${TRAINING_PACK_SCENARIO_OPT_IN_PREFIX}${requestedScenarioId}" or "${TRAINING_PACK_SCENARIO_OPT_IN_PREFIX}*" to requiredBehavioralTriggers.`
+      );
+      return null;
+    }
+
+    if (!scopedScenarioIds.has("*") && !scopedScenarioIds.has(requestedScenarioId)) {
+      options?.onSkip?.(
+        `[training-pack] skipping pack "${pack.title}" (${pack.id}) for scenario "${requestedScenarioId}" because it is not explicitly opted in.`
+      );
+      return null;
+    }
+
+    return pack;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logWarnThrottled("training-pack:lookup", `[training-pack] failed to load active training pack: ${message}`);
@@ -6480,7 +6518,10 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+    scenarioId: context.scenario.id,
+    onSkip: (message) => warnings.push(message)
+  });
   if (context.useModularPromptArchitecture && !activeTrainingPack) {
     warnings.push("No active training pack is available for this org. Orchestrator is running without training-pack additions.");
   }
@@ -6687,7 +6728,10 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+    scenarioId: context.scenario.id,
+    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+  });
 
   try {
     const prompts = context.useModularPromptArchitecture
@@ -6862,7 +6906,10 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+    scenarioId: context.scenario.id,
+    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+  });
 
   try {
     const systemPrompt = context.useModularPromptArchitecture
@@ -7051,7 +7098,10 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture);
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+    scenarioId: context.scenario.id,
+    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+  });
 
   try {
     const evaluationConfig = context.useModularPromptArchitecture
