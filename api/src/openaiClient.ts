@@ -57,9 +57,36 @@ async function parseOpenAiError(response: Response): Promise<string> {
 export async function requestChatCompletion(params: {
   model: string;
   messages: ChatMessage[];
-  temperature: number;
+  temperature?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  maxTokens?: number;
+  maxOutputTokens?: number;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
+  const body: Record<string, unknown> = {
+    model: params.model,
+    messages: params.messages
+  };
+  if (typeof params.temperature === "number") {
+    body.temperature = params.temperature;
+  }
+  if (typeof params.topP === "number") {
+    body.top_p = params.topP;
+  }
+  if (typeof params.frequencyPenalty === "number") {
+    body.frequency_penalty = params.frequencyPenalty;
+  }
+  if (typeof params.presencePenalty === "number") {
+    body.presence_penalty = params.presencePenalty;
+  }
+  if (typeof params.maxTokens === "number") {
+    body.max_tokens = params.maxTokens;
+  }
+  if (typeof params.maxOutputTokens === "number") {
+    body.max_output_tokens = params.maxOutputTokens;
+  }
 
   const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -67,11 +94,7 @@ export async function requestChatCompletion(params: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      model: params.model,
-      messages: params.messages,
-      temperature: params.temperature
-    })
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) {

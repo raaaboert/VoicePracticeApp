@@ -124,7 +124,9 @@ const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
 const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
+const OPENAI_SIMULATION_MODEL = runtimeConfig.openAiSimulationModel;
 const OPENAI_TRANSCRIPTION_MODEL = runtimeConfig.openAiTranscriptionModel;
+const OPENAI_SIMULATION_MAX_OUTPUT_TOKENS = runtimeConfig.openAiSimulationMaxOutputTokens;
 const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
 const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;
 const OPENAI_MAX_DAILY_TOKENS_PER_USER = runtimeConfig.openAiMaxDailyTokensPerUser;
@@ -147,6 +149,8 @@ const MAX_ACTIVE_ADMIN_SESSIONS = 100;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
+const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN = 800;
+const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE = 1200;
 const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
 const WARNING_LOG_THROTTLE_MS = 60_000;
@@ -208,6 +212,41 @@ function logWarnThrottled(key: string, message: string, throttleMs = WARNING_LOG
 
   warningLogByKey.set(key, now);
   logWarn(message);
+}
+
+function logSimulationAiMetrics(
+  route: "opening" | "turn" | "score",
+  startedAtMs: number,
+  requestedModel: string,
+  completion: {
+    model: string;
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+    };
+  }
+): void {
+  if (runtimeConfig.isProduction) {
+    return;
+  }
+
+  const latencyMs = Math.max(0, Date.now() - startedAtMs);
+  // eslint-disable-next-line no-console
+  console.log(
+    `[ai-simulation] route=${route} requestedModel=${requestedModel} responseModel=${completion.model} latencyMs=${latencyMs} tokens=input:${completion.usage.inputTokens},output:${completion.usage.outputTokens},total:${completion.usage.totalTokens}`
+  );
+}
+
+function resolveSimulationMaxOutputTokens(defaultValue: number): number {
+  if (
+    typeof OPENAI_SIMULATION_MAX_OUTPUT_TOKENS === "number" &&
+    Number.isFinite(OPENAI_SIMULATION_MAX_OUTPUT_TOKENS) &&
+    OPENAI_SIMULATION_MAX_OUTPUT_TOKENS > 0
+  ) {
+    return Math.floor(OPENAI_SIMULATION_MAX_OUTPUT_TOKENS);
+  }
+  return defaultValue;
 }
 
 async function getActiveTrainingPackForOrg(
@@ -7104,14 +7143,17 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           }),
           openingPrompt: buildOpeningPrompt(context.scenario)
         };
+    const requestStartedAt = Date.now();
     const completion = await requestChatCompletion({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_SIMULATION_MODEL,
       messages: [
         { role: "system", content: prompts.systemPrompt },
         { role: "user", content: prompts.openingPrompt }
       ],
+      maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
       temperature: 0.8
     });
+    logSimulationAiMetrics("opening", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     try {
       await withDatabase(async (db) => {
@@ -7281,14 +7323,17 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         });
 
     const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
+    const requestStartedAt = Date.now();
     const completion = await requestChatCompletion({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_SIMULATION_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         ...history.map((message) => ({ role: message.role, content: message.content }))
       ],
+      maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
       temperature
     });
+    logSimulationAiMetrics("turn", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     try {
       await withDatabase(async (db) => {
@@ -7479,14 +7524,17 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       });
 
     const transcript = formatDialogueForEvaluation(history);
+    const requestStartedAt = Date.now();
     const completion = await requestChatCompletion({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_SIMULATION_MODEL,
       messages: [
         { role: "system", content: evaluationPrompt },
         { role: "user", content: `Conversation transcript:\n${transcript}` }
       ],
+      maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE),
       temperature: 0.2
     });
+    logSimulationAiMetrics("score", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
     const scorecard = normalizeScorecard(parsed);

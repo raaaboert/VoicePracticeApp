@@ -19,7 +19,9 @@ export interface RuntimeConfig {
   adminTokenTtlMinutes: number;
   requireReverifyOnOnboard: boolean;
   openAiChatModel: string;
+  openAiSimulationModel: string;
   openAiTranscriptionModel: string;
+  openAiSimulationMaxOutputTokens: number | null;
   openAiMaxDailyCallsPerUser: number | null;
   openAiMaxDailyCallsGlobal: number | null;
   openAiMaxDailyTokensPerUser: number | null;
@@ -232,7 +234,13 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     adminTokenTtlMinutes: toInt(env.ADMIN_TOKEN_TTL_MINUTES, 720),
     requireReverifyOnOnboard: toBoolean(env.MOBILE_REVERIFY_ON_ONBOARD, isProduction),
     openAiChatModel: env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
+    openAiSimulationModel: env.OPENAI_SIMULATION_MODEL?.trim() || env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
     openAiTranscriptionModel: env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1",
+    openAiSimulationMaxOutputTokens: parseOptionalNonNegativeInt(
+      "OPENAI_SIMULATION_MAX_OUTPUT_TOKENS",
+      env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS,
+      null
+    ),
     openAiMaxDailyCallsPerUser: parseOptionalNonNegativeInt(
       "OPENAI_MAX_DAILY_CALLS_PER_USER",
       env.OPENAI_MAX_DAILY_CALLS_PER_USER,

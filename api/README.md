@@ -51,6 +51,8 @@ MOBILE_TOKEN_SECRET=replace_me_for_mobile_tokens
 MOBILE_REVERIFY_ON_ONBOARD=false
 OPENAI_API_KEY=
 OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_SIMULATION_MODEL=
+OPENAI_SIMULATION_MAX_OUTPUT_TOKENS=
 OPENAI_TRANSCRIPTION_MODEL=whisper-1
 OPENAI_MAX_DAILY_CALLS_PER_USER=
 OPENAI_MAX_DAILY_CALLS_GLOBAL=
@@ -72,6 +74,8 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
 - AI budget caps default in production when `OPENAI_API_KEY` is set (`120` per-user calls/day, `1500` global calls/day, `250000` per-user tokens/day, `2000000` global tokens/day).
+- `OPENAI_SIMULATION_MODEL` is optional and applies only to simulation routes (`/ai/opening`, `/ai/turn`, `/ai/score`). If unset, simulation routes use `OPENAI_CHAT_MODEL`.
+- `OPENAI_SIMULATION_MAX_OUTPUT_TOKENS` is optional and applies only to simulation routes. If unset, defaults are `800` for opening/turn and `1200` for score.
 - Usage billing increments are 15 seconds (round-down behavior).
 - Timezone changes are scheduled for next monthly renewal.
 - Remote AI is optional and API-owned. Mobile calls API AI routes; API calls OpenAI.
