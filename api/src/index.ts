@@ -131,6 +131,7 @@ const OPENAI_MAX_DAILY_TOKENS_PER_USER = runtimeConfig.openAiMaxDailyTokensPerUs
 const OPENAI_MAX_DAILY_TOKENS_GLOBAL = runtimeConfig.openAiMaxDailyTokensGlobal;
 const USE_MODULAR_PROMPT_ARCHITECTURE_ENV = runtimeConfig.useModularPromptArchitecture;
 const ENABLE_INTERNAL_DEBUG_ENDPOINTS = runtimeConfig.enableInternalDebugEndpoints;
+const INCLUDE_INTERNAL_DEBUG_DIAGNOSTICS = ENABLE_INTERNAL_DEBUG_ENDPOINTS && !runtimeConfig.isProduction;
 const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
 const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
@@ -227,9 +228,19 @@ async function getActiveTrainingPackForOrg(
       return null;
     }
 
+    const packDescriptor = runtimeConfig.isProduction
+      ? "active training pack"
+      : `pack "${pack.title}" (${pack.id})`;
     const requestedScenarioId = options?.scenarioId?.trim().toLowerCase();
+    if ((pack.requiredBehavioralTriggers ?? []).length === 0) {
+      logWarnThrottled(
+        `training-pack:empty-triggers:${pack.id}`,
+        `[training-pack] active pack "${pack.title}" (${pack.id}) for org "${pack.organizationId}" has empty requiredBehavioralTriggers; scenario opt-in gate will skip it.`
+      );
+    }
+
     if (!requestedScenarioId) {
-      options?.onSkip?.(`[training-pack] skipping pack "${pack.title}" (${pack.id}) because scenario context is missing.`);
+      options?.onSkip?.(`[training-pack] skipping ${packDescriptor} because scenario context is missing.`);
       return null;
     }
 
@@ -243,14 +254,14 @@ async function getActiveTrainingPackForOrg(
 
     if (scopedScenarioIds.size === 0) {
       options?.onSkip?.(
-        `[training-pack] skipping pack "${pack.title}" (${pack.id}) for scenario "${requestedScenarioId}" because no explicit opt-in was found. Add "${TRAINING_PACK_SCENARIO_OPT_IN_PREFIX}${requestedScenarioId}" or "${TRAINING_PACK_SCENARIO_OPT_IN_PREFIX}*" to requiredBehavioralTriggers.`
+        `[training-pack] skipping ${packDescriptor} for scenario "${requestedScenarioId}" because no explicit opt-in was found. Add "${TRAINING_PACK_SCENARIO_OPT_IN_PREFIX}${requestedScenarioId}" or "${TRAINING_PACK_SCENARIO_OPT_IN_PREFIX}*" to requiredBehavioralTriggers.`
       );
       return null;
     }
 
     if (!scopedScenarioIds.has("*") && !scopedScenarioIds.has(requestedScenarioId)) {
       options?.onSkip?.(
-        `[training-pack] skipping pack "${pack.title}" (${pack.id}) for scenario "${requestedScenarioId}" because it is not explicitly opted in.`
+        `[training-pack] skipping ${packDescriptor} for scenario "${requestedScenarioId}" because it is not explicitly opted in.`
       );
       return null;
     }
@@ -303,6 +314,24 @@ function getSingleQueryParam(value: unknown): string | null {
   }
 
   return null;
+}
+
+function normalizeTrainingPackTriggers(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const deduped = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      continue;
+    }
+    deduped.add(trimmed);
+  }
+  return Array.from(deduped);
 }
 
 function parseBooleanQueryFlag(value: string | null): boolean {
@@ -4357,6 +4386,240 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
   });
 });
 
+app.get("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  await withDatabaseRead(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    try {
+      const packs = await trainingPackStore.listTrainingPacksForOrg(org.id);
+      response.json({
+        generatedAt: nowIso(),
+        orgId: org.id,
+        packs
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not load training packs.";
+      response.status(503).json({ error: message });
+    }
+  });
+});
+
+app.post("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const body = request.body as {
+    title?: unknown;
+    trainingPackBrief?: unknown;
+    trainingTopic?: unknown;
+    requiredBehavioralTriggers?: unknown;
+    active?: unknown;
+  };
+
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const trainingPackBriefInput =
+    typeof body.trainingPackBrief === "string"
+      ? body.trainingPackBrief
+      : (typeof body.trainingTopic === "string" ? body.trainingTopic : "");
+  const trainingPackBrief = trainingPackBriefInput.trim();
+  if (!title) {
+    response.status(400).json({ error: "title is required." });
+    return;
+  }
+  if (!trainingPackBrief) {
+    response.status(400).json({ error: "trainingPackBrief is required." });
+    return;
+  }
+  if (body.requiredBehavioralTriggers !== undefined && !Array.isArray(body.requiredBehavioralTriggers)) {
+    response.status(400).json({ error: "requiredBehavioralTriggers must be a string array." });
+    return;
+  }
+  if (body.active !== undefined && typeof body.active !== "boolean") {
+    response.status(400).json({ error: "active must be a boolean." });
+    return;
+  }
+
+  const requiredBehavioralTriggers = normalizeTrainingPackTriggers(body.requiredBehavioralTriggers);
+  const active = body.active === true;
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    try {
+      const created = await trainingPackStore.createTrainingPackForOrg(org.id, {
+        title,
+        trainingTopic: trainingPackBrief,
+        requiredBehavioralTriggers,
+        active
+      });
+
+      appendPlatformAuditEvent(db, {
+        action: "org.training_pack.created",
+        orgId: org.id,
+        message: `Created training pack "${created.title}" for ${org.name}.`,
+        metadata: {
+          trainingPackId: created.id,
+          active: created.active,
+          requiredBehavioralTriggers: created.requiredBehavioralTriggers
+        }
+      });
+
+      response.status(201).json(created);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not create training pack.";
+      response.status(503).json({ error: message });
+    }
+  });
+});
+
+app.patch("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingPackId = request.params.trainingPackId?.trim();
+  const body = request.body as {
+    title?: unknown;
+    trainingPackBrief?: unknown;
+    trainingTopic?: unknown;
+    requiredBehavioralTriggers?: unknown;
+    active?: unknown;
+  };
+
+  if (!trainingPackId) {
+    response.status(400).json({ error: "trainingPackId is required." });
+    return;
+  }
+
+  const patch: {
+    title?: string;
+    trainingTopic?: string;
+    requiredBehavioralTriggers?: string[];
+    active?: boolean;
+  } = {};
+  const hasTitle = body.title !== undefined;
+  const hasBrief = body.trainingPackBrief !== undefined || body.trainingTopic !== undefined;
+  const hasTriggers = body.requiredBehavioralTriggers !== undefined;
+  const hasActive = body.active !== undefined;
+
+  if (hasTitle) {
+    if (typeof body.title !== "string" || !body.title.trim()) {
+      response.status(400).json({ error: "title must be a non-empty string." });
+      return;
+    }
+    patch.title = body.title.trim();
+  }
+
+  if (hasBrief) {
+    const briefInput =
+      typeof body.trainingPackBrief === "string"
+        ? body.trainingPackBrief
+        : (typeof body.trainingTopic === "string" ? body.trainingTopic : "");
+    const trainingPackBrief = briefInput.trim();
+    if (!trainingPackBrief) {
+      response.status(400).json({ error: "trainingPackBrief must be a non-empty string." });
+      return;
+    }
+    patch.trainingTopic = trainingPackBrief;
+  }
+
+  if (hasTriggers) {
+    if (!Array.isArray(body.requiredBehavioralTriggers)) {
+      response.status(400).json({ error: "requiredBehavioralTriggers must be a string array." });
+      return;
+    }
+    patch.requiredBehavioralTriggers = normalizeTrainingPackTriggers(body.requiredBehavioralTriggers);
+  }
+
+  if (hasActive) {
+    if (typeof body.active !== "boolean") {
+      response.status(400).json({ error: "active must be a boolean." });
+      return;
+    }
+    patch.active = body.active;
+  }
+
+  if (!hasTitle && !hasBrief && !hasTriggers && !hasActive) {
+    response.status(400).json({ error: "At least one patch field is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    try {
+      const updated = await trainingPackStore.updateTrainingPackForOrg(org.id, trainingPackId, patch);
+      if (!updated) {
+        response.status(404).json({ error: "Training pack not found." });
+        return;
+      }
+
+      appendPlatformAuditEvent(db, {
+        action: "org.training_pack.updated",
+        orgId: org.id,
+        message: `Updated training pack "${updated.title}" for ${org.name}.`,
+        metadata: {
+          trainingPackId: updated.id,
+          active: updated.active,
+          fields: Object.keys(patch)
+        }
+      });
+
+      response.json(updated);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update training pack.";
+      response.status(503).json({ error: message });
+    }
+  });
+});
+
+app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingPackId = request.params.trainingPackId?.trim();
+  if (!trainingPackId) {
+    response.status(400).json({ error: "trainingPackId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    try {
+      const deleted = await trainingPackStore.deleteTrainingPackForOrg(org.id, trainingPackId);
+      if (!deleted) {
+        response.status(404).json({ error: "Training pack not found." });
+        return;
+      }
+
+      appendPlatformAuditEvent(db, {
+        action: "org.training_pack.deleted",
+        orgId: org.id,
+        message: `Deleted training pack ${trainingPackId} for ${org.name}.`,
+        metadata: {
+          trainingPackId
+        }
+      });
+
+      response.json({ deleted: true, trainingPackId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not delete training pack.";
+      response.status(503).json({ error: message });
+    }
+  });
+});
+
 app.get("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
   await withDatabase(async (db) => {
@@ -6518,15 +6781,66 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
-    scenarioId: context.scenario.id,
+  const resolvedOrgId = typeof context.user.orgId === "string" ? context.user.orgId.trim() : "";
+  const requestedScenarioIdForGate = context.scenario.id?.trim().toLowerCase() || null;
+  const rawSqlOrgIdPassedToGetActiveTrainingPackForOrg = resolvedOrgId || null;
+  let directStoreActivePack: {
+    id: string;
+    organizationId: string;
+    active: boolean;
+    requiredBehavioralTriggersLength: number;
+  } | null = null;
+  let directStoreActivePackTriggers: string[] = [];
+  let packsReturnedByListCount: number | null = null;
+  let trainingPackStoreDiagnosticsError: string | null = null;
+
+  if (INCLUDE_INTERNAL_DEBUG_DIAGNOSTICS && rawSqlOrgIdPassedToGetActiveTrainingPackForOrg) {
+    try {
+      const storeActivePack = await trainingPackStore.getActiveTrainingPackForOrg(
+        rawSqlOrgIdPassedToGetActiveTrainingPackForOrg
+      );
+      if (storeActivePack) {
+        directStoreActivePackTriggers = storeActivePack.requiredBehavioralTriggers ?? [];
+        directStoreActivePack = {
+          id: storeActivePack.id,
+          organizationId: storeActivePack.organizationId,
+          active: storeActivePack.active === true,
+          requiredBehavioralTriggersLength: directStoreActivePackTriggers.length
+        };
+      }
+
+      const packsForOrg = await trainingPackStore.listTrainingPacksForOrg(rawSqlOrgIdPassedToGetActiveTrainingPackForOrg);
+      packsReturnedByListCount = packsForOrg.length;
+    } catch (error) {
+      trainingPackStoreDiagnosticsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  const scopedScenarioIdsForGate = Array.from(
+    new Set(
+      directStoreActivePackTriggers
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.toLowerCase().startsWith(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX))
+        .map((entry) => entry.slice(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX.length).trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+
+  const useModularPromptArchitectureForDebug =
+    context.useModularPromptArchitecture || directStoreActivePack !== null;
+
+  const activeTrainingPack = await getActiveTrainingPackForOrg(
+    rawSqlOrgIdPassedToGetActiveTrainingPackForOrg,
+    useModularPromptArchitectureForDebug,
+    {
+    scenarioId: requestedScenarioIdForGate,
     onSkip: (message) => warnings.push(message)
   });
-  if (context.useModularPromptArchitecture && !activeTrainingPack) {
+  if (useModularPromptArchitectureForDebug && !activeTrainingPack) {
     warnings.push("No active training pack is available for this org. Orchestrator is running without training-pack additions.");
   }
 
-  const roleplayConfig = context.useModularPromptArchitecture
+  const roleplayConfig = useModularPromptArchitectureForDebug
     ? buildRoleplayPromptsWithOrchestrator({
         scenario: context.scenario,
         difficulty: context.difficulty,
@@ -6548,7 +6862,7 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
         openingPrompt: buildOpeningPrompt(context.scenario)
       };
 
-  const evaluationConfig = context.useModularPromptArchitecture
+  const evaluationConfig = useModularPromptArchitectureForDebug
     ? buildEvaluationPromptWithOrchestrator({
         scenario: context.scenario,
         difficulty: context.difficulty,
@@ -6574,23 +6888,44 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
     });
 
   const roleplaySections = ["Base Roleplay System Prompt"];
-  if (context.useModularPromptArchitecture && activeTrainingPack) {
+  if (useModularPromptArchitectureForDebug && activeTrainingPack) {
     roleplaySections.push("Training Pack Brief");
     if ((activeTrainingPack.requiredBehavioralTriggers ?? []).length > 0) {
       roleplaySections.push("Required Behavioral Triggers");
     }
   }
 
+  const roleplaySystemPromptPreview = (() => {
+    const preview = roleplayConfig.systemPrompt.slice(0, 1200);
+    if (!activeTrainingPack) {
+      return preview;
+    }
+
+    const brief = activeTrainingPack.trainingTopic?.trim() ?? "";
+    if (!brief) {
+      return preview;
+    }
+
+    if (preview.toLowerCase().includes(brief.toLowerCase())) {
+      return preview;
+    }
+
+    return `${preview}\n\n[Training Pack Brief Snippet]\n${brief.slice(0, 300)}`;
+  })();
+
   const baselineSource: "client" | "server" =
-    !context.useModularPromptArchitecture && clientIndustryBaselineSnapshot !== null
+    !useModularPromptArchitectureForDebug && clientIndustryBaselineSnapshot !== null
       ? "client"
       : "server";
+  const warningsForResponse = runtimeConfig.isProduction
+    ? warnings.map((entry) => (entry.startsWith("[training-pack]") ? "[training-pack] skipped for current scenario." : entry))
+    : warnings;
 
   response.json({
     effectiveFlags: {
       envFlag: USE_MODULAR_PROMPT_ARCHITECTURE_ENV,
       orgFlag: context.orgFlag,
-      useModularPromptArchitecture: context.useModularPromptArchitecture,
+      useModularPromptArchitecture: useModularPromptArchitectureForDebug,
       debugEnabled: ENABLE_INTERNAL_DEBUG_ENDPOINTS
     },
     resolvedScenario: {
@@ -6605,15 +6940,29 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
       baselinePreview: (context.industryBaseline ?? "").slice(0, 300),
       ...(includeFull ? { baseline: context.industryBaseline ?? "" } : {})
     },
-    trainingPack: activeTrainingPack && context.useModularPromptArchitecture
+    trainingPack: activeTrainingPack && useModularPromptArchitectureForDebug
       ? {
           applied: true,
           id: activeTrainingPack.id,
           title: activeTrainingPack.title
         }
       : { applied: false },
+    ...(INCLUDE_INTERNAL_DEBUG_DIAGNOSTICS
+      ? {
+          trainingPackDiagnostics: {
+            resolvedOrgId: resolvedOrgId || null,
+            rawSqlOrgIdPassedToGetActiveTrainingPackForOrg,
+            storeGetActiveTrainingPackForOrgResult: directStoreActivePack,
+            listTrainingPacksForOrgCount: packsReturnedByListCount,
+            requestedScenarioIdUsedByGate: requestedScenarioIdForGate,
+            scopedScenarioIdsComputedFromTriggers: scopedScenarioIdsForGate,
+            gateReturned: activeTrainingPack ? "pack" : "null",
+            ...(trainingPackStoreDiagnosticsError ? { error: trainingPackStoreDiagnosticsError } : {})
+          }
+        }
+      : {}),
     roleplayPrompt: {
-      systemPromptPreview: roleplayConfig.systemPrompt.slice(0, 1200),
+      systemPromptPreview: roleplaySystemPromptPreview,
       includedSections: roleplaySections,
       ...(includeFull
         ? {
@@ -6632,7 +6981,7 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
         : { usesOverrides: false }),
       ...(includeFull ? { systemPrompt: evaluationPrompt } : {})
     },
-    warnings
+    warnings: warningsForResponse
   });
 });
 
@@ -8790,6 +9139,8 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 });
 
 void (async () => {
+  await trainingPackStore.initialize();
+
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
@@ -8800,4 +9151,9 @@ void (async () => {
     queueDatabaseReadinessRefresh();
   }, READINESS_REFRESH_MS);
   readinessInterval.unref();
-})();
+})().catch((error: unknown) => {
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  // eslint-disable-next-line no-console
+  console.error(`[BOOT] startup failed: ${message}`);
+  process.exit(1);
+});
