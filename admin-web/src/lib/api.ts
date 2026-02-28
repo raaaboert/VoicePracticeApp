@@ -1,6 +1,9 @@
 ﻿"use client";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4100";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL
+  ?? process.env.API_BASE_URL
+  ?? "http://localhost:4100";
 const REQUEST_ATTEMPT_TIMEOUT_MS = 7_000;
 const REQUEST_TOTAL_TIMEOUT_MS = 14_000;
 const REQUEST_MAX_ATTEMPTS = 2;

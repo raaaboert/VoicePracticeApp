@@ -33,6 +33,7 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
       || pathname.startsWith("/content")
       || pathname.startsWith("/config")
       || pathname.startsWith("/logs")
+      || pathname.startsWith("/prompt-preview")
     );
   }
 
@@ -43,6 +44,7 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
     || pathname.startsWith("/content")
     || pathname.startsWith("/stats")
     || pathname.startsWith("/logs")
+    || pathname.startsWith("/prompt-preview")
   );
 }
 
@@ -62,6 +64,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
   const isSupport = pathname.startsWith("/support");
   const isContent = pathname.startsWith("/content");
   const isLogs = pathname.startsWith("/logs");
+  const isPromptPreview = pathname.startsWith("/prompt-preview");
   const navClass = (isActive: boolean): string => (isActive ? "active" : "");
 
   useEffect(() => {
@@ -155,6 +158,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
         { href: "/support", label: "Support", active: isSupport },
         { href: "/config", label: "Config", active: isConfig },
         { href: "/logs", label: "Logs", active: isLogs },
+        { href: "/prompt-preview", label: "Prompt Preview", active: isPromptPreview },
       ];
     }
 
@@ -165,8 +169,9 @@ export function AdminShell({ title, children }: AdminShellProps) {
       { href: "/stats", label: "Stats", active: isStats },
       { href: "/support", label: "Support", active: isSupport },
       { href: "/logs", label: "Logs", active: isLogs },
+      { href: "/prompt-preview", label: "Prompt Preview", active: isPromptPreview },
     ];
-  }, [isConfig, isContent, isLogs, isStats, isSupport, isUsage, isUsers, mode]);
+  }, [isConfig, isContent, isLogs, isPromptPreview, isStats, isSupport, isUsage, isUsers, mode]);
 
   const switchMode = (nextMode: AdminMode) => {
     setMode(nextMode);

@@ -52,7 +52,7 @@ export default function LoginPage() {
           </p>
           {apiBaseLooksMisconfigured ? (
             <p className="error">
-              Admin API base URL is set to localhost. Set `NEXT_PUBLIC_API_BASE_URL` in Vercel and redeploy.
+              Admin API base URL is set to localhost. Set `API_BASE_URL` in Vercel and redeploy.
             </p>
           ) : null}
           <form onSubmit={onSubmit}>

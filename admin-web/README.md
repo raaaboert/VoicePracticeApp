@@ -11,6 +11,7 @@ Next.js admin console for VoicePractice.
 - `/stats`
 - `/support`
 - `/logs`
+- `/prompt-preview`
 
 ## Features
 
@@ -27,13 +28,18 @@ Next.js admin console for VoicePractice.
 Create `.env` from `.env.example`:
 
 ```bash
-NEXT_PUBLIC_API_BASE_URL=http://localhost:4100
+API_BASE_URL=http://localhost:4100
 ```
+
+`API_BASE_URL` is the backend API base used by the admin utility in local and Vercel environments.
 
 ## Run
 
 From repo root:
 
 ```bash
+npm run start:api
 npm run start:admin
 ```
+
+`/prompt-preview` expects the API to expose `GET /internal/ai/debug-prompt` and requires a valid admin login token.
