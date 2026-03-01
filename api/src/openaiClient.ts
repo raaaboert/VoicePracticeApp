@@ -201,6 +201,8 @@ export async function requestResponsesCompletion(params: {
   maxOutputTokens?: number;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
+  const modelKey = params.model.trim().toLowerCase();
+  const isGpt5Model = modelKey.startsWith("gpt-5");
   const body: Record<string, unknown> = {
     model: params.model,
     input: params.messages.map((message) => ({
@@ -209,7 +211,7 @@ export async function requestResponsesCompletion(params: {
     }))
   };
 
-  if (typeof params.temperature === "number") {
+  if (!isGpt5Model && typeof params.temperature === "number") {
     body.temperature = params.temperature;
   }
   if (typeof params.maxOutputTokens === "number") {
