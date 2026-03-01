@@ -578,12 +578,13 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             console.log("[TTS-TIMING]", {
               source: "simulation",
               preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
-              event: "assistantTextReceived",
-              sinceAssistantTextMs: 0,
+              phase: "assistant_text_received",
+              tsMs: assistantTextReceivedAtMs,
+              elapsedMs: 0,
             });
+            const speakPromise = speak(reply, assistantTextReceivedAtMs);
             setMode("speaking");
             setStatus("AI is speaking...");
-            const speakPromise = speak(reply, assistantTextReceivedAtMs);
             appendMessage({ id: createMessageId(), role: "assistant", content: reply });
             await speakPromise;
           }
@@ -662,14 +663,15 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         console.log("[TTS-TIMING]", {
           source: "simulation",
           preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
-          event: "assistantTextReceived",
-          sinceAssistantTextMs: 0,
+          phase: "assistant_text_received",
+          tsMs: assistantTextReceivedAtMs,
+          elapsedMs: 0,
         });
+        const speakPromise = speak(openingLine, assistantTextReceivedAtMs);
         pendingOpeningLineRef.current = null;
         kickoffSentRef.current = true;
         setMode("speaking");
         setStatus("AI is speaking...");
-        const speakPromise = speak(openingLine, assistantTextReceivedAtMs);
         appendMessage({
           id: createMessageId(),
           role: "assistant",

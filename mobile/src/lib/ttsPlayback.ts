@@ -9,7 +9,7 @@ import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
 
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
-const PLAYBACK_RATE = 1.1;
+const PLAYBACK_RATE = 1.15;
 const MIN_PLAYBACK_RATE = 0.8;
 const MAX_PLAYBACK_RATE = 1.4;
 
@@ -73,15 +73,28 @@ function clampPlaybackRate(value: number): number {
 function logTtsTiming(payload: {
   source: TtsSource;
   preset: RemoteTtsPreset;
-  event: "assistantTextReceived" | "ttsRequestStart" | "audioBytesReceived" | "playbackStarted";
-  sinceAssistantTextMs: number;
-  requestDurationMs?: number;
-  networkMs?: number;
-  playbackStartupMs?: number;
+  phase: "request_start" | "bytes_received" | "audio_loaded" | "play_started";
+  assistantTextReceivedAtMs: number;
+  tsMs?: number;
+  requestMs?: number;
+  loadMs?: number;
+  startupMs?: number;
   bytes?: number;
 }) {
+  const tsMs = typeof payload.tsMs === "number" ? payload.tsMs : Date.now();
+  const elapsedMs = tsMs - payload.assistantTextReceivedAtMs;
   // eslint-disable-next-line no-console
-  console.log("[TTS-TIMING]", payload);
+  console.log("[TTS-TIMING]", {
+    source: payload.source,
+    preset: payload.preset,
+    phase: payload.phase,
+    tsMs,
+    elapsedMs,
+    ...(typeof payload.requestMs === "number" ? { requestMs: payload.requestMs } : {}),
+    ...(typeof payload.loadMs === "number" ? { loadMs: payload.loadMs } : {}),
+    ...(typeof payload.startupMs === "number" ? { startupMs: payload.startupMs } : {}),
+    ...(typeof payload.bytes === "number" ? { bytes: payload.bytes } : {}),
+  });
 }
 
 export async function stopRemoteTtsPlayback(params: {
@@ -131,8 +144,9 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
     logTtsTiming({
       source: params.source,
       preset: params.preset,
-      event: "ttsRequestStart",
-      sinceAssistantTextMs: requestStartedAtMs - assistantTextReceivedAtMs,
+      phase: "request_start",
+      assistantTextReceivedAtMs,
+      tsMs: requestStartedAtMs,
     });
     try {
       const ttsAudio = await fetchAiTtsAudio({
@@ -145,10 +159,10 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
       logTtsTiming({
         source: params.source,
         preset: params.preset,
-        event: "audioBytesReceived",
-        sinceAssistantTextMs: audioBytesReceivedAtMs - assistantTextReceivedAtMs,
-        requestDurationMs: audioBytesReceivedAtMs - requestStartedAtMs,
-        networkMs: audioBytesReceivedAtMs - requestStartedAtMs,
+        phase: "bytes_received",
+        assistantTextReceivedAtMs,
+        tsMs: audioBytesReceivedAtMs,
+        requestMs: audioBytesReceivedAtMs - requestStartedAtMs,
         bytes: ttsAudio.bytes.byteLength,
       });
       const cacheDirectory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
@@ -164,9 +178,23 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
 
       const sound = new Audio.Sound();
       remoteTtsSoundRef.current = sound;
+      const audioLoadStartedAtMs = Date.now();
       await sound.loadAsync({ uri: fileUri }, { shouldPlay: false });
+      const audioLoadedAtMs = Date.now();
+      logTtsTiming({
+        source: params.source,
+        preset: params.preset,
+        phase: "audio_loaded",
+        assistantTextReceivedAtMs,
+        tsMs: audioLoadedAtMs,
+        requestMs: audioLoadedAtMs - requestStartedAtMs,
+        loadMs: audioLoadedAtMs - audioLoadStartedAtMs,
+      });
+      const remotePlaybackRate = clampPlaybackRate(PLAYBACK_RATE);
+      // eslint-disable-next-line no-console
+      console.log(`[TTS-PLAY] rate=${remotePlaybackRate}`);
       try {
-        await sound.setRateAsync(clampPlaybackRate(PLAYBACK_RATE), true);
+        await sound.setRateAsync(remotePlaybackRate, true);
       } catch {
         // Ignore rate-control errors and continue with default playback speed.
       }
@@ -192,11 +220,11 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
             logTtsTiming({
               source: params.source,
               preset: params.preset,
-              event: "playbackStarted",
-              sinceAssistantTextMs: playbackStartedAtMs - assistantTextReceivedAtMs,
-              requestDurationMs: playbackStartedAtMs - requestStartedAtMs,
-              networkMs: audioBytesReceivedAtMs - requestStartedAtMs,
-              playbackStartupMs: playbackStartedAtMs - audioBytesReceivedAtMs,
+              phase: "play_started",
+              assistantTextReceivedAtMs,
+              tsMs: playbackStartedAtMs,
+              requestMs: playbackStartedAtMs - requestStartedAtMs,
+              startupMs: playbackStartedAtMs - audioLoadedAtMs,
             });
           } catch (playbackError) {
             reject(playbackError instanceof Error ? playbackError : new Error("TTS playback failed."));
