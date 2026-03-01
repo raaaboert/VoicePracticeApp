@@ -21,6 +21,7 @@ export interface RuntimeConfig {
   openAiChatModel: string;
   openAiSimulationModel: string;
   openAiTranscriptionModel: string;
+  enableRemoteTts: boolean;
   openAiSimulationMaxOutputTokens: number | null;
   openAiMaxDailyCallsPerUser: number | null;
   openAiMaxDailyCallsGlobal: number | null;
@@ -236,6 +237,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     openAiChatModel: env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
     openAiSimulationModel: env.OPENAI_SIMULATION_MODEL?.trim() || env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
     openAiTranscriptionModel: env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1",
+    enableRemoteTts: toBoolean(env.ENABLE_REMOTE_TTS, false),
     openAiSimulationMaxOutputTokens: parseOptionalNonNegativeInt(
       "OPENAI_SIMULATION_MAX_OUTPUT_TOKENS",
       env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS,

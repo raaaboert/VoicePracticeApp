@@ -93,6 +93,7 @@ import {
   OpenAiResponsesRequestError,
   requestChatCompletion,
   requestResponsesCompletion,
+  requestSpeechSynthesis,
   requestTranscription
 } from "./openaiClient.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
@@ -131,6 +132,7 @@ const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
 const OPENAI_SIMULATION_MODEL = runtimeConfig.openAiSimulationModel;
 const OPENAI_TRANSCRIPTION_MODEL = runtimeConfig.openAiTranscriptionModel;
+const ENABLE_REMOTE_TTS = runtimeConfig.enableRemoteTts;
 const OPENAI_SIMULATION_MAX_OUTPUT_TOKENS = runtimeConfig.openAiSimulationMaxOutputTokens;
 const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
 const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;
@@ -156,6 +158,8 @@ const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN = 800;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE = 1200;
+const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL?.trim() || "tts-1";
+const TTS_TEXT_MAX_CHARS = 4_000;
 const PROCESS_STARTED_AT = new Date().toISOString();
 const BUILD_TIMESTAMP =
   process.env.BUILD_TIMESTAMP?.trim() ||
@@ -189,6 +193,25 @@ const TRANSIENT_DATABASE_ERROR_PATTERNS = [
   "could not connect to server",
   "self-signed certificate in certificate chain"
 ];
+
+type TtsPreset =
+  | "male-balanced"
+  | "male-warm"
+  | "male-bright"
+  | "female-balanced"
+  | "female-warm"
+  | "female-bright";
+
+const TTS_VOICE_BY_PRESET: Record<TtsPreset, string> = {
+  "male-balanced": "onyx",
+  "male-warm": "fable",
+  "male-bright": "echo",
+  "female-balanced": "nova",
+  "female-warm": "shimmer",
+  "female-bright": "alloy"
+};
+
+const TTS_PRESET_SET = new Set<TtsPreset>(Object.keys(TTS_VOICE_BY_PRESET) as TtsPreset[]);
 const warningLogByKey = new Map<string, number>();
 const PLACEHOLDER_USER_TEXT_PATTERN = /^voice input captured/i;
 const trainingPackStore = createTrainingPackStore({
@@ -546,6 +569,22 @@ function resolveSimulationCorrelationId(request: Request): string {
   }
 
   return `cid_${uuid().replace(/-/g, "").slice(0, 10)}`;
+}
+
+function parseTtsPreset(value: unknown): TtsPreset | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const preset = value.trim() as TtsPreset;
+  return TTS_PRESET_SET.has(preset) ? preset : null;
+}
+
+function estimateTtsDurationSeconds(text: string): number {
+  const tokens = text.trim().split(/\s+/).filter(Boolean).length;
+  if (tokens <= 0) {
+    return 0;
+  }
+  return Math.max(1, Number((tokens / 2.6).toFixed(1)));
 }
 
 function logSimulationUserTextDiagnostics(params: {
@@ -7069,6 +7108,101 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
     response.json({ text });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Transcription failed.";
+    response.status(503).json({ error: message });
+  }
+});
+
+app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {
+  if (!ENABLE_REMOTE_TTS) {
+    response.status(501).json({ error: "Remote TTS is disabled for this environment." });
+    return;
+  }
+
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  if (!isRemoteAiConfigured()) {
+    response.status(503).json({ error: "Remote AI is disabled for this environment." });
+    return;
+  }
+
+  const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
+  const body = request.body as { text?: unknown; preset?: unknown };
+  const preset = parseTtsPreset(body.preset);
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+
+  if (!preset) {
+    response.status(400).json({
+      error:
+        'preset must be one of: "male-balanced"|"male-warm"|"male-bright"|"female-balanced"|"female-warm"|"female-bright".'
+    });
+    return;
+  }
+
+  if (!text) {
+    response.status(400).json({ error: "text is required." });
+    return;
+  }
+
+  if (text.length > TTS_TEXT_MAX_CHARS) {
+    response.status(400).json({ error: `text must be ${TTS_TEXT_MAX_CHARS} characters or fewer.` });
+    return;
+  }
+
+  const context = await withDatabase(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return null;
+    }
+
+    const entitlements = computeEntitlements(db, user, new Date());
+    if (!entitlements.canStartSimulation) {
+      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      return null;
+    }
+
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    if (aiBudgetError) {
+      response.status(429).json({ error: aiBudgetError });
+      return null;
+    }
+
+    return { user };
+  });
+
+  if (!context) {
+    return;
+  }
+
+  try {
+    const voice = TTS_VOICE_BY_PRESET[preset];
+    const ttsResult = await requestSpeechSynthesis({
+      model: OPENAI_TTS_MODEL,
+      voice,
+      text,
+      format: "mp3"
+    });
+    const durationEstimateSec = estimateTtsDurationSeconds(text);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[ai-tts] correlationId=${correlationId} preset=${preset} bytes=${ttsResult.audioBuffer.byteLength} durationEstimateSec=${durationEstimateSec}`
+    );
+
+    response.setHeader("Content-Type", "audio/mpeg");
+    response.setHeader("Cache-Control", "no-store");
+    response.status(200).send(ttsResult.audioBuffer);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Text-to-speech failed.";
     response.status(503).json({ error: message });
   }
 });

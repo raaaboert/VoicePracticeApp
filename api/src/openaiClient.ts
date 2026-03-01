@@ -57,6 +57,8 @@ interface TranscriptionResponse {
   text?: string;
 }
 
+type SpeechFormat = "mp3" | "wav" | "opus" | "flac" | "aac" | "pcm";
+
 function getOpenAiApiKey(): string {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!key) {
@@ -308,4 +310,42 @@ export async function requestTranscription(params: {
 
   const payload = (await response.json()) as TranscriptionResponse;
   return payload.text?.trim() ?? "";
+}
+
+export async function requestSpeechSynthesis(params: {
+  model: string;
+  voice: string;
+  text: string;
+  format?: SpeechFormat;
+}): Promise<{ audioBuffer: Buffer; contentType: string }> {
+  const apiKey = getOpenAiApiKey();
+  const responseFormat: SpeechFormat = params.format ?? "mp3";
+  const body: Record<string, unknown> = {
+    model: params.model,
+    voice: params.voice,
+    input: params.text,
+    response_format: responseFormat
+  };
+
+  const response = await fetch(`${OPENAI_BASE_URL}/audio/speech`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI TTS request failed: ${await parseOpenAiError(response)}`);
+  }
+
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+  const contentTypeHeader = response.headers.get("content-type")?.split(";")[0]?.trim();
+  const contentType = contentTypeHeader || (responseFormat === "mp3" ? "audio/mpeg" : "application/octet-stream");
+
+  return {
+    audioBuffer,
+    contentType
+  };
 }
