@@ -5,7 +5,6 @@ import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
   getAiVoiceOption,
-  getVoiceSpeechTuning,
   selectSpeechVoiceIdentifier,
 } from "../data/preferences";
 import { DIFFICULTY_LABELS, PERSONA_LABELS } from "../data/prompts";
@@ -15,6 +14,11 @@ import {
 } from "../lib/mockAi";
 import { createSupportCase, getApiBaseUrl } from "../lib/api";
 import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
+import {
+  speakWithRemoteTtsFallback,
+  stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
+  toRemoteTtsPreset,
+} from "../lib/ttsPlayback";
 import { DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
 interface SimulationScreenProps {
@@ -179,10 +183,6 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
   const voiceOption = useMemo(() => getAiVoiceOption(config.voiceProfile), [config.voiceProfile]);
-  const voiceTuning = useMemo(
-    () => getVoiceSpeechTuning(config.voiceProfile, config.voiceGender),
-    [config.voiceGender, config.voiceProfile],
-  );
   const localTestMode = !apiConfigured || useLocalMockMode;
   const logSimulationApiCall = useCallback((callName: string) => {
     // eslint-disable-next-line no-console
@@ -212,6 +212,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const sessionCompletionInProgressRef = useRef(false);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const localModeConfirmedRef = useRef(false);
+  const remoteTtsSoundRef = useRef<Audio.Sound | null>(null);
+  const remoteTtsFileRef = useRef<string | null>(null);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -301,27 +303,28 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     setMessages(messagesRef.current);
   };
 
-  const speak = async (text: string): Promise<void> => {
-    if (!selectedVoiceIdentifierRef.current) {
-      try {
-        const voices = await Speech.getAvailableVoicesAsync();
-        selectedVoiceIdentifierRef.current = selectSpeechVoiceIdentifier(voices ?? [], config.voiceGender);
-      } catch {
-        selectedVoiceIdentifierRef.current = undefined;
-      }
-    }
+  const stopRemoteTtsPlayback = useCallback(async () => {
+    await stopRemoteTtsPlaybackHelper({
+      remoteTtsSoundRef,
+      remoteTtsFileRef,
+    });
+  }, []);
 
-    return new Promise((resolve) => {
-      Speech.stop();
-      Speech.speak(text, {
-        language: "en-US",
-        voice: selectedVoiceIdentifierRef.current,
-        rate: voiceTuning.speechRate,
-        pitch: voiceTuning.speechPitch,
-        onDone: () => resolve(),
-        onStopped: () => resolve(),
-        onError: () => resolve(),
-      });
+  const speak = async (text: string): Promise<void> => {
+    await speakWithRemoteTtsFallback({
+      source: "simulation",
+      text,
+      preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+      userId,
+      authToken,
+      remoteTtsEnabled: config.remoteTtsEnabled,
+      remoteAiConfigured: apiConfigured,
+      allowRemoteTts: !useLocalMockMode,
+      voiceGender: config.voiceGender,
+      voiceProfile: config.voiceProfile,
+      selectedVoiceIdentifierRef,
+      remoteTtsSoundRef,
+      remoteTtsFileRef,
     });
   };
 
@@ -439,6 +442,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
     try {
       await Speech.stop();
+      await stopRemoteTtsPlayback();
       await setAudioMode(true);
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
@@ -670,6 +674,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     setSessionActive(false);
     clearTurnMonitoring();
     Speech.stop();
+    await stopRemoteTtsPlayback();
     await stopRecordingSafely();
 
     if (showEndedText) {
@@ -823,6 +828,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       sessionActiveRef.current = false;
       clearTurnMonitoring();
       Speech.stop();
+      void stopRemoteTtsPlayback();
       void stopRecordingSafely();
       sessionCompletionInProgressRef.current = false;
     };
@@ -836,6 +842,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     submitAutoErrorReport,
     userId,
     logSimulationApiCall,
+    stopRemoteTtsPlayback,
   ]);
 
   useEffect(() => {

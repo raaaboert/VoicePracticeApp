@@ -116,6 +116,7 @@ console.log("[BOOT][ENV CHECK]", {
 console.log("[BOOT][RUNTIME CONFIG FLAGS]", {
   useModularPromptArchitecture: runtimeConfig.useModularPromptArchitecture,
   enableInternalDebugEndpoints: runtimeConfig.enableInternalDebugEndpoints,
+  enableRemoteTts: runtimeConfig.enableRemoteTts,
 });
 const PORT = runtimeConfig.port;
 const STORAGE_PROVIDER = runtimeConfig.storageProvider;
@@ -7113,6 +7114,10 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
 });
 
 app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {
+  const userId = request.params.userId;
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=tts userId=${userId}`);
+
   if (!ENABLE_REMOTE_TTS) {
     response.status(501).json({ error: "Remote TTS is disabled for this environment." });
     return;
@@ -7129,7 +7134,6 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     return;
   }
 
-  const userId = request.params.userId;
   const correlationId = resolveSimulationCorrelationId(request);
   const body = request.body as { text?: unknown; preset?: unknown };
   const preset = parseTtsPreset(body.preset);

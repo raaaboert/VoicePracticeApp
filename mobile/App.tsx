@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
-import * as Speech from "expo-speech";
+import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 import {
   ActivityIndicator,
@@ -27,9 +27,7 @@ import {
   AI_VOICE_GENDER_OPTIONS,
   AI_VOICE_OPTIONS,
   COLOR_SCHEME_OPTIONS,
-  getVoiceSpeechTuning,
   getAiVoiceOption,
-  selectSpeechVoiceIdentifier,
 } from "./src/data/preferences";
 import {
   DIFFICULTY_HINTS,
@@ -66,6 +64,11 @@ import {
   getApiBaseUrl,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
+import {
+  speakWithRemoteTtsFallback,
+  stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
+  toRemoteTtsPreset,
+} from "./src/lib/ttsPlayback";
 import {
   saveActiveIndustryBaselineContext,
   clearUserId,
@@ -619,6 +622,9 @@ export default function App() {
   const mobileUpdatesCursorRef = useRef(0);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const hasInitializedRef = useRef(false);
+  const sampleVoiceIdentifierRef = useRef<string | undefined>(undefined);
+  const sampleRemoteTtsSoundRef = useRef<Audio.Sound | null>(null);
+  const sampleRemoteTtsFileRef = useRef<string | null>(null);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -708,17 +714,41 @@ export default function App() {
   const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
+  const remoteTtsEnabled = useMemo(() => {
+    const envEnabled = process.env.EXPO_PUBLIC_REMOTE_TTS_ENABLED === "true";
+    const configWithRemoteTts = config as
+      | (AppConfig & {
+          featureFlags?: AppConfig["featureFlags"] & { remoteTtsEnabled?: boolean | string | null };
+          remoteTtsEnabled?: boolean | string | null;
+        })
+      | null;
+    const fromConfig =
+      configWithRemoteTts?.featureFlags?.remoteTtsEnabled ?? configWithRemoteTts?.remoteTtsEnabled ?? false;
+    return envEnabled || fromConfig === true || fromConfig === "true";
+  }, [config]);
 
   useEffect(() => {
     const resolvedApiBaseUrl = getApiBaseUrl();
     const remoteEnabledRaw = process.env.EXPO_PUBLIC_REMOTE_AI_ENABLED;
+    const remoteTtsEnabledRaw = process.env.EXPO_PUBLIC_REMOTE_TTS_ENABLED;
     // eslint-disable-next-line no-console
     console.log(
       `[runtime-startup] apiBaseUrl=${resolvedApiBaseUrl || "(empty)"} remoteEnabledRaw=${String(
         remoteEnabledRaw,
-      )} remoteEnabled=${apiConfigured} __DEV__=${__DEV__}`,
+      )} remoteEnabled=${apiConfigured} remoteTtsEnabledRaw=${String(
+        remoteTtsEnabledRaw,
+      )} remoteTtsEnabled=${remoteTtsEnabled} __DEV__=${__DEV__}`,
     );
-  }, [apiConfigured]);
+  }, [apiConfigured, remoteTtsEnabled]);
+
+  useEffect(() => {
+    return () => {
+      void stopRemoteTtsPlaybackHelper({
+        remoteTtsSoundRef: sampleRemoteTtsSoundRef,
+        remoteTtsFileRef: sampleRemoteTtsFileRef,
+      });
+    };
+  }, []);
 
   const enabledSegments = useMemo(
     () => config?.segments?.filter((segment) => segment.enabled) ?? [],
@@ -1982,31 +2012,32 @@ export default function App() {
       return;
     }
 
+    if (!user || !mobileAuthToken) {
+      setSettingsError("Sign in again to play a voice sample.");
+      return;
+    }
+
     setIsVoiceSamplePlaying(true);
     setSettingsNotice(null);
     setSettingsError(null);
 
     try {
       const sample = getAiVoiceOption(voiceProfile);
-      const sampleTuning = getVoiceSpeechTuning(voiceProfile, voiceGender);
-      const availableVoices = await Speech.getAvailableVoicesAsync().catch(() => []);
-      if (!availableVoices || availableVoices.length === 0) {
-        throw new Error("No text-to-speech voices are available on this device/emulator.");
-      }
-
-      const selectedVoiceId = selectSpeechVoiceIdentifier(availableVoices, voiceGender);
-
-      await new Promise<void>((resolve, reject) => {
-        Speech.speak("This is a sample of your selected simulator voice.", {
-          language: "en-US",
-          voice: selectedVoiceId,
-          rate: sampleTuning.speechRate,
-          pitch: sampleTuning.speechPitch,
-          onDone: () => resolve(),
-          onStopped: () => resolve(),
-          onError: () => reject(new Error("TTS playback failed.")),
-        });
+      await speakWithRemoteTtsFallback({
+        source: "sample",
+        text: "This is a sample of your selected simulator voice.",
+        preset: toRemoteTtsPreset(voiceGender, voiceProfile),
+        userId: user.id,
+        authToken: mobileAuthToken,
+        remoteTtsEnabled,
+        remoteAiConfigured: apiConfigured,
+        voiceGender,
+        voiceProfile,
+        selectedVoiceIdentifierRef: sampleVoiceIdentifierRef,
+        remoteTtsSoundRef: sampleRemoteTtsSoundRef,
+        remoteTtsFileRef: sampleRemoteTtsFileRef,
       });
+
       const selectedGenderLabel =
         AI_VOICE_GENDER_OPTIONS.find((option) => option.id === voiceGender)?.label ?? "Female";
       setSettingsNotice(`Played sample using ${selectedGenderLabel} ${sample.label} voice style.`);
@@ -2061,6 +2092,7 @@ export default function App() {
         personaStyle: selectedPersonaStyle,
         voiceProfile,
         voiceGender,
+        remoteTtsEnabled,
         maxSimulationMinutes: entitlements?.limits?.maxSimulationMinutes ?? null,
       });
       setScorecard(null);
