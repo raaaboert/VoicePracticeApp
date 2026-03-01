@@ -89,7 +89,7 @@ import {
   buildRoleplaySystemPrompt,
   formatDialogueForEvaluation
 } from "./aiPrompts.js";
-import { requestChatCompletion, requestTranscription } from "./openaiClient.js";
+import { requestChatCompletion, requestResponsesCompletion, requestTranscription } from "./openaiClient.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
@@ -226,29 +226,110 @@ function logWarnThrottled(key: string, message: string, throttleMs = WARNING_LOG
   logWarn(message);
 }
 
-function logSimulationAiMetrics(
-  route: "opening" | "turn" | "score",
-  startedAtMs: number,
-  requestedModel: string,
-  completion: {
-    model: string;
-    usage: {
-      inputTokens: number;
-      outputTokens: number;
-      totalTokens: number;
-    };
-  }
-): number {
-  const latencyMs = Math.max(0, Date.now() - startedAtMs);
+type SimulationRoute = "opening" | "turn" | "score";
+type SimulationApiPath = "responses" | "chat";
+
+interface SimulationCompletionResult {
+  text: string;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
+  model: string;
+}
+
+function shouldUseResponsesApiForSimulation(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("gpt-5");
+}
+
+function logSimulationAiMetrics(params: {
+  route: SimulationRoute;
+  startedAtMs: number;
+  requestedModel: string;
+  apiPathUsed: SimulationApiPath;
+  completion?: SimulationCompletionResult;
+  error?: unknown;
+}): number {
+  const latencyMs = Math.max(0, Date.now() - params.startedAtMs);
   if (runtimeConfig.isProduction) {
     return latencyMs;
   }
 
+  const logPayload: Record<string, unknown> = {
+    event: "ai-simulation",
+    route: params.route,
+    requestedModel: params.requestedModel,
+    apiPathUsed: params.apiPathUsed,
+    latencyMs,
+    responseModel: params.completion?.model ?? "unknown",
+    tokenUsage: params.completion
+      ? {
+          inputTokens: params.completion.usage.inputTokens,
+          outputTokens: params.completion.usage.outputTokens,
+          totalTokens: params.completion.usage.totalTokens
+        }
+      : {
+          inputTokens: "unknown",
+          outputTokens: "unknown",
+          totalTokens: "unknown"
+        }
+  };
+
+  if (params.error) {
+    logPayload.error = params.error instanceof Error ? params.error.message : String(params.error);
+  }
+
   // eslint-disable-next-line no-console
-  console.log(
-    `[ai-simulation] route=${route} requestedModel=${requestedModel} responseModel=${completion.model} latencyMs=${latencyMs} tokens=input:${completion.usage.inputTokens},output:${completion.usage.outputTokens},total:${completion.usage.totalTokens}`
-  );
+  console.log(`[ai-simulation] ${JSON.stringify(logPayload)}`);
   return latencyMs;
+}
+
+async function requestSimulationCompletion(params: {
+  route: SimulationRoute;
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  maxOutputTokens: number;
+  temperature?: number;
+}): Promise<{ completion: SimulationCompletionResult; latencyMs: number; apiPathUsed: SimulationApiPath }> {
+  const requestStartedAt = Date.now();
+  const requestedModel = OPENAI_SIMULATION_MODEL;
+  const apiPathUsed: SimulationApiPath = shouldUseResponsesApiForSimulation(requestedModel) ? "responses" : "chat";
+
+  try {
+    const completion =
+      apiPathUsed === "responses"
+        ? await requestResponsesCompletion({
+            model: requestedModel,
+            messages: params.messages,
+            maxOutputTokens: params.maxOutputTokens,
+            temperature: params.temperature
+          })
+        : await requestChatCompletion({
+            model: requestedModel,
+            messages: params.messages,
+            maxTokens: params.maxOutputTokens,
+            temperature: params.temperature
+          });
+
+    const latencyMs = logSimulationAiMetrics({
+      route: params.route,
+      startedAtMs: requestStartedAt,
+      requestedModel,
+      apiPathUsed,
+      completion
+    });
+
+    return { completion, latencyMs, apiPathUsed };
+  } catch (error) {
+    logSimulationAiMetrics({
+      route: params.route,
+      startedAtMs: requestStartedAt,
+      requestedModel,
+      apiPathUsed,
+      error
+    });
+    throw error;
+  }
 }
 
 interface PersistedSimulationAiDetails {
@@ -7351,17 +7432,15 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           }),
           openingPrompt: buildOpeningPrompt(context.scenario)
         };
-    const requestStartedAt = Date.now();
-    const completion = await requestChatCompletion({
-      model: OPENAI_SIMULATION_MODEL,
+    const { completion, latencyMs } = await requestSimulationCompletion({
+      route: "opening",
       messages: [
         { role: "system", content: prompts.systemPrompt },
         { role: "user", content: prompts.openingPrompt }
       ],
-      maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
+      maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
       temperature: 0.8
     });
-    const latencyMs = logSimulationAiMetrics("opening", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     try {
       await withDatabase(async (db) => {
@@ -7577,17 +7656,15 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         });
 
     const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
-    const requestStartedAt = Date.now();
-    const completion = await requestChatCompletion({
-      model: OPENAI_SIMULATION_MODEL,
+    const { completion, latencyMs } = await requestSimulationCompletion({
+      route: "turn",
       messages: [
         { role: "system", content: systemPrompt },
         ...history.map((message) => ({ role: message.role, content: message.content }))
       ],
-      maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
+      maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
       temperature
     });
-    const latencyMs = logSimulationAiMetrics("turn", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     try {
       await withDatabase(async (db) => {
@@ -7825,17 +7902,15 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       });
 
     const transcript = formatDialogueForEvaluation(history);
-    const requestStartedAt = Date.now();
-    const completion = await requestChatCompletion({
-      model: OPENAI_SIMULATION_MODEL,
+    const { completion, latencyMs } = await requestSimulationCompletion({
+      route: "score",
       messages: [
         { role: "system", content: evaluationPrompt },
         { role: "user", content: `Conversation transcript:\n${transcript}` }
       ],
-      maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE),
+      maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE),
       temperature: 0.2
     });
-    const latencyMs = logSimulationAiMetrics("score", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
     const aiDetails = buildPersistedSimulationAiDetails({
       requestedModel: OPENAI_SIMULATION_MODEL,
       responseModel: completion.model,

@@ -27,6 +27,24 @@ interface ChatCompletionResponse {
   model?: string;
 }
 
+interface ResponsesCompletionResponse {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+  }>;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  };
+  model?: string;
+}
+
 interface TranscriptionResponse {
   text?: string;
 }
@@ -109,6 +127,83 @@ export async function requestChatCompletion(params: {
 
   const promptTokens = Number(payload.usage?.prompt_tokens ?? 0);
   const completionTokens = Number(payload.usage?.completion_tokens ?? 0);
+  const totalTokens = Number(payload.usage?.total_tokens ?? promptTokens + completionTokens);
+
+  return {
+    text: message,
+    usage: {
+      inputTokens: Number.isFinite(promptTokens) ? Math.max(0, promptTokens) : 0,
+      outputTokens: Number.isFinite(completionTokens) ? Math.max(0, completionTokens) : 0,
+      totalTokens: Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0
+    },
+    model: typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : params.model
+  };
+}
+
+function extractResponseText(payload: ResponsesCompletionResponse): string | null {
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  const chunks: string[] = [];
+  for (const item of payload.output ?? []) {
+    for (const content of item.content ?? []) {
+      if (typeof content.text === "string" && content.text.trim()) {
+        chunks.push(content.text.trim());
+      }
+    }
+  }
+
+  if (chunks.length === 0) {
+    return null;
+  }
+
+  return chunks.join("\n");
+}
+
+export async function requestResponsesCompletion(params: {
+  model: string;
+  messages: ChatMessage[];
+  temperature?: number;
+  maxOutputTokens?: number;
+}): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
+  const apiKey = getOpenAiApiKey();
+  const body: Record<string, unknown> = {
+    model: params.model,
+    input: params.messages.map((message) => ({
+      role: message.role,
+      content: message.content
+    }))
+  };
+
+  if (typeof params.temperature === "number") {
+    body.temperature = params.temperature;
+  }
+  if (typeof params.maxOutputTokens === "number") {
+    body.max_output_tokens = params.maxOutputTokens;
+  }
+
+  const response = await fetch(`${OPENAI_BASE_URL}/responses`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI responses request failed: ${await parseOpenAiError(response)}`);
+  }
+
+  const payload = (await response.json()) as ResponsesCompletionResponse;
+  const message = extractResponseText(payload);
+  if (!message) {
+    throw new Error("OpenAI returned an empty responses output.");
+  }
+
+  const promptTokens = Number(payload.usage?.input_tokens ?? payload.usage?.prompt_tokens ?? 0);
+  const completionTokens = Number(payload.usage?.output_tokens ?? payload.usage?.completion_tokens ?? 0);
   const totalTokens = Number(payload.usage?.total_tokens ?? promptTokens + completionTokens);
 
   return {
