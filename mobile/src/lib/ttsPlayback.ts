@@ -9,6 +9,9 @@ import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
 
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
+const PLAYBACK_RATE = 1.1;
+const MIN_PLAYBACK_RATE = 0.8;
+const MAX_PLAYBACK_RATE = 1.4;
 
 interface SpeakWithTtsFallbackParams {
   source: TtsSource;
@@ -24,6 +27,7 @@ interface SpeakWithTtsFallbackParams {
   selectedVoiceIdentifierRef?: MutableRefObject<string | undefined>;
   remoteTtsSoundRef?: MutableRefObject<Audio.Sound | null>;
   remoteTtsFileRef?: MutableRefObject<string | null>;
+  assistantTextReceivedAtMs?: number;
 }
 
 export function toRemoteTtsPreset(voiceGender: AiVoiceGender, voiceProfile: AiVoiceProfile): RemoteTtsPreset {
@@ -62,6 +66,24 @@ function logTtsMode(source: TtsSource, preset: RemoteTtsPreset, mode: "remote" |
   console.log(`[TTS-MODE] source=${source} preset=${preset} mode=${mode} reason=${reason}`);
 }
 
+function clampPlaybackRate(value: number): number {
+  return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, value));
+}
+
+function logTtsTiming(payload: {
+  source: TtsSource;
+  preset: RemoteTtsPreset;
+  event: "assistantTextReceived" | "ttsRequestStart" | "audioBytesReceived" | "playbackStarted";
+  sinceAssistantTextMs: number;
+  requestDurationMs?: number;
+  networkMs?: number;
+  playbackStartupMs?: number;
+  bytes?: number;
+}) {
+  // eslint-disable-next-line no-console
+  console.log("[TTS-TIMING]", payload);
+}
+
 export async function stopRemoteTtsPlayback(params: {
   remoteTtsSoundRef: MutableRefObject<Audio.Sound | null>;
   remoteTtsFileRef: MutableRefObject<string | null>;
@@ -96,6 +118,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
   const selectedVoiceIdentifierRef = params.selectedVoiceIdentifierRef ?? { current: undefined };
   const remoteTtsSoundRef = params.remoteTtsSoundRef ?? { current: null };
   const remoteTtsFileRef = params.remoteTtsFileRef ?? { current: null };
+  const assistantTextReceivedAtMs = params.assistantTextReceivedAtMs ?? Date.now();
   const shouldAttemptRemote =
     params.remoteTtsEnabled &&
     params.remoteAiConfigured &&
@@ -104,12 +127,29 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
 
   if (shouldAttemptRemote) {
     logTtsMode(params.source, params.preset, "remote", "remoteCallStarted");
+    const requestStartedAtMs = Date.now();
+    logTtsTiming({
+      source: params.source,
+      preset: params.preset,
+      event: "ttsRequestStart",
+      sinceAssistantTextMs: requestStartedAtMs - assistantTextReceivedAtMs,
+    });
     try {
       const ttsAudio = await fetchAiTtsAudio({
         userId: params.userId,
         authToken: params.authToken,
         text: params.text,
         preset: params.preset,
+      });
+      const audioBytesReceivedAtMs = Date.now();
+      logTtsTiming({
+        source: params.source,
+        preset: params.preset,
+        event: "audioBytesReceived",
+        sinceAssistantTextMs: audioBytesReceivedAtMs - assistantTextReceivedAtMs,
+        requestDurationMs: audioBytesReceivedAtMs - requestStartedAtMs,
+        networkMs: audioBytesReceivedAtMs - requestStartedAtMs,
+        bytes: ttsAudio.bytes.byteLength,
       });
       const cacheDirectory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
       if (!cacheDirectory) {
@@ -124,7 +164,12 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
 
       const sound = new Audio.Sound();
       remoteTtsSoundRef.current = sound;
-      await sound.loadAsync({ uri: fileUri }, { shouldPlay: true });
+      await sound.loadAsync({ uri: fileUri }, { shouldPlay: false });
+      try {
+        await sound.setRateAsync(clampPlaybackRate(PLAYBACK_RATE), true);
+      } catch {
+        // Ignore rate-control errors and continue with default playback speed.
+      }
       await new Promise<void>((resolve, reject) => {
         sound.setOnPlaybackStatusUpdate((status) => {
           if (!status.isLoaded) {
@@ -140,6 +185,23 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
             resolve();
           }
         });
+        void (async () => {
+          try {
+            await sound.playAsync();
+            const playbackStartedAtMs = Date.now();
+            logTtsTiming({
+              source: params.source,
+              preset: params.preset,
+              event: "playbackStarted",
+              sinceAssistantTextMs: playbackStartedAtMs - assistantTextReceivedAtMs,
+              requestDurationMs: playbackStartedAtMs - requestStartedAtMs,
+              networkMs: audioBytesReceivedAtMs - requestStartedAtMs,
+              playbackStartupMs: playbackStartedAtMs - audioBytesReceivedAtMs,
+            });
+          } catch (playbackError) {
+            reject(playbackError instanceof Error ? playbackError : new Error("TTS playback failed."));
+          }
+        })();
       });
 
       await stopRemoteTtsPlayback({

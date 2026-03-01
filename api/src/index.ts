@@ -7255,15 +7255,39 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     return;
   }
 
+  let ttsCallStartedAtMs: number | null = null;
   try {
     const voice = TTS_VOICE_BY_PRESET[preset];
+    ttsCallStartedAtMs = Date.now();
     // eslint-disable-next-line no-console
-    console.log("[tts-call]", { userId, voicePreset: preset, provider: "openai", model: OPENAI_TTS_MODEL });
+    console.log("[tts-call]", {
+      route: "tts",
+      correlationId,
+      userId,
+      preset,
+      provider: "openai",
+      model: OPENAI_TTS_MODEL,
+      stage: "start",
+      startedAtMs: ttsCallStartedAtMs
+    });
     const ttsResult = await requestSpeechSynthesis({
       model: OPENAI_TTS_MODEL,
       voice,
       text,
       format: "mp3"
+    });
+    const ttsCallEndedAtMs = Date.now();
+    // eslint-disable-next-line no-console
+    console.log("[tts-call]", {
+      route: "tts",
+      correlationId,
+      userId,
+      preset,
+      provider: "openai",
+      model: OPENAI_TTS_MODEL,
+      stage: "end",
+      endedAtMs: ttsCallEndedAtMs,
+      durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
     });
     const durationEstimateSec = estimateTtsDurationSeconds(text);
     // eslint-disable-next-line no-console
@@ -7275,6 +7299,21 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     response.setHeader("Cache-Control", "no-store");
     response.status(200).send(ttsResult.audioBuffer);
   } catch (error) {
+    if (typeof ttsCallStartedAtMs === "number") {
+      const ttsCallEndedAtMs = Date.now();
+      // eslint-disable-next-line no-console
+      console.log("[tts-call]", {
+        route: "tts",
+        correlationId,
+        userId,
+        preset,
+        provider: "openai",
+        model: OPENAI_TTS_MODEL,
+        stage: "error",
+        endedAtMs: ttsCallEndedAtMs,
+        durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
+      });
+    }
     const message = error instanceof Error ? error.message : "Text-to-speech failed.";
     if (error instanceof OpenAiSpeechRequestError) {
       respondWithTtsError({

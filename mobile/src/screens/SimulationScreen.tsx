@@ -310,7 +310,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     });
   }, []);
 
-  const speak = async (text: string): Promise<void> => {
+  const speak = async (text: string, assistantTextReceivedAtMs?: number): Promise<void> => {
     await speakWithRemoteTtsFallback({
       source: "simulation",
       text,
@@ -325,6 +325,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       selectedVoiceIdentifierRef,
       remoteTtsSoundRef,
       remoteTtsFileRef,
+      assistantTextReceivedAtMs,
     });
   };
 
@@ -572,10 +573,19 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               });
 
           if (sessionActiveRef.current && !unmountedRef.current) {
-            appendMessage({ id: createMessageId(), role: "assistant", content: reply });
+            const assistantTextReceivedAtMs = Date.now();
+            // eslint-disable-next-line no-console
+            console.log("[TTS-TIMING]", {
+              source: "simulation",
+              preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+              event: "assistantTextReceived",
+              sinceAssistantTextMs: 0,
+            });
             setMode("speaking");
             setStatus("AI is speaking...");
-            await speak(reply);
+            const speakPromise = speak(reply, assistantTextReceivedAtMs);
+            appendMessage({ id: createMessageId(), role: "assistant", content: reply });
+            await speakPromise;
           }
         }
       } else {
@@ -647,16 +657,25 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       }
 
       if (openingLine) {
-        appendMessage({
-          id: createMessageId(),
-          role: "assistant",
-          content: openingLine,
+        const assistantTextReceivedAtMs = Date.now();
+        // eslint-disable-next-line no-console
+        console.log("[TTS-TIMING]", {
+          source: "simulation",
+          preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+          event: "assistantTextReceived",
+          sinceAssistantTextMs: 0,
         });
         pendingOpeningLineRef.current = null;
         kickoffSentRef.current = true;
         setMode("speaking");
         setStatus("AI is speaking...");
-        await speak(openingLine);
+        const speakPromise = speak(openingLine, assistantTextReceivedAtMs);
+        appendMessage({
+          id: createMessageId(),
+          role: "assistant",
+          content: openingLine,
+        });
+        await speakPromise;
       }
     }
 
