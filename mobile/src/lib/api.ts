@@ -92,6 +92,14 @@ function inferApiBaseUrl(): string {
 
 const API_BASE_URL = inferApiBaseUrl();
 
+export type RemoteTtsPreset =
+  | "male-balanced"
+  | "male-warm"
+  | "male-bright"
+  | "female-balanced"
+  | "female-warm"
+  | "female-bright";
+
 interface TimezoneResponse {
   items: string[];
 }
@@ -591,6 +599,79 @@ export async function fetchAiScore(params: {
     params.authToken,
     { timeoutMs: 45_000 },
   );
+}
+
+export async function fetchAiTtsAudio(params: {
+  userId: string;
+  authToken: string;
+  text: string;
+  preset: RemoteTtsPreset;
+  signal?: AbortSignal;
+}): Promise<{ bytes: Uint8Array; contentType: string }> {
+  const apiBase = API_BASE_URL.trim();
+  if (!apiBase) {
+    throw new Error("API base URL is not configured. Set EXPO_PUBLIC_API_BASE_URL for this build.");
+  }
+
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  params.signal?.addEventListener("abort", forwardAbort);
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 30_000);
+
+  try {
+    const response = await fetch(`${apiBase}/mobile/users/${encodeURIComponent(params.userId)}/ai/tts`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${params.authToken}`,
+      },
+      body: JSON.stringify({
+        text: params.text,
+        preset: params.preset,
+      }),
+    });
+
+    if (!response.ok) {
+      let message = `Request failed (${response.status})`;
+      try {
+        const payload = (await response.json()) as { error?: string };
+        if (payload.error) {
+          message = payload.error;
+        }
+      } catch {
+        // Fall back to status message.
+      }
+      throw new Error(message);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const contentType =
+      response.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
+
+    return {
+      bytes: new Uint8Array(arrayBuffer),
+      contentType,
+    };
+  } catch (error) {
+    if (timedOut) {
+      throw new Error("Request timed out after 30 seconds.");
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      if (params.signal?.aborted) {
+        throw new Error("Request aborted.");
+      }
+      throw new Error("Request timed out after 30 seconds.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+    params.signal?.removeEventListener("abort", forwardAbort);
+  }
 }
 
 export async function createSupportCase(params: {

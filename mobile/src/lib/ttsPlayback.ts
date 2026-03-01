@@ -9,9 +9,14 @@ import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
 
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
-const PLAYBACK_RATE = 1.15;
 const MIN_PLAYBACK_RATE = 0.8;
 const MAX_PLAYBACK_RATE = 1.4;
+const REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE: Record<AiVoiceProfile, number> = {
+  warm: 1.08,
+  balanced: 1.15,
+  bright: 1.22,
+};
+const REMOTE_PLAYBACK_GLOBAL_MULTIPLIER = 1.05;
 
 interface SpeakWithTtsFallbackParams {
   source: TtsSource;
@@ -28,6 +33,15 @@ interface SpeakWithTtsFallbackParams {
   remoteTtsSoundRef?: MutableRefObject<Audio.Sound | null>;
   remoteTtsFileRef?: MutableRefObject<string | null>;
   assistantTextReceivedAtMs?: number;
+  abortSignal?: AbortSignal;
+  isCancelled?: () => boolean;
+}
+
+class TtsPlaybackCancelledError extends Error {
+  constructor() {
+    super("TTS playback cancelled.");
+    this.name = "TtsPlaybackCancelledError";
+  }
 }
 
 export function toRemoteTtsPreset(voiceGender: AiVoiceGender, voiceProfile: AiVoiceProfile): RemoteTtsPreset {
@@ -68,6 +82,11 @@ function logTtsMode(source: TtsSource, preset: RemoteTtsPreset, mode: "remote" |
 
 function clampPlaybackRate(value: number): number {
   return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, value));
+}
+
+function resolveRemotePlaybackRate(profile: AiVoiceProfile): number {
+  const baseRate = REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE[profile] ?? REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE.balanced;
+  return clampPlaybackRate(baseRate * REMOTE_PLAYBACK_GLOBAL_MULTIPLIER);
 }
 
 function logTtsTiming(payload: {
@@ -137,8 +156,15 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
     params.remoteAiConfigured &&
     (params.allowRemoteTts ?? true) &&
     Platform.OS !== "web";
+  const isCancelled = (): boolean => Boolean(params.abortSignal?.aborted) || Boolean(params.isCancelled?.());
+  const throwIfCancelled = () => {
+    if (isCancelled()) {
+      throw new TtsPlaybackCancelledError();
+    }
+  };
 
   if (shouldAttemptRemote) {
+    throwIfCancelled();
     logTtsMode(params.source, params.preset, "remote", "remoteCallStarted");
     const requestStartedAtMs = Date.now();
     logTtsTiming({
@@ -154,7 +180,9 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         authToken: params.authToken,
         text: params.text,
         preset: params.preset,
+        signal: params.abortSignal,
       });
+      throwIfCancelled();
       const audioBytesReceivedAtMs = Date.now();
       logTtsTiming({
         source: params.source,
@@ -175,6 +203,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
       await FileSystem.writeAsStringAsync(fileUri, bytesToBase64(ttsAudio.bytes), {
         encoding: FileSystem.EncodingType.Base64,
       });
+      throwIfCancelled();
 
       const sound = new Audio.Sound();
       remoteTtsSoundRef.current = sound;
@@ -190,9 +219,10 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         requestMs: audioLoadedAtMs - requestStartedAtMs,
         loadMs: audioLoadedAtMs - audioLoadStartedAtMs,
       });
-      const remotePlaybackRate = clampPlaybackRate(PLAYBACK_RATE);
+      throwIfCancelled();
+      const remotePlaybackRate = resolveRemotePlaybackRate(params.voiceProfile);
       // eslint-disable-next-line no-console
-      console.log(`[TTS-PLAY] rate=${remotePlaybackRate}`);
+      console.log(`[TTS-PLAY] profile=${params.voiceProfile} rate=${remotePlaybackRate}`);
       try {
         await sound.setRateAsync(remotePlaybackRate, true);
       } catch {
@@ -215,6 +245,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         });
         void (async () => {
           try {
+            throwIfCancelled();
             await sound.playAsync();
             const playbackStartedAtMs = Date.now();
             logTtsTiming({
@@ -237,7 +268,14 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         remoteTtsFileRef,
       });
       return;
-    } catch {
+    } catch (error) {
+      if (error instanceof TtsPlaybackCancelledError || isCancelled()) {
+        await stopRemoteTtsPlayback({
+          remoteTtsSoundRef,
+          remoteTtsFileRef,
+        });
+        return;
+      }
       logTtsMode(params.source, params.preset, "fallback", "backendError");
       await stopRemoteTtsPlayback({
         remoteTtsSoundRef,

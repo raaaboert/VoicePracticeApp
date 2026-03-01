@@ -36,10 +36,9 @@ interface SimulationScreenProps {
 const MAX_TURN_DURATION_MS = 15000;
 const MIN_TURN_DURATION_MS = 1200;
 const SILENCE_CUTOFF_MS = 1200;
-const STATUS_POLL_INTERVAL_MS = 250;
+const STATUS_POLL_INTERVAL_MS = 120;
 const VOICE_METER_THRESHOLD_DB = -38;
 const MIN_VOICE_HIT_COUNT = 3;
-const POST_TTS_LISTEN_DELAY_MS = 260;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
@@ -77,12 +76,6 @@ function isPlaceholderTranscriptError(error: unknown): boolean {
     return error.message.toLowerCase().includes("no transcribed user text received");
   }
   return false;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 function isApiError(error: unknown): boolean {
@@ -214,6 +207,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const localModeConfirmedRef = useRef(false);
   const remoteTtsSoundRef = useRef<Audio.Sound | null>(null);
   const remoteTtsFileRef = useRef<string | null>(null);
+  const remoteTtsAbortControllerRef = useRef<AbortController | null>(null);
+  const ttsRequestGenerationRef = useRef(0);
+  const simulationClosedRef = useRef(false);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -310,23 +306,54 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     });
   }, []);
 
+  const cancelPendingTts = useCallback(async (markClosed = false) => {
+    if (markClosed) {
+      simulationClosedRef.current = true;
+    }
+    ttsRequestGenerationRef.current += 1;
+    const activeController = remoteTtsAbortControllerRef.current;
+    remoteTtsAbortControllerRef.current = null;
+    if (activeController) {
+      activeController.abort();
+    }
+    await stopRemoteTtsPlayback();
+    Speech.stop();
+  }, [stopRemoteTtsPlayback]);
+
   const speak = async (text: string, assistantTextReceivedAtMs?: number): Promise<void> => {
-    await speakWithRemoteTtsFallback({
-      source: "simulation",
-      text,
-      preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
-      userId,
-      authToken,
-      remoteTtsEnabled: config.remoteTtsEnabled,
-      remoteAiConfigured: apiConfigured,
-      allowRemoteTts: !useLocalMockMode,
-      voiceGender: config.voiceGender,
-      voiceProfile: config.voiceProfile,
-      selectedVoiceIdentifierRef,
-      remoteTtsSoundRef,
-      remoteTtsFileRef,
-      assistantTextReceivedAtMs,
-    });
+    const requestGeneration = ttsRequestGenerationRef.current;
+    const abortController = new AbortController();
+    const priorController = remoteTtsAbortControllerRef.current;
+    remoteTtsAbortControllerRef.current = abortController;
+    if (priorController) {
+      priorController.abort();
+    }
+
+    try {
+      await speakWithRemoteTtsFallback({
+        source: "simulation",
+        text,
+        preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+        userId,
+        authToken,
+        remoteTtsEnabled: config.remoteTtsEnabled,
+        remoteAiConfigured: apiConfigured,
+        allowRemoteTts: !useLocalMockMode,
+        voiceGender: config.voiceGender,
+        voiceProfile: config.voiceProfile,
+        selectedVoiceIdentifierRef,
+        remoteTtsSoundRef,
+        remoteTtsFileRef,
+        assistantTextReceivedAtMs,
+        abortSignal: abortController.signal,
+        isCancelled: () =>
+          ttsRequestGenerationRef.current !== requestGeneration || simulationClosedRef.current || unmountedRef.current,
+      });
+    } finally {
+      if (remoteTtsAbortControllerRef.current === abortController) {
+        remoteTtsAbortControllerRef.current = null;
+      }
+    }
   };
 
   const setAudioMode = async (allowsRecording: boolean) => {
@@ -442,8 +469,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     }
 
     try {
-      await Speech.stop();
-      await stopRemoteTtsPlayback();
+      await cancelPendingTts();
       await setAudioMode(true);
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
@@ -625,6 +651,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     }
 
     setError(null);
+    simulationClosedRef.current = false;
 
     if (!kickoffSentRef.current) {
       let openingLine = pendingOpeningLineRef.current;
@@ -691,11 +718,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   };
 
   const endSession = async (showEndedText: boolean) => {
+    simulationClosedRef.current = true;
     sessionActiveRef.current = false;
     setSessionActive(false);
     clearTurnMonitoring();
-    Speech.stop();
-    await stopRemoteTtsPlayback();
+    await cancelPendingTts(true);
     await stopRecordingSafely();
 
     if (showEndedText) {
@@ -792,6 +819,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       pendingOpeningLineRef.current = null;
       setElapsedSeconds(0);
       sessionCompletionInProgressRef.current = false;
+      simulationClosedRef.current = false;
 
       if (localTestMode) {
         pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
@@ -846,10 +874,10 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     return () => {
       cancelled = true;
       unmountedRef.current = true;
+      simulationClosedRef.current = true;
       sessionActiveRef.current = false;
       clearTurnMonitoring();
-      Speech.stop();
-      void stopRemoteTtsPlayback();
+      void cancelPendingTts(true);
       void stopRecordingSafely();
       sessionCompletionInProgressRef.current = false;
     };
@@ -863,7 +891,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     submitAutoErrorReport,
     userId,
     logSimulationApiCall,
-    stopRemoteTtsPlayback,
+    cancelPendingTts,
   ]);
 
   useEffect(() => {

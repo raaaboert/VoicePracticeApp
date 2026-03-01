@@ -27,21 +27,21 @@ export const AI_VOICE_OPTIONS: Array<{
   {
     id: "balanced",
     label: "Balanced",
-    description: "Neutral pacing and tone for most scenarios.",
+    description: "Natural pacing with neutral tone for everyday conversations.",
     speechRate: 0.97,
     speechPitch: 1.0,
   },
   {
     id: "warm",
     label: "Warm",
-    description: "Slightly slower and lower tone.",
+    description: "Softer tone with calmer pacing.",
     speechRate: 0.92,
     speechPitch: 0.92,
   },
   {
     id: "bright",
     label: "Bright",
-    description: "Faster and slightly higher tone.",
+    description: "Crisper tone with faster pacing.",
     speechRate: 1.03,
     speechPitch: 1.12,
   },
@@ -157,6 +157,8 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+const GLOBAL_SPEECH_RATE_MULTIPLIER = 1.05;
+
 export function getVoiceSpeechTuning(
   profile: AiVoiceProfile,
   gender: AiVoiceGender,
@@ -177,6 +179,8 @@ export function getVoiceSpeechTuning(
       speechPitch *= 0.76;
     }
   }
+
+  speechRate *= GLOBAL_SPEECH_RATE_MULTIPLIER;
 
   return {
     speechRate: clamp(speechRate, 0.6, 1.4),

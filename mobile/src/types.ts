@@ -58,6 +58,7 @@ export interface SimulationConfig {
   personaStyle: PersonaStyle;
   voiceProfile: AiVoiceProfile;
   voiceGender: AiVoiceGender;
+  remoteTtsEnabled: boolean;
   maxSimulationMinutes: number | null;
 }
 
