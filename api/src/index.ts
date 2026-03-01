@@ -90,6 +90,7 @@ import {
   formatDialogueForEvaluation
 } from "./aiPrompts.js";
 import {
+  OpenAiSpeechRequestError,
   OpenAiResponsesRequestError,
   requestChatCompletion,
   requestResponsesCompletion,
@@ -7115,69 +7116,135 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
 
 app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {
   const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
   // eslint-disable-next-line no-console
   console.log(`[request-hit] route=tts userId=${userId}`);
 
+  const respondWithTtsError = (params: {
+    status: number;
+    message: string;
+    code?: string | null;
+    type?: string | null;
+    openaiStatus?: number;
+    openaiMessage?: string;
+  }) => {
+    const payload: {
+      userId: string;
+      status: number;
+      code: string | null;
+      type: string | null;
+      message: string;
+      route: "tts";
+      correlationId: string;
+      openaiStatus?: number;
+      openaiMessage?: string;
+    } = {
+      userId,
+      status: params.status,
+      code: params.code ?? null,
+      type: params.type ?? null,
+      message: params.message,
+      route: "tts",
+      correlationId
+    };
+    if (typeof params.openaiStatus === "number") {
+      payload.openaiStatus = params.openaiStatus;
+    }
+    if (typeof params.openaiMessage === "string" && params.openaiMessage.trim()) {
+      payload.openaiMessage = params.openaiMessage.trim();
+    }
+    // eslint-disable-next-line no-console
+    console.error("[tts-error]", payload);
+    response.status(params.status).json({ error: params.message });
+  };
+
   if (!ENABLE_REMOTE_TTS) {
-    response.status(501).json({ error: "Remote TTS is disabled for this environment." });
+    respondWithTtsError({
+      status: 501,
+      message: "Remote TTS is disabled for this environment."
+    });
     return;
   }
 
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
-    response.status(401).json({ error: "Missing mobile token." });
+    respondWithTtsError({
+      status: 401,
+      message: "Missing mobile token."
+    });
     return;
   }
 
   if (!isRemoteAiConfigured()) {
-    response.status(503).json({ error: "Remote AI is disabled for this environment." });
+    respondWithTtsError({
+      status: 503,
+      message: "Remote AI is disabled for this environment."
+    });
     return;
   }
 
-  const correlationId = resolveSimulationCorrelationId(request);
   const body = request.body as { text?: unknown; preset?: unknown };
   const preset = parseTtsPreset(body.preset);
   const text = typeof body.text === "string" ? body.text.trim() : "";
 
   if (!preset) {
-    response.status(400).json({
-      error:
+    respondWithTtsError({
+      status: 400,
+      message:
         'preset must be one of: "male-balanced"|"male-warm"|"male-bright"|"female-balanced"|"female-warm"|"female-bright".'
     });
     return;
   }
 
   if (!text) {
-    response.status(400).json({ error: "text is required." });
+    respondWithTtsError({
+      status: 400,
+      message: "text is required."
+    });
     return;
   }
 
   if (text.length > TTS_TEXT_MAX_CHARS) {
-    response.status(400).json({ error: `text must be ${TTS_TEXT_MAX_CHARS} characters or fewer.` });
+    respondWithTtsError({
+      status: 400,
+      message: `text must be ${TTS_TEXT_MAX_CHARS} characters or fewer.`
+    });
     return;
   }
 
   const context = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
-      response.status(404).json({ error: "User not found." });
+      respondWithTtsError({
+        status: 404,
+        message: "User not found."
+      });
       return null;
     }
 
     if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-      response.status(401).json({ error: "Invalid mobile token." });
+      respondWithTtsError({
+        status: 401,
+        message: "Invalid mobile token."
+      });
       return null;
     }
 
     const entitlements = computeEntitlements(db, user, new Date());
     if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      respondWithTtsError({
+        status: 403,
+        message: entitlements.lockReason ?? "Simulation unavailable."
+      });
       return null;
     }
 
     const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
     if (aiBudgetError) {
-      response.status(429).json({ error: aiBudgetError });
+      respondWithTtsError({
+        status: 429,
+        message: aiBudgetError
+      });
       return null;
     }
 
@@ -7190,6 +7257,8 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
 
   try {
     const voice = TTS_VOICE_BY_PRESET[preset];
+    // eslint-disable-next-line no-console
+    console.log("[tts-call]", { userId, voicePreset: preset, provider: "openai", model: OPENAI_TTS_MODEL });
     const ttsResult = await requestSpeechSynthesis({
       model: OPENAI_TTS_MODEL,
       voice,
@@ -7207,7 +7276,22 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     response.status(200).send(ttsResult.audioBuffer);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Text-to-speech failed.";
-    response.status(503).json({ error: message });
+    if (error instanceof OpenAiSpeechRequestError) {
+      respondWithTtsError({
+        status: 503,
+        code: error.errorCode ?? null,
+        type: error.errorType ?? null,
+        message,
+        openaiStatus: error.statusCode,
+        openaiMessage: error.errorMessage
+      });
+      return;
+    }
+
+    respondWithTtsError({
+      status: 503,
+      message
+    });
   }
 });
 

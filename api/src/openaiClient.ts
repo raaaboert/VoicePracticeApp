@@ -107,6 +107,31 @@ export class OpenAiResponsesRequestError extends Error {
   }
 }
 
+export class OpenAiSpeechRequestError extends Error {
+  readonly statusCode?: number;
+  readonly errorType?: string;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+
+  constructor(params: {
+    statusCode?: number;
+    errorType?: string;
+    errorCode?: string;
+    errorMessage?: string;
+  }) {
+    const message =
+      typeof params.errorMessage === "string" && params.errorMessage.trim()
+        ? `OpenAI TTS request failed: ${params.errorMessage.trim()}`
+        : `OpenAI TTS request failed (${params.statusCode ?? "unknown"})`;
+    super(message);
+    this.name = "OpenAiSpeechRequestError";
+    this.statusCode = params.statusCode;
+    this.errorType = params.errorType;
+    this.errorCode = params.errorCode;
+    this.errorMessage = params.errorMessage;
+  }
+}
+
 export async function requestChatCompletion(params: {
   model: string;
   messages: ChatMessage[];
@@ -337,7 +362,34 @@ export async function requestSpeechSynthesis(params: {
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI TTS request failed: ${await parseOpenAiError(response)}`);
+    let errorMessage = response.statusText || "";
+    let errorType: string | undefined;
+    let errorCode: string | undefined;
+
+    try {
+      const payload = (await response.json()) as OpenAiErrorPayload;
+      const maybeMessage = payload.error?.message?.trim();
+      if (maybeMessage) {
+        errorMessage = maybeMessage;
+      }
+      const maybeType = payload.error?.type?.trim();
+      if (maybeType) {
+        errorType = maybeType;
+      }
+      const maybeCode = typeof payload.error?.code === "string" ? payload.error.code.trim() : "";
+      if (maybeCode) {
+        errorCode = maybeCode;
+      }
+    } catch {
+      // Ignore parsing errors and use status text fallback.
+    }
+
+    throw new OpenAiSpeechRequestError({
+      statusCode: response.status,
+      errorType,
+      errorCode,
+      errorMessage: errorMessage || `OpenAI request failed (${response.status})`
+    });
   }
 
   const audioBuffer = Buffer.from(await response.arrayBuffer());
