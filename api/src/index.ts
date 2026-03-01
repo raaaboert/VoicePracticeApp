@@ -206,8 +206,8 @@ type TtsPreset =
 
 const TTS_VOICE_BY_PRESET: Record<TtsPreset, string> = {
   "male-balanced": "onyx",
-  "male-warm": "fable",
-  "male-bright": "echo",
+  "male-warm": "echo",
+  "male-bright": "fable",
   "female-balanced": "nova",
   "female-warm": "shimmer",
   "female-bright": "alloy"

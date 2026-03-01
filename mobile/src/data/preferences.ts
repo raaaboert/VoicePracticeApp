@@ -157,7 +157,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-const GLOBAL_SPEECH_RATE_MULTIPLIER = 1.05;
+const GLOBAL_SPEECH_RATE_MULTIPLIER = 1.03;
 
 export function getVoiceSpeechTuning(
   profile: AiVoiceProfile,

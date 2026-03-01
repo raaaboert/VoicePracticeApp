@@ -16,7 +16,7 @@ const REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE: Record<AiVoiceProfile, number> = {
   balanced: 1.15,
   bright: 1.22,
 };
-const REMOTE_PLAYBACK_GLOBAL_MULTIPLIER = 1.05;
+const REMOTE_PLAYBACK_GLOBAL_MULTIPLIER = 1.03;
 
 interface SpeakWithTtsFallbackParams {
   source: TtsSource;
@@ -35,6 +35,7 @@ interface SpeakWithTtsFallbackParams {
   assistantTextReceivedAtMs?: number;
   abortSignal?: AbortSignal;
   isCancelled?: () => boolean;
+  onPlaybackStart?: (details: { source: TtsSource; mode: "remote" | "fallback"; startedAtMs: number }) => void;
 }
 
 class TtsPlaybackCancelledError extends Error {
@@ -229,6 +230,23 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         // Ignore rate-control errors and continue with default playback speed.
       }
       await new Promise<void>((resolve, reject) => {
+        let playbackStartedMarked = false;
+        const markPlaybackStarted = (startedAtMs: number) => {
+          if (playbackStartedMarked) {
+            return;
+          }
+          playbackStartedMarked = true;
+          logTtsTiming({
+            source: params.source,
+            preset: params.preset,
+            phase: "play_started",
+            assistantTextReceivedAtMs,
+            tsMs: startedAtMs,
+            requestMs: startedAtMs - requestStartedAtMs,
+            startupMs: startedAtMs - audioLoadedAtMs,
+          });
+          params.onPlaybackStart?.({ source: params.source, mode: "remote", startedAtMs });
+        };
         sound.setOnPlaybackStatusUpdate((status) => {
           if (!status.isLoaded) {
             if (status.error) {
@@ -239,6 +257,10 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
             return;
           }
 
+          if (status.isPlaying) {
+            markPlaybackStarted(Date.now());
+          }
+
           if (status.didJustFinish) {
             resolve();
           }
@@ -247,16 +269,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           try {
             throwIfCancelled();
             await sound.playAsync();
-            const playbackStartedAtMs = Date.now();
-            logTtsTiming({
-              source: params.source,
-              preset: params.preset,
-              phase: "play_started",
-              assistantTextReceivedAtMs,
-              tsMs: playbackStartedAtMs,
-              requestMs: playbackStartedAtMs - requestStartedAtMs,
-              startupMs: playbackStartedAtMs - audioLoadedAtMs,
-            });
+            markPlaybackStarted(Date.now());
           } catch (playbackError) {
             reject(playbackError instanceof Error ? playbackError : new Error("TTS playback failed."));
           }
@@ -299,6 +312,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
   const voiceTuning = getVoiceSpeechTuning(params.voiceProfile, params.voiceGender);
   await new Promise<void>((resolve) => {
     Speech.stop();
+    params.onPlaybackStart?.({ source: params.source, mode: "fallback", startedAtMs: Date.now() });
     Speech.speak(params.text, {
       language: "en-US",
       voice: selectedVoiceIdentifierRef.current,

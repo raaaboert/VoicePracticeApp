@@ -320,7 +320,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     Speech.stop();
   }, [stopRemoteTtsPlayback]);
 
-  const speak = async (text: string, assistantTextReceivedAtMs?: number): Promise<void> => {
+  const speak = async (
+    text: string,
+    assistantTextReceivedAtMs?: number,
+    onPlaybackStart?: () => void,
+  ): Promise<void> => {
     const requestGeneration = ttsRequestGenerationRef.current;
     const abortController = new AbortController();
     const priorController = remoteTtsAbortControllerRef.current;
@@ -348,6 +352,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         abortSignal: abortController.signal,
         isCancelled: () =>
           ttsRequestGenerationRef.current !== requestGeneration || simulationClosedRef.current || unmountedRef.current,
+        onPlaybackStart: () => {
+          onPlaybackStart?.();
+        },
       });
     } finally {
       if (remoteTtsAbortControllerRef.current === abortController) {
@@ -608,11 +615,25 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               tsMs: assistantTextReceivedAtMs,
               elapsedMs: 0,
             });
-            const speakPromise = speak(reply, assistantTextReceivedAtMs);
+            const assistantMessage = { id: createMessageId(), role: "assistant" as const, content: reply };
+            let assistantMessageShown = false;
+            const showAssistantMessage = () => {
+              if (assistantMessageShown || unmountedRef.current || simulationClosedRef.current) {
+                return;
+              }
+              assistantMessageShown = true;
+              appendMessage(assistantMessage);
+            };
+            const playbackStartFallback = setTimeout(showAssistantMessage, 2500);
+            const speakPromise = speak(reply, assistantTextReceivedAtMs, () => {
+              clearTimeout(playbackStartFallback);
+              showAssistantMessage();
+            });
             setMode("speaking");
             setStatus("AI is speaking...");
-            appendMessage({ id: createMessageId(), role: "assistant", content: reply });
             await speakPromise;
+            clearTimeout(playbackStartFallback);
+            showAssistantMessage();
           }
         }
       } else {
@@ -694,17 +715,27 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           tsMs: assistantTextReceivedAtMs,
           elapsedMs: 0,
         });
-        const speakPromise = speak(openingLine, assistantTextReceivedAtMs);
+        const openingAssistantMessage = { id: createMessageId(), role: "assistant" as const, content: openingLine };
+        let openingMessageShown = false;
+        const showOpeningMessage = () => {
+          if (openingMessageShown || unmountedRef.current || simulationClosedRef.current) {
+            return;
+          }
+          openingMessageShown = true;
+          appendMessage(openingAssistantMessage);
+        };
+        const playbackStartFallback = setTimeout(showOpeningMessage, 2500);
+        const speakPromise = speak(openingLine, assistantTextReceivedAtMs, () => {
+          clearTimeout(playbackStartFallback);
+          showOpeningMessage();
+        });
         pendingOpeningLineRef.current = null;
         kickoffSentRef.current = true;
         setMode("speaking");
         setStatus("AI is speaking...");
-        appendMessage({
-          id: createMessageId(),
-          role: "assistant",
-          content: openingLine,
-        });
         await speakPromise;
+        clearTimeout(playbackStartFallback);
+        showOpeningMessage();
       }
     }
 
