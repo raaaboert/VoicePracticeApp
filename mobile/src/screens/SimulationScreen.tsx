@@ -13,7 +13,7 @@ import {
   createLocalAssistantReply,
   createLocalOpeningLine,
 } from "../lib/mockAi";
-import { createSupportCase } from "../lib/api";
+import { createSupportCase, getApiBaseUrl } from "../lib/api";
 import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
 import { DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
@@ -184,6 +184,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     [config.voiceGender, config.voiceProfile],
   );
   const localTestMode = !apiConfigured || useLocalMockMode;
+  const logSimulationApiCall = useCallback((callName: string) => {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[simulation-api] call=${callName} apiBaseUrl=${getApiBaseUrl() || "(empty)"} remoteConfigured=${apiConfigured} localMockMode=${useLocalMockMode} localTestMode=${localTestMode}`,
+    );
+  }, [apiConfigured, localTestMode, useLocalMockMode]);
   const selectedVoiceIdentifierRef = useRef<string | undefined>(undefined);
   const messagesRef = useRef<DialogueMessage[]>([]);
   const recordingRef = useRef<Audio.Recording | null>(null);
@@ -267,6 +273,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       }
 
       try {
+        logSimulationApiCall("createSupportCase");
         await createSupportCase({
           userId,
           authToken,
@@ -277,7 +284,16 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         // Best-effort only.
       }
     },
-    [authToken, config.difficulty, config.personaStyle, config.scenario.id, config.scenario.segmentId, config.scenario.title, userId],
+    [
+      authToken,
+      config.difficulty,
+      config.personaStyle,
+      config.scenario.id,
+      config.scenario.segmentId,
+      config.scenario.title,
+      userId,
+      logSimulationApiCall,
+    ],
   );
 
   const appendMessage = (message: DialogueMessage) => {
@@ -492,6 +508,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
       if (useLiveApiThisTurn && shouldAttemptTranscription) {
         try {
+          logSimulationApiCall("transcribeAudio");
           userText = (
             await transcribeAudio({
               userId,
@@ -526,7 +543,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
         if (sessionActiveRef.current && !unmountedRef.current) {
           const reply = useLiveApiThisTurn
-            ? await generateAssistantReply({
+            ? (logSimulationApiCall("generateAssistantReply"),
+              await generateAssistantReply({
                 userId,
                 authToken,
                 scenario: config.scenario,
@@ -536,7 +554,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
                 segmentLabel: config.segmentLabel,
                 personaStyle: config.personaStyle,
                 history: [...messagesRef.current],
-              })
+              }))
             : createLocalAssistantReply({
                 scenario: config.scenario,
                 difficulty: config.difficulty,
@@ -600,6 +618,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
         } else {
           try {
+            logSimulationApiCall("createOpeningLine:startSession");
             openingLine = await createOpeningLine({
               userId,
               authToken,
@@ -757,6 +776,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       }
 
       try {
+        logSimulationApiCall("createOpeningLine:initialize");
         const openingLine = await createOpeningLine({
           userId,
           authToken,
@@ -815,6 +835,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     config.segmentLabel,
     submitAutoErrorReport,
     userId,
+    logSimulationApiCall,
   ]);
 
   useEffect(() => {

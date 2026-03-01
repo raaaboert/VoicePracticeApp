@@ -6926,6 +6926,8 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
   }
 
   const userId = request.params.userId;
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=transcribe userId=${userId}`);
   const file = (request as unknown as { file?: { buffer: Buffer; originalname: string; mimetype: string } }).file;
   if (!file?.buffer) {
     response.status(400).json({ error: "Audio file is required." });
@@ -7326,6 +7328,8 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
   }
 
   const userId = request.params.userId;
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=opening userId=${userId}`);
   const body = request.body as {
     scenarioId?: string;
     difficulty?: unknown;
@@ -7516,6 +7520,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   }
 
   const userId = request.params.userId;
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=turn userId=${userId}`);
   const body = request.body as {
     scenarioId?: string;
     difficulty?: unknown;
@@ -7741,6 +7747,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   }
 
   const userId = request.params.userId;
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=score userId=${userId}`);
   const body = request.body as {
     scenarioId?: string;
     difficulty?: unknown;

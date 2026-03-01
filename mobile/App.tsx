@@ -63,6 +63,7 @@ import {
   updateOrgAdminOrgSettings,
   updateMobileSettings,
   verifyMobileEmail,
+  getApiBaseUrl,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
@@ -707,6 +708,17 @@ export default function App() {
   const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
+
+  useEffect(() => {
+    const resolvedApiBaseUrl = getApiBaseUrl();
+    const remoteEnabledRaw = process.env.EXPO_PUBLIC_REMOTE_AI_ENABLED;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[runtime-startup] apiBaseUrl=${resolvedApiBaseUrl || "(empty)"} remoteEnabledRaw=${String(
+        remoteEnabledRaw,
+      )} remoteEnabled=${apiConfigured} __DEV__=${__DEV__}`,
+    );
+  }, [apiConfigured]);
 
   const enabledSegments = useMemo(
     () => config?.segments?.filter((segment) => segment.enabled) ?? [],
