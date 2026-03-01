@@ -310,16 +310,29 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
 
   const voiceTuning = getVoiceSpeechTuning(params.voiceProfile, params.voiceGender);
   await new Promise<void>((resolve) => {
+    let playbackStartedMarked = false;
+    const markPlaybackStarted = () => {
+      if (playbackStartedMarked) {
+        return;
+      }
+      playbackStartedMarked = true;
+      params.onPlaybackStart?.({ source: params.source, mode: "fallback", startedAtMs: Date.now() });
+    };
     Speech.stop();
-    params.onPlaybackStart?.({ source: params.source, mode: "fallback", startedAtMs: Date.now() });
     Speech.speak(params.text, {
       language: "en-US",
       voice: selectedVoiceIdentifierRef.current,
       rate: voiceTuning.speechRate,
       pitch: voiceTuning.speechPitch,
+      onStart: () => {
+        markPlaybackStarted();
+      },
       onDone: () => resolve(),
       onStopped: () => resolve(),
-      onError: () => resolve(),
+      onError: () => {
+        markPlaybackStarted();
+        resolve();
+      },
     });
   });
 }

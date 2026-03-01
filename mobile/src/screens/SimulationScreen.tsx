@@ -41,6 +41,10 @@ const VOICE_METER_THRESHOLD_DB = -38;
 const MIN_VOICE_HIT_COUNT = 3;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
+const FAST_START_MIN_TOTAL_CHARS = 260;
+const FAST_START_MIN_FIRST_CHARS = 160;
+const FAST_START_MAX_FIRST_CHARS = 300;
+const FAST_START_MIN_REMAINDER_CHARS = 90;
 
 const COLORS = {
   panel: "rgba(17, 37, 64, 0.84)",
@@ -164,6 +168,41 @@ function formatDurationClock(totalSeconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function splitAssistantSpeechForFastStart(text: string): string[] {
+  const trimmed = text.trim();
+  if (trimmed.length < FAST_START_MIN_TOTAL_CHARS) {
+    return [text];
+  }
+
+  const maxFirstBoundaryIndex = Math.min(
+    FAST_START_MAX_FIRST_CHARS - 1,
+    trimmed.length - FAST_START_MIN_REMAINDER_CHARS - 1,
+  );
+  if (maxFirstBoundaryIndex < FAST_START_MIN_FIRST_CHARS - 1) {
+    return [text];
+  }
+
+  let boundaryIndex = -1;
+  for (let index = FAST_START_MIN_FIRST_CHARS - 1; index <= maxFirstBoundaryIndex; index += 1) {
+    const char = trimmed[index];
+    if (char === "." || char === "!" || char === "?") {
+      boundaryIndex = index + 1;
+    }
+  }
+
+  if (boundaryIndex === -1) {
+    return [text];
+  }
+
+  const firstChunk = trimmed.slice(0, boundaryIndex).trim();
+  const remainderChunk = trimmed.slice(boundaryIndex).trim();
+  if (!firstChunk || remainderChunk.length < FAST_START_MIN_REMAINDER_CHARS) {
+    return [text];
+  }
+
+  return [firstChunk, remainderChunk];
+}
+
 export function SimulationScreen({ config, userId, authToken, onExit, onSessionComplete }: SimulationScreenProps) {
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [mode, setMode] = useState<OrbMode>("thinking");
@@ -177,6 +216,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
   const voiceOption = useMemo(() => getAiVoiceOption(config.voiceProfile), [config.voiceProfile]);
   const localTestMode = !apiConfigured || useLocalMockMode;
+  const shouldUseFastStartRemoteTts =
+    config.remoteTtsEnabled &&
+    apiConfigured &&
+    !useLocalMockMode &&
+    Platform.OS !== "web";
   const logSimulationApiCall = useCallback((callName: string) => {
     // eslint-disable-next-line no-console
     console.log(
@@ -320,7 +364,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     Speech.stop();
   }, [stopRemoteTtsPlayback]);
 
-  const speak = async (
+  const speakSingleUtterance = async (
     text: string,
     assistantTextReceivedAtMs?: number,
     onPlaybackStart?: () => void,
@@ -359,6 +403,38 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     } finally {
       if (remoteTtsAbortControllerRef.current === abortController) {
         remoteTtsAbortControllerRef.current = null;
+      }
+    }
+  };
+
+  const speakAssistantResponse = async (
+    text: string,
+    assistantTextReceivedAtMs?: number,
+    onPlaybackStart?: () => void,
+  ): Promise<void> => {
+    const chunks = shouldUseFastStartRemoteTts ? splitAssistantSpeechForFastStart(text) : [text];
+    let playbackStartHandled = false;
+    const handlePlaybackStart = () => {
+      if (playbackStartHandled) {
+        return;
+      }
+      playbackStartHandled = true;
+      onPlaybackStart?.();
+    };
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      await speakSingleUtterance(
+        chunk,
+        index === 0 ? assistantTextReceivedAtMs : Date.now(),
+        () => {
+          if (index === 0) {
+            handlePlaybackStart();
+          }
+        },
+      );
+      if (index === 0) {
+        handlePlaybackStart();
       }
     }
   };
@@ -624,7 +700,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               assistantMessageShown = true;
               appendMessage(assistantMessage);
             };
-            const speakPromise = speak(reply, assistantTextReceivedAtMs, () => {
+            const speakPromise = speakAssistantResponse(reply, assistantTextReceivedAtMs, () => {
               showAssistantMessage();
             });
             setMode("speaking");
@@ -721,7 +797,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           openingMessageShown = true;
           appendMessage(openingAssistantMessage);
         };
-        const speakPromise = speak(openingLine, assistantTextReceivedAtMs, () => {
+        const speakPromise = speakAssistantResponse(openingLine, assistantTextReceivedAtMs, () => {
           showOpeningMessage();
         });
         pendingOpeningLineRef.current = null;
