@@ -41,6 +41,7 @@ mobile/.expo-start.log
 tmp-*.png
 tmp_app_bundle.js
 mobile/*log*.txt
+logcat.txt
 docs/*.docx
 scripts/generate_state_summary_doc.py
 

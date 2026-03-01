@@ -45,6 +45,14 @@ interface ResponsesCompletionResponse {
   model?: string;
 }
 
+interface OpenAiErrorPayload {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string | null;
+  };
+}
+
 interface TranscriptionResponse {
   text?: string;
 }
@@ -70,6 +78,31 @@ async function parseOpenAiError(response: Response): Promise<string> {
   }
 
   return response.statusText || `OpenAI request failed (${response.status})`;
+}
+
+export class OpenAiResponsesRequestError extends Error {
+  readonly statusCode?: number;
+  readonly errorType?: string;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+
+  constructor(params: {
+    statusCode?: number;
+    errorType?: string;
+    errorCode?: string;
+    errorMessage?: string;
+  }) {
+    const message =
+      typeof params.errorMessage === "string" && params.errorMessage.trim()
+        ? `OpenAI responses request failed: ${params.errorMessage.trim()}`
+        : `OpenAI responses request failed (${params.statusCode ?? "unknown"})`;
+    super(message);
+    this.name = "OpenAiResponsesRequestError";
+    this.statusCode = params.statusCode;
+    this.errorType = params.errorType;
+    this.errorCode = params.errorCode;
+    this.errorMessage = params.errorMessage;
+  }
 }
 
 export async function requestChatCompletion(params: {
@@ -193,7 +226,34 @@ export async function requestResponsesCompletion(params: {
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI responses request failed: ${await parseOpenAiError(response)}`);
+    let errorMessage = response.statusText || "";
+    let errorType: string | undefined;
+    let errorCode: string | undefined;
+
+    try {
+      const payload = (await response.json()) as OpenAiErrorPayload;
+      const maybeMessage = payload.error?.message?.trim();
+      if (maybeMessage) {
+        errorMessage = maybeMessage;
+      }
+      const maybeType = payload.error?.type?.trim();
+      if (maybeType) {
+        errorType = maybeType;
+      }
+      const maybeCode = typeof payload.error?.code === "string" ? payload.error.code.trim() : "";
+      if (maybeCode) {
+        errorCode = maybeCode;
+      }
+    } catch {
+      // Ignore parsing errors and use status text fallback.
+    }
+
+    throw new OpenAiResponsesRequestError({
+      statusCode: response.status,
+      errorType,
+      errorCode,
+      errorMessage: errorMessage || `OpenAI request failed (${response.status})`
+    });
   }
 
   const payload = (await response.json()) as ResponsesCompletionResponse;

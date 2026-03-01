@@ -89,7 +89,12 @@ import {
   buildRoleplaySystemPrompt,
   formatDialogueForEvaluation
 } from "./aiPrompts.js";
-import { requestChatCompletion, requestResponsesCompletion, requestTranscription } from "./openaiClient.js";
+import {
+  OpenAiResponsesRequestError,
+  requestChatCompletion,
+  requestResponsesCompletion,
+  requestTranscription
+} from "./openaiClient.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
@@ -290,6 +295,7 @@ async function requestSimulationCompletion(params: {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   maxOutputTokens: number;
   temperature?: number;
+  correlationId: string;
 }): Promise<{ completion: SimulationCompletionResult; latencyMs: number; apiPathUsed: SimulationApiPath }> {
   const requestStartedAt = Date.now();
   const requestedModel = OPENAI_SIMULATION_MODEL;
@@ -321,6 +327,39 @@ async function requestSimulationCompletion(params: {
 
     return { completion, latencyMs, apiPathUsed };
   } catch (error) {
+    if (apiPathUsed === "responses") {
+      const details =
+        error instanceof OpenAiResponsesRequestError
+          ? {
+              statusCode: error.statusCode ?? null,
+              errorType: error.errorType ?? null,
+              errorCode: error.errorCode ?? null,
+              errorMessage: error.errorMessage ?? error.message
+            }
+          : {
+              statusCode: null,
+              errorType: null,
+              errorCode: null,
+              errorMessage: error instanceof Error ? error.message : String(error)
+            };
+
+      // eslint-disable-next-line no-console
+      console.error(
+        `[ai-responses-error] ${JSON.stringify({
+          event: "ai-responses-error",
+          correlationId: params.correlationId,
+          route: params.route,
+          requestedModel,
+          statusCode: details.statusCode,
+          openAiError: {
+            type: details.errorType,
+            code: details.errorCode,
+            message: details.errorMessage
+          }
+        })}`
+      );
+    }
+
     logSimulationAiMetrics({
       route: params.route,
       startedAtMs: requestStartedAt,
@@ -483,6 +522,30 @@ function resolveSimulationSessionId(request: Request, body: Record<string, unkno
   }
 
   return "unknown";
+}
+
+function resolveSimulationCorrelationId(request: Request): string {
+  const correlationHeader =
+    typeof request.headers["x-correlation-id"] === "string"
+      ? request.headers["x-correlation-id"].trim()
+      : Array.isArray(request.headers["x-correlation-id"])
+        ? request.headers["x-correlation-id"][0]?.trim() ?? ""
+        : "";
+  if (correlationHeader) {
+    return correlationHeader.slice(0, 80);
+  }
+
+  const requestHeader =
+    typeof request.headers["x-request-id"] === "string"
+      ? request.headers["x-request-id"].trim()
+      : Array.isArray(request.headers["x-request-id"])
+        ? request.headers["x-request-id"][0]?.trim() ?? ""
+        : "";
+  if (requestHeader) {
+    return requestHeader.slice(0, 80);
+  }
+
+  return `cid_${uuid().replace(/-/g, "").slice(0, 10)}`;
 }
 
 function logSimulationUserTextDiagnostics(params: {
@@ -7328,6 +7391,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
   }
 
   const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
   // eslint-disable-next-line no-console
   console.log(`[request-hit] route=opening userId=${userId}`);
   const body = request.body as {
@@ -7443,7 +7507,8 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
         { role: "user", content: prompts.openingPrompt }
       ],
       maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
-      temperature: 0.8
+      temperature: 0.8,
+      correlationId
     });
 
     try {
@@ -7520,6 +7585,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   }
 
   const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
   // eslint-disable-next-line no-console
   console.log(`[request-hit] route=turn userId=${userId}`);
   const body = request.body as {
@@ -7669,7 +7735,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         ...history.map((message) => ({ role: message.role, content: message.content }))
       ],
       maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
-      temperature
+      temperature,
+      correlationId
     });
 
     try {
@@ -7747,6 +7814,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   }
 
   const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
   // eslint-disable-next-line no-console
   console.log(`[request-hit] route=score userId=${userId}`);
   const body = request.body as {
@@ -7917,7 +7985,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
         { role: "user", content: `Conversation transcript:\n${transcript}` }
       ],
       maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE),
-      temperature: 0.2
+      temperature: 0.2,
+      correlationId
     });
     const aiDetails = buildPersistedSimulationAiDetails({
       requestedModel: OPENAI_SIMULATION_MODEL,
