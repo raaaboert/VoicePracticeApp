@@ -624,15 +624,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               assistantMessageShown = true;
               appendMessage(assistantMessage);
             };
-            const playbackStartFallback = setTimeout(showAssistantMessage, 2500);
             const speakPromise = speak(reply, assistantTextReceivedAtMs, () => {
-              clearTimeout(playbackStartFallback);
               showAssistantMessage();
             });
             setMode("speaking");
             setStatus("AI is speaking...");
             await speakPromise;
-            clearTimeout(playbackStartFallback);
             showAssistantMessage();
           }
         }
@@ -724,9 +721,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           openingMessageShown = true;
           appendMessage(openingAssistantMessage);
         };
-        const playbackStartFallback = setTimeout(showOpeningMessage, 2500);
         const speakPromise = speak(openingLine, assistantTextReceivedAtMs, () => {
-          clearTimeout(playbackStartFallback);
           showOpeningMessage();
         });
         pendingOpeningLineRef.current = null;
@@ -734,7 +729,6 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         setMode("speaking");
         setStatus("AI is speaking...");
         await speakPromise;
-        clearTimeout(playbackStartFallback);
         showOpeningMessage();
       }
     }

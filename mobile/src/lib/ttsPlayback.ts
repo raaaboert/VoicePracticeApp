@@ -269,7 +269,6 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           try {
             throwIfCancelled();
             await sound.playAsync();
-            markPlaybackStarted(Date.now());
           } catch (playbackError) {
             reject(playbackError instanceof Error ? playbackError : new Error("TTS playback failed."));
           }
