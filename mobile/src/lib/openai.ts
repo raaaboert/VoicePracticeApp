@@ -5,6 +5,12 @@ import { fetchAiOpeningLine, fetchAiScore, fetchAiTurn, transcribeAudioViaApi } 
 // Remote AI calls now go through the Node API. This flag simply controls whether the app
 // should attempt calling the backend or stay in local test mode.
 const REMOTE_AI_ENABLED = process.env.EXPO_PUBLIC_REMOTE_AI_ENABLED === "true";
+if (__DEV__) {
+  // eslint-disable-next-line no-console
+  console.log(
+    `[openai-config] EXPO_PUBLIC_REMOTE_AI_ENABLED=${String(process.env.EXPO_PUBLIC_REMOTE_AI_ENABLED)} resolvedRemote=${REMOTE_AI_ENABLED}`,
+  );
+}
 
 export function isOpenAiConfigured(): boolean {
   return REMOTE_AI_ENABLED;

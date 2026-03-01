@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as Speech from "expo-speech";
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
   getAiVoiceOption,
@@ -55,11 +55,24 @@ function createMessageId(): string {
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    if (message.toLowerCase().includes("no transcribed user text received")) {
+      return "No transcribed user text received; check remote mode / transcription.";
+    }
+    if (message) {
+      return message;
+    }
   }
 
   return fallback;
+}
+
+function isPlaceholderTranscriptError(error: unknown): boolean {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.toLowerCase().includes("no transcribed user text received");
+  }
+  return false;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -192,6 +205,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const kickoffSentRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
+  const localModeConfirmedRef = useRef(false);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -549,6 +563,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       continueLoop = sessionActiveRef.current;
     } catch (turnError) {
       setError(getErrorMessage(turnError, "Could not process voice response."));
+      if (isPlaceholderTranscriptError(turnError)) {
+        setStatus("Transcription missing. Please verify REMOTE mode.");
+      }
       void submitAutoErrorReport("simulation.turn_finalize", turnError);
       continueLoop = sessionActiveRef.current;
     } finally {
@@ -678,6 +695,32 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       return;
     }
 
+    if (!apiConfigured && !localModeConfirmedRef.current) {
+      if (Platform.OS === "web") {
+        localModeConfirmedRef.current = true;
+        setError("Remote AI is disabled. Press Start Continuous Mode again to confirm LOCAL TEST mode.");
+        return;
+      }
+
+        Alert.alert(
+          "Remote AI disabled",
+          "This build is in LOCAL TEST mode. Transcripts may use placeholders and simulation quality results are not valid. Continue anyway?",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Continue",
+              style: "destructive",
+              onPress: () => {
+                localModeConfirmedRef.current = true;
+                void startSession();
+              },
+            },
+          ],
+          { cancelable: true },
+        );
+        return;
+    }
+
     await startSession();
   };
 
@@ -700,6 +743,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       setMessages([]);
       setError(null);
       kickoffSentRef.current = false;
+      localModeConfirmedRef.current = false;
       pendingOpeningLineRef.current = null;
       setElapsedSeconds(0);
       sessionCompletionInProgressRef.current = false;
@@ -872,6 +916,21 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           AI voice: {config.voiceGender === "male" ? "Male" : "Female"} {voiceOption.label}
         </Text>
       </View>
+
+      {__DEV__ ? (
+        <View style={[styles.debugModeCard, localTestMode ? styles.debugModeLocal : styles.debugModeRemote]}>
+          <Text style={styles.debugModeText}>Mode: {localTestMode ? "LOCAL TEST" : "REMOTE"}</Text>
+        </View>
+      ) : null}
+
+      {!apiConfigured ? (
+        <View style={styles.warningCard}>
+          <Text style={styles.warningText}>
+            Remote AI is disabled for this build. This session runs in LOCAL TEST mode unless rebuilt with
+            EXPO_PUBLIC_REMOTE_AI_ENABLED=true.
+          </Text>
+        </View>
+      ) : null}
 
       <VoiceOrb mode={mode} />
       <Text style={styles.status}>{status}</Text>
@@ -1057,6 +1116,42 @@ const styles = StyleSheet.create({
   errorText: {
     color: COLORS.danger,
     fontSize: 13,
+  },
+  warningCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255, 203, 107, 0.6)",
+    backgroundColor: "rgba(84, 53, 7, 0.62)",
+    padding: 10,
+    marginBottom: 10,
+  },
+  warningText: {
+    color: "#ffd992",
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: "700",
+  },
+  debugModeCard: {
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+    alignSelf: "center",
+  },
+  debugModeRemote: {
+    borderColor: "rgba(62, 214, 166, 0.6)",
+    backgroundColor: "rgba(8, 77, 58, 0.55)",
+  },
+  debugModeLocal: {
+    borderColor: "rgba(255, 124, 124, 0.6)",
+    backgroundColor: "rgba(97, 23, 23, 0.58)",
+  },
+  debugModeText: {
+    color: COLORS.text,
+    fontWeight: "800",
+    fontSize: 12,
+    letterSpacing: 0.5,
   },
   chatCard: {
     minHeight: 230,

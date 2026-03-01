@@ -259,8 +259,14 @@ const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
 function getErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    if (message.toLowerCase().includes("no transcribed user text received")) {
+      return "No transcribed user text received; check remote mode / transcription.";
+    }
+    if (message) {
+      return message;
+    }
   }
 
   return fallback;

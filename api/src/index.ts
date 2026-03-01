@@ -151,6 +151,17 @@ const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN = 800;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE = 1200;
+const PROCESS_STARTED_AT = new Date().toISOString();
+const BUILD_TIMESTAMP =
+  process.env.BUILD_TIMESTAMP?.trim() ||
+  process.env.RENDER_BUILD_TIMESTAMP?.trim() ||
+  process.env.RENDER_DEPLOY_STARTED_AT?.trim() ||
+  PROCESS_STARTED_AT;
+const GIT_SHA =
+  process.env.GIT_SHA?.trim() ||
+  process.env.RENDER_GIT_COMMIT?.trim() ||
+  process.env.COMMIT_SHA?.trim() ||
+  "unknown";
 const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
 const WARNING_LOG_THROTTLE_MS = 60_000;
@@ -174,6 +185,7 @@ const TRANSIENT_DATABASE_ERROR_PATTERNS = [
   "self-signed certificate in certificate chain"
 ];
 const warningLogByKey = new Map<string, number>();
+const PLACEHOLDER_USER_TEXT_PATTERN = /^voice input captured/i;
 const trainingPackStore = createTrainingPackStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
@@ -226,15 +238,193 @@ function logSimulationAiMetrics(
       totalTokens: number;
     };
   }
-): void {
+): number {
+  const latencyMs = Math.max(0, Date.now() - startedAtMs);
+  if (runtimeConfig.isProduction) {
+    return latencyMs;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[ai-simulation] route=${route} requestedModel=${requestedModel} responseModel=${completion.model} latencyMs=${latencyMs} tokens=input:${completion.usage.inputTokens},output:${completion.usage.outputTokens},total:${completion.usage.totalTokens}`
+  );
+  return latencyMs;
+}
+
+interface PersistedSimulationAiDetails {
+  requestedModel: string;
+  responseModel: string;
+  tokenUsage: {
+    inputTokens: number | "unknown";
+    outputTokens: number | "unknown";
+    totalTokens: number | "unknown";
+  };
+  latencyMs: number | "unknown";
+}
+
+function toKnownModel(value: unknown): string {
+  if (typeof value !== "string") {
+    return "unknown";
+  }
+  const trimmed = value.trim();
+  return trimmed || "unknown";
+}
+
+function toKnownToken(value: unknown): number | "unknown" {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return "unknown";
+  }
+  return Math.floor(value);
+}
+
+function toKnownLatency(value: unknown): number | "unknown" {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return "unknown";
+  }
+  return Math.floor(value);
+}
+
+function toUsageEventToken(value: number | "unknown"): number {
+  return typeof value === "number" ? value : 0;
+}
+
+function buildPersistedSimulationAiDetails(params: {
+  requestedModel: string;
+  responseModel: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  } | null;
+  latencyMs?: number;
+}): PersistedSimulationAiDetails {
+  return {
+    requestedModel: toKnownModel(params.requestedModel),
+    responseModel: toKnownModel(params.responseModel),
+    tokenUsage: {
+      inputTokens: toKnownToken(params.usage?.inputTokens),
+      outputTokens: toKnownToken(params.usage?.outputTokens),
+      totalTokens: toKnownToken(params.usage?.totalTokens)
+    },
+    latencyMs: toKnownLatency(params.latencyMs)
+  };
+}
+
+function redactUserTextPreview(value: string | null | undefined): string {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
+    .replace(/\b\d{5,}\b/g, "[number]")
+    .trim()
+    .slice(0, 60);
+}
+
+function getLatestUserTextFromHistory(history: DialogueTurn[]): string | null {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const turn = history[index];
+    if (turn.role === "user") {
+      return turn.content;
+    }
+  }
+  return null;
+}
+
+function hasPlaceholderOrMissingUserText(text: string | null | undefined): boolean {
+  if (typeof text !== "string") {
+    return true;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return PLACEHOLDER_USER_TEXT_PATTERN.test(trimmed);
+}
+
+function detectSimulationPayloadType(
+  request: Request,
+  body: Record<string, unknown>
+): { hasAudioPayload: boolean; hasTranscriptionPayload: boolean; hasTextPayload: boolean; mode: string } {
+  const fileCarrier = request as Request & { file?: unknown };
+  const transcriptPayload = body.transcript;
+  const hasAudioPayload =
+    Boolean(fileCarrier.file) ||
+    typeof body.audio === "string" ||
+    typeof body.audioUri === "string" ||
+    typeof body.audioBase64 === "string";
+  const hasTranscriptionPayload =
+    typeof transcriptPayload === "string" ||
+    (Boolean(transcriptPayload) &&
+      typeof transcriptPayload === "object" &&
+      typeof (transcriptPayload as { text?: unknown }).text === "string");
+  const hasTextPayload = Array.isArray(body.history) || typeof body.text === "string";
+
+  const mode = hasAudioPayload
+    ? "audio"
+    : hasTranscriptionPayload
+      ? "transcription"
+      : hasTextPayload
+        ? "text"
+        : "unknown";
+
+  return { hasAudioPayload, hasTranscriptionPayload, hasTextPayload, mode };
+}
+
+function resolveSimulationSessionId(request: Request, body: Record<string, unknown>): string {
+  const bodySessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+  if (bodySessionId) {
+    return bodySessionId.slice(0, 120);
+  }
+
+  const headerSessionId =
+    typeof request.headers["x-session-id"] === "string"
+      ? request.headers["x-session-id"].trim()
+      : Array.isArray(request.headers["x-session-id"])
+        ? request.headers["x-session-id"][0]?.trim() ?? ""
+        : "";
+  if (headerSessionId) {
+    return headerSessionId.slice(0, 120);
+  }
+
+  const headerRequestId =
+    typeof request.headers["x-request-id"] === "string"
+      ? request.headers["x-request-id"].trim()
+      : Array.isArray(request.headers["x-request-id"])
+        ? request.headers["x-request-id"][0]?.trim() ?? ""
+        : "";
+  if (headerRequestId) {
+    return headerRequestId.slice(0, 120);
+  }
+
+  return "unknown";
+}
+
+function logSimulationUserTextDiagnostics(params: {
+  route: "turn" | "score";
+  sessionId: string;
+  userText: string | null;
+  placeholderDetected: boolean;
+  payloadType: {
+    hasAudioPayload: boolean;
+    hasTranscriptionPayload: boolean;
+    hasTextPayload: boolean;
+    mode: string;
+  };
+}): void {
   if (runtimeConfig.isProduction) {
     return;
   }
 
-  const latencyMs = Math.max(0, Date.now() - startedAtMs);
   // eslint-disable-next-line no-console
   console.log(
-    `[ai-simulation] route=${route} requestedModel=${requestedModel} responseModel=${completion.model} latencyMs=${latencyMs} tokens=input:${completion.usage.inputTokens},output:${completion.usage.outputTokens},total:${completion.usage.totalTokens}`
+    `[ai-simulation-input] route=${params.route} sessionId=${params.sessionId} userTextLength=${params.userText?.length ?? 0} userTextPreview=${JSON.stringify(
+      redactUserTextPreview(params.userText)
+    )} placeholderDetected=${params.placeholderDetected} payloadMode=${params.payloadType.mode} payloadFlags=audio:${params.payloadType.hasAudioPayload},transcription:${params.payloadType.hasTranscriptionPayload},text:${params.payloadType.hasTextPayload}`
   );
 }
 
@@ -3960,6 +4150,24 @@ app.get("/ready", (_request, response) => {
   });
 });
 
+app.get("/version", (_request, response) => {
+  if (!ENABLE_INTERNAL_DEBUG_ENDPOINTS) {
+    response.status(404).json({ error: "Not found." });
+    return;
+  }
+
+  response.json({
+    gitSha: GIT_SHA || "unknown",
+    buildTimestamp: BUILD_TIMESTAMP || "unknown",
+    processStartedAt: PROCESS_STARTED_AT,
+    models: {
+      chatModel: OPENAI_CHAT_MODEL || "unknown",
+      simulationModel: OPENAI_SIMULATION_MODEL || "unknown",
+      transcriptionModel: OPENAI_TRANSCRIPTION_MODEL || "unknown"
+    }
+  });
+});
+
 app.get("/meta/timezones", (_request, response) => {
   response.json({ items: getSupportedTimezones() });
 });
@@ -7153,7 +7361,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
       temperature: 0.8
     });
-    logSimulationAiMetrics("opening", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
+    const latencyMs = logSimulationAiMetrics("opening", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     try {
       await withDatabase(async (db) => {
@@ -7162,6 +7370,13 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           return;
         }
 
+        const aiDetails = buildPersistedSimulationAiDetails({
+          requestedModel: OPENAI_SIMULATION_MODEL,
+          responseModel: completion.model,
+          usage: completion.usage,
+          latencyMs
+        });
+
         const event: AiUsageEvent = {
           id: `ai_${uuid()}`,
           kind: "opening",
@@ -7169,16 +7384,28 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           orgId: user.orgId,
           segmentId: context.segment.id,
           scenarioId: context.scenario.id,
-          model: completion.model,
+          model: aiDetails.responseModel,
           promptVersion: AI_PROMPT_VERSION,
           rubricVersion: null,
-          inputTokens: completion.usage.inputTokens,
-          outputTokens: completion.usage.outputTokens,
-          totalTokens: completion.usage.totalTokens,
+          inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+          outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+          totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
           createdAt: nowIso()
         };
 
         db.aiUsageEvents.push(event);
+        appendMobileAuditEvent(db, user, {
+          action: "ai.simulation.opening.details",
+          userId: user.id,
+          orgId: user.orgId,
+          message: "Stored AI details for simulation opening step.",
+          metadata: {
+            route: "opening",
+            segmentId: context.segment.id,
+            scenarioId: context.scenario.id,
+            aiDetails
+          }
+        });
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
@@ -7217,12 +7444,23 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     industryId?: unknown;
     industryBaseline?: unknown;
     history?: unknown;
+    sessionId?: unknown;
+    transcript?: unknown;
+    audio?: unknown;
+    audioUri?: unknown;
+    audioBase64?: unknown;
+    text?: unknown;
   };
 
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
   const history = normalizeDialogueHistory(body.history);
+  const requestBodyRecord = body as Record<string, unknown>;
+  const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
+  const latestUserText = getLatestUserTextFromHistory(history);
+  const placeholderDetected = hasPlaceholderOrMissingUserText(latestUserText);
+  const payloadType = detectSimulationPayloadType(request, requestBodyRecord);
 
   if (!scenarioId) {
     response.status(400).json({ error: "scenarioId is required." });
@@ -7231,6 +7469,22 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
 
   if (history.length === 0) {
     response.status(400).json({ error: "history is required." });
+    return;
+  }
+
+  logSimulationUserTextDiagnostics({
+    route: "turn",
+    sessionId,
+    userText: latestUserText,
+    placeholderDetected,
+    payloadType
+  });
+
+  if (placeholderDetected) {
+    response.status(422).json({
+      error: "No transcribed user text received. Transcription may have failed or client is sending placeholder.",
+      hint: "Run transcription first and send real user transcript text in history. Do not send placeholder text like 'Voice input captured ...'."
+    });
     return;
   }
 
@@ -7333,7 +7587,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
       temperature
     });
-    logSimulationAiMetrics("turn", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
+    const latencyMs = logSimulationAiMetrics("turn", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
 
     try {
       await withDatabase(async (db) => {
@@ -7342,6 +7596,13 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
           return;
         }
 
+        const aiDetails = buildPersistedSimulationAiDetails({
+          requestedModel: OPENAI_SIMULATION_MODEL,
+          responseModel: completion.model,
+          usage: completion.usage,
+          latencyMs
+        });
+
         const event: AiUsageEvent = {
           id: `ai_${uuid()}`,
           kind: "turn",
@@ -7349,16 +7610,29 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
           orgId: user.orgId,
           segmentId: context.segment.id,
           scenarioId: context.scenario.id,
-          model: completion.model,
+          model: aiDetails.responseModel,
           promptVersion: AI_PROMPT_VERSION,
           rubricVersion: null,
-          inputTokens: completion.usage.inputTokens,
-          outputTokens: completion.usage.outputTokens,
-          totalTokens: completion.usage.totalTokens,
+          inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+          outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+          totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
           createdAt: nowIso()
         };
 
         db.aiUsageEvents.push(event);
+        appendMobileAuditEvent(db, user, {
+          action: "ai.simulation.turn.details",
+          userId: user.id,
+          orgId: user.orgId,
+          message: "Stored AI details for simulation turn step.",
+          metadata: {
+            route: "turn",
+            sessionId,
+            segmentId: context.segment.id,
+            scenarioId: context.scenario.id,
+            aiDetails
+          }
+        });
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
@@ -7399,12 +7673,23 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     startedAt?: string;
     endedAt?: string;
     history?: unknown;
+    sessionId?: unknown;
+    transcript?: unknown;
+    audio?: unknown;
+    audioUri?: unknown;
+    audioBase64?: unknown;
+    text?: unknown;
   };
 
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
   const history = normalizeDialogueHistory(body.history);
+  const requestBodyRecord = body as Record<string, unknown>;
+  const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
+  const latestUserText = getLatestUserTextFromHistory(history);
+  const placeholderDetected = hasPlaceholderOrMissingUserText(latestUserText);
+  const payloadType = detectSimulationPayloadType(request, requestBodyRecord);
 
   if (!scenarioId) {
     response.status(400).json({ error: "scenarioId is required." });
@@ -7425,6 +7710,22 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
 
   if (history.length === 0) {
     response.status(400).json({ error: "history is required." });
+    return;
+  }
+
+  logSimulationUserTextDiagnostics({
+    route: "score",
+    sessionId,
+    userText: latestUserText,
+    placeholderDetected,
+    payloadType
+  });
+
+  if (placeholderDetected) {
+    response.status(422).json({
+      error: "No transcribed user text received. Transcription may have failed or client is sending placeholder.",
+      hint: "Submit score only when history includes real transcribed user text. Do not send placeholder text like 'Voice input captured ...'."
+    });
     return;
   }
 
@@ -7534,7 +7835,13 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       maxTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE),
       temperature: 0.2
     });
-    logSimulationAiMetrics("score", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
+    const latencyMs = logSimulationAiMetrics("score", requestStartedAt, OPENAI_SIMULATION_MODEL, completion);
+    const aiDetails = buildPersistedSimulationAiDetails({
+      requestedModel: OPENAI_SIMULATION_MODEL,
+      responseModel: completion.model,
+      usage: completion.usage,
+      latencyMs
+    });
 
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
     const scorecard = normalizeScorecard(parsed);
@@ -7558,11 +7865,11 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       assertiveness: scorecard.assertiveness,
       summary: scorecard.summary,
       rubricVersion: AI_RUBRIC_VERSION,
-      model: completion.model,
+      model: aiDetails.responseModel,
       promptVersion: AI_PROMPT_VERSION,
-      inputTokens: completion.usage.inputTokens,
-      outputTokens: completion.usage.outputTokens,
-      totalTokens: completion.usage.totalTokens,
+      inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+      outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+      totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
       createdAt: now
     };
 
@@ -7582,16 +7889,29 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
           orgId: user.orgId,
           segmentId: context.segment.id,
           scenarioId: context.scenario.id,
-          model: completion.model,
+          model: aiDetails.responseModel,
           promptVersion: AI_PROMPT_VERSION,
           rubricVersion: AI_RUBRIC_VERSION,
-          inputTokens: completion.usage.inputTokens,
-          outputTokens: completion.usage.outputTokens,
-          totalTokens: completion.usage.totalTokens,
+          inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+          outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+          totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
           createdAt: nowIso()
         };
 
         db.aiUsageEvents.push(event);
+        appendMobileAuditEvent(db, user, {
+          action: "ai.simulation.score.details",
+          userId: user.id,
+          orgId: user.orgId,
+          message: "Stored AI details for simulation score step.",
+          metadata: {
+            route: "score",
+            sessionId,
+            segmentId: context.segment.id,
+            scenarioId: context.scenario.id,
+            aiDetails
+          }
+        });
       });
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
