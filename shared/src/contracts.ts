@@ -44,6 +44,7 @@ export interface IndustryDefinition {
   label: string;
   enabled: boolean;
   aiBaseline?: string;
+  standardScoringGuidance?: string;
 }
 
 export interface RoleIndustryDefinition {
@@ -713,7 +714,8 @@ export const DEFAULT_INDUSTRIES: IndustryDefinition[] = INDUSTRY_IDS.map((id) =>
   id,
   label: INDUSTRY_LABELS[id] ?? id,
   enabled: true,
-  aiBaseline: ""
+  aiBaseline: "",
+  standardScoringGuidance: ""
 }));
 
 export const DEFAULT_ROLE_INDUSTRIES: RoleIndustryDefinition[] = INDUSTRY_IDS.flatMap((industryId) =>
@@ -875,6 +877,7 @@ export interface ScoringGuidanceIndustryContext {
   id: string;
   label: string;
   aiBaseline?: string;
+  standardScoringGuidance?: string;
 }
 
 const DEFAULT_SCORING_INDUSTRY_ADD_ONS: Record<string, string[]> = {
@@ -906,7 +909,9 @@ function uniqueIndustryContexts(
     output.push({
       id,
       label: (item.label ?? "").trim() || id,
-      aiBaseline: typeof item.aiBaseline === "string" ? item.aiBaseline : ""
+      aiBaseline: typeof item.aiBaseline === "string" ? item.aiBaseline : "",
+      standardScoringGuidance:
+        typeof item.standardScoringGuidance === "string" ? item.standardScoringGuidance : ""
     });
   }
   return output;
@@ -1006,6 +1011,18 @@ export function buildDefaultScoringGuidance(params?: {
           ? `- ${industry.label} (${industry.id}): ${baseline}`
           : `- ${industry.label} (${industry.id}): no baseline text configured.`
       );
+    }
+    lines.push("");
+  }
+
+  if (industries.some((industry) => (industry.standardScoringGuidance ?? "").trim().length > 0)) {
+    lines.push("Industry-specific standard scoring focus:");
+    for (const industry of industries) {
+      const scoringFocus = (industry.standardScoringGuidance ?? "").trim();
+      if (!scoringFocus) {
+        continue;
+      }
+      lines.push(`- ${industry.label} (${industry.id}): ${scoringFocus}`);
     }
     lines.push("");
   }

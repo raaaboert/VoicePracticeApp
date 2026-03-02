@@ -115,6 +115,7 @@ export default function ContentPage() {
   const [newIndustryLabel, setNewIndustryLabel] = useState("");
   const [editingIndustryLabel, setEditingIndustryLabel] = useState("");
   const [editingIndustryAiBaseline, setEditingIndustryAiBaseline] = useState("");
+  const [editingIndustryStandardScoringGuidance, setEditingIndustryStandardScoringGuidance] = useState("");
 
   const [roleSearch, setRoleSearch] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState("");
@@ -247,7 +248,13 @@ export default function ContentPage() {
   useEffect(() => {
     setEditingIndustryLabel(selectedIndustry?.label ?? "");
     setEditingIndustryAiBaseline(selectedIndustry?.aiBaseline ?? "");
-  }, [selectedIndustry?.aiBaseline, selectedIndustry?.id, selectedIndustry?.label]);
+    setEditingIndustryStandardScoringGuidance(selectedIndustry?.standardScoringGuidance ?? "");
+  }, [
+    selectedIndustry?.aiBaseline,
+    selectedIndustry?.id,
+    selectedIndustry?.label,
+    selectedIndustry?.standardScoringGuidance
+  ]);
 
   const toggleSection = (section: ContentSectionKey) => {
     setContentSectionExpanded((prev) => ({
@@ -259,6 +266,10 @@ export default function ContentPage() {
   const industryAiBaselineWordCount = useMemo(
     () => countWords(editingIndustryAiBaseline),
     [editingIndustryAiBaseline]
+  );
+  const industryStandardScoringGuidanceWordCount = useMemo(
+    () => countWords(editingIndustryStandardScoringGuidance),
+    [editingIndustryStandardScoringGuidance]
   );
 
   useEffect(() => {
@@ -324,7 +335,10 @@ export default function ContentPage() {
 
     const existingIds = new Set((config.industries ?? []).map((industry) => industry.id));
     const id = createIdFromLabel(label, "industry", existingIds);
-    const nextIndustries = sortIndustries([...(config.industries ?? []), { id, label, enabled: true, aiBaseline: "" }]);
+    const nextIndustries = sortIndustries([
+      ...(config.industries ?? []),
+      { id, label, enabled: true, aiBaseline: "", standardScoringGuidance: "" }
+    ]);
 
     await savePatch({ industries: nextIndustries }, "Industry added.");
     setNewIndustryLabel("");
@@ -362,6 +376,20 @@ export default function ContentPage() {
       )
     );
     await savePatch({ industries: nextIndustries }, "Industry AI baseline updated.");
+  };
+
+  const saveIndustryStandardScoringGuidance = async () => {
+    if (!config || !selectedIndustry) {
+      return;
+    }
+
+    const standardScoringGuidance = editingIndustryStandardScoringGuidance.trim();
+    const nextIndustries = sortIndustries(
+      (config.industries ?? []).map((industry) =>
+        industry.id === selectedIndustry.id ? { ...industry, standardScoringGuidance } : industry
+      )
+    );
+    await savePatch({ industries: nextIndustries }, "Industry standard scoring guidance updated.");
   };
 
   const setIndustryActive = async (active: boolean) => {
@@ -775,6 +803,19 @@ export default function ContentPage() {
                     {industryAiBaselineWordCount} words | Recommended: 300 or fewer (avoid going over 1000 unless necessary)
                   </p>
                 </div>
+                <div>
+                  <label>Standard Scenario Scoring Guidance (Industry)</label>
+                  <textarea
+                    rows={7}
+                    value={editingIndustryStandardScoringGuidance}
+                    onChange={(event) => setEditingIndustryStandardScoringGuidance(event.target.value)}
+                    disabled={!selectedIndustry}
+                    placeholder="Optional: industry-specific scoring focus to apply to standard scenarios in this industry."
+                  />
+                  <p className="small content-word-counter">
+                    {industryStandardScoringGuidanceWordCount} words | Recommended: 200 or fewer
+                  </p>
+                </div>
               </div>
               <div className="content-actions content-actions-wrap content-actions-row">
                 <button
@@ -783,6 +824,13 @@ export default function ContentPage() {
                   onClick={() => void saveIndustryAiBaseline()}
                 >
                   Save AI Industry Baseline
+                </button>
+                <button
+                  type="button"
+                  disabled={saving || !selectedIndustry}
+                  onClick={() => void saveIndustryStandardScoringGuidance()}
+                >
+                  Save Standard Scoring Guidance
                 </button>
               </div>
               <p className="small content-hint">Rename, deactivate, or delete the selected industry.</p>

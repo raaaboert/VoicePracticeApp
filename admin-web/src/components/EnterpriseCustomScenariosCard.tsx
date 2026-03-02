@@ -165,7 +165,8 @@ function toScoringIndustryContexts(industries: IndustryDefinition[], selectedInd
   return source.map((industry) => ({
     id: industry.id,
     label: industry.label,
-    aiBaseline: industry.aiBaseline ?? ""
+    aiBaseline: industry.aiBaseline ?? "",
+    standardScoringGuidance: industry.standardScoringGuidance ?? ""
   }));
 }
 

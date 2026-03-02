@@ -1226,12 +1226,16 @@ function normalizeIndustryDefinitions(
     const aiBaseline = typeof candidate.aiBaseline === "string"
       ? candidate.aiBaseline.trim()
       : "";
+    const standardScoringGuidance = typeof candidate.standardScoringGuidance === "string"
+      ? candidate.standardScoringGuidance.trim()
+      : "";
 
     normalized.push({
       id,
       label,
       enabled: candidate.enabled !== false,
-      aiBaseline
+      aiBaseline,
+      standardScoringGuidance
     });
   }
 
@@ -3252,7 +3256,8 @@ function resolveMobileScenarioForUser(
       return {
         id: industryId,
         label: industry?.label ?? industryId,
-        aiBaseline: industry?.aiBaseline ?? ""
+        aiBaseline: industry?.aiBaseline ?? "",
+        standardScoringGuidance: industry?.standardScoringGuidance ?? ""
       };
     });
 
@@ -5476,7 +5481,8 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
         industryContexts: context.selectedIndustries.map((industry) => ({
           id: industry.id,
           label: industry.label,
-          aiBaseline: industry.aiBaseline ?? ""
+          aiBaseline: industry.aiBaseline ?? "",
+          standardScoringGuidance: industry.standardScoringGuidance ?? ""
         }))
       });
 
