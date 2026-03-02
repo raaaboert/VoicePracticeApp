@@ -177,6 +177,9 @@ const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
 const WARNING_LOG_THROTTLE_MS = 60_000;
 const TRAINING_PACK_SCENARIO_OPT_IN_PREFIX = "scenario:";
+const SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES = 5;
+const SIMULATION_AI_BUDGET_GRACE_FALLBACK_MINUTES = DEFAULT_MAX_SIMULATION_MINUTES + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES;
+const SIMULATION_AI_BUDGET_GRACE_MAX_MINUTES = MAX_MAX_SIMULATION_MINUTES + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES;
 const TRANSIENT_DATABASE_ERROR_CODES = new Set([
   "ETIMEDOUT",
   "ECONNRESET",
@@ -215,6 +218,7 @@ const TTS_VOICE_BY_PRESET: Record<TtsPreset, string> = {
 
 const TTS_PRESET_SET = new Set<TtsPreset>(Object.keys(TTS_VOICE_BY_PRESET) as TtsPreset[]);
 const warningLogByKey = new Map<string, number>();
+const simulationAiBudgetGraceByUserId = new Map<string, number>();
 const PLACEHOLDER_USER_TEXT_PATTERN = /^voice input captured/i;
 const trainingPackStore = createTrainingPackStore({
   provider: STORAGE_PROVIDER,
@@ -3539,6 +3543,35 @@ interface AiBudgetSnapshot {
   globalTokensToday: number;
 }
 
+function pruneExpiredSimulationAiBudgetGrace(nowMs = Date.now()): void {
+  for (const [userId, expiresAtMs] of simulationAiBudgetGraceByUserId.entries()) {
+    if (expiresAtMs <= nowMs) {
+      simulationAiBudgetGraceByUserId.delete(userId);
+    }
+  }
+}
+
+function hasActiveSimulationAiBudgetGrace(userId: string, nowMs = Date.now()): boolean {
+  pruneExpiredSimulationAiBudgetGrace(nowMs);
+  const expiresAtMs = simulationAiBudgetGraceByUserId.get(userId);
+  return typeof expiresAtMs === "number" && expiresAtMs > nowMs;
+}
+
+function activateSimulationAiBudgetGrace(userId: string, maxSimulationMinutes: number | null): void {
+  const nowMs = Date.now();
+  pruneExpiredSimulationAiBudgetGrace(nowMs);
+  const baseMinutes = clampNonNegativeInteger(maxSimulationMinutes, SIMULATION_AI_BUDGET_GRACE_FALLBACK_MINUTES);
+  const graceMinutes = Math.min(
+    SIMULATION_AI_BUDGET_GRACE_MAX_MINUTES,
+    Math.max(1, baseMinutes + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES)
+  );
+  simulationAiBudgetGraceByUserId.set(userId, nowMs + graceMinutes * 60 * 1000);
+}
+
+function clearSimulationAiBudgetGrace(userId: string): void {
+  simulationAiBudgetGraceByUserId.delete(userId);
+}
+
 function computeAiBudgetSnapshot(db: ApiDatabase, user: UserProfile, now: Date): AiBudgetSnapshot {
   const userTimezone = materializeUserTimezone(user, now);
   const userDayKey = getDayKey(now, userTimezone);
@@ -3581,7 +3614,16 @@ function computeAiBudgetSnapshot(db: ApiDatabase, user: UserProfile, now: Date):
   };
 }
 
-function resolveAiBudgetLimitError(db: ApiDatabase, user: UserProfile, now: Date): string | null {
+function resolveAiBudgetLimitError(
+  db: ApiDatabase,
+  user: UserProfile,
+  now: Date,
+  options?: { allowDuringActiveSimulation?: boolean }
+): string | null {
+  if (options?.allowDuringActiveSimulation && hasActiveSimulationAiBudgetGrace(user.id, now.getTime())) {
+    return null;
+  }
+
   const budget = computeAiBudgetSnapshot(db, user, now);
 
   if (
@@ -7056,7 +7098,9 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
       return null;
@@ -7239,7 +7283,9 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (aiBudgetError) {
       respondWithTtsError({
         status: 429,
@@ -7726,6 +7772,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
+      maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
       useModularPromptArchitecture
     };
   });
@@ -7827,6 +7874,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       model: completion.model,
       promptVersion: AI_PROMPT_VERSION
     });
+    activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
     response.status(503).json({ error: message });
@@ -7918,7 +7966,9 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
       return null;
@@ -7955,6 +8005,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
+      maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
       useModularPromptArchitecture
     };
   });
@@ -8056,6 +8107,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       model: completion.model,
       promptVersion: AI_PROMPT_VERSION
     });
+    activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
     response.status(503).json({ error: message });
@@ -8161,7 +8213,9 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
       return null;
@@ -8346,6 +8400,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
         }
       }
     });
+    clearSimulationAiBudgetGrace(context.user.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Score generation failed.";
     response.status(503).json({ error: message });

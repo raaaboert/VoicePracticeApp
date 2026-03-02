@@ -2398,6 +2398,50 @@ export default function App() {
     return filtered.slice(0, 2);
   }, [standardTiers, user?.tier]);
 
+  const dailyAllotmentUsage = useMemo(() => {
+    const limits = entitlements?.limits;
+    const usage = entitlements?.usage;
+    if (!limits || !usage) {
+      return {
+        limitSeconds: null as number | null,
+        usedSeconds: null as number | null,
+        usedPercent: null as number | null,
+      };
+    }
+
+    const limitCandidates: number[] = [];
+    if (typeof limits.dailySecondsLimit === "number") {
+      limitCandidates.push(Math.max(0, limits.dailySecondsLimit));
+    }
+    if (typeof limits.orgDailySecondsQuota === "number") {
+      limitCandidates.push(Math.max(0, limits.orgDailySecondsQuota));
+    }
+    if (typeof limits.perUserDailySecondsCap === "number") {
+      limitCandidates.push(Math.max(0, limits.perUserDailySecondsCap));
+    }
+
+    const limitSeconds = limitCandidates.length > 0 ? Math.min(...limitCandidates) : null;
+    const remainingSeconds =
+      typeof usage.dailySecondsRemaining === "number" ? Math.max(0, usage.dailySecondsRemaining) : null;
+
+    if (limitSeconds === null || remainingSeconds === null) {
+      return {
+        limitSeconds,
+        usedSeconds: null as number | null,
+        usedPercent: null as number | null,
+      };
+    }
+
+    const usedSeconds = Math.max(0, Math.min(limitSeconds, limitSeconds - remainingSeconds));
+    const usedPercent = limitSeconds > 0 ? Math.round((usedSeconds / limitSeconds) * 100) : 0;
+
+    return {
+      limitSeconds,
+      usedSeconds,
+      usedPercent: Math.max(0, Math.min(100, usedPercent)),
+    };
+  }, [entitlements]);
+
   const hasAdminAccess = Boolean(
     user?.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin"),
   );
@@ -2868,6 +2912,13 @@ export default function App() {
             {entitlements?.usage?.dailySecondsRemaining === null
               ? "Daily remaining: unlimited"
               : `Daily remaining: ${formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
+          </Text>
+          <Text style={styles.body}>
+            {dailyAllotmentUsage.usedPercent === null
+              ? "Daily allotment used: unavailable"
+              : `Daily allotment used: ${dailyAllotmentUsage.usedPercent}% (${formatSecondsAsClock(
+                  dailyAllotmentUsage.usedSeconds ?? 0
+                )} / ${formatSecondsAsClock(dailyAllotmentUsage.limitSeconds ?? 0)})`}
           </Text>
         </View>
       </ScrollView>
