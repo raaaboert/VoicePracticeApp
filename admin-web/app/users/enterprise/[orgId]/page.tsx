@@ -733,9 +733,72 @@ export default function EnterpriseOrgPage() {
                   <label>Email Domain</label>
                   <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
                 </div>
-                <div>
-                  <label>Join Code</label>
-                  <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <div className="grid" style={{ marginTop: 4, gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
+                    <div>
+                      <label>Join Code</label>
+                      <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
+                    </div>
+                    <div>
+                      <label>Time Allotment (Billing Cycle)</label>
+                      <p className="small" style={{ marginTop: 0 }}>
+                        Hard enforcement uses monthly organization minutes. Active-user projection uses active users only.
+                      </p>
+                      <div className="grid" style={{ marginTop: 8 }}>
+                        <div>
+                          <label>Monthly Org Minutes</label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={monthlyMinutesAllottedInput}
+                            onChange={(event) => setMonthlyMinutesAllottedInput(event.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label>Default Per-User Daily Minutes</label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={defaultPerUserDailyMinutesInput}
+                            onChange={(event) => setDefaultPerUserDailyMinutesInput(event.target.value)}
+                          />
+                        </div>
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <label
+                            style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 0, cursor: "pointer" }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={deferPerUserDailyCapUntilNextCycle}
+                              onChange={(event) => setDeferPerUserDailyCapUntilNextCycle(event.target.checked)}
+                              style={{ width: 16, minHeight: 16, height: 16, padding: 0, margin: 0 }}
+                            />
+                            <span>Apply default per-user daily change at next renewal instead of immediately</span>
+                          </label>
+                          {dashboard.org.pendingPerUserDailySecondsCap !== null &&
+                          dashboard.org.pendingPerUserDailySecondsCapEffectiveAt ? (
+                            <div className="small" style={{ marginTop: 6 }}>
+                              Pending next-cycle default:{" "}
+                              {Math.floor(dashboard.org.pendingPerUserDailySecondsCap / 60)} min/day (effective{" "}
+                              {formatDate(dashboard.org.pendingPerUserDailySecondsCapEffectiveAt)})
+                            </div>
+                          ) : null}
+                        </div>
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <div className="small">
+                            Org usage this period: {formatSecondsAsClock(dashboard.usage.usedSecondsThisPeriod)} /{" "}
+                            {formatSecondsAsClock(dashboard.usage.allottedSecondsThisPeriod)} (
+                            {dashboard.usage.usagePercentThisPeriod.toFixed(1)}%)
+                          </div>
+                          <div className="small">
+                            Active users: {activeUserRows.length} | Projected allocation at current daily caps:{" "}
+                            {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes over{" "}
+                            {billingPeriodDays} day(s)
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
                   <label>Segments Active</label>
@@ -781,62 +844,6 @@ export default function EnterpriseOrgPage() {
                       >
                         Inactive
                       </button>
-                    </div>
-                  </div>
-                </div>
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Time Allotment (Billing Cycle)</label>
-                  <p className="small" style={{ marginTop: 0 }}>
-                    Hard enforcement uses monthly organization minutes. Active-user projection uses active users only.
-                  </p>
-                  <div className="grid" style={{ marginTop: 8 }}>
-                    <div>
-                      <label>Monthly Org Minutes</label>
-                      <input
-                        type="number"
-                        min={0}
-                        value={monthlyMinutesAllottedInput}
-                        onChange={(event) => setMonthlyMinutesAllottedInput(event.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <label>Default Per-User Daily Minutes</label>
-                      <input
-                        type="number"
-                        min={0}
-                        value={defaultPerUserDailyMinutesInput}
-                        onChange={(event) => setDefaultPerUserDailyMinutesInput(event.target.value)}
-                      />
-                    </div>
-                    <div style={{ gridColumn: "1 / -1" }}>
-                      <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                        <input
-                          type="checkbox"
-                          checked={deferPerUserDailyCapUntilNextCycle}
-                          onChange={(event) => setDeferPerUserDailyCapUntilNextCycle(event.target.checked)}
-                        />
-                        Apply default per-user daily change at next renewal instead of immediately
-                      </label>
-                      {dashboard.org.pendingPerUserDailySecondsCap !== null &&
-                      dashboard.org.pendingPerUserDailySecondsCapEffectiveAt ? (
-                        <div className="small" style={{ marginTop: 6 }}>
-                          Pending next-cycle default:{" "}
-                          {Math.floor(dashboard.org.pendingPerUserDailySecondsCap / 60)} min/day (effective{" "}
-                          {formatDate(dashboard.org.pendingPerUserDailySecondsCapEffectiveAt)})
-                        </div>
-                      ) : null}
-                    </div>
-                    <div style={{ gridColumn: "1 / -1" }}>
-                      <div className="small">
-                        Org usage this period: {formatSecondsAsClock(dashboard.usage.usedSecondsThisPeriod)} /{" "}
-                        {formatSecondsAsClock(dashboard.usage.allottedSecondsThisPeriod)} (
-                        {dashboard.usage.usagePercentThisPeriod.toFixed(1)}%)
-                      </div>
-                      <div className="small">
-                        Active users: {activeUserRows.length} | Projected allocation at current daily caps:{" "}
-                        {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes over{" "}
-                        {billingPeriodDays} day(s)
-                      </div>
                     </div>
                   </div>
                 </div>
