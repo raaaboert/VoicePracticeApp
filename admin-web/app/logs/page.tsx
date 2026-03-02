@@ -102,6 +102,8 @@ export default function LogsPage() {
   const [actorType, setActorType] = useState<"" | AuditActorType>("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [pageSize, setPageSize] = useState(25);
+  const [pageIndex, setPageIndex] = useState(0);
 
   useEffect(() => {
     if (isPersonalMode) {
@@ -164,6 +166,16 @@ export default function LogsPage() {
       (payload?.rows ?? []).filter((row) => (isPersonalMode ? row.orgId === null : true)),
     [isPersonalMode, payload?.rows],
   );
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePageIndex = Math.min(pageIndex, totalPages - 1);
+  const pageStart = safePageIndex * pageSize;
+  const pageEnd = Math.min(rows.length, pageStart + pageSize);
+  const pagedRows = rows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [pageSize, days, orgId, actorId, actorType, fromDate, toDate, isPersonalMode]);
 
   return (
     <AdminShell title={isPersonalMode ? "Logs (Personal)" : "Logs"}>
@@ -243,6 +255,38 @@ export default function LogsPage() {
 
       <div className="card">
         <h3 style={{ marginBottom: 8 }}>Audit Events ({rows.length})</h3>
+        <div className="card-header" style={{ marginBottom: 0 }}>
+          <p className="small" style={{ margin: 0 }}>
+            Showing {rows.length === 0 ? 0 : pageStart + 1}-{pageEnd} of {rows.length}
+          </p>
+          <div className="card-actions" style={{ alignItems: "center" }}>
+            <div style={{ minWidth: 92 }}>
+              <label style={{ marginBottom: 2 }}>Rows</label>
+              <select
+                value={String(pageSize)}
+                onChange={(event) => setPageSize(Number(event.target.value) || 25)}
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
+              disabled={safePageIndex === 0}
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))}
+              disabled={safePageIndex >= totalPages - 1}
+            >
+              Next
+            </button>
+          </div>
+        </div>
         <div className="table-wrap">
           <table className="data-table">
             <thead>
@@ -264,7 +308,7 @@ export default function LogsPage() {
                   </td>
                 </tr>
               ) : (
-                rows.map((row) => (
+                pagedRows.map((row) => (
                   <tr key={row.id}>
                     <td>
                       <div>{formatDateTime(row.createdAt)}</div>

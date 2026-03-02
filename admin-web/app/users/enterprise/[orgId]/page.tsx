@@ -736,19 +736,21 @@ export default function EnterpriseOrgPage() {
                 <div style={{ gridColumn: "1 / -1" }}>
                   <div
                     style={{
-                      marginTop: 4,
+                      marginTop: 14,
+                      paddingTop: 18,
+                      borderTop: "1px solid rgba(129, 206, 166, 0.24)",
                       display: "grid",
                       gridTemplateColumns: "repeat(auto-fit, minmax(440px, 1fr))",
-                      gap: 18,
+                      gap: 24,
                       alignItems: "start"
                     }}
                   >
                     <div style={{ minWidth: 0 }}>
                       <label>Time Allotment (Billing Cycle)</label>
-                      <p className="small" style={{ marginTop: 0 }}>
+                      <p className="small" style={{ marginTop: 2, marginBottom: 10 }}>
                         Hard enforcement uses monthly organization minutes. Active-user projection uses active users only.
                       </p>
-                      <div className="grid" style={{ marginTop: 8 }}>
+                      <div className="grid" style={{ marginTop: 10 }}>
                         <div>
                           <label>Monthly Org Minutes</label>
                           <input
@@ -794,14 +796,14 @@ export default function EnterpriseOrgPage() {
                             {formatSecondsAsClock(dashboard.usage.allottedSecondsThisPeriod)} (
                             {dashboard.usage.usagePercentThisPeriod.toFixed(1)}%)
                           </div>
-                          <div className="small">
+                          <div className="small" style={{ marginTop: 4 }}>
                             Active users: {activeUserRows.length} | Projected allocation at current daily caps:{" "}
                             {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes over{" "}
                             {billingPeriodDays} day(s)
                           </div>
                         </div>
                       </div>
-                      <div style={{ marginTop: 12 }}>
+                      <div style={{ marginTop: 14 }}>
                         <button
                           className="primary"
                           disabled={savingQuotaSettings}
@@ -814,13 +816,13 @@ export default function EnterpriseOrgPage() {
                     <div style={{ minWidth: 0 }}>
                       <label>Segments Active</label>
                       <div>{segmentsActiveLabel}</div>
-                      <div className="small">
+                      <div className="small" style={{ marginTop: 2 }}>
                         Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
                         {formatDate(dashboard.billingPeriod.periodEndAt)}
                       </div>
-                      <div style={{ marginTop: 14 }}>
+                      <div style={{ marginTop: 16 }}>
                         <label>Segment Selection</label>
-                        <p className="small" style={{ marginTop: 0 }}>
+                        <p className="small" style={{ marginTop: 2, marginBottom: 10 }}>
                           Select an industry and toggle whether it is active for this company.
                         </p>
                         <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
@@ -857,11 +859,11 @@ export default function EnterpriseOrgPage() {
                           </div>
                         </div>
                       </div>
-                      <div style={{ marginTop: 14 }}>
+                      <div style={{ marginTop: 16 }}>
                         <label>Join Code</label>
                         <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
                       </div>
-                      <div style={{ marginTop: 12 }}>
+                      <div style={{ marginTop: 14 }}>
                         <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
                           {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
                         </button>
@@ -1054,7 +1056,7 @@ export default function EnterpriseOrgPage() {
                         </select>
                       </td>
                       <td>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                           <input
                             type="number"
                             min={0}
@@ -1071,7 +1073,7 @@ export default function EnterpriseOrgPage() {
                               }))
                             }
                           />
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
                             <button
                               type="button"
                               disabled={

@@ -956,7 +956,10 @@ export default function ContentPage() {
         </div>
 
         <div className="card content-section-card">
-          <div className="content-section-header content-collapsible-header">
+          <div
+            className="content-section-header content-collapsible-header"
+            style={{ marginBottom: contentSectionExpanded.roleIndustries ? 12 : 0 }}
+          >
             <h3>Role Industries</h3>
             <button
               type="button"
@@ -972,7 +975,7 @@ export default function ContentPage() {
               <p className="small content-pill">
                 Active Industries for role: {activeRoleIndustryLabels.length > 0 ? activeRoleIndustryLabels.join(", ") : "(none)"}
               </p>
-              <div className="content-grid content-grid-two">
+              <div className="content-grid content-grid-two" style={{ marginTop: 2 }}>
                 <div>
                   <label>Search Industries</label>
                   <input
@@ -996,7 +999,7 @@ export default function ContentPage() {
                   </select>
                 </div>
               </div>
-              <div className="content-actions content-actions-wrap content-actions-row">
+              <div className="content-actions content-actions-wrap content-actions-row" style={{ marginTop: 14 }}>
                 <button
                   type="button"
                   className="primary"
@@ -1018,7 +1021,10 @@ export default function ContentPage() {
         </div>
 
         <div className="card content-section-card">
-          <div className="content-section-header content-collapsible-header">
+          <div
+            className="content-section-header content-collapsible-header"
+            style={{ marginBottom: contentSectionExpanded.scenarios ? 12 : 0 }}
+          >
             <h3>Scenarios For Role</h3>
             <button
               type="button"
@@ -1031,7 +1037,7 @@ export default function ContentPage() {
           </div>
           {contentSectionExpanded.scenarios ? (
             <>
-              <div className="content-section-header content-header-actions">
+              <div className="content-section-header content-header-actions" style={{ marginBottom: 8 }}>
                 <div className="small">
                   {selectedRole ? `Managing scenarios for ${selectedRole.label}` : "Select a role to manage scenarios."}
                 </div>
@@ -1049,7 +1055,7 @@ export default function ContentPage() {
                   </button>
                 </div>
               </div>
-              <div className="content-table-wrap">
+              <div className="content-table-wrap" style={{ marginTop: 14 }}>
                 <table className="content-table">
                   <thead>
                     <tr>

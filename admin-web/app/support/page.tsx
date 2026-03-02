@@ -146,6 +146,8 @@ export default function SupportPage() {
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [pageSize, setPageSize] = useState(25);
+  const [pageIndex, setPageIndex] = useState(0);
 
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<SupportCaseDetail | null>(null);
@@ -180,6 +182,8 @@ export default function SupportPage() {
     setExportNotice(null);
     setSortKey("createdAt");
     setSortDirection("desc");
+    setPageSize(25);
+    setPageIndex(0);
   }, [isPersonalMode]);
 
   const rowsByMode = useMemo(
@@ -210,6 +214,16 @@ export default function SupportPage() {
     });
     return sorted;
   }, [rowsByMode, sortDirection, sortKey]);
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePageIndex = Math.min(pageIndex, totalPages - 1);
+  const pageStart = safePageIndex * pageSize;
+  const pageEnd = Math.min(rows.length, pageStart + pageSize);
+  const pagedRows = rows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [pageSize, sortKey, sortDirection, rowsByMode.length]);
 
   const setSort = (nextKey: SortKey) => {
     if (sortKey === nextKey) {
@@ -333,8 +347,8 @@ export default function SupportPage() {
                 : "Showing support cases submitted by enterprise users."}
             </p>
           </div>
-          <div className="card-actions">
-            <div style={{ minWidth: 150 }}>
+          <div className="card-actions" style={{ alignItems: "flex-end", rowGap: 10 }}>
+            <div style={{ minWidth: 170 }}>
               <label>Export From</label>
               <input
                 type="date"
@@ -342,7 +356,7 @@ export default function SupportPage() {
                 onChange={(event) => setExportFromDate(event.target.value)}
               />
             </div>
-            <div style={{ minWidth: 150 }}>
+            <div style={{ minWidth: 170 }}>
               <label>Export To</label>
               <input
                 type="date"
@@ -366,6 +380,39 @@ export default function SupportPage() {
           Click column headers to sort.
         </p>
 
+        <div className="card-header" style={{ marginTop: 10, marginBottom: 0 }}>
+          <p className="small" style={{ margin: 0 }}>
+            Showing {rows.length === 0 ? 0 : pageStart + 1}-{pageEnd} of {rows.length}
+          </p>
+          <div className="card-actions" style={{ alignItems: "center" }}>
+            <div style={{ minWidth: 92 }}>
+              <label style={{ marginBottom: 2 }}>Rows</label>
+              <select
+                value={String(pageSize)}
+                onChange={(event) => setPageSize(Number(event.target.value) || 25)}
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
+              disabled={safePageIndex === 0}
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))}
+              disabled={safePageIndex >= totalPages - 1}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+
         <div className="table-wrap">
           <table className="data-table">
             <thead>
@@ -382,7 +429,7 @@ export default function SupportPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {pagedRows.map((row) => (
                 <tr key={row.id}>
                   <td>
                     <div>{new Date(row.createdAt).toLocaleString()}</div>

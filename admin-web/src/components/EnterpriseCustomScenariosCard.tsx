@@ -1357,7 +1357,7 @@ export function EnterpriseCustomScenariosCard({
         <p className="small">Custom scenarios are collapsed. Total: {scenarios.length}</p>
       ) : (
         <>
-          <div className="content-grid content-grid-two">
+          <div className="content-grid content-grid-two" style={{ marginTop: 4, marginBottom: 4 }}>
             <div>
               <label>Search Custom Scenarios</label>
               <input
@@ -1379,7 +1379,7 @@ export function EnterpriseCustomScenariosCard({
             </div>
           </div>
 
-          <div className="content-table-wrap">
+          <div className="content-table-wrap" style={{ marginTop: 14 }}>
             <table className="content-table">
               <thead>
                 <tr>
