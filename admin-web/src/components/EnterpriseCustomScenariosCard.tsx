@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AppConfig,
+  buildDefaultScoringGuidance,
   CreateOrgCustomScenarioRequest,
   GenerateOrgCustomScenarioRequest,
   GenerateOrgCustomScenarioResponse,
@@ -158,7 +159,18 @@ function toGenerationInputsPayload(value: GenerationInputsForm): OrgCustomScenar
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
+function toScoringIndustryContexts(industries: IndustryDefinition[], selectedIndustryIds: string[]) {
+  const selected = new Set(selectedIndustryIds);
+  const source = selected.size > 0 ? industries.filter((industry) => selected.has(industry.id)) : industries;
+  return source.map((industry) => ({
+    id: industry.id,
+    label: industry.label,
+    aiBaseline: industry.aiBaseline ?? ""
+  }));
+}
+
 function createEmptyEditorForm(config: AppConfig | null): EditorFormState {
+  const defaultIndustryContexts = toScoringIndustryContexts(config?.industries ?? [], []);
   return {
     id: null,
     sourceMode: "scratch",
@@ -169,7 +181,7 @@ function createEmptyEditorForm(config: AppConfig | null): EditorFormState {
     title: "",
     description: "",
     aiRole: "",
-    scoringGuidance: "",
+    scoringGuidance: buildDefaultScoringGuidance({ industryContexts: defaultIndustryContexts }),
     enabled: false,
     generationInputs: emptyGenerationInputs(),
     provenanceBaseScenarioTitle: "",
@@ -403,20 +415,30 @@ export function EnterpriseCustomScenariosCard({
   };
 
   const prefillFromBaseScenario = (base: BaseScenarioOption) => {
-    setEditorForm((prev) => ({
-      ...prev,
-      baseScenarioId: base.id,
-      segmentId: base.segmentId,
-      title: base.title,
-      description: base.description,
-      aiRole: base.aiRole,
-      scoringGuidance:
-        prev.scoringGuidance.trim() ||
-        `Score communication quality, clarity, objection handling, and alignment to the training objective for "${base.title}".`,
-      provenanceBaseScenarioTitle: base.title,
-      provenanceBaseScenarioSegmentId: base.segmentId,
-      provenanceBaseScenarioVersion: config?.updatedAt ?? prev.provenanceBaseScenarioVersion,
-    }));
+    setEditorForm((prev) => {
+      const currentGuidance = prev.scoringGuidance.trim();
+      const currentTemplate = buildDefaultScoringGuidance({
+        industryContexts: toScoringIndustryContexts(industries, prev.applicableIndustryIds)
+      });
+      const nextTemplate = buildDefaultScoringGuidance({
+        scenarioTitle: base.title,
+        segmentLabel: base.segmentLabel,
+        industryContexts: toScoringIndustryContexts(industries, prev.applicableIndustryIds)
+      });
+
+      return {
+        ...prev,
+        baseScenarioId: base.id,
+        segmentId: base.segmentId,
+        title: base.title,
+        description: base.description,
+        aiRole: base.aiRole,
+        scoringGuidance: !currentGuidance || currentGuidance === currentTemplate ? nextTemplate : prev.scoringGuidance,
+        provenanceBaseScenarioTitle: base.title,
+        provenanceBaseScenarioSegmentId: base.segmentId,
+        provenanceBaseScenarioVersion: config?.updatedAt ?? prev.provenanceBaseScenarioVersion,
+      };
+    });
     setGenerationPreview(null);
   };
 
@@ -1035,9 +1057,28 @@ export function EnterpriseCustomScenariosCard({
                 />
               </div>
               <div style={{ gridColumn: "1 / -1" }}>
-                <label>Scoring Guidance</label>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <label style={{ marginBottom: 0 }}>Scoring Guidance</label>
+                  <button
+                    type="button"
+                    disabled={editorSaving || generatingPreview}
+                    onClick={() => {
+                      setEditorForm((prev) => ({
+                        ...prev,
+                        scoringGuidance: buildDefaultScoringGuidance({
+                          scenarioTitle: prev.title.trim() || selectedBaseScenario?.title || null,
+                          segmentLabel: roleLabelById.get(prev.segmentId) ?? selectedBaseScenario?.segmentLabel ?? null,
+                          industryContexts: toScoringIndustryContexts(industries, prev.applicableIndustryIds)
+                        })
+                      }));
+                      setGenerationPreview(null);
+                    }}
+                  >
+                    Apply Standard Scoring Template
+                  </button>
+                </div>
                 <textarea
-                  rows={4}
+                  rows={12}
                   value={editorForm.scoringGuidance}
                   onChange={(event) => {
                     setEditorForm((prev) => ({ ...prev, scoringGuidance: event.target.value }));

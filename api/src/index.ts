@@ -78,7 +78,8 @@ import {
   secondsToWholeMinutes,
   sumRawSeconds,
   computeMonthlyPeriodBounds,
-  computeNextRenewalAt
+  computeNextRenewalAt,
+  buildDefaultScoringGuidance
 } from "@voicepractice/shared";
 import {
   AI_PROMPT_VERSION,
@@ -3246,12 +3247,25 @@ function resolveMobileScenarioForUser(
         .map((entry) => entry.industryId),
     ) as IndustryId[];
 
+    const scoringIndustryContexts = allowedIndustryIds.map((industryId) => {
+      const industry = (configForUser.industries ?? []).find((entry) => entry.id === industryId);
+      return {
+        id: industryId,
+        label: industry?.label ?? industryId,
+        aiBaseline: industry?.aiBaseline ?? ""
+      };
+    });
+
     return {
       source: "standard",
       segment,
       scenario,
       allowedIndustryIds,
-      scoringGuidance: null,
+      scoringGuidance: buildDefaultScoringGuidance({
+        scenarioTitle: scenario.title,
+        segmentLabel: segment.label,
+        industryContexts: scoringIndustryContexts
+      }),
     };
   }
 
@@ -5456,7 +5470,15 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
       `a realistic counterpart who is interacting with a ${context.segment.label}`;
     const fallbackScoring =
       context.draft.scoringGuidance ??
-      "Score communication quality, objection handling, clarity, and alignment to the stated training objective.";
+      buildDefaultScoringGuidance({
+        scenarioTitle: fallbackTitle,
+        segmentLabel: context.segment.label,
+        industryContexts: context.selectedIndustries.map((industry) => ({
+          id: industry.id,
+          label: industry.label,
+          aiBaseline: industry.aiBaseline ?? ""
+        }))
+      });
 
     const generatedTitle = toMultilineText(parsed.title, 300) || fallbackTitle;
     const generatedDescription = toMultilineText(parsed.description, 8_000) || fallbackDescription;

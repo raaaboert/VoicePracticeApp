@@ -871,6 +871,164 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
   }
 ];
 
+export interface ScoringGuidanceIndustryContext {
+  id: string;
+  label: string;
+  aiBaseline?: string;
+}
+
+const DEFAULT_SCORING_INDUSTRY_ADD_ONS: Record<string, string[]> = {
+  sales: [
+    "Emphasize value articulation, objection conversion, and commitment ask quality.",
+    "Reward clear business impact and next-step specificity."
+  ],
+  people_management: [
+    "Emphasize coaching quality, accountability clarity, and conflict de-escalation.",
+    "Reward balanced empathy, standards, and action-plan ownership."
+  ],
+  medical: [
+    "Emphasize patient or family-centered communication, clarity under stress, and trust-building.",
+    "Reward accurate risk framing and plain-language explanations without overpromising."
+  ]
+};
+
+function uniqueIndustryContexts(
+  value: ScoringGuidanceIndustryContext[] | null | undefined
+): ScoringGuidanceIndustryContext[] {
+  const seen = new Set<string>();
+  const output: ScoringGuidanceIndustryContext[] = [];
+  for (const item of value ?? []) {
+    const id = (item.id ?? "").trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    output.push({
+      id,
+      label: (item.label ?? "").trim() || id,
+      aiBaseline: typeof item.aiBaseline === "string" ? item.aiBaseline : ""
+    });
+  }
+  return output;
+}
+
+export function buildDefaultScoringGuidance(params?: {
+  scenarioTitle?: string | null;
+  segmentLabel?: string | null;
+  industryContexts?: ScoringGuidanceIndustryContext[] | null;
+}): string {
+  const scenarioTitle = typeof params?.scenarioTitle === "string" ? params.scenarioTitle.trim() : "";
+  const segmentLabel = typeof params?.segmentLabel === "string" ? params.segmentLabel.trim() : "";
+  const industries = uniqueIndustryContexts(params?.industryContexts);
+
+  const lines: string[] = [
+    "SCORING PARAMETERS v1 (Standard Default)",
+    "",
+    "Evaluator scope:",
+    "- Evaluate USER performance only.",
+    "- Use scenario context, persona style, and industry baseline guidance.",
+    "- Reward behavior that moves this specific conversation forward.",
+    ""
+  ];
+
+  if (scenarioTitle) {
+    lines.push(`Scenario focus: ${scenarioTitle}`);
+  }
+  if (segmentLabel) {
+    lines.push(`Target role focus: ${segmentLabel}`);
+  }
+  if (scenarioTitle || segmentLabel) {
+    lines.push("");
+  }
+
+  lines.push(
+    "Scoring categories (Title + Guiding Details):",
+    "",
+    "1) Outcome Progress and Next-Step Commitment (Weight 20)",
+    "- Did the user move toward a concrete objective in this scenario?",
+    "- Did they secure or clearly attempt a specific next step?",
+    "- Higher score when progress is explicit, measurable, and time-bound.",
+    "",
+    "2) Discovery and Active Listening (Weight 12)",
+    "- Did the user ask targeted questions and adapt to concerns?",
+    "- Did they acknowledge and use what they heard?",
+    "- Penalize scripted, non-responsive replies.",
+    "",
+    "3) Message Clarity and Structure (Weight 12)",
+    "- Was communication concise, organized, and easy to follow?",
+    "- Did the user avoid rambling and maintain a clear thread?",
+    "- Reward strong framing, summarization, and transitions.",
+    "",
+    "4) Evidence, Reasoning, and Credibility (Weight 14)",
+    "- Did the user support claims with relevant rationale, examples, or data?",
+    "- Were claims believable and directly tied to objections?",
+    "- Penalize unsupported assertions.",
+    "",
+    "5) Objection Handling and Problem Solving (Weight 14)",
+    "- Did the user directly address resistance and constraints?",
+    "- Did they reframe constructively and propose practical options?",
+    "- Reward calm, specific, solution-oriented responses.",
+    "",
+    "6) Assertiveness and Conversation Control (Weight 13)",
+    "- Did the user maintain direction without becoming aggressive?",
+    "- Did they guide toward decisions and keep momentum?",
+    "- Penalize passivity or loss of control.",
+    "",
+    "7) Empathy, Professionalism, and Rapport (Weight 10)",
+    "- Did the user demonstrate understanding, respect, and emotional intelligence?",
+    "- Was tone professional, composed, and relationship-preserving?",
+    "- Penalize dismissive or tone-deaf communication.",
+    "",
+    "8) Industry Baseline Adherence (Weight 15)",
+    "- Score how well the user's approach aligns with the active industry baseline guidance.",
+    "- Reward baseline-consistent priorities, language, and constraints.",
+    "- Penalize direct conflicts with baseline expectations.",
+    "- If baseline guidance is missing, score neutral and note the limitation in summary.",
+    "",
+    "Scoring behavior rules:",
+    "- Anchor judgments to observed transcript behavior.",
+    "- Keep strengths and improvements specific and actionable.",
+    "- Use stricter standards for hard difficulty than easy or medium.",
+    "",
+    "Output compatibility rules:",
+    "- Preserve required output schema: overallScore, persuasion, clarity, empathy, assertiveness, strengths[3], improvements[3], summary.",
+    "- Map categories into required dimensions without dropping category coverage.",
+    "- overallScore should reflect weighted performance across all categories.",
+    ""
+  );
+
+  if (industries.length > 0) {
+    lines.push("Industry baseline references for selected industries:");
+    for (const industry of industries) {
+      const baseline = (industry.aiBaseline ?? "").trim();
+      lines.push(
+        baseline
+          ? `- ${industry.label} (${industry.id}): ${baseline}`
+          : `- ${industry.label} (${industry.id}): no baseline text configured.`
+      );
+    }
+    lines.push("");
+  }
+
+  const addOnIds = industries.length > 0 ? industries.map((industry) => industry.id) : Object.keys(DEFAULT_SCORING_INDUSTRY_ADD_ONS);
+  const addOns = Array.from(new Set(addOnIds))
+    .map((industryId) => ({ industryId, rules: DEFAULT_SCORING_INDUSTRY_ADD_ONS[industryId] }))
+    .filter((entry): entry is { industryId: string; rules: string[] } => Array.isArray(entry.rules));
+
+  if (addOns.length > 0) {
+    lines.push("Industry-specific add-ons:");
+    for (const addOn of addOns) {
+      lines.push(`${INDUSTRY_LABELS[addOn.industryId] ?? addOn.industryId.toUpperCase()} add-on:`);
+      for (const rule of addOn.rules) {
+        lines.push(`- ${rule}`);
+      }
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
 export function createDefaultConfig(nowIso: string): AppConfig {
   return {
     activeSegmentId: "project_manager",
