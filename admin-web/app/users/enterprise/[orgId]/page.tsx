@@ -734,12 +734,16 @@ export default function EnterpriseOrgPage() {
                   <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <div className="grid" style={{ marginTop: 4, gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
-                    <div>
-                      <label>Join Code</label>
-                      <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
-                    </div>
-                    <div>
+                  <div
+                    style={{
+                      marginTop: 4,
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(440px, 1fr))",
+                      gap: 18,
+                      alignItems: "start"
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
                       <label>Time Allotment (Billing Cycle)</label>
                       <p className="small" style={{ marginTop: 0 }}>
                         Hard enforcement uses monthly organization minutes. Active-user projection uses active users only.
@@ -797,64 +801,74 @@ export default function EnterpriseOrgPage() {
                           </div>
                         </div>
                       </div>
+                      <div style={{ marginTop: 12 }}>
+                        <button
+                          className="primary"
+                          disabled={savingQuotaSettings}
+                          onClick={() => void saveOrgQuotaSettings()}
+                        >
+                          {savingQuotaSettings ? "Saving..." : "Save Time Allotment Settings"}
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <label>Segments Active</label>
+                      <div>{segmentsActiveLabel}</div>
+                      <div className="small">
+                        Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
+                        {formatDate(dashboard.billingPeriod.periodEndAt)}
+                      </div>
+                      <div style={{ marginTop: 14 }}>
+                        <label>Segment Selection</label>
+                        <p className="small" style={{ marginTop: 0 }}>
+                          Select an industry and toggle whether it is active for this company.
+                        </p>
+                        <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
+                          <div style={{ minWidth: 260, flex: "1 1 260px" }}>
+                            <label>Industry</label>
+                            <select
+                              value={selectedIndustryId}
+                              onChange={(event) => setSelectedIndustryId(event.target.value)}
+                            >
+                              {industries.map((industry) => (
+                                <option key={industry.id} value={industry.id}>
+                                  {industry.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <button
+                              type="button"
+                              className={selectedIndustryActive ? "primary" : undefined}
+                              disabled={savingIndustries || !selectedIndustryId}
+                              onClick={() => void setIndustryActive(true)}
+                            >
+                              Active
+                            </button>
+                            <button
+                              type="button"
+                              className={!selectedIndustryActive ? "primary" : undefined}
+                              disabled={savingIndustries || !selectedIndustryId}
+                              onClick={() => void setIndustryActive(false)}
+                            >
+                              Inactive
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 14 }}>
+                        <label>Join Code</label>
+                        <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
+                      </div>
+                      <div style={{ marginTop: 12 }}>
+                        <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
+                          {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Segments Active</label>
-                  <div>{segmentsActiveLabel}</div>
-                  <div className="small">
-                    Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
-                    {formatDate(dashboard.billingPeriod.periodEndAt)}
-                  </div>
-                </div>
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <label>Segment Selection</label>
-                  <p className="small" style={{ marginTop: 0 }}>
-                    Select an industry and toggle whether it is active for this company.
-                  </p>
-                  <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
-                    <div style={{ minWidth: 260, flex: "1 1 260px" }}>
-                      <label>Industry</label>
-                      <select
-                        value={selectedIndustryId}
-                        onChange={(event) => setSelectedIndustryId(event.target.value)}
-                      >
-                        {industries.map((industry) => (
-                          <option key={industry.id} value={industry.id}>
-                            {industry.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <button
-                        type="button"
-                        className={selectedIndustryActive ? "primary" : undefined}
-                        disabled={savingIndustries || !selectedIndustryId}
-                        onClick={() => void setIndustryActive(true)}
-                      >
-                        Active
-                      </button>
-                      <button
-                        type="button"
-                        className={!selectedIndustryActive ? "primary" : undefined}
-                        disabled={savingIndustries || !selectedIndustryId}
-                        onClick={() => void setIndustryActive(false)}
-                      >
-                        Inactive
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="form-actions">
-                <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
-                  {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
-                </button>
-                <button className="primary" disabled={savingQuotaSettings} onClick={() => void saveOrgQuotaSettings()}>
-                  {savingQuotaSettings ? "Saving..." : "Save Time Allotment Settings"}
-                </button>
               </div>
             </>
           ) : (
