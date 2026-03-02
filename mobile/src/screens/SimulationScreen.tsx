@@ -243,6 +243,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const pendingOpeningLineRef = useRef<string | null>(null);
   const lastVoiceAtRef = useRef(0);
   const heardVoiceRef = useRef(false);
+  const detectedVoiceRef = useRef(false);
   const meteringSeenRef = useRef(false);
   const voiceHitCountRef = useRef(0);
   const kickoffSentRef = useRef(false);
@@ -517,6 +518,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
         if (status.metering > VOICE_METER_THRESHOLD_DB) {
           voiceHitCountRef.current += 1;
+          detectedVoiceRef.current = true;
           if (voiceHitCountRef.current >= MIN_VOICE_HIT_COUNT) {
             heardVoiceRef.current = true;
           }
@@ -562,6 +564,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       turnStartedAtRef.current = Date.now();
       lastVoiceAtRef.current = turnStartedAtRef.current;
       heardVoiceRef.current = false;
+      detectedVoiceRef.current = false;
       meteringSeenRef.current = false;
       voiceHitCountRef.current = 0;
 
@@ -616,7 +619,10 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       );
       const inferredVoiceWithoutMeter =
         !meteringSeenRef.current && turnDurationSeconds >= 3;
-      const shouldAttemptTranscription = heardVoiceRef.current || inferredVoiceWithoutMeter;
+      const shouldAttemptTranscription =
+        detectedVoiceRef.current ||
+        heardVoiceRef.current ||
+        inferredVoiceWithoutMeter;
 
       let userText = "";
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
@@ -637,7 +643,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             setError(null);
             setStatus("Live AI unavailable. Switched to local test mode.");
             useLiveApiThisTurn = false;
-            if (heardVoiceRef.current || inferredVoiceWithoutMeter) {
+            if (detectedVoiceRef.current || heardVoiceRef.current || inferredVoiceWithoutMeter) {
               userText = buildLocalCapturedText(turnDurationSeconds);
             }
           } else {
@@ -700,6 +706,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               assistantMessageShown = true;
               appendMessage(assistantMessage);
             };
+            // eslint-disable-next-line no-console
+            console.log("[TTS-TIMING]", {
+              source: "simulation",
+              preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+              phase: "speak_invoked",
+              tsMs: Date.now(),
+              elapsedMs: Date.now() - assistantTextReceivedAtMs,
+            });
             const speakPromise = speakAssistantResponse(reply, assistantTextReceivedAtMs, () => {
               showAssistantMessage();
             });
@@ -797,6 +811,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           openingMessageShown = true;
           appendMessage(openingAssistantMessage);
         };
+        // eslint-disable-next-line no-console
+        console.log("[TTS-TIMING]", {
+          source: "simulation",
+          preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+          phase: "speak_invoked",
+          tsMs: Date.now(),
+          elapsedMs: Date.now() - assistantTextReceivedAtMs,
+        });
         const speakPromise = speakAssistantResponse(openingLine, assistantTextReceivedAtMs, () => {
           showOpeningMessage();
         });
