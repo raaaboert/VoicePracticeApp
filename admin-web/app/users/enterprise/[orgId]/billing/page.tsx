@@ -195,6 +195,20 @@ export default function EnterpriseUsageBillingPage() {
                 <div>{formatMinutes(payload.usage.allottedMinutes)}</div>
               </div>
               <div>
+                <label>Default Per-User Daily Minutes</label>
+                <div>{formatMinutes((payload.org.perUserDailySecondsCap ?? 0) / 60)}</div>
+              </div>
+              <div>
+                <label>Pending Per-User Daily Minutes</label>
+                <div>
+                  {payload.org.pendingPerUserDailySecondsCap !== null
+                    ? `${formatMinutes(payload.org.pendingPerUserDailySecondsCap / 60)} (effective ${formatDate(
+                        payload.org.pendingPerUserDailySecondsCapEffectiveAt ?? ""
+                      )})`
+                    : "None"}
+                </div>
+              </div>
+              <div>
                 <label>Used Minutes (Current Cycle)</label>
                 <div>{formatMinutes(payload.usage.usedMinutes)}</div>
               </div>

@@ -57,7 +57,7 @@ import {
   recordUsageSession,
   submitOrgAccessRequest,
   decideOrgAdminAccessRequest,
-  setOrgAdminUserStatus,
+  setOrgAdminUserControls,
   updateOrgAdminOrgSettings,
   updateMobileSettings,
   verifyMobileEmail,
@@ -295,6 +295,8 @@ function shouldAutoReportErrorMessage(message: string): boolean {
     "daily plan limit reached",
     "organization daily quota reached",
     "user daily quota reached",
+    "organization monthly allotment reached",
+    "user daily time allotment reached",
     "you cannot lock or unlock your own account",
     "user admins cannot lock or unlock org admins",
   ];
@@ -1339,7 +1341,9 @@ export default function App() {
       setAdminError(null);
 
       try {
-        await setOrgAdminUserStatus(user.id, targetUserId, mobileAuthToken, locked ? "disabled" : "active");
+        await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
+          status: locked ? "disabled" : "active",
+        });
         await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
       } catch (caught) {
         const message = getErrorMessage(caught, "Could not update user status.");
@@ -1347,6 +1351,41 @@ export default function App() {
         void submitAutoErrorReport("admin_user_status.update", caught, {
           screen: "admin_user_detail",
           details: { targetUserId, locked },
+        });
+      } finally {
+        setAdminLoading(false);
+      }
+    },
+    [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
+  );
+
+  const setOrgUserDailyOverage = useCallback(
+    async (targetUserId: string, allowDailyOverageThisCycle: boolean) => {
+      if (!user || !mobileAuthToken) {
+        return;
+      }
+
+      const actorHasAdminAccess =
+        user.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin");
+      if (!actorHasAdminAccess) {
+        setAdminError("Admin access required.");
+        return;
+      }
+
+      setAdminLoading(true);
+      setAdminError(null);
+
+      try {
+        await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
+          allowDailyOverageThisCycle,
+        });
+        await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
+      } catch (caught) {
+        const message = getErrorMessage(caught, "Could not update user overage allowance.");
+        setAdminError(message);
+        void submitAutoErrorReport("admin_user_overage.update", caught, {
+          screen: "admin_user_detail",
+          details: { targetUserId, allowDailyOverageThisCycle },
         });
       } finally {
         setAdminLoading(false);
@@ -2062,7 +2101,7 @@ export default function App() {
     try {
       const latestEntitlements = await refreshEntitlements();
       if (latestEntitlements && !latestEntitlements.canStartSimulation) {
-        throw new Error(latestEntitlements.lockReason || "Daily limit reached.");
+        throw new Error(latestEntitlements.lockReason || "Time allotment reached.");
       }
 
       const scenario = activeScenario;
@@ -2398,14 +2437,33 @@ export default function App() {
     return filtered.slice(0, 2);
   }, [standardTiers, user?.tier]);
 
-  const dailyAllotmentUsage = useMemo(() => {
+  const timeAllotmentUsage = useMemo(() => {
     const limits = entitlements?.limits;
     const usage = entitlements?.usage;
     if (!limits || !usage) {
       return {
+        mode: "unknown" as "monthly_org" | "daily_user" | "unknown",
         limitSeconds: null as number | null,
         usedSeconds: null as number | null,
         usedPercent: null as number | null,
+        remainingSeconds: null as number | null,
+      };
+    }
+
+    if (
+      typeof usage.orgAllottedSecondsThisPeriod === "number" &&
+      typeof usage.orgUsedSecondsThisPeriod === "number"
+    ) {
+      const limitSeconds = Math.max(0, usage.orgAllottedSecondsThisPeriod);
+      const usedSeconds = Math.max(0, Math.min(limitSeconds, usage.orgUsedSecondsThisPeriod));
+      const remainingSeconds = Math.max(0, limitSeconds - usedSeconds);
+      const usedPercent = limitSeconds > 0 ? Math.round((usedSeconds / limitSeconds) * 100) : 0;
+      return {
+        mode: "monthly_org" as const,
+        limitSeconds,
+        usedSeconds,
+        usedPercent: Math.max(0, Math.min(100, usedPercent)),
+        remainingSeconds,
       };
     }
 
@@ -2426,9 +2484,11 @@ export default function App() {
 
     if (limitSeconds === null || remainingSeconds === null) {
       return {
+        mode: "unknown" as const,
         limitSeconds,
         usedSeconds: null as number | null,
         usedPercent: null as number | null,
+        remainingSeconds: null as number | null,
       };
     }
 
@@ -2436,9 +2496,11 @@ export default function App() {
     const usedPercent = limitSeconds > 0 ? Math.round((usedSeconds / limitSeconds) * 100) : 0;
 
     return {
+      mode: "daily_user" as const,
       limitSeconds,
       usedSeconds,
       usedPercent: Math.max(0, Math.min(100, usedPercent)),
+      remainingSeconds,
     };
   }, [entitlements]);
 
@@ -2506,14 +2568,22 @@ export default function App() {
             </View>
             <Text style={styles.menuBody}>Plan: {currentTier?.label ?? "Free"}</Text>
             <Text style={styles.menuBody}>
-              {entitlements?.usage?.dailySecondsRemaining === null
-                ? "Daily remaining: unlimited"
-                : `Daily remaining: ${formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
+              {timeAllotmentUsage.mode === "monthly_org"
+                ? `Org remaining this cycle: ${formatSecondsAsClock(timeAllotmentUsage.remainingSeconds ?? 0)}`
+                : entitlements?.usage?.dailySecondsRemaining === null
+                  ? "Daily remaining: unlimited"
+                  : `Daily remaining: ${formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
             </Text>
             <Text style={styles.menuBody}>
-              Month used: {secondsToWholeMinutes(entitlements?.usage?.billedSecondsThisMonth ?? 0)} min
+              {timeAllotmentUsage.mode === "monthly_org"
+                ? `Org used this cycle: ${secondsToWholeMinutes(entitlements?.usage?.orgUsedSecondsThisPeriod ?? 0)} min`
+                : `Month used: ${secondsToWholeMinutes(entitlements?.usage?.billedSecondsThisMonth ?? 0)} min`}
             </Text>
-            <Text style={styles.menuBody}>Reset: {entitlements?.usage?.nextDailyResetLabel ?? "Unavailable"}</Text>
+            <Text style={styles.menuBody}>
+              {timeAllotmentUsage.mode === "monthly_org"
+                ? `Renewal: ${formatDateLabel(entitlements?.usage?.nextRenewalAt ?? null)}`
+                : `Reset: ${entitlements?.usage?.nextDailyResetLabel ?? "Unavailable"}`}
+            </Text>
             <View style={styles.menuSeparator} />
             <Pressable
               style={styles.menuItemButton}
@@ -2907,19 +2977,37 @@ export default function App() {
 
         <View style={styles.card}>
           <Text style={styles.label}>Usage Check</Text>
-          <Text style={styles.body}>{entitlements?.usage?.nextDailyResetLabel ?? "Daily reset unavailable."}</Text>
-          <Text style={styles.body}>
-            {entitlements?.usage?.dailySecondsRemaining === null
-              ? "Daily remaining: unlimited"
-              : `Daily remaining: ${formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
-          </Text>
-          <Text style={styles.body}>
-            {dailyAllotmentUsage.usedPercent === null
-              ? "Daily allotment used: unavailable"
-              : `Daily allotment used: ${dailyAllotmentUsage.usedPercent}% (${formatSecondsAsClock(
-                  dailyAllotmentUsage.usedSeconds ?? 0
-                )} / ${formatSecondsAsClock(dailyAllotmentUsage.limitSeconds ?? 0)})`}
-          </Text>
+          {timeAllotmentUsage.mode === "monthly_org" ? (
+            <>
+              <Text style={styles.body}>
+                Resets at next renewal: {formatDateLabel(entitlements?.usage?.nextRenewalAt ?? null)}
+              </Text>
+              <Text style={styles.body}>
+                Remaining this cycle: {formatSecondsAsClock(timeAllotmentUsage.remainingSeconds ?? 0)}
+              </Text>
+              <Text style={styles.body}>
+                Org allotment used: {timeAllotmentUsage.usedPercent ?? 0}% (
+                {formatSecondsAsClock(timeAllotmentUsage.usedSeconds ?? 0)} /{" "}
+                {formatSecondsAsClock(timeAllotmentUsage.limitSeconds ?? 0)})
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.body}>{entitlements?.usage?.nextDailyResetLabel ?? "Daily reset unavailable."}</Text>
+              <Text style={styles.body}>
+                {entitlements?.usage?.dailySecondsRemaining === null
+                  ? "Daily remaining: unlimited"
+                  : `Daily remaining: ${formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
+              </Text>
+              <Text style={styles.body}>
+                {timeAllotmentUsage.usedPercent === null
+                  ? "Daily allotment used: unavailable"
+                  : `Daily allotment used: ${timeAllotmentUsage.usedPercent}% (${formatSecondsAsClock(
+                      timeAllotmentUsage.usedSeconds ?? 0
+                    )} / ${formatSecondsAsClock(timeAllotmentUsage.limitSeconds ?? 0)})`}
+              </Text>
+            </>
+          )}
         </View>
       </ScrollView>
 
@@ -3166,9 +3254,11 @@ export default function App() {
             Used this month: {secondsToWholeMinutes(entitlements?.usage?.billedSecondsThisMonth ?? 0)} min billed
           </Text>
           <Text style={styles.body}>
-            Daily remaining: {entitlements?.usage?.dailySecondsRemaining === null
-              ? "unlimited"
-              : formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}
+            {timeAllotmentUsage.mode === "monthly_org"
+              ? `Org remaining this cycle: ${formatSecondsAsClock(timeAllotmentUsage.remainingSeconds ?? 0)}`
+              : `Daily remaining: ${entitlements?.usage?.dailySecondsRemaining === null
+                  ? "unlimited"
+                  : formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
           </Text>
         </View>
 
@@ -3522,9 +3612,26 @@ export default function App() {
           .join(", ")
       : "-";
 
-    const allotmentSeconds = usage?.annualizedAllotmentSeconds ?? 0;
+    const allotmentSeconds = usage?.monthlyAllottedSeconds ?? 0;
     const usedSeconds = usage?.billedSecondsThisPeriod ?? 0;
-    const usagePct = allotmentSeconds > 0 ? Math.min(1, usedSeconds / allotmentSeconds) : 0;
+    const usagePct =
+      typeof usage?.usagePercentThisPeriod === "number"
+        ? Math.max(0, Math.min(1, usage.usagePercentThisPeriod / 100))
+        : allotmentSeconds > 0
+          ? Math.min(1, usedSeconds / allotmentSeconds)
+          : 0;
+    const projectedAllocatedSeconds = usage?.projectedAllocatedUserSecondsThisPeriod ?? 0;
+    const projectedAllocatedPct = Math.max(
+      0,
+      Math.min(
+        100,
+        typeof usage?.projectedAllocatedUtilizationPercent === "number"
+          ? usage.projectedAllocatedUtilizationPercent
+          : allotmentSeconds > 0
+            ? (projectedAllocatedSeconds / allotmentSeconds) * 100
+            : 0
+      )
+    );
 
     const analyticsSessions = orgAdminAnalytics?.bySegment.reduce((total, row) => total + (row.sessions ?? 0), 0) ?? 0;
 
@@ -3598,10 +3705,11 @@ export default function App() {
 
             <View style={{ gap: 10, marginTop: 6 }}>
               <View style={styles.optionCard}>
-                <Text style={styles.optionTitle}>Annual Allotment</Text>
+                <Text style={styles.optionTitle}>Monthly Allotment</Text>
                 <Text style={styles.body}>
                   Used: {formatSecondsAsClock(usedSeconds)}{"\n"}
-                  Included: {formatSecondsAsClock(allotmentSeconds)}
+                  Included: {formatSecondsAsClock(allotmentSeconds)}{"\n"}
+                  Remaining: {formatSecondsAsClock(Math.max(0, usage?.remainingSecondsThisPeriod ?? 0))}
                 </Text>
                 <View
                   style={{
@@ -3621,13 +3729,23 @@ export default function App() {
                   />
                 </View>
                 <Text style={styles.body}>Utilization: {Math.round(usagePct * 100)}%</Text>
+                <Text style={styles.body}>
+                  Active users: {usage?.activeUserCount ?? 0}{"\n"}
+                  Projected from active-user daily caps this cycle: {Math.round(projectedAllocatedSeconds / 60)} min (
+                  {projectedAllocatedPct.toFixed(1)}%)
+                </Text>
               </View>
 
               <View style={styles.optionCard}>
                 <Text style={styles.optionTitle}>Quota Rules</Text>
                 <Text style={styles.body}>
-                  Org daily quota: {formatSecondsAsClock(usage?.dailyQuotaSeconds ?? 0)}{"\n"}
                   Per-user daily cap: {formatSecondsAsClock(usage?.perUserDailyCapSeconds ?? 0)}{"\n"}
+                  Pending per-user cap next cycle:{" "}
+                  {org?.pendingPerUserDailySecondsCap !== null
+                    ? `${formatSecondsAsClock(org?.pendingPerUserDailySecondsCap ?? 0)} (effective ${formatDateLabel(
+                        org?.pendingPerUserDailySecondsCapEffectiveAt ?? null
+                      )})`
+                    : "none"}{"\n"}
                   Manual bonus pool: {formatSecondsAsClock(org?.manualBonusSeconds ?? 0)}
                 </Text>
               </View>
@@ -4064,7 +4182,9 @@ export default function App() {
                       <Text style={styles.optionTitle}>{row.email}</Text>
                       <Text style={styles.body}>
                         Role: {formatRole(row.orgRole)}{"\n"}
-                        Status: {formatStatus(row.status)}
+                        Status: {formatStatus(row.status)}{"\n"}
+                        Daily cap: {formatSecondsAsClock(row.effectiveDailySecondsCap ?? 0)}{"\n"}
+                        Daily overage: {row.allowDailyOverageThisCycle ? "Allowed" : "Off"}
                       </Text>
                     </Pressable>
                   ))}
@@ -4105,6 +4225,7 @@ export default function App() {
     const actorIsUserAdmin = user.orgRole === "user_admin";
     const targetIsOrgAdmin = detail ? detail.user.orgRole === "org_admin" : false;
     const locked = detail ? detail.user.status !== "active" : false;
+    const dailyOverageAllowed = detail ? detail.user.allowDailyOverageThisCycle === true : false;
     const roleLabel = detail
       ? (ORG_USER_ROLE_LABELS as unknown as Record<string, string>)[detail.user.orgRole] ?? detail.user.orgRole
       : "-";
@@ -4163,7 +4284,9 @@ export default function App() {
                 <Text style={styles.title}>{detail.user.email}</Text>
                 <Text style={styles.body}>
                   Role: {roleLabel}{"\n"}
-                  Status: {detail.user.status === "disabled" ? "Locked" : "Active"}
+                  Status: {detail.user.status === "disabled" ? "Locked" : "Active"}{"\n"}
+                  Effective daily cap: {formatSecondsAsClock(detail.user.effectiveDailySecondsCap ?? 0)}{"\n"}
+                  Overage: {dailyOverageAllowed ? "Allowed" : "Off"}
                 </Text>
 
                 <Text style={styles.hintText}>Access</Text>
@@ -4196,6 +4319,49 @@ export default function App() {
                 ) : actorIsUserAdmin && targetIsOrgAdmin ? (
                   <Text style={styles.body}>User Admins cannot lock or unlock Org Admins.</Text>
                 ) : null}
+
+                <Text style={styles.hintText}>Daily Overage</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+                  <Pressable
+                    style={[
+                      styles.timezoneChip,
+                      !dailyOverageAllowed ? styles.selectedChip : null,
+                      adminLoading ? styles.disabled : null,
+                    ]}
+                    disabled={adminLoading}
+                    onPress={() => {
+                      if (!dailyOverageAllowed) {
+                        return;
+                      }
+                      void setOrgUserDailyOverage(targetUserId, false);
+                    }}
+                  >
+                    <Text style={styles.chipText}>Off</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.timezoneChip,
+                      dailyOverageAllowed ? styles.selectedChip : null,
+                      adminLoading ? styles.disabled : null,
+                    ]}
+                    disabled={adminLoading}
+                    onPress={() => {
+                      if (dailyOverageAllowed) {
+                        return;
+                      }
+                      void setOrgUserDailyOverage(targetUserId, true);
+                    }}
+                  >
+                    <Text style={styles.chipText}>Allow</Text>
+                  </Pressable>
+                </ScrollView>
+                {dailyOverageAllowed ? (
+                  <Text style={styles.body}>
+                    Overage currently allowed through {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
+                  </Text>
+                ) : (
+                  <Text style={styles.body}>Daily cap enforced for this user.</Text>
+                )}
               </View>
 
               <View style={styles.card}>

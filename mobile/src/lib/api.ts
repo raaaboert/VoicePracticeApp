@@ -783,7 +783,10 @@ export async function fetchOrgAdminDashboard(
     activeIndustries: string[];
     dailySecondsQuota: number;
     perUserDailySecondsCap: number;
+    pendingPerUserDailySecondsCap: number | null;
+    pendingPerUserDailySecondsCapEffectiveAt: string | null;
     manualBonusSeconds: number;
+    monthlyMinutesAllotted: number;
     maxSimulationMinutes: number;
     createdAt: string;
     updatedAt: string;
@@ -795,10 +798,14 @@ export async function fetchOrgAdminDashboard(
     daysInPeriod: number;
   };
   usage: {
-    dailyQuotaSeconds: number;
-    perUserDailyCapSeconds: number;
+    monthlyAllottedSeconds: number;
     billedSecondsThisPeriod: number;
-    annualizedAllotmentSeconds: number;
+    remainingSecondsThisPeriod: number;
+    usagePercentThisPeriod: number;
+    perUserDailyCapSeconds: number;
+    activeUserCount: number;
+    projectedAllocatedUserSecondsThisPeriod: number;
+    projectedAllocatedUtilizationPercent: number;
   };
 }> {
   return requestJson(
@@ -811,12 +818,22 @@ export async function fetchOrgAdminDashboard(
 export async function updateOrgAdminOrgSettings(
   userId: string,
   authToken: string,
-  patch: { maxSimulationMinutes: number },
+  patch: {
+    maxSimulationMinutes?: number;
+    monthlyMinutesAllotted?: number;
+    perUserDailySecondsCap?: number;
+    applyPerUserDailySecondsCapNextCycle?: boolean;
+    clearPendingPerUserDailySecondsCap?: boolean;
+  },
 ): Promise<{
   ok: boolean;
   org: {
     id: string;
     maxSimulationMinutes: number;
+    monthlyMinutesAllotted: number;
+    perUserDailySecondsCap: number;
+    pendingPerUserDailySecondsCap: number | null;
+    pendingPerUserDailySecondsCapEffectiveAt: string | null;
     updatedAt: string;
   };
 }> {
@@ -836,7 +853,16 @@ export async function fetchOrgAdminUsers(
 ): Promise<{
   generatedAt: string;
   org: { id: string; name: string };
-  users: Array<{ userId: string; email: string; status: string; orgRole: string }>;
+  users: Array<{
+    userId: string;
+    email: string;
+    status: string;
+    orgRole: string;
+    dailySecondsCapOverride: number | null;
+    effectiveDailySecondsCap: number;
+    allowDailyOverageThisCycle: boolean;
+    dailyOverageExpiresAt: string | null;
+  }>;
 }> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(userId)}/admin/org/users`,
@@ -913,7 +939,16 @@ export async function fetchOrgAdminUserDetail(
 ): Promise<{
   generatedAt: string;
   org: { id: string; name: string };
-  user: { userId: string; email: string; status: string; orgRole: string };
+  user: {
+    userId: string;
+    email: string;
+    status: string;
+    orgRole: string;
+    dailySecondsCapOverride: number | null;
+    effectiveDailySecondsCap: number;
+    allowDailyOverageThisCycle: boolean;
+    dailyOverageExpiresAt: string | null;
+  };
   period: { startAt: string; endAt: string; days: number };
   usage: { sessions: number; billedSeconds: number };
   scores: {
@@ -931,17 +966,28 @@ export async function fetchOrgAdminUserDetail(
   );
 }
 
-export async function setOrgAdminUserStatus(
+export async function setOrgAdminUserControls(
   userId: string,
   targetUserId: string,
   authToken: string,
-  status: "active" | "disabled",
-): Promise<{ userId: string; email: string; status: string }> {
+  patch: {
+    status?: "active" | "disabled";
+    allowDailyOverageThisCycle?: boolean;
+    dailySecondsCapOverride?: number | null;
+  },
+): Promise<{
+  userId: string;
+  email: string;
+  status: string;
+  allowDailyOverageThisCycle: boolean;
+  dailySecondsCapOverride: number | null;
+  dailyOverageExpiresAt: string | null;
+}> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(userId)}/admin/org/users/${encodeURIComponent(targetUserId)}`,
     {
       method: "PATCH",
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(patch),
     },
     authToken,
   );

@@ -172,6 +172,8 @@ export interface EnterpriseOrg {
   activeIndustries: IndustryId[];
   dailySecondsQuota: number;
   perUserDailySecondsCap: number;
+  pendingPerUserDailySecondsCap: number | null;
+  pendingPerUserDailySecondsCapEffectiveAt: string | null;
   manualBonusSeconds: number;
   contractSignedAt: string;
   monthlyMinutesAllotted: number;
@@ -219,6 +221,9 @@ export interface UserProfile {
   pendingTimezoneEffectiveAt: string | null;
   planAnchorAt: string;
   manualBonusSeconds: number;
+  dailySecondsCapOverride: number | null;
+  allowDailyOverageThisCycle: boolean;
+  dailyOverageExpiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -418,6 +423,14 @@ export interface UsageSummary {
   rawSecondsThisMonth: number;
   billedSecondsThisMonth: number;
   dailySecondsRemaining: number | null;
+  orgBillingPeriodStartAt?: string | null;
+  orgBillingPeriodEndAt?: string | null;
+  orgUsedSecondsThisPeriod?: number | null;
+  orgAllottedSecondsThisPeriod?: number | null;
+  orgRemainingSecondsThisPeriod?: number | null;
+  orgUsagePercentThisPeriod?: number | null;
+  userDailyCapSeconds?: number | null;
+  userDailyOverageAllowed?: boolean;
   dayKey: string;
   monthKey: string;
   timezoneUsed: string;
@@ -438,6 +451,7 @@ export interface UserEntitlementsResponse {
     dailySecondsLimit: number | null;
     orgDailySecondsQuota: number | null;
     perUserDailySecondsCap: number | null;
+    orgMonthlySecondsAllotted: number | null;
     maxSimulationMinutes: number | null;
     manualBonusSeconds: number;
     billingIncrementSeconds: number;
@@ -479,6 +493,8 @@ export interface UpdateUserRequest {
   orgId?: string | null;
   orgRole?: OrgUserRole;
   manualBonusSeconds?: number;
+  dailySecondsCapOverride?: number | null;
+  allowDailyOverageThisCycle?: boolean;
 }
 
 export interface UpdateConfigRequest {

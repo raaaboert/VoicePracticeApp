@@ -77,7 +77,6 @@ import {
   isUserStatus,
   secondsToWholeMinutes,
   sumRawSeconds,
-  computeAnnualPeriodBounds,
   computeMonthlyPeriodBounds,
   computeNextRenewalAt
 } from "@voicepractice/shared";
@@ -180,6 +179,7 @@ const TRAINING_PACK_SCENARIO_OPT_IN_PREFIX = "scenario:";
 const SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES = 5;
 const SIMULATION_AI_BUDGET_GRACE_FALLBACK_MINUTES = DEFAULT_MAX_SIMULATION_MINUTES + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES;
 const SIMULATION_AI_BUDGET_GRACE_MAX_MINUTES = MAX_MAX_SIMULATION_MINUTES + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES;
+const SIMULATION_ORG_MONTHLY_OVERRUN_GRACE_MINUTES = 20;
 const TRANSIENT_DATABASE_ERROR_CODES = new Set([
   "ETIMEDOUT",
   "ECONNRESET",
@@ -219,6 +219,7 @@ const TTS_VOICE_BY_PRESET: Record<TtsPreset, string> = {
 const TTS_PRESET_SET = new Set<TtsPreset>(Object.keys(TTS_VOICE_BY_PRESET) as TtsPreset[]);
 const warningLogByKey = new Map<string, number>();
 const simulationAiBudgetGraceByUserId = new Map<string, number>();
+const simulationOrgMonthlyOverrunGraceByUserId = new Map<string, number>();
 const PLACEHOLDER_USER_TEXT_PATTERN = /^voice input captured/i;
 const trainingPackStore = createTrainingPackStore({
   provider: STORAGE_PROVIDER,
@@ -847,6 +848,24 @@ function normalizeMonthlyMinutesAllotted(value: unknown, fallbackMinutes: number
   return clampNonNegativeInteger(value, clampNonNegativeInteger(fallbackMinutes, 0));
 }
 
+function normalizeOptionalSecondsCap(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string" && !value.trim()) {
+    return null;
+  }
+  return clampNonNegativeInteger(value, 0);
+}
+
+function normalizeOptionalIsoDate(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const parsed = parseIsoDateOrNull(value);
+  return parsed ? parsed.toISOString() : null;
+}
+
 function normalizeRenewalTotalUsd(value: unknown, fallbackUsd: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -1301,13 +1320,26 @@ function normalizeOrgUserRole(value: unknown): OrgUserRole {
 function ensureOrgContractFields(org: EnterpriseOrg): EnterpriseOrg {
   const signedAtFallback = isValidIsoDate(org.createdAt) ? org.createdAt : nowIso();
   const monthlyFallback = deriveDefaultMonthlyMinutesAllotted(org);
+  const pendingPerUserDailySecondsCap = normalizeOptionalSecondsCap(org.pendingPerUserDailySecondsCap);
+  const pendingPerUserDailySecondsCapEffectiveAt = normalizeOptionalIsoDate(org.pendingPerUserDailySecondsCapEffectiveAt);
   return {
     ...org,
+    dailySecondsQuota: clampNonNegativeInteger(org.dailySecondsQuota, 0),
+    perUserDailySecondsCap: clampNonNegativeInteger(org.perUserDailySecondsCap, 0),
+    manualBonusSeconds: clampNonNegativeInteger(org.manualBonusSeconds, 0),
     contractSignedAt: normalizeContractSignedAt(org.contractSignedAt, signedAtFallback),
     monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(org.monthlyMinutesAllotted, monthlyFallback),
     renewalTotalUsd: normalizeRenewalTotalUsd(org.renewalTotalUsd, 0),
     softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers),
     maxSimulationMinutes: normalizeMaxSimulationMinutes(org.maxSimulationMinutes),
+    pendingPerUserDailySecondsCap:
+      pendingPerUserDailySecondsCap !== null && pendingPerUserDailySecondsCapEffectiveAt
+        ? pendingPerUserDailySecondsCap
+        : null,
+    pendingPerUserDailySecondsCapEffectiveAt:
+      pendingPerUserDailySecondsCap !== null && pendingPerUserDailySecondsCapEffectiveAt
+        ? pendingPerUserDailySecondsCapEffectiveAt
+        : null,
     enableModularPromptArchitecture: org.enableModularPromptArchitecture === true
   };
 }
@@ -1837,6 +1869,10 @@ function ensureDemoEnterpriseData(db: {
       existing.renewalTotalUsd = normalizeRenewalTotalUsd(existing.renewalTotalUsd, 0);
       existing.softLimitPercentTriggers = normalizeSoftLimitPercentTriggers(existing.softLimitPercentTriggers, [75, 90]);
       existing.maxSimulationMinutes = normalizeMaxSimulationMinutes(existing.maxSimulationMinutes);
+      existing.pendingPerUserDailySecondsCap = normalizeOptionalSecondsCap(existing.pendingPerUserDailySecondsCap);
+      existing.pendingPerUserDailySecondsCapEffectiveAt = normalizeOptionalIsoDate(
+        existing.pendingPerUserDailySecondsCapEffectiveAt
+      );
       existing.customScenarios = Array.isArray(existing.customScenarios) ? existing.customScenarios : [];
       continue;
     }
@@ -1852,6 +1888,8 @@ function ensureDemoEnterpriseData(db: {
       activeIndustries: normalizeIndustryIds(demoOrg.activeIndustries, defaultIndustryIds, allowedIndustryIds),
       dailySecondsQuota: db.config.enterprise.defaultOrgDailySecondsQuota,
       perUserDailySecondsCap: db.config.enterprise.defaultPerUserDailySecondsCap,
+      pendingPerUserDailySecondsCap: null,
+      pendingPerUserDailySecondsCapEffectiveAt: null,
       manualBonusSeconds: 0,
       contractSignedAt: demoOrg.establishedAt,
       monthlyMinutesAllotted: Math.floor((db.config.enterprise.defaultOrgDailySecondsQuota * 30) / 60),
@@ -1878,6 +1916,9 @@ function ensureDemoEnterpriseData(db: {
       existingUser.orgRole = demoUser.orgRole;
       existingUser.status = existingUser.status ?? "active";
       existingUser.timezone = existingUser.timezone ?? "America/New_York";
+      existingUser.dailySecondsCapOverride = normalizeOptionalSecondsCap(existingUser.dailySecondsCapOverride);
+      existingUser.allowDailyOverageThisCycle = existingUser.allowDailyOverageThisCycle === true;
+      existingUser.dailyOverageExpiresAt = normalizeOptionalIsoDate(existingUser.dailyOverageExpiresAt);
       existingUser.updatedAt = existingUser.updatedAt || now;
       continue;
     }
@@ -1896,6 +1937,9 @@ function ensureDemoEnterpriseData(db: {
       pendingTimezoneEffectiveAt: null,
       planAnchorAt: now,
       manualBonusSeconds: 0,
+      dailySecondsCapOverride: null,
+      allowDailyOverageThisCycle: false,
+      dailyOverageExpiresAt: null,
       createdAt: now,
       updatedAt: now
     });
@@ -2625,11 +2669,15 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
   const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
     ...user,
+    manualBonusSeconds: clampNonNegativeInteger((user as Partial<UserProfile>).manualBonusSeconds, 0),
     emailVerifiedAt:
       typeof (user as Partial<UserProfile>).emailVerifiedAt === "string" ||
       (user as Partial<UserProfile>).emailVerifiedAt === null
         ? ((user as Partial<UserProfile>).emailVerifiedAt as string | null)
         : (user as Partial<UserProfile>).createdAt ?? now,
+    dailySecondsCapOverride: normalizeOptionalSecondsCap((user as Partial<UserProfile>).dailySecondsCapOverride),
+    allowDailyOverageThisCycle: (user as Partial<UserProfile>).allowDailyOverageThisCycle === true,
+    dailyOverageExpiresAt: normalizeOptionalIsoDate((user as Partial<UserProfile>).dailyOverageExpiresAt),
     orgRole:
       (user as Partial<UserProfile>).accountType === "enterprise"
         ? normalizeOrgUserRole((user as Partial<UserProfile>).orgRole)
@@ -3453,7 +3501,12 @@ function resolveTierDefinition(db: ApiDatabase, tierId: string): TierDefinition 
   );
 }
 
-function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): UserEntitlementsResponse {
+function computeEntitlements(
+  db: ApiDatabase,
+  user: UserProfile,
+  now: Date,
+  options?: { allowDuringActiveSimulation?: boolean }
+): UserEntitlementsResponse {
   const timezone = materializeUserTimezone(user, now);
   const tierDefinition = resolveTierDefinition(db, user.tier);
   const usage = computeUserUsage(db, user, now, timezone);
@@ -3462,8 +3515,17 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
   let dailySecondsLimit: number | null = tierDefinition.dailySecondsLimit;
   let orgDailySecondsQuota: number | null = null;
   let perUserDailySecondsCap: number | null = null;
+  let orgMonthlySecondsAllotted: number | null = null;
   let maxSimulationMinutes: number | null = null;
   let dailySecondsRemaining: number | null = null;
+  let orgBillingPeriodStartAt: string | null = null;
+  let orgBillingPeriodEndAt: string | null = null;
+  let orgUsedSecondsThisPeriod: number | null = null;
+  let orgAllottedSecondsThisPeriod: number | null = null;
+  let orgRemainingSecondsThisPeriod: number | null = null;
+  let orgUsagePercentThisPeriod: number | null = null;
+  let userDailyOverageAllowed = false;
+  let nextRenewalAt = computeNextRenewalAt(user.planAnchorAt, now);
   let lockReason: string | null = null;
 
   if (user.accountType === "enterprise") {
@@ -3471,22 +3533,59 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
       dailySecondsLimit = null;
       lockReason = "Enterprise account is not currently active.";
       dailySecondsRemaining = 0;
+      clearSimulationOrgMonthlyOverrunGrace(user.id);
     } else {
       orgDailySecondsQuota = org.dailySecondsQuota + org.manualBonusSeconds;
-      perUserDailySecondsCap = org.perUserDailySecondsCap + user.manualBonusSeconds;
+      const effectiveOrgPerUserDailySecondsCap = resolveEffectiveOrgPerUserDailySecondsCap(org, now);
+      const userDailyCapBase =
+        user.dailySecondsCapOverride !== null
+          ? clampNonNegativeInteger(user.dailySecondsCapOverride, effectiveOrgPerUserDailySecondsCap)
+          : effectiveOrgPerUserDailySecondsCap;
+      perUserDailySecondsCap = Math.max(0, userDailyCapBase + user.manualBonusSeconds);
       maxSimulationMinutes = normalizeMaxSimulationMinutes(org.maxSimulationMinutes);
-      const orgBilledToday = computeOrgBilledToday(db, org.id, now, timezone);
-      const orgRemaining = Math.max(0, orgDailySecondsQuota - orgBilledToday);
-      const perUserRemaining = Math.max(0, perUserDailySecondsCap - usage.billedSecondsToday);
+      const orgUsage = resolveOrgUsageForCurrentBillingCycle(db, org, now);
+      orgMonthlySecondsAllotted = orgUsage.allottedSeconds;
+      orgBillingPeriodStartAt = orgUsage.periodStartAt;
+      orgBillingPeriodEndAt = orgUsage.periodEndAt;
+      orgUsedSecondsThisPeriod = orgUsage.usedSeconds;
+      orgAllottedSecondsThisPeriod = orgUsage.allottedSeconds;
+      orgRemainingSecondsThisPeriod = orgUsage.remainingSeconds;
+      orgUsagePercentThisPeriod = orgUsage.usagePercent;
+      nextRenewalAt = orgUsage.nextRenewalAt;
 
-      dailySecondsRemaining = Math.max(0, Math.min(orgRemaining, perUserRemaining));
+      const dailyOverageAllowance = resolveUserDailyOverageAllowance(user, now);
+      userDailyOverageAllowed = dailyOverageAllowance.active;
+      const userDailyLockReason = "User daily time allotment reached.";
+      const orgMonthlyLockReason = "Organization monthly allotment reached.";
+      let userDailyCapExceeded = false;
 
-      if (dailySecondsRemaining <= 0) {
-        if (orgRemaining <= 0) {
-          lockReason = "Organization daily quota reached.";
-        } else {
-          lockReason = "User daily quota reached.";
+      if (!userDailyOverageAllowed) {
+        const perUserRemaining = Math.max(0, perUserDailySecondsCap - usage.billedSecondsToday);
+        dailySecondsRemaining = perUserRemaining;
+        if (perUserRemaining <= 0) {
+          userDailyCapExceeded = true;
         }
+      } else {
+        dailySecondsRemaining = null;
+      }
+
+      const orgMonthlyCapExceeded = orgUsage.remainingSeconds <= 0;
+      if (userDailyCapExceeded || orgMonthlyCapExceeded) {
+        const quotaLockReason = orgMonthlyCapExceeded ? orgMonthlyLockReason : userDailyLockReason;
+        const nowMs = now.getTime();
+        const allowGrace =
+          options?.allowDuringActiveSimulation === true && hasActiveSimulationAiBudgetGrace(user.id, nowMs);
+        if (allowGrace) {
+          const graceExpiresAtMs = ensureSimulationOrgMonthlyOverrunGrace(user.id, nowMs);
+          if (graceExpiresAtMs <= nowMs) {
+            lockReason = quotaLockReason;
+          }
+        } else {
+          clearSimulationOrgMonthlyOverrunGrace(user.id);
+          lockReason = quotaLockReason;
+        }
+      } else {
+        clearSimulationOrgMonthlyOverrunGrace(user.id);
       }
     }
   } else if (dailySecondsLimit !== null) {
@@ -3500,11 +3599,13 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
   if (!user.emailVerifiedAt) {
     lockReason = "Email verification required.";
     dailySecondsRemaining = 0;
+    clearSimulationOrgMonthlyOverrunGrace(user.id);
   }
 
   if (user.status !== "active") {
     lockReason = "User account is disabled.";
     dailySecondsRemaining = 0;
+    clearSimulationOrgMonthlyOverrunGrace(user.id);
   }
 
   return {
@@ -3520,6 +3621,7 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
       dailySecondsLimit,
       orgDailySecondsQuota,
       perUserDailySecondsCap,
+      orgMonthlySecondsAllotted,
       maxSimulationMinutes,
       manualBonusSeconds: user.manualBonusSeconds,
       billingIncrementSeconds: USAGE_BILLING_INCREMENT_SECONDS
@@ -3527,9 +3629,17 @@ function computeEntitlements(db: ApiDatabase, user: UserProfile, now: Date): Use
     usage: {
       ...usage,
       dailySecondsRemaining,
+      orgBillingPeriodStartAt,
+      orgBillingPeriodEndAt,
+      orgUsedSecondsThisPeriod,
+      orgAllottedSecondsThisPeriod,
+      orgRemainingSecondsThisPeriod,
+      orgUsagePercentThisPeriod,
+      userDailyCapSeconds: perUserDailySecondsCap,
+      userDailyOverageAllowed,
       timezoneUsed: timezone,
       nextDailyResetLabel: humanDailyResetLabel(timezone),
-      nextRenewalAt: computeNextRenewalAt(user.planAnchorAt, now)
+      nextRenewalAt
     },
     canStartSimulation: user.status === "active" && !lockReason,
     lockReason
@@ -3570,6 +3680,88 @@ function activateSimulationAiBudgetGrace(userId: string, maxSimulationMinutes: n
 
 function clearSimulationAiBudgetGrace(userId: string): void {
   simulationAiBudgetGraceByUserId.delete(userId);
+}
+
+function clearSimulationOrgMonthlyOverrunGrace(userId: string): void {
+  simulationOrgMonthlyOverrunGraceByUserId.delete(userId);
+}
+
+function ensureSimulationOrgMonthlyOverrunGrace(userId: string, nowMs = Date.now()): number {
+  const existing = simulationOrgMonthlyOverrunGraceByUserId.get(userId);
+  if (typeof existing === "number") {
+    return existing;
+  }
+
+  const expiresAtMs = nowMs + SIMULATION_ORG_MONTHLY_OVERRUN_GRACE_MINUTES * 60 * 1000;
+  simulationOrgMonthlyOverrunGraceByUserId.set(userId, expiresAtMs);
+  return expiresAtMs;
+}
+
+function resolveEffectiveOrgPerUserDailySecondsCap(org: EnterpriseOrg, now: Date): number {
+  const pendingCap = clampNonNegativeInteger(org.pendingPerUserDailySecondsCap, -1);
+  const pendingEffectiveAt = parseIsoDateOrNull(org.pendingPerUserDailySecondsCapEffectiveAt);
+  if (pendingCap >= 0 && pendingEffectiveAt && pendingEffectiveAt.getTime() <= now.getTime()) {
+    return pendingCap;
+  }
+  return clampNonNegativeInteger(org.perUserDailySecondsCap, 0);
+}
+
+function resolveUserDailyOverageAllowance(user: UserProfile, now: Date): {
+  active: boolean;
+  expiresAt: string | null;
+} {
+  if (!user.allowDailyOverageThisCycle) {
+    return { active: false, expiresAt: null };
+  }
+
+  const expiresAt = parseIsoDateOrNull(user.dailyOverageExpiresAt);
+  if (!expiresAt || expiresAt.getTime() <= now.getTime()) {
+    user.allowDailyOverageThisCycle = false;
+    user.dailyOverageExpiresAt = null;
+    return { active: false, expiresAt: null };
+  }
+
+  return { active: true, expiresAt: expiresAt.toISOString() };
+}
+
+function resolveOrgUsageForCurrentBillingCycle(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  now: Date
+): {
+  periodStartAt: string;
+  periodEndAt: string;
+  nextRenewalAt: string;
+  usedSeconds: number;
+  allottedSeconds: number;
+  remainingSeconds: number;
+  usagePercent: number;
+} {
+  const snapshot = buildOrgUsageSnapshot(db, org, now);
+  const remainingSeconds = Math.max(0, snapshot.allottedSeconds - snapshot.usedSeconds);
+  const usagePercent = snapshot.allottedSeconds > 0 ? (snapshot.usedSeconds / snapshot.allottedSeconds) * 100 : 0;
+  return {
+    periodStartAt: snapshot.periodStartAt,
+    periodEndAt: snapshot.periodEndAt,
+    nextRenewalAt: snapshot.nextRenewalAt,
+    usedSeconds: snapshot.usedSeconds,
+    allottedSeconds: snapshot.allottedSeconds,
+    remainingSeconds,
+    usagePercent
+  };
+}
+
+function isQuotaLockReason(lockReason: string | null | undefined): boolean {
+  if (!lockReason) {
+    return false;
+  }
+  const normalized = lockReason.toLowerCase();
+  return (
+    normalized.includes("allotment") ||
+    normalized.includes("quota") ||
+    normalized.includes("daily") ||
+    normalized.includes("monthly")
+  );
 }
 
 function computeAiBudgetSnapshot(db: ApiDatabase, user: UserProfile, now: Date): AiBudgetSnapshot {
@@ -3620,6 +3812,10 @@ function resolveAiBudgetLimitError(
   now: Date,
   options?: { allowDuringActiveSimulation?: boolean }
 ): string | null {
+  if (user.accountType === "enterprise") {
+    return null;
+  }
+
   if (options?.allowDuringActiveSimulation && hasActiveSimulationAiBudgetGrace(user.id, now.getTime())) {
     return null;
   }
@@ -4683,6 +4879,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       activeIndustries: normalizeIndustryIds(body.activeIndustries, fallbackIndustryIds, allowedIndustryIds),
       dailySecondsQuota,
       perUserDailySecondsCap,
+      pendingPerUserDailySecondsCap: null,
+      pendingPerUserDailySecondsCapEffectiveAt: null,
       manualBonusSeconds: 0,
       contractSignedAt: normalizeContractSignedAt(body.contractSignedAt, now),
       monthlyMinutesAllotted: normalizeMonthlyMinutesAllotted(body.monthlyMinutesAllotted, monthlyMinutesFallback),
@@ -4711,7 +4909,12 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
 
 app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
-  const patch = request.body as Partial<EnterpriseOrg>;
+  const patch = request.body as Partial<EnterpriseOrg> & {
+    applyPerUserDailySecondsCapNextCycle?: unknown;
+    clearPendingPerUserDailySecondsCap?: unknown;
+  };
+  const applyPerUserDailySecondsCapNextCycle = patch.applyPerUserDailySecondsCapNextCycle === true;
+  const clearPendingPerUserDailySecondsCap = patch.clearPendingPerUserDailySecondsCap === true;
 
   await withDatabase(async (db) => {
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
@@ -4794,10 +4997,24 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
     }
 
     if (patch.perUserDailySecondsCap !== undefined) {
-      org.perUserDailySecondsCap = clampNonNegativeInteger(
+      const normalizedPerUserDailySecondsCap = clampNonNegativeInteger(
         patch.perUserDailySecondsCap,
         org.perUserDailySecondsCap
       );
+      if (applyPerUserDailySecondsCapNextCycle) {
+        const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, new Date()), new Date());
+        org.pendingPerUserDailySecondsCap = normalizedPerUserDailySecondsCap;
+        org.pendingPerUserDailySecondsCapEffectiveAt = billing.nextRenewalAt;
+      } else {
+        org.perUserDailySecondsCap = normalizedPerUserDailySecondsCap;
+        org.pendingPerUserDailySecondsCap = null;
+        org.pendingPerUserDailySecondsCapEffectiveAt = null;
+      }
+    }
+
+    if (clearPendingPerUserDailySecondsCap) {
+      org.pendingPerUserDailySecondsCap = null;
+      org.pendingPerUserDailySecondsCapEffectiveAt = null;
     }
 
     if (patch.manualBonusSeconds !== undefined) {
@@ -5611,17 +5828,20 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
       response.status(404).json({ error: "Organization not found." });
       return;
     }
+    const normalizedOrg = ensureOrgContractFields(org);
 
     const now = new Date();
-    const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, now), now);
+    const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
     const periodStartMs = new Date(billing.periodStartAt).getTime();
     const periodEndMs = new Date(billing.periodEndAt).getTime();
+    const usageSnapshot = buildOrgUsageSnapshot(db, normalizedOrg, now);
+    const effectiveOrgPerUserDailySecondsCap = resolveEffectiveOrgPerUserDailySecondsCap(normalizedOrg, now);
 
     const orgUsers = db.users
-      .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
+      .filter((user) => user.accountType === "enterprise" && user.orgId === normalizedOrg.id)
       .sort((a, b) => a.email.localeCompare(b.email));
 
-    const sessionsForOrg = db.usageSessions.filter((session) => session.orgId === org.id);
+    const sessionsForOrg = db.usageSessions.filter((session) => session.orgId === normalizedOrg.id);
 
     const users = orgUsers.map((user) => {
       const sessionsInPeriod = sessionsForOrg.filter((session) => {
@@ -5643,23 +5863,57 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
         0
       );
 
+      const dailyOverageExpiresAt = user.dailyOverageExpiresAt;
+      const allowDailyOverageThisCycle =
+        user.allowDailyOverageThisCycle === true &&
+        (() => {
+          const parsed = parseIsoDateOrNull(dailyOverageExpiresAt);
+          return parsed ? parsed.getTime() > now.getTime() : false;
+        })();
+
       return {
         userId: user.id,
         email: user.email,
         status: user.status,
         orgRole: user.orgRole,
+        dailySecondsCapOverride: user.dailySecondsCapOverride,
+        effectiveDailySecondsCap:
+          (user.dailySecondsCapOverride ?? effectiveOrgPerUserDailySecondsCap) + user.manualBonusSeconds,
+        allowDailyOverageThisCycle,
+        dailyOverageExpiresAt: allowDailyOverageThisCycle ? dailyOverageExpiresAt : null,
         rawSecondsThisPeriod,
         billedSecondsThisPeriod
       };
     });
 
+    const daysInBillingPeriod = Math.max(1, Math.round((periodEndMs - periodStartMs) / (24 * 60 * 60 * 1000)));
+    const activeUsers = users.filter((entry) => entry.status === "active");
+    const projectedAllocatedUserSecondsThisPeriod = activeUsers.reduce(
+      (total, entry) => total + Math.max(0, entry.effectiveDailySecondsCap) * daysInBillingPeriod,
+      0
+    );
+    const projectedAllocatedUserMinutesThisPeriod = projectedAllocatedUserSecondsThisPeriod / 60;
+    const monthlyAllottedSeconds = usageSnapshot.allottedSeconds;
+    const projectedAllocatedUtilizationPercent =
+      monthlyAllottedSeconds > 0 ? (projectedAllocatedUserSecondsThisPeriod / monthlyAllottedSeconds) * 100 : 0;
+
     response.json({
       generatedAt: now.toISOString(),
-      org,
+      org: normalizedOrg,
       billingPeriod: {
         periodStartAt: billing.periodStartAt,
         periodEndAt: billing.periodEndAt,
         nextRenewalAt: billing.nextRenewalAt
+      },
+      usage: {
+        usedSecondsThisPeriod: usageSnapshot.usedSeconds,
+        allottedSecondsThisPeriod: usageSnapshot.allottedSeconds,
+        remainingSecondsThisPeriod: Math.max(0, usageSnapshot.allottedSeconds - usageSnapshot.usedSeconds),
+        usagePercentThisPeriod: usageSnapshot.usagePercent,
+        activeUserCount: activeUsers.length,
+        projectedAllocatedUserSecondsThisPeriod,
+        projectedAllocatedUserMinutesThisPeriod,
+        projectedAllocatedUtilizationPercent
       },
       users
     });
@@ -5837,6 +6091,9 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       pendingTimezoneEffectiveAt: null,
       planAnchorAt: now,
       manualBonusSeconds: 0,
+      dailySecondsCapOverride: null,
+      allowDailyOverageThisCycle: false,
+      dailyOverageExpiresAt: null,
       createdAt: now,
       updatedAt: now
     };
@@ -5877,6 +6134,9 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       orgId: user.orgId,
       orgRole: user.orgRole,
       manualBonusSeconds: user.manualBonusSeconds,
+      dailySecondsCapOverride: user.dailySecondsCapOverride,
+      allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
+      dailyOverageExpiresAt: user.dailyOverageExpiresAt,
       timezone: user.timezone
     };
     const now = new Date();
@@ -5958,10 +6218,38 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       }
     } else {
       user.orgRole = "user";
+      user.dailySecondsCapOverride = null;
+      user.allowDailyOverageThisCycle = false;
+      user.dailyOverageExpiresAt = null;
     }
 
     if (patch.manualBonusSeconds !== undefined) {
       user.manualBonusSeconds = clampNonNegativeInteger(patch.manualBonusSeconds, user.manualBonusSeconds);
+    }
+
+    if (patch.dailySecondsCapOverride !== undefined) {
+      user.dailySecondsCapOverride = normalizeOptionalSecondsCap(patch.dailySecondsCapOverride);
+    }
+
+    if (patch.allowDailyOverageThisCycle !== undefined) {
+      if (user.accountType !== "enterprise" || !user.orgId) {
+        response.status(400).json({ error: "Daily overage applies only to enterprise users." });
+        return;
+      }
+
+      const allowDailyOverageThisCycle = patch.allowDailyOverageThisCycle === true;
+      user.allowDailyOverageThisCycle = allowDailyOverageThisCycle;
+      if (allowDailyOverageThisCycle) {
+        const org = getOrgById(db, user.orgId);
+        if (!org || org.status !== "active") {
+          response.status(400).json({ error: "Enterprise users must belong to an active organization." });
+          return;
+        }
+        const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, now), now);
+        user.dailyOverageExpiresAt = billing.nextRenewalAt;
+      } else {
+        user.dailyOverageExpiresAt = null;
+      }
     }
 
     if (typeof patch.timezone === "string") {
@@ -5989,6 +6277,9 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           orgId: user.orgId,
           orgRole: user.orgRole,
           manualBonusSeconds: user.manualBonusSeconds,
+          dailySecondsCapOverride: user.dailySecondsCapOverride,
+          allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
+          dailyOverageExpiresAt: user.dailyOverageExpiresAt,
           timezone: user.timezone
         }
       }
@@ -6143,6 +6434,9 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       pendingTimezoneEffectiveAt: null,
       planAnchorAt: now,
       manualBonusSeconds: 0,
+      dailySecondsCapOverride: null,
+      allowDailyOverageThisCycle: false,
+      dailyOverageExpiresAt: null,
       createdAt: now,
       updatedAt: now
     };
@@ -7092,7 +7386,9 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date());
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
       return null;
@@ -7274,7 +7570,9 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date());
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (!entitlements.canStartSimulation) {
       respondWithTtsError({
         status: 403,
@@ -7960,7 +8258,9 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date());
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
       return null;
@@ -8207,7 +8507,9 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date());
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      allowDuringActiveSimulation: true
+    });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
       return null;
@@ -8401,6 +8703,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       }
     });
     clearSimulationAiBudgetGrace(context.user.id);
+    clearSimulationOrgMonthlyOverrunGrace(context.user.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Score generation failed.";
     response.status(503).json({ error: message });
@@ -8640,31 +8943,22 @@ app.get("/mobile/users/:userId/admin/org/dashboard", async (request: Request, re
       response.status(404).json({ error: "Organization not found." });
       return;
     }
+    Object.assign(org, ensureOrgContractFields(org));
 
     const now = new Date();
-    const anchorAt =
-      org.createdAt && !Number.isNaN(new Date(org.createdAt).getTime()) ? org.createdAt : now.toISOString();
-    const billing = computeAnnualPeriodBounds(anchorAt, now);
-    const periodStartMs = new Date(billing.periodStartAt).getTime();
-    const periodEndMs = new Date(billing.periodEndAt).getTime();
-
-    const sessionsForOrg = db.usageSessions.filter((session) => session.orgId === org.id);
-    const sessionsInPeriod = sessionsForOrg.filter((session) => {
-      const startedAtMs = new Date(session.startedAt).getTime();
-      if (Number.isNaN(startedAtMs)) {
-        return false;
-      }
-      return startedAtMs >= periodStartMs && startedAtMs < periodEndMs;
-    });
-
-    const billedSecondsThisPeriod = sessionsInPeriod.reduce(
-      (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
-      0
+    const usage = buildOrgUsageSnapshot(db, org, now);
+    const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, now), now);
+    const daysInPeriod = Math.max(
+      1,
+      Math.round((new Date(billing.periodEndAt).getTime() - new Date(billing.periodStartAt).getTime()) / (24 * 60 * 60 * 1000))
     );
-
-    const daysInPeriod = Math.max(1, Math.round((periodEndMs - periodStartMs) / (24 * 60 * 60 * 1000)));
-    const dailyQuotaSeconds = org.dailySecondsQuota + org.manualBonusSeconds;
-    const annualizedAllotmentSeconds = dailyQuotaSeconds * daysInPeriod;
+    const effectivePerUserDailyCapSeconds = resolveEffectiveOrgPerUserDailySecondsCap(org, now);
+    const activeUserCount = db.users.filter(
+      (user) => user.accountType === "enterprise" && user.orgId === org.id && user.status === "active"
+    ).length;
+    const projectedAllocatedUserSecondsThisPeriod = activeUserCount * effectivePerUserDailyCapSeconds * daysInPeriod;
+    const projectedAllocatedUtilizationPercent =
+      usage.allottedSeconds > 0 ? (projectedAllocatedUserSecondsThisPeriod / usage.allottedSeconds) * 100 : 0;
 
     response.json({
       generatedAt: now.toISOString(),
@@ -8676,10 +8970,14 @@ app.get("/mobile/users/:userId/admin/org/dashboard", async (request: Request, re
         daysInPeriod
       },
       usage: {
-        dailyQuotaSeconds,
-        perUserDailyCapSeconds: org.perUserDailySecondsCap,
-        billedSecondsThisPeriod,
-        annualizedAllotmentSeconds
+        monthlyAllottedSeconds: usage.allottedSeconds,
+        billedSecondsThisPeriod: usage.usedSeconds,
+        remainingSecondsThisPeriod: Math.max(0, usage.allottedSeconds - usage.usedSeconds),
+        usagePercentThisPeriod: usage.usagePercent,
+        perUserDailyCapSeconds: effectivePerUserDailyCapSeconds,
+        activeUserCount,
+        projectedAllocatedUserSecondsThisPeriod,
+        projectedAllocatedUtilizationPercent
       }
     });
   });
@@ -8693,10 +8991,26 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
   }
 
   const actorUserId = request.params.userId;
-  const body = request.body as { maxSimulationMinutes?: unknown };
+  const body = request.body as {
+    maxSimulationMinutes?: unknown;
+    monthlyMinutesAllotted?: unknown;
+    perUserDailySecondsCap?: unknown;
+    applyPerUserDailySecondsCapNextCycle?: unknown;
+    clearPendingPerUserDailySecondsCap?: unknown;
+  };
+  const applyPerUserDailySecondsCapNextCycle = body.applyPerUserDailySecondsCapNextCycle === true;
+  const clearPendingPerUserDailySecondsCap = body.clearPendingPerUserDailySecondsCap === true;
 
-  if (body.maxSimulationMinutes === undefined) {
-    response.status(400).json({ error: "maxSimulationMinutes is required." });
+  if (
+    body.maxSimulationMinutes === undefined &&
+    body.monthlyMinutesAllotted === undefined &&
+    body.perUserDailySecondsCap === undefined &&
+    !clearPendingPerUserDailySecondsCap
+  ) {
+    response.status(400).json({
+      error:
+        "At least one setting is required: maxSimulationMinutes, monthlyMinutesAllotted, perUserDailySecondsCap."
+    });
     return;
   }
 
@@ -8728,7 +9042,38 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       return;
     }
 
-    org.maxSimulationMinutes = normalizeMaxSimulationMinutes(body.maxSimulationMinutes, org.maxSimulationMinutes);
+    if (body.maxSimulationMinutes !== undefined) {
+      org.maxSimulationMinutes = normalizeMaxSimulationMinutes(body.maxSimulationMinutes, org.maxSimulationMinutes);
+    }
+
+    if (body.monthlyMinutesAllotted !== undefined) {
+      org.monthlyMinutesAllotted = normalizeMonthlyMinutesAllotted(
+        body.monthlyMinutesAllotted,
+        org.monthlyMinutesAllotted
+      );
+    }
+
+    if (body.perUserDailySecondsCap !== undefined) {
+      const nextPerUserDailySecondsCap = clampNonNegativeInteger(
+        body.perUserDailySecondsCap,
+        org.perUserDailySecondsCap
+      );
+      if (applyPerUserDailySecondsCapNextCycle) {
+        const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, new Date()), new Date());
+        org.pendingPerUserDailySecondsCap = nextPerUserDailySecondsCap;
+        org.pendingPerUserDailySecondsCapEffectiveAt = billing.nextRenewalAt;
+      } else {
+        org.perUserDailySecondsCap = nextPerUserDailySecondsCap;
+        org.pendingPerUserDailySecondsCap = null;
+        org.pendingPerUserDailySecondsCapEffectiveAt = null;
+      }
+    }
+
+    if (clearPendingPerUserDailySecondsCap) {
+      org.pendingPerUserDailySecondsCap = null;
+      org.pendingPerUserDailySecondsCapEffectiveAt = null;
+    }
+
     org.updatedAt = nowIso();
     emitMobileUpdateForOrg(db, org.id, "org");
     appendMobileAuditEvent(db, actor, {
@@ -8737,7 +9082,11 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       orgId: org.id,
       message: `Updated org settings for ${org.name}.`,
       metadata: {
-        maxSimulationMinutes: org.maxSimulationMinutes
+        maxSimulationMinutes: org.maxSimulationMinutes,
+        monthlyMinutesAllotted: org.monthlyMinutesAllotted,
+        perUserDailySecondsCap: org.perUserDailySecondsCap,
+        pendingPerUserDailySecondsCap: org.pendingPerUserDailySecondsCap,
+        pendingPerUserDailySecondsCapEffectiveAt: org.pendingPerUserDailySecondsCapEffectiveAt
       }
     });
 
@@ -8746,6 +9095,10 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       org: {
         id: org.id,
         maxSimulationMinutes: org.maxSimulationMinutes,
+        monthlyMinutesAllotted: org.monthlyMinutesAllotted,
+        perUserDailySecondsCap: org.perUserDailySecondsCap,
+        pendingPerUserDailySecondsCap: org.pendingPerUserDailySecondsCap,
+        pendingPerUserDailySecondsCapEffectiveAt: org.pendingPerUserDailySecondsCapEffectiveAt,
         updatedAt: org.updatedAt
       }
     });
@@ -8788,16 +9141,31 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
       response.status(404).json({ error: "Organization not found." });
       return;
     }
+    const effectiveOrgPerUserDailySecondsCap = resolveEffectiveOrgPerUserDailySecondsCap(org, new Date());
 
     const users = db.users
       .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
       .sort((a, b) => a.email.localeCompare(b.email))
-      .map((user) => ({
-        userId: user.id,
-        email: user.email,
-        status: user.status,
-        orgRole: user.orgRole
-      }));
+      .map((user) => {
+        const dailyOverageExpiresAt = user.dailyOverageExpiresAt;
+        const allowDailyOverageThisCycle =
+          user.allowDailyOverageThisCycle === true &&
+          (() => {
+            const parsed = parseIsoDateOrNull(dailyOverageExpiresAt);
+            return parsed ? parsed.getTime() > Date.now() : false;
+          })();
+        return {
+          userId: user.id,
+          email: user.email,
+          status: user.status,
+          orgRole: user.orgRole,
+          dailySecondsCapOverride: user.dailySecondsCapOverride,
+          effectiveDailySecondsCap:
+            (user.dailySecondsCapOverride ?? effectiveOrgPerUserDailySecondsCap) + user.manualBonusSeconds,
+          allowDailyOverageThisCycle,
+          dailyOverageExpiresAt: allowDailyOverageThisCycle ? dailyOverageExpiresAt : null
+        };
+      });
 
     response.json({
       generatedAt: nowIso(),
@@ -8887,6 +9255,13 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
 
     const safeScores = scores.map((record) => Math.max(0, Math.min(100, record.overallScore)));
     const avgOverallScore = safeScores.length > 0 ? safeScores.reduce((a, b) => a + b, 0) / safeScores.length : null;
+    const dailyOverageExpiresAt = target.dailyOverageExpiresAt;
+    const allowDailyOverageThisCycle =
+      target.allowDailyOverageThisCycle === true &&
+      (() => {
+        const parsed = parseIsoDateOrNull(dailyOverageExpiresAt);
+        return parsed ? parsed.getTime() > now.getTime() : false;
+      })();
 
     response.json({
       generatedAt: now.toISOString(),
@@ -8895,7 +9270,13 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
         userId: target.id,
         email: target.email,
         status: target.status,
-        orgRole: target.orgRole
+        orgRole: target.orgRole,
+        dailySecondsCapOverride: target.dailySecondsCapOverride,
+        effectiveDailySecondsCap:
+          (target.dailySecondsCapOverride ?? resolveEffectiveOrgPerUserDailySecondsCap(org, now)) +
+          target.manualBonusSeconds,
+        allowDailyOverageThisCycle,
+        dailyOverageExpiresAt: allowDailyOverageThisCycle ? dailyOverageExpiresAt : null
       },
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
       usage: {
@@ -8930,7 +9311,14 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
 
   const actorUserId = request.params.userId;
   const targetUserId = request.params.targetUserId;
-  const body = request.body as { status?: UserStatus };
+  const body = request.body as {
+    status?: UserStatus;
+    allowDailyOverageThisCycle?: unknown;
+    dailySecondsCapOverride?: unknown;
+  };
+  const hasStatusPatch = body.status !== undefined;
+  const hasOveragePatch = typeof body.allowDailyOverageThisCycle === "boolean";
+  const hasDailyCapOverridePatch = body.dailySecondsCapOverride !== undefined;
 
   await withDatabase(async (db) => {
     const actor = getUserById(db, actorUserId);
@@ -8954,8 +9342,10 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
-    if (!body.status || !isUserStatus(body.status)) {
-      response.status(400).json({ error: "Valid status is required." });
+    if (!hasStatusPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
+      response.status(400).json({
+        error: "Provide at least one patch field: status, allowDailyOverageThisCycle, or dailySecondsCapOverride."
+      });
       return;
     }
 
@@ -8981,22 +9371,50 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
-    target.status = body.status;
+    if (hasStatusPatch) {
+      if (!body.status || !isUserStatus(body.status)) {
+        response.status(400).json({ error: "Valid status is required." });
+        return;
+      }
+      target.status = body.status;
+    }
+
+    if (hasDailyCapOverridePatch) {
+      target.dailySecondsCapOverride = normalizeOptionalSecondsCap(body.dailySecondsCapOverride);
+    }
+
+    if (hasOveragePatch) {
+      const allowDailyOverageThisCycle = body.allowDailyOverageThisCycle === true;
+      target.allowDailyOverageThisCycle = allowDailyOverageThisCycle;
+      if (allowDailyOverageThisCycle) {
+        const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, new Date()), new Date());
+        target.dailyOverageExpiresAt = billing.nextRenewalAt;
+      } else {
+        target.dailyOverageExpiresAt = null;
+      }
+    }
+
     target.updatedAt = nowIso();
     emitMobileUpdateForUser(db, target.id, "user");
     appendMobileAuditEvent(db, actor, {
       action: "org_user.status_updated",
       orgId: actor.orgId,
       userId: target.id,
-      message: `Updated user status for ${target.email} to ${target.status}.`,
+      message: `Updated org-user controls for ${target.email}.`,
       metadata: {
-        status: target.status
+        status: target.status,
+        dailySecondsCapOverride: target.dailySecondsCapOverride,
+        allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
+        dailyOverageExpiresAt: target.dailyOverageExpiresAt
       }
     });
     response.json({
       userId: target.id,
       email: target.email,
-      status: target.status
+      status: target.status,
+      dailySecondsCapOverride: target.dailySecondsCapOverride,
+      allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
+      dailyOverageExpiresAt: target.dailyOverageExpiresAt
     });
   });
 });
@@ -9189,8 +9607,10 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
 
     const entitlements = computeEntitlements(db, user, now);
     if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
-      return;
+      if (!isQuotaLockReason(entitlements.lockReason)) {
+        response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+        return;
+      }
     }
 
     let rawDurationSeconds = clampNonNegativeInteger(body.rawDurationSeconds, 0);
@@ -9210,6 +9630,8 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       rawDurationSeconds,
       createdAt: now.toISOString()
     });
+    clearSimulationAiBudgetGrace(user.id);
+    clearSimulationOrgMonthlyOverrunGrace(user.id);
 
     const refreshed = computeEntitlements(db, user, now);
     response.status(201).json({

@@ -25,6 +25,10 @@ interface OrgDashboardUserRow {
   email: string;
   status: UserStatus;
   orgRole: OrgUserRole;
+  dailySecondsCapOverride: number | null;
+  effectiveDailySecondsCap: number;
+  allowDailyOverageThisCycle: boolean;
+  dailyOverageExpiresAt: string | null;
   rawSecondsThisPeriod: number;
   billedSecondsThisPeriod: number;
 }
@@ -36,6 +40,16 @@ interface OrgDashboardResponse {
     periodStartAt: string;
     periodEndAt: string;
     nextRenewalAt: string;
+  };
+  usage: {
+    usedSecondsThisPeriod: number;
+    allottedSecondsThisPeriod: number;
+    remainingSecondsThisPeriod: number;
+    usagePercentThisPeriod: number;
+    activeUserCount: number;
+    projectedAllocatedUserSecondsThisPeriod: number;
+    projectedAllocatedUserMinutesThisPeriod: number;
+    projectedAllocatedUtilizationPercent: number;
   };
   users: OrgDashboardUserRow[];
 }
@@ -149,9 +163,16 @@ export default function EnterpriseOrgPage() {
   const [savingIndustries, setSavingIndustries] = useState(false);
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const [savingQuotaSettings, setSavingQuotaSettings] = useState(false);
+  const [savingUserQuotaId, setSavingUserQuotaId] = useState<string | null>(null);
+  const [savingUserOverageId, setSavingUserOverageId] = useState<string | null>(null);
   const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
   const [orgDomainInput, setOrgDomainInput] = useState("");
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
+  const [monthlyMinutesAllottedInput, setMonthlyMinutesAllottedInput] = useState("0");
+  const [defaultPerUserDailyMinutesInput, setDefaultPerUserDailyMinutesInput] = useState("0");
+  const [deferPerUserDailyCapUntilNextCycle, setDeferPerUserDailyCapUntilNextCycle] = useState(false);
+  const [perUserDailyMinutesInputByUserId, setPerUserDailyMinutesInputByUserId] = useState<Record<string, string>>({});
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [joinRequestsGeneratedAt, setJoinRequestsGeneratedAt] = useState<string | null>(null);
@@ -186,6 +207,17 @@ export default function EnterpriseOrgPage() {
       setIndustries(configPayload.industries ?? []);
       setOrgDomainInput(payload.org.emailDomain ?? "");
       setOrgJoinCodeInput(payload.org.joinCode ?? "");
+      setMonthlyMinutesAllottedInput(String(payload.org.monthlyMinutesAllotted ?? 0));
+      setDefaultPerUserDailyMinutesInput(String(Math.max(0, Math.floor((payload.org.perUserDailySecondsCap ?? 0) / 60))));
+      setDeferPerUserDailyCapUntilNextCycle(false);
+      setPerUserDailyMinutesInputByUserId(
+        Object.fromEntries(
+          (payload.users ?? []).map((row) => [
+            row.userId,
+            String(Math.max(0, Math.floor((row.dailySecondsCapOverride ?? payload.org.perUserDailySecondsCap ?? 0) / 60)))
+          ])
+        )
+      );
       setJoinRequestsGeneratedAt(joinRequestsPayload.generatedAt);
       const scopedPendingJoinRequests = (joinRequestsPayload.rows ?? []).filter(
         (row) => row.status === "pending" && row.org?.id === payload.org.id
@@ -249,6 +281,26 @@ export default function EnterpriseOrgPage() {
     activeIndustries.length > 0
       ? activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")
       : "-";
+  const billingPeriodDays = useMemo(() => {
+    if (!dashboard) {
+      return 0;
+    }
+    const startMs = new Date(dashboard.billingPeriod.periodStartAt).getTime();
+    const endMs = new Date(dashboard.billingPeriod.periodEndAt).getTime();
+    if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs <= startMs) {
+      return 0;
+    }
+    return Math.max(1, Math.round((endMs - startMs) / (24 * 60 * 60 * 1000)));
+  }, [dashboard]);
+  const activeUserRows = useMemo(
+    () => (dashboard?.users ?? []).filter((row) => row.status === "active"),
+    [dashboard]
+  );
+  const projectedAllocatedActiveUserSecondsThisPeriod = useMemo(
+    () =>
+      activeUserRows.reduce((total, row) => total + Math.max(0, row.effectiveDailySecondsCap) * Math.max(1, billingPeriodDays), 0),
+    [activeUserRows, billingPeriodDays]
+  );
 
   const toggleCard = (key: EnterpriseCardKey) => {
     setCardExpanded((prev) => ({
@@ -311,7 +363,9 @@ export default function EnterpriseOrgPage() {
 
   const patchEnterpriseUser = async (
     userId: string,
-    patch: Partial<Pick<UserProfile, "orgRole" | "status">>,
+    patch: Partial<
+      Pick<UserProfile, "orgRole" | "status" | "dailySecondsCapOverride" | "allowDailyOverageThisCycle">
+    >,
   ) => {
     setSavingUserId(userId);
     setError(null);
@@ -336,6 +390,11 @@ export default function EnterpriseOrgPage() {
                   ...row,
                   status: updated.status,
                   orgRole: updated.orgRole,
+                  dailySecondsCapOverride: updated.dailySecondsCapOverride,
+                  effectiveDailySecondsCap:
+                    (updated.dailySecondsCapOverride ?? prev.org.perUserDailySecondsCap) + updated.manualBonusSeconds,
+                  allowDailyOverageThisCycle: updated.allowDailyOverageThisCycle,
+                  dailyOverageExpiresAt: updated.dailyOverageExpiresAt,
                 }
               : row,
           ),
@@ -345,6 +404,171 @@ export default function EnterpriseOrgPage() {
       setError(caught instanceof Error ? caught.message : "Could not update user.");
     } finally {
       setSavingUserId(null);
+    }
+  };
+
+  const saveOrgQuotaSettings = async () => {
+    if (!dashboard) {
+      return;
+    }
+
+    const monthlyMinutesAllotted = Math.max(0, Math.floor(Number(monthlyMinutesAllottedInput) || 0));
+    const perUserDailySecondsCap = Math.max(0, Math.floor(Number(defaultPerUserDailyMinutesInput) || 0)) * 60;
+    const applyModeLabel = deferPerUserDailyCapUntilNextCycle ? "next renewal cycle" : "immediately";
+    const confirmed = window.confirm(
+      `Save organization time allotment settings?\n\n` +
+        `Monthly org allotment: ${monthlyMinutesAllotted.toLocaleString()} minutes\n` +
+        `Default per-user daily allotment: ${Math.floor(perUserDailySecondsCap / 60)} minutes\n` +
+        `Per-user daily change applies: ${applyModeLabel}\n\n` +
+        `This can affect users immediately when applied now.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setSavingQuotaSettings(true);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updatedOrg = await adminFetch<EnterpriseOrg>(`/orgs/${dashboard.org.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          monthlyMinutesAllotted,
+          perUserDailySecondsCap,
+          applyPerUserDailySecondsCapNextCycle: deferPerUserDailyCapUntilNextCycle,
+        }),
+      });
+      setDashboard((prev) => (prev ? { ...prev, org: updatedOrg } : prev));
+      setSuccessMessage("Organization allotment settings saved.");
+      await load({ preserveSuccessMessage: true });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save organization allotment settings.");
+    } finally {
+      setSavingQuotaSettings(false);
+    }
+  };
+
+  const saveUserDailyCapOverride = async (userId: string) => {
+    const minutesRaw = perUserDailyMinutesInputByUserId[userId] ?? "";
+    const minutes = Math.max(0, Math.floor(Number(minutesRaw) || 0));
+    setSavingUserQuotaId(userId);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updated = await adminFetch<UserProfile>(`/users/${userId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          dailySecondsCapOverride: minutes * 60,
+        }),
+      });
+      setDashboard((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        return {
+          ...prev,
+          users: prev.users.map((row) =>
+            row.userId === userId
+              ? {
+                  ...row,
+                  dailySecondsCapOverride: updated.dailySecondsCapOverride,
+                  effectiveDailySecondsCap:
+                    (updated.dailySecondsCapOverride ?? prev.org.perUserDailySecondsCap) + updated.manualBonusSeconds,
+                  allowDailyOverageThisCycle: updated.allowDailyOverageThisCycle,
+                  dailyOverageExpiresAt: updated.dailyOverageExpiresAt,
+                }
+              : row
+          ),
+        };
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save user allotment override.");
+    } finally {
+      setSavingUserQuotaId(null);
+    }
+  };
+
+  const clearUserDailyCapOverride = async (userId: string) => {
+    if (!dashboard) {
+      return;
+    }
+
+    setSavingUserQuotaId(userId);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updated = await adminFetch<UserProfile>(`/users/${userId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          dailySecondsCapOverride: null,
+        }),
+      });
+      setDashboard((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        return {
+          ...prev,
+          users: prev.users.map((row) =>
+            row.userId === userId
+              ? {
+                  ...row,
+                  dailySecondsCapOverride: updated.dailySecondsCapOverride,
+                  effectiveDailySecondsCap:
+                    (updated.dailySecondsCapOverride ?? prev.org.perUserDailySecondsCap) + updated.manualBonusSeconds,
+                  allowDailyOverageThisCycle: updated.allowDailyOverageThisCycle,
+                  dailyOverageExpiresAt: updated.dailyOverageExpiresAt,
+                }
+              : row
+          ),
+        };
+      });
+      setPerUserDailyMinutesInputByUserId((prev) => ({
+        ...prev,
+        [userId]: String(Math.max(0, Math.floor((dashboard.org.perUserDailySecondsCap ?? 0) / 60))),
+      }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not clear user allotment override.");
+    } finally {
+      setSavingUserQuotaId(null);
+    }
+  };
+
+  const setUserDailyOverageAllowance = async (userId: string, allowDailyOverageThisCycle: boolean) => {
+    setSavingUserOverageId(userId);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updated = await adminFetch<UserProfile>(`/users/${userId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          allowDailyOverageThisCycle,
+        }),
+      });
+      setDashboard((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        return {
+          ...prev,
+          users: prev.users.map((row) =>
+            row.userId === userId
+              ? {
+                  ...row,
+                  dailySecondsCapOverride: updated.dailySecondsCapOverride,
+                  effectiveDailySecondsCap:
+                    (updated.dailySecondsCapOverride ?? prev.org.perUserDailySecondsCap) + updated.manualBonusSeconds,
+                  allowDailyOverageThisCycle: updated.allowDailyOverageThisCycle,
+                  dailyOverageExpiresAt: updated.dailyOverageExpiresAt,
+                }
+              : row
+          ),
+        };
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update user overage allowance.");
+    } finally {
+      setSavingUserOverageId(null);
     }
   };
 
@@ -560,10 +784,69 @@ export default function EnterpriseOrgPage() {
                     </div>
                   </div>
                 </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label>Time Allotment (Billing Cycle)</label>
+                  <p className="small" style={{ marginTop: 0 }}>
+                    Hard enforcement uses monthly organization minutes. Active-user projection uses active users only.
+                  </p>
+                  <div className="grid" style={{ marginTop: 8 }}>
+                    <div>
+                      <label>Monthly Org Minutes</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={monthlyMinutesAllottedInput}
+                        onChange={(event) => setMonthlyMinutesAllottedInput(event.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label>Default Per-User Daily Minutes</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={defaultPerUserDailyMinutesInput}
+                        onChange={(event) => setDefaultPerUserDailyMinutesInput(event.target.value)}
+                      />
+                    </div>
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={deferPerUserDailyCapUntilNextCycle}
+                          onChange={(event) => setDeferPerUserDailyCapUntilNextCycle(event.target.checked)}
+                        />
+                        Apply default per-user daily change at next renewal instead of immediately
+                      </label>
+                      {dashboard.org.pendingPerUserDailySecondsCap !== null &&
+                      dashboard.org.pendingPerUserDailySecondsCapEffectiveAt ? (
+                        <div className="small" style={{ marginTop: 6 }}>
+                          Pending next-cycle default:{" "}
+                          {Math.floor(dashboard.org.pendingPerUserDailySecondsCap / 60)} min/day (effective{" "}
+                          {formatDate(dashboard.org.pendingPerUserDailySecondsCapEffectiveAt)})
+                        </div>
+                      ) : null}
+                    </div>
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <div className="small">
+                        Org usage this period: {formatSecondsAsClock(dashboard.usage.usedSecondsThisPeriod)} /{" "}
+                        {formatSecondsAsClock(dashboard.usage.allottedSecondsThisPeriod)} (
+                        {dashboard.usage.usagePercentThisPeriod.toFixed(1)}%)
+                      </div>
+                      <div className="small">
+                        Active users: {activeUserRows.length} | Projected allocation at current daily caps:{" "}
+                        {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes over{" "}
+                        {billingPeriodDays} day(s)
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div className="form-actions">
                 <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
                   {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
+                </button>
+                <button className="primary" disabled={savingQuotaSettings} onClick={() => void saveOrgQuotaSettings()}>
+                  {savingQuotaSettings ? "Saving..." : "Save Time Allotment Settings"}
                 </button>
               </div>
             </>
@@ -683,6 +966,10 @@ export default function EnterpriseOrgPage() {
             <p className="small" style={{ marginTop: 0 }}>
               Usage shown is billed time within the current monthly billing period.
             </p>
+            <p className="small" style={{ marginTop: 0 }}>
+              Active users: {activeUserRows.length} | Projected allocation:{" "}
+              {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes this cycle.
+            </p>
           </div>
           <div className="card-actions">
             <button type="button" onClick={() => toggleCard("users")}>
@@ -698,6 +985,8 @@ export default function EnterpriseOrgPage() {
                   <th>Email</th>
                   <th>Role</th>
                   <th>Locked Out</th>
+                  <th>Daily Allotment</th>
+                  <th>Daily Overage</th>
                   <th>Usage This Billing Period</th>
                   <th>Actions</th>
                 </tr>
@@ -705,7 +994,7 @@ export default function EnterpriseOrgPage() {
               <tbody>
                 {(dashboard?.users ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="small">
+                    <td colSpan={7} className="small">
                       {loading ? "Loading..." : "No users found for this enterprise account."}
                     </td>
                   </tr>
@@ -742,6 +1031,75 @@ export default function EnterpriseOrgPage() {
                           <option value="active">Active</option>
                           <option value="disabled">Locked</option>
                         </select>
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <input
+                            type="number"
+                            min={0}
+                            value={perUserDailyMinutesInputByUserId[user.userId] ?? ""}
+                            disabled={
+                              savingUserQuotaId === user.userId ||
+                              savingUserId === user.userId ||
+                              deletingUserId === user.userId
+                            }
+                            onChange={(event) =>
+                              setPerUserDailyMinutesInputByUserId((prev) => ({
+                                ...prev,
+                                [user.userId]: event.target.value,
+                              }))
+                            }
+                          />
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              disabled={
+                                savingUserQuotaId === user.userId ||
+                                savingUserId === user.userId ||
+                                deletingUserId === user.userId
+                              }
+                              onClick={() => void saveUserDailyCapOverride(user.userId)}
+                            >
+                              {savingUserQuotaId === user.userId ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={
+                                savingUserQuotaId === user.userId ||
+                                savingUserId === user.userId ||
+                                deletingUserId === user.userId
+                              }
+                              onClick={() => void clearUserDailyCapOverride(user.userId)}
+                            >
+                              Use Org Default
+                            </button>
+                          </div>
+                          <div className="small">
+                            Effective: {formatSecondsAsClock(user.effectiveDailySecondsCap)}
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                          <input
+                            type="checkbox"
+                            checked={user.allowDailyOverageThisCycle === true}
+                            disabled={
+                              savingUserOverageId === user.userId ||
+                              savingUserId === user.userId ||
+                              deletingUserId === user.userId
+                            }
+                            onChange={(event) =>
+                              void setUserDailyOverageAllowance(user.userId, event.target.checked)
+                            }
+                          />
+                          Allow
+                        </label>
+                        {user.allowDailyOverageThisCycle && user.dailyOverageExpiresAt ? (
+                          <div className="small" style={{ marginTop: 4 }}>
+                            Expires {formatDate(user.dailyOverageExpiresAt)}
+                          </div>
+                        ) : null}
                       </td>
                       <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
                       <td>
