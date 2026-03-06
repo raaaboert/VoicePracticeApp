@@ -497,6 +497,10 @@ function hasPlaceholderOrMissingUserText(text: string | null | undefined): boole
   return PLACEHOLDER_USER_TEXT_PATTERN.test(trimmed);
 }
 
+function hasAnyPlaceholderUserText(history: DialogueTurn[]): boolean {
+  return history.some((turn) => turn.role === "user" && PLACEHOLDER_USER_TEXT_PATTERN.test(turn.content.trim()));
+}
+
 function detectSimulationPayloadType(
   request: Request,
   body: Record<string, unknown>
@@ -1693,7 +1697,11 @@ interface DialogueTurn {
   content: string;
 }
 
-function normalizeDialogueHistory(value: unknown): DialogueTurn[] {
+interface NormalizeDialogueHistoryOptions {
+  maxTurns?: number | null;
+}
+
+function normalizeDialogueHistory(value: unknown, options?: NormalizeDialogueHistoryOptions): DialogueTurn[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -1716,13 +1724,15 @@ function normalizeDialogueHistory(value: unknown): DialogueTurn[] {
     }
 
     safe.push({ role, content: trimmed.slice(0, 2_500) });
-    if (safe.length >= 40) {
-      break;
-    }
   }
 
-  // Keep the most recent turns when the client sends a lot.
-  return safe.length > 24 ? safe.slice(safe.length - 24) : safe;
+  const maxTurns = options?.maxTurns;
+  if (typeof maxTurns !== "number" || !Number.isFinite(maxTurns) || maxTurns <= 0) {
+    return safe;
+  }
+
+  const normalizedMaxTurns = Math.floor(maxTurns);
+  return safe.length > normalizedMaxTurns ? safe.slice(safe.length - normalizedMaxTurns) : safe;
 }
 
 function isDifficulty(value: unknown): value is Difficulty {
@@ -1755,7 +1765,7 @@ interface SimulationScorecard {
 }
 
 function clamp(value: number, min: number, max: number): number {
-  if (Number.isNaN(value)) {
+  if (!Number.isFinite(value)) {
     return min;
   }
 
@@ -4013,12 +4023,12 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
   }
 
   const cachedBaseline = normalizeAiIndustryBaselineForPrompt(selectedIndustryBaselineRaw);
-  const hasCachedBaselineSnapshot = typeof selectedIndustryBaselineRaw === "string";
+  const resolvedBaseline = cachedBaseline ?? configuredBaseline;
 
   return {
     industryId: selectedIndustry.id,
     industryLabel: selectedIndustry.label,
-    industryBaseline: hasCachedBaselineSnapshot ? cachedBaseline : (cachedBaseline ?? configuredBaseline)
+    industryBaseline: resolvedBaseline
   };
 }
 
@@ -8241,7 +8251,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
-  const history = normalizeDialogueHistory(body.history);
+  const history = normalizeDialogueHistory(body.history, { maxTurns: 24 });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
   const latestUserText = getLatestUserTextFromHistory(history);
@@ -8478,11 +8488,12 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
-  const history = normalizeDialogueHistory(body.history);
+  const history = normalizeDialogueHistory(body.history, { maxTurns: null });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
   const latestUserText = getLatestUserTextFromHistory(history);
   const placeholderDetected = hasPlaceholderOrMissingUserText(latestUserText);
+  const placeholderDetectedInHistory = hasAnyPlaceholderUserText(history);
   const payloadType = detectSimulationPayloadType(request, requestBodyRecord);
 
   if (!scenarioId) {
@@ -8523,6 +8534,16 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     return;
   }
 
+  if (placeholderDetectedInHistory) {
+    response.status(422).json({
+      error:
+        "No transcribed user text received in full history. This session appears to include local mock transcript text, so score tracking is disabled.",
+      hint:
+        "Only score sessions where every user turn comes from real transcription. Do not include placeholder text like 'Voice input captured ...'."
+    });
+    return;
+  }
+
   const context = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
@@ -8552,6 +8573,11 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     }
 
     const configForUser = resolveConfigForUser(db, user);
+    if (configForUser.featureFlags?.scoringEnabled === false) {
+      response.status(403).json({ error: "Scoring is currently disabled for this account." });
+      return null;
+    }
+
     const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
@@ -8674,7 +8700,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       await withDatabase(async (db) => {
         const user = getUserById(db, context.user.id);
         if (!user) {
-          return;
+          throw new Error("User not found while saving score.");
         }
 
         db.scoreRecords.push(record);
@@ -8713,6 +8739,10 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     } catch (persistError) {
       const message = persistError instanceof Error ? persistError.message : String(persistError);
       logWarnThrottled("ai-usage:score", `[ai-usage] failed to persist score artifacts: ${message}`);
+      response.status(503).json({
+        error: "Score was generated but could not be saved. Please retry once the service is healthy."
+      });
+      return;
     }
 
     response.status(201).json({
@@ -8780,6 +8810,10 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     }
 
     const configForUser = resolveConfigForUser(db, user);
+    if (configForUser.featureFlags?.scoringEnabled === false) {
+      response.status(403).json({ error: "Scoring is currently disabled for this account." });
+      return;
+    }
     const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for score record." });

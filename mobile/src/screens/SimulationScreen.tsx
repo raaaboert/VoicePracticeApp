@@ -255,6 +255,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const remoteTtsAbortControllerRef = useRef<AbortController | null>(null);
   const ttsRequestGenerationRef = useRef(0);
   const simulationClosedRef = useRef(false);
+  const usedMockModeDuringSessionRef = useRef(false);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -626,6 +627,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       let userText = "";
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
+      if (!useLiveApiThisTurn) {
+        usedMockModeDuringSessionRef.current = true;
+      }
       if (useLiveApiThisTurn && shouldAttemptTranscription) {
         try {
           logSimulationApiCall("transcribeAudio");
@@ -640,6 +644,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         } catch (transcriptionError) {
           if (isApiError(transcriptionError)) {
             setUseLocalMockMode(true);
+            usedMockModeDuringSessionRef.current = true;
             setError(null);
             setStatus("Live AI unavailable. Switched to local test mode.");
             useLiveApiThisTurn = false;
@@ -760,6 +765,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
     setError(null);
     simulationClosedRef.current = false;
+    if (localTestMode) {
+      usedMockModeDuringSessionRef.current = true;
+    }
 
     if (!kickoffSentRef.current) {
       let openingLine = pendingOpeningLineRef.current;
@@ -782,6 +790,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           } catch (openingError) {
             if (isApiError(openingError)) {
               setUseLocalMockMode(true);
+              usedMockModeDuringSessionRef.current = true;
               openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
             } else {
               setError(getErrorMessage(openingError, "Could not initialize simulation."));
@@ -874,6 +883,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         rawDurationSeconds,
+        usedMockMode: usedMockModeDuringSessionRef.current,
       });
     } finally {
       sessionCompletionInProgressRef.current = false;
@@ -943,6 +953,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       setElapsedSeconds(0);
       sessionCompletionInProgressRef.current = false;
       simulationClosedRef.current = false;
+      usedMockModeDuringSessionRef.current = false;
 
       if (localTestMode) {
         pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
@@ -975,6 +986,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       } catch (initError) {
         if (isApiError(initError)) {
           setUseLocalMockMode(true);
+          usedMockModeDuringSessionRef.current = true;
           pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
           setMode("idle");
           setStatus("Local test mode ready. Press Start Continuous Mode.");

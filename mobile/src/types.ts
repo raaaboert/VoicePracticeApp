@@ -66,4 +66,5 @@ export interface SessionTiming {
   startedAt: string;
   endedAt: string;
   rawDurationSeconds: number;
+  usedMockMode: boolean;
 }

@@ -53,7 +53,6 @@ import {
   resendMobileVerificationEmail,
   createPublicSupportErrorCase,
   createSupportCase,
-  recordSimulationScore,
   recordUsageSession,
   submitOrgAccessRequest,
   decideOrgAdminAccessRequest,
@@ -2237,27 +2236,39 @@ export default function App() {
     }
 
     void (async () => {
-      let finalScorecard: SimulationScorecard;
+      let finalScorecard: SimulationScorecard | null = null;
       let scoreError: string | null = null;
-      let usedServerScore = false;
+      const scoringEnabled = config?.featureFlags?.scoringEnabled !== false;
+      const usedMockMode = timing.usedMockMode === true;
+
+      const markTranscriptAsLocalFallback = () => {
+        setLastTranscript((prev) => {
+          if (!prev) {
+            return prev;
+          }
+
+          const updatedMeta = { ...prev.meta, model: "local-fallback", promptVersion: "local", rubricVersion: "local" };
+          const updatedText = prev.text
+            .replace("AI Model: (pending)", "AI Model: local-fallback")
+            .replace("Prompt Version: (pending)", "Prompt Version: local")
+            .replace("Rubric Version: (pending)", "Rubric Version: local")
+            .replace("Tokens (input/output/total): (pending)", "Tokens (input/output/total): n/a");
+          return { ...prev, meta: updatedMeta, text: updatedText };
+        });
+      };
 
       try {
-        if (!apiConfigured) {
+        if (!scoringEnabled) {
+          scoreError = "Scoring is currently disabled for your account. This session was not scored or tracked.";
+        } else if (usedMockMode) {
           finalScorecard = fallbackScorecard(history);
-          scoreError = "Remote AI is disabled, so fallback scoring was used.";
-          setLastTranscript((prev) => {
-            if (!prev) {
-              return prev;
-            }
-
-            const updatedMeta = { ...prev.meta, model: "local-fallback", promptVersion: "local", rubricVersion: "local" };
-            const updatedText = prev.text
-              .replace("AI Model: (pending)", "AI Model: local-fallback")
-              .replace("Prompt Version: (pending)", "Prompt Version: local")
-              .replace("Rubric Version: (pending)", "Rubric Version: local")
-              .replace("Tokens (input/output/total): (pending)", "Tokens (input/output/total): n/a");
-            return { ...prev, meta: updatedMeta, text: updatedText };
-          });
+          scoreError =
+            "Local test/mock mode was used during this simulation. This score is for practice only and was not tracked.";
+          markTranscriptAsLocalFallback();
+        } else if (!apiConfigured) {
+          finalScorecard = fallbackScorecard(history);
+          scoreError = "Remote AI is disabled, so fallback scoring was used. This score was not tracked.";
+          markTranscriptAsLocalFallback();
         } else {
           if (!user || !mobileAuthToken) {
             throw new Error("Missing mobile auth context for scoring.");
@@ -2277,7 +2288,6 @@ export default function App() {
             history,
           });
           finalScorecard = result.scorecard;
-          usedServerScore = true;
 
           setLastTranscript((prev) => {
             if (!prev) {
@@ -2308,7 +2318,8 @@ export default function App() {
         }
       } catch (evaluationError) {
         finalScorecard = fallbackScorecard(history);
-        scoreError = getErrorMessage(evaluationError, "Score generation failed. Fallback scoring used.");
+        scoreError = `${getErrorMessage(evaluationError, "Score generation failed. Fallback scoring used.")} This fallback score was not tracked.`;
+        markTranscriptAsLocalFallback();
         void submitAutoErrorReport("simulation.score_generation", evaluationError, {
           screen: "scorecard",
           details: {
@@ -2323,36 +2334,6 @@ export default function App() {
       setScorecard(finalScorecard);
       if (scoreError) {
         setScorecardError(scoreError);
-      }
-
-      if (!usedServerScore && user && mobileAuthToken) {
-        try {
-          await recordSimulationScore(
-            user.id,
-            {
-              userId: user.id,
-              segmentId: completedConfig.scenario.segmentId,
-              scenarioId: completedConfig.scenario.id,
-              startedAt: timing.startedAt,
-              endedAt: timing.endedAt,
-              overallScore: finalScorecard.overallScore,
-              persuasion: finalScorecard.persuasion,
-              clarity: finalScorecard.clarity,
-              empathy: finalScorecard.empathy,
-              assertiveness: finalScorecard.assertiveness,
-            },
-            mobileAuthToken,
-          );
-        } catch (caught) {
-          setScorecardError((prev) => prev ?? getErrorMessage(caught, "Could not sync score history."));
-          void submitAutoErrorReport("simulation.score_sync", caught, {
-            screen: "scorecard",
-            details: {
-              segmentId: completedConfig.scenario.segmentId,
-              scenarioId: completedConfig.scenario.id,
-            },
-          });
-        }
       }
     })();
   };
