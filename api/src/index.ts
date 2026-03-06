@@ -105,7 +105,7 @@ import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
-import { computeWeightedOverallScore } from "./services/trainingPackRuntime.js";
+import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
 
 const runtimeConfig = loadRuntimeConfig();
 console.log("[BOOT][ENV CHECK]", {
@@ -158,6 +158,7 @@ const MAX_ACTIVE_ADMIN_SESSIONS = 100;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
+const MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS = 4_000;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN = 800;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE = 1200;
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL?.trim() || "tts-1";
@@ -3305,6 +3306,60 @@ function resolveMobileScenarioForUser(
     allowedIndustryIds: uniqueStrings(customScenario.applicableIndustryIds) as IndustryId[],
     scoringGuidance: customScenario.scoringGuidance?.trim() || null,
   };
+}
+
+function buildScoringIndustryContextsForIds(configForUser: AppConfig, industryIds: readonly string[]): Array<{
+  id: string;
+  label: string;
+  aiBaseline: string;
+  standardScoringGuidance: string;
+}> {
+  return uniqueStrings([...industryIds]).map((industryId) => {
+    const industry = (configForUser.industries ?? []).find((entry) => entry.id === industryId);
+    return {
+      id: industryId,
+      label: industry?.label ?? industryId,
+      aiBaseline: industry?.aiBaseline ?? "",
+      standardScoringGuidance: industry?.standardScoringGuidance ?? ""
+    };
+  });
+}
+
+function resolveScenarioScoringGuidanceForEvaluation(
+  configForUser: AppConfig,
+  resolvedScenario: ResolvedMobileScenarioContext,
+  selectedIndustryId: string | null
+): string | null {
+  if (resolvedScenario.source === "custom") {
+    return resolvedScenario.scoringGuidance?.trim() || null;
+  }
+
+  const allowedIndustryIds = uniqueStrings(resolvedScenario.allowedIndustryIds);
+  const selectedIndustryIdTrimmed = typeof selectedIndustryId === "string" ? selectedIndustryId.trim() : "";
+  const scopedIndustryIds =
+    selectedIndustryIdTrimmed && allowedIndustryIds.includes(selectedIndustryIdTrimmed)
+      ? [selectedIndustryIdTrimmed]
+      : allowedIndustryIds;
+  const industryContexts = buildScoringIndustryContextsForIds(configForUser, scopedIndustryIds);
+
+  return buildDefaultScoringGuidance({
+    scenarioTitle: resolvedScenario.scenario.title,
+    segmentLabel: resolvedScenario.segment.label,
+    industryContexts
+  });
+}
+
+function resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario: ResolvedMobileScenarioContext): string | null {
+  if (resolvedScenario.source !== "custom") {
+    return null;
+  }
+
+  const guidance = resolvedScenario.scoringGuidance?.trim() ?? "";
+  if (!guidance) {
+    return null;
+  }
+
+  return guidance.slice(0, MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS);
 }
 
 function buildCustomScenarioGenerationPromptPreview(input: {
@@ -7797,6 +7852,12 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
       warnings.push(`Industry "${industryId}" is not available for this scenario/user context.`);
     }
 
+    const scoringGuidance = resolveScenarioScoringGuidanceForEvaluation(
+      configForUser,
+      resolvedScenario,
+      industryPromptContext.industryId
+    );
+
     return {
       user,
       scenario: resolvedScenario.scenario,
@@ -7807,7 +7868,8 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
-      scoringGuidance: resolvedScenario.scoringGuidance,
+      scoringGuidance,
+      counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
       orgFlag,
       useModularPromptArchitecture
     };
@@ -7877,13 +7939,14 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
   }
 
   const roleplayConfig = useModularPromptArchitectureForDebug
-    ? buildRoleplayPromptsWithOrchestrator({
+      ? buildRoleplayPromptsWithOrchestrator({
         scenario: context.scenario,
         difficulty: context.difficulty,
         segmentLabel: context.segmentLabel,
         personaStyle: context.personaStyle,
         industryLabel: context.industryLabel,
         industryBaseline: context.industryBaseline,
+        counterpartBehaviorGuidance: context.counterpartBehaviorGuidance,
         trainingPack: activeTrainingPack
       })
     : {
@@ -7893,7 +7956,8 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
           segmentLabel: context.segmentLabel,
           personaStyle: context.personaStyle,
           industryLabel: context.industryLabel,
-          industryBaseline: context.industryBaseline
+          industryBaseline: context.industryBaseline,
+          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance
         }),
         openingPrompt: buildOpeningPrompt(context.scenario)
       };
@@ -8097,7 +8161,6 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
         canonicalIndustryDefinitions: db.config.industries
       }
     );
-
     return {
       user,
       org,
@@ -8108,6 +8171,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
+      counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
       maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
       useModularPromptArchitecture
     };
@@ -8131,6 +8195,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           personaStyle: context.personaStyle,
           industryLabel: context.industryLabel,
           industryBaseline: context.industryBaseline,
+          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance,
           trainingPack: activeTrainingPack
         })
       : {
@@ -8140,7 +8205,8 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
             segmentLabel: context.segment.label,
             personaStyle: context.personaStyle,
             industryLabel: context.industryLabel,
-            industryBaseline: context.industryBaseline
+            industryBaseline: context.industryBaseline,
+            counterpartBehaviorGuidance: context.counterpartBehaviorGuidance
           }),
           openingPrompt: buildOpeningPrompt(context.scenario)
         };
@@ -8332,7 +8398,6 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         canonicalIndustryDefinitions: db.config.industries
       }
     );
-
     return {
       user,
       org,
@@ -8343,6 +8408,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
+      counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
       maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
       useModularPromptArchitecture
     };
@@ -8366,6 +8432,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
           personaStyle: context.personaStyle,
           industryLabel: context.industryLabel,
           industryBaseline: context.industryBaseline,
+          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance,
           trainingPack: activeTrainingPack
         }).systemPrompt
       : buildRoleplaySystemPrompt({
@@ -8374,7 +8441,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
           segmentLabel: context.segment.label,
           personaStyle: context.personaStyle,
           industryLabel: context.industryLabel,
-          industryBaseline: context.industryBaseline
+          industryBaseline: context.industryBaseline,
+          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance
         });
 
     const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
@@ -8597,6 +8665,11 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
         canonicalIndustryDefinitions: db.config.industries
       }
     );
+    const scoringGuidance = resolveScenarioScoringGuidanceForEvaluation(
+      configForUser,
+      resolvedScenario,
+      industryPromptContext.industryId
+    );
 
     return {
       user,
@@ -8608,7 +8681,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
-      scoringGuidance: resolvedScenario.scoringGuidance,
+      scoringGuidance,
       useModularPromptArchitecture
     };
   });
@@ -8668,9 +8741,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
 
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
     const scorecard = normalizeScorecard(parsed);
-    if (evaluationConfig?.usesTrainingPackScoringOverrides) {
-      scorecard.overallScore = computeWeightedOverallScore(scorecard, evaluationConfig.scoringWeights);
-    }
+    const scoringWeights = evaluationConfig?.scoringWeights ?? getDefaultScoringWeights();
+    scorecard.overallScore = computeWeightedOverallScore(scorecard, scoringWeights);
 
     const now = nowIso();
     const record: SimulationScoreRecord = {
@@ -8679,6 +8751,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       orgId: context.user.orgId,
       segmentId: context.segment.id,
       scenarioId: context.scenario.id,
+      industryId: context.industryId,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
       overallScore: scorecard.overallScore,
@@ -8925,10 +8998,24 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
     }
 
     const segmentLabelById = new Map(db.config.segments.map((segment) => [segment.id, segment.label]));
+    const industryLabelById = new Map((db.config.industries ?? []).map((industry) => [industry.id, industry.label]));
     const bySegment = new Map<string, { sessions: number; totalScore: number }>();
     for (const record of scoreRecords) {
       const current = bySegment.get(record.segmentId) ?? { sessions: 0, totalScore: 0 };
       bySegment.set(record.segmentId, {
+        sessions: current.sessions + 1,
+        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
+      });
+    }
+
+    const byIndustry = new Map<string, { sessions: number; totalScore: number }>();
+    for (const record of scoreRecords) {
+      const industryId = typeof record.industryId === "string" ? record.industryId.trim() : "";
+      if (!industryId) {
+        continue;
+      }
+      const current = byIndustry.get(industryId) ?? { sessions: 0, totalScore: 0 };
+      byIndustry.set(industryId, {
         sessions: current.sessions + 1,
         totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
       });
@@ -8954,6 +9041,14 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
           avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
         }))
         .sort((a, b) => b.sessions - a.sessions),
+      byIndustry: Array.from(byIndustry.entries())
+        .map(([industryId, row]) => ({
+          industryId,
+          industryLabel: industryLabelById.get(industryId) ?? industryId,
+          sessions: row.sessions,
+          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
+        }))
+        .sort((a, b) => b.sessions - a.sessions),
       recent: scoreRecords
         .slice()
         .sort((a, b) => new Date(b.endedAt).getTime() - new Date(a.endedAt).getTime())
@@ -8963,6 +9058,7 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
           endedAt: record.endedAt,
           segmentId: record.segmentId,
           scenarioId: record.scenarioId,
+          industryId: typeof record.industryId === "string" ? record.industryId : null,
           overallScore: record.overallScore
         }))
     });
@@ -9357,6 +9453,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
             endedAt: record.endedAt,
             segmentId: record.segmentId,
             scenarioId: record.scenarioId,
+            industryId: typeof record.industryId === "string" ? record.industryId : null,
             overallScore: record.overallScore
           }))
       }
@@ -9540,10 +9637,24 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
     const orgAvgOverallScore = safeScores.length > 0 ? safeScores.reduce((a, b) => a + b, 0) / safeScores.length : null;
 
     const segmentLabelById = new Map(db.config.segments.map((segment) => [segment.id, segment.label]));
+    const industryLabelById = new Map((db.config.industries ?? []).map((industry) => [industry.id, industry.label]));
     const bySegment = new Map<string, { sessions: number; totalScore: number }>();
     for (const record of records) {
       const current = bySegment.get(record.segmentId) ?? { sessions: 0, totalScore: 0 };
       bySegment.set(record.segmentId, {
+        sessions: current.sessions + 1,
+        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
+      });
+    }
+
+    const byIndustry = new Map<string, { sessions: number; totalScore: number }>();
+    for (const record of records) {
+      const industryId = typeof record.industryId === "string" ? record.industryId.trim() : "";
+      if (!industryId) {
+        continue;
+      }
+      const current = byIndustry.get(industryId) ?? { sessions: 0, totalScore: 0 };
+      byIndustry.set(industryId, {
         sessions: current.sessions + 1,
         totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
       });
@@ -9600,6 +9711,14 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
         .map(([segmentId, row]) => ({
           segmentId,
           segmentLabel: segmentLabelById.get(segmentId) ?? segmentId,
+          sessions: row.sessions,
+          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
+        }))
+        .sort((a, b) => b.sessions - a.sessions),
+      byIndustry: Array.from(byIndustry.entries())
+        .map(([industryId, row]) => ({
+          industryId,
+          industryLabel: industryLabelById.get(industryId) ?? industryId,
           sessions: row.sessions,
           avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
         }))

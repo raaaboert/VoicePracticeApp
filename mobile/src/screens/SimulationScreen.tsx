@@ -33,11 +33,13 @@ interface SimulationScreenProps {
   ) => void;
 }
 
-const MAX_TURN_DURATION_MS = 15000;
-const MIN_TURN_DURATION_MS = 1200;
-const SILENCE_CUTOFF_MS = 1200;
+const SOFT_MAX_TURN_DURATION_MS = 35000;
+const ABSOLUTE_MAX_TURN_DURATION_MS = 60000;
+const MIN_TURN_DURATION_MS = 1600;
+const SILENCE_CUTOFF_MS = 2200;
+const LONG_TURN_SILENCE_CUTOFF_MS = 3000;
 const STATUS_POLL_INTERVAL_MS = 120;
-const VOICE_METER_THRESHOLD_DB = -38;
+const VOICE_METER_THRESHOLD_DB = -42;
 const MIN_VOICE_HIT_COUNT = 3;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
@@ -246,6 +248,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const detectedVoiceRef = useRef(false);
   const meteringSeenRef = useRef(false);
   const voiceHitCountRef = useRef(0);
+  const noiseFloorDbRef = useRef<number | null>(null);
   const kickoffSentRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
@@ -516,8 +519,13 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       if (typeof status.metering === "number") {
         meteringSeenRef.current = true;
+        const priorNoiseFloor = noiseFloorDbRef.current ?? status.metering;
+        const adaptiveThreshold = Math.max(
+          VOICE_METER_THRESHOLD_DB,
+          Math.min(-28, priorNoiseFloor + 10),
+        );
 
-        if (status.metering > VOICE_METER_THRESHOLD_DB) {
+        if (status.metering > adaptiveThreshold) {
           voiceHitCountRef.current += 1;
           detectedVoiceRef.current = true;
           if (voiceHitCountRef.current >= MIN_VOICE_HIT_COUNT) {
@@ -527,20 +535,36 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         } else if (voiceHitCountRef.current > 0) {
           voiceHitCountRef.current = Math.max(0, voiceHitCountRef.current - 1);
         }
+
+        if (!heardVoiceRef.current || status.metering <= adaptiveThreshold) {
+          noiseFloorDbRef.current = priorNoiseFloor * 0.85 + status.metering * 0.15;
+        }
       }
+
+      const silenceCutoffMs =
+        elapsed >= 12000 ? LONG_TURN_SILENCE_CUTOFF_MS : SILENCE_CUTOFF_MS;
 
       if (
         meteringSeenRef.current &&
         heardVoiceRef.current &&
         elapsed >= MIN_TURN_DURATION_MS &&
-        now - lastVoiceAtRef.current >= SILENCE_CUTOFF_MS
+        now - lastVoiceAtRef.current >= silenceCutoffMs
       ) {
         setStatus("Silence detected. Processing...");
         requestFinalizeTurn();
         return;
       }
 
-      if (elapsed >= MAX_TURN_DURATION_MS) {
+      if (
+        elapsed >= SOFT_MAX_TURN_DURATION_MS &&
+        (!heardVoiceRef.current || now - lastVoiceAtRef.current >= LONG_TURN_SILENCE_CUTOFF_MS)
+      ) {
+        setStatus("Turn length limit reached. Processing...");
+        requestFinalizeTurn();
+        return;
+      }
+
+      if (elapsed >= ABSOLUTE_MAX_TURN_DURATION_MS) {
         setStatus("Max turn length reached. Processing...");
         requestFinalizeTurn();
       }
@@ -568,6 +592,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       detectedVoiceRef.current = false;
       meteringSeenRef.current = false;
       voiceHitCountRef.current = 0;
+      noiseFloorDbRef.current = null;
 
       setMode("recording");
       setStatus("Listening...");
@@ -578,7 +603,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       safetyTimerRef.current = setTimeout(() => {
         setStatus("Processing...");
         requestFinalizeTurn();
-      }, MAX_TURN_DURATION_MS + 500);
+      }, ABSOLUTE_MAX_TURN_DURATION_MS + 500);
     } catch (recordingError) {
       setError(getErrorMessage(recordingError, "Could not start recording."));
       void submitAutoErrorReport("simulation.recording_start", recordingError);

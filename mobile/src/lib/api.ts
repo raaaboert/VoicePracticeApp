@@ -728,7 +728,15 @@ export async function fetchScoreSummary(
   totals: { sessions: number; avgOverallScore: number | null };
   byDay: Array<{ dayKey: string; sessions: number; avgOverallScore: number | null }>;
   bySegment: Array<{ segmentId: string; segmentLabel: string; sessions: number; avgOverallScore: number | null }>;
-  recent: Array<{ id: string; endedAt: string; segmentId: string; scenarioId: string; overallScore: number }>;
+  byIndustry: Array<{ industryId: string; industryLabel: string; sessions: number; avgOverallScore: number | null }>;
+  recent: Array<{
+    id: string;
+    endedAt: string;
+    segmentId: string;
+    scenarioId: string;
+    industryId: string | null;
+    overallScore: number;
+  }>;
 }> {
   const params = new URLSearchParams();
   params.set("days", String(options.days));
@@ -954,7 +962,14 @@ export async function fetchOrgAdminUserDetail(
   scores: {
     sessions: number;
     avgOverallScore: number | null;
-    recent: Array<{ id: string; endedAt: string; segmentId: string; scenarioId: string; overallScore: number }>;
+    recent: Array<{
+      id: string;
+      endedAt: string;
+      segmentId: string;
+      scenarioId: string;
+      industryId: string | null;
+      overallScore: number;
+    }>;
   };
 }> {
   const params = new URLSearchParams();
@@ -1004,6 +1019,7 @@ export async function fetchOrgAdminAnalytics(
   orgAvgOverallScore: number | null;
   topUsers: Array<{ userId: string; email: string; sessions: number; avgOverallScore: number | null }>;
   bySegment: Array<{ segmentId: string; segmentLabel: string; sessions: number; avgOverallScore: number | null }>;
+  byIndustry: Array<{ industryId: string; industryLabel: string; sessions: number; avgOverallScore: number | null }>;
   trendByDay: Array<{ dayKey: string; sessions: number; avgOverallScore: number | null }>;
 }> {
   const params = new URLSearchParams();

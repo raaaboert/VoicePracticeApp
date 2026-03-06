@@ -299,6 +299,7 @@ export interface SimulationScoreRecord {
   orgId: string | null;
   segmentId: string;
   scenarioId: string;
+  industryId?: string | null;
   startedAt: string;
   endedAt: string;
   overallScore: number;
@@ -927,7 +928,7 @@ export function buildDefaultScoringGuidance(params?: {
   const industries = uniqueIndustryContexts(params?.industryContexts);
 
   const lines: string[] = [
-    "SCORING PARAMETERS v1 (Standard Default)",
+    "SCORING PARAMETERS v2 (Standard Default)",
     "",
     "Evaluator scope:",
     "- Evaluate USER performance only.",
@@ -949,7 +950,7 @@ export function buildDefaultScoringGuidance(params?: {
   lines.push(
     "Scoring categories (Title + Guiding Details):",
     "",
-    "1) Outcome Progress and Next-Step Commitment (Weight 20)",
+    "1) Outcome Progress and Next-Step Commitment (Weight 18)",
     "- Did the user move toward a concrete objective in this scenario?",
     "- Did they secure or clearly attempt a specific next step?",
     "- Higher score when progress is explicit, measurable, and time-bound.",
@@ -964,17 +965,17 @@ export function buildDefaultScoringGuidance(params?: {
     "- Did the user avoid rambling and maintain a clear thread?",
     "- Reward strong framing, summarization, and transitions.",
     "",
-    "4) Evidence, Reasoning, and Credibility (Weight 14)",
+    "4) Evidence, Reasoning, and Credibility (Weight 13)",
     "- Did the user support claims with relevant rationale, examples, or data?",
     "- Were claims believable and directly tied to objections?",
     "- Penalize unsupported assertions.",
     "",
-    "5) Objection Handling and Problem Solving (Weight 14)",
+    "5) Objection Handling and Problem Solving (Weight 13)",
     "- Did the user directly address resistance and constraints?",
     "- Did they reframe constructively and propose practical options?",
     "- Reward calm, specific, solution-oriented responses.",
     "",
-    "6) Assertiveness and Conversation Control (Weight 13)",
+    "6) Assertiveness and Conversation Control (Weight 12)",
     "- Did the user maintain direction without becoming aggressive?",
     "- Did they guide toward decisions and keep momentum?",
     "- Penalize passivity or loss of control.",
@@ -984,7 +985,7 @@ export function buildDefaultScoringGuidance(params?: {
     "- Was tone professional, composed, and relationship-preserving?",
     "- Penalize dismissive or tone-deaf communication.",
     "",
-    "8) Industry Baseline Adherence (Weight 15)",
+    "8) Industry Baseline Adherence (Weight 10)",
     "- Score how well the user's approach aligns with the active industry baseline guidance.",
     "- Reward baseline-consistent priorities, language, and constraints.",
     "- Penalize direct conflicts with baseline expectations.",

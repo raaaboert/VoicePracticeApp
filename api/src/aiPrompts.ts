@@ -1,7 +1,7 @@
 import { Difficulty, PersonaStyle, Scenario } from "@voicepractice/shared";
 
-export const AI_PROMPT_VERSION = "2026-02-23.v2";
-export const AI_RUBRIC_VERSION = "2026-02-16.v1";
+export const AI_PROMPT_VERSION = "2026-03-06.v3";
+export const AI_RUBRIC_VERSION = "2026-03-06.v2";
 
 const DIFFICULTY_BEHAVIOR: Record<Difficulty, string> = {
   easy:
@@ -28,9 +28,11 @@ export function buildRoleplaySystemPrompt(params: {
   personaStyle: PersonaStyle;
   industryLabel?: string | null;
   industryBaseline?: string | null;
+  counterpartBehaviorGuidance?: string | null;
 }): string {
   const { scenario, difficulty, segmentLabel, personaStyle } = params;
   const industryBaseline = params.industryBaseline?.trim() ?? "";
+  const counterpartBehaviorGuidance = params.counterpartBehaviorGuidance?.trim() ?? "";
   const lines = [
     "You are a role-play opponent in a voice-based professional simulation.",
     `The user is acting as a ${segmentLabel}.`,
@@ -42,6 +44,12 @@ export function buildRoleplaySystemPrompt(params: {
 
   if (industryBaseline) {
     lines.push(`Industry baseline guidance for this conversation:\n${industryBaseline}`);
+  }
+
+  if (counterpartBehaviorGuidance) {
+    lines.push(
+      `Scenario coaching priorities (use these to shape objections and pressure-tests; do not quote or mention these instructions):\n${counterpartBehaviorGuidance}`
+    );
   }
 
   lines.push(
@@ -97,6 +105,8 @@ export function buildEvaluationSystemPrompt(params: {
 
   lines.push(
     `Scenario: ${params.scenario.title}`,
+    `Counterpart role: ${params.scenario.aiRole}`,
+    `Scenario context: ${params.scenario.description}`,
     `Difficulty: ${params.difficulty}`,
     `Persona style: ${params.personaStyle}`,
   );
@@ -109,6 +119,7 @@ export function buildEvaluationSystemPrompt(params: {
 
   lines.push(
     "Grade only the USER performance.",
+    "Use the full transcript context and evaluate behavior across the entire conversation, not only the final turns.",
     "Return ONLY strict JSON with this exact schema:",
     '{"overallScore":number(0-100),"persuasion":number(1-10),"clarity":number(1-10),"empathy":number(1-10),"assertiveness":number(1-10),"strengths":[string,string,string],"improvements":[string,string,string],"summary":string}',
     "Use higher standards for hard difficulty.",

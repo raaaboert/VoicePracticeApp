@@ -3620,6 +3620,16 @@ export default function App() {
       if (!orgAdminAnalytics) {
         return [] as Array<{ industryId: string; industryLabel: string; sessions: number; avgOverallScore: number | null }>;
       }
+      if (Array.isArray(orgAdminAnalytics.byIndustry) && orgAdminAnalytics.byIndustry.length > 0) {
+        return orgAdminAnalytics.byIndustry
+          .map((row) => ({
+            industryId: row.industryId,
+            industryLabel: row.industryLabel ?? (industryLabelById.get(row.industryId) ?? row.industryId),
+            sessions: row.sessions ?? 0,
+            avgOverallScore: row.avgOverallScore ?? null,
+          }))
+          .sort((a, b) => b.sessions - a.sessions);
+      }
       const grouped = new Map<string, { sessions: number; totalScore: number }>();
       for (const row of orgAdminAnalytics.bySegment) {
         const industryIds = industryIdsByRoleSegmentId.get(row.segmentId as unknown as string) ?? [];

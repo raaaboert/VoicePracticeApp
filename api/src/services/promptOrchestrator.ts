@@ -16,6 +16,7 @@ interface RoleplayOrchestratorParams {
   personaStyle: PersonaStyle;
   industryLabel?: string | null;
   industryBaseline?: string | null;
+  counterpartBehaviorGuidance?: string | null;
   trainingPack?: TrainingPack | null;
 }
 
@@ -42,6 +43,7 @@ export function buildRoleplayPromptsWithOrchestrator(params: RoleplayOrchestrato
     personaStyle: params.personaStyle,
     industryLabel: params.industryLabel,
     industryBaseline: params.industryBaseline,
+    counterpartBehaviorGuidance: params.counterpartBehaviorGuidance,
   });
   const openingPrompt = buildOpeningPrompt(params.scenario);
 
