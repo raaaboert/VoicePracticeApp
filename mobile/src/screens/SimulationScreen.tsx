@@ -12,7 +12,7 @@ import {
   createLocalAssistantReply,
   createLocalOpeningLine,
 } from "../lib/mockAi";
-import { createSupportCase, getApiBaseUrl } from "../lib/api";
+import { createSupportCase, fetchAiTtsAudio, getApiBaseUrl } from "../lib/api";
 import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
 import {
   speakWithRemoteTtsFallback,
@@ -373,6 +373,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     text: string,
     assistantTextReceivedAtMs?: number,
     onPlaybackStart?: () => void,
+    prefetchedRemoteAudio?: { bytes: Uint8Array; contentType: string } | null,
   ): Promise<void> => {
     const requestGeneration = ttsRequestGenerationRef.current;
     const abortController = new AbortController();
@@ -398,6 +399,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         remoteTtsSoundRef,
         remoteTtsFileRef,
         assistantTextReceivedAtMs,
+        prefetchedRemoteAudio,
         abortSignal: abortController.signal,
         isCancelled: () =>
           ttsRequestGenerationRef.current !== requestGeneration || simulationClosedRef.current || unmountedRef.current,
@@ -412,12 +414,54 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     }
   };
 
+  const prefetchRemoteTtsChunk = useCallback(
+    async (
+      text: string,
+      requestGeneration: number,
+      preset: ReturnType<typeof toRemoteTtsPreset>,
+    ): Promise<{ bytes: Uint8Array; contentType: string } | null> => {
+      if (!shouldUseFastStartRemoteTts || !text.trim()) {
+        return null;
+      }
+      if (
+        ttsRequestGenerationRef.current !== requestGeneration ||
+        simulationClosedRef.current ||
+        unmountedRef.current
+      ) {
+        return null;
+      }
+
+      try {
+        const prefetched = await fetchAiTtsAudio({
+          userId,
+          authToken,
+          text,
+          preset,
+        });
+        if (
+          ttsRequestGenerationRef.current !== requestGeneration ||
+          simulationClosedRef.current ||
+          unmountedRef.current
+        ) {
+          return null;
+        }
+        return prefetched;
+      } catch {
+        return null;
+      }
+    },
+    [authToken, shouldUseFastStartRemoteTts, userId],
+  );
+
   const speakAssistantResponse = async (
     text: string,
     assistantTextReceivedAtMs?: number,
     onPlaybackStart?: () => void,
   ): Promise<void> => {
     const chunks = shouldUseFastStartRemoteTts ? splitAssistantSpeechForFastStart(text) : [text];
+    const requestGeneration = ttsRequestGenerationRef.current;
+    const preset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
+    const prefetchedChunkByIndex = new Map<number, Promise<{ bytes: Uint8Array; contentType: string } | null>>();
     let playbackStartHandled = false;
     const handlePlaybackStart = () => {
       if (playbackStartHandled) {
@@ -426,9 +470,28 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       playbackStartHandled = true;
       onPlaybackStart?.();
     };
+    const startPrefetchForChunk = (targetIndex: number) => {
+      if (!shouldUseFastStartRemoteTts || targetIndex >= chunks.length) {
+        return;
+      }
+      if (prefetchedChunkByIndex.has(targetIndex)) {
+        return;
+      }
+      prefetchedChunkByIndex.set(
+        targetIndex,
+        prefetchRemoteTtsChunk(chunks[targetIndex], requestGeneration, preset),
+      );
+    };
 
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
+      let prefetchedRemoteAudio: { bytes: Uint8Array; contentType: string } | null = null;
+      if (index > 0) {
+        const prefetchedPromise = prefetchedChunkByIndex.get(index);
+        if (prefetchedPromise) {
+          prefetchedRemoteAudio = await prefetchedPromise;
+        }
+      }
       await speakSingleUtterance(
         chunk,
         index === 0 ? assistantTextReceivedAtMs : Date.now(),
@@ -436,11 +499,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           if (index === 0) {
             handlePlaybackStart();
           }
+          startPrefetchForChunk(index + 1);
         },
+        prefetchedRemoteAudio,
       );
       if (index === 0) {
         handlePlaybackStart();
       }
+      startPrefetchForChunk(index + 1);
     }
   };
 

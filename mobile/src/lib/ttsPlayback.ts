@@ -33,6 +33,7 @@ interface SpeakWithTtsFallbackParams {
   remoteTtsSoundRef?: MutableRefObject<Audio.Sound | null>;
   remoteTtsFileRef?: MutableRefObject<string | null>;
   assistantTextReceivedAtMs?: number;
+  prefetchedRemoteAudio?: { bytes: Uint8Array; contentType: string } | null;
   abortSignal?: AbortSignal;
   isCancelled?: () => boolean;
   onPlaybackStart?: (details: { source: TtsSource; mode: "remote" | "fallback"; startedAtMs: number }) => void;
@@ -168,32 +169,35 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
     throwIfCancelled();
     logTtsMode(params.source, params.preset, "remote", "remoteCallStarted");
     const requestStartedAtMs = Date.now();
-    logTtsTiming({
-      source: params.source,
-      preset: params.preset,
-      phase: "request_start",
-      assistantTextReceivedAtMs,
-      tsMs: requestStartedAtMs,
-    });
     try {
-      const ttsAudio = await fetchAiTtsAudio({
-        userId: params.userId,
-        authToken: params.authToken,
-        text: params.text,
-        preset: params.preset,
-        signal: params.abortSignal,
-      });
-      throwIfCancelled();
-      const audioBytesReceivedAtMs = Date.now();
-      logTtsTiming({
-        source: params.source,
-        preset: params.preset,
-        phase: "bytes_received",
-        assistantTextReceivedAtMs,
-        tsMs: audioBytesReceivedAtMs,
-        requestMs: audioBytesReceivedAtMs - requestStartedAtMs,
-        bytes: ttsAudio.bytes.byteLength,
-      });
+      let ttsAudio = params.prefetchedRemoteAudio ?? null;
+      if (!ttsAudio) {
+        logTtsTiming({
+          source: params.source,
+          preset: params.preset,
+          phase: "request_start",
+          assistantTextReceivedAtMs,
+          tsMs: requestStartedAtMs,
+        });
+        ttsAudio = await fetchAiTtsAudio({
+          userId: params.userId,
+          authToken: params.authToken,
+          text: params.text,
+          preset: params.preset,
+          signal: params.abortSignal,
+        });
+        throwIfCancelled();
+        const audioBytesReceivedAtMs = Date.now();
+        logTtsTiming({
+          source: params.source,
+          preset: params.preset,
+          phase: "bytes_received",
+          assistantTextReceivedAtMs,
+          tsMs: audioBytesReceivedAtMs,
+          requestMs: audioBytesReceivedAtMs - requestStartedAtMs,
+          bytes: ttsAudio.bytes.byteLength,
+        });
+      }
       const cacheDirectory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
       if (!cacheDirectory) {
         throw new Error("No writable cache directory available for TTS playback.");
