@@ -293,7 +293,9 @@ const webAuthService = createWebAuthService({
   codeSecret: MOBILE_TOKEN_SECRET
 });
 const authCodeDelivery = createAuthCodeDeliveryService({
-  provider: runtimeConfig.authCodeDeliveryProvider,
+  defaultProvider: runtimeConfig.authCodeDeliveryProvider,
+  webAuthProvider: runtimeConfig.webAuthCodeDeliveryProvider,
+  mobileEmailVerificationProvider: runtimeConfig.mobileEmailVerificationDeliveryProvider,
   resendApiKey: runtimeConfig.resendApiKey,
   fromEmail: runtimeConfig.authCodeFromEmail,
   fromName: runtimeConfig.authCodeFromName,
@@ -3202,7 +3204,8 @@ function buildDomainMatchForEmail(db: ApiDatabase, email: string): EnterpriseDom
 async function issueEmailVerification(
   db: ApiDatabase,
   user: UserProfile,
-  now: Date
+  now: Date,
+  experience: "dashboard" | "mobile"
 ): Promise<{ expiresAt: string; delivery: WebAuthRequestCodeResponse["delivery"] }> {
   const nowIsoValue = now.toISOString();
   const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
@@ -3225,7 +3228,8 @@ async function issueEmailVerification(
     delivery: await authCodeDelivery.sendEmailVerificationCode({
       email: user.email,
       code,
-      expiresAt
+      expiresAt,
+      experience
     })
   };
 }
@@ -7123,7 +7127,7 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
         })
       };
     } else {
-      const verification = await issueEmailVerification(db, user, now);
+      const verification = await issueEmailVerification(db, user, now, "dashboard");
       payload = {
         ok: true,
         challengeType: "email_verification",
@@ -9197,7 +9201,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
         return;
       }
 
-      const verification = await issueEmailVerification(db, existing, new Date(issuedAt));
+      const verification = await issueEmailVerification(db, existing, new Date(issuedAt), "mobile");
       const payload: MobileOnboardResponse = {
         user: existing,
         authToken,
@@ -9242,7 +9246,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
 
     db.users.push(user);
     const authToken = upsertMobileAuthToken(db, user.id, now);
-    const verification = await issueEmailVerification(db, user, new Date(now));
+    const verification = await issueEmailVerification(db, user, new Date(now), "mobile");
     appendMobileAuditEvent(db, user, {
       action: "mobile.user_created",
       userId: user.id,
@@ -9293,7 +9297,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    const verification = await issueEmailVerification(db, user, new Date());
+    const verification = await issueEmailVerification(db, user, new Date(), "mobile");
     appendMobileAuditEvent(db, user, {
       action: "mobile.verification_resent",
       userId: user.id,
@@ -10100,7 +10104,7 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
 
     user.updatedAt = now.toISOString();
     if (emailChanged) {
-      await issueEmailVerification(db, user, now);
+      await issueEmailVerification(db, user, now, "mobile");
     }
     appendMobileAuditEvent(db, user, {
       action: "mobile.settings_updated",

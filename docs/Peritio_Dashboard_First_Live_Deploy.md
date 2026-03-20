@@ -38,6 +38,18 @@ WEB_AUTH_TOKEN_SECRET=<strong secret>
 AUTH_CODE_DELIVERY_PROVIDER=log_only
 ```
 
+If you are enabling real dashboard OTP emails via Resend without switching the mobile app yet, use:
+
+```bash
+AUTH_CODE_DELIVERY_PROVIDER=log_only
+WEB_AUTH_CODE_DELIVERY_PROVIDER=resend
+MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER=log_only
+RESEND_API_KEY=<resend key>
+AUTH_CODE_FROM_EMAIL=<verified resend sender>
+AUTH_CODE_FROM_NAME=Peritio
+AUTH_CODE_REPLY_TO=<optional>
+```
+
 Also keep the existing required API secrets/env vars already used by the live service, especially:
 
 - `DATABASE_URL`

@@ -21,6 +21,8 @@ export interface RuntimeConfig {
   adminTokenTtlMinutes: number;
   webAuthTokenTtlMinutes: number;
   authCodeDeliveryProvider: AuthCodeDeliveryProvider;
+  webAuthCodeDeliveryProvider: AuthCodeDeliveryProvider | null;
+  mobileEmailVerificationDeliveryProvider: AuthCodeDeliveryProvider | null;
   resendApiKey: string | null;
   authCodeFromEmail: string | null;
   authCodeFromName: string;
@@ -154,6 +156,15 @@ function parseAuthCodeDeliveryProvider(rawValue: string | undefined): AuthCodeDe
   throw new Error(`Invalid AUTH_CODE_DELIVERY_PROVIDER value "${rawValue}". Expected "log_only" or "resend".`);
 }
 
+function parseOptionalAuthCodeDeliveryProvider(rawValue: string | undefined): AuthCodeDeliveryProvider | null {
+  const candidate = rawValue?.trim();
+  if (!candidate) {
+    return null;
+  }
+
+  return parseAuthCodeDeliveryProvider(candidate);
+}
+
 function assertNotPlaceholderSecret(
   envName: string,
   value: string,
@@ -212,6 +223,10 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const adminTokenSecret = env.ADMIN_TOKEN_SECRET?.trim() || "replace_me_for_production";
   const webAuthTokenSecret = env.WEB_AUTH_TOKEN_SECRET?.trim() || "";
   const authCodeDeliveryProvider = parseAuthCodeDeliveryProvider(env.AUTH_CODE_DELIVERY_PROVIDER);
+  const webAuthCodeDeliveryProvider = parseOptionalAuthCodeDeliveryProvider(env.WEB_AUTH_CODE_DELIVERY_PROVIDER);
+  const mobileEmailVerificationDeliveryProvider = parseOptionalAuthCodeDeliveryProvider(
+    env.MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER
+  );
   const resendApiKey = env.RESEND_API_KEY?.trim() || null;
   const authCodeFromEmail = env.AUTH_CODE_FROM_EMAIL?.trim() || null;
   const authCodeFromName = env.AUTH_CODE_FROM_NAME?.trim() || "Peritio";
@@ -234,12 +249,21 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     minimumLength: 32
   });
 
-  if (authCodeDeliveryProvider === "resend") {
+  const usesResend =
+    authCodeDeliveryProvider === "resend"
+    || webAuthCodeDeliveryProvider === "resend"
+    || mobileEmailVerificationDeliveryProvider === "resend";
+
+  if (usesResend) {
     if (!resendApiKey || resendApiKey.length < 16) {
-      throw new Error("RESEND_API_KEY is required when AUTH_CODE_DELIVERY_PROVIDER=resend.");
+      throw new Error(
+        "RESEND_API_KEY is required when any auth code delivery provider is set to resend."
+      );
     }
     if (!authCodeFromEmail) {
-      throw new Error("AUTH_CODE_FROM_EMAIL is required when AUTH_CODE_DELIVERY_PROVIDER=resend.");
+      throw new Error(
+        "AUTH_CODE_FROM_EMAIL is required when any auth code delivery provider is set to resend."
+      );
     }
   }
 
@@ -275,6 +299,8 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     adminTokenTtlMinutes: toInt(env.ADMIN_TOKEN_TTL_MINUTES, 720),
     webAuthTokenTtlMinutes: toInt(env.WEB_AUTH_TOKEN_TTL_MINUTES, 720),
     authCodeDeliveryProvider,
+    webAuthCodeDeliveryProvider,
+    mobileEmailVerificationDeliveryProvider,
     resendApiKey,
     authCodeFromEmail,
     authCodeFromName,

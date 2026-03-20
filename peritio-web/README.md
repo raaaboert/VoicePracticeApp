@@ -46,9 +46,10 @@ This app can still keep `PERITIO_PUBLIC_HOST=peritio.ai` for redirect behavior e
 
 The API owns OTP delivery behind `api/src/services/authCodeDelivery.ts`.
 
-- Local/dev: `AUTH_CODE_DELIVERY_PROVIDER=log_only`
-- First live pass: `AUTH_CODE_DELIVERY_PROVIDER=log_only`
-- Later production email path: `AUTH_CODE_DELIVERY_PROVIDER=resend`
+- Local/dev: keep `AUTH_CODE_DELIVERY_PROVIDER=log_only`
+- Lowest-risk dashboard email rollout: keep `AUTH_CODE_DELIVERY_PROVIDER=log_only` and set `WEB_AUTH_CODE_DELIVERY_PROVIDER=resend`
+- Mobile onboarding verification can stay on `log_only` until you are ready by leaving `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER` blank or setting it to `log_only`
+- Later, if you also want the practice app to email verification codes, set `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER=resend`
 
 When using Resend, configure these API env vars:
 

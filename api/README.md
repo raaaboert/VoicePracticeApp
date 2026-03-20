@@ -63,6 +63,8 @@ ADMIN_TOKEN_TTL_MINUTES=720
 WEB_AUTH_TOKEN_SECRET=replace_me_for_shared_web_auth
 WEB_AUTH_TOKEN_TTL_MINUTES=720
 AUTH_CODE_DELIVERY_PROVIDER=log_only
+WEB_AUTH_CODE_DELIVERY_PROVIDER=
+MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER=
 RESEND_API_KEY=
 AUTH_CODE_FROM_EMAIL=
 AUTH_CODE_FROM_NAME=Peritio
@@ -93,7 +95,11 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Postgres pool env defaults: `PG_POOL_MAX=5`, `PG_CONNECT_TIMEOUT_MS=8000`, `PG_IDLE_TIMEOUT_MS=30000`.
 - In production, set `STORAGE_PROVIDER` explicitly and provide `CORS_ALLOWED_ORIGINS`.
 - If the API is already serving other browser apps, append new origins to `CORS_ALLOWED_ORIGINS`; do not replace existing working origins blindly.
-- First live dashboard pass can safely keep `AUTH_CODE_DELIVERY_PROVIDER=log_only`. OTP codes will appear in Render logs instead of being emailed.
+- `AUTH_CODE_DELIVERY_PROVIDER` is the default auth-code delivery mode for all flows unless overridden.
+- `WEB_AUTH_CODE_DELIVERY_PROVIDER` applies to the dashboard shared web-auth flow (`/web/auth/*` and dashboard email verification).
+- `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER` applies to mobile onboarding/settings email verification.
+- For the lowest-risk dashboard rollout, keep `AUTH_CODE_DELIVERY_PROVIDER=log_only`, set `WEB_AUTH_CODE_DELIVERY_PROVIDER=resend`, and leave `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER` blank or `log_only`.
+- If either the default provider or any override is `resend`, `RESEND_API_KEY` and `AUTH_CODE_FROM_EMAIL` are required.
 - `WEB_AUTH_TOKEN_SECRET` is required for shared web OTP sessions and must be strong in hosted environments.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
