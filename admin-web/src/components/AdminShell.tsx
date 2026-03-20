@@ -15,6 +15,7 @@ import {
 
 interface AdminShellProps {
   title: string;
+  headerContent?: ReactNode;
   children: ReactNode;
 }
 
@@ -52,7 +53,7 @@ function getFallbackPathForMode(mode: AdminMode): string {
   return mode === "personal" ? "/users" : "/users";
 }
 
-export function AdminShell({ title, children }: AdminShellProps) {
+export function AdminShell({ title, headerContent, children }: AdminShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [mode, setMode] = useState<AdminMode>("enterprise");
@@ -223,6 +224,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
 
         <div className="card">
           <h2>{title}</h2>
+          {headerContent ? <div className="shell-header-content">{headerContent}</div> : null}
         </div>
 
         {children}

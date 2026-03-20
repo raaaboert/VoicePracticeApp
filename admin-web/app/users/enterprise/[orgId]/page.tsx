@@ -88,16 +88,16 @@ interface OrgJoinRequestsResponse {
   rows: OrgJoinRequestRow[];
 }
 
-type EnterpriseCardKey = "company" | "accessRequests" | "trainingPacks" | "customScenarios" | "users";
+type EnterpriseOrgTabId = "companyDetails" | "trainings" | "users";
+type EnterpriseCardKey = "accessRequests" | "trainingPacks" | "customScenarios" | "users";
 type EnterpriseCardExpandedState = Record<EnterpriseCardKey, boolean>;
 
 function buildDefaultEnterpriseCardExpandedState(hasJoinRequests: boolean): EnterpriseCardExpandedState {
   return {
-    company: true,
     accessRequests: hasJoinRequests,
     trainingPacks: true,
     customScenarios: true,
-    users: false
+    users: true
   };
 }
 
@@ -111,7 +111,6 @@ function parseEnterpriseCardExpandedState(
   try {
     const parsed = JSON.parse(raw) as Partial<EnterpriseCardExpandedState>;
     return {
-      company: parsed.company !== undefined ? parsed.company === true : fallback.company,
       accessRequests: parsed.accessRequests !== undefined ? parsed.accessRequests === true : fallback.accessRequests,
       trainingPacks: parsed.trainingPacks !== undefined ? parsed.trainingPacks === true : fallback.trainingPacks,
       customScenarios: parsed.customScenarios !== undefined ? parsed.customScenarios === true : fallback.customScenarios,
@@ -146,6 +145,15 @@ function formatDateTime(value: string): string {
   });
 }
 
+function EnterpriseSummaryPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="enterprise-summary-pill">
+      <span className="small">{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
 export default function EnterpriseOrgPage() {
   useRequireAdminToken();
   const mode = "enterprise";
@@ -174,6 +182,7 @@ export default function EnterpriseOrgPage() {
   const [defaultPerUserDailyMinutesInput, setDefaultPerUserDailyMinutesInput] = useState("0");
   const [deferPerUserDailyCapUntilNextCycle, setDeferPerUserDailyCapUntilNextCycle] = useState(false);
   const [perUserDailyMinutesInputByUserId, setPerUserDailyMinutesInputByUserId] = useState<Record<string, string>>({});
+  const [activeTab, setActiveTab] = useState<EnterpriseOrgTabId>("companyDetails");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [joinRequestsGeneratedAt, setJoinRequestsGeneratedAt] = useState<string | null>(null);
@@ -295,6 +304,14 @@ export default function EnterpriseOrgPage() {
   }, [dashboard]);
   const activeUserRows = useMemo(
     () => (dashboard?.users ?? []).filter((row) => row.status === "active"),
+    [dashboard]
+  );
+  const dashboardEnabledUserCount = useMemo(
+    () => (dashboard?.users ?? []).filter((row) => row.dashboardAccessEnabled === true).length,
+    [dashboard]
+  );
+  const lockedUserCount = useMemo(
+    () => (dashboard?.users ?? []).filter((row) => row.status === "disabled").length,
     [dashboard]
   );
   const projectedAllocatedActiveUserSecondsThisPeriod = useMemo(
@@ -691,484 +708,634 @@ export default function EnterpriseOrgPage() {
   };
 
   return (
-    <AdminShell title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}>
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
-            <div className="small">{dashboard?.org.id ?? ""}</div>
+    <AdminShell
+      title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}
+      headerContent={
+        <div className="tab-row enterprise-page-tabs" role="tablist" aria-label="Enterprise account sections">
+          <button
+            id="enterprise-tab-company-details"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "companyDetails"}
+            aria-controls="enterprise-panel-company-details"
+            className={`tab-button ${activeTab === "companyDetails" ? "active" : ""}`}
+            onClick={() => setActiveTab("companyDetails")}
+          >
+            Company Details
+          </button>
+          <button
+            id="enterprise-tab-trainings"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "trainings"}
+            aria-controls="enterprise-panel-trainings"
+            className={`tab-button ${activeTab === "trainings" ? "active" : ""}`}
+            onClick={() => setActiveTab("trainings")}
+          >
+            Trainings
+          </button>
+          <button
+            id="enterprise-tab-users"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "users"}
+            aria-controls="enterprise-panel-users"
+            className={`tab-button ${activeTab === "users" ? "active" : ""}`}
+            onClick={() => setActiveTab("users")}
+          >
+            Users
+          </button>
+        </div>
+      }
+    >
+      <div className="enterprise-page">
+        <div className="card">
+          <div className="enterprise-org-context">
+            <div className="enterprise-org-context-main">
+              <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
+              <div className="small">{dashboard?.org.id ?? ""}</div>
+              <div className="enterprise-summary-grid">
+                <EnterpriseSummaryPill
+                  label="Billing Period"
+                  value={
+                    dashboard
+                      ? `${formatDate(dashboard.billingPeriod.periodStartAt)} to ${formatDate(dashboard.billingPeriod.periodEndAt)}`
+                      : "-"
+                  }
+                />
+                <EnterpriseSummaryPill label="Active Users" value={String(activeUserRows.length)} />
+                <EnterpriseSummaryPill label="Pending Requests" value={String(joinRequests.length)} />
+                <EnterpriseSummaryPill label="Active Segments" value={activeIndustries.length > 0 ? String(activeIndustries.length) : "0"} />
+              </div>
+              <p className="small enterprise-note" style={{ marginTop: 12 }}>
+                {dashboard?.generatedAt
+                  ? `Workspace refreshed ${formatDateTime(dashboard.generatedAt)}.`
+                  : loading
+                    ? "Loading enterprise workspace..."
+                    : "Enterprise workspace data is not available yet."}
+              </p>
+            </div>
+            <div className="card-actions card-actions-end">
+              <button type="button" onClick={() => void load()} disabled={loading}>
+                {loading ? "Refreshing..." : "Refresh"}
+              </button>
+              <Link className="button" href={withAdminMode("/users", mode)}>
+                Back to Accounts
+              </Link>
+              <Link className="button" href={withAdminMode(`/users/enterprise/${orgId}/billing`, mode)}>
+                Usage/Billing
+              </Link>
+            </div>
           </div>
-          <div className="card-actions">
-            <button type="button" onClick={() => toggleCard("company")}>
-              {cardExpanded.company ? "Collapse" : "Expand"}
-            </button>
-            <Link className="button" href={withAdminMode("/users", mode)}>
-              Back to Accounts
-            </Link>
-            <Link className="button" href={withAdminMode(`/users/enterprise/${orgId}/billing`, mode)}>
-              Usage/Billing
-            </Link>
-          </div>
+          {error ? <p className="error">{error}</p> : null}
+          {successMessage ? <p className="success">{successMessage}</p> : null}
         </div>
 
-        {error ? <p className="error">{error}</p> : null}
-        {successMessage ? <p className="success">{successMessage}</p> : null}
-
-        {cardExpanded.company ? (
-          dashboard ? (
+        <section
+          id="enterprise-panel-company-details"
+          role="tabpanel"
+          aria-labelledby="enterprise-tab-company-details"
+          className="enterprise-tab-panel"
+          hidden={activeTab !== "companyDetails"}
+        >
+          {dashboard ? (
             <>
-              <div className="grid" style={{ marginTop: 10 }}>
-                <div>
-                  <label>Date Established</label>
-                  <div>{formatDate(dashboard.org.createdAt)}</div>
+              <div className="card enterprise-section-card">
+                <div className="card-header">
+                  <div>
+                    <h3 style={{ marginBottom: 6 }}>Company Profile</h3>
+                    <p className="small">
+                      Core account details, billing defaults, and company-level configuration for this enterprise customer.
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <label>Next Renewal Date</label>
-                  <div>{formatDate(dashboard.billingPeriod.nextRenewalAt)}</div>
+                <div className="enterprise-detail-grid">
+                  <div className="enterprise-detail-item">
+                    <label>Company Name</label>
+                    <div className="enterprise-detail-value">{dashboard.org.name}</div>
+                  </div>
+                  <div className="enterprise-detail-item">
+                    <label>Org Identifier</label>
+                    <div className="enterprise-detail-value break-word">{dashboard.org.id}</div>
+                  </div>
+                  <div className="enterprise-detail-item">
+                    <label>Date Established</label>
+                    <div className="enterprise-detail-value">{formatDate(dashboard.org.createdAt)}</div>
+                  </div>
+                  <div className="enterprise-detail-item">
+                    <label>Next Renewal Date</label>
+                    <div className="enterprise-detail-value">{formatDate(dashboard.billingPeriod.nextRenewalAt)}</div>
+                  </div>
+                  <div className="enterprise-detail-item">
+                    <label>Company Contact</label>
+                    <div className="enterprise-detail-value">{dashboard.org.contactName || "-"}</div>
+                  </div>
+                  <div className="enterprise-detail-item">
+                    <label>Contact Email</label>
+                    <div className="enterprise-detail-value break-word">{dashboard.org.contactEmail || "-"}</div>
+                  </div>
                 </div>
-                <div>
-                  <label>Company Contact</label>
-                  <div>{dashboard.org.contactName}</div>
-                </div>
-                <div>
-                  <label>Contact Email</label>
-                  <div>{dashboard.org.contactEmail}</div>
-                </div>
-                <div>
-                  <label>Email Domain</label>
-                  <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
-                </div>
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <div
-                    style={{
-                      marginTop: 14,
-                      paddingTop: 18,
-                      borderTop: "1px solid rgba(129, 206, 166, 0.24)",
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fit, minmax(440px, 1fr))",
-                      gap: 24,
-                      alignItems: "start"
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <label>Time Allotment (Billing Cycle)</label>
-                      <p className="small" style={{ marginTop: 2, marginBottom: 10 }}>
+              </div>
+
+              <div className="enterprise-two-column">
+                <div className="card enterprise-section-card">
+                  <div className="card-header">
+                    <div>
+                      <h3 style={{ marginBottom: 6 }}>Time Allotment & Billing Cycle</h3>
+                      <p className="small">
                         Hard enforcement uses monthly organization minutes. Active-user projection uses active users only.
                       </p>
-                      <div className="grid" style={{ marginTop: 10 }}>
-                        <div>
-                          <label>Monthly Org Minutes</label>
-                          <input
-                            type="number"
-                            min={0}
-                            value={monthlyMinutesAllottedInput}
-                            onChange={(event) => setMonthlyMinutesAllottedInput(event.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label>Default Per-User Daily Minutes</label>
-                          <input
-                            type="number"
-                            min={0}
-                            value={defaultPerUserDailyMinutesInput}
-                            onChange={(event) => setDefaultPerUserDailyMinutesInput(event.target.value)}
-                          />
-                        </div>
-                        <div style={{ gridColumn: "1 / -1" }}>
-                          <label
-                            style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 0, cursor: "pointer" }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={deferPerUserDailyCapUntilNextCycle}
-                              onChange={(event) => setDeferPerUserDailyCapUntilNextCycle(event.target.checked)}
-                              style={{ width: 16, minHeight: 16, height: 16, padding: 0, margin: 0 }}
-                            />
-                            <span>Apply default per-user daily change at next renewal instead of immediately</span>
-                          </label>
-                          {dashboard.org.pendingPerUserDailySecondsCap !== null &&
-                          dashboard.org.pendingPerUserDailySecondsCapEffectiveAt ? (
-                            <div className="small" style={{ marginTop: 6 }}>
-                              Pending next-cycle default:{" "}
-                              {Math.floor(dashboard.org.pendingPerUserDailySecondsCap / 60)} min/day (effective{" "}
-                              {formatDate(dashboard.org.pendingPerUserDailySecondsCapEffectiveAt)})
-                            </div>
-                          ) : null}
-                        </div>
-                        <div style={{ gridColumn: "1 / -1" }}>
-                          <div className="small">
-                            Org usage this period: {formatSecondsAsClock(dashboard.usage.usedSecondsThisPeriod)} /{" "}
-                            {formatSecondsAsClock(dashboard.usage.allottedSecondsThisPeriod)} (
-                            {dashboard.usage.usagePercentThisPeriod.toFixed(1)}%)
-                          </div>
-                          <div className="small" style={{ marginTop: 4 }}>
-                            Active users: {activeUserRows.length} | Projected allocation at current daily caps:{" "}
-                            {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes over{" "}
-                            {billingPeriodDays} day(s)
-                          </div>
-                        </div>
+                    </div>
+                  </div>
+                  <div className="enterprise-summary-grid">
+                    <EnterpriseSummaryPill label="Used This Period" value={formatSecondsAsClock(dashboard.usage.usedSecondsThisPeriod)} />
+                    <EnterpriseSummaryPill
+                      label="Remaining This Period"
+                      value={formatSecondsAsClock(dashboard.usage.remainingSecondsThisPeriod)}
+                    />
+                    <EnterpriseSummaryPill
+                      label="Usage Percent"
+                      value={`${dashboard.usage.usagePercentThisPeriod.toFixed(1)}%`}
+                    />
+                    <EnterpriseSummaryPill
+                      label="Projected Allocation"
+                      value={`${Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} min`}
+                    />
+                  </div>
+                  <div className="enterprise-subsection">
+                    <div className="grid">
+                      <div>
+                        <label>Monthly Org Minutes</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={monthlyMinutesAllottedInput}
+                          onChange={(event) => setMonthlyMinutesAllottedInput(event.target.value)}
+                        />
                       </div>
-                      <div style={{ marginTop: 14 }}>
-                        <button
-                          className="primary"
-                          disabled={savingQuotaSettings}
-                          onClick={() => void saveOrgQuotaSettings()}
+                      <div>
+                        <label>Default Per-User Daily Minutes</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={defaultPerUserDailyMinutesInput}
+                          onChange={(event) => setDefaultPerUserDailyMinutesInput(event.target.value)}
+                        />
+                      </div>
+                      <div style={{ gridColumn: "1 / -1" }}>
+                        <label
+                          style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 0, cursor: "pointer" }}
                         >
-                          {savingQuotaSettings ? "Saving..." : "Save Time Allotment Settings"}
-                        </button>
+                          <input
+                            type="checkbox"
+                            checked={deferPerUserDailyCapUntilNextCycle}
+                            onChange={(event) => setDeferPerUserDailyCapUntilNextCycle(event.target.checked)}
+                            style={{ width: 16, minHeight: 16, height: 16, padding: 0, margin: 0 }}
+                          />
+                          <span>Apply default per-user daily change at next renewal instead of immediately</span>
+                        </label>
+                        {dashboard.org.pendingPerUserDailySecondsCap !== null &&
+                        dashboard.org.pendingPerUserDailySecondsCapEffectiveAt ? (
+                          <div className="small" style={{ marginTop: 6 }}>
+                            Pending next-cycle default: {Math.floor(dashboard.org.pendingPerUserDailySecondsCap / 60)} min/day
+                            {" "}effective {formatDate(dashboard.org.pendingPerUserDailySecondsCapEffectiveAt)}.
+                          </div>
+                        ) : null}
+                      </div>
+                      <div style={{ gridColumn: "1 / -1" }}>
+                        <div className="small">
+                          Org usage this period: {formatSecondsAsClock(dashboard.usage.usedSecondsThisPeriod)} /{" "}
+                          {formatSecondsAsClock(dashboard.usage.allottedSecondsThisPeriod)} (
+                          {dashboard.usage.usagePercentThisPeriod.toFixed(1)}%)
+                        </div>
+                        <div className="small" style={{ marginTop: 4 }}>
+                          Active users: {activeUserRows.length} | Projected allocation at current daily caps:{" "}
+                          {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes over{" "}
+                          {billingPeriodDays} day(s)
+                        </div>
                       </div>
                     </div>
-                    <div style={{ minWidth: 0 }}>
-                      <label>Segments Active</label>
-                      <div>{segmentsActiveLabel}</div>
-                      <div className="small" style={{ marginTop: 2 }}>
-                        Billing period: {formatDate(dashboard.billingPeriod.periodStartAt)} to{" "}
-                        {formatDate(dashboard.billingPeriod.periodEndAt)}
+                    <div className="form-actions">
+                      <button className="primary" disabled={savingQuotaSettings} onClick={() => void saveOrgQuotaSettings()}>
+                        {savingQuotaSettings ? "Saving..." : "Save Time Allotment Settings"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="card enterprise-section-card">
+                  <div className="card-header">
+                    <div>
+                      <h3 style={{ marginBottom: 6 }}>Identity, Segments & Enrollment</h3>
+                      <p className="small">
+                        Domain controls, join code management, and segment activation for this enterprise account.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="enterprise-subsection">
+                    <div className="enterprise-detail-grid">
+                      <div className="enterprise-detail-item">
+                        <label>Email Domain</label>
+                        <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
                       </div>
-                      <div style={{ marginTop: 16 }}>
-                        <label>Segment Selection</label>
-                        <p className="small" style={{ marginTop: 2, marginBottom: 10 }}>
-                          Select an industry and toggle whether it is active for this company.
-                        </p>
-                        <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
-                          <div style={{ minWidth: 260, flex: "1 1 260px" }}>
-                            <label>Industry</label>
-                            <select
-                              value={selectedIndustryId}
-                              onChange={(event) => setSelectedIndustryId(event.target.value)}
-                            >
-                              {industries.map((industry) => (
-                                <option key={industry.id} value={industry.id}>
-                                  {industry.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                            <button
-                              type="button"
-                              className={selectedIndustryActive ? "primary" : undefined}
-                              disabled={savingIndustries || !selectedIndustryId}
-                              onClick={() => void setIndustryActive(true)}
-                            >
-                              Active
-                            </button>
-                            <button
-                              type="button"
-                              className={!selectedIndustryActive ? "primary" : undefined}
-                              disabled={savingIndustries || !selectedIndustryId}
-                              onClick={() => void setIndustryActive(false)}
-                            >
-                              Inactive
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                      <div style={{ marginTop: 16 }}>
+                      <div className="enterprise-detail-item">
                         <label>Join Code</label>
                         <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
                       </div>
-                      <div style={{ marginTop: 14 }}>
-                        <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
-                          {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
-                        </button>
+                      <div className="enterprise-detail-item">
+                        <label>Segments Active</label>
+                        <div className="enterprise-detail-value break-word">{segmentsActiveLabel}</div>
                       </div>
+                      <div className="enterprise-detail-item">
+                        <label>Billing Period</label>
+                        <div className="enterprise-detail-value">
+                          {formatDate(dashboard.billingPeriod.periodStartAt)} to {formatDate(dashboard.billingPeriod.periodEndAt)}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 16 }}>
+                      <label>Segment Selection</label>
+                      <p className="small" style={{ marginTop: 2, marginBottom: 10 }}>
+                        Select an industry and toggle whether it is active for this company.
+                      </p>
+                      <div className="enterprise-actions-inline" style={{ alignItems: "end" }}>
+                        <div style={{ minWidth: 260, flex: "1 1 260px" }}>
+                          <label>Industry</label>
+                          <select value={selectedIndustryId} onChange={(event) => setSelectedIndustryId(event.target.value)}>
+                            {industries.map((industry) => (
+                              <option key={industry.id} value={industry.id}>
+                                {industry.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="enterprise-actions-inline">
+                          <button
+                            type="button"
+                            className={selectedIndustryActive ? "primary" : undefined}
+                            disabled={savingIndustries || !selectedIndustryId}
+                            onClick={() => void setIndustryActive(true)}
+                          >
+                            Active
+                          </button>
+                          <button
+                            type="button"
+                            className={!selectedIndustryActive ? "primary" : undefined}
+                            disabled={savingIndustries || !selectedIndustryId}
+                            onClick={() => void setIndustryActive(false)}
+                          >
+                            Inactive
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="form-actions">
+                      <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
+                        {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
+                      </button>
                     </div>
                   </div>
                 </div>
               </div>
             </>
           ) : (
-            <p className="small">{loading ? "Loading company details..." : "Company details are not available."}</p>
-          )
-        ) : (
-          <p className="small">Company details are collapsed.</p>
-        )}
-      </div>
-
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h3 style={{ marginBottom: 6 }}>Org Access Requests</h3>
-            <div className="small">
-              Pending requests for this account: {joinRequests.length}
-              {joinRequestsGeneratedAt ? ` | Refreshed ${formatDateTime(joinRequestsGeneratedAt)}` : ""}
+            <div className="card">
+              <p className="small">{loading ? "Loading company details..." : "Company details are not available."}</p>
             </div>
+          )}
+        </section>
+
+        <section
+          id="enterprise-panel-trainings"
+          role="tabpanel"
+          aria-labelledby="enterprise-tab-trainings"
+          className="enterprise-tab-panel"
+          hidden={activeTab !== "trainings"}
+        >
+          <div className="card enterprise-section-card">
+            <div className="card-header">
+              <div>
+                <h3 style={{ marginBottom: 6 }}>Training Workspace</h3>
+                <p className="small">
+                  Training packs and custom scenarios live together here so future session-level management can land in one place.
+                </p>
+              </div>
+            </div>
+            <div className="enterprise-summary-grid">
+              <EnterpriseSummaryPill label="Supporting Assets" value="Training Packs" />
+              <EnterpriseSummaryPill label="Supporting Assets" value="Custom Scenarios" />
+              <EnterpriseSummaryPill label="Future Home" value="Training Sessions" />
+            </div>
+            <p className="small enterprise-note">
+              Session activity already exists in backend usage records, but the admin utility does not yet expose a dedicated
+              training-session workspace. This tab sets up that future without inventing session controls before the model is ready.
+            </p>
           </div>
-          <div className="card-actions">
-            <button type="button" onClick={() => toggleCard("accessRequests")}>
-              {cardExpanded.accessRequests ? "Collapse" : "Expand"}
-            </button>
-            <button type="button" onClick={() => void load()} disabled={loading}>
-              Refresh
-            </button>
+
+          <EnterpriseTrainingPacksCard
+            orgId={orgId}
+            orgName={dashboard?.org.name}
+            config={config}
+            orgUsers={dashboard?.users ?? []}
+            collapsed={!cardExpanded.trainingPacks}
+            onToggleCollapse={() => toggleCard("trainingPacks")}
+          />
+
+          <EnterpriseCustomScenariosCard
+            orgId={orgId}
+            orgName={dashboard?.org.name}
+            config={config}
+            collapsed={!cardExpanded.customScenarios}
+            onToggleCollapse={() => toggleCard("customScenarios")}
+          />
+        </section>
+
+        <section
+          id="enterprise-panel-users"
+          role="tabpanel"
+          aria-labelledby="enterprise-tab-users"
+          className="enterprise-tab-panel"
+          hidden={activeTab !== "users"}
+        >
+          <div className="card enterprise-section-card">
+            <div className="card-header">
+              <div>
+                <h3 style={{ marginBottom: 6 }}>Users & Access</h3>
+                <p className="small">Pending org access requests and enterprise user controls live here.</p>
+              </div>
+            </div>
+            <div className="enterprise-summary-grid">
+              <EnterpriseSummaryPill label="Pending Requests" value={String(joinRequests.length)} />
+              <EnterpriseSummaryPill label="Total Users" value={String(dashboard?.users.length ?? 0)} />
+              <EnterpriseSummaryPill label="Dashboard Access Enabled" value={String(dashboardEnabledUserCount)} />
+              <EnterpriseSummaryPill label="Locked Out" value={String(lockedUserCount)} />
+            </div>
+            <p className="small enterprise-note">
+              Usage shown below is billed time within the current monthly billing period. Dashboard access is an explicit
+              authorization toggle and sign-in still requires a verified email.
+            </p>
           </div>
-        </div>
-        {cardExpanded.accessRequests ? (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Email Domain</th>
-                  <th>Submitted</th>
-                  <th>Expires</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {joinRequests.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="small">
-                      {loading ? "Loading..." : "No pending requests for this enterprise account."}
-                    </td>
-                  </tr>
-                ) : (
-                  joinRequests.map((row) => (
-                    <tr key={row.id}>
-                      <td>
-                        <div>{row.email}</div>
-                        <div className="small">{row.user?.id ?? row.id}</div>
-                      </td>
-                      <td>{row.emailDomain}</td>
-                      <td>{formatDateTime(row.createdAt)}</td>
-                      <td>{formatDateTime(row.expiresAt)}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button
-                            type="button"
-                            className="primary"
-                            disabled={actingJoinRequestId === row.id}
-                            onClick={() => void decideJoinRequest(row.id, "approve")}
-                          >
-                            {actingJoinRequestId === row.id ? "Saving..." : "Approve"}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={actingJoinRequestId === row.id}
-                            onClick={() => void decideJoinRequest(row.id, "approve", { assignOrgAdmin: true })}
-                          >
-                            Approve as Org Admin
-                          </button>
-                          <button
-                            type="button"
-                            className="danger"
-                            disabled={actingJoinRequestId === row.id}
-                            onClick={() => void decideJoinRequest(row.id, "reject")}
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      </td>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <h3 style={{ marginBottom: 6 }}>Org Access Requests</h3>
+                <div className="small">
+                  Pending requests for this account: {joinRequests.length}
+                  {joinRequestsGeneratedAt ? ` | Refreshed ${formatDateTime(joinRequestsGeneratedAt)}` : ""}
+                </div>
+              </div>
+              <div className="card-actions">
+                <button type="button" onClick={() => toggleCard("accessRequests")}>
+                  {cardExpanded.accessRequests ? "Collapse" : "Expand"}
+                </button>
+                <button type="button" onClick={() => void load()} disabled={loading}>
+                  Refresh
+                </button>
+              </div>
+            </div>
+            {cardExpanded.accessRequests ? (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      <th>Email Domain</th>
+                      <th>Submitted</th>
+                      <th>Expires</th>
+                      <th>Actions</th>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody>
+                    {joinRequests.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="small">
+                          {loading ? "Loading..." : "No pending requests for this enterprise account."}
+                        </td>
+                      </tr>
+                    ) : (
+                      joinRequests.map((row) => (
+                        <tr key={row.id}>
+                          <td>
+                            <div>{row.email}</div>
+                            <div className="small">{row.user?.id ?? row.id}</div>
+                          </td>
+                          <td>{row.emailDomain}</td>
+                          <td>{formatDateTime(row.createdAt)}</td>
+                          <td>{formatDateTime(row.expiresAt)}</td>
+                          <td>
+                            <div className="enterprise-actions-inline">
+                              <button
+                                type="button"
+                                className="primary"
+                                disabled={actingJoinRequestId === row.id}
+                                onClick={() => void decideJoinRequest(row.id, "approve")}
+                              >
+                                {actingJoinRequestId === row.id ? "Saving..." : "Approve"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={actingJoinRequestId === row.id}
+                                onClick={() => void decideJoinRequest(row.id, "approve", { assignOrgAdmin: true })}
+                              >
+                                Approve as Org Admin
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                disabled={actingJoinRequestId === row.id}
+                                onClick={() => void decideJoinRequest(row.id, "reject")}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="small">Org access requests are collapsed.</p>
+            )}
           </div>
-        ) : (
-          <p className="small">Org access requests are collapsed.</p>
-        )}
-      </div>
 
-      <EnterpriseTrainingPacksCard
-        orgId={orgId}
-        orgName={dashboard?.org.name}
-        config={config}
-        orgUsers={dashboard?.users ?? []}
-        collapsed={!cardExpanded.trainingPacks}
-        onToggleCollapse={() => toggleCard("trainingPacks")}
-      />
-
-      <EnterpriseCustomScenariosCard
-        orgId={orgId}
-        orgName={dashboard?.org.name}
-        config={config}
-        collapsed={!cardExpanded.customScenarios}
-        onToggleCollapse={() => toggleCard("customScenarios")}
-      />
-
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h3 style={{ marginBottom: 6 }}>Users</h3>
-            <p className="small" style={{ marginTop: 0 }}>
-              Usage shown is billed time within the current monthly billing period.
-            </p>
-            <p className="small" style={{ marginTop: 0 }}>
-              Active users: {activeUserRows.length} | Projected allocation:{" "}
-              {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes this cycle.
-            </p>
-            <p className="small" style={{ marginTop: 0 }}>
-              Dashboard access is an explicit authorization toggle. Sign-in still requires a verified email.
-            </p>
-          </div>
-          <div className="card-actions">
-            <button type="button" onClick={() => toggleCard("users")}>
-              {cardExpanded.users ? "Collapse" : "Expand"}
-            </button>
-          </div>
-        </div>
-        {cardExpanded.users ? (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Email</th>
-                  <th>Role</th>
-                  <th>Dashboard Access</th>
-                  <th>Locked Out</th>
-                  <th>Daily Allotment</th>
-                  <th>Daily Overage</th>
-                  <th>Usage This Billing Period</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(dashboard?.users ?? []).length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="small">
-                      {loading ? "Loading..." : "No users found for this enterprise account."}
-                    </td>
-                  </tr>
-                ) : (
-                  (dashboard?.users ?? []).map((user) => (
-                    <tr key={user.userId}>
-                      <td>
-                        <div>{user.email}</div>
-                        <div className="small">{user.userId}</div>
-                      </td>
-                      <td>
-                        <select
-                          value={user.orgRole}
-                          disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                          onChange={(event) => {
-                            void patchEnterpriseUser(user.userId, { orgRole: event.target.value as OrgUserRole });
-                          }}
-                        >
-                          {ORG_USER_ROLES.map((role) => (
-                            <option key={role} value={role}>
-                              {ORG_USER_ROLE_LABELS[role]}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                          <input
-                            type="checkbox"
-                            checked={user.dashboardAccessEnabled === true}
-                            disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                            onChange={(event) => {
-                              void patchEnterpriseUser(user.userId, {
-                                dashboardAccessEnabled: event.target.checked,
-                              });
-                            }}
-                          />
-                          Enabled
-                        </label>
-                      </td>
-                      <td>
-                        <select
-                          value={user.status}
-                          disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                          onChange={(event) => {
-                            void patchEnterpriseUser(user.userId, { status: event.target.value as UserStatus });
-                          }}
-                        >
-                          <option value="active">Active</option>
-                          <option value="disabled">Locked</option>
-                        </select>
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          <input
-                            type="number"
-                            min={0}
-                            value={perUserDailyMinutesInputByUserId[user.userId] ?? ""}
-                            disabled={
-                              savingUserQuotaId === user.userId ||
-                              savingUserId === user.userId ||
-                              deletingUserId === user.userId
-                            }
-                            onChange={(event) =>
-                              setPerUserDailyMinutesInputByUserId((prev) => ({
-                                ...prev,
-                                [user.userId]: event.target.value,
-                              }))
-                            }
-                          />
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <h3 style={{ marginBottom: 6 }}>Users</h3>
+                <p className="small" style={{ marginTop: 0 }}>
+                  Active users: {activeUserRows.length} | Projected allocation:{" "}
+                  {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes this cycle.
+                </p>
+              </div>
+              <div className="card-actions">
+                <button type="button" onClick={() => toggleCard("users")}>
+                  {cardExpanded.users ? "Collapse" : "Expand"}
+                </button>
+              </div>
+            </div>
+            {cardExpanded.users ? (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Role</th>
+                      <th>Dashboard Access</th>
+                      <th>Locked Out</th>
+                      <th>Daily Allotment</th>
+                      <th>Daily Overage</th>
+                      <th>Usage This Billing Period</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(dashboard?.users ?? []).length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="small">
+                          {loading ? "Loading..." : "No users found for this enterprise account."}
+                        </td>
+                      </tr>
+                    ) : (
+                      (dashboard?.users ?? []).map((user) => (
+                        <tr key={user.userId}>
+                          <td>
+                            <div>{user.email}</div>
+                            <div className="small">{user.userId}</div>
+                          </td>
+                          <td>
+                            <select
+                              value={user.orgRole}
+                              disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                              onChange={(event) => {
+                                void patchEnterpriseUser(user.userId, { orgRole: event.target.value as OrgUserRole });
+                              }}
+                            >
+                              {ORG_USER_ROLES.map((role) => (
+                                <option key={role} value={role}>
+                                  {ORG_USER_ROLE_LABELS[role]}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>
+                            <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                              <input
+                                type="checkbox"
+                                checked={user.dashboardAccessEnabled === true}
+                                disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                                onChange={(event) => {
+                                  void patchEnterpriseUser(user.userId, {
+                                    dashboardAccessEnabled: event.target.checked,
+                                  });
+                                }}
+                              />
+                              Enabled
+                            </label>
+                          </td>
+                          <td>
+                            <select
+                              value={user.status}
+                              disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                              onChange={(event) => {
+                                void patchEnterpriseUser(user.userId, { status: event.target.value as UserStatus });
+                              }}
+                            >
+                              <option value="active">Active</option>
+                              <option value="disabled">Locked</option>
+                            </select>
+                          </td>
+                          <td>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                              <input
+                                type="number"
+                                min={0}
+                                value={perUserDailyMinutesInputByUserId[user.userId] ?? ""}
+                                disabled={
+                                  savingUserQuotaId === user.userId ||
+                                  savingUserId === user.userId ||
+                                  deletingUserId === user.userId
+                                }
+                                onChange={(event) =>
+                                  setPerUserDailyMinutesInputByUserId((prev) => ({
+                                    ...prev,
+                                    [user.userId]: event.target.value,
+                                  }))
+                                }
+                              />
+                              <div className="enterprise-actions-inline" style={{ marginTop: 2 }}>
+                                <button
+                                  type="button"
+                                  disabled={
+                                    savingUserQuotaId === user.userId ||
+                                    savingUserId === user.userId ||
+                                    deletingUserId === user.userId
+                                  }
+                                  onClick={() => void saveUserDailyCapOverride(user.userId)}
+                                >
+                                  {savingUserQuotaId === user.userId ? "Saving..." : "Save"}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={
+                                    savingUserQuotaId === user.userId ||
+                                    savingUserId === user.userId ||
+                                    deletingUserId === user.userId
+                                  }
+                                  onClick={() => void clearUserDailyCapOverride(user.userId)}
+                                >
+                                  Use Org Default
+                                </button>
+                              </div>
+                              <div className="small">Effective: {formatSecondsAsClock(user.effectiveDailySecondsCap)}</div>
+                            </div>
+                          </td>
+                          <td>
+                            <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                              <input
+                                type="checkbox"
+                                checked={user.allowDailyOverageThisCycle === true}
+                                disabled={
+                                  savingUserOverageId === user.userId ||
+                                  savingUserId === user.userId ||
+                                  deletingUserId === user.userId
+                                }
+                                onChange={(event) =>
+                                  void setUserDailyOverageAllowance(user.userId, event.target.checked)
+                                }
+                              />
+                              Allow
+                            </label>
+                            {user.allowDailyOverageThisCycle && user.dailyOverageExpiresAt ? (
+                              <div className="small" style={{ marginTop: 4 }}>
+                                Expires {formatDate(user.dailyOverageExpiresAt)}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
+                          <td>
                             <button
                               type="button"
-                              disabled={
-                                savingUserQuotaId === user.userId ||
-                                savingUserId === user.userId ||
-                                deletingUserId === user.userId
-                              }
-                              onClick={() => void saveUserDailyCapOverride(user.userId)}
+                              className="danger"
+                              disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                              onClick={() => void deleteEnterpriseUser(user.userId, user.email)}
                             >
-                              {savingUserQuotaId === user.userId ? "Saving..." : "Save"}
+                              {deletingUserId === user.userId ? "Deleting..." : "Delete"}
                             </button>
-                            <button
-                              type="button"
-                              disabled={
-                                savingUserQuotaId === user.userId ||
-                                savingUserId === user.userId ||
-                                deletingUserId === user.userId
-                              }
-                              onClick={() => void clearUserDailyCapOverride(user.userId)}
-                            >
-                              Use Org Default
-                            </button>
-                          </div>
-                          <div className="small">
-                            Effective: {formatSecondsAsClock(user.effectiveDailySecondsCap)}
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                          <input
-                            type="checkbox"
-                            checked={user.allowDailyOverageThisCycle === true}
-                            disabled={
-                              savingUserOverageId === user.userId ||
-                              savingUserId === user.userId ||
-                              deletingUserId === user.userId
-                            }
-                            onChange={(event) =>
-                              void setUserDailyOverageAllowance(user.userId, event.target.checked)
-                            }
-                          />
-                          Allow
-                        </label>
-                        {user.allowDailyOverageThisCycle && user.dailyOverageExpiresAt ? (
-                          <div className="small" style={{ marginTop: 4 }}>
-                            Expires {formatDate(user.dailyOverageExpiresAt)}
-                          </div>
-                        ) : null}
-                      </td>
-                      <td>{formatSecondsAsClock(user.billedSecondsThisPeriod)}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="danger"
-                          disabled={savingUserId === user.userId || deletingUserId === user.userId}
-                          onClick={() => void deleteEnterpriseUser(user.userId, user.email)}
-                        >
-                          {deletingUserId === user.userId ? "Deleting..." : "Delete"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="small">Users are collapsed.</p>
+            )}
           </div>
-        ) : (
-          <p className="small">Users are collapsed.</p>
-        )}
+        </section>
       </div>
     </AdminShell>
   );
