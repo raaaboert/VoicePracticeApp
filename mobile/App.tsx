@@ -2181,7 +2181,7 @@ export default function App() {
       };
 
       const transcriptLines: string[] = [
-        "Voice Practice Session Transcript",
+        "Peritio Session Transcript",
         "",
         `Scenario: ${completedConfig.scenario.title}`,
         `Segment: ${completedConfig.segmentLabel}`,
@@ -2216,6 +2216,7 @@ export default function App() {
             userId: user.id,
             segmentId: completedConfig.scenario.segmentId,
             scenarioId: completedConfig.scenario.id,
+            trainingPackId: timing.trainingPackId ?? null,
             startedAt: timing.startedAt,
             endedAt: timing.endedAt,
             rawDurationSeconds: timing.rawDurationSeconds,
@@ -2286,6 +2287,7 @@ export default function App() {
             startedAt: timing.startedAt,
             endedAt: timing.endedAt,
             history,
+            trainingPackId: timing.trainingPackId ?? null,
           });
           finalScorecard = result.scorecard;
 
@@ -2500,7 +2502,7 @@ export default function App() {
     <View style={styles.fill}>
       <View style={styles.topRow}>
         <View style={styles.spacer} />
-        <Text style={styles.topTitle}>Voice Practice</Text>
+        <Text style={styles.topTitle}>Peritio</Text>
         <Pressable
           style={styles.menuButton}
           onPress={() => {

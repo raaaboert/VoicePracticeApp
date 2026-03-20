@@ -8,6 +8,19 @@ Express API for Phase 1 development.
 - `GET /ready`
 - `POST /auth/login`
 - `POST /auth/change-password`
+- `POST /web/auth/request-code`
+- `POST /web/auth/verify-code`
+- `GET /web/auth/session`
+- `POST /web/auth/logout`
+- `GET /dashboard/overview`
+- `GET /dashboard/customers`
+- `GET /dashboard/customers/:orgId`
+- `GET /dashboard/users`
+- `GET /dashboard/users/:userId`
+- `GET /dashboard/training`
+- `GET /dashboard/training/:trainingPackId`
+- `GET /dashboard/training/:trainingPackId/assignments/:assignmentId`
+- `GET /dashboard/attempts/:attemptId`
 - `GET /config`
 - `PATCH /config` (admin)
 - `GET /users` (admin)
@@ -47,6 +60,13 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
 ADMIN_BOOTSTRAP_PASSWORD=admin
 ADMIN_TOKEN_SECRET=replace_me_for_production
 ADMIN_TOKEN_TTL_MINUTES=720
+WEB_AUTH_TOKEN_SECRET=replace_me_for_shared_web_auth
+WEB_AUTH_TOKEN_TTL_MINUTES=720
+AUTH_CODE_DELIVERY_PROVIDER=log_only
+RESEND_API_KEY=
+AUTH_CODE_FROM_EMAIL=
+AUTH_CODE_FROM_NAME=Peritio
+AUTH_CODE_REPLY_TO=
 MOBILE_TOKEN_SECRET=replace_me_for_mobile_tokens
 MOBILE_REVERIFY_ON_ONBOARD=false
 OPENAI_API_KEY=
@@ -66,11 +86,15 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Storage supports two providers:
   - `file` via `DB_PATH`
   - `postgres` via `DATABASE_URL` (durable, recommended for hosted deployments)
+- For the hosted Peritio dashboard, use `postgres`. Training-pack lifecycle/reporting is limited when `STORAGE_PROVIDER=file`.
 - For hosted production APIs, prefer direct Postgres (`:5432`) when available, or pooler session mode (`:5432`) if direct routing is unavailable.
 - Avoid transaction pooler (`:6543`) for long-lived always-on API instances.
 - URL-encode any special characters in `DATABASE_URL` passwords (`!` -> `%21`, `@` -> `%40`, etc.).
 - Postgres pool env defaults: `PG_POOL_MAX=5`, `PG_CONNECT_TIMEOUT_MS=8000`, `PG_IDLE_TIMEOUT_MS=30000`.
 - In production, set `STORAGE_PROVIDER` explicitly and provide `CORS_ALLOWED_ORIGINS`.
+- If the API is already serving other browser apps, append new origins to `CORS_ALLOWED_ORIGINS`; do not replace existing working origins blindly.
+- First live dashboard pass can safely keep `AUTH_CODE_DELIVERY_PROVIDER=log_only`. OTP codes will appear in Render logs instead of being emailed.
+- `WEB_AUTH_TOKEN_SECRET` is required for shared web OTP sessions and must be strong in hosted environments.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
 - AI budget caps default in production when `OPENAI_API_KEY` is set (`120` per-user calls/day, `1500` global calls/day, `250000` per-user tokens/day, `2000000` global tokens/day).

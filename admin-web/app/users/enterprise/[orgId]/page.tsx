@@ -25,6 +25,7 @@ interface OrgDashboardUserRow {
   email: string;
   status: UserStatus;
   orgRole: OrgUserRole;
+  dashboardAccessEnabled: boolean;
   dailySecondsCapOverride: number | null;
   effectiveDailySecondsCap: number;
   allowDailyOverageThisCycle: boolean;
@@ -364,7 +365,10 @@ export default function EnterpriseOrgPage() {
   const patchEnterpriseUser = async (
     userId: string,
     patch: Partial<
-      Pick<UserProfile, "orgRole" | "status" | "dailySecondsCapOverride" | "allowDailyOverageThisCycle">
+      Pick<
+        UserProfile,
+        "orgRole" | "status" | "dashboardAccessEnabled" | "dailySecondsCapOverride" | "allowDailyOverageThisCycle"
+      >
     >,
   ) => {
     setSavingUserId(userId);
@@ -390,6 +394,7 @@ export default function EnterpriseOrgPage() {
                   ...row,
                   status: updated.status,
                   orgRole: updated.orgRole,
+                  dashboardAccessEnabled: updated.dashboardAccessEnabled === true,
                   dailySecondsCapOverride: updated.dailySecondsCapOverride,
                   effectiveDailySecondsCap:
                     (updated.dailySecondsCapOverride ?? prev.org.perUserDailySecondsCap) + updated.manualBonusSeconds,
@@ -970,6 +975,7 @@ export default function EnterpriseOrgPage() {
         orgId={orgId}
         orgName={dashboard?.org.name}
         config={config}
+        orgUsers={dashboard?.users ?? []}
         collapsed={!cardExpanded.trainingPacks}
         onToggleCollapse={() => toggleCard("trainingPacks")}
       />
@@ -993,6 +999,9 @@ export default function EnterpriseOrgPage() {
               Active users: {activeUserRows.length} | Projected allocation:{" "}
               {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes this cycle.
             </p>
+            <p className="small" style={{ marginTop: 0 }}>
+              Dashboard access is an explicit authorization toggle. Sign-in still requires a verified email.
+            </p>
           </div>
           <div className="card-actions">
             <button type="button" onClick={() => toggleCard("users")}>
@@ -1007,6 +1016,7 @@ export default function EnterpriseOrgPage() {
                 <tr>
                   <th>Email</th>
                   <th>Role</th>
+                  <th>Dashboard Access</th>
                   <th>Locked Out</th>
                   <th>Daily Allotment</th>
                   <th>Daily Overage</th>
@@ -1017,7 +1027,7 @@ export default function EnterpriseOrgPage() {
               <tbody>
                 {(dashboard?.users ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="small">
+                    <td colSpan={8} className="small">
                       {loading ? "Loading..." : "No users found for this enterprise account."}
                     </td>
                   </tr>
@@ -1042,6 +1052,21 @@ export default function EnterpriseOrgPage() {
                             </option>
                           ))}
                         </select>
+                      </td>
+                      <td>
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                          <input
+                            type="checkbox"
+                            checked={user.dashboardAccessEnabled === true}
+                            disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                            onChange={(event) => {
+                              void patchEnterpriseUser(user.userId, {
+                                dashboardAccessEnabled: event.target.checked,
+                              });
+                            }}
+                          />
+                          Enabled
+                        </label>
                       </td>
                       <td>
                         <select

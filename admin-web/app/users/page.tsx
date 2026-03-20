@@ -308,6 +308,10 @@ export default function UsersPage() {
               <button onClick={() => void load()}>{loading ? "Refreshing..." : "Refresh"}</button>
             </div>
           </div>
+          <p className="small" style={{ marginTop: 0 }}>
+            Customer dashboard access is managed per user inside each enterprise account. Platform-admin dashboard access
+            still remains a backend-controlled flag.
+          </p>
           <div className="table-wrap">
             <table className="data-table">
               <thead>

@@ -188,7 +188,7 @@ export function AdminShell({ title, children }: AdminShellProps) {
       <div className="shell">
         <div className="topbar">
           <div className="topbar-main">
-            <div className="brand">VoicePractice Admin</div>
+            <div className="brand">Peritio - Web Admin</div>
             <div className="mode-toggle" role="tablist" aria-label="Admin mode">
               <button type="button" className={mode === "personal" ? "active" : ""} onClick={() => switchMode("personal")}>
                 Personal

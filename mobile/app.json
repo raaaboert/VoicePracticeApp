@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "VoicePracticeApp",
+    "name": "Peritio",
     "slug": "VoicePracticeApp",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Voice Practice App needs microphone access to run voice simulation training."
+        "NSMicrophoneUsageDescription": "Peritio needs microphone access to run voice simulation training."
       }
     },
     "android": {

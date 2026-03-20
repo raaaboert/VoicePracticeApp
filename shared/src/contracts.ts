@@ -15,6 +15,9 @@ export type OrgStatus = (typeof ORG_STATUSES)[number];
 export const ORG_USER_ROLES = ["org_admin", "user_admin", "user"] as const;
 export type OrgUserRole = (typeof ORG_USER_ROLES)[number];
 
+export const DASHBOARD_ACCESS_TYPES = ["platform_admin", "customer_dashboard_user"] as const;
+export type DashboardAccessType = (typeof DASHBOARD_ACCESS_TYPES)[number];
+
 export const ORG_JOIN_REQUEST_STATUSES = ["pending", "approved", "rejected", "expired"] as const;
 export type OrgJoinRequestStatus = (typeof ORG_JOIN_REQUEST_STATUSES)[number];
 
@@ -212,6 +215,9 @@ export interface UserProfile {
   id: string;
   email: string;
   emailVerifiedAt: string | null;
+  isPlatformAdmin?: boolean;
+  // Explicit customer-side dashboard authorization. This is separate from mobile/app org role.
+  dashboardAccessEnabled?: boolean;
   accountType: AccountType;
   tier: TierId;
   status: UserStatus;
@@ -225,6 +231,25 @@ export interface UserProfile {
   dailySecondsCapOverride: number | null;
   allowDailyOverageThisCycle: boolean;
   dailyOverageExpiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TrainingPackAssignmentCompletionRule = "scored_required_scenarios_v1";
+export type TrainingPackAssignmentProgressStatus = "not_started" | "in_progress" | "completed";
+
+export interface TrainingPackAssignmentRecord {
+  id: string;
+  trainingPackId: string;
+  orgId: string;
+  userId: string;
+  active: boolean;
+  assignedAt: string;
+  assignedByUserId: string | null;
+  requiredScenarioIds: string[];
+  completionRule: TrainingPackAssignmentCompletionRule;
+  startedAt: string | null;
+  completedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -287,6 +312,7 @@ export interface UsageSessionRecord {
   orgId: string | null;
   segmentId: string;
   scenarioId: string;
+  trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
   rawDurationSeconds: number;
@@ -299,6 +325,7 @@ export interface SimulationScoreRecord {
   orgId: string | null;
   segmentId: string;
   scenarioId: string;
+  trainingPackId?: string | null;
   industryId?: string | null;
   startedAt: string;
   endedAt: string;
@@ -308,6 +335,8 @@ export interface SimulationScoreRecord {
   empathy: number;
   assertiveness: number;
   summary?: string;
+  coachingArtifact?: SimulationScoreCoachingArtifact | null;
+  normalizedCoachingThemes?: SimulationScoreNormalizedThemes | null;
   rubricVersion?: string;
   model?: string;
   promptVersion?: string;
@@ -335,7 +364,7 @@ export interface AiUsageEvent {
   createdAt: string;
 }
 
-export type AuditActorType = "platform_admin" | "mobile_user" | "system";
+export type AuditActorType = "platform_admin" | "mobile_user" | "web_user" | "system";
 
 export interface AuditEvent {
   id: string;
@@ -394,6 +423,27 @@ export interface EmailVerificationRecord {
   createdAt: string;
   expiresAt: string;
   consumedAt: string | null;
+}
+
+export type WebAuthChallengeType = "sign_in" | "email_verification";
+
+export interface WebAuthChallengeRecord {
+  id: string;
+  userId: string;
+  email: string;
+  challengeType: WebAuthChallengeType;
+  codeHash: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+}
+
+export interface WebAuthSessionRecord {
+  sessionId: string;
+  userId: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
 }
 
 export interface EnterpriseJoinRequestRecord {
@@ -472,6 +522,470 @@ export interface AdminLoginResponse {
   expiresAt: string;
 }
 
+export interface DashboardViewer {
+  accessType: DashboardAccessType;
+  userId: string;
+  email: string;
+  isPlatformAdmin: boolean;
+  orgId: string | null;
+  orgName: string | null;
+}
+
+export const WEB_AUTH_DELIVERY_MODES = ["log_only", "email"] as const;
+export type WebAuthDeliveryMode = (typeof WEB_AUTH_DELIVERY_MODES)[number];
+
+export interface WebAuthRequestCodeRequest {
+  email: string;
+}
+
+export interface WebAuthRequestCodeResponse {
+  ok: true;
+  challengeType: WebAuthChallengeType;
+  expiresAt: string;
+  delivery: WebAuthDeliveryMode;
+}
+
+export interface WebAuthVerifyCodeRequest {
+  email: string;
+  code: string;
+}
+
+export interface WebAuthSessionUser {
+  userId: string;
+  email: string;
+  emailVerifiedAt: string | null;
+  isPlatformAdmin: boolean;
+  dashboardAccessEnabled: boolean;
+  accountType: AccountType;
+  orgId: string | null;
+}
+
+export interface WebAuthSessionResponse {
+  session: WebAuthSessionUser;
+  dashboardViewer: DashboardViewer | null;
+}
+
+export interface WebAuthVerifyCodeResponse extends WebAuthSessionResponse {
+  token: string;
+  expiresAt: string;
+}
+
+export interface DashboardCustomerUserSummary {
+  userId: string;
+  email: string;
+  status: UserStatus;
+  orgRole: OrgUserRole;
+  dashboardAccessEnabled: boolean;
+}
+
+export interface DashboardCustomerSummary {
+  orgId: string;
+  orgName: string;
+  orgStatus: OrgStatus;
+  contactName: string;
+  contactEmail: string;
+  industryLabels: string[];
+  createdAt: string;
+  nextRenewalAt: string;
+  monthlyMinutesAllotted: number;
+  activeUserCount: number;
+  totalUserCount: number;
+  dashboardUserCount: number;
+  simulationsLast30Days: number;
+  usedMinutesThisPeriod: number;
+  averageScoreThisPeriod: number | null;
+  scoreDeltaLast30Days: number | null;
+  trainingPackCount: number;
+  activeTrainingPackCount: number;
+  customScenarioCount: number;
+  latestActivityAt: string | null;
+  customerUsers: DashboardCustomerUserSummary[];
+}
+
+export interface DashboardCustomerListResponse {
+  viewer: DashboardViewer;
+  customers: DashboardCustomerSummary[];
+}
+
+export interface DashboardCustomerTrendPoint {
+  label: string;
+  periodStartAt: string;
+  periodEndAt: string;
+  usageMinutes: number;
+  simulations: number;
+  averageScore: number | null;
+}
+
+export interface DashboardCustomerTrainingPackSummary {
+  trainingPackId: string;
+  title: string;
+  trainingTopic: string;
+  audienceLevel: string;
+  active: boolean;
+  objectiveCount: number;
+  selectedScenarioCount: number | null;
+  scenarioSelectionMode: "all" | "selected" | "none";
+  scenarioSelectionLabel: string;
+  requiredBehaviorCount: number;
+  completionSupported: boolean;
+  requiredScenarioCount: number;
+  assignedLearnerCount: number;
+  startedLearnerCount: number;
+  completedLearnerCount: number;
+  inProgressLearnerCount: number;
+  notStartedLearnerCount: number;
+  attemptsLast30Days: number;
+  scoredAttemptsLast30Days: number;
+  learnerCountLast30Days: number;
+  averageScoreLast30Days: number | null;
+  scoreDeltaLast30Days: number | null;
+  latestActivityAt: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export interface DashboardCustomerUserPerformanceSummary {
+  userId: string;
+  email: string;
+  status: UserStatus;
+  orgRole: OrgUserRole;
+  dashboardAccessEnabled: boolean;
+  simulationsLast30Days: number;
+  usedMinutesLast30Days: number;
+  averageScoreLast30Days: number | null;
+  latestActivityAt: string | null;
+  lastScenarioTitle: string | null;
+}
+
+export interface DashboardCustomerScenarioSummary {
+  scenarioId: string;
+  title: string;
+  summary: string | null;
+  segmentId: string;
+  segmentLabel: string;
+  source: "standard" | "custom";
+  attemptsLast30Days: number;
+  learnerCountLast30Days: number;
+  averageScoreLast30Days: number | null;
+  scoreDeltaLast30Days: number | null;
+  latestActivityAt: string | null;
+  topUserEmail: string | null;
+  topUserAverageScore: number | null;
+}
+
+export interface DashboardTrainingAttributionSummary {
+  mode: "forward_only";
+  attributedUsageSessionsLast30Days: number;
+  unattributedUsageSessionsLast30Days: number;
+  attributedScoresLast30Days: number;
+  unattributedScoresLast30Days: number;
+}
+
+export interface DashboardCoachingThemeSummary {
+  themeId: string;
+  theme: string;
+  countLast30Days: number;
+  countPrior30Days: number;
+  deltaCount: number | null;
+}
+
+export interface DashboardUnmappedCoachingPhraseSummary {
+  phrase: string;
+  countLast30Days: number;
+  countPrior30Days: number;
+  deltaCount: number | null;
+}
+
+export interface DashboardCoachingNormalizationCategoryDiagnostics {
+  totalPhrasesLast30Days: number;
+  mappedPhrasesLast30Days: number;
+  unmappedPhrasesLast30Days: number;
+  mappingCoveragePercentLast30Days: number | null;
+  topUnmappedPhrases: DashboardUnmappedCoachingPhraseSummary[];
+}
+
+export interface DashboardCoachingNormalizationDiagnostics {
+  mode: "platform_admin_internal";
+  canonicalThemeCount: number;
+  strengths: DashboardCoachingNormalizationCategoryDiagnostics;
+  improvementAreas: DashboardCoachingNormalizationCategoryDiagnostics;
+  coachingPriorities: DashboardCoachingNormalizationCategoryDiagnostics;
+}
+
+export interface DashboardCoachingInsights {
+  mode: "artifact_only";
+  totalScoredAttemptsLast30Days: number;
+  artifactBackedScoresLast30Days: number;
+  artifactCoveragePercentLast30Days: number | null;
+  normalizedThemeScoresLast30Days: number;
+  normalizedThemeCoveragePercentLast30Days: number | null;
+  topImprovementAreas: DashboardCoachingThemeSummary[];
+  topStrengths: DashboardCoachingThemeSummary[];
+  topCoachingPriorities: DashboardCoachingThemeSummary[];
+  repeatedFocusArea: string | null;
+  normalizationDiagnostics?: DashboardCoachingNormalizationDiagnostics | null;
+}
+
+export interface DashboardCustomerInsights {
+  usage: {
+    periodStartAt: string;
+    periodEndAt: string;
+    nextRenewalAt: string;
+    usedMinutesThisPeriod: number;
+    allottedMinutesThisPeriod: number;
+    usagePercentThisPeriod: number;
+  };
+  trend: DashboardCustomerTrendPoint[];
+  trainingPacks: DashboardCustomerTrainingPackSummary[];
+  users: DashboardCustomerUserPerformanceSummary[];
+  scenarios: DashboardCustomerScenarioSummary[];
+  trainingPackAttribution: DashboardTrainingAttributionSummary;
+  coachingInsights: DashboardCoachingInsights;
+}
+
+export interface DashboardCustomerDetailResponse {
+  viewer: DashboardViewer;
+  customer: DashboardCustomerSummary;
+  insights: DashboardCustomerInsights;
+}
+
+export interface DashboardPortfolioScenarioSummary extends DashboardCustomerScenarioSummary {
+  orgId: string;
+  orgName: string;
+}
+
+export interface DashboardOverviewResponse {
+  viewer: DashboardViewer;
+  summary: {
+    activeCustomers: number;
+    activeUsers: number;
+    dashboardUsers: number;
+    monthlyUsageMinutes: number;
+    simulationsLast30Days: number;
+    averageScoreThisPeriod: number | null;
+    activeTrainingPackCount: number;
+    customScenarioCount: number;
+  };
+  customers: DashboardCustomerSummary[];
+  topScenarios: DashboardPortfolioScenarioSummary[];
+  trainingPackAttribution: DashboardTrainingAttributionSummary;
+  coachingInsights: DashboardCoachingInsights;
+}
+
+export interface DashboardTrainingPackReportSummary extends DashboardCustomerTrainingPackSummary {
+  orgId: string;
+  orgName: string;
+}
+
+export interface DashboardTrainingPackScenarioProgressRow {
+  scenarioId: string;
+  title: string;
+  segmentId: string;
+  segmentLabel: string;
+  source: "standard" | "custom";
+  assignedLearnerCount: number;
+  startedLearnerCount: number;
+  completedLearnerCount: number;
+  attemptsLast30Days: number;
+  scoredAttemptsLast30Days: number;
+  averageScoreLast30Days: number | null;
+  latestActivityAt: string | null;
+}
+
+export interface DashboardTrainingPackAssignmentProgressRow {
+  assignmentId: string;
+  userId: string;
+  email: string;
+  userStatus: UserStatus;
+  status: TrainingPackAssignmentProgressStatus;
+  assignedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  requiredScenarioCount: number;
+  completedScenarioCount: number;
+  attemptsLast30Days: number;
+  scoredAttemptsLast30Days: number;
+  averageScoreLast30Days: number | null;
+  latestActivityAt: string | null;
+  latestScenarioTitle: string | null;
+}
+
+export interface DashboardTrainingPackTrendPoint {
+  label: string;
+  periodStartAt: string;
+  periodEndAt: string;
+  attempts: number;
+  averageScore: number | null;
+}
+
+export type DashboardAttemptActivityKind = "scored_attempt" | "usage_only";
+export type DashboardAssignmentContextStatus =
+  | "not_assignment_scoped"
+  | "counts_toward_completion"
+  | "within_assignment_window"
+  | "outside_assignment_window";
+
+export interface DashboardAttemptHistoryRow {
+  activityId: string;
+  activityKind: DashboardAttemptActivityKind;
+  userId: string;
+  userEmail: string;
+  userStatus: UserStatus;
+  orgId: string | null;
+  orgName: string | null;
+  scenarioId: string;
+  scenarioTitle: string | null;
+  segmentId: string;
+  segmentLabel: string | null;
+  trainingPackId: string | null;
+  trainingPackTitle: string | null;
+  packAttributed: boolean;
+  assignmentId: string | null;
+  assignmentContextStatus: DashboardAssignmentContextStatus;
+  startedAt: string;
+  endedAt: string;
+  rawDurationSeconds: number | null;
+  overallScore: number | null;
+  summary: string | null;
+  coachingPriority: string | null;
+  model: string | null;
+  promptVersion: string | null;
+  rubricVersion: string | null;
+}
+
+export interface DashboardTrainingReportResponse {
+  viewer: DashboardViewer;
+  summary: {
+    visibleTrainingPackCount: number;
+    activeTrainingPackCount: number;
+    assignmentCount: number;
+    startedAssignmentCount: number;
+    completedAssignmentCount: number;
+    inProgressAssignmentCount: number;
+    notStartedAssignmentCount: number;
+    engagedLearnerCountLast30Days: number;
+    attributedAttemptsLast30Days: number;
+    attributedScoresLast30Days: number;
+    averageScoreLast30Days: number | null;
+  };
+  trainingPacks: DashboardTrainingPackReportSummary[];
+  trainingPackAttribution: DashboardTrainingAttributionSummary;
+}
+
+export interface DashboardTrainingPackDetailResponse {
+  viewer: DashboardViewer;
+  pack: DashboardTrainingPackReportSummary & {
+    trainingPackAttribution: DashboardTrainingAttributionSummary;
+    coachingInsights: DashboardCoachingInsights;
+    scenarios: DashboardTrainingPackScenarioProgressRow[];
+    assignments: DashboardTrainingPackAssignmentProgressRow[];
+    trend: DashboardTrainingPackTrendPoint[];
+  };
+}
+
+export interface DashboardTrainingPackAssignmentRequiredScenarioRow {
+  scenarioId: string;
+  title: string | null;
+  segmentId: string;
+  segmentLabel: string | null;
+  source: "standard" | "custom" | "unknown";
+}
+
+export interface DashboardTrainingPackAssignmentDetailResponse {
+  viewer: DashboardViewer;
+  pack: DashboardTrainingPackReportSummary;
+  assignment: DashboardTrainingPackAssignmentProgressRow & {
+    completionRule: TrainingPackAssignmentCompletionRule;
+    requiredScenarios: DashboardTrainingPackAssignmentRequiredScenarioRow[];
+  };
+  attempts: DashboardAttemptHistoryRow[];
+}
+
+export interface DashboardUserReportRow {
+  userId: string;
+  email: string;
+  orgId: string | null;
+  orgName: string | null;
+  status: UserStatus;
+  orgRole: OrgUserRole;
+  dashboardAccessEnabled: boolean;
+  simulationsLast30Days: number;
+  usedMinutesLast30Days: number;
+  scoredAttemptsLast30Days: number;
+  averageScoreLast30Days: number | null;
+  scoreDeltaLast30Days: number | null;
+  uniqueScenariosLast30Days: number;
+  trainingPackAttemptsLast30Days: number;
+  latestActivityAt: string | null;
+  latestScenarioTitle: string | null;
+  latestTrainingPackTitle: string | null;
+}
+
+export interface DashboardUserReportResponse {
+  viewer: DashboardViewer;
+  summary: {
+    userCount: number;
+    activeUserCount: number;
+    dashboardUserCount: number;
+    simulationsLast30Days: number;
+    averageScoreLast30Days: number | null;
+  };
+  users: DashboardUserReportRow[];
+}
+
+export interface DashboardUserAssignmentSummaryRow {
+  assignmentId: string;
+  trainingPackId: string;
+  trainingPackTitle: string;
+  status: TrainingPackAssignmentProgressStatus;
+  assignedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  requiredScenarioCount: number;
+  completedScenarioCount: number;
+}
+
+export interface DashboardUserDetailResponse {
+  viewer: DashboardViewer;
+  user: DashboardUserReportRow;
+  coachingInsights: DashboardCoachingInsights;
+  assignments: DashboardUserAssignmentSummaryRow[];
+  attempts: DashboardAttemptHistoryRow[];
+}
+
+export interface DashboardAttemptDetailResponse {
+  viewer: DashboardViewer;
+  attempt: DashboardAttemptHistoryRow & {
+    industryId: string | null;
+    industryLabel: string | null;
+    scoreBreakdown: {
+      overallScore: number;
+      persuasion: number;
+      clarity: number;
+      empathy: number;
+      assertiveness: number;
+    } | null;
+    derivedSignals: {
+      strongestCategory: string | null;
+      weakestCategory: string | null;
+      coachingFocus: string | null;
+    };
+    coachingArtifact: SimulationScoreCoachingArtifact | null;
+    transcriptAvailable: false;
+  };
+}
+
+export interface AdminTrainingPackAssignmentsResponse {
+  generatedAt: string;
+  orgId: string;
+  trainingPackId: string;
+  assignments: TrainingPackAssignmentRecord[];
+}
+
+export interface SetTrainingPackAssignmentsRequest {
+  userIds: string[];
+}
+
 export interface ChangeAdminPasswordRequest {
   currentPassword: string;
   newPassword: string;
@@ -484,12 +998,16 @@ export interface CreateUserRequest {
   timezone: string;
   orgId?: string | null;
   orgRole?: OrgUserRole;
+  isPlatformAdmin?: boolean;
+  dashboardAccessEnabled?: boolean;
 }
 
 export interface UpdateUserRequest {
   email?: string;
   tier?: TierId;
   status?: UserStatus;
+  isPlatformAdmin?: boolean;
+  dashboardAccessEnabled?: boolean;
   accountType?: AccountType;
   timezone?: string;
   orgId?: string | null;
@@ -608,6 +1126,7 @@ export interface RecordUsageSessionRequest {
   userId: string;
   segmentId: string;
   scenarioId: string;
+  trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
   rawDurationSeconds: number;
@@ -617,6 +1136,7 @@ export interface RecordSimulationScoreRequest {
   userId: string;
   segmentId: string;
   scenarioId: string;
+  trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
   overallScore: number;
@@ -624,12 +1144,38 @@ export interface RecordSimulationScoreRequest {
   clarity: number;
   empathy: number;
   assertiveness: number;
+  summary?: string;
+  coachingArtifact?: SimulationScoreCoachingArtifactInput | null;
+}
+
+export interface SimulationScoreCoachingArtifact {
+  strengths: string[];
+  improvementAreas: string[];
+  coachingPriority: string | null;
+}
+
+export interface SimulationScoreCoachingThemeTag {
+  id: string;
+  label: string;
+}
+
+export interface SimulationScoreNormalizedThemes {
+  strengths: SimulationScoreCoachingThemeTag[];
+  improvementAreas: SimulationScoreCoachingThemeTag[];
+  coachingPriority: SimulationScoreCoachingThemeTag | null;
+}
+
+export interface SimulationScoreCoachingArtifactInput {
+  strengths?: string[];
+  improvementAreas?: string[];
+  coachingPriority?: string | null;
 }
 
 export interface ApiDatabase {
   config: AppConfig;
   users: UserProfile[];
   orgs: EnterpriseOrg[];
+  trainingPackAssignments: TrainingPackAssignmentRecord[];
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
   aiUsageEvents: AiUsageEvent[];
@@ -637,6 +1183,8 @@ export interface ApiDatabase {
   supportCases: SupportCaseRecord[];
   mobileAuthTokens: MobileAuthRecord[];
   emailVerifications: EmailVerificationRecord[];
+  webAuthChallenges: WebAuthChallengeRecord[];
+  webAuthSessions: WebAuthSessionRecord[];
   enterpriseJoinRequests: EnterpriseJoinRequestRecord[];
   admin: {
     passwordHash: string | null;

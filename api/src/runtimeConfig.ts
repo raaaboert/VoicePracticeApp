@@ -1,6 +1,7 @@
 import path from "node:path";
 
 export type StorageProvider = "file" | "postgres";
+export type AuthCodeDeliveryProvider = "log_only" | "resend";
 
 export interface RuntimeConfig {
   nodeEnv: string;
@@ -15,8 +16,15 @@ export interface RuntimeConfig {
   corsAllowedOrigins: string[];
   adminBootstrapPassword: string;
   adminTokenSecret: string;
+  webAuthTokenSecret: string;
   mobileTokenSecret: string;
   adminTokenTtlMinutes: number;
+  webAuthTokenTtlMinutes: number;
+  authCodeDeliveryProvider: AuthCodeDeliveryProvider;
+  resendApiKey: string | null;
+  authCodeFromEmail: string | null;
+  authCodeFromName: string;
+  authCodeReplyTo: string | null;
   requireReverifyOnOnboard: boolean;
   openAiChatModel: string;
   openAiSimulationModel: string;
@@ -135,6 +143,17 @@ function parseStorageProvider(
   return databaseUrl ? "postgres" : "file";
 }
 
+function parseAuthCodeDeliveryProvider(rawValue: string | undefined): AuthCodeDeliveryProvider {
+  const candidate = rawValue?.trim().toLowerCase();
+  if (!candidate || candidate === "log_only") {
+    return "log_only";
+  }
+  if (candidate === "resend") {
+    return "resend";
+  }
+  throw new Error(`Invalid AUTH_CODE_DELIVERY_PROVIDER value "${rawValue}". Expected "log_only" or "resend".`);
+}
+
 function assertNotPlaceholderSecret(
   envName: string,
   value: string,
@@ -191,18 +210,38 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
 
   const adminBootstrapPassword = env.ADMIN_BOOTSTRAP_PASSWORD?.trim() || "admin";
   const adminTokenSecret = env.ADMIN_TOKEN_SECRET?.trim() || "replace_me_for_production";
+  const webAuthTokenSecret = env.WEB_AUTH_TOKEN_SECRET?.trim() || "";
+  const authCodeDeliveryProvider = parseAuthCodeDeliveryProvider(env.AUTH_CODE_DELIVERY_PROVIDER);
+  const resendApiKey = env.RESEND_API_KEY?.trim() || null;
+  const authCodeFromEmail = env.AUTH_CODE_FROM_EMAIL?.trim() || null;
+  const authCodeFromName = env.AUTH_CODE_FROM_NAME?.trim() || "Peritio";
+  const authCodeReplyTo = env.AUTH_CODE_REPLY_TO?.trim() || null;
   const mobileTokenSecret = env.MOBILE_TOKEN_SECRET?.trim() || adminTokenSecret;
   const supportTranscriptSecret =
     env.SUPPORT_TRANSCRIPT_SECRET?.trim() || env.ADMIN_TOKEN_SECRET?.trim() || "replace_me_for_production";
+
+  if (webAuthTokenSecret.length < 32) {
+    throw new Error("WEB_AUTH_TOKEN_SECRET is required and must be at least 32 characters.");
+  }
 
   assertNotPlaceholderSecret("ADMIN_BOOTSTRAP_PASSWORD", adminBootstrapPassword, isProduction, {
     minimumLength: 8
   });
   assertNotPlaceholderSecret("ADMIN_TOKEN_SECRET", adminTokenSecret, isProduction, { minimumLength: 32 });
+  assertNotPlaceholderSecret("WEB_AUTH_TOKEN_SECRET", webAuthTokenSecret, isProduction, { minimumLength: 32 });
   assertNotPlaceholderSecret("MOBILE_TOKEN_SECRET", mobileTokenSecret, isProduction, { minimumLength: 32 });
   assertNotPlaceholderSecret("SUPPORT_TRANSCRIPT_SECRET", supportTranscriptSecret, isProduction, {
     minimumLength: 32
   });
+
+  if (authCodeDeliveryProvider === "resend") {
+    if (!resendApiKey || resendApiKey.length < 16) {
+      throw new Error("RESEND_API_KEY is required when AUTH_CODE_DELIVERY_PROVIDER=resend.");
+    }
+    if (!authCodeFromEmail) {
+      throw new Error("AUTH_CODE_FROM_EMAIL is required when AUTH_CODE_DELIVERY_PROVIDER=resend.");
+    }
+  }
 
   const openAiDefaults = hasOpenAiApiKey && isProduction
     ? {
@@ -231,8 +270,15 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     corsAllowedOrigins,
     adminBootstrapPassword,
     adminTokenSecret,
+    webAuthTokenSecret,
     mobileTokenSecret,
     adminTokenTtlMinutes: toInt(env.ADMIN_TOKEN_TTL_MINUTES, 720),
+    webAuthTokenTtlMinutes: toInt(env.WEB_AUTH_TOKEN_TTL_MINUTES, 720),
+    authCodeDeliveryProvider,
+    resendApiKey,
+    authCodeFromEmail,
+    authCodeFromName,
+    authCodeReplyTo,
     requireReverifyOnOnboard: toBoolean(env.MOBILE_REVERIFY_ON_ONBOARD, isProduction),
     openAiChatModel: env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
     openAiSimulationModel: env.OPENAI_SIMULATION_MODEL?.trim() || env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",

@@ -242,6 +242,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const unmountedRef = useRef(false);
   const turnStartedAtRef = useRef(0);
   const sessionStartedAtRef = useRef<Date | null>(null);
+  const sessionTrainingPackIdRef = useRef<string | null>(null);
   const pendingOpeningLineRef = useRef<string | null>(null);
   const lastVoiceAtRef = useRef(0);
   const heardVoiceRef = useRef(false);
@@ -770,6 +771,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
                 segmentLabel: config.segmentLabel,
                 personaStyle: config.personaStyle,
                 history: [...messagesRef.current],
+                trainingPackId: sessionTrainingPackIdRef.current,
               }))
             : createLocalAssistantReply({
                 scenario: config.scenario,
@@ -865,10 +867,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (!openingLine) {
         if (localTestMode) {
           openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+          sessionTrainingPackIdRef.current = null;
         } else {
           try {
             logSimulationApiCall("createOpeningLine:startSession");
-            openingLine = await createOpeningLine({
+            const openingPayload = await createOpeningLine({
               userId,
               authToken,
               scenario: config.scenario,
@@ -878,11 +881,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               segmentLabel: config.segmentLabel,
               personaStyle: config.personaStyle,
             });
+            openingLine = openingPayload.assistantText;
+            sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
           } catch (openingError) {
             if (isApiError(openingError)) {
               setUseLocalMockMode(true);
               usedMockModeDuringSessionRef.current = true;
               openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+              sessionTrainingPackIdRef.current = null;
             } else {
               setError(getErrorMessage(openingError, "Could not initialize simulation."));
               void submitAutoErrorReport("simulation.opening_line", openingError);
@@ -975,6 +981,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         endedAt: endedAt.toISOString(),
         rawDurationSeconds,
         usedMockMode: usedMockModeDuringSessionRef.current,
+        trainingPackId: sessionTrainingPackIdRef.current,
       });
     } finally {
       sessionCompletionInProgressRef.current = false;
@@ -1036,6 +1043,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       setIsInitializing(true);
       messagesRef.current = [];
       sessionStartedAtRef.current = null;
+      sessionTrainingPackIdRef.current = null;
       setMessages([]);
       setError(null);
       kickoffSentRef.current = false;
@@ -1048,6 +1056,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       if (localTestMode) {
         pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+        sessionTrainingPackIdRef.current = null;
         setMode("idle");
         setStatus("Scenario ready. Press Start Continuous Mode.");
         setIsInitializing(false);
@@ -1056,7 +1065,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       try {
         logSimulationApiCall("createOpeningLine:initialize");
-        const openingLine = await createOpeningLine({
+        const openingPayload = await createOpeningLine({
           userId,
           authToken,
           scenario: config.scenario,
@@ -1071,7 +1080,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           return;
         }
 
-        pendingOpeningLineRef.current = openingLine;
+        pendingOpeningLineRef.current = openingPayload.assistantText;
+        sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
         setMode("idle");
         setStatus("Scenario ready. Press Start Continuous Mode.");
       } catch (initError) {
@@ -1079,6 +1089,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           setUseLocalMockMode(true);
           usedMockModeDuringSessionRef.current = true;
           pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+          sessionTrainingPackIdRef.current = null;
           setMode("idle");
           setStatus("Local test mode ready. Press Start Continuous Mode.");
           setError(null);

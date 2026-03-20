@@ -67,4 +67,5 @@ export interface SessionTiming {
   endedAt: string;
   rawDurationSeconds: number;
   usedMockMode: boolean;
+  trainingPackId?: string | null;
 }

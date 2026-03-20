@@ -1,0 +1,96 @@
+"use client";
+
+import Link from "next/link";
+import { ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { DashboardViewer } from "@voicepractice/shared";
+
+import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
+
+const NAV_ITEMS = [
+  { href: "/app", label: "Workspace" },
+  { href: "/app/dashboard", label: "Dashboard" },
+  { href: "/app/customers", label: "Customers" },
+  { href: "/app/training", label: "Training" },
+  { href: "/app/users", label: "Users" },
+  { href: "/app/settings", label: "Settings" },
+];
+
+function isActivePath(pathname: string, href: string): boolean {
+  if (href === "/app") {
+    return pathname === href;
+  }
+
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+export function DashboardShell({
+  children,
+  viewer,
+}: {
+  children: ReactNode;
+  viewer: DashboardViewer;
+}) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const sessionLabel = viewer.accessType === "platform_admin" ? "Platform Admin" : viewer.orgName ?? "Customer";
+
+  const signOut = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  };
+
+  return (
+    <main className="app-shell">
+      <aside className="app-sidebar">
+        <div className="brand-block">
+          <div className="brand-mark">P</div>
+          <div>
+            <p className="eyebrow">Peritio</p>
+            <h1 className="sidebar-title">Dashboard</h1>
+            <p className="sidebar-copy">Training insight shell for customer reporting, coaching, and renewal reviews.</p>
+          </div>
+        </div>
+
+        <nav className="app-nav" aria-label="Dashboard navigation">
+          {NAV_ITEMS.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={isActivePath(pathname, item.href) ? "active" : undefined}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+
+        <div className="sidebar-note">
+          <p className="eyebrow">Access</p>
+          <p>
+            {viewer.accessType === "platform_admin"
+              ? "You can review any customer account in this dashboard."
+              : "You are limited to your own customer account and its related reporting views."}
+          </p>
+        </div>
+      </aside>
+
+      <section className="app-main">
+        <header className="app-topbar">
+          <div className="pill-row">
+            <span className="pill accent">{sessionLabel}</span>
+            <span className="pill">{viewer.email}</span>
+          </div>
+          <div className="topbar-actions">
+            <ThemeSwitchButton />
+            <button type="button" className="ghost-button" onClick={signOut}>
+              Sign out
+            </button>
+          </div>
+        </header>
+
+        <div className="page-stack">{children}</div>
+      </section>
+    </main>
+  );
+}

@@ -25,7 +25,7 @@ export async function createOpeningLine(params: {
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
-}): Promise<string> {
+}): Promise<{ assistantText: string; trainingPackId: string | null }> {
   const payload = await fetchAiOpeningLine({
     userId: params.userId,
     authToken: params.authToken,
@@ -36,7 +36,10 @@ export async function createOpeningLine(params: {
     personaStyle: params.personaStyle,
   });
 
-  return payload.assistantText?.trim() ?? "";
+  return {
+    assistantText: payload.assistantText?.trim() ?? "",
+    trainingPackId: payload.trainingPack?.applied === true ? payload.trainingPack.id ?? null : null,
+  };
 }
 
 export async function generateAssistantReply(params: {
@@ -49,6 +52,7 @@ export async function generateAssistantReply(params: {
   segmentLabel: string;
   personaStyle: PersonaStyle;
   history: DialogueMessage[];
+  trainingPackId?: string | null;
 }): Promise<string> {
   const payload = await fetchAiTurn({
     userId: params.userId,
@@ -59,6 +63,7 @@ export async function generateAssistantReply(params: {
     difficulty: params.difficulty,
     personaStyle: params.personaStyle,
     history: params.history,
+    trainingPackId: params.trainingPackId ?? undefined,
   });
 
   return payload.assistantText?.trim() ?? "";
@@ -93,11 +98,13 @@ export async function evaluateSimulation(params: {
   startedAt: string;
   endedAt: string;
   history: DialogueMessage[];
+  trainingPackId?: string | null;
 }): Promise<{
   scorecard: SimulationScorecard;
   record: {
     id: string;
     createdAt: string;
+    trainingPackId?: string | null;
     model: string | null;
     promptVersion: string | null;
     rubricVersion: string | null;
@@ -115,5 +122,6 @@ export async function evaluateSimulation(params: {
     startedAt: params.startedAt,
     endedAt: params.endedAt,
     history: params.history,
+    trainingPackId: params.trainingPackId ?? undefined,
   });
 }

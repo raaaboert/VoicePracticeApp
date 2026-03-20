@@ -1,8 +1,8 @@
-import "dotenv/config";
 import "express-async-errors";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import crypto from "node:crypto";
+import dotenv from "dotenv";
 import { v4 as uuid } from "uuid";
 import multer from "multer";
 import {
@@ -11,6 +11,36 @@ import {
   ApiDatabase,
   AiUsageEvent,
   AppConfig,
+  DashboardAttemptDetailResponse,
+  DashboardAttemptHistoryRow,
+  DashboardCoachingInsights,
+  DashboardCustomerInsights,
+  DashboardCustomerDetailResponse,
+  DashboardCustomerListResponse,
+  DashboardCustomerScenarioSummary,
+  DashboardCustomerSummary,
+  DashboardTrainingAttributionSummary,
+  DashboardCustomerTrainingPackSummary,
+  DashboardCustomerTrendPoint,
+  DashboardCustomerUserSummary,
+  DashboardCustomerUserPerformanceSummary,
+  DashboardOverviewResponse,
+  DashboardPortfolioScenarioSummary,
+  DashboardTrainingPackAssignmentProgressRow,
+  DashboardTrainingPackAssignmentDetailResponse,
+  DashboardTrainingPackAssignmentRequiredScenarioRow,
+  DashboardTrainingPackDetailResponse,
+  DashboardTrainingPackScenarioProgressRow,
+  DashboardTrainingPackTrendPoint,
+  DashboardTrainingPackReportSummary,
+  DashboardTrainingReportResponse,
+  DashboardUnmappedCoachingPhraseSummary,
+  DashboardUserAssignmentSummaryRow,
+  DashboardUserDetailResponse,
+  DashboardUserReportRow,
+  DashboardUserReportResponse,
+  DashboardViewer,
+  INDUSTRY_LABELS,
   buildScenarioSummary,
   ChangeAdminPasswordRequest,
   COMMON_TIMEZONES,
@@ -38,6 +68,7 @@ import {
   PersonaStyle,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  AdminTrainingPackAssignmentsResponse,
   OrgAccountsExportResponse,
   OrgAccountsExportRow,
   OrgUsageBillingResponse,
@@ -49,9 +80,14 @@ import {
   RecordSimulationScoreRequest,
   Scenario,
   SegmentDefinition,
+  SetTrainingPackAssignmentsRequest,
+  SimulationScoreCoachingArtifact,
+  SimulationScoreCoachingArtifactInput,
   SupportCaseRecord,
   SimulationScoreRecord,
   TrainingPack,
+  TrainingPackAssignmentRecord,
+  TrainingPackAssignmentProgressStatus,
   TIER_IDS,
   TierDefinition,
   RoleIndustryDefinition,
@@ -63,6 +99,11 @@ import {
   UserStatus,
   USAGE_BILLING_INCREMENT_SECONDS,
   UsageSessionRecord,
+  WebAuthRequestCodeRequest,
+  WebAuthRequestCodeResponse,
+  WebAuthSessionResponse,
+  WebAuthVerifyCodeRequest,
+  WebAuthVerifyCodeResponse,
   calculateBilledSecondsFromRaw,
   createDefaultConfig,
   getDayKey,
@@ -105,7 +146,21 @@ import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
+import {
+  canDashboardViewerAccessOrg,
+  resolveDashboardViewer
+} from "./services/dashboardAuthorization.js";
+import {
+  buildDashboardCoachingInsights,
+  buildNormalizedSimulationScoreThemesFromArtifact,
+} from "./services/coachingThemeNormalization.js";
+import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services/authCodeDelivery.js";
+import { hashScryptPassword, verifyScryptPassword } from "./services/passwordHash.js";
+import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
+
+dotenv.config({ path: ".env.local" });
+dotenv.config();
 
 const runtimeConfig = loadRuntimeConfig();
 console.log("[BOOT][ENV CHECK]", {
@@ -129,6 +184,8 @@ const PG_IDLE_TIMEOUT_MS = runtimeConfig.pgIdleTimeoutMs;
 const ADMIN_BOOTSTRAP_PASSWORD = runtimeConfig.adminBootstrapPassword;
 const ADMIN_TOKEN_SECRET = runtimeConfig.adminTokenSecret;
 const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
+const WEB_AUTH_TOKEN_SECRET = runtimeConfig.webAuthTokenSecret;
+const WEB_AUTH_TOKEN_TTL_MINUTES = runtimeConfig.webAuthTokenTtlMinutes;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
 const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
@@ -231,6 +288,17 @@ const trainingPackStore = createTrainingPackStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
+const webAuthService = createWebAuthService({
+  tokenSecret: WEB_AUTH_TOKEN_SECRET,
+  codeSecret: MOBILE_TOKEN_SECRET
+});
+const authCodeDelivery = createAuthCodeDeliveryService({
+  provider: runtimeConfig.authCodeDeliveryProvider,
+  resendApiKey: runtimeConfig.resendApiKey,
+  fromEmail: runtimeConfig.authCodeFromEmail,
+  fromName: runtimeConfig.authCodeFromName,
+  replyTo: runtimeConfig.authCodeReplyTo
+});
 
 interface AdminTokenPayload {
   role: "admin";
@@ -241,6 +309,27 @@ interface AdminTokenPayload {
 interface AdminAuthRequest extends Request {
   admin?: AdminTokenPayload;
   adminToken?: string;
+}
+
+interface DashboardRequestPrincipal {
+  token: WebAuthTokenPayload;
+  user: UserProfile;
+  viewer: DashboardViewer;
+}
+
+interface DashboardAuthRequest extends Request {
+  dashboard?: DashboardRequestPrincipal;
+}
+
+interface WebAuthRequestPrincipal {
+  token: WebAuthTokenPayload;
+  user: UserProfile;
+  sessionId: string;
+}
+
+interface WebAuthRequest extends Request {
+  webAuth?: WebAuthRequestPrincipal;
+  webAuthToken?: string;
 }
 
 function nowIso(): string {
@@ -1542,6 +1631,19 @@ function appendMobileAuditEvent(
   });
 }
 
+function appendWebAuditEvent(
+  db: ApiDatabase,
+  actor: UserProfile,
+  input: Omit<AppendAuditEventInput, "actorType" | "actorId">
+): void {
+  appendAuditEvent(db, {
+    ...input,
+    actorType: "web_user",
+    actorId: actor.id,
+    orgId: input.orgId ?? actor.orgId
+  });
+}
+
 interface RateLimitState {
   count: number;
   windowStartMs: number;
@@ -1765,6 +1867,9 @@ interface SimulationScorecard {
   summary: string;
 }
 
+const MAX_PERSISTED_COACHING_ITEMS = 3;
+const MAX_PERSISTED_COACHING_TEXT_LENGTH = 160;
+
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -1813,6 +1918,7 @@ function createDefaultDatabase(): ApiDatabase {
     config,
     users: [],
     orgs: [],
+    trainingPackAssignments: [],
     usageSessions: [],
     scoreRecords: [],
     aiUsageEvents: [],
@@ -1820,6 +1926,8 @@ function createDefaultDatabase(): ApiDatabase {
     supportCases: [],
     mobileAuthTokens: [],
     emailVerifications: [],
+    webAuthChallenges: [],
+    webAuthSessions: [],
     enterpriseJoinRequests: [],
     admin: {
       passwordHash: null,
@@ -2685,6 +2793,11 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
   const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
     ...user,
+    isPlatformAdmin: (user as Partial<UserProfile>).isPlatformAdmin === true,
+    dashboardAccessEnabled:
+      (user as Partial<UserProfile>).accountType === "enterprise"
+        ? (user as Partial<UserProfile>).dashboardAccessEnabled === true
+        : false,
     manualBonusSeconds: clampNonNegativeInteger((user as Partial<UserProfile>).manualBonusSeconds, 0),
     emailVerifiedAt:
       typeof (user as Partial<UserProfile>).emailVerifiedAt === "string" ||
@@ -2704,6 +2817,22 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     config,
     users: normalizedUsers,
     orgs: normalizedOrgs,
+    trainingPackAssignments: Array.isArray((candidate as Partial<ApiDatabase>).trainingPackAssignments)
+      ? ((candidate as Partial<ApiDatabase>).trainingPackAssignments ?? []).map((assignment) => ({
+          ...assignment,
+          active: assignment.active !== false,
+          assignedByUserId:
+            typeof assignment.assignedByUserId === "string" || assignment.assignedByUserId === null
+              ? assignment.assignedByUserId
+              : null,
+          requiredScenarioIds: Array.isArray(assignment.requiredScenarioIds)
+            ? assignment.requiredScenarioIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+            : [],
+          completionRule: assignment.completionRule ?? "scored_required_scenarios_v1",
+          startedAt: normalizeOptionalIsoDate(assignment.startedAt),
+          completedAt: normalizeOptionalIsoDate(assignment.completedAt)
+        }))
+      : [],
     usageSessions: Array.isArray(candidate.usageSessions) ? candidate.usageSessions : fallback.usageSessions,
     scoreRecords: Array.isArray((candidate as Partial<ApiDatabase>).scoreRecords)
       ? (candidate as Partial<ApiDatabase>).scoreRecords ?? []
@@ -2722,6 +2851,14 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     emailVerifications: Array.isArray(candidate.emailVerifications)
       ? candidate.emailVerifications
       : fallback.emailVerifications,
+    webAuthChallenges:
+      Array.isArray((candidate as Partial<ApiDatabase>).webAuthChallenges)
+        ? (candidate as Partial<ApiDatabase>).webAuthChallenges ?? []
+        : [],
+    webAuthSessions:
+      Array.isArray((candidate as Partial<ApiDatabase>).webAuthSessions)
+        ? (candidate as Partial<ApiDatabase>).webAuthSessions ?? []
+        : [],
     enterpriseJoinRequests: Array.isArray(candidate.enterpriseJoinRequests)
       ? candidate.enterpriseJoinRequests
       : fallback.enterpriseJoinRequests,
@@ -2866,29 +3003,6 @@ function queueDatabaseReadinessRefresh(): void {
   });
 }
 
-function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString("hex");
-  const derived = crypto.scryptSync(password, salt, 64).toString("hex");
-  return `${salt}:${derived}`;
-}
-
-function verifyPassword(password: string, hashed: string): boolean {
-  const [salt, expected] = hashed.split(":");
-  if (!salt || !expected) {
-    return false;
-  }
-
-  const actual = crypto.scryptSync(password, salt, 64).toString("hex");
-  const expectedBuffer = Buffer.from(expected, "hex");
-  const actualBuffer = Buffer.from(actual, "hex");
-
-  if (expectedBuffer.length !== actualBuffer.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
-}
-
 function base64UrlEncode(value: string): string {
   return Buffer.from(value).toString("base64url");
 }
@@ -2996,6 +3110,20 @@ function getIncomingMobileToken(request: Request): string | null {
   return null;
 }
 
+function getIncomingWebAuthToken(request: Request): string | null {
+  const authHeader = request.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    return authHeader.slice(7).trim();
+  }
+
+  const webHeader = request.headers["x-web-auth-token"];
+  if (typeof webHeader === "string" && webHeader.trim()) {
+    return webHeader.trim();
+  }
+
+  return null;
+}
+
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
 }
@@ -3071,13 +3199,11 @@ function buildDomainMatchForEmail(db: ApiDatabase, email: string): EnterpriseDom
   };
 }
 
-function sendVerificationEmail(email: string, code: string, expiresAt: string): void {
-  const expiresLocal = new Date(expiresAt).toLocaleString();
-  // Temporary delivery path: emit one-time code to service logs until SMTP/provider integration is added.
-  console.log(`[email-verification] ${email} code=${code} expiresAt=${expiresAt} (${expiresLocal})`);
-}
-
-function issueEmailVerification(db: ApiDatabase, user: UserProfile, now: Date): { expiresAt: string } {
+async function issueEmailVerification(
+  db: ApiDatabase,
+  user: UserProfile,
+  now: Date
+): Promise<{ expiresAt: string; delivery: WebAuthRequestCodeResponse["delivery"] }> {
   const nowIsoValue = now.toISOString();
   const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
   const code = createVerificationCode();
@@ -3094,8 +3220,133 @@ function issueEmailVerification(db: ApiDatabase, user: UserProfile, now: Date): 
   };
 
   db.emailVerifications.push(record);
-  sendVerificationEmail(user.email, code, expiresAt);
-  return { expiresAt };
+  return {
+    expiresAt,
+    delivery: await authCodeDelivery.sendEmailVerificationCode({
+      email: user.email,
+      code,
+      expiresAt
+    })
+  };
+}
+
+function normalizePersistedCoachingText(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.slice(0, MAX_PERSISTED_COACHING_TEXT_LENGTH);
+}
+
+function normalizePersistedCoachingList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const items: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const normalized = normalizePersistedCoachingText(entry);
+    if (!normalized) {
+      continue;
+    }
+
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    items.push(normalized);
+    if (items.length >= MAX_PERSISTED_COACHING_ITEMS) {
+      break;
+    }
+  }
+
+  return items;
+}
+
+function normalizeSimulationScoreCoachingArtifact(
+  value: SimulationScoreCoachingArtifactInput | null | undefined
+): SimulationScoreCoachingArtifact | null {
+  const strengths = normalizePersistedCoachingList(value?.strengths);
+  const improvementAreas = normalizePersistedCoachingList(value?.improvementAreas);
+  const coachingPriority = normalizePersistedCoachingText(value?.coachingPriority) ?? improvementAreas[0] ?? null;
+
+  if (strengths.length === 0 && improvementAreas.length === 0 && !coachingPriority) {
+    return null;
+  }
+
+  return {
+    strengths,
+    improvementAreas,
+    coachingPriority
+  };
+}
+
+function buildSimulationScoreCoachingArtifactFromScorecard(
+  scorecard: SimulationScorecard
+): SimulationScoreCoachingArtifact | null {
+  return normalizeSimulationScoreCoachingArtifact({
+    strengths: scorecard.strengths,
+    improvementAreas: scorecard.improvements,
+    coachingPriority: scorecard.improvements[0] ?? null
+  });
+}
+
+function verifyLatestEmailVerification(
+  db: ApiDatabase,
+  user: UserProfile,
+  code: string,
+  now: Date
+): "ok" | "missing" | "expired" | "invalid" {
+  const pending = db.emailVerifications
+    .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const latest = pending[0];
+  if (!latest) {
+    return "missing";
+  }
+
+  const expiresAtMs = new Date(latest.expiresAt).getTime();
+  if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+    latest.consumedAt = now.toISOString();
+    return "expired";
+  }
+
+  const expectedHash = Buffer.from(latest.codeHash, "hex");
+  const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
+  if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
+    return "invalid";
+  }
+
+  latest.consumedAt = now.toISOString();
+  return "ok";
+}
+
+function buildWebAuthSessionUser(user: UserProfile): WebAuthSessionResponse["session"] {
+  return {
+    userId: user.id,
+    email: user.email,
+    emailVerifiedAt: user.emailVerifiedAt,
+    isPlatformAdmin: user.isPlatformAdmin === true,
+    dashboardAccessEnabled: user.dashboardAccessEnabled === true,
+    accountType: user.accountType,
+    orgId: user.orgId
+  };
+}
+
+function buildWebAuthSessionResponse(db: ApiDatabase, user: UserProfile): WebAuthSessionResponse {
+  return {
+    session: buildWebAuthSessionUser(user),
+    dashboardViewer: resolveDashboardViewer(db, user)
+  };
 }
 
 async function requireAdmin(request: AdminAuthRequest, response: Response, next: NextFunction): Promise<void> {
@@ -3119,6 +3370,81 @@ async function requireAdmin(request: AdminAuthRequest, response: Response, next:
 
   request.admin = payload;
   request.adminToken = token;
+  next();
+}
+
+async function requireWebAuth(request: WebAuthRequest, response: Response, next: NextFunction): Promise<void> {
+  const token = getIncomingWebAuthToken(request);
+  if (!token) {
+    response.status(401).json({ error: "Missing web auth token." });
+    return;
+  }
+
+  const payload = webAuthService.verifyToken(token);
+  if (!payload) {
+    response.status(401).json({ error: "Invalid or expired web auth token." });
+    return;
+  }
+
+  const db = await loadDatabase();
+  const sessionRecord = webAuthService.getActiveSessionRecord(db, payload);
+  if (!sessionRecord) {
+    response.status(401).json({ error: "Invalid or expired web auth token." });
+    return;
+  }
+
+  const user = getUserById(db, payload.sub);
+  if (!user || user.status !== "active" || !user.emailVerifiedAt) {
+    response.status(401).json({ error: "Web auth session is no longer valid." });
+    return;
+  }
+
+  request.webAuth = {
+    token: payload,
+    user,
+    sessionId: sessionRecord.sessionId
+  };
+  request.webAuthToken = token;
+  next();
+}
+
+async function requireDashboardAuth(
+  request: DashboardAuthRequest,
+  response: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = getIncomingWebAuthToken(request);
+  if (!token) {
+    response.status(401).json({ error: "Missing web auth token." });
+    return;
+  }
+
+  const webPayload = webAuthService.verifyToken(token);
+  if (!webPayload) {
+    response.status(401).json({ error: "Invalid or expired web auth token." });
+    return;
+  }
+
+  const db = await loadDatabase();
+  const sessionRecord = webAuthService.getActiveSessionRecord(db, webPayload);
+  if (!sessionRecord) {
+    response.status(401).json({ error: "Invalid or expired web auth token." });
+    return;
+  }
+
+  const user = getUserById(db, webPayload.sub);
+  if (!user || user.status !== "active" || !user.emailVerifiedAt) {
+    response.status(401).json({ error: "Dashboard user not found." });
+    return;
+  }
+
+  const viewer = resolveDashboardViewer(db, user);
+  if (!viewer) {
+    response.status(403).json({ error: "Dashboard access is not enabled for this account." });
+    return;
+  }
+
+  request.dashboard = { token: webPayload, user, viewer };
   next();
 }
 
@@ -3154,6 +3480,1901 @@ function getOrgById(db: ApiDatabase, orgId: string | null): EnterpriseOrg | unde
   }
 
   return db.orgs.find((org) => org.id === orgId);
+}
+
+function roundMinutes(seconds: number): number {
+  return Math.round((seconds / 60) * 10) / 10;
+}
+
+function averageScore(records: Array<{ overallScore: number }>): number | null {
+  if (records.length === 0) {
+    return null;
+  }
+
+  return Math.round(records.reduce((total, record) => total + record.overallScore, 0) / records.length);
+}
+
+function averageScoreDelta(
+  currentRecords: Array<{ overallScore: number }>,
+  previousRecords: Array<{ overallScore: number }>
+): number | null {
+  const currentAverage = averageScore(currentRecords);
+  const previousAverage = averageScore(previousRecords);
+  if (currentAverage === null || previousAverage === null) {
+    return null;
+  }
+
+  return Math.round((currentAverage - previousAverage) * 10) / 10;
+}
+
+function maxIsoDate(values: Array<string | null | undefined>): string | null {
+  let bestValue: string | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+
+    const parsedMs = new Date(value).getTime();
+    if (!Number.isFinite(parsedMs) || parsedMs <= bestMs) {
+      continue;
+    }
+
+    bestMs = parsedMs;
+    bestValue = value;
+  }
+
+  return bestValue;
+}
+
+function minIsoDate(values: Array<string | null | undefined>): string | null {
+  let bestValue: string | null = null;
+  let bestMs = Number.POSITIVE_INFINITY;
+
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+
+    const parsedMs = new Date(value).getTime();
+    if (!Number.isFinite(parsedMs) || parsedMs >= bestMs) {
+      continue;
+    }
+
+    bestMs = parsedMs;
+    bestValue = value;
+  }
+
+  return bestValue;
+}
+
+function filterOrgUsageSessions(db: ApiDatabase, orgId: string, startMs: number, endMs: number): UsageSessionRecord[] {
+  return db.usageSessions.filter((session) => {
+    if (session.orgId !== orgId) {
+      return false;
+    }
+
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= startMs && startedAtMs < endMs;
+  });
+}
+
+function filterOrgScoreRecords(db: ApiDatabase, orgId: string, startMs: number, endMs: number): SimulationScoreRecord[] {
+  return (db.scoreRecords ?? []).filter((record) => {
+    if (record.orgId !== orgId) {
+      return false;
+    }
+
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= startMs && endedAtMs < endMs;
+  });
+}
+
+function formatDashboardMonthLabel(date: Date): string {
+  return date.toLocaleDateString("en-US", { month: "short" });
+}
+
+function parseTrainingPackScenarioSelection(triggers: string[]): {
+  mode: "all" | "selected" | "none";
+  selectedScenarioIds: string[];
+} {
+  let mode: "all" | "selected" | "none" = "none";
+  const selectedScenarioIds = new Set<string>();
+
+  for (const trigger of triggers) {
+    const lower = trigger.trim().toLowerCase();
+    if (!lower.startsWith(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX)) {
+      continue;
+    }
+
+    const scenarioId = trigger.slice(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX.length).trim();
+    if (!scenarioId) {
+      continue;
+    }
+
+    if (scenarioId === "*") {
+      mode = "all";
+      selectedScenarioIds.clear();
+      break;
+    }
+
+    mode = "selected";
+    selectedScenarioIds.add(scenarioId);
+  }
+
+  return {
+    mode,
+    selectedScenarioIds: Array.from(selectedScenarioIds)
+  };
+}
+
+function isTrainingPackScopedToScenario(pack: TrainingPack, scenarioId: string): boolean {
+  const selection = parseTrainingPackScenarioSelection(pack.requiredBehavioralTriggers ?? []);
+  if (selection.mode === "all") {
+    return true;
+  }
+  if (selection.mode !== "selected") {
+    return false;
+  }
+
+  const normalizedScenarioId = scenarioId.trim().toLowerCase();
+  return selection.selectedScenarioIds.some((entry) => entry.trim().toLowerCase() === normalizedScenarioId);
+}
+
+async function resolvePersistedTrainingPackForScenario(params: {
+  orgId: string | null | undefined;
+  scenarioId: string;
+  useModularPromptArchitecture: boolean;
+  submittedTrainingPackId?: string | null;
+}): Promise<TrainingPack | null> {
+  if (!params.useModularPromptArchitecture) {
+    return null;
+  }
+
+  const submittedTrainingPackId = params.submittedTrainingPackId?.trim();
+  if (submittedTrainingPackId) {
+    if (!params.orgId) {
+      return null;
+    }
+    const packs = await listTrainingPacksForDashboardOrg(params.orgId);
+    const submittedPack = packs.find((pack) => pack.id === submittedTrainingPackId);
+    if (submittedPack && isTrainingPackScopedToScenario(submittedPack, params.scenarioId)) {
+      return submittedPack;
+    }
+  }
+
+  return getActiveTrainingPackForOrg(params.orgId, params.useModularPromptArchitecture, {
+    scenarioId: params.scenarioId,
+    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+  });
+}
+
+function buildTrainingPackAttributionSummary(params: {
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+}): DashboardTrainingAttributionSummary {
+  return {
+    mode: "forward_only",
+    attributedUsageSessionsLast30Days: params.usageSessions.filter((session) => Boolean(session.trainingPackId)).length,
+    unattributedUsageSessionsLast30Days: params.usageSessions.filter((session) => !session.trainingPackId).length,
+    attributedScoresLast30Days: params.scoreRecords.filter((record) => Boolean(record.trainingPackId)).length,
+    unattributedScoresLast30Days: params.scoreRecords.filter((record) => !record.trainingPackId).length
+  };
+}
+
+function resolveTrainingPackRequiredScenarioIds(
+  pack: TrainingPack,
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>
+): string[] {
+  const selection = parseTrainingPackScenarioSelection(pack.requiredBehavioralTriggers ?? []);
+  if (selection.mode === "all") {
+    return Array.from(scenarioCatalog.keys());
+  }
+  if (selection.mode !== "selected") {
+    return [];
+  }
+  return selection.selectedScenarioIds.filter((scenarioId) => scenarioId.trim().length > 0);
+}
+
+function listTrainingPackAssignments(
+  db: ApiDatabase,
+  orgId: string,
+  trainingPackId: string,
+  options?: { activeOnly?: boolean }
+): TrainingPackAssignmentRecord[] {
+  const activeOnly = options?.activeOnly !== false;
+  return (db.trainingPackAssignments ?? []).filter((assignment) => {
+    if (assignment.orgId !== orgId || assignment.trainingPackId !== trainingPackId) {
+      return false;
+    }
+    if (activeOnly && assignment.active !== true) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function resolveTrainingPackAssignmentCompletionAt(
+  assignment: TrainingPackAssignmentRecord,
+  scoreRecords: SimulationScoreRecord[]
+): string | null {
+  const requiredScenarioIds = new Set(assignment.requiredScenarioIds);
+  if (requiredScenarioIds.size === 0) {
+    return null;
+  }
+
+  const seenScenarioIds = new Set<string>();
+  const sortedScores = scoreRecords
+    .slice()
+    .sort((left, right) => new Date(left.endedAt).getTime() - new Date(right.endedAt).getTime());
+
+  for (const record of sortedScores) {
+    if (!requiredScenarioIds.has(record.scenarioId)) {
+      continue;
+    }
+    seenScenarioIds.add(record.scenarioId);
+    if (seenScenarioIds.size >= requiredScenarioIds.size) {
+      return record.endedAt;
+    }
+  }
+
+  return null;
+}
+
+function computeTrainingPackAssignmentProgress(params: {
+  db: ApiDatabase;
+  assignment: TrainingPackAssignmentRecord;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  allSessions: UsageSessionRecord[];
+  allScores: SimulationScoreRecord[];
+  recentSessions: UsageSessionRecord[];
+  recentScores: SimulationScoreRecord[];
+}): DashboardTrainingPackAssignmentProgressRow {
+  const { db, assignment, scenarioCatalog } = params;
+  const user = getUserById(db, assignment.userId);
+  const assignedAtMs = new Date(assignment.assignedAt).getTime();
+  const filterAfterAssignment = <T extends { userId: string; trainingPackId?: string | null; startedAt?: string; endedAt: string }>(
+    entries: T[],
+    resolveActivityAt: (entry: T) => string
+  ): T[] =>
+    entries.filter((entry) => {
+      if (entry.userId !== assignment.userId || entry.trainingPackId !== assignment.trainingPackId) {
+        return false;
+      }
+      const activityAtMs = new Date(resolveActivityAt(entry)).getTime();
+      return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
+    });
+
+  const relevantAllSessions = filterAfterAssignment(params.allSessions, (entry) => entry.startedAt ?? entry.endedAt);
+  const relevantAllScores = filterAfterAssignment(params.allScores, (entry) => entry.endedAt);
+  const relevantRecentSessions = filterAfterAssignment(params.recentSessions, (entry) => entry.startedAt ?? entry.endedAt);
+  const relevantRecentScores = filterAfterAssignment(params.recentScores, (entry) => entry.endedAt);
+  const earliestActivityAt = minIsoDate([
+    ...relevantAllSessions.map((session) => session.startedAt),
+    ...relevantAllScores.map((record) => record.endedAt)
+  ]);
+  const completionAt = assignment.completedAt ?? resolveTrainingPackAssignmentCompletionAt(assignment, relevantAllScores);
+  const startedAt = assignment.startedAt ?? earliestActivityAt;
+  const completedScenarioIds = new Set<string>(
+    relevantAllScores
+      .filter((record) => assignment.requiredScenarioIds.includes(record.scenarioId))
+      .map((record) => record.scenarioId)
+  );
+  const requiredScenarioCount = assignment.requiredScenarioIds.length;
+  const completionSupported = requiredScenarioCount > 0;
+  const status: TrainingPackAssignmentProgressStatus = completionAt
+    ? "completed"
+    : startedAt
+      ? "in_progress"
+      : "not_started";
+  const normalizedStatus: TrainingPackAssignmentProgressStatus = completionSupported
+    ? status
+    : startedAt
+      ? "in_progress"
+      : "not_started";
+  const billedSeconds = relevantRecentSessions.reduce(
+    (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
+    0
+  );
+  const latestSession = relevantRecentSessions
+    .slice()
+    .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+  const latestScore = relevantRecentScores
+    .slice()
+    .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+  const latestActivityAt = maxIsoDate([latestSession?.endedAt ?? null, latestScore?.endedAt ?? null]);
+  const latestScenarioId = latestScore?.scenarioId ?? latestSession?.scenarioId ?? null;
+
+  return {
+    assignmentId: assignment.id,
+    userId: assignment.userId,
+    email: user?.email ?? assignment.userId,
+    userStatus: user?.status ?? "disabled",
+    status: normalizedStatus,
+    assignedAt: assignment.assignedAt,
+    startedAt,
+    completedAt: completionSupported ? completionAt : null,
+    requiredScenarioCount,
+    completedScenarioCount: completedScenarioIds.size,
+    attemptsLast30Days: relevantRecentSessions.length,
+    scoredAttemptsLast30Days: relevantRecentScores.length,
+    averageScoreLast30Days: averageScore(relevantRecentScores),
+    latestActivityAt,
+    latestScenarioTitle: latestScenarioId ? scenarioCatalog.get(latestScenarioId)?.title ?? latestScenarioId : null
+  };
+}
+
+function syncTrainingPackAssignmentLifecycle(
+  db: ApiDatabase,
+  assignment: TrainingPackAssignmentRecord
+): TrainingPackAssignmentRecord {
+  const assignedAtMs = new Date(assignment.assignedAt).getTime();
+  const sessions = db.usageSessions.filter((session) => {
+    if (session.userId !== assignment.userId || session.trainingPackId !== assignment.trainingPackId) {
+      return false;
+    }
+    const activityAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
+  });
+  const scores = (db.scoreRecords ?? []).filter((record) => {
+    if (record.userId !== assignment.userId || record.trainingPackId !== assignment.trainingPackId) {
+      return false;
+    }
+    const activityAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
+  });
+
+  const earliestActivityAt = minIsoDate([
+    ...sessions.map((session) => session.startedAt),
+    ...scores.map((record) => record.endedAt)
+  ]);
+  const computedCompletedAt = resolveTrainingPackAssignmentCompletionAt(assignment, scores);
+  const nextStartedAt = minIsoDate([assignment.startedAt, earliestActivityAt]);
+  const nextCompletedAt = minIsoDate([assignment.completedAt, computedCompletedAt]);
+
+  if (nextStartedAt !== assignment.startedAt) {
+    assignment.startedAt = nextStartedAt;
+  }
+  if (assignment.requiredScenarioIds.length > 0) {
+    if (nextCompletedAt !== assignment.completedAt) {
+      assignment.completedAt = nextCompletedAt;
+    }
+  } else if (assignment.completedAt !== null) {
+    assignment.completedAt = null;
+  }
+
+  return assignment;
+}
+
+function projectTrainingPackAssignmentLifecycle(
+  db: ApiDatabase,
+  assignment: TrainingPackAssignmentRecord
+): TrainingPackAssignmentRecord {
+  return syncTrainingPackAssignmentLifecycle(db, {
+    ...assignment,
+    requiredScenarioIds: assignment.requiredScenarioIds.slice()
+  });
+}
+
+function syncTrainingPackAssignmentsForUserPack(
+  db: ApiDatabase,
+  orgId: string | null | undefined,
+  userId: string,
+  trainingPackId: string | null | undefined
+): void {
+  if (!orgId || !trainingPackId) {
+    return;
+  }
+
+  const assignments = listTrainingPackAssignments(db, orgId, trainingPackId).filter((assignment) => assignment.userId === userId);
+  if (assignments.length === 0) {
+    return;
+  }
+
+  const now = nowIso();
+  for (const assignment of assignments) {
+    const previousStartedAt = assignment.startedAt;
+    const previousCompletedAt = assignment.completedAt;
+    syncTrainingPackAssignmentLifecycle(db, assignment);
+    if (assignment.startedAt !== previousStartedAt || assignment.completedAt !== previousCompletedAt) {
+      assignment.updatedAt = now;
+    }
+  }
+}
+
+function buildTrainingPackTrendPoints(
+  packSessions: UsageSessionRecord[],
+  packScores: SimulationScoreRecord[],
+  now: Date
+): DashboardTrainingPackTrendPoint[] {
+  const points: DashboardTrainingPackTrendPoint[] = [];
+
+  for (let offset = 2; offset >= 0; offset -= 1) {
+    const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
+    const sessions = packSessions.filter((session) => {
+      const startedAtMs = new Date(session.startedAt).getTime();
+      return Number.isFinite(startedAtMs) && startedAtMs >= monthStart.getTime() && startedAtMs < monthEnd.getTime();
+    });
+    const scores = packScores.filter((record) => {
+      const endedAtMs = new Date(record.endedAt).getTime();
+      return Number.isFinite(endedAtMs) && endedAtMs >= monthStart.getTime() && endedAtMs < monthEnd.getTime();
+    });
+
+    points.push({
+      label: formatDashboardMonthLabel(monthStart),
+      periodStartAt: monthStart.toISOString(),
+      periodEndAt: monthEnd.toISOString(),
+      attempts: sessions.length,
+      averageScore: averageScore(scores)
+    });
+  }
+
+  return points;
+}
+
+function buildTrainingPackScenarioProgressRows(params: {
+  requiredScenarioIds: string[];
+  assignments: TrainingPackAssignmentRecord[];
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  packSessions: UsageSessionRecord[];
+  packScores: SimulationScoreRecord[];
+  recentPackSessions: UsageSessionRecord[];
+  recentPackScores: SimulationScoreRecord[];
+}): DashboardTrainingPackScenarioProgressRow[] {
+  return params.requiredScenarioIds
+    .filter((scenarioId, index, entries) => scenarioId.trim().length > 0 && entries.indexOf(scenarioId) === index)
+    .map((scenarioId): DashboardTrainingPackScenarioProgressRow => {
+      const scenarioMeta = params.scenarioCatalog.get(scenarioId);
+      const scopedAssignments = params.assignments.filter((assignment) => assignment.requiredScenarioIds.includes(scenarioId));
+      const startedLearnerCount = scopedAssignments.filter((assignment) => {
+        const assignedAtMs = new Date(assignment.assignedAt).getTime();
+        return (
+          params.packSessions.some((session) => {
+            if (session.userId !== assignment.userId || session.scenarioId !== scenarioId) {
+              return false;
+            }
+            const activityAtMs = new Date(session.startedAt).getTime();
+            return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
+          }) ||
+          params.packScores.some((record) => {
+            if (record.userId !== assignment.userId || record.scenarioId !== scenarioId) {
+              return false;
+            }
+            const activityAtMs = new Date(record.endedAt).getTime();
+            return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
+          })
+        );
+      }).length;
+      const completedLearnerCount = scopedAssignments.filter((assignment) => {
+        const assignedAtMs = new Date(assignment.assignedAt).getTime();
+        return params.packScores.some((record) => {
+          if (record.userId !== assignment.userId || record.scenarioId !== scenarioId) {
+            return false;
+          }
+          const activityAtMs = new Date(record.endedAt).getTime();
+          return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
+        });
+      }).length;
+      const recentScenarioSessions = params.recentPackSessions.filter((session) => session.scenarioId === scenarioId);
+      const recentScenarioScores = params.recentPackScores.filter((record) => record.scenarioId === scenarioId);
+
+      return {
+        scenarioId,
+        title: scenarioMeta?.title ?? scenarioId,
+        segmentId: scenarioMeta?.segmentId ?? "unknown",
+        segmentLabel: scenarioMeta?.segmentLabel ?? "Unknown",
+        source: scenarioMeta?.source ?? "standard",
+        assignedLearnerCount: scopedAssignments.length,
+        startedLearnerCount,
+        completedLearnerCount,
+        attemptsLast30Days: recentScenarioSessions.length,
+        scoredAttemptsLast30Days: recentScenarioScores.length,
+        averageScoreLast30Days: averageScore(recentScenarioScores),
+        latestActivityAt: maxIsoDate([
+          ...recentScenarioSessions.map((session) => session.endedAt),
+          ...recentScenarioScores.map((record) => record.endedAt)
+        ])
+      };
+    })
+    .sort((left, right) => {
+      if (right.assignedLearnerCount !== left.assignedLearnerCount) {
+        return right.assignedLearnerCount - left.assignedLearnerCount;
+      }
+      return left.title.localeCompare(right.title);
+    });
+}
+
+interface DashboardScenarioCatalogEntry {
+  scenarioId: string;
+  title: string;
+  summary: string | null;
+  segmentId: string;
+  segmentLabel: string;
+  source: "standard" | "custom";
+}
+
+function buildDashboardScenarioCatalog(db: ApiDatabase, org: EnterpriseOrg): Map<string, DashboardScenarioCatalogEntry> {
+  const catalog = new Map<string, DashboardScenarioCatalogEntry>();
+
+  for (const segment of db.config.segments) {
+    if (segment.enabled !== true) {
+      continue;
+    }
+
+    for (const scenario of segment.scenarios ?? []) {
+      if (scenario.enabled === false) {
+        continue;
+      }
+
+      catalog.set(scenario.id, {
+        scenarioId: scenario.id,
+        title: scenario.title,
+        summary: scenario.summary ?? null,
+        segmentId: segment.id,
+        segmentLabel: segment.label,
+        source: "standard"
+      });
+    }
+  }
+
+  for (const customScenario of ensureOrgCustomScenarioCollection(org)) {
+    if (customScenario.enabled === false) {
+      continue;
+    }
+
+    const segmentLabel = getConfigSegmentById(db.config, customScenario.segmentId)?.label ?? customScenario.segmentId;
+    catalog.set(customScenario.id, {
+      scenarioId: customScenario.id,
+      title: customScenario.title,
+      summary: customScenario.summary ?? buildScenarioSummary(customScenario.description),
+      segmentId: customScenario.segmentId,
+      segmentLabel,
+      source: "custom"
+    });
+  }
+
+  return catalog;
+}
+
+async function listTrainingPacksForDashboardOrg(orgId: string): Promise<TrainingPack[]> {
+  try {
+    return await trainingPackStore.listTrainingPacksForOrg(orgId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarnThrottled("dashboard:training-packs", `[dashboard] failed to load training packs for ${orgId}: ${message}`);
+    return [];
+  }
+}
+
+async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg): Promise<DashboardCustomerSummary> {
+  const normalizedOrg = ensureOrgContractFields(org);
+  const now = new Date();
+  const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
+  const usage = buildOrgUsageSnapshot(db, normalizedOrg, now);
+  const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = now.getTime() - 60 * 24 * 60 * 60 * 1000;
+  const customerUsers = db.users
+    .filter((user) => user.accountType === "enterprise" && user.orgId === normalizedOrg.id)
+    .sort((left, right) => left.email.localeCompare(right.email));
+  const activeUserCount = customerUsers.filter((user) => user.status === "active").length;
+  const dashboardUserCount = customerUsers.filter((user) => user.dashboardAccessEnabled === true).length;
+  const simulationsLast30Days = db.usageSessions.filter((session) => {
+    if (session.orgId !== normalizedOrg.id) {
+      return false;
+    }
+
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold;
+  }).length;
+
+  const scoresThisPeriod = (db.scoreRecords ?? []).filter((record) => {
+    if (record.orgId !== normalizedOrg.id) {
+      return false;
+    }
+
+    const endedAtMs = new Date(record.endedAt).getTime();
+    const periodStartMs = new Date(billing.periodStartAt).getTime();
+    const periodEndMs = new Date(billing.periodEndAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= periodStartMs && endedAtMs < periodEndMs;
+  });
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime());
+  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
+  const trainingPacks = await listTrainingPacksForDashboardOrg(normalizedOrg.id);
+  const customScenarioCount = ensureOrgCustomScenarioCollection(normalizedOrg).filter((scenario) => scenario.enabled !== false).length;
+  const latestActivityAt = maxIsoDate([
+    ...db.usageSessions.filter((session) => session.orgId === normalizedOrg.id).map((session) => session.endedAt),
+    ...(db.scoreRecords ?? []).filter((record) => record.orgId === normalizedOrg.id).map((record) => record.endedAt)
+  ]);
+
+  return {
+    orgId: normalizedOrg.id,
+    orgName: normalizedOrg.name,
+    orgStatus: normalizedOrg.status,
+    contactName: normalizedOrg.contactName,
+    contactEmail: normalizedOrg.contactEmail,
+    industryLabels: normalizedOrg.activeIndustries.map((industryId) => INDUSTRY_LABELS[industryId] ?? industryId),
+    createdAt: normalizedOrg.createdAt,
+    nextRenewalAt: billing.nextRenewalAt,
+    monthlyMinutesAllotted: normalizedOrg.monthlyMinutesAllotted,
+    activeUserCount,
+    totalUserCount: customerUsers.length,
+    dashboardUserCount,
+    simulationsLast30Days,
+    usedMinutesThisPeriod: Math.round(usage.usedSeconds / 60),
+    averageScoreThisPeriod:
+      scoresThisPeriod.length > 0
+        ? Math.round(scoresThisPeriod.reduce((total, record) => total + record.overallScore, 0) / scoresThisPeriod.length)
+        : null,
+    scoreDeltaLast30Days: averageScoreDelta(recentScores, previousScores),
+    trainingPackCount: trainingPacks.length,
+    activeTrainingPackCount: trainingPacks.filter((pack) => pack.active === true).length,
+    customScenarioCount,
+    latestActivityAt,
+    customerUsers: customerUsers.map(
+      (user): DashboardCustomerUserSummary => ({
+        userId: user.id,
+        email: user.email,
+        status: user.status,
+        orgRole: user.orgRole,
+        dashboardAccessEnabled: user.dashboardAccessEnabled === true
+      })
+    )
+  };
+}
+
+function buildDashboardCustomerTrend(db: ApiDatabase, org: EnterpriseOrg, now: Date): DashboardCustomerTrendPoint[] {
+  const points: DashboardCustomerTrendPoint[] = [];
+
+  for (let offset = 2; offset >= 0; offset -= 1) {
+    const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
+    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime());
+    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime());
+    const billedSeconds = sessions.reduce(
+      (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
+      0
+    );
+
+    points.push({
+      label: formatDashboardMonthLabel(monthStart),
+      periodStartAt: monthStart.toISOString(),
+      periodEndAt: monthEnd.toISOString(),
+      usageMinutes: roundMinutes(billedSeconds),
+      simulations: sessions.length,
+      averageScore: averageScore(scores)
+    });
+  }
+
+  return points;
+}
+
+function buildDashboardCustomerUserRows(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
+  now: Date
+): DashboardCustomerUserPerformanceSummary[] {
+  const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime());
+  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime());
+
+  return db.users
+    .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
+    .sort((left, right) => left.email.localeCompare(right.email))
+    .map((user): DashboardCustomerUserPerformanceSummary => {
+      const userSessions = sessions.filter((session) => session.userId === user.id);
+      const userScores = scores.filter((record) => record.userId === user.id);
+      const billedSeconds = userSessions.reduce(
+        (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
+        0
+      );
+      const latestSession = userSessions
+        .slice()
+        .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+      const latestScore = userScores
+        .slice()
+        .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+      const latestActivityAt = maxIsoDate([latestSession?.endedAt ?? null, latestScore?.endedAt ?? null]);
+      const latestScenarioId = latestScore?.scenarioId ?? latestSession?.scenarioId ?? null;
+
+      return {
+        userId: user.id,
+        email: user.email,
+        status: user.status,
+        orgRole: user.orgRole,
+        dashboardAccessEnabled: user.dashboardAccessEnabled === true,
+        simulationsLast30Days: userSessions.length,
+        usedMinutesLast30Days: roundMinutes(billedSeconds),
+        averageScoreLast30Days: averageScore(userScores),
+        latestActivityAt,
+        lastScenarioTitle: latestScenarioId ? scenarioCatalog.get(latestScenarioId)?.title ?? latestScenarioId : null
+      };
+    });
+}
+
+function buildDashboardCustomerScenarioRows(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
+  now: Date
+): DashboardCustomerScenarioSummary[] {
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs);
+  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs);
+  const previousScores = filterOrgScoreRecords(db, org.id, previous30DaysThreshold, last30DaysThreshold);
+
+  const aggregates = new Map<
+    string,
+    {
+      scenarioId: string;
+      segmentId: string;
+      attempts: number;
+      learnerIds: Set<string>;
+      latestActivityAt: string | null;
+      totalScore: number;
+      scoreCount: number;
+      previousTotalScore: number;
+      previousScoreCount: number;
+      userScores: Map<string, { totalScore: number; count: number }>;
+    }
+  >();
+
+  function ensureScenarioAggregate(scenarioId: string, segmentId: string) {
+    const existing = aggregates.get(scenarioId);
+    if (existing) {
+      return existing;
+    }
+
+    const created = {
+      scenarioId,
+      segmentId,
+      attempts: 0,
+      learnerIds: new Set<string>(),
+      latestActivityAt: null,
+      totalScore: 0,
+      scoreCount: 0,
+      previousTotalScore: 0,
+      previousScoreCount: 0,
+      userScores: new Map<string, { totalScore: number; count: number }>()
+    };
+    aggregates.set(scenarioId, created);
+    return created;
+  }
+
+  for (const session of sessions) {
+    const aggregate = ensureScenarioAggregate(session.scenarioId, session.segmentId);
+    aggregate.attempts += 1;
+    aggregate.learnerIds.add(session.userId);
+    aggregate.latestActivityAt = maxIsoDate([aggregate.latestActivityAt, session.endedAt]);
+  }
+
+  for (const record of currentScores) {
+    const aggregate = ensureScenarioAggregate(record.scenarioId, record.segmentId);
+    aggregate.totalScore += record.overallScore;
+    aggregate.scoreCount += 1;
+    aggregate.latestActivityAt = maxIsoDate([aggregate.latestActivityAt, record.endedAt]);
+    const existingUser = aggregate.userScores.get(record.userId) ?? { totalScore: 0, count: 0 };
+    aggregate.userScores.set(record.userId, {
+      totalScore: existingUser.totalScore + record.overallScore,
+      count: existingUser.count + 1
+    });
+  }
+
+  for (const record of previousScores) {
+    const aggregate = ensureScenarioAggregate(record.scenarioId, record.segmentId);
+    aggregate.previousTotalScore += record.overallScore;
+    aggregate.previousScoreCount += 1;
+  }
+
+  return Array.from(aggregates.values())
+    .map((aggregate): DashboardCustomerScenarioSummary => {
+      const meta = scenarioCatalog.get(aggregate.scenarioId);
+      const topUser = Array.from(aggregate.userScores.entries())
+        .map(([userId, value]) => ({
+          user: getUserById(db, userId),
+          averageScore: value.count > 0 ? value.totalScore / value.count : 0
+        }))
+        .sort((left, right) => right.averageScore - left.averageScore)[0];
+      const averageScoreLast30Days =
+        aggregate.scoreCount > 0 ? Math.round(aggregate.totalScore / aggregate.scoreCount) : null;
+      const previousAverageScore =
+        aggregate.previousScoreCount > 0 ? aggregate.previousTotalScore / aggregate.previousScoreCount : null;
+
+      return {
+        scenarioId: aggregate.scenarioId,
+        title: meta?.title ?? aggregate.scenarioId,
+        summary: meta?.summary ?? null,
+        segmentId: meta?.segmentId ?? aggregate.segmentId,
+        segmentLabel: meta?.segmentLabel ?? aggregate.segmentId,
+        source: meta?.source ?? "standard",
+        attemptsLast30Days: aggregate.attempts,
+        learnerCountLast30Days: aggregate.learnerIds.size,
+        averageScoreLast30Days,
+        scoreDeltaLast30Days:
+          averageScoreLast30Days !== null && previousAverageScore !== null
+            ? Math.round((averageScoreLast30Days - previousAverageScore) * 10) / 10
+            : null,
+        latestActivityAt: aggregate.latestActivityAt,
+        topUserEmail: topUser?.user?.email ?? null,
+        topUserAverageScore: topUser ? Math.round(topUser.averageScore) : null
+      };
+    })
+    .sort((left, right) => {
+      if (right.attemptsLast30Days !== left.attemptsLast30Days) {
+        return right.attemptsLast30Days - left.attemptsLast30Days;
+      }
+      return (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+    });
+}
+
+async function buildDashboardTrainingPackRows(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
+  now: Date
+): Promise<DashboardCustomerTrainingPackSummary[]> {
+  const packs = await listTrainingPacksForDashboardOrg(org.id);
+  const availableScenarioCount = scenarioCatalog.size;
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const allPackSessions = db.usageSessions.filter((session) => session.orgId === org.id && Boolean(session.trainingPackId));
+  const allPackScores = (db.scoreRecords ?? []).filter((record) => record.orgId === org.id && Boolean(record.trainingPackId));
+  const currentSessions = allPackSessions.filter((session) => {
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
+  });
+  const currentScores = allPackScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
+  });
+  const previousScores = allPackScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+
+  return packs
+    .slice()
+    .sort(
+      (left, right) =>
+        Number(right.active === true) - Number(left.active === true) ||
+        new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+    )
+    .map((pack): DashboardCustomerTrainingPackSummary => {
+      const selection = parseTrainingPackScenarioSelection(pack.requiredBehavioralTriggers ?? []);
+      const requiredScenarioIds = resolveTrainingPackRequiredScenarioIds(pack, scenarioCatalog);
+      const selectedScenarioCount =
+        selection.mode === "all" ? availableScenarioCount : selection.mode === "selected" ? selection.selectedScenarioIds.length : 0;
+      const requiredBehaviorCount = (pack.requiredBehavioralTriggers ?? []).filter(
+        (entry) => !entry.toLowerCase().startsWith(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX)
+      ).length;
+      const packAllSessions = allPackSessions.filter((session) => session.trainingPackId === pack.id);
+      const packAllScores = allPackScores.filter((record) => record.trainingPackId === pack.id);
+      const packSessions = currentSessions.filter((session) => session.trainingPackId === pack.id);
+      const packScores = currentScores.filter((record) => record.trainingPackId === pack.id);
+      const previousPackScores = previousScores.filter((record) => record.trainingPackId === pack.id);
+      const assignments = listTrainingPackAssignments(db, org.id, pack.id);
+      const completionSupported = requiredScenarioIds.length > 0 || assignments.some((assignment) => assignment.requiredScenarioIds.length > 0);
+      const assignmentRows = assignments.map((assignment) =>
+        computeTrainingPackAssignmentProgress({
+          db,
+          assignment,
+          scenarioCatalog,
+          allSessions: packAllSessions,
+          allScores: packAllScores,
+          recentSessions: packSessions,
+          recentScores: packScores
+        })
+      );
+      const learnerCount = new Set<string>([
+        ...packSessions.map((session) => session.userId),
+        ...packScores.map((record) => record.userId)
+      ]).size;
+      const latestActivityAt = maxIsoDate([
+        ...packSessions.map((session) => session.endedAt),
+        ...packScores.map((record) => record.endedAt)
+      ]);
+
+      return {
+        trainingPackId: pack.id,
+        title: pack.title,
+        trainingTopic: pack.trainingTopic,
+        audienceLevel: pack.audienceLevel,
+        active: pack.active === true,
+        objectiveCount: (pack.learningObjectives ?? []).length,
+        selectedScenarioCount: selection.mode === "none" ? 0 : selectedScenarioCount,
+        scenarioSelectionMode: selection.mode,
+        scenarioSelectionLabel:
+          selection.mode === "all"
+            ? `All enabled scenarios (${availableScenarioCount})`
+            : selection.mode === "selected"
+              ? `${selectedScenarioCount} selected`
+              : "No scenario mapping stored",
+        requiredBehaviorCount,
+        completionSupported,
+        requiredScenarioCount: requiredScenarioIds.length,
+        assignedLearnerCount: assignmentRows.length,
+        startedLearnerCount: assignmentRows.filter((row) => row.status !== "not_started").length,
+        completedLearnerCount: assignmentRows.filter((row) => row.status === "completed").length,
+        inProgressLearnerCount: assignmentRows.filter((row) => row.status === "in_progress").length,
+        notStartedLearnerCount: assignmentRows.filter((row) => row.status === "not_started").length,
+        attemptsLast30Days: packSessions.length,
+        scoredAttemptsLast30Days: packScores.length,
+        learnerCountLast30Days: learnerCount,
+        averageScoreLast30Days: averageScore(packScores),
+        scoreDeltaLast30Days: averageScoreDelta(packScores, previousPackScores),
+        latestActivityAt,
+        updatedAt: pack.updatedAt,
+        createdAt: pack.createdAt
+      };
+    });
+}
+
+async function buildDashboardCustomerInsights(db: ApiDatabase, org: EnterpriseOrg): Promise<DashboardCustomerInsights> {
+  const normalizedOrg = ensureOrgContractFields(org);
+  const now = new Date();
+  const usage = buildOrgUsageSnapshot(db, normalizedOrg, now);
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, normalizedOrg);
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs);
+  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
+
+  return {
+    usage: {
+      periodStartAt: usage.periodStartAt,
+      periodEndAt: usage.periodEndAt,
+      nextRenewalAt: usage.nextRenewalAt,
+      usedMinutesThisPeriod: roundMinutes(usage.usedSeconds),
+      allottedMinutesThisPeriod: usage.allottedMinutes,
+      usagePercentThisPeriod: Math.round(usage.usagePercent * 10) / 10
+    },
+    trend: buildDashboardCustomerTrend(db, normalizedOrg, now),
+    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now),
+    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now),
+    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now),
+    trainingPackAttribution: buildTrainingPackAttributionSummary({
+      usageSessions: recentSessions,
+      scoreRecords: recentScores
+    }),
+    coachingInsights: buildDashboardCoachingInsights({
+      currentScores: recentScores,
+      previousScores
+    })
+  };
+}
+
+function listDashboardAccessibleOrgs(db: ApiDatabase, viewer: DashboardViewer): EnterpriseOrg[] {
+  return viewer.accessType === "platform_admin"
+    ? db.orgs.slice().sort((left, right) => left.name.localeCompare(right.name))
+    : db.orgs.filter((org) => org.id === viewer.orgId);
+}
+
+async function listDashboardAccessibleCustomers(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardCustomerSummary[]> {
+  return Promise.all(listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardCustomerSummary(db, org)));
+}
+
+async function getDashboardAccessibleCustomer(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  orgId: string
+): Promise<DashboardCustomerSummary | null> {
+  if (!canDashboardViewerAccessOrg(viewer, orgId)) {
+    return null;
+  }
+
+  const org = getOrgById(db, orgId);
+  if (!org) {
+    return null;
+  }
+
+  return buildDashboardCustomerSummary(db, org);
+}
+
+async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardOverviewResponse> {
+  const customers = await listDashboardAccessibleCustomers(db, viewer);
+  const accessibleOrgIds = new Set(customers.map((customer) => customer.orgId));
+  const now = new Date();
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const activeCustomers = customers.length;
+  const activeUsers = customers.reduce((total, customer) => total + customer.activeUserCount, 0);
+  const dashboardUsers = customers.reduce((total, customer) => total + customer.dashboardUserCount, 0);
+  const monthlyUsageMinutes = customers.reduce((total, customer) => total + customer.usedMinutesThisPeriod, 0);
+  const simulationsLast30Days = customers.reduce((total, customer) => total + customer.simulationsLast30Days, 0);
+  const averageScoreCandidates = customers
+    .map((customer) => customer.averageScoreThisPeriod)
+    .filter((score): score is number => typeof score === "number");
+  const topScenarios = (
+    await Promise.all(
+      customers.map(async (customer) => {
+        const org = getOrgById(db, customer.orgId);
+        if (!org) {
+          return [];
+        }
+
+        const scenarios = buildDashboardCustomerScenarioRows(db, org, buildDashboardScenarioCatalog(db, org), now).slice(0, 5);
+        return scenarios.map(
+          (scenario): DashboardPortfolioScenarioSummary => ({
+            ...scenario,
+            orgId: customer.orgId,
+            orgName: customer.orgName
+          })
+        );
+      })
+    )
+  )
+    .flat()
+    .sort((left, right) => {
+      if (right.attemptsLast30Days !== left.attemptsLast30Days) {
+        return right.attemptsLast30Days - left.attemptsLast30Days;
+      }
+      return (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+    })
+    .slice(0, 6);
+  const recentSessions = db.usageSessions.filter((session) => {
+    if (!session.orgId || !accessibleOrgIds.has(session.orgId)) {
+      return false;
+    }
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
+  });
+  const recentScores = (db.scoreRecords ?? []).filter((record) => {
+    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
+      return false;
+    }
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
+  });
+  const previousScores = (db.scoreRecords ?? []).filter((record) => {
+    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
+      return false;
+    }
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+
+  return {
+    viewer,
+    summary: {
+      activeCustomers,
+      activeUsers,
+      dashboardUsers,
+      monthlyUsageMinutes: Math.round(monthlyUsageMinutes * 10) / 10,
+      simulationsLast30Days,
+      averageScoreThisPeriod:
+        averageScoreCandidates.length > 0
+          ? Math.round(averageScoreCandidates.reduce((total, score) => total + score, 0) / averageScoreCandidates.length)
+          : null,
+      activeTrainingPackCount: customers.reduce((total, customer) => total + customer.activeTrainingPackCount, 0),
+      customScenarioCount: customers.reduce((total, customer) => total + customer.customScenarioCount, 0)
+    },
+    customers,
+    topScenarios,
+    trainingPackAttribution: buildTrainingPackAttributionSummary({
+      usageSessions: recentSessions,
+      scoreRecords: recentScores
+    }),
+    coachingInsights: buildDashboardCoachingInsights({
+      currentScores: recentScores,
+      previousScores,
+      includeNormalizationDiagnostics: viewer.accessType === "platform_admin"
+    })
+  };
+}
+
+async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardTrainingReportResponse> {
+  const orgs = listDashboardAccessibleOrgs(db, viewer);
+  const now = new Date();
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const orgIds = new Set(orgs.map((org) => org.id));
+  const trainingPacks = (
+    await Promise.all(
+      orgs.map(async (org) => {
+        const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+        const rows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now);
+        return rows.map(
+          (row): DashboardTrainingPackReportSummary => ({
+            ...row,
+            orgId: org.id,
+            orgName: org.name
+          })
+        );
+      })
+    )
+  )
+    .flat()
+    .sort((left, right) => {
+      if (Number(right.active) !== Number(left.active)) {
+        return Number(right.active) - Number(left.active);
+      }
+      const latestDelta =
+        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+  const engagedLearnerIds = new Set<string>();
+  for (const row of trainingPacks) {
+    if (row.learnerCountLast30Days > 0) {
+      const scopedSessions = filterOrgUsageSessions(db, row.orgId, last30DaysThreshold, nowMs).filter(
+        (session) => session.trainingPackId === row.trainingPackId
+      );
+      const scopedScores = filterOrgScoreRecords(db, row.orgId, last30DaysThreshold, nowMs).filter(
+        (record) => record.trainingPackId === row.trainingPackId
+      );
+      scopedSessions.forEach((session) => engagedLearnerIds.add(session.userId));
+      scopedScores.forEach((record) => engagedLearnerIds.add(record.userId));
+    }
+  }
+  const recentSessions = db.usageSessions.filter((session) => {
+    if (!session.orgId || !orgIds.has(session.orgId)) {
+      return false;
+    }
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
+  });
+  const recentScores = (db.scoreRecords ?? []).filter((record) => {
+    if (!record.orgId || !orgIds.has(record.orgId)) {
+      return false;
+    }
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
+  });
+
+  return {
+    viewer,
+    summary: {
+      visibleTrainingPackCount: trainingPacks.length,
+      activeTrainingPackCount: trainingPacks.filter((pack) => pack.active).length,
+      assignmentCount: trainingPacks.reduce((total, pack) => total + pack.assignedLearnerCount, 0),
+      startedAssignmentCount: trainingPacks.reduce((total, pack) => total + pack.startedLearnerCount, 0),
+      completedAssignmentCount: trainingPacks.reduce((total, pack) => total + pack.completedLearnerCount, 0),
+      inProgressAssignmentCount: trainingPacks.reduce((total, pack) => total + pack.inProgressLearnerCount, 0),
+      notStartedAssignmentCount: trainingPacks.reduce((total, pack) => total + pack.notStartedLearnerCount, 0),
+      engagedLearnerCountLast30Days: engagedLearnerIds.size,
+      attributedAttemptsLast30Days: trainingPacks.reduce((total, pack) => total + pack.attemptsLast30Days, 0),
+      attributedScoresLast30Days: trainingPacks.reduce((total, pack) => total + pack.scoredAttemptsLast30Days, 0),
+      averageScoreLast30Days: averageScore(recentScores.filter((record) => Boolean(record.trainingPackId)))
+    },
+    trainingPacks,
+    trainingPackAttribution: buildTrainingPackAttributionSummary({
+      usageSessions: recentSessions,
+      scoreRecords: recentScores
+    })
+  };
+}
+
+async function findDashboardAccessibleTrainingPack(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  trainingPackId: string
+): Promise<{
+  org: EnterpriseOrg;
+  pack: TrainingPack;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+} | null> {
+  const normalizedTrainingPackId = trainingPackId.trim();
+  if (!normalizedTrainingPackId) {
+    return null;
+  }
+
+  for (const org of listDashboardAccessibleOrgs(db, viewer)) {
+    const packs = await listTrainingPacksForDashboardOrg(org.id);
+    const pack = packs.find((entry) => entry.id === normalizedTrainingPackId);
+    if (pack) {
+      return {
+        org,
+        pack,
+        scenarioCatalog: buildDashboardScenarioCatalog(db, org)
+      };
+    }
+  }
+
+  return null;
+}
+
+async function buildDashboardTrainingPackDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  trainingPackId: string
+): Promise<DashboardTrainingPackDetailResponse | null> {
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  if (!located) {
+    return null;
+  }
+
+  const { org, pack, scenarioCatalog } = located;
+  const now = new Date();
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now);
+  const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
+  if (!packSummary) {
+    return null;
+  }
+
+  const allPackSessions = db.usageSessions.filter((session) => session.orgId === org.id && session.trainingPackId === pack.id);
+  const allPackScores = (db.scoreRecords ?? []).filter((record) => record.orgId === org.id && record.trainingPackId === pack.id);
+  const recentPackSessions = allPackSessions.filter((session) => {
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
+  });
+  const recentPackScores = allPackScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
+  });
+  const previousPackScores = allPackScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+  const assignments = listTrainingPackAssignments(db, org.id, pack.id);
+  const assignmentRows = assignments
+    .map((assignment) =>
+      computeTrainingPackAssignmentProgress({
+        db,
+        assignment,
+        scenarioCatalog,
+        allSessions: allPackSessions,
+        allScores: allPackScores,
+        recentSessions: recentPackSessions,
+        recentScores: recentPackScores
+      })
+    )
+    .sort((left, right) => {
+      if (left.status !== right.status) {
+        const order: Record<TrainingPackAssignmentProgressStatus, number> = {
+          in_progress: 0,
+          not_started: 1,
+          completed: 2
+        };
+        return order[left.status] - order[right.status];
+      }
+      const latestDelta =
+        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.email.localeCompare(right.email);
+    });
+  const requiredScenarioIds = resolveTrainingPackRequiredScenarioIds(pack, scenarioCatalog);
+  const scenarioRows = buildTrainingPackScenarioProgressRows({
+    requiredScenarioIds,
+    assignments,
+    scenarioCatalog,
+    packSessions: allPackSessions,
+    packScores: allPackScores,
+    recentPackSessions,
+    recentPackScores
+  });
+
+  return {
+    viewer,
+    pack: {
+      ...packSummary,
+      orgId: org.id,
+      orgName: org.name,
+      trainingPackAttribution: buildTrainingPackAttributionSummary({
+        usageSessions: recentPackSessions,
+        scoreRecords: recentPackScores
+      }),
+      coachingInsights: buildDashboardCoachingInsights({
+        currentScores: recentPackScores,
+        previousScores: previousPackScores
+      }),
+      scenarios: scenarioRows,
+      assignments: assignmentRows,
+      trend: buildTrainingPackTrendPoints(allPackSessions, allPackScores, now)
+    }
+  };
+}
+
+function findRelatedUsageSessionForScore(
+  sessions: UsageSessionRecord[],
+  score: SimulationScoreRecord
+): UsageSessionRecord | null {
+  const exact = sessions.find(
+    (session) =>
+      session.userId === score.userId &&
+      session.scenarioId === score.scenarioId &&
+      (session.trainingPackId ?? null) === (score.trainingPackId ?? null) &&
+      session.startedAt === score.startedAt &&
+      session.endedAt === score.endedAt
+  );
+  if (exact) {
+    return exact;
+  }
+
+  const scoreStartedMs = new Date(score.startedAt).getTime();
+  const scoreEndedMs = new Date(score.endedAt).getTime();
+  let best: { session: UsageSessionRecord; delta: number } | null = null;
+
+  for (const session of sessions) {
+    if (
+      session.userId !== score.userId ||
+      session.scenarioId !== score.scenarioId ||
+      (session.trainingPackId ?? null) !== (score.trainingPackId ?? null)
+    ) {
+      continue;
+    }
+
+    const startedDelta = Math.abs(new Date(session.startedAt).getTime() - scoreStartedMs);
+    const endedDelta = Math.abs(new Date(session.endedAt).getTime() - scoreEndedMs);
+    const delta = startedDelta + endedDelta;
+    if (!Number.isFinite(delta) || delta > 10 * 60 * 1000) {
+      continue;
+    }
+    if (!best || delta < best.delta) {
+      best = { session, delta };
+    }
+  }
+
+  return best?.session ?? null;
+}
+
+function buildTrainingPackTitleMap(packs: TrainingPack[]): Map<string, string> {
+  const titles = new Map<string, string>();
+  packs.forEach((pack) => titles.set(pack.id, pack.title));
+  return titles;
+}
+
+function resolveAttemptActivityAssignmentStatus(params: {
+  assignment: TrainingPackAssignmentRecord | null;
+  activityAt: string;
+  scenarioId: string;
+  isScored: boolean;
+}): DashboardAttemptHistoryRow["assignmentContextStatus"] {
+  const { assignment, activityAt, scenarioId, isScored } = params;
+  if (!assignment) {
+    return "not_assignment_scoped";
+  }
+
+  const assignedAtMs = new Date(assignment.assignedAt).getTime();
+  const activityAtMs = new Date(activityAt).getTime();
+  if (!Number.isFinite(activityAtMs) || activityAtMs < assignedAtMs) {
+    return "outside_assignment_window";
+  }
+
+  if (isScored && assignment.requiredScenarioIds.includes(scenarioId)) {
+    return "counts_toward_completion";
+  }
+
+  return "within_assignment_window";
+}
+
+function findAssignmentForUserPackActivity(
+  db: ApiDatabase,
+  orgId: string,
+  userId: string,
+  trainingPackId: string | null | undefined,
+  activityAt: string
+): TrainingPackAssignmentRecord | null {
+  if (!trainingPackId) {
+    return null;
+  }
+
+  const activityAtMs = new Date(activityAt).getTime();
+  const assignments = listTrainingPackAssignments(db, orgId, trainingPackId, { activeOnly: false })
+    .filter((assignment) => assignment.userId === userId)
+    .sort((left, right) => new Date(right.assignedAt).getTime() - new Date(left.assignedAt).getTime());
+
+  for (const assignment of assignments) {
+    const assignedAtMs = new Date(assignment.assignedAt).getTime();
+    if (Number.isFinite(assignedAtMs) && Number.isFinite(activityAtMs) && assignedAtMs <= activityAtMs) {
+      return projectTrainingPackAssignmentLifecycle(db, assignment);
+    }
+  }
+
+  return assignments[0] ? projectTrainingPackAssignmentLifecycle(db, assignments[0]) : null;
+}
+
+function buildDashboardAttemptHistoryRowFromScore(params: {
+  db: ApiDatabase;
+  score: SimulationScoreRecord;
+  user: UserProfile;
+  org: EnterpriseOrg | null;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  trainingPackTitles: Map<string, string>;
+  relatedSession: UsageSessionRecord | null;
+  assignment: TrainingPackAssignmentRecord | null;
+}): DashboardAttemptHistoryRow {
+  const { score, user, org, scenarioCatalog, trainingPackTitles, relatedSession, assignment } = params;
+  const scenarioMeta = scenarioCatalog.get(score.scenarioId);
+
+  return {
+    activityId: score.id,
+    activityKind: "scored_attempt",
+    userId: user.id,
+    userEmail: user.email,
+    userStatus: user.status,
+    orgId: org?.id ?? null,
+    orgName: org?.name ?? null,
+    scenarioId: score.scenarioId,
+    scenarioTitle: scenarioMeta?.title ?? score.scenarioId,
+    segmentId: score.segmentId,
+    segmentLabel: scenarioMeta?.segmentLabel ?? score.segmentId,
+    trainingPackId: score.trainingPackId ?? null,
+    trainingPackTitle: score.trainingPackId ? trainingPackTitles.get(score.trainingPackId) ?? score.trainingPackId : null,
+    packAttributed: Boolean(score.trainingPackId),
+    assignmentId: assignment?.id ?? null,
+    assignmentContextStatus: resolveAttemptActivityAssignmentStatus({
+      assignment,
+      activityAt: score.endedAt,
+      scenarioId: score.scenarioId,
+      isScored: true
+    }),
+    startedAt: score.startedAt,
+    endedAt: score.endedAt,
+    rawDurationSeconds: relatedSession?.rawDurationSeconds ?? null,
+    overallScore: score.overallScore,
+    summary: score.summary ?? null,
+    coachingPriority: score.coachingArtifact?.coachingPriority ?? null,
+    model: score.model ?? null,
+    promptVersion: score.promptVersion ?? null,
+    rubricVersion: score.rubricVersion ?? null
+  };
+}
+
+function buildDashboardAttemptHistoryRowFromSession(params: {
+  session: UsageSessionRecord;
+  user: UserProfile;
+  org: EnterpriseOrg | null;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  trainingPackTitles: Map<string, string>;
+  assignment: TrainingPackAssignmentRecord | null;
+}): DashboardAttemptHistoryRow {
+  const { session, user, org, scenarioCatalog, trainingPackTitles, assignment } = params;
+  const scenarioMeta = scenarioCatalog.get(session.scenarioId);
+
+  return {
+    activityId: session.id,
+    activityKind: "usage_only",
+    userId: user.id,
+    userEmail: user.email,
+    userStatus: user.status,
+    orgId: org?.id ?? null,
+    orgName: org?.name ?? null,
+    scenarioId: session.scenarioId,
+    scenarioTitle: scenarioMeta?.title ?? session.scenarioId,
+    segmentId: session.segmentId,
+    segmentLabel: scenarioMeta?.segmentLabel ?? session.segmentId,
+    trainingPackId: session.trainingPackId ?? null,
+    trainingPackTitle: session.trainingPackId ? trainingPackTitles.get(session.trainingPackId) ?? session.trainingPackId : null,
+    packAttributed: Boolean(session.trainingPackId),
+    assignmentId: assignment?.id ?? null,
+    assignmentContextStatus: resolveAttemptActivityAssignmentStatus({
+      assignment,
+      activityAt: session.endedAt,
+      scenarioId: session.scenarioId,
+      isScored: false
+    }),
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    rawDurationSeconds: session.rawDurationSeconds,
+    overallScore: null,
+    summary: null,
+    coachingPriority: null,
+    model: null,
+    promptVersion: null,
+    rubricVersion: null
+  };
+}
+
+function sortDashboardAttemptHistoryRows(rows: DashboardAttemptHistoryRow[]): DashboardAttemptHistoryRow[] {
+  return rows
+    .slice()
+    .sort((left, right) => {
+      const byTime = new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime();
+      if (byTime !== 0) {
+        return byTime;
+      }
+      if (left.activityKind !== right.activityKind) {
+        return left.activityKind === "scored_attempt" ? -1 : 1;
+      }
+      return left.activityId.localeCompare(right.activityId);
+    });
+}
+
+function deriveScoreSignals(record: SimulationScoreRecord): DashboardAttemptDetailResponse["attempt"]["derivedSignals"] {
+  const categories = [
+    { key: "persuasion", label: "Persuasion", value: record.persuasion },
+    { key: "clarity", label: "Clarity", value: record.clarity },
+    { key: "empathy", label: "Empathy", value: record.empathy },
+    { key: "assertiveness", label: "Assertiveness", value: record.assertiveness }
+  ].sort((left, right) => right.value - left.value);
+
+  const strongest = categories[0];
+  const weakest = categories[categories.length - 1];
+  return {
+    strongestCategory: strongest?.label ?? null,
+    weakestCategory: weakest?.label ?? null,
+    coachingFocus: record.coachingArtifact?.coachingPriority ?? (weakest ? `Focus next on ${weakest.label.toLowerCase()}.` : null)
+  };
+}
+
+async function buildDashboardTrainingPackAssignmentDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  trainingPackId: string,
+  assignmentId: string
+): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  if (!located) {
+    return null;
+  }
+
+  const { org, pack, scenarioCatalog } = located;
+  const assignment = listTrainingPackAssignments(db, org.id, pack.id).find((entry) => entry.id === assignmentId);
+  if (!assignment) {
+    return null;
+  }
+
+  const user = getUserById(db, assignment.userId);
+  if (!user) {
+    return null;
+  }
+
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date());
+  const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
+  if (!packSummary) {
+    return null;
+  }
+
+  const packSessions = db.usageSessions.filter(
+    (session) => session.orgId === org.id && session.userId === assignment.userId && session.trainingPackId === pack.id
+  );
+  const packScores = (db.scoreRecords ?? []).filter(
+    (record) => record.orgId === org.id && record.userId === assignment.userId && record.trainingPackId === pack.id
+  );
+  const projectedAssignment = projectTrainingPackAssignmentLifecycle(db, assignment);
+  const assignmentRow = computeTrainingPackAssignmentProgress({
+    db,
+    assignment: projectedAssignment,
+    scenarioCatalog,
+    allSessions: packSessions,
+    allScores: packScores,
+    recentSessions: packSessions,
+    recentScores: packScores
+  });
+  const trainingPackTitles = buildTrainingPackTitleMap([pack]);
+  const usedSessionIds = new Set<string>();
+  const attemptRows: DashboardAttemptHistoryRow[] = [];
+
+  for (const score of packScores) {
+    const relatedSession = findRelatedUsageSessionForScore(packSessions, score);
+    if (relatedSession) {
+      usedSessionIds.add(relatedSession.id);
+    }
+    attemptRows.push(
+      buildDashboardAttemptHistoryRowFromScore({
+        db,
+        score,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        relatedSession,
+        assignment: projectedAssignment
+      })
+    );
+  }
+
+  for (const session of packSessions) {
+    if (usedSessionIds.has(session.id)) {
+      continue;
+    }
+    attemptRows.push(
+      buildDashboardAttemptHistoryRowFromSession({
+        session,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        assignment: projectedAssignment
+      })
+    );
+  }
+
+  const requiredScenarios: DashboardTrainingPackAssignmentRequiredScenarioRow[] = projectedAssignment.requiredScenarioIds.map((scenarioId) => {
+    const scenarioMeta = scenarioCatalog.get(scenarioId);
+    return {
+      scenarioId,
+      title: scenarioMeta?.title ?? scenarioId,
+      segmentId: scenarioMeta?.segmentId ?? "unknown",
+      segmentLabel: scenarioMeta?.segmentLabel ?? null,
+      source: scenarioMeta?.source ?? "unknown"
+    };
+  });
+
+  return {
+    viewer,
+    pack: {
+      ...packSummary,
+      orgId: org.id,
+      orgName: org.name
+    },
+    assignment: {
+      ...assignmentRow,
+      completionRule: projectedAssignment.completionRule,
+      requiredScenarios
+    },
+    attempts: sortDashboardAttemptHistoryRows(attemptRows)
+  };
+}
+
+async function buildDashboardUserDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  userId: string
+): Promise<DashboardUserDetailResponse | null> {
+  const report = await buildDashboardUserReport(db, viewer);
+  const userRow = report.users.find((entry) => entry.userId === userId);
+  if (!userRow || !userRow.orgId) {
+    return null;
+  }
+
+  const org = getOrgById(db, userRow.orgId);
+  const user = getUserById(db, userId);
+  if (!org || !user || !canDashboardViewerAccessOrg(viewer, org.id)) {
+    return null;
+  }
+
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+  const packs = await listTrainingPacksForDashboardOrg(org.id);
+  const trainingPackTitles = buildTrainingPackTitleMap(packs);
+  const userSessions = db.usageSessions.filter((session) => session.userId === user.id && session.orgId === org.id);
+  const userScores = (db.scoreRecords ?? []).filter((record) => record.userId === user.id && record.orgId === org.id);
+  const now = Date.now();
+  const last30DaysThreshold = now - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = now - 60 * 24 * 60 * 60 * 1000;
+  const recentUserScores = userScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < now;
+  });
+  const previousUserScores = userScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+  const assignments = (db.trainingPackAssignments ?? [])
+    .filter((assignment) => assignment.active === true && assignment.userId === user.id && assignment.orgId === org.id)
+    .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment));
+  const assignmentRows: DashboardUserAssignmentSummaryRow[] = assignments
+    .map((assignment) => {
+      const pack = packs.find((entry) => entry.id === assignment.trainingPackId);
+      const packSessions = userSessions.filter((session) => session.trainingPackId === assignment.trainingPackId);
+      const packScores = userScores.filter((record) => record.trainingPackId === assignment.trainingPackId);
+      const progress = computeTrainingPackAssignmentProgress({
+        db,
+        assignment,
+        scenarioCatalog,
+        allSessions: packSessions,
+        allScores: packScores,
+        recentSessions: packSessions,
+        recentScores: packScores
+      });
+
+      return {
+        assignmentId: assignment.id,
+        trainingPackId: assignment.trainingPackId,
+        trainingPackTitle: pack?.title ?? assignment.trainingPackId,
+        status: progress.status,
+        assignedAt: progress.assignedAt,
+        startedAt: progress.startedAt,
+        completedAt: progress.completedAt,
+        requiredScenarioCount: progress.requiredScenarioCount,
+        completedScenarioCount: progress.completedScenarioCount
+      };
+    })
+    .sort((left, right) => {
+      const latestDelta =
+        (new Date(right.completedAt ?? right.startedAt ?? right.assignedAt).getTime() || 0) -
+        (new Date(left.completedAt ?? left.startedAt ?? left.assignedAt).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.trainingPackTitle.localeCompare(right.trainingPackTitle);
+    });
+
+  const attemptRows = sortDashboardAttemptHistoryRows(
+    userScores.map((score) => {
+      return buildDashboardAttemptHistoryRowFromScore({
+        db,
+        score,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        relatedSession: findRelatedUsageSessionForScore(userSessions, score),
+        assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
+      });
+    })
+  ).slice(0, 40);
+
+  return {
+    viewer,
+    user: userRow,
+    coachingInsights: buildDashboardCoachingInsights({
+      currentScores: recentUserScores,
+      previousScores: previousUserScores
+    }),
+    assignments: assignmentRows,
+    attempts: attemptRows
+  };
+}
+
+async function buildDashboardAttemptDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  attemptId: string
+): Promise<DashboardAttemptDetailResponse | null> {
+  const score = (db.scoreRecords ?? []).find((entry) => entry.id === attemptId);
+  if (!score || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
+    return null;
+  }
+
+  const org = getOrgById(db, score.orgId);
+  const user = getUserById(db, score.userId);
+  if (!org || !user) {
+    return null;
+  }
+
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+  const packs = await listTrainingPacksForDashboardOrg(org.id);
+  const trainingPackTitles = buildTrainingPackTitleMap(packs);
+  const attempt = buildDashboardAttemptHistoryRowFromScore({
+    db,
+    score,
+    user,
+    org,
+    scenarioCatalog,
+    trainingPackTitles,
+    relatedSession: findRelatedUsageSessionForScore(
+      db.usageSessions.filter((session) => session.userId === score.userId && session.orgId === org.id),
+      score
+    ),
+    assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
+  });
+
+  return {
+    viewer,
+    attempt: {
+      ...attempt,
+      industryId: score.industryId ?? null,
+      industryLabel: score.industryId ? INDUSTRY_LABELS[score.industryId] ?? score.industryId : null,
+      scoreBreakdown: {
+        overallScore: score.overallScore,
+        persuasion: score.persuasion,
+        clarity: score.clarity,
+        empathy: score.empathy,
+        assertiveness: score.assertiveness
+      },
+      derivedSignals: deriveScoreSignals(score),
+      coachingArtifact: score.coachingArtifact ?? null,
+      transcriptAvailable: false
+    }
+  };
+}
+
+async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardUserReportResponse> {
+  const orgs = listDashboardAccessibleOrgs(db, viewer);
+  const orgById = new Map(orgs.map((org) => [org.id, org] as const));
+  const accessibleOrgIds = new Set(orgs.map((org) => org.id));
+  const now = new Date();
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const recentSessions = db.usageSessions.filter((session) => {
+    if (!session.orgId || !accessibleOrgIds.has(session.orgId)) {
+      return false;
+    }
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
+  });
+  const recentScores = (db.scoreRecords ?? []).filter((record) => {
+    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
+      return false;
+    }
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
+  });
+  const previousScores = (db.scoreRecords ?? []).filter((record) => {
+    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
+      return false;
+    }
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+  const scenarioCatalogByOrg = new Map<string, Map<string, DashboardScenarioCatalogEntry>>(
+    orgs.map((org) => [org.id, buildDashboardScenarioCatalog(db, org)])
+  );
+  const trainingPackTitleByOrg = new Map<string, Map<string, string>>();
+  for (const org of orgs) {
+    const packMap = new Map<string, string>();
+    const packs = await listTrainingPacksForDashboardOrg(org.id);
+    packs.forEach((pack) => packMap.set(pack.id, pack.title));
+    trainingPackTitleByOrg.set(org.id, packMap);
+  }
+
+  const users = db.users
+    .filter((user) => user.accountType === "enterprise" && Boolean(user.orgId) && accessibleOrgIds.has(user.orgId!))
+    .sort((left, right) => left.email.localeCompare(right.email))
+    .map((user): DashboardUserReportRow => {
+      const userSessions = recentSessions.filter((session) => session.userId === user.id);
+      const userScores = recentScores.filter((record) => record.userId === user.id);
+      const userPreviousScores = previousScores.filter((record) => record.userId === user.id);
+      const billedSeconds = userSessions.reduce(
+        (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
+        0
+      );
+      const latestSession = userSessions
+        .slice()
+        .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+      const latestScore = userScores
+        .slice()
+        .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+      const latestActivityAt = maxIsoDate([latestSession?.endedAt ?? null, latestScore?.endedAt ?? null]);
+      const latestScenarioId = latestScore?.scenarioId ?? latestSession?.scenarioId ?? null;
+      const latestTrainingPackId = latestScore?.trainingPackId ?? latestSession?.trainingPackId ?? null;
+      const orgId = user.orgId;
+      const scenarioCatalog = orgId ? scenarioCatalogByOrg.get(orgId) : null;
+      const trainingPackTitles = orgId ? trainingPackTitleByOrg.get(orgId) : null;
+      const uniqueScenariosLast30Days = new Set<string>([
+        ...userSessions.map((session) => session.scenarioId),
+        ...userScores.map((record) => record.scenarioId)
+      ]).size;
+
+      return {
+        userId: user.id,
+        email: user.email,
+        orgId,
+        orgName: orgId ? orgById.get(orgId)?.name ?? null : null,
+        status: user.status,
+        orgRole: user.orgRole,
+        dashboardAccessEnabled: user.dashboardAccessEnabled === true,
+        simulationsLast30Days: userSessions.length,
+        usedMinutesLast30Days: roundMinutes(billedSeconds),
+        scoredAttemptsLast30Days: userScores.length,
+        averageScoreLast30Days: averageScore(userScores),
+        scoreDeltaLast30Days: averageScoreDelta(userScores, userPreviousScores),
+        uniqueScenariosLast30Days,
+        trainingPackAttemptsLast30Days: userSessions.filter((session) => Boolean(session.trainingPackId)).length,
+        latestActivityAt,
+        latestScenarioTitle: latestScenarioId ? scenarioCatalog?.get(latestScenarioId)?.title ?? latestScenarioId : null,
+        latestTrainingPackTitle:
+          latestTrainingPackId && trainingPackTitles ? trainingPackTitles.get(latestTrainingPackId) ?? latestTrainingPackId : null
+      };
+    })
+    .sort((left, right) => {
+      const latestDelta =
+        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.email.localeCompare(right.email);
+    });
+
+  return {
+    viewer,
+    summary: {
+      userCount: users.length,
+      activeUserCount: users.filter((user) => user.status === "active").length,
+      dashboardUserCount: users.filter((user) => user.dashboardAccessEnabled).length,
+      simulationsLast30Days: users.reduce((total, user) => total + user.simulationsLast30Days, 0),
+      averageScoreLast30Days: averageScore(recentScores)
+    },
+    users
+  };
 }
 
 function ensureOrgCustomScenarioCollection(org: EnterpriseOrg): OrgCustomScenario[] {
@@ -4574,6 +6795,18 @@ const authLoginRateLimiter = createRateLimiter({
   max: 12
 });
 
+const webAuthRequestCodeRateLimiter = createRateLimiter({
+  name: "web-auth-request-code",
+  windowMs: 15 * 60 * 1000,
+  max: 12
+});
+
+const webAuthVerifyCodeRateLimiter = createRateLimiter({
+  name: "web-auth-verify-code",
+  windowMs: 15 * 60 * 1000,
+  max: 20
+});
+
 const mobileOnboardRateLimiter = createRateLimiter({
   name: "mobile-onboard",
   windowMs: 15 * 60 * 1000,
@@ -4783,7 +7016,7 @@ app.post("/auth/login", authLoginRateLimiter, async (request: Request, response:
 
   await withDatabase(async (db) => {
     const valid = db.admin.passwordHash
-      ? verifyPassword(password, db.admin.passwordHash)
+      ? verifyScryptPassword(password, db.admin.passwordHash)
       : password === ADMIN_BOOTSTRAP_PASSWORD;
 
     if (!valid) {
@@ -4837,7 +7070,7 @@ app.post("/auth/change-password", requireAdmin, async (request: Request, respons
 
   await withDatabase(async (db) => {
     const valid = db.admin.passwordHash
-      ? verifyPassword(currentPassword, db.admin.passwordHash)
+      ? verifyScryptPassword(currentPassword, db.admin.passwordHash)
       : currentPassword === ADMIN_BOOTSTRAP_PASSWORD;
 
     if (!valid) {
@@ -4845,12 +7078,306 @@ app.post("/auth/change-password", requireAdmin, async (request: Request, respons
       return;
     }
 
-    db.admin.passwordHash = hashPassword(newPassword);
+    db.admin.passwordHash = hashScryptPassword(newPassword);
     appendPlatformAuditEvent(db, {
       action: "admin.password_changed",
       message: "Platform admin password was changed."
     });
     response.json({ ok: true });
+  });
+});
+
+app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request: Request, response: Response) => {
+  const body = request.body as WebAuthRequestCodeRequest;
+  const email = body.email?.trim().toLowerCase();
+
+  if (!email || !isEmailLike(email)) {
+    response.status(400).json({ error: "Valid email is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = db.users.find((entry) => entry.email.toLowerCase() === email);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (user.status !== "active") {
+      response.status(403).json({ error: "This account is not active." });
+      return;
+    }
+
+    const now = new Date();
+    let payload: WebAuthRequestCodeResponse;
+    if (user.emailVerifiedAt) {
+      const challenge = webAuthService.issueSignInChallenge(db, user, EMAIL_VERIFICATION_TTL_MINUTES, now);
+      payload = {
+        ok: true,
+        challengeType: "sign_in",
+        expiresAt: challenge.expiresAt,
+        delivery: await authCodeDelivery.sendWebSignInCode({
+          email: user.email,
+          code: challenge.code,
+          expiresAt: challenge.expiresAt
+        })
+      };
+    } else {
+      const verification = await issueEmailVerification(db, user, now);
+      payload = {
+        ok: true,
+        challengeType: "email_verification",
+        expiresAt: verification.expiresAt,
+        delivery: verification.delivery
+      };
+    }
+
+    appendWebAuditEvent(db, user, {
+      action: "web_auth.code_requested",
+      orgId: user.orgId,
+      userId: user.id,
+      message: `Issued ${payload.challengeType} code for ${user.email}.`,
+      metadata: {
+        challengeType: payload.challengeType,
+        expiresAt: payload.expiresAt
+      }
+    });
+
+    response.json(payload);
+  });
+});
+
+app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: Request, response: Response) => {
+  const body = request.body as WebAuthVerifyCodeRequest;
+  const email = body.email?.trim().toLowerCase();
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+
+  if (!email || !isEmailLike(email) || !/^\d{6}$/.test(code)) {
+    response.status(400).json({ error: "Email and 6-digit code are required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = db.users.find((entry) => entry.email.toLowerCase() === email);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (user.status !== "active") {
+      response.status(403).json({ error: "This account is not active." });
+      return;
+    }
+
+    const now = new Date();
+    let challengeType: WebAuthRequestCodeResponse["challengeType"];
+    if (user.emailVerifiedAt) {
+      const result = webAuthService.verifyLatestSignInChallenge(db, user, code, now);
+      if (result === "missing") {
+        response.status(400).json({ error: "No pending sign-in code. Request a new code first." });
+        return;
+      }
+      if (result === "expired") {
+        response.status(400).json({ error: "Sign-in code expired. Request a new code." });
+        return;
+      }
+      if (result === "invalid") {
+        response.status(400).json({ error: "Invalid sign-in code." });
+        return;
+      }
+
+      challengeType = "sign_in";
+    } else {
+      const result = verifyLatestEmailVerification(db, user, code, now);
+      if (result === "missing") {
+        response.status(400).json({ error: "No pending verification code. Request a new code first." });
+        return;
+      }
+      if (result === "expired") {
+        response.status(400).json({ error: "Verification code expired. Request a new code." });
+        return;
+      }
+      if (result === "invalid") {
+        response.status(400).json({ error: "Invalid verification code." });
+        return;
+      }
+
+      const nowIsoValue = now.toISOString();
+      user.emailVerifiedAt = nowIsoValue;
+      user.updatedAt = nowIsoValue;
+      emitMobileUpdateForUser(db, user.id, "user");
+      appendWebAuditEvent(db, user, {
+        action: "web_auth.email_verified",
+        userId: user.id,
+        message: `Email verified via shared web auth for ${user.email}.`
+      });
+      challengeType = "email_verification";
+    }
+
+    const { token, expiresAt, sessionId } = webAuthService.issueSession(db, user, WEB_AUTH_TOKEN_TTL_MINUTES, now);
+    appendWebAuditEvent(db, user, {
+      action: "web_auth.session_created",
+      orgId: user.orgId,
+      userId: user.id,
+      message: `Created shared web session for ${user.email}.`,
+      metadata: {
+        challengeType,
+        sessionId,
+        expiresAt
+      }
+    });
+
+    const payload: WebAuthVerifyCodeResponse = {
+      token,
+      expiresAt,
+      ...buildWebAuthSessionResponse(db, user)
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/web/auth/session", requireWebAuth, async (request: WebAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const user = getUserById(db, request.webAuth!.user.id);
+    if (!user || user.status !== "active" || !user.emailVerifiedAt) {
+      response.status(401).json({ error: "Web auth session is no longer valid." });
+      return;
+    }
+
+    response.json(buildWebAuthSessionResponse(db, user));
+  });
+});
+
+app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, response: Response) => {
+  await withDatabase(async (db) => {
+    webAuthService.revokeSession(db, request.webAuth!.sessionId);
+    appendWebAuditEvent(db, request.webAuth!.user, {
+      action: "web_auth.logout",
+      orgId: request.webAuth!.user.orgId,
+      userId: request.webAuth!.user.id,
+      message: `Signed out shared web session for ${request.webAuth!.user.email}.`,
+      metadata: {
+        sessionId: request.webAuth!.sessionId
+      }
+    });
+    response.json({ ok: true });
+  });
+});
+
+app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload = await buildDashboardOverview(db, request.dashboard!.viewer);
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/customers", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload: DashboardCustomerListResponse = {
+      viewer: request.dashboard!.viewer,
+      customers: await listDashboardAccessibleCustomers(db, request.dashboard!.viewer)
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const orgId = request.params.orgId;
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Customer account not found." });
+      return;
+    }
+
+    if (!canDashboardViewerAccessOrg(request.dashboard!.viewer, orgId)) {
+      response.status(403).json({ error: "You do not have access to this customer account." });
+      return;
+    }
+
+    const customer = await getDashboardAccessibleCustomer(db, request.dashboard!.viewer, orgId);
+    if (!customer) {
+      response.status(404).json({ error: "Customer account not found." });
+      return;
+    }
+
+    const payload: DashboardCustomerDetailResponse = {
+      viewer: request.dashboard!.viewer,
+      customer,
+      insights: await buildDashboardCustomerInsights(db, org)
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/training", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload = await buildDashboardTrainingReport(db, request.dashboard!.viewer);
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload = await buildDashboardTrainingPackDetail(db, request.dashboard!.viewer, request.params.trainingPackId);
+    if (!payload) {
+      response.status(404).json({ error: "Training pack not found." });
+      return;
+    }
+
+    response.json(payload);
+  });
+});
+
+app.get(
+  "/dashboard/training/:trainingPackId/assignments/:assignmentId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    await withDatabaseRead(async (db) => {
+      const payload = await buildDashboardTrainingPackAssignmentDetail(
+        db,
+        request.dashboard!.viewer,
+        request.params.trainingPackId,
+        request.params.assignmentId
+      );
+      if (!payload) {
+        response.status(404).json({ error: "Training pack assignment not found." });
+        return;
+      }
+
+      response.json(payload);
+    });
+  }
+);
+
+app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload = await buildDashboardUserReport(db, request.dashboard!.viewer);
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload = await buildDashboardUserDetail(db, request.dashboard!.viewer, request.params.userId);
+    if (!payload) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const payload = await buildDashboardAttemptDetail(db, request.dashboard!.viewer, request.params.attemptId);
+    if (!payload) {
+      response.status(404).json({ error: "Attempt detail not found." });
+      return;
+    }
+
+    response.json(payload);
   });
 });
 
@@ -5184,6 +7711,155 @@ app.get("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, re
   });
 });
 
+app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingPackId = request.params.trainingPackId?.trim();
+  if (!trainingPackId) {
+    response.status(400).json({ error: "trainingPackId is required." });
+    return;
+  }
+
+  await withDatabaseRead(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    try {
+      const packs = await trainingPackStore.listTrainingPacksForOrg(org.id);
+      const pack = packs.find((entry) => entry.id === trainingPackId);
+      if (!pack) {
+        response.status(404).json({ error: "Training pack not found." });
+        return;
+      }
+
+      const assignments = listTrainingPackAssignments(db, org.id, trainingPackId)
+        .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment))
+        .sort((left, right) => left.assignedAt.localeCompare(right.assignedAt));
+      const payload: AdminTrainingPackAssignmentsResponse = {
+        generatedAt: nowIso(),
+        orgId: org.id,
+        trainingPackId,
+        assignments
+      };
+      response.json(payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not load training pack assignments.";
+      response.status(503).json({ error: message });
+    }
+  });
+});
+
+app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingPackId = request.params.trainingPackId?.trim();
+  const body = request.body as SetTrainingPackAssignmentsRequest;
+  if (!trainingPackId) {
+    response.status(400).json({ error: "trainingPackId is required." });
+    return;
+  }
+  if (!Array.isArray(body.userIds)) {
+    response.status(400).json({ error: "userIds must be a string array." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    try {
+      const packs = await trainingPackStore.listTrainingPacksForOrg(org.id);
+      const pack = packs.find((entry) => entry.id === trainingPackId);
+      if (!pack) {
+        response.status(404).json({ error: "Training pack not found." });
+        return;
+      }
+
+      const normalizedUserIds = Array.from(
+        new Set(
+          body.userIds
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        )
+      );
+      const eligibleUsers = db.users.filter((user) => user.accountType === "enterprise" && user.orgId === org.id);
+      const eligibleUserIds = new Set(eligibleUsers.map((user) => user.id));
+      const invalidUserId = normalizedUserIds.find((userId) => !eligibleUserIds.has(userId));
+      if (invalidUserId) {
+        response.status(400).json({ error: `User ${invalidUserId} is not eligible for this organization's training pack.` });
+        return;
+      }
+
+      const now = nowIso();
+      const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+      const requiredScenarioIds = resolveTrainingPackRequiredScenarioIds(pack, scenarioCatalog);
+      const activeAssignments = listTrainingPackAssignments(db, org.id, trainingPackId);
+      const nextUserIdSet = new Set(normalizedUserIds);
+
+      for (const assignment of activeAssignments) {
+        if (!nextUserIdSet.has(assignment.userId)) {
+          assignment.active = false;
+          assignment.updatedAt = now;
+        }
+      }
+
+      for (const userId of normalizedUserIds) {
+        const existing = activeAssignments.find((assignment) => assignment.userId === userId);
+        if (existing) {
+          syncTrainingPackAssignmentLifecycle(db, existing);
+          continue;
+        }
+
+        db.trainingPackAssignments.push({
+          id: `tpa_${uuid()}`,
+          trainingPackId,
+          orgId: org.id,
+          userId,
+          active: true,
+          assignedAt: now,
+          assignedByUserId: null,
+          requiredScenarioIds: requiredScenarioIds.slice(),
+          completionRule: "scored_required_scenarios_v1",
+          startedAt: null,
+          completedAt: null,
+          createdAt: now,
+          updatedAt: now
+        });
+      }
+
+      const assignments = listTrainingPackAssignments(db, org.id, trainingPackId)
+        .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment))
+        .sort((left, right) => left.assignedAt.localeCompare(right.assignedAt));
+
+      appendPlatformAuditEvent(db, {
+        action: "org.training_pack.assignments.updated",
+        orgId: org.id,
+        message: `Updated training pack assignments for "${pack.title}" in ${org.name}.`,
+        metadata: {
+          trainingPackId,
+          assignedUserCount: assignments.length
+        }
+      });
+
+      const payload: AdminTrainingPackAssignmentsResponse = {
+        generatedAt: nowIso(),
+        orgId: org.id,
+        trainingPackId,
+        assignments
+      };
+      response.json(payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update training pack assignments.";
+      response.status(503).json({ error: message });
+    }
+  });
+});
+
 app.post("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
   const body = request.body as {
@@ -5376,6 +8052,11 @@ app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (r
       if (!deleted) {
         response.status(404).json({ error: "Training pack not found." });
         return;
+      }
+      const now = nowIso();
+      for (const assignment of listTrainingPackAssignments(db, org.id, trainingPackId)) {
+        assignment.active = false;
+        assignment.updatedAt = now;
       }
 
       appendPlatformAuditEvent(db, {
@@ -5969,6 +8650,7 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
         email: user.email,
         status: user.status,
         orgRole: user.orgRole,
+        dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         dailySecondsCapOverride: user.dailySecondsCapOverride,
         effectiveDailySecondsCap:
           (user.dailySecondsCapOverride ?? effectiveOrgPerUserDailySecondsCap) + user.manualBonusSeconds,
@@ -6174,6 +8856,8 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       id: `usr_${uuid()}`,
       email,
       emailVerifiedAt: now,
+      isPlatformAdmin: body.isPlatformAdmin === true,
+      dashboardAccessEnabled: body.accountType === "enterprise" && body.dashboardAccessEnabled === true,
       accountType: body.accountType,
       tier: body.tier,
       status: "active",
@@ -6199,6 +8883,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       message: `Created user ${user.email}.`,
       metadata: {
         email: user.email,
+        dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         accountType: user.accountType,
         tier: user.tier,
         orgRole: user.orgRole
@@ -6221,6 +8906,8 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
 
     const before = {
       email: user.email,
+      isPlatformAdmin: user.isPlatformAdmin === true,
+      dashboardAccessEnabled: user.dashboardAccessEnabled === true,
       tier: user.tier,
       accountType: user.accountType,
       status: user.status,
@@ -6252,6 +8939,9 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       if (email !== user.email) {
         user.email = email;
         user.emailVerifiedAt = null;
+        webAuthService.revokeUserSessions(db, user.id);
+        db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
+        db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
         emailChanged = true;
       }
     }
@@ -6263,6 +8953,14 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       }
 
       user.tier = patch.tier;
+    }
+
+    if (patch.isPlatformAdmin !== undefined) {
+      user.isPlatformAdmin = patch.isPlatformAdmin === true;
+    }
+
+    if (patch.dashboardAccessEnabled !== undefined) {
+      user.dashboardAccessEnabled = patch.dashboardAccessEnabled === true;
     }
 
     let nextAccountType = user.accountType;
@@ -6282,6 +8980,9 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       }
 
       user.status = patch.status;
+      if (user.status !== "active") {
+        webAuthService.revokeUserSessions(db, user.id);
+      }
     }
 
     let nextOrgId = patch.orgId !== undefined ? patch.orgId : user.orgId;
@@ -6311,6 +9012,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       }
     } else {
       user.orgRole = "user";
+      user.dashboardAccessEnabled = false;
       user.dailySecondsCapOverride = null;
       user.allowDailyOverageThisCycle = false;
       user.dailyOverageExpiresAt = null;
@@ -6364,6 +9066,8 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
         before,
         after: {
           email: user.email,
+          isPlatformAdmin: user.isPlatformAdmin === true,
+          dashboardAccessEnabled: user.dashboardAccessEnabled === true,
           tier: user.tier,
           accountType: user.accountType,
           status: user.status,
@@ -6400,6 +9104,8 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     db.supportCases = db.supportCases.filter((supportCase) => supportCase.userId !== user.id);
     db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
     db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
+    db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
+    db.webAuthSessions = (db.webAuthSessions ?? []).filter((record) => record.userId !== user.id);
     db.enterpriseJoinRequests = db.enterpriseJoinRequests
       .filter((record) => record.userId !== user.id)
       .map((record) => (record.decidedByUserId === user.id ? { ...record, decidedByUserId: null } : record));
@@ -6491,7 +9197,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
         return;
       }
 
-      const verification = issueEmailVerification(db, existing, new Date(issuedAt));
+      const verification = await issueEmailVerification(db, existing, new Date(issuedAt));
       const payload: MobileOnboardResponse = {
         user: existing,
         authToken,
@@ -6536,7 +9242,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
 
     db.users.push(user);
     const authToken = upsertMobileAuthToken(db, user.id, now);
-    const verification = issueEmailVerification(db, user, new Date(now));
+    const verification = await issueEmailVerification(db, user, new Date(now));
     appendMobileAuditEvent(db, user, {
       action: "mobile.user_created",
       userId: user.id,
@@ -6587,7 +9293,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    const verification = issueEmailVerification(db, user, new Date());
+    const verification = await issueEmailVerification(db, user, new Date());
     appendMobileAuditEvent(db, user, {
       action: "mobile.verification_resent",
       userId: user.id,
@@ -7394,7 +10100,7 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
 
     user.updatedAt = now.toISOString();
     if (emailChanged) {
-      issueEmailVerification(db, user, now);
+      await issueEmailVerification(db, user, now);
     }
     appendMobileAuditEvent(db, user, {
       action: "mobile.settings_updated",
@@ -8274,7 +10980,16 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       assistantText: completion.text,
       usage: completion.usage,
       model: completion.model,
-      promptVersion: AI_PROMPT_VERSION
+      promptVersion: AI_PROMPT_VERSION,
+      trainingPack: activeTrainingPack
+        ? {
+            applied: true,
+            id: activeTrainingPack.id,
+            title: activeTrainingPack.title
+          }
+        : {
+            applied: false
+          }
     });
     activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
   } catch (error) {
@@ -8305,6 +11020,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     personaStyle?: unknown;
     industryId?: unknown;
     industryBaseline?: unknown;
+    trainingPackId?: unknown;
     history?: unknown;
     sessionId?: unknown;
     transcript?: unknown;
@@ -8317,6 +11033,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
+  const submittedTrainingPackId =
+    typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
   const history = normalizeDialogueHistory(body.history, { maxTurns: 24 });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
@@ -8418,9 +11136,11 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+  const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
+    orgId: context.user.orgId,
     scenarioId: context.scenario.id,
-    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+    useModularPromptArchitecture: context.useModularPromptArchitecture,
+    submittedTrainingPackId
   });
 
   try {
@@ -8542,6 +11262,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     personaStyle?: unknown;
     industryId?: unknown;
     industryBaseline?: unknown;
+    trainingPackId?: unknown;
     startedAt?: string;
     endedAt?: string;
     history?: unknown;
@@ -8556,6 +11277,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   const scenarioId = body.scenarioId?.trim();
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
+  const submittedTrainingPackId =
+    typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
   const history = normalizeDialogueHistory(body.history, { maxTurns: null });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
@@ -8690,9 +11413,11 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+  const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
+    orgId: context.user.orgId,
     scenarioId: context.scenario.id,
-    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+    useModularPromptArchitecture: context.useModularPromptArchitecture,
+    submittedTrainingPackId
   });
 
   try {
@@ -8743,6 +11468,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     const scorecard = normalizeScorecard(parsed);
     const scoringWeights = evaluationConfig?.scoringWeights ?? getDefaultScoringWeights();
     scorecard.overallScore = computeWeightedOverallScore(scorecard, scoringWeights);
+    const coachingArtifact = buildSimulationScoreCoachingArtifactFromScorecard(scorecard);
+    const normalizedCoachingThemes = buildNormalizedSimulationScoreThemesFromArtifact(coachingArtifact);
 
     const now = nowIso();
     const record: SimulationScoreRecord = {
@@ -8751,6 +11478,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       orgId: context.user.orgId,
       segmentId: context.segment.id,
       scenarioId: context.scenario.id,
+      trainingPackId: activeTrainingPack?.id ?? null,
       industryId: context.industryId,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
@@ -8760,6 +11488,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       empathy: scorecard.empathy,
       assertiveness: scorecard.assertiveness,
       summary: scorecard.summary,
+      coachingArtifact,
+      normalizedCoachingThemes,
       rubricVersion: AI_RUBRIC_VERSION,
       model: aiDetails.responseModel,
       promptVersion: AI_PROMPT_VERSION,
@@ -8777,6 +11507,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
         }
 
         db.scoreRecords.push(record);
+        syncTrainingPackAssignmentsForUserPack(db, user.orgId, user.id, record.trainingPackId ?? null);
 
         const event: AiUsageEvent = {
           id: `ai_${uuid()}`,
@@ -8823,6 +11554,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       record: {
         id: record.id,
         createdAt: record.createdAt,
+        trainingPackId: record.trainingPackId ?? null,
         model: record.model,
         promptVersion: record.promptVersion,
         rubricVersion: record.rubricVersion,
@@ -8852,6 +11584,8 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
   const body = request.body as RecordSimulationScoreRequest;
   const segmentId = body.segmentId?.trim();
   const scenarioId = body.scenarioId?.trim();
+  const submittedTrainingPackId =
+    typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
 
   if (!segmentId || !scenarioId) {
     response.status(400).json({ error: "segmentId and scenarioId are required." });
@@ -8896,6 +11630,15 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       response.status(400).json({ error: "Scenario does not match the submitted segment." });
       return;
     }
+    const org = getOrgById(db, user.orgId);
+    const useModularPromptArchitecture =
+      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
+    const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
+      orgId: user.orgId,
+      scenarioId,
+      useModularPromptArchitecture,
+      submittedTrainingPackId
+    });
 
     const clampScore = (value: unknown, max: number): number => {
       const parsed = Number(value);
@@ -8906,12 +11649,15 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     };
 
     const now = new Date();
+    const coachingArtifact = normalizeSimulationScoreCoachingArtifact(body.coachingArtifact ?? null);
+    const normalizedCoachingThemes = buildNormalizedSimulationScoreThemesFromArtifact(coachingArtifact);
     const record: SimulationScoreRecord = {
       id: `score_${uuid()}`,
       userId: user.id,
       orgId: user.orgId,
       segmentId,
       scenarioId,
+      trainingPackId: persistedTrainingPack?.id ?? null,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
       overallScore: clampScore(body.overallScore, 100),
@@ -8919,10 +11665,14 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       clarity: clampScore(body.clarity, 10),
       empathy: clampScore(body.empathy, 10),
       assertiveness: clampScore(body.assertiveness, 10),
+      summary: typeof body.summary === "string" && body.summary.trim() ? body.summary.trim() : undefined,
+      coachingArtifact,
+      normalizedCoachingThemes,
       createdAt: now.toISOString()
     };
 
     db.scoreRecords.push(record);
+    syncTrainingPackAssignmentsForUserPack(db, user.orgId, user.id, record.trainingPackId ?? null);
     response.status(201).json(record);
   });
 });
@@ -9737,6 +12487,8 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
 app.post("/usage/sessions", async (request: Request, response: Response) => {
   const body = request.body as RecordUsageSessionRequest;
   const authToken = getIncomingMobileToken(request);
+  const submittedTrainingPackId =
+    typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
 
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -9770,6 +12522,15 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
+    const org = getOrgById(db, user.orgId);
+    const useModularPromptArchitecture =
+      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
+    const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
+      orgId: user.orgId,
+      scenarioId: body.scenarioId,
+      useModularPromptArchitecture,
+      submittedTrainingPackId
+    });
 
     const now = new Date();
     const parsedStart = parseIsoDateOrNull(body.startedAt);
@@ -9806,11 +12567,13 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       orgId: user.orgId,
       segmentId: body.segmentId,
       scenarioId: body.scenarioId,
+      trainingPackId: persistedTrainingPack?.id ?? null,
       startedAt: sessionStart.toISOString(),
       endedAt: sessionEnd.toISOString(),
       rawDurationSeconds,
       createdAt: now.toISOString()
     });
+    syncTrainingPackAssignmentsForUserPack(db, user.orgId, user.id, persistedTrainingPack?.id ?? null);
     clearSimulationAiBudgetGrace(user.id);
     clearSimulationOrgMonthlyOverrunGrace(user.id);
 
@@ -10568,6 +13331,11 @@ function isTransientDatabaseError(error: unknown): boolean {
 }
 
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  if (error instanceof AuthCodeDeliveryError) {
+    response.status(error.statusCode).json({ error: error.message });
+    return;
+  }
+
   if (isTransientDatabaseError(error)) {
     response.status(503).json({ error: "Database temporarily unavailable. Please retry." });
     return;

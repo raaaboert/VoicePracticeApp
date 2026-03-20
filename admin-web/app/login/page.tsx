@@ -46,7 +46,7 @@ export default function LoginPage() {
     <main>
       <div className="shell" style={{ maxWidth: 500, paddingTop: 60 }}>
         <div className="card">
-          <h2>Admin Login</h2>
+          <h2>Peritio - Web Admin</h2>
           <p className="small">
             Development login is backed by API password auth. Use the bootstrap password from API env until changed.
           </p>

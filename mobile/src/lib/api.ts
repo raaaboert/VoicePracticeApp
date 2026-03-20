@@ -510,7 +510,13 @@ export async function fetchAiOpeningLine(params: {
   industryBaseline?: string;
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
-}): Promise<{ assistantText: string; model: string; promptVersion: string; usage: AiUsagePayload }> {
+}): Promise<{
+  assistantText: string;
+  model: string;
+  promptVersion: string;
+  usage: AiUsagePayload;
+  trainingPack: { applied: boolean; id?: string; title?: string };
+}> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/opening`,
     {
@@ -536,7 +542,13 @@ export async function fetchAiTurn(params: {
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
   history: DialogueMessage[];
-}): Promise<{ assistantText: string; model: string; promptVersion: string; usage: AiUsagePayload }> {
+  trainingPackId?: string;
+}): Promise<{
+  assistantText: string;
+  model: string;
+  promptVersion: string;
+  usage: AiUsagePayload;
+}> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/turn`,
     {
@@ -546,6 +558,7 @@ export async function fetchAiTurn(params: {
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
+        ...(params.trainingPackId ? { trainingPackId: params.trainingPackId } : {}),
         history: params.history.map((message) => ({
           role: message.role,
           content: message.content,
@@ -568,11 +581,13 @@ export async function fetchAiScore(params: {
   startedAt: string;
   endedAt: string;
   history: DialogueMessage[];
+  trainingPackId?: string;
 }): Promise<{
   scorecard: SimulationScorecard;
   record: {
     id: string;
     createdAt: string;
+    trainingPackId?: string | null;
     model: string | null;
     promptVersion: string | null;
     rubricVersion: string | null;
@@ -590,6 +605,7 @@ export async function fetchAiScore(params: {
         personaStyle: params.personaStyle,
         startedAt: params.startedAt,
         endedAt: params.endedAt,
+        ...(params.trainingPackId ? { trainingPackId: params.trainingPackId } : {}),
         history: params.history.map((message) => ({
           role: message.role,
           content: message.content,

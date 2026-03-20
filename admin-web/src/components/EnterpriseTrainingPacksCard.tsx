@@ -3,15 +3,24 @@
 import { useEffect, useMemo, useState } from "react";
 // @ts-expect-error Workspace does not include react-dom type declarations.
 import { createPortal } from "react-dom";
-import { AppConfig, TrainingPack } from "@voicepractice/shared";
+import { AdminTrainingPackAssignmentsResponse, AppConfig, TrainingPack } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";
 
 interface EnterpriseTrainingPacksCardProps {
   orgId: string;
   orgName?: string;
   config: AppConfig | null;
+  orgUsers?: TrainingPackAssignableUser[];
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+}
+
+interface TrainingPackAssignableUser {
+  userId: string;
+  email: string;
+  status: string;
+  orgRole?: string;
+  dashboardAccessEnabled?: boolean;
 }
 
 interface OrgTrainingPacksListResponse {
@@ -150,6 +159,7 @@ export function EnterpriseTrainingPacksCard({
   orgId,
   orgName,
   config,
+  orgUsers = [],
   collapsed = false,
   onToggleCollapse
 }: EnterpriseTrainingPacksCardProps) {
@@ -166,6 +176,11 @@ export function EnterpriseTrainingPacksCard({
   const [editorScenarioSearch, setEditorScenarioSearch] = useState("");
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [assignmentEditorPack, setAssignmentEditorPack] = useState<TrainingPack | null>(null);
+  const [assignmentUserIds, setAssignmentUserIds] = useState<string[]>([]);
+  const [assignmentLoading, setAssignmentLoading] = useState(false);
+  const [assignmentSaving, setAssignmentSaving] = useState(false);
+  const [assignmentError, setAssignmentError] = useState<string | null>(null);
 
   const scenarioOptions = useMemo<ScenarioOption[]>(() => {
     const rows: ScenarioOption[] = [];
@@ -205,6 +220,16 @@ export function EnterpriseTrainingPacksCard({
         return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
       }),
     [packs]
+  );
+  const sortedAssignableUsers = useMemo(
+    () =>
+      [...orgUsers].sort((left, right) => {
+        if (left.status !== right.status) {
+          return left.status === "active" ? -1 : 1;
+        }
+        return left.email.localeCompare(right.email, undefined, { sensitivity: "base" });
+      }),
+    [orgUsers]
   );
 
   const refresh = async (options?: { preserveNotice?: boolean }) => {
@@ -252,6 +277,68 @@ export function EnterpriseTrainingPacksCard({
     setEditorOpen(false);
     setEditorError(null);
     setEditorSaving(false);
+  };
+
+  const openAssignments = async (pack: TrainingPack) => {
+    if (!orgId) {
+      return;
+    }
+    setAssignmentEditorPack(pack);
+    setAssignmentLoading(true);
+    setAssignmentSaving(false);
+    setAssignmentError(null);
+    try {
+      const payload = await adminFetch<AdminTrainingPackAssignmentsResponse>(
+        `/orgs/${orgId}/training-packs/${pack.id}/assignments`
+      );
+      setAssignmentUserIds((payload.assignments ?? []).map((assignment) => assignment.userId));
+    } catch (caught) {
+      setAssignmentError(caught instanceof Error ? caught.message : "Could not load training pack assignments.");
+    } finally {
+      setAssignmentLoading(false);
+    }
+  };
+
+  const closeAssignments = () => {
+    setAssignmentEditorPack(null);
+    setAssignmentUserIds([]);
+    setAssignmentLoading(false);
+    setAssignmentSaving(false);
+    setAssignmentError(null);
+  };
+
+  const toggleAssignedUser = (userId: string) => {
+    setAssignmentUserIds((prev) => {
+      if (prev.includes(userId)) {
+        return prev.filter((entry) => entry !== userId);
+      }
+      return [...prev, userId];
+    });
+  };
+
+  const saveAssignments = async () => {
+    if (!orgId || !assignmentEditorPack) {
+      return;
+    }
+
+    setAssignmentSaving(true);
+    setAssignmentError(null);
+    setError(null);
+    try {
+      await adminFetch<AdminTrainingPackAssignmentsResponse>(
+        `/orgs/${orgId}/training-packs/${assignmentEditorPack.id}/assignments`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ userIds: assignmentUserIds })
+        }
+      );
+      setNotice("Training pack assignments updated.");
+      closeAssignments();
+    } catch (caught) {
+      setAssignmentError(caught instanceof Error ? caught.message : "Could not update training pack assignments.");
+    } finally {
+      setAssignmentSaving(false);
+    }
   };
 
   const toggleScenario = (scenarioId: string) => {
@@ -456,6 +543,9 @@ export function EnterpriseTrainingPacksCard({
                           <button type="button" disabled={busy} onClick={() => openEdit(pack)}>
                             Edit
                           </button>
+                          <button type="button" disabled={busy} onClick={() => void openAssignments(pack)}>
+                            Assignments
+                          </button>
                           <button type="button" disabled={busy} onClick={() => void toggleActive(pack)}>
                             {pack.active ? "Deactivate" : "Activate"}
                           </button>
@@ -627,6 +717,103 @@ export function EnterpriseTrainingPacksCard({
                   </button>
                   <button type="button" className="primary" onClick={() => void saveEditor()} disabled={editorSaving}>
                     {editorSaving ? "Saving..." : editorMode === "create" ? "Create Training Pack" : "Save Changes"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
+
+      {assignmentEditorPack && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="content-modal-backdrop"
+              style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 9999,
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "flex-start",
+                paddingTop: "10vh",
+                paddingLeft: 16,
+                paddingRight: 16,
+                paddingBottom: 24,
+                overflowY: "auto"
+              }}
+            >
+              <div
+                className="card content-modal-card"
+                style={{ width: "min(860px, calc(100vw - 32px))", maxHeight: "calc(100vh - 14vh)", overflowY: "auto" }}
+              >
+                <div className="content-section-header content-header-actions" style={{ marginBottom: 12 }}>
+                  <div>
+                    <h3 style={{ marginBottom: 4 }}>Manage Assignments</h3>
+                    <div className="small">
+                      {assignmentEditorPack.title}. Completion uses one scored attempt for every required scenario snapshot captured when a user is assigned.
+                    </div>
+                  </div>
+                  <button type="button" onClick={closeAssignments} disabled={assignmentSaving}>
+                    Close
+                  </button>
+                </div>
+
+                {assignmentError ? <p className="error">{assignmentError}</p> : null}
+
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <p className="small" style={{ margin: 0 }}>
+                    Assignments are durable roster records for this pack. Removing a user deactivates the active assignment but does not delete history.
+                  </p>
+                </div>
+
+                {assignmentLoading ? (
+                  <p className="small">Loading assignments...</p>
+                ) : sortedAssignableUsers.length > 0 ? (
+                  <div className="content-table-wrap">
+                    <table className="content-table">
+                      <thead>
+                        <tr>
+                          <th>Assign</th>
+                          <th>User</th>
+                          <th>Status</th>
+                          <th>Org Role</th>
+                          <th>Dashboard Access</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedAssignableUsers.map((user) => (
+                          <tr key={user.userId}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={assignmentUserIds.includes(user.userId)}
+                                disabled={assignmentSaving}
+                                onChange={() => toggleAssignedUser(user.userId)}
+                              />
+                            </td>
+                            <td>
+                              <div>{user.email}</div>
+                              <div className="small">{user.userId}</div>
+                            </td>
+                            <td>{user.status === "active" ? "Active" : "Disabled"}</td>
+                            <td>{user.orgRole ?? "-"}</td>
+                            <td>{user.dashboardAccessEnabled ? "Enabled" : "Disabled"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="small">No enterprise users were found for this account yet.</p>
+                )}
+
+                <div className="content-actions content-actions-wrap" style={{ marginTop: 16, justifyContent: "flex-end" }}>
+                  <button type="button" onClick={closeAssignments} disabled={assignmentSaving}>
+                    Cancel
+                  </button>
+                  <button type="button" className="primary" onClick={() => void saveAssignments()} disabled={assignmentSaving || assignmentLoading}>
+                    {assignmentSaving ? "Saving..." : "Save Assignments"}
                   </button>
                 </div>
               </div>

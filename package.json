@@ -5,6 +5,7 @@
   "workspaces": [
     "mobile",
     "admin-web",
+    "peritio-web",
     "api",
     "shared"
   ],
@@ -12,15 +13,18 @@
     "start:mobile": "npm run build --workspace shared && npm run start --workspace mobile",
     "start:api": "npm run build --workspace shared && npm run dev --workspace api",
     "start:admin": "npm run build --workspace shared && npm run dev --workspace admin-web",
+    "start:peritio": "npm run build --workspace shared && npm run dev --workspace peritio-web",
     "start:api:prod": "npm run build --workspace shared && npm run build --workspace api && npm run start --workspace api",
     "start:admin:prod": "npm run build --workspace shared && npm run build --workspace admin-web && npm run start --workspace admin-web",
+    "start:peritio:prod": "npm run build --workspace shared && npm run build --workspace peritio-web && npm run start --workspace peritio-web",
     "start:review": "powershell -ExecutionPolicy Bypass -File .\\scripts\\launch-review-stack.ps1",
     "open:android": "scripts\\open-expo-on-emulator.cmd",
     "build:api": "npm run build --workspace shared && npm run build --workspace api",
     "build:shared": "npm run build --workspace shared",
+    "build:peritio": "npm run build --workspace shared && npm run build --workspace peritio-web",
     "smoke:stack": "node scripts/smoke-stack.mjs",
     "test:critical-flow": "node scripts/test-critical-flow.mjs",
-    "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run build --workspace admin-web && npx tsc --noEmit -p mobile/tsconfig.json",
+    "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run build --workspace admin-web && npm run build --workspace peritio-web && npx tsc --noEmit -p mobile/tsconfig.json",
     "verify:all": "npm run verify:fast && npm run smoke:stack && npm run test:critical-flow"
   }
 }
