@@ -394,6 +394,19 @@ button:disabled,
   margin: 0;
 }
 
+.enterprise-search-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-top: 12px;
+}
+
+.enterprise-search-field {
+  min-width: 240px;
+  flex: 1 1 320px;
+}
+
 label {
   display: block;
   font-size: 13px;
@@ -646,6 +659,10 @@ td {
 
   .enterprise-org-context {
     align-items: stretch;
+  }
+
+  .enterprise-search-field {
+    min-width: 100%;
   }
 
   .data-table {

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppConfig,
   ORG_USER_ROLE_LABELS,
@@ -183,6 +183,7 @@ export default function EnterpriseOrgPage() {
   const [deferPerUserDailyCapUntilNextCycle, setDeferPerUserDailyCapUntilNextCycle] = useState(false);
   const [perUserDailyMinutesInputByUserId, setPerUserDailyMinutesInputByUserId] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<EnterpriseOrgTabId>("companyDetails");
+  const [userSearch, setUserSearch] = useState("");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
   const [joinRequestsGeneratedAt, setJoinRequestsGeneratedAt] = useState<string | null>(null);
@@ -249,6 +250,10 @@ export default function EnterpriseOrgPage() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId]);
+
+  useEffect(() => {
+    setUserSearch("");
   }, [orgId]);
 
   useEffect(() => {
@@ -319,6 +324,28 @@ export default function EnterpriseOrgPage() {
       activeUserRows.reduce((total, row) => total + Math.max(0, row.effectiveDailySecondsCap) * Math.max(1, billingPeriodDays), 0),
     [activeUserRows, billingPeriodDays]
   );
+  const deferredUserSearch = useDeferredValue(userSearch.trim().toLowerCase());
+  const filteredOrgUsers = useMemo(() => {
+    const rows = dashboard?.users ?? [];
+    if (!deferredUserSearch) {
+      return rows;
+    }
+
+    return rows.filter((row) => {
+      const roleLabel = ORG_USER_ROLE_LABELS[row.orgRole] ?? row.orgRole;
+      const searchBlob = [
+        row.email,
+        row.userId,
+        row.orgRole,
+        roleLabel,
+        row.status,
+        row.dashboardAccessEnabled ? "dashboard enabled" : "dashboard disabled",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return searchBlob.includes(deferredUserSearch);
+    });
+  }, [dashboard?.users, deferredUserSearch]);
 
   const toggleCard = (key: EnterpriseCardKey) => {
     setCardExpanded((prev) => ({
@@ -749,47 +776,12 @@ export default function EnterpriseOrgPage() {
       }
     >
       <div className="enterprise-page">
-        <div className="card">
-          <div className="enterprise-org-context">
-            <div className="enterprise-org-context-main">
-              <h3 style={{ marginBottom: 6 }}>{dashboard?.org.name ?? (loading ? "Loading..." : "Enterprise Account")}</h3>
-              <div className="small">{dashboard?.org.id ?? ""}</div>
-              <div className="enterprise-summary-grid">
-                <EnterpriseSummaryPill
-                  label="Billing Period"
-                  value={
-                    dashboard
-                      ? `${formatDate(dashboard.billingPeriod.periodStartAt)} to ${formatDate(dashboard.billingPeriod.periodEndAt)}`
-                      : "-"
-                  }
-                />
-                <EnterpriseSummaryPill label="Active Users" value={String(activeUserRows.length)} />
-                <EnterpriseSummaryPill label="Pending Requests" value={String(joinRequests.length)} />
-                <EnterpriseSummaryPill label="Active Segments" value={activeIndustries.length > 0 ? String(activeIndustries.length) : "0"} />
-              </div>
-              <p className="small enterprise-note" style={{ marginTop: 12 }}>
-                {dashboard?.generatedAt
-                  ? `Workspace refreshed ${formatDateTime(dashboard.generatedAt)}.`
-                  : loading
-                    ? "Loading enterprise workspace..."
-                    : "Enterprise workspace data is not available yet."}
-              </p>
-            </div>
-            <div className="card-actions card-actions-end">
-              <button type="button" onClick={() => void load()} disabled={loading}>
-                {loading ? "Refreshing..." : "Refresh"}
-              </button>
-              <Link className="button" href={withAdminMode("/users", mode)}>
-                Back to Accounts
-              </Link>
-              <Link className="button" href={withAdminMode(`/users/enterprise/${orgId}/billing`, mode)}>
-                Usage/Billing
-              </Link>
-            </div>
+        {error || successMessage ? (
+          <div className="card">
+            {error ? <p className="error">{error}</p> : null}
+            {successMessage ? <p className="success">{successMessage}</p> : null}
           </div>
-          {error ? <p className="error">{error}</p> : null}
-          {successMessage ? <p className="success">{successMessage}</p> : null}
-        </div>
+        ) : null}
 
         <section
           id="enterprise-panel-company-details"
@@ -800,6 +792,43 @@ export default function EnterpriseOrgPage() {
         >
           {dashboard ? (
             <>
+              <div className="card">
+                <div className="enterprise-org-context">
+                  <div className="enterprise-org-context-main">
+                    <h3 style={{ marginBottom: 6 }}>{dashboard.org.name}</h3>
+                    <div className="small">{dashboard.org.id}</div>
+                    <div className="enterprise-summary-grid">
+                      <EnterpriseSummaryPill
+                        label="Billing Period"
+                        value={`${formatDate(dashboard.billingPeriod.periodStartAt)} to ${formatDate(dashboard.billingPeriod.periodEndAt)}`}
+                      />
+                      <EnterpriseSummaryPill label="Active Users" value={String(activeUserRows.length)} />
+                      <EnterpriseSummaryPill label="Pending Requests" value={String(joinRequests.length)} />
+                      <EnterpriseSummaryPill
+                        label="Active Segments"
+                        value={activeIndustries.length > 0 ? String(activeIndustries.length) : "0"}
+                      />
+                    </div>
+                    <p className="small enterprise-note" style={{ marginTop: 12 }}>
+                      {dashboard.generatedAt
+                        ? `Workspace refreshed ${formatDateTime(dashboard.generatedAt)}.`
+                        : "Enterprise workspace data is not available yet."}
+                    </p>
+                  </div>
+                  <div className="card-actions card-actions-end">
+                    <button type="button" onClick={() => void load()} disabled={loading}>
+                      {loading ? "Refreshing..." : "Refresh"}
+                    </button>
+                    <Link className="button" href={withAdminMode("/users", mode)}>
+                      Back to Accounts
+                    </Link>
+                    <Link className="button" href={withAdminMode(`/users/enterprise/${orgId}/billing`, mode)}>
+                      Usage/Billing
+                    </Link>
+                  </div>
+                </div>
+              </div>
+
               <div className="card enterprise-section-card">
                 <div className="card-header">
                   <div>
@@ -1169,6 +1198,28 @@ export default function EnterpriseOrgPage() {
                   Active users: {activeUserRows.length} | Projected allocation:{" "}
                   {Math.round(projectedAllocatedActiveUserSecondsThisPeriod / 60).toLocaleString()} minutes this cycle.
                 </p>
+                <div className="enterprise-search-row">
+                  <div className="enterprise-search-field">
+                    <label htmlFor="enterprise-user-search">Search Users</label>
+                    <input
+                      id="enterprise-user-search"
+                      type="search"
+                      value={userSearch}
+                      onChange={(event) => setUserSearch(event.target.value)}
+                      placeholder="Search by email, user ID, role, or status"
+                    />
+                  </div>
+                  {userSearch.trim() ? (
+                    <button type="button" onClick={() => setUserSearch("")}>
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+                <div className="small" style={{ marginTop: 6 }}>
+                  {deferredUserSearch
+                    ? `Showing ${filteredOrgUsers.length} of ${dashboard?.users.length ?? 0} user(s).`
+                    : `Showing all ${dashboard?.users.length ?? 0} user(s).`}
+                </div>
               </div>
               <div className="card-actions">
                 <button type="button" onClick={() => toggleCard("users")}>
@@ -1192,19 +1243,25 @@ export default function EnterpriseOrgPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(dashboard?.users ?? []).length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="small">
-                          {loading ? "Loading..." : "No users found for this enterprise account."}
-                        </td>
-                      </tr>
-                    ) : (
-                      (dashboard?.users ?? []).map((user) => (
-                        <tr key={user.userId}>
-                          <td>
-                            <div>{user.email}</div>
-                            <div className="small">{user.userId}</div>
-                          </td>
+                {(dashboard?.users ?? []).length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="small">
+                      {loading ? "Loading..." : "No users found for this enterprise account."}
+                    </td>
+                  </tr>
+                ) : filteredOrgUsers.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="small">
+                      No users match "{userSearch.trim()}".
+                    </td>
+                  </tr>
+                ) : (
+                  filteredOrgUsers.map((user) => (
+                    <tr key={user.userId}>
+                      <td>
+                        <div>{user.email}</div>
+                        <div className="small">{user.userId}</div>
+                      </td>
                           <td>
                             <select
                               value={user.orgRole}
