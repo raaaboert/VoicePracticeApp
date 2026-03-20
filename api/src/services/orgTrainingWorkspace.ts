@@ -288,11 +288,16 @@ export function replaceOrgTrainingPackAttachments(params: {
   createAttachmentId: () => string;
 }): void {
   ensureOrgTrainingCollections(params.db);
+  const requestedTrainingPackIds = new Set(params.trainingPackIds.map((entry) => entry.trim()).filter(Boolean));
   params.db.orgTrainingPackAttachments = params.db.orgTrainingPackAttachments.filter(
-    (entry) => !(entry.orgId === params.orgId && entry.trainingId === params.trainingId),
+    (entry) =>
+      !(
+        entry.orgId === params.orgId &&
+        (entry.trainingId === params.trainingId || requestedTrainingPackIds.has(entry.trainingPackId))
+      ),
   );
 
-  for (const trainingPackId of Array.from(new Set(params.trainingPackIds.map((entry) => entry.trim()).filter(Boolean)))) {
+  for (const trainingPackId of Array.from(requestedTrainingPackIds)) {
     params.db.orgTrainingPackAttachments.push({
       id: params.createAttachmentId(),
       orgId: params.orgId,
@@ -313,11 +318,16 @@ export function replaceOrgTrainingScenarioAttachments(params: {
   createAttachmentId: () => string;
 }): void {
   ensureOrgTrainingCollections(params.db);
+  const requestedScenarioIds = new Set(params.scenarioIds.map((entry) => entry.trim()).filter(Boolean));
   params.db.orgTrainingScenarioAttachments = params.db.orgTrainingScenarioAttachments.filter(
-    (entry) => !(entry.orgId === params.orgId && entry.trainingId === params.trainingId),
+    (entry) =>
+      !(
+        entry.orgId === params.orgId &&
+        (entry.trainingId === params.trainingId || requestedScenarioIds.has(entry.scenarioId))
+      ),
   );
 
-  for (const scenarioId of Array.from(new Set(params.scenarioIds.map((entry) => entry.trim()).filter(Boolean)))) {
+  for (const scenarioId of Array.from(requestedScenarioIds)) {
     params.db.orgTrainingScenarioAttachments.push({
       id: params.createAttachmentId(),
       orgId: params.orgId,

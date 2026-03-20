@@ -14,6 +14,7 @@ interface EnterpriseTrainingPacksCardProps {
   collapsed?: boolean;
   onToggleCollapse?: () => void;
   onCatalogChanged?: () => void | Promise<void>;
+  trainingScope?: TrainingPackScope;
 }
 
 interface TrainingPackAssignableUser {
@@ -22,6 +23,13 @@ interface TrainingPackAssignableUser {
   status: string;
   orgRole?: string;
   dashboardAccessEnabled?: boolean;
+}
+
+interface TrainingPackScope {
+  trainingId: string;
+  trainingName: string;
+  attachedTrainingPackIds: string[];
+  onTrainingPackOwnershipChange?: (trainingPackIds: string[]) => Promise<void>;
 }
 
 interface OrgTrainingPacksListResponse {
@@ -163,7 +171,8 @@ export function EnterpriseTrainingPacksCard({
   orgUsers = [],
   collapsed = false,
   onToggleCollapse,
-  onCatalogChanged
+  onCatalogChanged,
+  trainingScope,
 }: EnterpriseTrainingPacksCardProps) {
   const [packs, setPacks] = useState<TrainingPack[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
@@ -213,15 +222,23 @@ export function EnterpriseTrainingPacksCard({
     );
   }, [editorScenarioSearch, scenarioOptions]);
 
+  const scopedPacks = useMemo(() => {
+    if (!trainingScope) {
+      return packs;
+    }
+    const scopedIds = new Set(trainingScope.attachedTrainingPackIds);
+    return packs.filter((pack) => scopedIds.has(pack.id));
+  }, [packs, trainingScope]);
+
   const sortedPacks = useMemo(
     () =>
-      [...packs].sort((a, b) => {
+      [...scopedPacks].sort((a, b) => {
         if (a.active !== b.active) {
           return a.active ? -1 : 1;
         }
         return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
       }),
-    [packs]
+    [scopedPacks]
   );
   const sortedAssignableUsers = useMemo(
     () =>
@@ -393,11 +410,21 @@ export function EnterpriseTrainingPacksCard({
         active: editorForm.active
       };
       if (editorMode === "create") {
-        await adminFetch<TrainingPack>(`/orgs/${orgId}/training-packs`, {
+        const created = await adminFetch<TrainingPack>(`/orgs/${orgId}/training-packs`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
-        setNotice("Training pack created.");
+        if (trainingScope?.onTrainingPackOwnershipChange) {
+          await trainingScope.onTrainingPackOwnershipChange([
+            ...trainingScope.attachedTrainingPackIds,
+            created.id,
+          ]);
+        }
+        setNotice(
+          trainingScope
+            ? `Training pack created for "${trainingScope.trainingName}".`
+            : "Training pack created.",
+        );
       } else if (editorForm.id) {
         await adminFetch<TrainingPack>(`/orgs/${orgId}/training-packs/${editorForm.id}`, {
           method: "PATCH",
@@ -467,14 +494,18 @@ export function EnterpriseTrainingPacksCard({
     <div className="card content-section-card" style={editorOpen ? { position: "relative", zIndex: 1200 } : undefined}>
       <div className="content-section-header content-header-actions">
         <div>
-          <h3 style={{ marginBottom: 6 }}>Training Packs</h3>
+          <h3 style={{ marginBottom: 6 }}>
+            {trainingScope ? "Training Packs" : "Training Packs"}
+          </h3>
           <div className="small">
-            Org-scoped prompt coaching packs. {orgName ? `${orgName}. ` : ""}
-            {generatedAt ? `Refreshed ${formatDateTime(generatedAt)}` : ""}
+            {trainingScope
+              ? `Packs owned by ${trainingScope.trainingName}.`
+              : `Org-scoped prompt coaching packs. ${orgName ? `${orgName}. ` : ""}`}
+            {generatedAt ? ` Refreshed ${formatDateTime(generatedAt)}` : ""}
           </div>
         </div>
         <div className="content-actions content-actions-wrap">
-          {onToggleCollapse ? (
+          {onToggleCollapse && !trainingScope ? (
             <button type="button" onClick={onToggleCollapse}>
               {collapsed ? "Expand" : "Collapse"}
             </button>
@@ -510,7 +541,11 @@ export function EnterpriseTrainingPacksCard({
               {sortedPacks.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="small">
-                    {loading ? "Loading..." : "No training packs found for this account."}
+                    {loading
+                      ? "Loading..."
+                      : trainingScope
+                        ? "No training packs exist for this training yet."
+                        : "No training packs found for this account."}
                   </td>
                 </tr>
               ) : (

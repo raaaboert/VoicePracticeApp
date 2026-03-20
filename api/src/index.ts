@@ -8926,6 +8926,18 @@ app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: R
       response.status(404).json({ error: "Training not found." });
       return;
     }
+    const attachedTrainingPackCount = db.orgTrainingPackAttachments.filter(
+      (entry) => entry.orgId === org.id && entry.trainingId === training.id
+    ).length;
+    const attachedScenarioCount = db.orgTrainingScenarioAttachments.filter(
+      (entry) => entry.orgId === org.id && entry.trainingId === training.id
+    ).length;
+    if (attachedTrainingPackCount > 0 || attachedScenarioCount > 0) {
+      response.status(400).json({
+        error: "Remove or delete the training's packs and custom scenarios before deleting the training.",
+      });
+      return;
+    }
 
     db.orgTrainings = db.orgTrainings.filter((entry) => !(entry.orgId === org.id && entry.id === trainingId));
     db.orgTrainingPackAttachments = db.orgTrainingPackAttachments.filter(

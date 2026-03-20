@@ -1045,10 +1045,6 @@ export default function EnterpriseOrgPage() {
             orgName={dashboard?.org.name}
             config={config}
             orgUsers={dashboard?.users ?? []}
-            trainingPacksCollapsed={!cardExpanded.trainingPacks}
-            onToggleTrainingPacks={() => toggleCard("trainingPacks")}
-            customScenariosCollapsed={!cardExpanded.customScenarios}
-            onToggleCustomScenarios={() => toggleCard("customScenarios")}
           />
         </section>
 

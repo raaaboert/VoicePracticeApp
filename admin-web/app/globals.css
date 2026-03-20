@@ -427,6 +427,23 @@ button:disabled,
   background: rgba(45, 165, 99, 0.12);
 }
 
+.enterprise-training-name-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--vp-text);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.enterprise-training-name-button:hover,
+.enterprise-training-name-button:focus-visible {
+  color: var(--vp-brand-200);
+  text-decoration: underline;
+}
+
 .enterprise-attachment-list {
   display: flex;
   flex-direction: column;

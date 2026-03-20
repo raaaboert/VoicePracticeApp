@@ -23,6 +23,14 @@ interface EnterpriseCustomScenariosCardProps {
   collapsed?: boolean;
   onToggleCollapse?: () => void;
   onCatalogChanged?: () => void | Promise<void>;
+  trainingScope?: TrainingScenarioScope;
+}
+
+interface TrainingScenarioScope {
+  trainingId: string;
+  trainingName: string;
+  attachedScenarioIds: string[];
+  onScenarioOwnershipChange?: (scenarioIds: string[]) => Promise<void>;
 }
 
 interface OrgCustomScenariosListResponse {
@@ -242,6 +250,7 @@ export function EnterpriseCustomScenariosCard({
   collapsed = false,
   onToggleCollapse,
   onCatalogChanged,
+  trainingScope,
 }: EnterpriseCustomScenariosCardProps) {
   const [scenarios, setScenarios] = useState<OrgCustomScenario[]>([]);
   const [loading, setLoading] = useState(false);
@@ -316,9 +325,17 @@ export function EnterpriseCustomScenariosCard({
     );
   }, [baseScenarioOptions, baseScenarioSearch]);
 
+  const scopedScenarios = useMemo(() => {
+    if (!trainingScope) {
+      return scenarios;
+    }
+    const scopedIds = new Set(trainingScope.attachedScenarioIds);
+    return scenarios.filter((scenario) => scopedIds.has(scenario.id));
+  }, [scenarios, trainingScope]);
+
   const filteredScenarios = useMemo(() => {
     const needle = searchText.trim().toLowerCase();
-    return scenarios.filter((scenario) => {
+    return scopedScenarios.filter((scenario) => {
       if (roleFilter && scenario.segmentId !== roleFilter) return false;
       if (!needle) return true;
       const industriesText = (scenario.applicableIndustryIds ?? []).map((id) => industryById.get(id)?.label ?? id).join(" ");
@@ -327,7 +344,7 @@ export function EnterpriseCustomScenariosCard({
         .toLowerCase()
         .includes(needle);
     });
-  }, [scenarios, searchText, roleFilter, industryById]);
+  }, [scopedScenarios, searchText, roleFilter, industryById]);
 
   useEffect(() => {
     if (!orgId) return;
@@ -497,7 +514,7 @@ export function EnterpriseCustomScenariosCard({
       ],
     ];
 
-    for (const scenario of [...scenarios].sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }))) {
+    for (const scenario of [...scopedScenarios].sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }))) {
       rows.push([
         orgId,
         orgName ?? "",
@@ -522,7 +539,8 @@ export function EnterpriseCustomScenariosCard({
       ]);
     }
 
-    downloadCsv(rows, `voicepractice-custom-scenarios-${orgId}-${new Date().toISOString().slice(0, 10)}.csv`);
+    const suffix = trainingScope ? `${trainingScope.trainingId}-custom-scenarios` : `${orgId}`;
+    downloadCsv(rows, `voicepractice-custom-scenarios-${suffix}-${new Date().toISOString().slice(0, 10)}.csv`);
   };
 
   const downloadSingleScenarioCsv = (scenario: OrgCustomScenario | null) => {
@@ -629,12 +647,22 @@ export function EnterpriseCustomScenariosCard({
           method: "POST",
           body: JSON.stringify(payload),
         });
+        if (trainingScope?.onScenarioOwnershipChange) {
+          await trainingScope.onScenarioOwnershipChange([
+            ...trainingScope.attachedScenarioIds,
+            created.id,
+          ]);
+        }
         setScenarios((prev) =>
           [...prev.filter((entry) => entry.id !== created.id), created].sort((a, b) =>
             a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
           ),
         );
-        setNotice(`Saved "${created.title}" as inactive.`);
+        setNotice(
+          trainingScope
+            ? `Saved "${created.title}" under ${trainingScope.trainingName} as inactive.`
+            : `Saved "${created.title}" as inactive.`,
+        );
       } else if (editorForm.id) {
         const payload: UpdateOrgCustomScenarioRequest = {
           title: editorForm.title.trim(),
@@ -1335,16 +1363,19 @@ export function EnterpriseCustomScenariosCard({
         <div>
           <h3 style={{ marginBottom: 6 }}>Custom Scenarios</h3>
           <div className="small">
-            Account-specific scenarios only. {generatedAt ? `Refreshed ${formatDateTime(generatedAt)}` : ""}
+            {trainingScope
+              ? `Scenarios owned by ${trainingScope.trainingName}.`
+              : "Account-specific scenarios only."}
+            {generatedAt ? ` Refreshed ${formatDateTime(generatedAt)}` : ""}
           </div>
         </div>
         <div className="content-actions content-actions-wrap">
-          {onToggleCollapse ? (
+          {onToggleCollapse && !trainingScope ? (
             <button type="button" onClick={onToggleCollapse}>
               {collapsed ? "Expand" : "Collapse"}
             </button>
           ) : null}
-          <button type="button" onClick={downloadAllScenariosCsv} disabled={scenarios.length === 0}>
+          <button type="button" onClick={downloadAllScenariosCsv} disabled={scopedScenarios.length === 0}>
             Download CSV
           </button>
           <button type="button" onClick={() => void refreshScenarios()} disabled={loading}>
@@ -1400,7 +1431,11 @@ export function EnterpriseCustomScenariosCard({
                 {filteredScenarios.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="small">
-                      {loading ? "Loading..." : "No custom scenarios found for this account."}
+                      {loading
+                        ? "Loading..."
+                        : trainingScope
+                          ? "No custom scenarios exist for this training yet."
+                          : "No custom scenarios found for this account."}
                     </td>
                   </tr>
                 ) : (

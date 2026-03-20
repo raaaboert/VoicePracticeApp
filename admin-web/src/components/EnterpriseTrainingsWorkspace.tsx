@@ -4,14 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AppConfig,
   CreateOrgTrainingRequest,
-  OrgCustomScenario,
   ORG_TRAINING_STATUSES,
   OrgTrainingListResponse,
   OrgTrainingStatus,
   OrgTrainingSummary,
   SetOrgTrainingPackAttachmentsRequest,
   SetOrgTrainingScenarioAttachmentsRequest,
-  TrainingPack,
   UpdateOrgTrainingRequest,
 } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";
@@ -23,10 +21,6 @@ interface EnterpriseTrainingsWorkspaceProps {
   orgName?: string;
   config: AppConfig | null;
   orgUsers?: TrainingWorkspaceAssignableUser[];
-  trainingPacksCollapsed?: boolean;
-  onToggleTrainingPacks?: () => void;
-  customScenariosCollapsed?: boolean;
-  onToggleCustomScenarios?: () => void;
 }
 
 interface TrainingWorkspaceAssignableUser {
@@ -35,18 +29,6 @@ interface TrainingWorkspaceAssignableUser {
   status: string;
   orgRole?: string;
   dashboardAccessEnabled?: boolean;
-}
-
-interface OrgTrainingPacksListResponse {
-  generatedAt: string;
-  orgId: string;
-  packs: TrainingPack[];
-}
-
-interface OrgCustomScenariosListResponse {
-  generatedAt: string;
-  orgId: string;
-  scenarios: OrgCustomScenario[];
 }
 
 interface TrainingEditorState {
@@ -114,28 +96,17 @@ export function EnterpriseTrainingsWorkspace({
   orgName,
   config,
   orgUsers = [],
-  trainingPacksCollapsed = false,
-  onToggleTrainingPacks,
-  customScenariosCollapsed = false,
-  onToggleCustomScenarios,
 }: EnterpriseTrainingsWorkspaceProps) {
   const [trainings, setTrainings] = useState<OrgTrainingSummary[]>([]);
-  const [trainingPacks, setTrainingPacks] = useState<TrainingPack[]>([]);
-  const [customScenarios, setCustomScenarios] = useState<OrgCustomScenario[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [trainingSearch, setTrainingSearch] = useState("");
   const [editorTargetId, setEditorTargetId] = useState<string | null>(null);
   const [editorState, setEditorState] = useState<TrainingEditorState>(() => createEmptyTrainingEditor());
   const [trainingSaving, setTrainingSaving] = useState(false);
   const [deletingTrainingId, setDeletingTrainingId] = useState<string | null>(null);
-  const [packAttachmentSaving, setPackAttachmentSaving] = useState(false);
-  const [scenarioAttachmentSaving, setScenarioAttachmentSaving] = useState(false);
-  const [packSearch, setPackSearch] = useState("");
-  const [scenarioSearch, setScenarioSearch] = useState("");
-  const [selectedPackIds, setSelectedPackIds] = useState<string[]>([]);
-  const [selectedScenarioIds, setSelectedScenarioIds] = useState<string[]>([]);
 
   const refreshWorkspace = async (options?: { preserveTargetId?: string | null; preserveNotice?: boolean }) => {
     if (!orgId) {
@@ -148,41 +119,25 @@ export function EnterpriseTrainingsWorkspace({
       setNotice(null);
     }
 
-    const [trainingResult, packsResult, scenariosResult] = await Promise.allSettled([
-      adminFetch<OrgTrainingListResponse>(`/orgs/${orgId}/trainings`),
-      adminFetch<OrgTrainingPacksListResponse>(`/orgs/${orgId}/training-packs`),
-      adminFetch<OrgCustomScenariosListResponse>(`/orgs/${orgId}/custom-scenarios`),
-    ]);
+    try {
+      const payload = await adminFetch<OrgTrainingListResponse>(`/orgs/${orgId}/trainings`);
+      setTrainings(sortTrainings(payload.trainings ?? []));
+      setGeneratedAt(payload.generatedAt ?? null);
 
-    if (trainingResult.status === "fulfilled") {
-      setTrainings(sortTrainings(trainingResult.value.trainings ?? []));
-      setGeneratedAt(trainingResult.value.generatedAt ?? null);
-      const preferredTargetId = options?.preserveTargetId ?? editorTargetId;
+      const preferredTargetId =
+        options && "preserveTargetId" in options ? options.preserveTargetId : editorTargetId;
       if (preferredTargetId === NEW_TRAINING_ID) {
         setEditorTargetId(NEW_TRAINING_ID);
-      } else if (preferredTargetId && trainingResult.value.trainings.some((entry) => entry.id === preferredTargetId)) {
+      } else if (preferredTargetId && payload.trainings.some((entry) => entry.id === preferredTargetId)) {
         setEditorTargetId(preferredTargetId);
-      } else if (trainingResult.value.trainings.length > 0) {
-        setEditorTargetId(trainingResult.value.trainings[0].id);
       } else {
         setEditorTargetId(null);
       }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not load training workspace.");
+    } finally {
+      setLoading(false);
     }
-
-    if (packsResult.status === "fulfilled") {
-      setTrainingPacks(packsResult.value.packs ?? []);
-    }
-    if (scenariosResult.status === "fulfilled") {
-      setCustomScenarios(scenariosResult.value.scenarios ?? []);
-    }
-
-    const failures = [trainingResult, packsResult, scenariosResult].filter((entry) => entry.status === "rejected");
-    if (failures.length > 0) {
-      const firstFailure = failures[0];
-      setError(firstFailure.reason instanceof Error ? firstFailure.reason.message : "Could not load training workspace.");
-    }
-
-    setLoading(false);
   };
 
   const replaceTrainingSummary = (next: OrgTrainingSummary | null | undefined, options?: { select?: boolean }) => {
@@ -213,63 +168,26 @@ export function EnterpriseTrainingsWorkspace({
       setEditorState(editorFromTraining(selectedTraining));
       return;
     }
-    if (trainings.length === 0) {
-      setEditorState(createEmptyTrainingEditor());
-    }
-  }, [editorTargetId, selectedTraining, trainings.length]);
+    setEditorState(createEmptyTrainingEditor());
+  }, [editorTargetId, selectedTraining]);
 
-  useEffect(() => {
-    if (!selectedTraining) {
-      setSelectedPackIds([]);
-      setSelectedScenarioIds([]);
-      return;
-    }
-    setSelectedPackIds(selectedTraining.attachedTrainingPackIds ?? []);
-    setSelectedScenarioIds(selectedTraining.attachedCustomScenarioIds ?? []);
-  }, [selectedTraining]);
-
-  const roleLabelById = useMemo(
-    () => new Map((config?.segments ?? []).map((segment) => [segment.id, segment.label])),
-    [config?.segments],
-  );
-  const industryLabelById = useMemo(
-    () => new Map((config?.industries ?? []).map((industry) => [industry.id, industry.label])),
-    [config?.industries],
-  );
-
-  const filteredTrainingPacks = useMemo(() => {
-    const needle = packSearch.trim().toLowerCase();
+  const filteredTrainings = useMemo(() => {
+    const needle = trainingSearch.trim().toLowerCase();
     if (!needle) {
-      return trainingPacks;
+      return trainings;
     }
-    return trainingPacks.filter((pack) =>
-      [pack.title, pack.id, pack.trainingTopic].join(" ").toLowerCase().includes(needle),
-    );
-  }, [packSearch, trainingPacks]);
-
-  const filteredCustomScenarios = useMemo(() => {
-    const needle = scenarioSearch.trim().toLowerCase();
-    if (!needle) {
-      return customScenarios;
-    }
-    return customScenarios.filter((scenario) =>
-      [
-        scenario.title,
-        scenario.id,
-        scenario.description,
-        scenario.aiRole,
-        roleLabelById.get(scenario.segmentId) ?? scenario.segmentId,
-        ...(scenario.applicableIndustryIds ?? []).map((industryId) => industryLabelById.get(industryId) ?? industryId),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle),
-    );
-  }, [customScenarios, industryLabelById, roleLabelById, scenarioSearch]);
+    return trainings.filter((training) => training.name.toLowerCase().includes(needle));
+  }, [trainingSearch, trainings]);
 
   const startCreateTraining = () => {
     setEditorTargetId(NEW_TRAINING_ID);
     setEditorState(createEmptyTrainingEditor());
+    setNotice(null);
+    setError(null);
+  };
+
+  const openTraining = (trainingId: string) => {
+    setEditorTargetId(trainingId);
     setNotice(null);
     setError(null);
   };
@@ -320,9 +238,13 @@ export function EnterpriseTrainingsWorkspace({
     if (!selectedTraining) {
       return;
     }
+    if (selectedTraining.attachedTrainingPackCount > 0 || selectedTraining.attachedCustomScenarioCount > 0) {
+      setError("Remove or delete the training's packs and custom scenarios before deleting the training.");
+      return;
+    }
 
     const confirmed = window.confirm(
-      `Delete training "${selectedTraining.name}"? This detaches its packs and scenarios but does not delete the underlying assets.`,
+      `Delete training "${selectedTraining.name}"?`,
     );
     if (!confirmed) {
       return;
@@ -335,9 +257,8 @@ export function EnterpriseTrainingsWorkspace({
       await adminFetch<{ deleted: boolean; trainingId: string }>(`/orgs/${orgId}/trainings/${selectedTraining.id}`, {
         method: "DELETE",
       });
-      const remaining = trainings.filter((entry) => entry.id !== selectedTraining.id);
-      setTrainings(sortTrainings(remaining));
-      setEditorTargetId(remaining[0]?.id ?? null);
+      setTrainings((prev) => prev.filter((entry) => entry.id !== selectedTraining.id));
+      setEditorTargetId(null);
       setNotice(`Deleted training "${selectedTraining.name}".`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete training.");
@@ -346,70 +267,24 @@ export function EnterpriseTrainingsWorkspace({
     }
   };
 
-  const savePackAttachments = async () => {
-    if (!selectedTraining) {
-      return;
-    }
-
-    setPackAttachmentSaving(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const updated = await adminFetch<OrgTrainingSummary>(
-        `/orgs/${orgId}/trainings/${selectedTraining.id}/training-packs`,
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            trainingPackIds: selectedPackIds,
-          } satisfies SetOrgTrainingPackAttachmentsRequest),
-        },
-      );
-      replaceTrainingSummary(updated, { select: true });
-      setNotice(`Updated attached training packs for "${updated.name}".`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update training pack attachments.");
-    } finally {
-      setPackAttachmentSaving(false);
-    }
+  const updateTrainingPackOwnership = async (trainingId: string, trainingPackIds: string[]) => {
+    const updated = await adminFetch<OrgTrainingSummary>(`/orgs/${orgId}/trainings/${trainingId}/training-packs`, {
+      method: "PUT",
+      body: JSON.stringify({
+        trainingPackIds,
+      } satisfies SetOrgTrainingPackAttachmentsRequest),
+    });
+    replaceTrainingSummary(updated, { select: true });
   };
 
-  const saveScenarioAttachments = async () => {
-    if (!selectedTraining) {
-      return;
-    }
-
-    setScenarioAttachmentSaving(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const updated = await adminFetch<OrgTrainingSummary>(
-        `/orgs/${orgId}/trainings/${selectedTraining.id}/custom-scenarios`,
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            scenarioIds: selectedScenarioIds,
-          } satisfies SetOrgTrainingScenarioAttachmentsRequest),
-        },
-      );
-      replaceTrainingSummary(updated, { select: true });
-      setNotice(`Updated attached custom scenarios for "${updated.name}".`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update custom scenario attachments.");
-    } finally {
-      setScenarioAttachmentSaving(false);
-    }
-  };
-
-  const toggleSelectedPack = (trainingPackId: string) => {
-    setSelectedPackIds((prev) =>
-      prev.includes(trainingPackId) ? prev.filter((entry) => entry !== trainingPackId) : [...prev, trainingPackId],
-    );
-  };
-
-  const toggleSelectedScenario = (scenarioId: string) => {
-    setSelectedScenarioIds((prev) =>
-      prev.includes(scenarioId) ? prev.filter((entry) => entry !== scenarioId) : [...prev, scenarioId],
-    );
+  const updateTrainingScenarioOwnership = async (trainingId: string, scenarioIds: string[]) => {
+    const updated = await adminFetch<OrgTrainingSummary>(`/orgs/${orgId}/trainings/${trainingId}/custom-scenarios`, {
+      method: "PUT",
+      body: JSON.stringify({
+        scenarioIds,
+      } satisfies SetOrgTrainingScenarioAttachmentsRequest),
+    });
+    replaceTrainingSummary(updated, { select: true });
   };
 
   const workspaceTargetName =
@@ -417,46 +292,6 @@ export function EnterpriseTrainingsWorkspace({
 
   return (
     <div className="enterprise-tab-panel">
-      <div className="card enterprise-section-card">
-        <div className="card-header">
-          <div>
-            <h3 style={{ marginBottom: 6 }}>Trainings Workspace</h3>
-            <p className="small">
-              Trainings are now the primary admin object. Packs and scenarios remain available below as supporting libraries.
-            </p>
-          </div>
-          <div className="card-actions">
-            <button type="button" onClick={() => void refreshWorkspace({ preserveTargetId: editorTargetId, preserveNotice: true })} disabled={loading}>
-              {loading ? "Refreshing..." : "Refresh Workspace"}
-            </button>
-            <button type="button" className="primary" onClick={startCreateTraining}>
-              Create Training
-            </button>
-          </div>
-        </div>
-        <div className="enterprise-summary-grid">
-          <div className="enterprise-summary-pill">
-            <span className="small">Trainings</span>
-            <strong>{trainings.length}</strong>
-          </div>
-          <div className="enterprise-summary-pill">
-            <span className="small">Supporting Packs</span>
-            <strong>{trainingPacks.length}</strong>
-          </div>
-          <div className="enterprise-summary-pill">
-            <span className="small">Supporting Scenarios</span>
-            <strong>{customScenarios.length}</strong>
-          </div>
-          <div className="enterprise-summary-pill">
-            <span className="small">Next</span>
-            <strong>Training-based reporting</strong>
-          </div>
-        </div>
-        <p className="small enterprise-note">
-          {generatedAt ? `Workspace refreshed ${formatDateTime(generatedAt)}.` : "Training workspace data is loading."}
-        </p>
-      </div>
-
       {error ? (
         <div className="card">
           <p className="error">{error}</p>
@@ -472,15 +307,40 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card-header">
           <div>
             <h3 style={{ marginBottom: 6 }}>Trainings</h3>
-            <p className="small">Select a training to manage its details, attached packs, and attached scenarios.</p>
+            <p className="small">
+              Select a training to manage its details and the training-specific packs and scenarios below.
+            </p>
           </div>
-        </div>
-        {trainings.length === 0 ? (
-          <div className="enterprise-training-empty">
-            <p>No trainings created yet.</p>
+          <div className="card-actions">
+            <button
+              type="button"
+              onClick={() => void refreshWorkspace({ preserveTargetId: editorTargetId, preserveNotice: true })}
+              disabled={loading}
+            >
+              {loading ? "Refreshing..." : "Refresh Workspace"}
+            </button>
             <button type="button" className="primary" onClick={startCreateTraining}>
               Create Training
             </button>
+          </div>
+        </div>
+        <div className="enterprise-search-row">
+          <div className="enterprise-search-field">
+            <label>Search Trainings</label>
+            <input
+              type="search"
+              value={trainingSearch}
+              onChange={(event) => setTrainingSearch(event.target.value)}
+              placeholder="Search by training name"
+            />
+          </div>
+        </div>
+        <p className="small enterprise-note">
+          {generatedAt ? `Workspace refreshed ${formatDateTime(generatedAt)}.` : "Training workspace data is loading."}
+        </p>
+        {trainings.length === 0 ? (
+          <div className="enterprise-training-empty">
+            <p>No trainings created yet.</p>
           </div>
         ) : (
           <div className="table-wrap">
@@ -488,6 +348,7 @@ export function EnterpriseTrainingsWorkspace({
               <thead>
                 <tr>
                   <th>Training Name</th>
+                  <th>Created</th>
                   <th>Status</th>
                   <th>Updated</th>
                   <th>Attached Packs</th>
@@ -496,33 +357,57 @@ export function EnterpriseTrainingsWorkspace({
                 </tr>
               </thead>
               <tbody>
-                {trainings.map((training) => (
-                  <tr
-                    key={training.id}
-                    className={training.id === selectedTraining?.id ? "enterprise-training-row-selected" : undefined}
-                  >
-                    <td className="content-long-cell">
-                      <div>{training.name}</div>
-                      <div className="small">{training.id}</div>
-                    </td>
-                    <td>{training.status}</td>
-                    <td>{formatDateTime(training.updatedAt)}</td>
-                    <td>{training.attachedTrainingPackCount}</td>
-                    <td>{training.attachedCustomScenarioCount}</td>
-                    <td>
-                      <button type="button" onClick={() => setEditorTargetId(training.id)}>
-                        {training.id === selectedTraining?.id ? "Selected" : "Open"}
-                      </button>
+                {filteredTrainings.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="small">
+                      No trainings match your search.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredTrainings.map((training) => (
+                    <tr
+                      key={training.id}
+                      className={training.id === selectedTraining?.id ? "enterprise-training-row-selected" : undefined}
+                    >
+                      <td className="content-long-cell">
+                        <button
+                          type="button"
+                          className="enterprise-training-name-button"
+                          onClick={() => openTraining(training.id)}
+                        >
+                          {training.name}
+                        </button>
+                        <div className="small">{training.id}</div>
+                      </td>
+                      <td>{formatDateTime(training.createdAt)}</td>
+                      <td>{training.status}</td>
+                      <td>{formatDateTime(training.updatedAt)}</td>
+                      <td>{training.attachedTrainingPackCount}</td>
+                      <td>{training.attachedCustomScenarioCount}</td>
+                      <td>
+                        <button type="button" onClick={() => openTraining(training.id)}>
+                          {training.id === selectedTraining?.id ? "Selected" : "Open"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      {(selectedTraining || editorTargetId === NEW_TRAINING_ID) ? (
+      {editorTargetId !== NEW_TRAINING_ID && !selectedTraining ? (
+        <div className="card enterprise-section-card">
+          <div className="card-header">
+            <div>
+              <h3 style={{ marginBottom: 6 }}>Training Workspace</h3>
+              <p className="small">Please select a training to view/edit in the previous card.</p>
+            </div>
+          </div>
+        </div>
+      ) : (
         <div className="card enterprise-section-card">
           <div className="card-header">
             <div>
@@ -543,17 +428,17 @@ export function EnterpriseTrainingsWorkspace({
                 </button>
               ) : null}
               <button type="button" className="primary" disabled={trainingSaving} onClick={() => void saveTraining()}>
-                {trainingSaving
-                  ? "Saving..."
-                  : editorTargetId === NEW_TRAINING_ID
-                    ? "Create Training"
-                    : "Save Training"}
+                {trainingSaving ? "Saving..." : editorTargetId === NEW_TRAINING_ID ? "Create Training" : "Save Training"}
               </button>
             </div>
           </div>
 
           {selectedTraining ? (
             <div className="enterprise-summary-grid">
+              <div className="enterprise-summary-pill">
+                <span className="small">Created</span>
+                <strong>{formatDateTime(selectedTraining.createdAt)}</strong>
+              </div>
               <div className="enterprise-summary-pill">
                 <span className="small">Status</span>
                 <strong>{selectedTraining.status}</strong>
@@ -611,139 +496,46 @@ export function EnterpriseTrainingsWorkspace({
             </div>
           </div>
 
-          {selectedTraining ? (
-            <div className="enterprise-two-column">
-              <div className="enterprise-subsection">
-                <div className="card-header">
-                  <div>
-                    <h4 style={{ marginBottom: 6 }}>Attached Training Packs</h4>
-                    <p className="small">
-                      Choose which existing training packs belong to this training. Attached: {selectedPackIds.length}
-                    </p>
-                  </div>
-                  <button type="button" onClick={() => void savePackAttachments()} disabled={packAttachmentSaving}>
-                    {packAttachmentSaving ? "Saving..." : "Save Pack Attachments"}
-                  </button>
-                </div>
-                <div className="enterprise-search-row">
-                  <div className="enterprise-search-field">
-                    <label>Search Training Packs</label>
-                    <input
-                      type="search"
-                      value={packSearch}
-                      onChange={(event) => setPackSearch(event.target.value)}
-                      placeholder="Search by title, id, or brief"
-                    />
-                  </div>
-                </div>
-                <div className="enterprise-attachment-list">
-                  {filteredTrainingPacks.length === 0 ? (
-                    <p className="small">No training packs found for this account.</p>
-                  ) : (
-                    filteredTrainingPacks.map((pack) => (
-                      <label key={pack.id} className="enterprise-attachment-row">
-                        <input
-                          type="checkbox"
-                          checked={selectedPackIds.includes(pack.id)}
-                          onChange={() => toggleSelectedPack(pack.id)}
-                        />
-                        <span>
-                          {pack.title}
-                          <span className="small" style={{ display: "block" }}>
-                            {pack.active ? "Active" : "Inactive"} | {pack.id}
-                          </span>
-                        </span>
-                      </label>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="enterprise-subsection">
-                <div className="card-header">
-                  <div>
-                    <h4 style={{ marginBottom: 6 }}>Attached Custom Scenarios</h4>
-                    <p className="small">
-                      Choose which existing custom scenarios belong to this training. Attached: {selectedScenarioIds.length}
-                    </p>
-                  </div>
-                  <button type="button" onClick={() => void saveScenarioAttachments()} disabled={scenarioAttachmentSaving}>
-                    {scenarioAttachmentSaving ? "Saving..." : "Save Scenario Attachments"}
-                  </button>
-                </div>
-                <div className="enterprise-search-row">
-                  <div className="enterprise-search-field">
-                    <label>Search Custom Scenarios</label>
-                    <input
-                      type="search"
-                      value={scenarioSearch}
-                      onChange={(event) => setScenarioSearch(event.target.value)}
-                      placeholder="Search by title, role, industry, or id"
-                    />
-                  </div>
-                </div>
-                <div className="enterprise-attachment-list">
-                  {filteredCustomScenarios.length === 0 ? (
-                    <p className="small">No custom scenarios found for this account.</p>
-                  ) : (
-                    filteredCustomScenarios.map((scenario) => (
-                      <label key={scenario.id} className="enterprise-attachment-row">
-                        <input
-                          type="checkbox"
-                          checked={selectedScenarioIds.includes(scenario.id)}
-                          onChange={() => toggleSelectedScenario(scenario.id)}
-                        />
-                        <span>
-                          {scenario.title}
-                          <span className="small" style={{ display: "block" }}>
-                            {roleLabelById.get(scenario.segmentId) ?? scenario.segmentId}
-                            {" | "}
-                            {(scenario.applicableIndustryIds ?? [])
-                              .map((industryId) => industryLabelById.get(industryId) ?? industryId)
-                              .join(", ") || "-"}
-                          </span>
-                        </span>
-                      </label>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <p className="small">Create the training first, then attach packs and scenarios.</p>
-          )}
+          {!selectedTraining ? (
+            <p className="small">Save the training first, then create and manage its packs and custom scenarios below.</p>
+          ) : null}
         </div>
+      )}
+
+      {selectedTraining ? (
+        <>
+          <EnterpriseTrainingPacksCard
+            orgId={orgId}
+            orgName={orgName}
+            config={config}
+            orgUsers={orgUsers}
+            onCatalogChanged={() => refreshWorkspace({ preserveTargetId: selectedTraining.id, preserveNotice: true })}
+            trainingScope={{
+              trainingId: selectedTraining.id,
+              trainingName: selectedTraining.name,
+              attachedTrainingPackIds: selectedTraining.attachedTrainingPackIds,
+              onTrainingPackOwnershipChange: async (trainingPackIds) => {
+                await updateTrainingPackOwnership(selectedTraining.id, trainingPackIds);
+              },
+            }}
+          />
+
+          <EnterpriseCustomScenariosCard
+            orgId={orgId}
+            orgName={orgName}
+            config={config}
+            onCatalogChanged={() => refreshWorkspace({ preserveTargetId: selectedTraining.id, preserveNotice: true })}
+            trainingScope={{
+              trainingId: selectedTraining.id,
+              trainingName: selectedTraining.name,
+              attachedScenarioIds: selectedTraining.attachedCustomScenarioIds,
+              onScenarioOwnershipChange: async (scenarioIds) => {
+                await updateTrainingScenarioOwnership(selectedTraining.id, scenarioIds);
+              },
+            }}
+          />
+        </>
       ) : null}
-
-      <div className="card enterprise-section-card">
-        <div className="card-header">
-          <div>
-            <h3 style={{ marginBottom: 6 }}>Supporting Asset Libraries</h3>
-            <p className="small">
-              These libraries stay available for creating and maintaining the assets that trainings use.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <EnterpriseTrainingPacksCard
-        orgId={orgId}
-        orgName={orgName}
-        config={config}
-        orgUsers={orgUsers}
-        collapsed={trainingPacksCollapsed}
-        onToggleCollapse={onToggleTrainingPacks}
-        onCatalogChanged={() => refreshWorkspace({ preserveTargetId: editorTargetId, preserveNotice: true })}
-      />
-
-      <EnterpriseCustomScenariosCard
-        orgId={orgId}
-        orgName={orgName}
-        config={config}
-        collapsed={customScenariosCollapsed}
-        onToggleCollapse={onToggleCustomScenarios}
-        onCatalogChanged={() => refreshWorkspace({ preserveTargetId: editorTargetId, preserveNotice: true })}
-      />
     </div>
   );
 }

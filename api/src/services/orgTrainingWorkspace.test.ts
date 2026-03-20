@@ -11,6 +11,8 @@ import {
   normalizeOrgTrainingPackAttachments,
   normalizeOrgTrainingRecords,
   normalizeOrgTrainingScenarioAttachments,
+  replaceOrgTrainingPackAttachments,
+  replaceOrgTrainingScenarioAttachments,
   seedLegacyOrgTraining,
 } from "./orgTrainingWorkspace.js";
 
@@ -169,4 +171,78 @@ test("ensureOrgTrainingCollections initializes missing arrays", () => {
   assert.deepEqual(db.orgTrainings, []);
   assert.deepEqual(db.orgTrainingPackAttachments, []);
   assert.deepEqual(db.orgTrainingScenarioAttachments, []);
+});
+
+test("replaceOrgTrainingPackAttachments enforces one-training-only ownership inside an org", () => {
+  const db = {
+    orgTrainings: [],
+    orgTrainingPackAttachments: [
+      {
+        id: "pack_attachment_1",
+        orgId: "org_123",
+        trainingId: "training_a",
+        trainingPackId: "pack_a",
+        createdAt: "2026-03-20T00:00:00.000Z",
+        updatedAt: "2026-03-20T00:00:00.000Z",
+      },
+    ],
+    orgTrainingScenarioAttachments: [],
+  };
+
+  replaceOrgTrainingPackAttachments({
+    db,
+    orgId: "org_123",
+    trainingId: "training_b",
+    trainingPackIds: ["pack_a", "pack_b"],
+    now: "2026-03-20T00:00:00.000Z",
+    createAttachmentId: () => `pack_attachment_${db.orgTrainingPackAttachments.length + 1}`,
+  });
+
+  assert.deepEqual(
+    db.orgTrainingPackAttachments.map((entry) => ({
+      trainingId: entry.trainingId,
+      trainingPackId: entry.trainingPackId,
+    })),
+    [
+      { trainingId: "training_b", trainingPackId: "pack_a" },
+      { trainingId: "training_b", trainingPackId: "pack_b" },
+    ],
+  );
+});
+
+test("replaceOrgTrainingScenarioAttachments enforces one-training-only ownership inside an org", () => {
+  const db = {
+    orgTrainings: [],
+    orgTrainingPackAttachments: [],
+    orgTrainingScenarioAttachments: [
+      {
+        id: "scenario_attachment_1",
+        orgId: "org_123",
+        trainingId: "training_a",
+        scenarioId: "scenario_a",
+        createdAt: "2026-03-20T00:00:00.000Z",
+        updatedAt: "2026-03-20T00:00:00.000Z",
+      },
+    ],
+  };
+
+  replaceOrgTrainingScenarioAttachments({
+    db,
+    orgId: "org_123",
+    trainingId: "training_b",
+    scenarioIds: ["scenario_a", "scenario_b"],
+    now: "2026-03-20T00:00:00.000Z",
+    createAttachmentId: () => `scenario_attachment_${db.orgTrainingScenarioAttachments.length + 1}`,
+  });
+
+  assert.deepEqual(
+    db.orgTrainingScenarioAttachments.map((entry) => ({
+      trainingId: entry.trainingId,
+      scenarioId: entry.scenarioId,
+    })),
+    [
+      { trainingId: "training_b", scenarioId: "scenario_a" },
+      { trainingId: "training_b", scenarioId: "scenario_b" },
+    ],
+  );
 });
