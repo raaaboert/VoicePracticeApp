@@ -20,6 +20,7 @@ export async function createOpeningLine(params: {
   userId: string;
   authToken: string;
   scenario: Scenario;
+  trainingId?: string | null;
   industryId?: string;
   industryBaseline?: string;
   difficulty: Difficulty;
@@ -30,6 +31,7 @@ export async function createOpeningLine(params: {
     userId: params.userId,
     authToken: params.authToken,
     scenarioId: params.scenario.id,
+    trainingId: params.trainingId ?? undefined,
     industryId: params.industryId,
     industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
@@ -46,6 +48,7 @@ export async function generateAssistantReply(params: {
   userId: string;
   authToken: string;
   scenario: Scenario;
+  trainingId?: string | null;
   industryId?: string;
   industryBaseline?: string;
   difficulty: Difficulty;
@@ -58,6 +61,7 @@ export async function generateAssistantReply(params: {
     userId: params.userId,
     authToken: params.authToken,
     scenarioId: params.scenario.id,
+    trainingId: params.trainingId ?? undefined,
     industryId: params.industryId,
     industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
@@ -90,6 +94,7 @@ export async function evaluateSimulation(params: {
   userId: string;
   authToken: string;
   scenario: Scenario;
+  trainingId?: string | null;
   industryId?: string;
   industryBaseline?: string;
   difficulty: Difficulty;
@@ -115,6 +120,7 @@ export async function evaluateSimulation(params: {
     userId: params.userId,
     authToken: params.authToken,
     scenarioId: params.scenario.id,
+    trainingId: params.trainingId ?? undefined,
     industryId: params.industryId,
     industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,

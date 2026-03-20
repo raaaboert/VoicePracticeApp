@@ -69,8 +69,13 @@ import {
   MobileOnboardRequest,
   MobileOnboardResponse,
   AdminTrainingPackAssignmentsResponse,
+  CreateOrgTrainingRequest,
   OrgAccountsExportResponse,
   OrgAccountsExportRow,
+  OrgTrainingListResponse,
+  OrgTrainingRecord,
+  OrgTrainingSummary,
+  OrgTrainingStatus,
   OrgUsageBillingResponse,
   MobileResendVerificationRequest,
   MobileSubmitOrgJoinRequest,
@@ -80,6 +85,8 @@ import {
   RecordSimulationScoreRequest,
   Scenario,
   SegmentDefinition,
+  SetOrgTrainingPackAttachmentsRequest,
+  SetOrgTrainingScenarioAttachmentsRequest,
   SetTrainingPackAssignmentsRequest,
   SimulationScoreCoachingArtifact,
   SimulationScoreCoachingArtifactInput,
@@ -91,6 +98,7 @@ import {
   TIER_IDS,
   TierDefinition,
   RoleIndustryDefinition,
+  UpdateOrgTrainingRequest,
   UpdateOrgCustomScenarioRequest,
   UpdateConfigRequest,
   UpdateUserRequest,
@@ -158,6 +166,19 @@ import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services
 import { hashScryptPassword, verifyScryptPassword } from "./services/passwordHash.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
+import {
+  buildOrgTrainingSummaries,
+  ensureOrgTrainingCollections,
+  findOrgTrainingRecord,
+  listOrgTrainingRecords,
+  normalizeOrgTrainingPackAttachments,
+  normalizeOrgTrainingRecords,
+  normalizeOrgTrainingScenarioAttachments,
+  normalizeOrgTrainingStatus,
+  replaceOrgTrainingPackAttachments,
+  replaceOrgTrainingScenarioAttachments,
+  seedLegacyOrgTraining,
+} from "./services/orgTrainingWorkspace.js";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config();
@@ -1920,6 +1941,9 @@ function createDefaultDatabase(): ApiDatabase {
     config,
     users: [],
     orgs: [],
+    orgTrainings: [],
+    orgTrainingPackAttachments: [],
+    orgTrainingScenarioAttachments: [],
     trainingPackAssignments: [],
     usageSessions: [],
     scoreRecords: [],
@@ -2506,6 +2530,14 @@ function purgeDemoSeedData(db: ApiDatabase): void {
   db.users = db.users.filter(
     (user) => !demoUserIds.has(user.id) && (user.orgId === null || !demoOrgIds.has(user.orgId))
   );
+  db.orgTrainings = db.orgTrainings.filter((training) => !demoOrgIds.has(training.orgId));
+  const remainingTrainingIds = new Set(db.orgTrainings.map((training) => training.id));
+  db.orgTrainingPackAttachments = db.orgTrainingPackAttachments.filter(
+    (attachment) => !demoOrgIds.has(attachment.orgId) && remainingTrainingIds.has(attachment.trainingId)
+  );
+  db.orgTrainingScenarioAttachments = db.orgTrainingScenarioAttachments.filter(
+    (attachment) => !demoOrgIds.has(attachment.orgId) && remainingTrainingIds.has(attachment.trainingId)
+  );
 
   db.usageSessions = db.usageSessions.filter(
     (session) =>
@@ -2814,11 +2846,33 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
         ? normalizeOrgUserRole((user as Partial<UserProfile>).orgRole)
         : "user"
   }));
+  const validOrgIds = new Set(normalizedOrgs.map((org) => org.id));
+  const normalizedOrgTrainings = normalizeOrgTrainingRecords(
+    (candidate as Partial<ApiDatabase>).orgTrainings,
+    validOrgIds,
+    now
+  );
+  const validTrainingIds = new Set(normalizedOrgTrainings.map((training) => training.id));
+  const normalizedOrgTrainingPackAttachments = normalizeOrgTrainingPackAttachments(
+    (candidate as Partial<ApiDatabase>).orgTrainingPackAttachments,
+    validOrgIds,
+    validTrainingIds,
+    now
+  );
+  const normalizedOrgTrainingScenarioAttachments = normalizeOrgTrainingScenarioAttachments(
+    (candidate as Partial<ApiDatabase>).orgTrainingScenarioAttachments,
+    validOrgIds,
+    validTrainingIds,
+    now
+  );
 
   const normalized = {
     config,
     users: normalizedUsers,
     orgs: normalizedOrgs,
+    orgTrainings: normalizedOrgTrainings,
+    orgTrainingPackAttachments: normalizedOrgTrainingPackAttachments,
+    orgTrainingScenarioAttachments: normalizedOrgTrainingScenarioAttachments,
     trainingPackAssignments: Array.isArray((candidate as Partial<ApiDatabase>).trainingPackAssignments)
       ? ((candidate as Partial<ApiDatabase>).trainingPackAssignments ?? []).map((assignment) => ({
           ...assignment,
@@ -5391,6 +5445,86 @@ function ensureOrgCustomScenarioCollection(org: EnterpriseOrg): OrgCustomScenari
   return org.customScenarios;
 }
 
+function createOrgTrainingId(): string {
+  return `training_${uuid()}`;
+}
+
+function createOrgTrainingPackAttachmentId(): string {
+  return `training_pack_attachment_${uuid()}`;
+}
+
+function createOrgTrainingScenarioAttachmentId(): string {
+  return `training_scenario_attachment_${uuid()}`;
+}
+
+async function ensureOrgTrainingWorkspace(db: ApiDatabase, org: EnterpriseOrg): Promise<void> {
+  ensureOrgTrainingCollections(db);
+  if (listOrgTrainingRecords(db, org.id).length > 0) {
+    return;
+  }
+
+  const scenarioIds = ensureOrgCustomScenarioCollection(org).map((scenario) => scenario.id);
+  let trainingPackIds: string[] = [];
+  try {
+    trainingPackIds = (await trainingPackStore.listTrainingPacksForOrg(org.id)).map((pack) => pack.id);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarnThrottled("org-trainings:backfill", `[org-trainings] failed to inspect training packs for ${org.id}: ${message}`);
+  }
+
+  seedLegacyOrgTraining({
+    db,
+    orgId: org.id,
+    trainingPackIds,
+    scenarioIds,
+    now: nowIso(),
+    createTrainingId: createOrgTrainingId,
+    createPackAttachmentId: createOrgTrainingPackAttachmentId,
+    createScenarioAttachmentId: createOrgTrainingScenarioAttachmentId,
+  });
+}
+
+function getMobileReadyOrgTrainings(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  config: AppConfig,
+): OrgTrainingSummary[] {
+  ensureOrgTrainingCollections(db);
+  const mobileScenarioIds = new Set(getMobileReadyOrgCustomScenarios(org, config).map((scenario) => scenario.id));
+
+  return buildOrgTrainingSummaries({
+    db,
+    orgId: org.id,
+    validScenarioIds: mobileScenarioIds,
+  })
+    .filter((training) => training.status === "active" && training.attachedCustomScenarioIds.length > 0)
+    .map((training) => ({
+      ...training,
+      attachedCustomScenarioCount: training.attachedCustomScenarioIds.length,
+      attachedTrainingPackCount: training.attachedTrainingPackIds.length,
+    }));
+}
+
+function touchOrgTrainingRecord(training: OrgTrainingRecord, now: string): void {
+  training.updatedAt = now;
+}
+
+function buildOrgTrainingSummaryForResponse(
+  db: ApiDatabase,
+  orgId: string,
+  trainingId: string,
+  options?: { validTrainingPackIds?: Iterable<string>; validScenarioIds?: Iterable<string> },
+): OrgTrainingSummary | null {
+  return (
+    buildOrgTrainingSummaries({
+      db,
+      orgId,
+      validTrainingPackIds: options?.validTrainingPackIds,
+      validScenarioIds: options?.validScenarioIds,
+    }).find((entry) => entry.id === trainingId) ?? null
+  );
+}
+
 function getConfigSegmentById(config: AppConfig, segmentId: string): SegmentDefinition | undefined {
   return config.segments.find((segment) => segment.id === segmentId);
 }
@@ -5470,6 +5604,7 @@ interface ResolvedMobileScenarioContext {
 function resolveMobileScenarioForUser(
   configForUser: AppConfig,
   scenarioId: string,
+  trainingId?: string | null,
 ): ResolvedMobileScenarioContext | null {
   for (const segment of configForUser.segments) {
     if (segment.enabled !== true) {
@@ -5514,6 +5649,19 @@ function resolveMobileScenarioForUser(
     (entry) => entry.id === scenarioId && entry.enabled === true,
   );
   if (!customScenario) {
+    return null;
+  }
+
+  const activeTrainings = configForUser.orgTrainings ?? [];
+  const normalizedTrainingId = typeof trainingId === "string" ? trainingId.trim() : "";
+  if (normalizedTrainingId) {
+    const selectedTraining = activeTrainings.find((entry) => entry.id === normalizedTrainingId);
+    if (!selectedTraining || !selectedTraining.attachedCustomScenarioIds.includes(customScenario.id)) {
+      return null;
+    }
+  } else if (
+    !activeTrainings.some((entry) => entry.attachedCustomScenarioIds.includes(customScenario.id))
+  ) {
     return null;
   }
 
@@ -6186,13 +6334,20 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
   );
   const scopedIndustryIdSet = new Set(scopedIndustryIds);
   const mobileCustomScenarios = getMobileReadyOrgCustomScenarios(org, db.config);
+  const mobileTrainings = getMobileReadyOrgTrainings(db, org, db.config);
+  const mobileTrainingScenarioIdSet = new Set(
+    mobileTrainings.flatMap((training) => training.attachedCustomScenarioIds)
+  );
+  const trainingScopedCustomScenarios = mobileCustomScenarios.filter((scenario) =>
+    mobileTrainingScenarioIdSet.has(scenario.id)
+  );
   const customIndustryIdSet = new Set(
-    mobileCustomScenarios.flatMap((scenario) => scenario.applicableIndustryIds ?? []),
+    trainingScopedCustomScenarios.flatMap((scenario) => scenario.applicableIndustryIds ?? []),
   );
   const allowedRoleSegmentIds = new Set(
     getRoleSegmentIdsForIndustries(scopedIndustryIds, db.config.roleIndustries)
   );
-  for (const customScenario of mobileCustomScenarios) {
+  for (const customScenario of trainingScopedCustomScenarios) {
     allowedRoleSegmentIds.add(customScenario.segmentId);
   }
   const filteredSegments = db.config.segments.filter((segment) => allowedRoleSegmentIds.has(segment.id));
@@ -6212,7 +6367,8 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
       industries: filteredIndustries,
       roleIndustries: filteredRoleIndustries,
       segments: [],
-      orgCustomScenarios: mobileCustomScenarios,
+      orgCustomScenarios: trainingScopedCustomScenarios,
+      orgTrainings: mobileTrainings,
     };
   }
 
@@ -6227,7 +6383,8 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
     roleIndustries: filteredRoleIndustries,
     activeSegmentId: hasActiveSegment ? db.config.activeSegmentId : fallbackSegment.id,
     segments: filteredSegments,
-    orgCustomScenarios: mobileCustomScenarios,
+    orgCustomScenarios: trainingScopedCustomScenarios,
+    orgTrainings: mobileTrainings,
   };
 }
 
@@ -8057,6 +8214,10 @@ app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (r
         response.status(404).json({ error: "Training pack not found." });
         return;
       }
+      ensureOrgTrainingCollections(db);
+      db.orgTrainingPackAttachments = db.orgTrainingPackAttachments.filter(
+        (entry) => !(entry.orgId === org.id && entry.trainingPackId === trainingPackId)
+      );
       const now = nowIso();
       for (const assignment of listTrainingPackAssignments(db, org.id, trainingPackId)) {
         assignment.active = false;
@@ -8577,6 +8738,10 @@ app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (req
     }
 
     org.customScenarios = scenarios.filter((entry) => entry.id !== scenarioId);
+    ensureOrgTrainingCollections(db);
+    db.orgTrainingScenarioAttachments = db.orgTrainingScenarioAttachments.filter(
+      (entry) => !(entry.orgId === org.id && entry.scenarioId === scenarioId)
+    );
     org.updatedAt = nowIso();
     emitMobileUpdateForOrg(db, org.id, "org");
     appendPlatformAuditEvent(db, {
@@ -8596,6 +8761,347 @@ app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (req
     });
   });
 });
+
+app.get("/orgs/:orgId/trainings", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    await ensureOrgTrainingWorkspace(db, org);
+    const scenarioIds = new Set(ensureOrgCustomScenarioCollection(org).map((scenario) => scenario.id));
+    const payload: OrgTrainingListResponse = {
+      generatedAt: nowIso(),
+      orgId: org.id,
+      trainings: buildOrgTrainingSummaries({
+        db,
+        orgId: org.id,
+        validScenarioIds: scenarioIds,
+      }),
+    };
+    response.json(payload);
+  });
+});
+
+app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const body = request.body as CreateOrgTrainingRequest;
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    await ensureOrgTrainingWorkspace(db, org);
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) {
+      response.status(400).json({ error: "name is required." });
+      return;
+    }
+
+    const now = nowIso();
+    const training: OrgTrainingRecord = {
+      id: createOrgTrainingId(),
+      orgId: org.id,
+      name: name.slice(0, 160),
+      status: normalizeOrgTrainingStatus(body.status, "draft"),
+      description: typeof body.description === "string" ? body.description.trim().slice(0, 4_000) : "",
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.orgTrainings.push(training);
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.training.created",
+      orgId: org.id,
+      message: `Created training "${training.name}" for ${org.name}.`,
+      metadata: {
+        trainingId: training.id,
+        status: training.status,
+      },
+    });
+
+    response.status(201).json(
+      buildOrgTrainingSummaryForResponse(db, org.id, training.id) ?? {
+        ...training,
+        attachedTrainingPackIds: [],
+        attachedCustomScenarioIds: [],
+        attachedTrainingPackCount: 0,
+        attachedCustomScenarioCount: 0,
+      },
+    );
+  });
+});
+
+app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingId = request.params.trainingId?.trim();
+  const patch = request.body as UpdateOrgTrainingRequest;
+
+  if (!trainingId) {
+    response.status(400).json({ error: "trainingId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    await ensureOrgTrainingWorkspace(db, org);
+    const training = findOrgTrainingRecord(db, org.id, trainingId);
+    if (!training) {
+      response.status(404).json({ error: "Training not found." });
+      return;
+    }
+
+    if (patch.name === undefined && patch.description === undefined && patch.status === undefined) {
+      response.status(400).json({ error: "At least one patch field is required." });
+      return;
+    }
+
+    if (patch.name !== undefined) {
+      const nextName = typeof patch.name === "string" ? patch.name.trim() : "";
+      if (!nextName) {
+        response.status(400).json({ error: "name must be a non-empty string." });
+        return;
+      }
+      training.name = nextName.slice(0, 160);
+    }
+    if (patch.description !== undefined) {
+      if (patch.description !== null && typeof patch.description !== "string") {
+        response.status(400).json({ error: "description must be a string." });
+        return;
+      }
+      training.description = typeof patch.description === "string" ? patch.description.trim().slice(0, 4_000) : "";
+    }
+    if (patch.status !== undefined) {
+      training.status = normalizeOrgTrainingStatus(patch.status, training.status);
+    }
+
+    touchOrgTrainingRecord(training, nowIso());
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.training.updated",
+      orgId: org.id,
+      message: `Updated training "${training.name}" for ${org.name}.`,
+      metadata: {
+        trainingId: training.id,
+        status: training.status,
+        fields: Object.keys(patch ?? {}).slice(0, 25),
+      },
+    });
+
+    response.json(buildOrgTrainingSummaryForResponse(db, org.id, training.id));
+  });
+});
+
+app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingId = request.params.trainingId?.trim();
+
+  if (!trainingId) {
+    response.status(400).json({ error: "trainingId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    await ensureOrgTrainingWorkspace(db, org);
+    const training = findOrgTrainingRecord(db, org.id, trainingId);
+    if (!training) {
+      response.status(404).json({ error: "Training not found." });
+      return;
+    }
+
+    db.orgTrainings = db.orgTrainings.filter((entry) => !(entry.orgId === org.id && entry.id === trainingId));
+    db.orgTrainingPackAttachments = db.orgTrainingPackAttachments.filter(
+      (entry) => !(entry.orgId === org.id && entry.trainingId === trainingId)
+    );
+    db.orgTrainingScenarioAttachments = db.orgTrainingScenarioAttachments.filter(
+      (entry) => !(entry.orgId === org.id && entry.trainingId === trainingId)
+    );
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.training.deleted",
+      orgId: org.id,
+      message: `Deleted training "${training.name}" from ${org.name}.`,
+      metadata: {
+        trainingId: training.id,
+      },
+    });
+
+    response.json({ deleted: true, trainingId: training.id });
+  });
+});
+
+app.put("/orgs/:orgId/trainings/:trainingId/training-packs", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const trainingId = request.params.trainingId?.trim();
+  const body = request.body as SetOrgTrainingPackAttachmentsRequest;
+
+  if (!trainingId) {
+    response.status(400).json({ error: "trainingId is required." });
+    return;
+  }
+  if (!Array.isArray(body.trainingPackIds)) {
+    response.status(400).json({ error: "trainingPackIds must be a string array." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    await ensureOrgTrainingWorkspace(db, org);
+    const training = findOrgTrainingRecord(db, org.id, trainingId);
+    if (!training) {
+      response.status(404).json({ error: "Training not found." });
+      return;
+    }
+
+    let packs: TrainingPack[] = [];
+    try {
+      packs = await trainingPackStore.listTrainingPacksForOrg(org.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not load training packs.";
+      response.status(503).json({ error: message });
+      return;
+    }
+    const requestedPackIds = Array.from(
+      new Set(
+        body.trainingPackIds
+          .filter((entry): entry is string => typeof entry === "string")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      )
+    );
+    const validPackIds = new Set(packs.map((pack) => pack.id));
+    const invalidPackId = requestedPackIds.find((packId) => !validPackIds.has(packId));
+    if (invalidPackId) {
+      response.status(400).json({ error: `Training pack ${invalidPackId} is not available for this account.` });
+      return;
+    }
+
+    replaceOrgTrainingPackAttachments({
+      db,
+      orgId: org.id,
+      trainingId: training.id,
+      trainingPackIds: requestedPackIds,
+      now: nowIso(),
+      createAttachmentId: createOrgTrainingPackAttachmentId,
+    });
+    touchOrgTrainingRecord(training, nowIso());
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.training.pack_attachments.updated",
+      orgId: org.id,
+      message: `Updated attached training packs for "${training.name}" in ${org.name}.`,
+      metadata: {
+        trainingId: training.id,
+        attachedTrainingPackCount: requestedPackIds.length,
+      },
+    });
+
+    response.json(
+      buildOrgTrainingSummaryForResponse(db, org.id, training.id, {
+        validTrainingPackIds: validPackIds,
+      })
+    );
+  });
+});
+
+app.put(
+  "/orgs/:orgId/trainings/:trainingId/custom-scenarios",
+  requireAdmin,
+  async (request: Request, response: Response) => {
+    const orgId = request.params.orgId;
+    const trainingId = request.params.trainingId?.trim();
+    const body = request.body as SetOrgTrainingScenarioAttachmentsRequest;
+
+    if (!trainingId) {
+      response.status(400).json({ error: "trainingId is required." });
+      return;
+    }
+    if (!Array.isArray(body.scenarioIds)) {
+      response.status(400).json({ error: "scenarioIds must be a string array." });
+      return;
+    }
+
+    await withDatabase(async (db) => {
+      const org = getOrgById(db, orgId);
+      if (!org) {
+        response.status(404).json({ error: "Organization not found." });
+        return;
+      }
+
+      await ensureOrgTrainingWorkspace(db, org);
+      const training = findOrgTrainingRecord(db, org.id, trainingId);
+      if (!training) {
+        response.status(404).json({ error: "Training not found." });
+        return;
+      }
+
+      const scenarios = ensureOrgCustomScenarioCollection(org);
+      const requestedScenarioIds = Array.from(
+        new Set(
+          body.scenarioIds
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        )
+      );
+      const validScenarioIds = new Set(scenarios.map((scenario) => scenario.id));
+      const invalidScenarioId = requestedScenarioIds.find((scenarioId) => !validScenarioIds.has(scenarioId));
+      if (invalidScenarioId) {
+        response.status(400).json({ error: `Custom scenario ${invalidScenarioId} is not available for this account.` });
+        return;
+      }
+
+      replaceOrgTrainingScenarioAttachments({
+        db,
+        orgId: org.id,
+        trainingId: training.id,
+        scenarioIds: requestedScenarioIds,
+        now: nowIso(),
+        createAttachmentId: createOrgTrainingScenarioAttachmentId,
+      });
+      touchOrgTrainingRecord(training, nowIso());
+      emitMobileUpdateForOrg(db, org.id, "org");
+      appendPlatformAuditEvent(db, {
+        action: "org.training.scenario_attachments.updated",
+        orgId: org.id,
+        message: `Updated attached custom scenarios for "${training.name}" in ${org.name}.`,
+        metadata: {
+          trainingId: training.id,
+          attachedScenarioCount: requestedScenarioIds.length,
+        },
+      });
+
+      response.json(
+        buildOrgTrainingSummaryForResponse(db, org.id, training.id, {
+          validScenarioIds,
+        })
+      );
+    });
+  }
+);
 
 app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
@@ -9436,7 +9942,7 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
     return;
   }
 
-  await withDatabaseRead(async (db) => {
+  await withDatabase(async (db) => {
     const user = getUserById(db, request.params.userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -9446,6 +9952,11 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
     if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
+    }
+
+    const org = getOrgById(db, user.orgId);
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
     }
 
     response.json(resolveConfigForUser(db, user));
@@ -10813,12 +11324,14 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
   console.log(`[request-hit] route=opening userId=${userId}`);
   const body = request.body as {
     scenarioId?: string;
+    trainingId?: string;
     difficulty?: unknown;
     personaStyle?: unknown;
     industryId?: unknown;
     industryBaseline?: unknown;
   };
   const scenarioId = body.scenarioId?.trim();
+  const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
 
@@ -10851,13 +11364,17 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       return null;
     }
 
+    const org = getOrgById(db, user.orgId);
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+
     const configForUser = resolveConfigForUser(db, user);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
-    const org = getOrgById(db, user.orgId);
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
@@ -11020,6 +11537,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   console.log(`[request-hit] route=turn userId=${userId}`);
   const body = request.body as {
     scenarioId?: string;
+    trainingId?: string;
     difficulty?: unknown;
     personaStyle?: unknown;
     industryId?: unknown;
@@ -11035,6 +11553,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   };
 
   const scenarioId = body.scenarioId?.trim();
+  const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
   const submittedTrainingPackId =
@@ -11100,13 +11619,17 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
+    const org = getOrgById(db, user.orgId);
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+
     const configForUser = resolveConfigForUser(db, user);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
-    const org = getOrgById(db, user.orgId);
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
@@ -11262,6 +11785,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   console.log(`[request-hit] route=score userId=${userId}`);
   const body = request.body as {
     scenarioId?: string;
+    trainingId?: string;
     difficulty?: unknown;
     personaStyle?: unknown;
     industryId?: unknown;
@@ -11279,6 +11803,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   };
 
   const scenarioId = body.scenarioId?.trim();
+  const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
   const submittedTrainingPackId =
@@ -11367,18 +11892,22 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
+    const org = getOrgById(db, user.orgId);
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+
     const configForUser = resolveConfigForUser(db, user);
     if (configForUser.featureFlags?.scoringEnabled === false) {
       response.status(403).json({ error: "Scoring is currently disabled for this account." });
       return null;
     }
 
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
-    const org = getOrgById(db, user.orgId);
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
@@ -11588,6 +12117,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
   const body = request.body as RecordSimulationScoreRequest;
   const segmentId = body.segmentId?.trim();
   const scenarioId = body.scenarioId?.trim();
+  const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const submittedTrainingPackId =
     typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
 
@@ -11620,12 +12150,17 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       return;
     }
 
+    const org = getOrgById(db, user.orgId);
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+
     const configForUser = resolveConfigForUser(db, user);
     if (configForUser.featureFlags?.scoringEnabled === false) {
       response.status(403).json({ error: "Scoring is currently disabled for this account." });
       return;
     }
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for score record." });
       return;
@@ -11634,7 +12169,6 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       response.status(400).json({ error: "Scenario does not match the submitted segment." });
       return;
     }
-    const org = getOrgById(db, user.orgId);
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
@@ -11661,6 +12195,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       orgId: user.orgId,
       segmentId,
       scenarioId,
+      trainingId,
       trainingPackId: persistedTrainingPack?.id ?? null,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
@@ -12491,6 +13026,7 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
 app.post("/usage/sessions", async (request: Request, response: Response) => {
   const body = request.body as RecordUsageSessionRequest;
   const authToken = getIncomingMobileToken(request);
+  const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const submittedTrainingPackId =
     typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
 
@@ -12516,8 +13052,13 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       return;
     }
 
+    const org = getOrgById(db, user.orgId);
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+
     const configForUser = resolveConfigForUser(db, user);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for usage session." });
       return;
@@ -12526,7 +13067,6 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
-    const org = getOrgById(db, user.orgId);
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
@@ -12571,6 +13111,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       orgId: user.orgId,
       segmentId: body.segmentId,
       scenarioId: body.scenarioId,
+      trainingId,
       trainingPackId: persistedTrainingPack?.id ?? null,
       startedAt: sessionStart.toISOString(),
       endedAt: sessionEnd.toISOString(),

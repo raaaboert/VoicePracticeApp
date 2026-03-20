@@ -22,6 +22,7 @@ interface EnterpriseCustomScenariosCardProps {
   config: AppConfig | null;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  onCatalogChanged?: () => void | Promise<void>;
 }
 
 interface OrgCustomScenariosListResponse {
@@ -240,6 +241,7 @@ export function EnterpriseCustomScenariosCard({
   config,
   collapsed = false,
   onToggleCollapse,
+  onCatalogChanged,
 }: EnterpriseCustomScenariosCardProps) {
   const [scenarios, setScenarios] = useState<OrgCustomScenario[]>([]);
   const [loading, setLoading] = useState(false);
@@ -657,6 +659,7 @@ export function EnterpriseCustomScenariosCard({
       }
 
       closeEditor();
+      await onCatalogChanged?.();
     } catch (caught) {
       setEditorError(caught instanceof Error ? caught.message : "Could not save custom scenario.");
     } finally {
@@ -746,6 +749,7 @@ export function EnterpriseCustomScenariosCard({
         ),
       );
       setNotice(`"${updated.title}" set to ${updated.enabled === true ? "active" : "inactive"}.`);
+      await onCatalogChanged?.();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update scenario status.");
     } finally {
@@ -778,6 +782,7 @@ export function EnterpriseCustomScenariosCard({
       }
       setNotice(target ? `Deleted "${target.title}".` : "Custom scenario deleted.");
       resetDeleteDialog();
+      await onCatalogChanged?.();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete custom scenario.");
     } finally {

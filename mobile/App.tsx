@@ -258,6 +258,14 @@ type ScenarioIndustryOption = {
   roles: SegmentDefinition[];
 };
 
+type ScenarioTrainingOption = {
+  id: string;
+  label: string;
+  description: string;
+  attachedScenarioCount: number;
+  industries: ScenarioIndustryOption[];
+};
+
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
@@ -636,6 +644,7 @@ export default function App() {
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
   const [entitlements, setEntitlements] = useState<UserEntitlementsResponse | null>(null);
 
+  const [selectedTrainingId, setSelectedTrainingId] = useState("");
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState<string>("");
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>("");
@@ -831,78 +840,113 @@ export default function App() {
     [activeRoleIndustryLinks, enabledIndustries, segmentsWithEnabledStandardScenarios],
   );
 
-  const customIndustryOptions = useMemo<ScenarioIndustryOption[]>(
-    () => {
-      if (activeOrgCustomScenarios.length === 0 || enabledIndustries.length === 0 || enabledSegments.length === 0) {
-        return [];
-      }
+  const activeCustomTrainingOptions = useMemo<ScenarioTrainingOption[]>(() => {
+    if (activeOrgCustomScenarios.length === 0 || enabledIndustries.length === 0 || enabledSegments.length === 0) {
+      return [];
+    }
 
-      const enabledSegmentById = new Map(enabledSegments.map((segment) => [segment.id, segment]));
-      const enabledIndustryById = new Map(enabledIndustries.map((industry) => [industry.id, industry]));
-      const scenariosByIndustryRole = new Map<string, Scenario[]>();
-      const roleIdsByIndustryId = new Map<string, Set<string>>();
+    const customScenarioById = new Map(activeOrgCustomScenarios.map((scenario) => [scenario.id, scenario]));
+    const enabledSegmentById = new Map(enabledSegments.map((segment) => [segment.id, segment]));
+    const enabledIndustryById = new Map(enabledIndustries.map((industry) => [industry.id, industry]));
 
-      for (const customScenario of activeOrgCustomScenarios) {
-        const baseSegment = enabledSegmentById.get(customScenario.segmentId);
-        if (!baseSegment) {
-          continue;
+    return (config?.orgTrainings ?? [])
+      .filter((training) => training.status === "active")
+      .map((training) => {
+        const attachedScenarios = training.attachedCustomScenarioIds
+          .map((scenarioId) => customScenarioById.get(scenarioId))
+          .filter((scenario): scenario is OrgCustomScenario => Boolean(scenario));
+        if (attachedScenarios.length === 0) {
+          return null;
         }
 
-        const runtimeScenario = toRuntimeScenarioFromCustomScenario(customScenario);
-        for (const industryId of customScenario.applicableIndustryIds ?? []) {
-          if (!enabledIndustryById.has(industryId)) {
+        const scenariosByIndustryRole = new Map<string, Scenario[]>();
+        const roleIdsByIndustryId = new Map<string, Set<string>>();
+
+        for (const customScenario of attachedScenarios) {
+          const baseSegment = enabledSegmentById.get(customScenario.segmentId);
+          if (!baseSegment) {
             continue;
           }
 
-          const roleIds = roleIdsByIndustryId.get(industryId) ?? new Set<string>();
-          roleIds.add(baseSegment.id);
-          roleIdsByIndustryId.set(industryId, roleIds);
+          const runtimeScenario = toRuntimeScenarioFromCustomScenario(customScenario);
+          for (const industryId of customScenario.applicableIndustryIds ?? []) {
+            if (!enabledIndustryById.has(industryId)) {
+              continue;
+            }
 
-          const key = `${industryId}::${baseSegment.id}`;
-          const current = scenariosByIndustryRole.get(key) ?? [];
-          current.push(runtimeScenario);
-          scenariosByIndustryRole.set(key, current);
+            const roleIds = roleIdsByIndustryId.get(industryId) ?? new Set<string>();
+            roleIds.add(baseSegment.id);
+            roleIdsByIndustryId.set(industryId, roleIds);
+
+            const key = `${industryId}::${baseSegment.id}`;
+            const current = scenariosByIndustryRole.get(key) ?? [];
+            current.push(runtimeScenario);
+            scenariosByIndustryRole.set(key, current);
+          }
         }
-      }
 
-      return enabledIndustries
-        .map((industry) => {
-          const roleIds = Array.from(roleIdsByIndustryId.get(industry.id) ?? []);
-          const roles = roleIds
-            .map((roleId) => {
-              const segment = enabledSegmentById.get(roleId);
-              if (!segment) {
-                return null;
-              }
+        const industries = enabledIndustries
+          .map((industry) => {
+            const roleIds = Array.from(roleIdsByIndustryId.get(industry.id) ?? []);
+            const roles = roleIds
+              .map((roleId) => {
+                const segment = enabledSegmentById.get(roleId);
+                if (!segment) {
+                  return null;
+                }
 
-              const key = `${industry.id}::${roleId}`;
-              const scenarios = [...(scenariosByIndustryRole.get(key) ?? [])].sort((a, b) =>
-                a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
-              );
-              if (scenarios.length === 0) {
-                return null;
-              }
+                const key = `${industry.id}::${roleId}`;
+                const scenarios = [...(scenariosByIndustryRole.get(key) ?? [])].sort((a, b) =>
+                  a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+                );
+                if (scenarios.length === 0) {
+                  return null;
+                }
 
-              return {
-                ...segment,
-                scenarios,
-              };
-            })
-            .filter((segment): segment is SegmentDefinition => Boolean(segment));
+                return {
+                  ...segment,
+                  scenarios,
+                };
+              })
+              .filter((segment): segment is SegmentDefinition => Boolean(segment));
 
-          return {
-            id: industry.id,
-            label: industry.label,
-            aiBaseline: industry.aiBaseline ?? "",
-            roles,
-          };
-        })
-        .filter((industry) => industry.roles.length > 0);
-    },
-    [activeOrgCustomScenarios, enabledIndustries, enabledSegments],
+            return {
+              id: industry.id,
+              label: industry.label,
+              aiBaseline: industry.aiBaseline ?? "",
+              roles,
+            };
+          })
+          .filter((industry) => industry.roles.length > 0);
+
+        if (industries.length === 0) {
+          return null;
+        }
+
+        return {
+          id: training.id,
+          label: training.name,
+          description: training.description ?? "",
+          attachedScenarioCount: attachedScenarios.length,
+          industries,
+        };
+      })
+      .filter((training): training is ScenarioTrainingOption => Boolean(training));
+  }, [activeOrgCustomScenarios, config?.orgTrainings, enabledIndustries, enabledSegments]);
+
+  const hasCustomScenarioOptions = activeCustomTrainingOptions.length > 0;
+
+  const activeTraining = useMemo(() => {
+    if (activeCustomTrainingOptions.length === 0) {
+      return null;
+    }
+    return activeCustomTrainingOptions.find((training) => training.id === selectedTrainingId) ?? activeCustomTrainingOptions[0];
+  }, [activeCustomTrainingOptions, selectedTrainingId]);
+
+  const customIndustryOptions = useMemo<ScenarioIndustryOption[]>(
+    () => activeTraining?.industries ?? [],
+    [activeTraining],
   );
-
-  const hasCustomScenarioOptions = customIndustryOptions.length > 0;
 
   const industryOptions = useMemo<ScenarioIndustryOption[]>(
     () => (scenarioCatalogTab === "custom" ? customIndustryOptions : standardIndustryOptions),
@@ -954,6 +998,14 @@ export default function App() {
   const styles = useMemo(() => createStyles(theme), [theme]);
   const statusBarStyle = colorScheme === "soft_light" ? "dark" : "light";
   const selectedVoiceOption = useMemo(() => getAiVoiceOption(voiceProfile), [voiceProfile]);
+  const trainingSelectOptions = useMemo<SelectOption[]>(
+    () =>
+      activeCustomTrainingOptions.map((training) => ({
+        value: training.id,
+        label: training.label,
+      })),
+    [activeCustomTrainingOptions],
+  );
   const industrySelectOptions = useMemo<SelectOption[]>(
     () => industryOptions.map((industry) => ({ value: industry.id, label: industry.label })),
     [industryOptions],
@@ -1757,6 +1809,17 @@ export default function App() {
   }, [hasCustomScenarioOptions, industryOptions.length, scenarioCatalogTab]);
 
   useEffect(() => {
+    if (activeCustomTrainingOptions.length === 0) {
+      setSelectedTrainingId("");
+      return;
+    }
+
+    if (!activeCustomTrainingOptions.some((training) => training.id === selectedTrainingId)) {
+      setSelectedTrainingId(activeCustomTrainingOptions[0].id);
+    }
+  }, [activeCustomTrainingOptions, selectedTrainingId]);
+
+  useEffect(() => {
     if (industryOptions.length === 0) {
       setSelectedIndustryId("");
       return;
@@ -2095,6 +2158,10 @@ export default function App() {
       setSetupError("Missing setup context. Please refresh and try again.");
       return;
     }
+    if (scenarioCatalogTab === "custom" && !activeTraining) {
+      setSetupError("Select a training before starting a custom scenario.");
+      return;
+    }
 
     setSetupError(null);
     try {
@@ -2132,6 +2199,7 @@ export default function App() {
         voiceGender,
         remoteTtsEnabled,
         maxSimulationMinutes: entitlements?.limits?.maxSimulationMinutes ?? null,
+        trainingId: scenarioCatalogTab === "custom" ? activeTraining?.id ?? null : null,
       });
       setScorecard(null);
       setScorecardError(null);
@@ -2216,6 +2284,7 @@ export default function App() {
             userId: user.id,
             segmentId: completedConfig.scenario.segmentId,
             scenarioId: completedConfig.scenario.id,
+            trainingId: timing.trainingId ?? null,
             trainingPackId: timing.trainingPackId ?? null,
             startedAt: timing.startedAt,
             endedAt: timing.endedAt,
@@ -2287,6 +2356,7 @@ export default function App() {
             startedAt: timing.startedAt,
             endedAt: timing.endedAt,
             history,
+            trainingId: timing.trainingId ?? null,
             trainingPackId: timing.trainingPackId ?? null,
           });
           finalScorecard = result.scorecard;
@@ -2888,7 +2958,7 @@ export default function App() {
           {scenarioCatalogTab === "custom" ? (
             <Text style={styles.hintText}>
               {hasCustomScenarioOptions
-                ? "Custom scenarios are account-specific and use the same industry baseline + AI role runtime flow."
+                ? "Custom scenarios are now organized by training. Pick a training first, then choose from the scenarios attached to it."
                 : "No active custom scenarios are available for this account yet."}
             </Text>
           ) : (
@@ -2896,6 +2966,28 @@ export default function App() {
               Standard scenarios show only industries/roles that currently have active scenarios available.
             </Text>
           )}
+
+          {scenarioCatalogTab === "custom" ? (
+            <>
+              <Text style={styles.hintText}>Training</Text>
+              <SelectionDropdown
+                title="Training"
+                value={selectedTrainingId}
+                options={trainingSelectOptions}
+                onChange={setSelectedTrainingId}
+                placeholder="Select training"
+                styles={styles}
+              />
+              {activeTraining ? (
+                <Text style={styles.hintText}>
+                  {activeTraining.description
+                    ? `${activeTraining.description} `
+                    : ""}
+                  Attached scenarios: {activeTraining.attachedScenarioCount}.
+                </Text>
+              ) : null}
+            </>
+          ) : null}
 
           <Text style={styles.hintText}>Industry</Text>
           <SelectionDropdown

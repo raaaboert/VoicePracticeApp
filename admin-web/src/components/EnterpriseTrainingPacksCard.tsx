@@ -13,6 +13,7 @@ interface EnterpriseTrainingPacksCardProps {
   orgUsers?: TrainingPackAssignableUser[];
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  onCatalogChanged?: () => void | Promise<void>;
 }
 
 interface TrainingPackAssignableUser {
@@ -161,7 +162,8 @@ export function EnterpriseTrainingPacksCard({
   config,
   orgUsers = [],
   collapsed = false,
-  onToggleCollapse
+  onToggleCollapse,
+  onCatalogChanged
 }: EnterpriseTrainingPacksCardProps) {
   const [packs, setPacks] = useState<TrainingPack[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
@@ -405,6 +407,7 @@ export function EnterpriseTrainingPacksCard({
       }
       closeEditor();
       await refresh({ preserveNotice: true });
+      await onCatalogChanged?.();
     } catch (caught) {
       setEditorError(caught instanceof Error ? caught.message : "Could not save training pack.");
     } finally {
@@ -426,6 +429,7 @@ export function EnterpriseTrainingPacksCard({
       });
       setNotice(!pack.active ? "Training pack activated." : "Training pack deactivated.");
       await refresh({ preserveNotice: true });
+      await onCatalogChanged?.();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update training pack status.");
     } finally {
@@ -451,6 +455,7 @@ export function EnterpriseTrainingPacksCard({
       });
       setNotice("Training pack deleted.");
       await refresh({ preserveNotice: true });
+      await onCatalogChanged?.();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete training pack.");
     } finally {

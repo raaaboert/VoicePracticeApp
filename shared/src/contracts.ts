@@ -159,6 +159,8 @@ export interface AppConfig {
   segments: SegmentDefinition[];
   // Mobile-scoped config responses may include active org-specific custom scenarios.
   orgCustomScenarios?: OrgCustomScenario[];
+  // Mobile-scoped config responses may include active org trainings with attached custom scenarios.
+  orgTrainings?: OrgTrainingSummary[];
   tiers: TierDefinition[];
   enterprise: EnterpriseConfig;
   featureFlags: AppFeatureFlags;
@@ -193,6 +195,8 @@ export interface EnterpriseOrg {
 export const TRAINING_PACK_SCORING_KEYS = ["persuasion", "clarity", "empathy", "assertiveness"] as const;
 export type TrainingPackScoringKey = (typeof TRAINING_PACK_SCORING_KEYS)[number];
 export type TrainingPackScoringWeightOverrides = Record<string, number>;
+export const ORG_TRAINING_STATUSES = ["draft", "active", "archived"] as const;
+export type OrgTrainingStatus = (typeof ORG_TRAINING_STATUSES)[number];
 
 export interface TrainingPack {
   id: string;
@@ -233,6 +237,41 @@ export interface UserProfile {
   dailyOverageExpiresAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface OrgTrainingRecord {
+  id: string;
+  orgId: string;
+  name: string;
+  status: OrgTrainingStatus;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrgTrainingPackAttachmentRecord {
+  id: string;
+  orgId: string;
+  trainingId: string;
+  trainingPackId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrgTrainingScenarioAttachmentRecord {
+  id: string;
+  orgId: string;
+  trainingId: string;
+  scenarioId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrgTrainingSummary extends OrgTrainingRecord {
+  attachedTrainingPackIds: string[];
+  attachedCustomScenarioIds: string[];
+  attachedTrainingPackCount: number;
+  attachedCustomScenarioCount: number;
 }
 
 export type TrainingPackAssignmentCompletionRule = "scored_required_scenarios_v1";
@@ -312,6 +351,7 @@ export interface UsageSessionRecord {
   orgId: string | null;
   segmentId: string;
   scenarioId: string;
+  trainingId?: string | null;
   trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
@@ -325,6 +365,7 @@ export interface SimulationScoreRecord {
   orgId: string | null;
   segmentId: string;
   scenarioId: string;
+  trainingId?: string | null;
   trainingPackId?: string | null;
   industryId?: string | null;
   startedAt: string;
@@ -986,6 +1027,32 @@ export interface SetTrainingPackAssignmentsRequest {
   userIds: string[];
 }
 
+export interface OrgTrainingListResponse {
+  generatedAt: string;
+  orgId: string;
+  trainings: OrgTrainingSummary[];
+}
+
+export interface CreateOrgTrainingRequest {
+  name?: string;
+  status?: OrgTrainingStatus;
+  description?: string;
+}
+
+export interface UpdateOrgTrainingRequest {
+  name?: string;
+  status?: OrgTrainingStatus;
+  description?: string;
+}
+
+export interface SetOrgTrainingPackAttachmentsRequest {
+  trainingPackIds: string[];
+}
+
+export interface SetOrgTrainingScenarioAttachmentsRequest {
+  scenarioIds: string[];
+}
+
 export interface ChangeAdminPasswordRequest {
   currentPassword: string;
   newPassword: string;
@@ -1126,6 +1193,7 @@ export interface RecordUsageSessionRequest {
   userId: string;
   segmentId: string;
   scenarioId: string;
+  trainingId?: string | null;
   trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
@@ -1136,6 +1204,7 @@ export interface RecordSimulationScoreRequest {
   userId: string;
   segmentId: string;
   scenarioId: string;
+  trainingId?: string | null;
   trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
@@ -1175,6 +1244,9 @@ export interface ApiDatabase {
   config: AppConfig;
   users: UserProfile[];
   orgs: EnterpriseOrg[];
+  orgTrainings: OrgTrainingRecord[];
+  orgTrainingPackAttachments: OrgTrainingPackAttachmentRecord[];
+  orgTrainingScenarioAttachments: OrgTrainingScenarioAttachmentRecord[];
   trainingPackAssignments: TrainingPackAssignmentRecord[];
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];

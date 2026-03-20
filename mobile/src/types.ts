@@ -60,6 +60,7 @@ export interface SimulationConfig {
   voiceGender: AiVoiceGender;
   remoteTtsEnabled: boolean;
   maxSimulationMinutes: number | null;
+  trainingId?: string | null;
 }
 
 export interface SessionTiming {
@@ -67,5 +68,6 @@ export interface SessionTiming {
   endedAt: string;
   rawDurationSeconds: number;
   usedMockMode: boolean;
+  trainingId?: string | null;
   trainingPackId?: string | null;
 }

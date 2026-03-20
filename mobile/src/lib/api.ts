@@ -506,6 +506,7 @@ export async function fetchAiOpeningLine(params: {
   userId: string;
   authToken: string;
   scenarioId: string;
+  trainingId?: string;
   industryId?: string;
   industryBaseline?: string;
   difficulty: Difficulty;
@@ -523,6 +524,7 @@ export async function fetchAiOpeningLine(params: {
       method: "POST",
       body: JSON.stringify({
         scenarioId: params.scenarioId,
+        ...(params.trainingId ? { trainingId: params.trainingId } : {}),
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
@@ -537,6 +539,7 @@ export async function fetchAiTurn(params: {
   userId: string;
   authToken: string;
   scenarioId: string;
+  trainingId?: string;
   industryId?: string;
   industryBaseline?: string;
   difficulty: Difficulty;
@@ -555,6 +558,7 @@ export async function fetchAiTurn(params: {
       method: "POST",
       body: JSON.stringify({
         scenarioId: params.scenarioId,
+        ...(params.trainingId ? { trainingId: params.trainingId } : {}),
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
@@ -574,6 +578,7 @@ export async function fetchAiScore(params: {
   userId: string;
   authToken: string;
   scenarioId: string;
+  trainingId?: string;
   industryId?: string;
   industryBaseline?: string;
   difficulty: Difficulty;
@@ -600,6 +605,7 @@ export async function fetchAiScore(params: {
       method: "POST",
       body: JSON.stringify({
         scenarioId: params.scenarioId,
+        ...(params.trainingId ? { trainingId: params.trainingId } : {}),
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,

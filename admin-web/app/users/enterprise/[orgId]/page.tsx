@@ -14,8 +14,7 @@ import {
   formatSecondsAsClock,
 } from "@voicepractice/shared";
 import { AdminShell } from "../../../../src/components/AdminShell";
-import { EnterpriseCustomScenariosCard } from "../../../../src/components/EnterpriseCustomScenariosCard";
-import { EnterpriseTrainingPacksCard } from "../../../../src/components/EnterpriseTrainingPacksCard";
+import { EnterpriseTrainingsWorkspace } from "../../../../src/components/EnterpriseTrainingsWorkspace";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../../../src/lib/api";
 import { withAdminMode } from "../../../../src/lib/adminMode";
@@ -1041,41 +1040,15 @@ export default function EnterpriseOrgPage() {
           className="enterprise-tab-panel"
           hidden={activeTab !== "trainings"}
         >
-          <div className="card enterprise-section-card">
-            <div className="card-header">
-              <div>
-                <h3 style={{ marginBottom: 6 }}>Training Workspace</h3>
-                <p className="small">
-                  Training packs and custom scenarios live together here so future session-level management can land in one place.
-                </p>
-              </div>
-            </div>
-            <div className="enterprise-summary-grid">
-              <EnterpriseSummaryPill label="Supporting Assets" value="Training Packs" />
-              <EnterpriseSummaryPill label="Supporting Assets" value="Custom Scenarios" />
-              <EnterpriseSummaryPill label="Future Home" value="Training Sessions" />
-            </div>
-            <p className="small enterprise-note">
-              Session activity already exists in backend usage records, but the admin utility does not yet expose a dedicated
-              training-session workspace. This tab sets up that future without inventing session controls before the model is ready.
-            </p>
-          </div>
-
-          <EnterpriseTrainingPacksCard
+          <EnterpriseTrainingsWorkspace
             orgId={orgId}
             orgName={dashboard?.org.name}
             config={config}
             orgUsers={dashboard?.users ?? []}
-            collapsed={!cardExpanded.trainingPacks}
-            onToggleCollapse={() => toggleCard("trainingPacks")}
-          />
-
-          <EnterpriseCustomScenariosCard
-            orgId={orgId}
-            orgName={dashboard?.org.name}
-            config={config}
-            collapsed={!cardExpanded.customScenarios}
-            onToggleCollapse={() => toggleCard("customScenarios")}
+            trainingPacksCollapsed={!cardExpanded.trainingPacks}
+            onToggleTrainingPacks={() => toggleCard("trainingPacks")}
+            customScenariosCollapsed={!cardExpanded.customScenarios}
+            onToggleCustomScenarios={() => toggleCard("customScenarios")}
           />
         </section>
 
