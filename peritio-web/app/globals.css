@@ -447,6 +447,10 @@ main {
   padding: 1.2rem;
 }
 
+.metric-grid-primary .metric-card {
+  padding: 1.35rem;
+}
+
 .metric-card.positive {
   background: linear-gradient(160deg, var(--panel) 0%, rgba(79, 129, 104, 0.32) 100%);
 }
@@ -471,6 +475,11 @@ main {
   display: block;
   margin-top: 0.55rem;
   font-size: clamp(1.8rem, 4vw, 2.6rem);
+}
+
+.metric-grid-primary .metric-value {
+  color: var(--text);
+  font-size: clamp(2rem, 4.4vw, 2.9rem);
 }
 
 .metric-meta {
@@ -617,8 +626,74 @@ main {
   gap: 1rem;
 }
 
+.dashboard-primary-section {
+  margin-top: 0.3rem;
+}
+
 .dashboard-insight-value {
   font-size: clamp(1.2rem, 2vw, 1.75rem);
+}
+
+.dashboard-signal-block {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.dashboard-signal-block h3,
+.dashboard-signal-block p {
+  margin: 0;
+}
+
+.dashboard-signal-block h3 {
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.dashboard-signal-block p {
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+.dashboard-signal-block-strong {
+  gap: 0.45rem;
+  margin-bottom: 1.15rem;
+}
+
+.dashboard-signal-lead {
+  color: var(--text) !important;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.dashboard-signal-note {
+  font-size: 0.95rem;
+}
+
+.dashboard-table th,
+.dashboard-table td {
+  padding: 0.78rem 0.7rem;
+  border-bottom-color: rgba(137, 167, 195, 0.12);
+}
+
+html[data-theme="light"] .dashboard-table th,
+html[data-theme="light"] .dashboard-table td {
+  border-bottom-color: rgba(45, 74, 102, 0.1);
+}
+
+.dashboard-table tbody tr:last-child td {
+  border-bottom-color: transparent;
+}
+
+.dashboard-table thead th {
+  color: rgba(159, 177, 195, 0.88);
+}
+
+html[data-theme="light"] .dashboard-table thead th {
+  color: rgba(93, 112, 134, 0.88);
 }
 
 .empty-state-panel {

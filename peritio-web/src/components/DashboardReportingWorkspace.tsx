@@ -41,6 +41,98 @@ function getTrainingOptionLabel(training: DashboardTrainingWorkspaceRow, multipl
   return multipleOrgs ? `${training.name} - ${training.orgName}` : training.name;
 }
 
+function buildTrainingPerformanceSummary(training: DashboardTrainingWorkspaceRow): string {
+  const strongestArea = training.insights.strongestArea?.label;
+  const weakestArea = training.insights.weakestArea?.label;
+
+  if (strongestArea && weakestArea && strongestArea !== weakestArea) {
+    return `Your team performs strongly in ${strongestArea} but has the most room to improve in ${weakestArea}.`;
+  }
+
+  if (strongestArea) {
+    return `Your team performs most strongly in ${strongestArea} in this training.`;
+  }
+
+  if (weakestArea) {
+    return `${weakestArea} is the clearest performance gap in this training so far.`;
+  }
+
+  if (training.summary.totalAttemptsLast30Days > 0) {
+    return "Recent activity is available, but scored performance signals are still limited.";
+  }
+
+  return "Scored attempts will surface performance patterns here.";
+}
+
+function buildTrainingRecommendedFocus(training: DashboardTrainingWorkspaceRow): string {
+  const lowestScenario = training.insights.lowestPerformingScenario?.title;
+  const weakestArea = training.insights.weakestArea?.label;
+
+  if (lowestScenario) {
+    return `Recommended focus: Reinforce scenario ${lowestScenario}.`;
+  }
+
+  if (weakestArea) {
+    return `Recommended focus: Improve ${weakestArea} in the next round of practice.`;
+  }
+
+  return "Recommended focus: Gather more scored attempts to identify the next priority.";
+}
+
+function buildUserHighlights(users: DashboardUserReportResponse["users"]) {
+  const scoredUsers = users
+    .filter((user) => user.averageScoreLast30Days !== null && user.simulationsLast30Days > 0)
+    .slice()
+    .sort((left, right) => {
+      if ((right.averageScoreLast30Days ?? 0) !== (left.averageScoreLast30Days ?? 0)) {
+        return (right.averageScoreLast30Days ?? 0) - (left.averageScoreLast30Days ?? 0);
+      }
+
+      if (right.simulationsLast30Days !== left.simulationsLast30Days) {
+        return right.simulationsLast30Days - left.simulationsLast30Days;
+      }
+
+      return left.email.localeCompare(right.email);
+    });
+
+  const topPerformer = scoredUsers[0] ?? null;
+  const needsAttention = scoredUsers.length > 1 ? scoredUsers[scoredUsers.length - 1] : null;
+
+  return {
+    topPerformer,
+    needsAttention,
+  };
+}
+
+function buildCompanyTrend(
+  topTrainings: DashboardTrainingWorkspaceRow[],
+  totalAttemptsLast30Days: number
+): string[] {
+  if (totalAttemptsLast30Days <= 0 || topTrainings.length === 0) {
+    return ["Recent activity is limited in the current reporting window."];
+  }
+
+  const leadTraining = topTrainings[0];
+  const leadAttempts = leadTraining.summary.totalAttemptsLast30Days;
+  const leadShare = totalAttemptsLast30Days > 0 ? leadAttempts / totalAttemptsLast30Days : 0;
+
+  let summary = "Activity remains focused in the current reporting window.";
+  if (topTrainings.length === 1) {
+    summary = "Usage is currently concentrated in one active training.";
+  } else if (leadShare >= 0.6) {
+    summary = `Usage is currently concentrated in ${leadTraining.name}.`;
+  } else if (topTrainings.length <= 3) {
+    summary = "Activity is concentrated in a small set of active trainings.";
+  }
+
+  const latestActivityAt = leadTraining.summary.latestActivityAt;
+  if (!latestActivityAt) {
+    return [summary];
+  }
+
+  return [summary, `Latest recorded activity was ${formatDateTime(latestActivityAt)}.`];
+}
+
 export function DashboardReportingWorkspace({
   trainingWorkspace,
   userReport,
@@ -96,6 +188,14 @@ export function DashboardReportingWorkspace({
   const users = userReport?.users ?? [];
   const userSummary = userReport?.summary;
   const companySummary = overview?.summary;
+  const trainingPerformanceSummary = selectedTraining
+    ? buildTrainingPerformanceSummary(selectedTraining)
+    : null;
+  const trainingRecommendedFocus = selectedTraining
+    ? buildTrainingRecommendedFocus(selectedTraining)
+    : null;
+  const { topPerformer, needsAttention } = buildUserHighlights(users);
+  const companyTrend = buildCompanyTrend(topTrainings, companySummary?.simulationsLast30Days ?? 0);
 
   return (
     <div className="page-stack">
@@ -103,9 +203,7 @@ export function DashboardReportingWorkspace({
         <div>
           <p className="eyebrow">Reporting</p>
           <h1>Training performance</h1>
-          <p className="page-description">
-            Review training, user, and company performance in one focused workspace.
-          </p>
+          <p className="page-description">Review performance by training, user, and company.</p>
         </div>
       </header>
 
@@ -182,7 +280,7 @@ export function DashboardReportingWorkspace({
 
           {selectedTraining ? (
             <>
-              <section className="metric-grid">
+              <section className="metric-grid metric-grid-primary">
                 <MetricCard
                   label="Total attempts"
                   value={`${selectedTraining.summary.totalAttemptsLast30Days}`}
@@ -212,15 +310,20 @@ export function DashboardReportingWorkspace({
                 />
               </section>
 
-              <section className="section-card">
+              <section className="section-card dashboard-primary-section">
                 <div className="section-header">
                   <div>
-                    <p className="eyebrow">Key insights</p>
-                    <h2>{selectedTraining.name}</h2>
-                    <p className="section-copy">
-                      Highlights for the currently selected training based on recent real activity.
-                    </p>
+                    <p className="eyebrow">Training</p>
+                    <h2>Performance summary</h2>
+                    <p className="section-copy">Performance for this training.</p>
                   </div>
+                </div>
+
+                <div className="dashboard-signal-block dashboard-signal-block-strong">
+                  <p className="dashboard-signal-lead">{trainingPerformanceSummary}</p>
+                  {trainingRecommendedFocus ? (
+                    <p className="dashboard-signal-note">{trainingRecommendedFocus}</p>
+                  ) : null}
                 </div>
 
                 <div className="dashboard-insight-grid">
@@ -279,15 +382,13 @@ export function DashboardReportingWorkspace({
                   <div>
                     <p className="eyebrow">Users</p>
                     <h2>User performance</h2>
-                    <p className="section-copy">
-                      People with recent activity inside {selectedTraining.name}.
-                    </p>
+                    <p className="section-copy">Recent activity inside this training.</p>
                   </div>
                 </div>
 
                 {selectedTraining.users.length > 0 ? (
                   <div className="table-scroll">
-                    <table className="data-table">
+                    <table className="data-table dashboard-table">
                       <thead>
                         <tr>
                           <th>User</th>
@@ -331,15 +432,13 @@ export function DashboardReportingWorkspace({
                   <div>
                     <p className="eyebrow">Scenarios</p>
                     <h2>Scenario performance</h2>
-                    <p className="section-copy">
-                      Scenario-level performance for the assets attached to {selectedTraining.name}.
-                    </p>
+                    <p className="section-copy">Scenario-level performance for this training.</p>
                   </div>
                 </div>
 
                 {selectedTraining.scenarios.length > 0 ? (
                   <div className="table-scroll">
-                    <table className="data-table">
+                    <table className="data-table dashboard-table">
                       <thead>
                         <tr>
                           <th>Scenario</th>
@@ -409,13 +508,29 @@ export function DashboardReportingWorkspace({
               <div>
                 <p className="eyebrow">Users</p>
                 <h2>User performance</h2>
-                <p className="section-copy">Performance and recent activity across the current reporting scope.</p>
+                <p className="section-copy">Performance across your current reporting scope.</p>
               </div>
+            </div>
+
+            <div className="dashboard-signal-block">
+              <h3>Highlights</h3>
+              <p>
+                Top performer:{" "}
+                {topPerformer
+                  ? `${topPerformer.email} (${formatScore(topPerformer.averageScoreLast30Days ?? 0)} avg)`
+                  : "No scored user activity yet."}
+              </p>
+              <p>
+                Needs attention:{" "}
+                {needsAttention
+                  ? `${needsAttention.email} (${formatScore(needsAttention.averageScoreLast30Days ?? 0)} avg)`
+                  : "More scored activity is needed for comparison."}
+              </p>
             </div>
 
             {users.length > 0 ? (
               <div className="table-scroll">
-                <table className="data-table">
+                <table className="data-table dashboard-table">
                   <thead>
                     <tr>
                       <th>User</th>
@@ -487,15 +602,20 @@ export function DashboardReportingWorkspace({
               <div>
                 <p className="eyebrow">Company</p>
                 <h2>Top trainings by activity</h2>
-                <p className="section-copy">
-                  The most active trainings in your current reporting scope.
-                </p>
+                <p className="section-copy">Training activity across your current reporting scope.</p>
               </div>
+            </div>
+
+            <div className="dashboard-signal-block">
+              <h3>Activity trend</h3>
+              {companyTrend.map((line) => (
+                <p key={line}>{line}</p>
+              ))}
             </div>
 
             {topTrainings.length > 0 ? (
               <div className="table-scroll">
-                <table className="data-table">
+                <table className="data-table dashboard-table">
                   <thead>
                     <tr>
                       <th>Training</th>
