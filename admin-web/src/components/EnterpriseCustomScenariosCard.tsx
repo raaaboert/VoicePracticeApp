@@ -1361,10 +1361,10 @@ export function EnterpriseCustomScenariosCard({
     >
       <div className="content-section-header content-header-actions">
         <div>
-          <h3 style={{ marginBottom: 6 }}>Custom Scenarios</h3>
+          <h3 style={{ marginBottom: 6 }}>{trainingScope ? "Attached Custom Scenarios" : "Custom Scenarios"}</h3>
           <div className="small">
             {trainingScope
-              ? `Scenarios owned by ${trainingScope.trainingName}.`
+              ? `Showing scenarios attached to ${trainingScope.trainingName}.`
               : "Account-specific scenarios only."}
             {generatedAt ? ` Refreshed ${formatDateTime(generatedAt)}` : ""}
           </div>
@@ -1434,7 +1434,7 @@ export function EnterpriseCustomScenariosCard({
                       {loading
                         ? "Loading..."
                         : trainingScope
-                          ? "No custom scenarios exist for this training yet."
+                          ? "No custom scenarios are attached to this training yet."
                           : "No custom scenarios found for this account."}
                     </td>
                   </tr>

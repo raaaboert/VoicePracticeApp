@@ -494,12 +494,10 @@ export function EnterpriseTrainingPacksCard({
     <div className="card content-section-card" style={editorOpen ? { position: "relative", zIndex: 1200 } : undefined}>
       <div className="content-section-header content-header-actions">
         <div>
-          <h3 style={{ marginBottom: 6 }}>
-            {trainingScope ? "Training Packs" : "Training Packs"}
-          </h3>
+          <h3 style={{ marginBottom: 6 }}>{trainingScope ? "Attached Training Packs" : "Training Packs"}</h3>
           <div className="small">
             {trainingScope
-              ? `Packs owned by ${trainingScope.trainingName}.`
+              ? `Showing packs attached to ${trainingScope.trainingName}.`
               : `Org-scoped prompt coaching packs. ${orgName ? `${orgName}. ` : ""}`}
             {generatedAt ? ` Refreshed ${formatDateTime(generatedAt)}` : ""}
           </div>
@@ -544,7 +542,7 @@ export function EnterpriseTrainingPacksCard({
                     {loading
                       ? "Loading..."
                       : trainingScope
-                        ? "No training packs exist for this training yet."
+                        ? "No training packs are attached to this training yet."
                         : "No training packs found for this account."}
                   </td>
                 </tr>

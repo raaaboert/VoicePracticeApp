@@ -38,6 +38,8 @@ interface TrainingEditorState {
 }
 
 const NEW_TRAINING_ID = "__new__";
+const LEGACY_MIGRATION_DESCRIPTION =
+  "Auto-created to preserve existing enterprise training assets during the training-first workspace migration.";
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) {
@@ -64,11 +66,22 @@ function createEmptyTrainingEditor(): TrainingEditorState {
   };
 }
 
+function sanitizeTrainingDescription(value: string | null | undefined): string {
+  const description = (value ?? "").trim();
+  if (!description) {
+    return "";
+  }
+  if (description === LEGACY_MIGRATION_DESCRIPTION) {
+    return "";
+  }
+  return description;
+}
+
 function editorFromTraining(training: OrgTrainingSummary): TrainingEditorState {
   return {
     name: training.name,
     status: training.status,
-    description: training.description ?? "",
+    description: sanitizeTrainingDescription(training.description),
   };
 }
 
@@ -287,9 +300,6 @@ export function EnterpriseTrainingsWorkspace({
     replaceTrainingSummary(updated, { select: true });
   };
 
-  const workspaceTargetName =
-    editorTargetId === NEW_TRAINING_ID ? "New Training" : (selectedTraining?.name ?? "Training Workspace");
-
   return (
     <div className="enterprise-tab-panel">
       {error ? (
@@ -307,9 +317,7 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card-header">
           <div>
             <h3 style={{ marginBottom: 6 }}>Trainings</h3>
-            <p className="small">
-              Select a training to manage its details and the training-specific packs and scenarios below.
-            </p>
+            <p className="small enterprise-note">Select a training to open its detail workspace and attached assets.</p>
           </div>
           <div className="card-actions">
             <button
@@ -367,7 +375,21 @@ export function EnterpriseTrainingsWorkspace({
                   filteredTrainings.map((training) => (
                     <tr
                       key={training.id}
-                      className={training.id === selectedTraining?.id ? "enterprise-training-row-selected" : undefined}
+                      className={[
+                        "enterprise-training-row",
+                        training.id === selectedTraining?.id ? "enterprise-training-row-selected" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      tabIndex={0}
+                      aria-selected={training.id === selectedTraining?.id}
+                      onClick={() => openTraining(training.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openTraining(training.id);
+                        }
+                      }}
                     >
                       <td className="content-long-cell">
                         <button
@@ -385,9 +407,19 @@ export function EnterpriseTrainingsWorkspace({
                       <td>{training.attachedTrainingPackCount}</td>
                       <td>{training.attachedCustomScenarioCount}</td>
                       <td>
-                        <button type="button" onClick={() => openTraining(training.id)}>
-                          {training.id === selectedTraining?.id ? "Selected" : "Open"}
-                        </button>
+                        {training.id === selectedTraining?.id ? (
+                          <span className="enterprise-row-status-badge">Selected</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openTraining(training.id);
+                            }}
+                          >
+                            Select
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -402,8 +434,8 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card enterprise-section-card">
           <div className="card-header">
             <div>
-              <h3 style={{ marginBottom: 6 }}>Training Workspace</h3>
-              <p className="small">Please select a training to view/edit in the previous card.</p>
+              <h3 style={{ marginBottom: 6 }}>Training Details</h3>
+              <p className="small">Select a training above to view its details and attached assets.</p>
             </div>
           </div>
         </div>
@@ -411,9 +443,11 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card enterprise-section-card">
           <div className="card-header">
             <div>
-              <h3 style={{ marginBottom: 6 }}>{workspaceTargetName}</h3>
+              <h3 style={{ marginBottom: 6 }}>Training Details</h3>
               <p className="small">
-                Use this workspace to define the training and manage the packs and scenarios that support it.
+                {selectedTraining
+                  ? `Editing ${selectedTraining.name}.`
+                  : "Create a training, save it, then manage the packs and scenarios attached to it."}
               </p>
             </div>
             <div className="card-actions">
@@ -434,65 +468,69 @@ export function EnterpriseTrainingsWorkspace({
           </div>
 
           {selectedTraining ? (
-            <div className="enterprise-summary-grid">
-              <div className="enterprise-summary-pill">
-                <span className="small">Created</span>
-                <strong>{formatDateTime(selectedTraining.createdAt)}</strong>
-              </div>
-              <div className="enterprise-summary-pill">
-                <span className="small">Status</span>
-                <strong>{selectedTraining.status}</strong>
-              </div>
-              <div className="enterprise-summary-pill">
-                <span className="small">Attached Packs</span>
-                <strong>{selectedTraining.attachedTrainingPackCount}</strong>
-              </div>
-              <div className="enterprise-summary-pill">
-                <span className="small">Attached Scenarios</span>
-                <strong>{selectedTraining.attachedCustomScenarioCount}</strong>
-              </div>
-              <div className="enterprise-summary-pill">
-                <span className="small">Updated</span>
-                <strong>{formatDateTime(selectedTraining.updatedAt)}</strong>
+            <div className="enterprise-subsection">
+              <div className="enterprise-summary-grid" style={{ marginTop: 0 }}>
+                <div className="enterprise-summary-pill">
+                  <span className="small">Created</span>
+                  <strong>{formatDateTime(selectedTraining.createdAt)}</strong>
+                </div>
+                <div className="enterprise-summary-pill">
+                  <span className="small">Status</span>
+                  <strong>{selectedTraining.status}</strong>
+                </div>
+                <div className="enterprise-summary-pill">
+                  <span className="small">Attached Packs</span>
+                  <strong>{selectedTraining.attachedTrainingPackCount}</strong>
+                </div>
+                <div className="enterprise-summary-pill">
+                  <span className="small">Attached Scenarios</span>
+                  <strong>{selectedTraining.attachedCustomScenarioCount}</strong>
+                </div>
+                <div className="enterprise-summary-pill">
+                  <span className="small">Updated</span>
+                  <strong>{formatDateTime(selectedTraining.updatedAt)}</strong>
+                </div>
               </div>
             </div>
           ) : null}
 
-          <div className="enterprise-detail-grid">
-            <div className="enterprise-detail-item">
-              <label>Training Name</label>
-              <input
-                value={editorState.name}
-                onChange={(event) => setEditorState((prev) => ({ ...prev, name: event.target.value }))}
-                placeholder="Enter training name"
-              />
-            </div>
-            <div className="enterprise-detail-item">
-              <label>Status</label>
-              <select
-                value={editorState.status}
-                onChange={(event) =>
-                  setEditorState((prev) => ({
-                    ...prev,
-                    status: event.target.value as OrgTrainingStatus,
-                  }))
-                }
-              >
-                {ORG_TRAINING_STATUSES.map((status) => (
-                  <option key={status} value={status}>
-                    {status}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="enterprise-detail-item" style={{ gridColumn: "1 / -1" }}>
-              <label>Internal Notes</label>
-              <textarea
-                rows={4}
-                value={editorState.description}
-                onChange={(event) => setEditorState((prev) => ({ ...prev, description: event.target.value }))}
-                placeholder="Optional notes for operators. This is not customer-facing."
-              />
+          <div className="enterprise-subsection">
+            <div className="enterprise-detail-grid">
+              <div className="enterprise-detail-item">
+                <label>Training Name</label>
+                <input
+                  value={editorState.name}
+                  onChange={(event) => setEditorState((prev) => ({ ...prev, name: event.target.value }))}
+                  placeholder="Enter training name"
+                />
+              </div>
+              <div className="enterprise-detail-item">
+                <label>Status</label>
+                <select
+                  value={editorState.status}
+                  onChange={(event) =>
+                    setEditorState((prev) => ({
+                      ...prev,
+                      status: event.target.value as OrgTrainingStatus,
+                    }))
+                  }
+                >
+                  {ORG_TRAINING_STATUSES.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="enterprise-detail-item" style={{ gridColumn: "1 / -1" }}>
+                <label>Notes</label>
+                <textarea
+                  rows={4}
+                  value={editorState.description}
+                  onChange={(event) => setEditorState((prev) => ({ ...prev, description: event.target.value }))}
+                  placeholder="Optional notes for operators."
+                />
+              </div>
             </div>
           </div>
 
