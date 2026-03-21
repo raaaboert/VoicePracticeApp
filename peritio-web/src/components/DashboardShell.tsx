@@ -8,11 +8,8 @@ import { DashboardViewer } from "@voicepractice/shared";
 import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
 
 const NAV_ITEMS = [
-  { href: "/app", label: "Workspace" },
   { href: "/app/dashboard", label: "Dashboard" },
   { href: "/app/customers", label: "Customers" },
-  { href: "/app/training", label: "Training" },
-  { href: "/app/users", label: "Users" },
   { href: "/app/settings", label: "Settings" },
 ];
 
@@ -49,7 +46,7 @@ export function DashboardShell({
           <div>
             <p className="eyebrow">Peritio</p>
             <h1 className="sidebar-title">Dashboard</h1>
-            <p className="sidebar-copy">Training insight shell for customer reporting, coaching, and renewal reviews.</p>
+            <p className="sidebar-copy">Training-first reporting for customer managers and account review work.</p>
           </div>
         </div>
 
@@ -69,8 +66,8 @@ export function DashboardShell({
           <p className="eyebrow">Access</p>
           <p>
             {viewer.accessType === "platform_admin"
-              ? "You can review any customer account in this dashboard."
-              : "You are limited to your own customer account and its related reporting views."}
+              ? "You can review every customer account currently in your reporting scope."
+              : "You are limited to your own customer account and its reporting views."}
           </p>
         </div>
       </aside>

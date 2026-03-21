@@ -10,6 +10,7 @@ import {
   DashboardTrainingPackAssignmentDetailResponse,
   DashboardTrainingPackDetailResponse,
   DashboardTrainingReportResponse,
+  DashboardTrainingWorkspaceResponse,
   DashboardUserDetailResponse,
   DashboardUserReportResponse,
   DashboardViewer,
@@ -232,6 +233,23 @@ export async function getDashboardTrainingReport(): Promise<DashboardTrainingRep
 
   try {
     return await fetchDashboardApi<DashboardTrainingReportResponse>("/dashboard/training", { token });
+  } catch (error) {
+    if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+export async function getDashboardTrainingWorkspace(): Promise<DashboardTrainingWorkspaceResponse | null> {
+  const token = await getWebAuthBearerToken();
+  if (!token) {
+    return null;
+  }
+
+  try {
+    return await fetchDashboardApi<DashboardTrainingWorkspaceResponse>("/dashboard/reporting/trainings", { token });
   } catch (error) {
     if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
       return null;

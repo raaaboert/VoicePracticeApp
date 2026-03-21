@@ -913,6 +913,67 @@ export interface DashboardTrainingReportResponse {
   trainingPackAttribution: DashboardTrainingAttributionSummary;
 }
 
+export interface DashboardTrainingWorkspaceInsightMetric {
+  label: string;
+  averageScoreLast30Days: number | null;
+}
+
+export interface DashboardTrainingWorkspaceScenarioInsight {
+  scenarioId: string;
+  title: string;
+  attemptsLast30Days?: number;
+  averageScoreLast30Days?: number | null;
+}
+
+export interface DashboardTrainingWorkspaceUserRow {
+  userId: string;
+  email: string;
+  orgId: string;
+  orgName: string;
+  status: UserStatus;
+  orgRole: OrgUserRole;
+  attemptsLast30Days: number;
+  averageScoreLast30Days: number | null;
+  latestActivityAt: string | null;
+  latestScenarioTitle: string | null;
+}
+
+export interface DashboardTrainingWorkspaceScenarioRow {
+  scenarioId: string;
+  title: string;
+  segmentId: string;
+  segmentLabel: string;
+  source: "standard" | "custom" | "unknown";
+  attemptsLast30Days: number;
+  averageScoreLast30Days: number | null;
+  latestActivityAt: string | null;
+}
+
+export interface DashboardTrainingWorkspaceRow extends OrgTrainingSummary {
+  orgName: string;
+  summary: {
+    totalAttemptsLast30Days: number;
+    averageScoreLast30Days: number | null;
+    activeLearnerCountLast30Days: number;
+    totalScenarioCount: number;
+    latestActivityAt: string | null;
+  };
+  insights: {
+    strongestArea: DashboardTrainingWorkspaceInsightMetric | null;
+    weakestArea: DashboardTrainingWorkspaceInsightMetric | null;
+    mostUsedScenario: DashboardTrainingWorkspaceScenarioInsight | null;
+    lowestPerformingScenario: DashboardTrainingWorkspaceScenarioInsight | null;
+  };
+  users: DashboardTrainingWorkspaceUserRow[];
+  scenarios: DashboardTrainingWorkspaceScenarioRow[];
+}
+
+export interface DashboardTrainingWorkspaceResponse {
+  viewer: DashboardViewer;
+  generatedAt: string;
+  trainings: DashboardTrainingWorkspaceRow[];
+}
+
 export interface DashboardTrainingPackDetailResponse {
   viewer: DashboardViewer;
   pack: DashboardTrainingPackReportSummary & {

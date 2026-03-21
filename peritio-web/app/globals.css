@@ -594,6 +594,50 @@ main {
   gap: 1rem;
 }
 
+.dashboard-selector-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: end;
+}
+
+.dashboard-selector-field {
+  min-width: 0;
+}
+
+.dashboard-training-meta {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.dashboard-insight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.dashboard-insight-value {
+  font-size: clamp(1.2rem, 2vw, 1.75rem);
+}
+
+.empty-state-panel {
+  padding: 1.2rem;
+  border-radius: 18px;
+  border: 1px dashed var(--border-strong);
+  background: var(--panel-muted);
+}
+
+.empty-state-panel h3 {
+  margin: 0 0 0.45rem;
+}
+
+.empty-state-panel p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
 .trend-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
@@ -694,6 +738,10 @@ html[data-theme="light"] .progress-track {
   }
 
   .login-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-selector-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -34,6 +34,11 @@ import {
   DashboardTrainingPackTrendPoint,
   DashboardTrainingPackReportSummary,
   DashboardTrainingReportResponse,
+  DashboardTrainingWorkspaceInsightMetric,
+  DashboardTrainingWorkspaceResponse,
+  DashboardTrainingWorkspaceRow,
+  DashboardTrainingWorkspaceScenarioRow,
+  DashboardTrainingWorkspaceUserRow,
   DashboardUnmappedCoachingPhraseSummary,
   DashboardUserAssignmentSummaryRow,
   DashboardUserDetailResponse,
@@ -4472,6 +4477,322 @@ async function buildDashboardTrainingPackRows(
     });
 }
 
+function isActivityInDashboardTrainingScope(
+  entry: Pick<UsageSessionRecord, "trainingId" | "trainingPackId" | "scenarioId">,
+  trainingId: string,
+  attachedTrainingPackIds: ReadonlySet<string>,
+  attachedScenarioIds: ReadonlySet<string>
+): boolean {
+  const explicitTrainingId = typeof entry.trainingId === "string" ? entry.trainingId.trim() : "";
+  if (explicitTrainingId) {
+    return explicitTrainingId === trainingId;
+  }
+
+  if (entry.trainingPackId && attachedTrainingPackIds.has(entry.trainingPackId)) {
+    return true;
+  }
+
+  return attachedScenarioIds.has(entry.scenarioId);
+}
+
+function buildDashboardTrainingScoreInsights(
+  scores: SimulationScoreRecord[]
+): {
+  strongestArea: DashboardTrainingWorkspaceInsightMetric | null;
+  weakestArea: DashboardTrainingWorkspaceInsightMetric | null;
+} {
+  if (scores.length === 0) {
+    return {
+      strongestArea: null,
+      weakestArea: null,
+    };
+  }
+
+  const scoreAreas = [
+    {
+      label: "Persuasion",
+      averageScoreLast30Days:
+        scores.reduce((total, record) => total + record.persuasion, 0) / scores.length,
+    },
+    {
+      label: "Clarity",
+      averageScoreLast30Days: scores.reduce((total, record) => total + record.clarity, 0) / scores.length,
+    },
+    {
+      label: "Empathy",
+      averageScoreLast30Days: scores.reduce((total, record) => total + record.empathy, 0) / scores.length,
+    },
+    {
+      label: "Assertiveness",
+      averageScoreLast30Days:
+        scores.reduce((total, record) => total + record.assertiveness, 0) / scores.length,
+    },
+  ]
+    .map((entry) => ({
+      ...entry,
+      averageScoreLast30Days: Math.round(entry.averageScoreLast30Days * 10) / 10,
+    }))
+    .sort((left, right) => right.averageScoreLast30Days - left.averageScoreLast30Days);
+
+  return {
+    strongestArea: scoreAreas[0] ?? null,
+    weakestArea: scoreAreas[scoreAreas.length - 1] ?? null,
+  };
+}
+
+function buildDashboardTrainingWorkspaceUserRows(params: {
+  db: ApiDatabase;
+  org: EnterpriseOrg;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  sessions: UsageSessionRecord[];
+  scores: SimulationScoreRecord[];
+}): DashboardTrainingWorkspaceUserRow[] {
+  const userIds = new Set<string>([
+    ...params.sessions.map((session) => session.userId),
+    ...params.scores.map((record) => record.userId),
+  ]);
+
+  return Array.from(userIds)
+    .map((userId): DashboardTrainingWorkspaceUserRow | null => {
+      const user = getUserById(params.db, userId);
+      if (!user || user.accountType !== "enterprise" || user.orgId !== params.org.id) {
+        return null;
+      }
+
+      const userSessions = params.sessions.filter((session) => session.userId === userId);
+      const userScores = params.scores.filter((record) => record.userId === userId);
+      const latestSession = userSessions
+        .slice()
+        .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+      const latestScore = userScores
+        .slice()
+        .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
+      const latestActivityAt = maxIsoDate([latestSession?.endedAt ?? null, latestScore?.endedAt ?? null]);
+      const latestScenarioId = latestScore?.scenarioId ?? latestSession?.scenarioId ?? null;
+
+      return {
+        userId: user.id,
+        email: user.email,
+        orgId: params.org.id,
+        orgName: params.org.name,
+        status: user.status,
+        orgRole: user.orgRole,
+        attemptsLast30Days: userSessions.length,
+        averageScoreLast30Days: averageScore(userScores),
+        latestActivityAt,
+        latestScenarioTitle: latestScenarioId
+          ? params.scenarioCatalog.get(latestScenarioId)?.title ?? latestScenarioId
+          : null,
+      };
+    })
+    .filter((entry): entry is DashboardTrainingWorkspaceUserRow => Boolean(entry))
+    .sort((left, right) => {
+      if (right.attemptsLast30Days !== left.attemptsLast30Days) {
+        return right.attemptsLast30Days - left.attemptsLast30Days;
+      }
+      const latestDelta =
+        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.email.localeCompare(right.email, undefined, { sensitivity: "base" });
+    });
+}
+
+function buildDashboardTrainingWorkspaceScenarioRows(params: {
+  scenarioIds: Iterable<string>;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  sessions: UsageSessionRecord[];
+  scores: SimulationScoreRecord[];
+}): DashboardTrainingWorkspaceScenarioRow[] {
+  return Array.from(new Set(Array.from(params.scenarioIds).map((entry) => entry.trim()).filter(Boolean)))
+    .map((scenarioId): DashboardTrainingWorkspaceScenarioRow => {
+      const sessionRows = params.sessions.filter((session) => session.scenarioId === scenarioId);
+      const scoreRows = params.scores.filter((record) => record.scenarioId === scenarioId);
+      const meta = params.scenarioCatalog.get(scenarioId);
+
+      return {
+        scenarioId,
+        title: meta?.title ?? scenarioId,
+        segmentId: meta?.segmentId ?? "unknown",
+        segmentLabel: meta?.segmentLabel ?? "Unknown",
+        source: meta?.source ?? "unknown",
+        attemptsLast30Days: sessionRows.length,
+        averageScoreLast30Days: averageScore(scoreRows),
+        latestActivityAt: maxIsoDate([
+          ...sessionRows.map((session) => session.endedAt),
+          ...scoreRows.map((record) => record.endedAt),
+        ]),
+      };
+    })
+    .sort((left, right) => {
+      if (right.attemptsLast30Days !== left.attemptsLast30Days) {
+        return right.attemptsLast30Days - left.attemptsLast30Days;
+      }
+      const latestDelta =
+        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.title.localeCompare(right.title, undefined, { sensitivity: "base" });
+    });
+}
+
+async function buildDashboardTrainingWorkspaceRowsForOrg(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  now: Date
+): Promise<DashboardTrainingWorkspaceRow[]> {
+  ensureOrgTrainingCollections(db);
+  const normalizedOrg = ensureOrgContractFields(org);
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, normalizedOrg);
+  const trainingPacks = await listTrainingPacksForDashboardOrg(normalizedOrg.id);
+  const validTrainingPackIds = new Set(trainingPacks.map((pack) => pack.id));
+  const validScenarioIds = new Set(ensureOrgCustomScenarioCollection(normalizedOrg).map((scenario) => scenario.id));
+  const trainingPackById = new Map(trainingPacks.map((pack) => [pack.id, pack]));
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs);
+  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
+
+  return buildOrgTrainingSummaries({
+    db,
+    orgId: normalizedOrg.id,
+    validTrainingPackIds,
+    validScenarioIds,
+  }).map((training): DashboardTrainingWorkspaceRow => {
+    const attachedTrainingPackIds = new Set(training.attachedTrainingPackIds);
+    const attachedScenarioIds = new Set(training.attachedCustomScenarioIds);
+    const scopedSessions = recentSessions.filter((session) =>
+      isActivityInDashboardTrainingScope(session, training.id, attachedTrainingPackIds, attachedScenarioIds)
+    );
+    const scopedScores = recentScores.filter((record) =>
+      isActivityInDashboardTrainingScope(record, training.id, attachedTrainingPackIds, attachedScenarioIds)
+    );
+    const scopedPreviousScores = previousScores.filter((record) =>
+      isActivityInDashboardTrainingScope(record, training.id, attachedTrainingPackIds, attachedScenarioIds)
+    );
+
+    const relevantScenarioIds = new Set<string>([
+      ...training.attachedCustomScenarioIds,
+      ...scopedSessions.map((session) => session.scenarioId),
+      ...scopedScores.map((record) => record.scenarioId),
+      ...scopedPreviousScores.map((record) => record.scenarioId),
+    ]);
+
+    for (const trainingPackId of training.attachedTrainingPackIds) {
+      const trainingPack = trainingPackById.get(trainingPackId);
+      if (!trainingPack) {
+        continue;
+      }
+      resolveTrainingPackRequiredScenarioIds(trainingPack, scenarioCatalog).forEach((scenarioId) =>
+        relevantScenarioIds.add(scenarioId)
+      );
+    }
+
+    const users = buildDashboardTrainingWorkspaceUserRows({
+      db,
+      org: normalizedOrg,
+      scenarioCatalog,
+      sessions: scopedSessions,
+      scores: scopedScores,
+    });
+    const scenarios = buildDashboardTrainingWorkspaceScenarioRows({
+      scenarioIds: relevantScenarioIds,
+      scenarioCatalog,
+      sessions: scopedSessions,
+      scores: scopedScores,
+    });
+    const scoreInsights = buildDashboardTrainingScoreInsights(scopedScores);
+    const mostUsedScenarioRow = scenarios.find((scenario) => scenario.attemptsLast30Days > 0) ?? null;
+    const lowestPerformingScenarioRow =
+      scenarios
+        .filter((scenario) => scenario.averageScoreLast30Days !== null)
+        .sort((left, right) => {
+          if ((left.averageScoreLast30Days ?? 0) !== (right.averageScoreLast30Days ?? 0)) {
+            return (left.averageScoreLast30Days ?? 0) - (right.averageScoreLast30Days ?? 0);
+          }
+          return right.attemptsLast30Days - left.attemptsLast30Days;
+        })[0] ?? null;
+
+    return {
+      ...training,
+      orgName: normalizedOrg.name,
+      summary: {
+        totalAttemptsLast30Days: scopedSessions.length,
+        averageScoreLast30Days: averageScore(scopedScores),
+        activeLearnerCountLast30Days: new Set([
+          ...scopedSessions.map((session) => session.userId),
+          ...scopedScores.map((record) => record.userId),
+        ]).size,
+        totalScenarioCount: relevantScenarioIds.size,
+        latestActivityAt: maxIsoDate([
+          ...scopedSessions.map((session) => session.endedAt),
+          ...scopedScores.map((record) => record.endedAt),
+        ]),
+      },
+      insights: {
+        strongestArea: scoreInsights.strongestArea,
+        weakestArea: scoreInsights.weakestArea,
+        mostUsedScenario: mostUsedScenarioRow
+          ? {
+              scenarioId: mostUsedScenarioRow.scenarioId,
+              title: mostUsedScenarioRow.title,
+              attemptsLast30Days: mostUsedScenarioRow.attemptsLast30Days,
+            }
+          : null,
+        lowestPerformingScenario: lowestPerformingScenarioRow
+          ? {
+              scenarioId: lowestPerformingScenarioRow.scenarioId,
+              title: lowestPerformingScenarioRow.title,
+              averageScoreLast30Days: lowestPerformingScenarioRow.averageScoreLast30Days,
+            }
+          : null,
+      },
+      users,
+      scenarios,
+    };
+  });
+}
+
+async function buildDashboardTrainingWorkspace(
+  db: ApiDatabase,
+  viewer: DashboardViewer
+): Promise<DashboardTrainingWorkspaceResponse> {
+  const now = new Date();
+  const trainings = (
+    await Promise.all(
+      listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardTrainingWorkspaceRowsForOrg(db, org, now))
+    )
+  )
+    .flat()
+    .sort((left, right) => {
+      const statusOrder: Record<OrgTrainingStatus, number> = {
+        active: 0,
+        draft: 1,
+        archived: 2,
+      };
+      if (statusOrder[left.status] !== statusOrder[right.status]) {
+        return statusOrder[left.status] - statusOrder[right.status];
+      }
+
+      const updatedDelta = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      if (Number.isFinite(updatedDelta) && updatedDelta !== 0) {
+        return updatedDelta;
+      }
+
+      return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+    });
+
+  return {
+    viewer,
+    generatedAt: now.toISOString(),
+    trainings,
+  };
+}
+
 async function buildDashboardCustomerInsights(db: ApiDatabase, org: EnterpriseOrg): Promise<DashboardCustomerInsights> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
@@ -7428,6 +7749,16 @@ app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, res
 app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withDatabaseRead(async (db) => {
     const payload = await buildDashboardOverview(db, request.dashboard!.viewer);
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabase(async (db) => {
+    for (const org of listDashboardAccessibleOrgs(db, request.dashboard!.viewer)) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!.viewer);
     response.json(payload);
   });
 });
