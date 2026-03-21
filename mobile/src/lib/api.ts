@@ -11,6 +11,7 @@ import {
   PersonaStyle,
   RecordUsageSessionRequest,
   RecordSimulationScoreRequest,
+  SuperUserOrgOptionsResponse,
   UserEntitlementsResponse,
   UserProfile,
 } from "@voicepractice/shared";
@@ -91,6 +92,12 @@ function inferApiBaseUrl(): string {
 }
 
 const API_BASE_URL = inferApiBaseUrl();
+let activeSuperUserOrgId: string | null = null;
+
+export function setActiveSuperUserOrgId(orgId: string | null): void {
+  const trimmed = typeof orgId === "string" ? orgId.trim() : "";
+  activeSuperUserOrgId = trimmed ? trimmed : null;
+}
 
 export type RemoteTtsPreset =
   | "male-balanced"
@@ -131,6 +138,7 @@ async function requestJson<T>(
         "Content-Type": "application/json",
         ...(init?.headers ?? {}),
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...(activeSuperUserOrgId ? { "X-Superuser-Org-Id": activeSuperUserOrgId } : {}),
       },
     });
 
@@ -203,6 +211,7 @@ async function requestFormData<T>(
       signal: controller.signal,
       headers: {
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...(activeSuperUserOrgId ? { "X-Superuser-Org-Id": activeSuperUserOrgId } : {}),
       },
       body: formData,
     });
@@ -350,6 +359,17 @@ export async function verifyMobileEmail(
 
 export async function fetchMobileUser(userId: string, authToken: string): Promise<UserProfile> {
   return requestJson<UserProfile>(`/mobile/users/${encodeURIComponent(userId)}`, undefined, authToken);
+}
+
+export async function fetchSuperUserOrgOptions(
+  userId: string,
+  authToken: string,
+): Promise<SuperUserOrgOptionsResponse> {
+  return requestJson<SuperUserOrgOptionsResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/superuser/orgs`,
+    undefined,
+    authToken,
+  );
 }
 
 export async function fetchMobileConfig(userId: string, authToken: string): Promise<AppConfig> {
@@ -651,6 +671,7 @@ export async function fetchAiTtsAudio(params: {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${params.authToken}`,
+        ...(activeSuperUserOrgId ? { "X-Superuser-Org-Id": activeSuperUserOrgId } : {}),
       },
       body: JSON.stringify({
         text: params.text,

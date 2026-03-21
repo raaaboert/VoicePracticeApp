@@ -29,6 +29,7 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
 
     return (
       pathname.startsWith("/users")
+      || pathname.startsWith("/settings")
       || pathname.startsWith("/usage")
       || pathname.startsWith("/support")
       || pathname.startsWith("/content")
@@ -40,6 +41,7 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
 
   return (
     pathname.startsWith("/users")
+    || pathname.startsWith("/settings")
     || pathname.startsWith("/usage")
     || pathname.startsWith("/support")
     || pathname.startsWith("/content")
@@ -59,6 +61,7 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
   const [mode, setMode] = useState<AdminMode>("enterprise");
 
   const isUsers = pathname.startsWith("/users");
+  const isSettings = pathname.startsWith("/settings");
   const isConfig = pathname.startsWith("/config");
   const isUsage = pathname.startsWith("/usage");
   const isStats = pathname.startsWith("/stats");
@@ -209,6 +212,14 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
                 {item.label}
               </Link>
             ))}
+            <Link
+              href={withAdminMode("/settings", mode)}
+              className={`icon-button ${navClass(isSettings)}`}
+              aria-label="Settings"
+              title="Settings"
+            >
+              ⚙
+            </Link>
             <button
               onClick={() => {
                 void (async () => {

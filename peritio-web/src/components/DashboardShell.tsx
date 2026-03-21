@@ -7,11 +7,10 @@ import { DashboardViewer } from "@voicepractice/shared";
 
 import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
 
-const NAV_ITEMS = [
+const BASE_NAV_ITEMS = [
   { href: "/app/dashboard", label: "Dashboard" },
-  { href: "/app/customers", label: "Customers" },
   { href: "/app/settings", label: "Settings" },
-];
+] as const;
 
 function isActivePath(pathname: string, href: string): boolean {
   if (href === "/app") {
@@ -30,7 +29,14 @@ export function DashboardShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const sessionLabel = viewer.accessType === "platform_admin" ? "Platform Admin" : viewer.orgName ?? "Customer";
+  const sessionLabel = viewer.isSuperUser
+    ? "Super User"
+    : viewer.accessType === "platform_admin"
+      ? "Platform Admin"
+      : viewer.orgName ?? "Customer";
+  const navItems = viewer.isSuperUser
+    ? [BASE_NAV_ITEMS[0], { href: "/app/customers", label: "Customers" }, BASE_NAV_ITEMS[1]]
+    : BASE_NAV_ITEMS;
 
   const signOut = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -51,7 +57,7 @@ export function DashboardShell({
         </div>
 
         <nav className="app-nav" aria-label="Dashboard navigation">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <Link
               key={item.href}
               href={item.href}
@@ -66,6 +72,8 @@ export function DashboardShell({
           <p className="eyebrow">Access</p>
           <p>
             {viewer.accessType === "platform_admin"
+              ? "You can review every customer account currently in your reporting scope."
+              : viewer.isSuperUser
               ? "You can review every customer account currently in your reporting scope."
               : "You are limited to your own customer account and its reporting views."}
           </p>

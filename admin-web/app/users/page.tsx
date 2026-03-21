@@ -64,7 +64,7 @@ export default function UsersPage() {
   const personalUsers = useMemo(
     () =>
       users
-        .filter((user) => user.accountType === "individual")
+        .filter((user) => user.accountType === "individual" && user.isSuperUser !== true)
         .slice()
         .sort((a, b) => a.email.localeCompare(b.email)),
     [users],

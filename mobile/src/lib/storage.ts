@@ -8,6 +8,7 @@ const USER_ID_STORAGE_KEY = "@voice_practice_user_id";
 const MOBILE_AUTH_TOKEN_STORAGE_KEY = "@voice_practice_mobile_auth_token";
 const MOBILE_AUTH_TOKEN_SECURE_STORAGE_KEY = "voice_practice_mobile_auth_token";
 const ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY = "@voice_practice_active_industry_baseline";
+const SUPERUSER_ACTIVE_ORG_ID_STORAGE_KEY = "@voice_practice_superuser_active_org_id";
 const COLOR_SCHEME_STORAGE_KEY = "@voice_practice_color_scheme";
 const VOICE_PROFILE_STORAGE_KEY = "@voice_practice_voice_profile";
 const VOICE_GENDER_STORAGE_KEY = "@voice_practice_voice_gender";
@@ -146,7 +147,31 @@ export async function clearMobileAuthToken(): Promise<void> {
 export async function clearUserId(): Promise<void> {
   await AsyncStorage.removeItem(USER_ID_STORAGE_KEY);
   await AsyncStorage.removeItem(ACTIVE_INDUSTRY_BASELINE_CONTEXT_STORAGE_KEY);
+  await AsyncStorage.removeItem(SUPERUSER_ACTIVE_ORG_ID_STORAGE_KEY);
   await clearMobileAuthToken();
+}
+
+export async function loadSuperUserActiveOrgId(): Promise<string | null> {
+  try {
+    const stored = await AsyncStorage.getItem(SUPERUSER_ACTIVE_ORG_ID_STORAGE_KEY);
+    return stored && stored.trim() ? stored.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSuperUserActiveOrgId(orgId: string): Promise<void> {
+  const trimmed = orgId.trim();
+  if (!trimmed) {
+    await AsyncStorage.removeItem(SUPERUSER_ACTIVE_ORG_ID_STORAGE_KEY);
+    return;
+  }
+
+  await AsyncStorage.setItem(SUPERUSER_ACTIVE_ORG_ID_STORAGE_KEY, trimmed);
+}
+
+export async function clearSuperUserActiveOrgId(): Promise<void> {
+  await AsyncStorage.removeItem(SUPERUSER_ACTIVE_ORG_ID_STORAGE_KEY);
 }
 
 export async function loadActiveIndustryBaselineContext(): Promise<{

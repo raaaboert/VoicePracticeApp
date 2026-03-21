@@ -5,7 +5,7 @@ import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSectio
 import { CustomerDetailTabs } from "@/src/components/CustomerDetailTabs";
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
-import { DashboardAccessDeniedError, getAccessibleCustomerDetail } from "@/src/lib/auth";
+import { DashboardAccessDeniedError, getAccessibleCustomerDetail, getDashboardViewer } from "@/src/lib/auth";
 import { formatDate, formatDateTime, formatScore, formatSignedPercent, formatUsageMinutes } from "@/src/lib/formatters";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -19,6 +19,11 @@ export default async function CustomerDetailPage({
 }: {
   params: Promise<{ customerId: string }>;
 }) {
+  const viewer = await getDashboardViewer();
+  if (!viewer?.isSuperUser) {
+    redirect("/app/dashboard");
+  }
+
   const { customerId } = await params;
   let payload;
   try {

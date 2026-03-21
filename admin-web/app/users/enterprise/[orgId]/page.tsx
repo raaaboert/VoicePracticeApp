@@ -175,6 +175,7 @@ export default function EnterpriseOrgPage() {
   const [savingUserQuotaId, setSavingUserQuotaId] = useState<string | null>(null);
   const [savingUserOverageId, setSavingUserOverageId] = useState<string | null>(null);
   const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
+  const [savingOrgStatus, setSavingOrgStatus] = useState(false);
   const [orgDomainInput, setOrgDomainInput] = useState("");
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [monthlyMinutesAllottedInput, setMonthlyMinutesAllottedInput] = useState("0");
@@ -646,6 +647,43 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const toggleOrgStatus = async () => {
+    if (!dashboard) {
+      return;
+    }
+
+    const nextStatus = dashboard.org.status === "active" ? "disabled" : "active";
+    const confirmed = window.confirm(
+      nextStatus === "disabled"
+        ? `Deactivate account "${dashboard.org.name}"?\n\nThis will immediately remove app and dashboard access for all users in this enterprise account. Historical data will be preserved.`
+        : `Reactivate account "${dashboard.org.name}"?\n\nThis will restore app and dashboard access for users in this enterprise account.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setSavingOrgStatus(true);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updated = await adminFetch<EnterpriseOrg>(`/orgs/${dashboard.org.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      setDashboard((prev) => (prev ? { ...prev, org: updated } : prev));
+      setSuccessMessage(
+        nextStatus === "disabled"
+          ? "Enterprise account deactivated. Customer access has been revoked."
+          : "Enterprise account reactivated.",
+      );
+      await load({ preserveSuccessMessage: true });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update enterprise account status.");
+    } finally {
+      setSavingOrgStatus(false);
+    }
+  };
+
   const deleteEnterpriseUser = async (userId: string, email: string) => {
     const firstConfirm = window.confirm("Are you sure? This can not be reversed!");
     if (!firstConfirm) {
@@ -815,6 +853,20 @@ export default function EnterpriseOrgPage() {
                     </p>
                   </div>
                   <div className="card-actions card-actions-end">
+                    <button
+                      type="button"
+                      className={dashboard.org.status === "active" ? "danger" : "primary"}
+                      onClick={() => void toggleOrgStatus()}
+                      disabled={savingOrgStatus}
+                    >
+                      {savingOrgStatus
+                        ? dashboard.org.status === "active"
+                          ? "Deactivating..."
+                          : "Reactivating..."
+                        : dashboard.org.status === "active"
+                          ? "Deactivate Account"
+                          : "Reactivate Account"}
+                    </button>
                     <button type="button" onClick={() => void load()} disabled={loading}>
                       {loading ? "Refreshing..." : "Refresh"}
                     </button>
@@ -853,6 +905,10 @@ export default function EnterpriseOrgPage() {
                   <div className="enterprise-detail-item">
                     <label>Next Renewal Date</label>
                     <div className="enterprise-detail-value">{formatDate(dashboard.billingPeriod.nextRenewalAt)}</div>
+                  </div>
+                  <div className="enterprise-detail-item">
+                    <label>Account Status</label>
+                    <div className="enterprise-detail-value">{dashboard.org.status === "active" ? "Active" : "Deactivated"}</div>
                   </div>
                   <div className="enterprise-detail-item">
                     <label>Company Contact</label>

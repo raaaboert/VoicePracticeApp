@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
@@ -7,6 +8,9 @@ import { formatDate, formatScore, formatSignedPercent, formatUsageMinutes } from
 
 export default async function CustomersPage() {
   const viewer = await getDashboardViewer();
+  if (!viewer?.isSuperUser) {
+    redirect("/app/dashboard");
+  }
   const customers = await listAccessibleCustomers();
   const customerCount = customers.length;
   const totalActiveUsers = customers.reduce((total, customer) => total + customer.activeUserCount, 0);
@@ -19,9 +23,7 @@ export default async function CustomersPage() {
         eyebrow="Customers"
         title="Customer accounts"
         description={
-          viewer?.accessType === "platform_admin"
-            ? "Platform admins can review every customer account in scope. These cards now use real usage, score, and account data."
-            : "Your dashboard is restricted to your own customer account and its protected reporting data."
+          "Review customer accounts in scope. These cards use the current protected usage, score, and account data."
         }
       />
 

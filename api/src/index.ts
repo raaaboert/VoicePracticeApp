@@ -95,6 +95,10 @@ import {
   SetTrainingPackAssignmentsRequest,
   SimulationScoreCoachingArtifact,
   SimulationScoreCoachingArtifactInput,
+  CreateSuperUserRequest,
+  SuperUserListResponse,
+  SuperUserSummary,
+  SuperUserOrgOptionsResponse,
   SupportCaseRecord,
   SimulationScoreRecord,
   TrainingPack,
@@ -2833,6 +2837,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
     ...user,
     isPlatformAdmin: (user as Partial<UserProfile>).isPlatformAdmin === true,
+    isSuperUser: (user as Partial<UserProfile>).isSuperUser === true,
     dashboardAccessEnabled:
       (user as Partial<UserProfile>).accountType === "enterprise"
         ? (user as Partial<UserProfile>).dashboardAccessEnabled === true
@@ -3399,6 +3404,7 @@ function buildWebAuthSessionUser(user: UserProfile): WebAuthSessionResponse["ses
     email: user.email,
     emailVerifiedAt: user.emailVerifiedAt,
     isPlatformAdmin: user.isPlatformAdmin === true,
+    isSuperUser: user.isSuperUser === true,
     dashboardAccessEnabled: user.dashboardAccessEnabled === true,
     accountType: user.accountType,
     orgId: user.orgId
@@ -3543,6 +3549,92 @@ function getOrgById(db: ApiDatabase, orgId: string | null): EnterpriseOrg | unde
   }
 
   return db.orgs.find((org) => org.id === orgId);
+}
+
+function isSuperUser(user: UserProfile): boolean {
+  return user.isSuperUser === true;
+}
+
+function getIncomingSuperUserOrgId(request: Request): string | null {
+  const headerValue = request.headers["x-superuser-org-id"];
+  if (typeof headerValue !== "string") {
+    return null;
+  }
+
+  const trimmed = headerValue.trim();
+  return trimmed ? trimmed : null;
+}
+
+interface MobileAccessContext {
+  user: UserProfile;
+  actingOrg: EnterpriseOrg | null;
+  actingOrgId: string | null;
+  isSuperUser: boolean;
+}
+
+function resolveMobileAccessContext(
+  db: ApiDatabase,
+  user: UserProfile,
+  request: Request,
+  response: Response,
+  options?: { requireSuperUserOrgSelection?: boolean }
+): MobileAccessContext | null {
+  if (user.status !== "active") {
+    response.status(403).json({ error: "User account is disabled." });
+    return null;
+  }
+
+  if (isSuperUser(user)) {
+    const requestedOrgId = getIncomingSuperUserOrgId(request);
+    if (!requestedOrgId) {
+      if (options?.requireSuperUserOrgSelection === true) {
+        response.status(400).json({ error: "Select an enterprise account environment first." });
+        return null;
+      }
+
+      return {
+        user,
+        actingOrg: null,
+        actingOrgId: null,
+        isSuperUser: true,
+      };
+    }
+
+    const actingOrg = getOrgById(db, requestedOrgId);
+    if (!actingOrg) {
+      response.status(404).json({ error: "Selected enterprise account was not found." });
+      return null;
+    }
+
+    return {
+      user,
+      actingOrg,
+      actingOrgId: actingOrg.id,
+      isSuperUser: true,
+    };
+  }
+
+  if (user.accountType === "enterprise") {
+    const actingOrg = getOrgById(db, user.orgId);
+    if (!actingOrg || actingOrg.status !== "active") {
+      response.status(403).json({ error: "Enterprise account is not active." });
+      return null;
+    }
+
+    return {
+      user,
+      actingOrg,
+      actingOrgId: actingOrg.id,
+      isSuperUser: false,
+    };
+  }
+
+  return {
+    user,
+    actingOrg: null,
+    actingOrgId: null,
+    isSuperUser: false,
+  };
 }
 
 function roundMinutes(seconds: number): number {
@@ -4830,7 +4922,7 @@ async function buildDashboardCustomerInsights(db: ApiDatabase, org: EnterpriseOr
 }
 
 function listDashboardAccessibleOrgs(db: ApiDatabase, viewer: DashboardViewer): EnterpriseOrg[] {
-  return viewer.accessType === "platform_admin"
+  return viewer.accessType === "platform_admin" || viewer.accessType === "super_user"
     ? db.orgs.slice().sort((left, right) => left.name.localeCompare(right.name))
     : db.orgs.filter((org) => org.id === viewer.orgId);
 }
@@ -6283,12 +6375,12 @@ function computeEntitlements(
   db: ApiDatabase,
   user: UserProfile,
   now: Date,
-  options?: { allowDuringActiveSimulation?: boolean }
+  options?: { allowDuringActiveSimulation?: boolean; actingOrgId?: string | null }
 ): UserEntitlementsResponse {
   const timezone = materializeUserTimezone(user, now);
   const tierDefinition = resolveTierDefinition(db, user.tier);
   const usage = computeUserUsage(db, user, now, timezone);
-  const org = getOrgById(db, user.orgId);
+  const org = getOrgById(db, isSuperUser(user) ? options?.actingOrgId ?? null : user.orgId);
 
   let dailySecondsLimit: number | null = tierDefinition.dailySecondsLimit;
   let orgDailySecondsQuota: number | null = null;
@@ -6306,7 +6398,25 @@ function computeEntitlements(
   let nextRenewalAt = computeNextRenewalAt(user.planAnchorAt, now);
   let lockReason: string | null = null;
 
-  if (user.accountType === "enterprise") {
+  if (isSuperUser(user)) {
+    dailySecondsLimit = null;
+    if (!org) {
+      lockReason = "Select an enterprise account environment.";
+      dailySecondsRemaining = 0;
+    } else {
+      const orgUsage = resolveOrgUsageForCurrentBillingCycle(db, org, now);
+      maxSimulationMinutes = normalizeMaxSimulationMinutes(org.maxSimulationMinutes);
+      orgMonthlySecondsAllotted = orgUsage.allottedSeconds;
+      orgBillingPeriodStartAt = orgUsage.periodStartAt;
+      orgBillingPeriodEndAt = orgUsage.periodEndAt;
+      orgUsedSecondsThisPeriod = 0;
+      orgAllottedSecondsThisPeriod = orgUsage.allottedSeconds;
+      orgRemainingSecondsThisPeriod = orgUsage.allottedSeconds;
+      orgUsagePercentThisPeriod = 0;
+      nextRenewalAt = orgUsage.nextRenewalAt;
+      dailySecondsRemaining = null;
+    }
+  } else if (user.accountType === "enterprise") {
     if (!org || org.status !== "active") {
       dailySecondsLimit = null;
       lockReason = "Enterprise account is not currently active.";
@@ -6392,8 +6502,9 @@ function computeEntitlements(
     accountType: user.accountType,
     status: user.status,
     features: {
-      support: tierDefinition.supportIncluded || user.accountType === "enterprise",
-      customScenarioBuilder: db.config.featureFlags.customScenarioBuilder && tierDefinition.canCreateCustomScenarios
+      support: isSuperUser(user) || tierDefinition.supportIncluded || user.accountType === "enterprise",
+      customScenarioBuilder:
+        isSuperUser(user) || (db.config.featureFlags.customScenarioBuilder && tierDefinition.canCreateCustomScenarios)
     },
     limits: {
       dailySecondsLimit,
@@ -6635,13 +6746,15 @@ function resolveAiBudgetLimitError(
   return null;
 }
 
-function resolveConfigForUser(db: ApiDatabase, user: UserProfile): AppConfig {
-  if (user.accountType !== "enterprise") {
+function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: string | null): AppConfig {
+  const resolvedOrgId = isSuperUser(user) ? actingOrgId ?? null : user.orgId;
+
+  if (!resolvedOrgId) {
     return db.config;
   }
 
-  const org = getOrgById(db, user.orgId);
-  if (!org || org.status !== "active") {
+  const org = getOrgById(db, resolvedOrgId);
+  if (!org || (!isSuperUser(user) && org.status !== "active")) {
     return db.config;
   }
 
@@ -7208,6 +7321,39 @@ function resolveWaiter(userId: string, waiter: MobileUpdateWaiter, payload: Mobi
   }
 }
 
+function revokeMobileAccessForUser(db: ApiDatabase, userId: string, reason: string): void {
+  db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== userId);
+
+  const waiters = mobileUpdateWaitersByUserId.get(userId);
+  if (waiters && waiters.size > 0) {
+    for (const waiter of Array.from(waiters)) {
+      if (waiter.resolved) {
+        continue;
+      }
+      waiter.resolved = true;
+      clearTimeout(waiter.timeoutHandle);
+      try {
+        waiter.response.status(410).json({ error: reason });
+      } catch {
+        // Ignore disconnected clients.
+      }
+    }
+  }
+
+  mobileUpdateWaitersByUserId.delete(userId);
+  mobileUpdatePayloadByUserId.delete(userId);
+  mobileUpdateCursorByUserId.delete(userId);
+  mobileUpdateReasonByUserId.delete(userId);
+}
+
+function revokeEnterpriseOrgUserAccess(db: ApiDatabase, orgId: string, reason: string): void {
+  for (const user of db.users.filter((entry) => entry.accountType === "enterprise" && entry.orgId === orgId)) {
+    webAuthService.revokeUserSessions(db, user.id);
+    db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
+    revokeMobileAccessForUser(db, user.id, reason);
+  }
+}
+
 function emitMobileUpdateForUser(db: ApiDatabase, userId: string, reason: MobileUpdateReason): void {
   const user = getUserById(db, userId);
   if (!user) {
@@ -7590,6 +7736,14 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
       return;
     }
 
+    if (user.accountType === "enterprise" && !isSuperUser(user)) {
+      const org = getOrgById(db, user.orgId);
+      if (!org || org.status !== "active") {
+        response.status(403).json({ error: "This enterprise account is not active." });
+        return;
+      }
+    }
+
     const now = new Date();
     let payload: WebAuthRequestCodeResponse;
     if (user.emailVerifiedAt) {
@@ -7649,6 +7803,14 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     if (user.status !== "active") {
       response.status(403).json({ error: "This account is not active." });
       return;
+    }
+
+    if (user.accountType === "enterprise" && !isSuperUser(user)) {
+      const org = getOrgById(db, user.orgId);
+      if (!org || org.status !== "active") {
+        response.status(403).json({ error: "This enterprise account is not active." });
+        return;
+      }
     }
 
     const now = new Date();
@@ -8027,6 +8189,7 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       response.status(404).json({ error: "Organization not found." });
       return;
     }
+    const previousStatus = org.status;
 
     if (typeof patch.name === "string" && patch.name.trim()) {
       org.name = patch.name.trim();
@@ -8161,6 +8324,10 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
           .filter(Boolean)
       );
       org.joinCode = generateUniqueJoinCode(existingCodes, org.name);
+    }
+
+    if (previousStatus !== org.status && org.status === "disabled") {
+      revokeEnterpriseOrgUserAccess(db, org.id, "Enterprise account access was deactivated.");
     }
 
     org.updatedAt = nowIso();
@@ -9644,6 +9811,141 @@ app.get("/orgs/accounts-export", requireAdmin, async (_request: Request, respons
   });
 });
 
+app.get("/admin/settings/superusers", requireAdmin, async (_request: Request, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const rows: SuperUserSummary[] = db.users
+      .filter((user) => user.isSuperUser === true)
+      .slice()
+      .sort((left, right) => left.email.localeCompare(right.email))
+      .map((user) => ({
+        userId: user.id,
+        email: user.email,
+        status: user.status,
+        emailVerifiedAt: user.emailVerifiedAt,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+      }));
+
+    const payload: SuperUserListResponse = {
+      generatedAt: nowIso(),
+      rows,
+    };
+    response.json(payload);
+  });
+});
+
+app.post("/admin/settings/superusers", requireAdmin, async (request: Request, response: Response) => {
+  const body = request.body as CreateSuperUserRequest;
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+
+  if (!email || !isEmailLike(email)) {
+    response.status(400).json({ error: "Valid email is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const existing = db.users.find((user) => user.email.toLowerCase() === email);
+    if (existing) {
+      if (existing.accountType === "enterprise") {
+        response.status(409).json({
+          error: "A user with this email address already exists in an enterprise account.",
+        });
+        return;
+      }
+
+      if (existing.isSuperUser === true) {
+        response.status(409).json({ error: "This super user already exists." });
+        return;
+      }
+
+      response.status(409).json({ error: "Email already exists." });
+      return;
+    }
+
+    const now = nowIso();
+    const user: UserProfile = {
+      id: `usr_${uuid()}`,
+      email,
+      emailVerifiedAt: null,
+      isPlatformAdmin: false,
+      isSuperUser: true,
+      dashboardAccessEnabled: false,
+      accountType: "individual",
+      tier: "free",
+      status: "active",
+      orgId: null,
+      orgRole: "user",
+      timezone: "UTC",
+      pendingTimezone: null,
+      pendingTimezoneEffectiveAt: null,
+      planAnchorAt: now,
+      manualBonusSeconds: 0,
+      dailySecondsCapOverride: null,
+      allowDailyOverageThisCycle: false,
+      dailyOverageExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    db.users.push(user);
+    appendPlatformAuditEvent(db, {
+      action: "settings.super_user.created",
+      userId: user.id,
+      message: `Created super user ${user.email}.`,
+      metadata: {
+        email: user.email,
+      },
+    });
+
+    const payload: SuperUserSummary = {
+      userId: user.id,
+      email: user.email,
+      status: user.status,
+      emailVerifiedAt: user.emailVerifiedAt,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
+    response.status(201).json(payload);
+  });
+});
+
+app.delete("/admin/settings/superusers/:userId", requireAdmin, async (request: Request, response: Response) => {
+  const userId = request.params.userId?.trim();
+  if (!userId) {
+    response.status(400).json({ error: "userId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user || user.isSuperUser !== true) {
+      response.status(404).json({ error: "Super user not found." });
+      return;
+    }
+
+    revokeMobileAccessForUser(db, user.id, "Super user access was removed.");
+    webAuthService.revokeUserSessions(db, user.id);
+    db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
+    db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
+    db.users = db.users.filter((entry) => entry.id !== user.id);
+
+    appendPlatformAuditEvent(db, {
+      action: "settings.super_user.deleted",
+      userId: user.id,
+      message: `Removed super user ${user.email}.`,
+      metadata: {
+        email: user.email,
+      },
+    });
+
+    response.json({
+      deleted: true,
+      userId: user.id,
+      email: user.email,
+    });
+  });
+});
+
 app.get("/users", requireAdmin, async (_request: Request, response: Response) => {
   await withDatabaseRead(async (db) => {
     response.json(db.users);
@@ -9835,6 +10137,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       user.status = patch.status;
       if (user.status !== "active") {
         webAuthService.revokeUserSessions(db, user.id);
+        revokeMobileAccessForUser(db, user.id, "User access was disabled.");
       }
     }
 
@@ -10019,6 +10322,14 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
     const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
+      if (existing.accountType === "enterprise" && !isSuperUser(existing)) {
+        const org = getOrgById(db, existing.orgId);
+        if (!org || org.status !== "active") {
+          response.status(403).json({ error: "Enterprise account is not active." });
+          return;
+        }
+      }
+
       const issuedAt = nowIso();
       existing.timezone = timezone;
       existing.updatedAt = issuedAt;
@@ -10278,6 +10589,45 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
   });
 });
 
+app.get("/mobile/users/:userId/superuser/orgs", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  await withDatabaseRead(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (!isSuperUser(user)) {
+      response.status(403).json({ error: "Super user access is required." });
+      return;
+    }
+
+    const payload: SuperUserOrgOptionsResponse = {
+      generatedAt: nowIso(),
+      orgs: db.orgs
+        .slice()
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((org) => ({
+          orgId: org.id,
+          orgName: org.name,
+          orgStatus: org.status,
+        })),
+    };
+    response.json(payload);
+  });
+});
+
 app.get("/mobile/users/:userId/config", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
@@ -10297,12 +10647,16 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
       return;
     }
 
-    const org = getOrgById(db, user.orgId);
-    if (org) {
-      await ensureOrgTrainingWorkspace(db, org);
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
     }
 
-    response.json(resolveConfigForUser(db, user));
+    if (accessContext.actingOrg) {
+      await ensureOrgTrainingWorkspace(db, accessContext.actingOrg);
+    }
+
+    response.json(resolveConfigForUser(db, user, accessContext.actingOrgId));
   });
 });
 
@@ -11005,7 +11359,14 @@ app.get("/mobile/users/:userId/entitlements", async (request: Request, response:
       return;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date());
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      actingOrgId: accessContext.actingOrgId,
+    });
     response.json(entitlements);
   });
 });
@@ -11043,8 +11404,14 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       return null;
     }
 
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return null;
+    }
+
     const entitlements = computeEntitlements(db, user, new Date(), {
-      allowDuringActiveSimulation: true
+      allowDuringActiveSimulation: true,
+      actingOrgId: accessContext.actingOrgId
     });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
@@ -11059,7 +11426,11 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       return null;
     }
 
-    return { user };
+    return {
+      user,
+      isSuperUser: accessContext.isSuperUser,
+      actingOrgId: accessContext.actingOrgId,
+    };
   });
 
   if (!context) {
@@ -11074,34 +11445,36 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       mimeType: file.mimetype || "audio/m4a"
     });
 
-    try {
-      await withDatabase(async (db) => {
-        const user = getUserById(db, context.user.id);
-        if (!user) {
-          return;
-        }
+    if (!context.isSuperUser) {
+      try {
+        await withDatabase(async (db) => {
+          const user = getUserById(db, context.user.id);
+          if (!user) {
+            return;
+          }
 
-        const event: AiUsageEvent = {
-          id: `ai_${uuid()}`,
-          kind: "transcribe",
-          userId: user.id,
-          orgId: user.orgId,
-          segmentId: null,
-          scenarioId: null,
-          model: OPENAI_TRANSCRIPTION_MODEL,
-          promptVersion: AI_PROMPT_VERSION,
-          rubricVersion: null,
-          inputTokens: 0,
-          outputTokens: 0,
-          totalTokens: 0,
-          createdAt: nowIso()
-        };
+          const event: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "transcribe",
+            userId: user.id,
+            orgId: context.actingOrgId,
+            segmentId: null,
+            scenarioId: null,
+            model: OPENAI_TRANSCRIPTION_MODEL,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            createdAt: nowIso()
+          };
 
-        db.aiUsageEvents.push(event);
-      });
-    } catch (persistError) {
-      const message = persistError instanceof Error ? persistError.message : String(persistError);
-      logWarnThrottled("ai-usage:transcribe", `[ai-usage] failed to persist transcribe event: ${message}`);
+          db.aiUsageEvents.push(event);
+        });
+      } catch (persistError) {
+        const message = persistError instanceof Error ? persistError.message : String(persistError);
+        logWarnThrottled("ai-usage:transcribe", `[ai-usage] failed to persist transcribe event: ${message}`);
+      }
     }
 
     response.json({ text });
@@ -11227,8 +11600,16 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       return null;
     }
 
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return null;
+    }
+
     const entitlements = computeEntitlements(db, user, new Date(), {
-      allowDuringActiveSimulation: true
+      allowDuringActiveSimulation: true,
+      actingOrgId: accessContext.actingOrgId
     });
     if (!entitlements.canStartSimulation) {
       respondWithTtsError({
@@ -11249,7 +11630,7 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       return null;
     }
 
-    return { user };
+    return { user, isSuperUser: accessContext.isSuperUser };
   });
 
   if (!context) {
@@ -11695,7 +12076,16 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date());
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return null;
+    }
+
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      actingOrgId: accessContext.actingOrgId,
+    });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
       return null;
@@ -11707,12 +12097,12 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       return null;
     }
 
-    const org = getOrgById(db, user.orgId);
+    const org = accessContext.actingOrg;
     if (org) {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user);
+    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
     const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
@@ -11734,6 +12124,8 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     return {
       user,
       org,
+      actingOrgId: accessContext.actingOrgId,
+      isSuperUser: accessContext.isSuperUser,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
@@ -11751,7 +12143,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     return;
   }
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.user.orgId, context.useModularPromptArchitecture, {
+  const activeTrainingPack = await getActiveTrainingPackForOrg(context.actingOrgId, context.useModularPromptArchitecture, {
     scenarioId: context.scenario.id,
     onSkip: (message) => logWarnThrottled("training-pack:scope", message)
   });
@@ -11791,53 +12183,55 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       correlationId
     });
 
-    try {
-      await withDatabase(async (db) => {
-        const user = getUserById(db, context.user.id);
-        if (!user) {
-          return;
-        }
+    if (!context.isSuperUser) {
+      try {
+        await withDatabase(async (db) => {
+          const user = getUserById(db, context.user.id);
+          if (!user) {
+            return;
+          }
 
-        const aiDetails = buildPersistedSimulationAiDetails({
-          requestedModel: OPENAI_SIMULATION_MODEL,
-          responseModel: completion.model,
-          usage: completion.usage,
-          latencyMs
-        });
+          const aiDetails = buildPersistedSimulationAiDetails({
+            requestedModel: OPENAI_SIMULATION_MODEL,
+            responseModel: completion.model,
+            usage: completion.usage,
+            latencyMs
+          });
 
-        const event: AiUsageEvent = {
-          id: `ai_${uuid()}`,
-          kind: "opening",
-          userId: user.id,
-          orgId: user.orgId,
-          segmentId: context.segment.id,
-          scenarioId: context.scenario.id,
-          model: aiDetails.responseModel,
-          promptVersion: AI_PROMPT_VERSION,
-          rubricVersion: null,
-          inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
-          outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
-          totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
-          createdAt: nowIso()
-        };
-
-        db.aiUsageEvents.push(event);
-        appendMobileAuditEvent(db, user, {
-          action: "ai.simulation.opening.details",
-          userId: user.id,
-          orgId: user.orgId,
-          message: "Stored AI details for simulation opening step.",
-          metadata: {
-            route: "opening",
+          const event: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "opening",
+            userId: user.id,
+            orgId: context.actingOrgId,
             segmentId: context.segment.id,
             scenarioId: context.scenario.id,
-            aiDetails
-          }
+            model: aiDetails.responseModel,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: null,
+            inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+            outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+            totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
+            createdAt: nowIso()
+          };
+
+          db.aiUsageEvents.push(event);
+          appendMobileAuditEvent(db, user, {
+            action: "ai.simulation.opening.details",
+            userId: user.id,
+            orgId: context.actingOrgId,
+            message: "Stored AI details for simulation opening step.",
+            metadata: {
+              route: "opening",
+              segmentId: context.segment.id,
+              scenarioId: context.scenario.id,
+              aiDetails
+            }
+          });
         });
-      });
-    } catch (persistError) {
-      const message = persistError instanceof Error ? persistError.message : String(persistError);
-      logWarnThrottled("ai-usage:opening", `[ai-usage] failed to persist opening event: ${message}`);
+      } catch (persistError) {
+        const message = persistError instanceof Error ? persistError.message : String(persistError);
+        logWarnThrottled("ai-usage:opening", `[ai-usage] failed to persist opening event: ${message}`);
+      }
     }
 
     response.json({
@@ -11946,8 +12340,16 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return null;
+    }
+
     const entitlements = computeEntitlements(db, user, new Date(), {
-      allowDuringActiveSimulation: true
+      allowDuringActiveSimulation: true,
+      actingOrgId: accessContext.actingOrgId
     });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
@@ -11962,12 +12364,12 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
-    const org = getOrgById(db, user.orgId);
+    const org = accessContext.actingOrg;
     if (org) {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user);
+    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
     const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
@@ -11989,6 +12391,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     return {
       user,
       org,
+      actingOrgId: accessContext.actingOrgId,
+      isSuperUser: accessContext.isSuperUser,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
@@ -12007,7 +12411,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   }
 
   const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
-    orgId: context.user.orgId,
+    orgId: context.actingOrgId,
     scenarioId: context.scenario.id,
     useModularPromptArchitecture: context.useModularPromptArchitecture,
     submittedTrainingPackId
@@ -12047,54 +12451,56 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       correlationId
     });
 
-    try {
-      await withDatabase(async (db) => {
-        const user = getUserById(db, context.user.id);
-        if (!user) {
-          return;
-        }
+    if (!context.isSuperUser) {
+      try {
+        await withDatabase(async (db) => {
+          const user = getUserById(db, context.user.id);
+          if (!user) {
+            return;
+          }
 
-        const aiDetails = buildPersistedSimulationAiDetails({
-          requestedModel: OPENAI_SIMULATION_MODEL,
-          responseModel: completion.model,
-          usage: completion.usage,
-          latencyMs
-        });
+          const aiDetails = buildPersistedSimulationAiDetails({
+            requestedModel: OPENAI_SIMULATION_MODEL,
+            responseModel: completion.model,
+            usage: completion.usage,
+            latencyMs
+          });
 
-        const event: AiUsageEvent = {
-          id: `ai_${uuid()}`,
-          kind: "turn",
-          userId: user.id,
-          orgId: user.orgId,
-          segmentId: context.segment.id,
-          scenarioId: context.scenario.id,
-          model: aiDetails.responseModel,
-          promptVersion: AI_PROMPT_VERSION,
-          rubricVersion: null,
-          inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
-          outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
-          totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
-          createdAt: nowIso()
-        };
-
-        db.aiUsageEvents.push(event);
-        appendMobileAuditEvent(db, user, {
-          action: "ai.simulation.turn.details",
-          userId: user.id,
-          orgId: user.orgId,
-          message: "Stored AI details for simulation turn step.",
-          metadata: {
-            route: "turn",
-            sessionId,
+          const event: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "turn",
+            userId: user.id,
+            orgId: context.actingOrgId,
             segmentId: context.segment.id,
             scenarioId: context.scenario.id,
-            aiDetails
-          }
+            model: aiDetails.responseModel,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: null,
+            inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+            outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+            totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
+            createdAt: nowIso()
+          };
+
+          db.aiUsageEvents.push(event);
+          appendMobileAuditEvent(db, user, {
+            action: "ai.simulation.turn.details",
+            userId: user.id,
+            orgId: context.actingOrgId,
+            message: "Stored AI details for simulation turn step.",
+            metadata: {
+              route: "turn",
+              sessionId,
+              segmentId: context.segment.id,
+              scenarioId: context.scenario.id,
+              aiDetails
+            }
+          });
         });
-      });
-    } catch (persistError) {
-      const message = persistError instanceof Error ? persistError.message : String(persistError);
-      logWarnThrottled("ai-usage:turn", `[ai-usage] failed to persist turn event: ${message}`);
+      } catch (persistError) {
+        const message = persistError instanceof Error ? persistError.message : String(persistError);
+        logWarnThrottled("ai-usage:turn", `[ai-usage] failed to persist turn event: ${message}`);
+      }
     }
 
     response.json({
@@ -12219,8 +12625,16 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return null;
+    }
+
     const entitlements = computeEntitlements(db, user, new Date(), {
-      allowDuringActiveSimulation: true
+      allowDuringActiveSimulation: true,
+      actingOrgId: accessContext.actingOrgId
     });
     if (!entitlements.canStartSimulation) {
       response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
@@ -12235,12 +12649,12 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
-    const org = getOrgById(db, user.orgId);
+    const org = accessContext.actingOrg;
     if (org) {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user);
+    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
     if (configForUser.featureFlags?.scoringEnabled === false) {
       response.status(403).json({ error: "Scoring is currently disabled for this account." });
       return null;
@@ -12273,6 +12687,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     return {
       user,
       org,
+      actingOrgId: accessContext.actingOrgId,
+      isSuperUser: accessContext.isSuperUser,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
@@ -12290,7 +12706,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   }
 
   const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
-    orgId: context.user.orgId,
+    orgId: context.actingOrgId,
     scenarioId: context.scenario.id,
     useModularPromptArchitecture: context.useModularPromptArchitecture,
     submittedTrainingPackId
@@ -12351,9 +12767,10 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     const record: SimulationScoreRecord = {
       id: `score_${uuid()}`,
       userId: context.user.id,
-      orgId: context.user.orgId,
+      orgId: context.actingOrgId,
       segmentId: context.segment.id,
       scenarioId: context.scenario.id,
+      trainingId,
       trainingPackId: activeTrainingPack?.id ?? null,
       industryId: context.industryId,
       startedAt: parsedStart.toISOString(),
@@ -12375,54 +12792,56 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       createdAt: now
     };
 
-    try {
-      await withDatabase(async (db) => {
-        const user = getUserById(db, context.user.id);
-        if (!user) {
-          throw new Error("User not found while saving score.");
-        }
+    if (!context.isSuperUser) {
+      try {
+        await withDatabase(async (db) => {
+          const user = getUserById(db, context.user.id);
+          if (!user) {
+            throw new Error("User not found while saving score.");
+          }
 
-        db.scoreRecords.push(record);
-        syncTrainingPackAssignmentsForUserPack(db, user.orgId, user.id, record.trainingPackId ?? null);
+          db.scoreRecords.push(record);
+          syncTrainingPackAssignmentsForUserPack(db, context.actingOrgId, user.id, record.trainingPackId ?? null);
 
-        const event: AiUsageEvent = {
-          id: `ai_${uuid()}`,
-          kind: "score",
-          userId: user.id,
-          orgId: user.orgId,
-          segmentId: context.segment.id,
-          scenarioId: context.scenario.id,
-          model: aiDetails.responseModel,
-          promptVersion: AI_PROMPT_VERSION,
-          rubricVersion: AI_RUBRIC_VERSION,
-          inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
-          outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
-          totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
-          createdAt: nowIso()
-        };
-
-        db.aiUsageEvents.push(event);
-        appendMobileAuditEvent(db, user, {
-          action: "ai.simulation.score.details",
-          userId: user.id,
-          orgId: user.orgId,
-          message: "Stored AI details for simulation score step.",
-          metadata: {
-            route: "score",
-            sessionId,
+          const event: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "score",
+            userId: user.id,
+            orgId: context.actingOrgId,
             segmentId: context.segment.id,
             scenarioId: context.scenario.id,
-            aiDetails
-          }
+            model: aiDetails.responseModel,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: AI_RUBRIC_VERSION,
+            inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
+            outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
+            totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
+            createdAt: nowIso()
+          };
+
+          db.aiUsageEvents.push(event);
+          appendMobileAuditEvent(db, user, {
+            action: "ai.simulation.score.details",
+            userId: user.id,
+            orgId: context.actingOrgId,
+            message: "Stored AI details for simulation score step.",
+            metadata: {
+              route: "score",
+              sessionId,
+              segmentId: context.segment.id,
+              scenarioId: context.scenario.id,
+              aiDetails
+            }
+          });
         });
-      });
-    } catch (persistError) {
-      const message = persistError instanceof Error ? persistError.message : String(persistError);
-      logWarnThrottled("ai-usage:score", `[ai-usage] failed to persist score artifacts: ${message}`);
-      response.status(503).json({
-        error: "Score was generated but could not be saved. Please retry once the service is healthy."
-      });
-      return;
+      } catch (persistError) {
+        const message = persistError instanceof Error ? persistError.message : String(persistError);
+        logWarnThrottled("ai-usage:score", `[ai-usage] failed to persist score artifacts: ${message}`);
+        response.status(503).json({
+          error: "Score was generated but could not be saved. Please retry once the service is healthy."
+        });
+        return;
+      }
     }
 
     response.status(201).json({
@@ -12493,12 +12912,19 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       return;
     }
 
-    const org = getOrgById(db, user.orgId);
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return;
+    }
+
+    const org = accessContext.actingOrg;
     if (org) {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user);
+    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
     if (configForUser.featureFlags?.scoringEnabled === false) {
       response.status(403).json({ error: "Scoring is currently disabled for this account." });
       return;
@@ -12515,7 +12941,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
-      orgId: user.orgId,
+      orgId: accessContext.actingOrgId,
       scenarioId,
       useModularPromptArchitecture,
       submittedTrainingPackId
@@ -12535,7 +12961,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     const record: SimulationScoreRecord = {
       id: `score_${uuid()}`,
       userId: user.id,
-      orgId: user.orgId,
+      orgId: accessContext.actingOrgId,
       segmentId,
       scenarioId,
       trainingId,
@@ -12553,8 +12979,10 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       createdAt: now.toISOString()
     };
 
-    db.scoreRecords.push(record);
-    syncTrainingPackAssignmentsForUserPack(db, user.orgId, user.id, record.trainingPackId ?? null);
+    if (!accessContext.isSuperUser) {
+      db.scoreRecords.push(record);
+      syncTrainingPackAssignmentsForUserPack(db, accessContext.actingOrgId, user.id, record.trainingPackId ?? null);
+    }
     response.status(201).json(record);
   });
 });
@@ -13395,12 +13823,19 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       return;
     }
 
-    const org = getOrgById(db, user.orgId);
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return;
+    }
+
+    const org = accessContext.actingOrg;
     if (org) {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user);
+    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
     const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for usage session." });
@@ -13413,7 +13848,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
-      orgId: user.orgId,
+      orgId: accessContext.actingOrgId,
       scenarioId: body.scenarioId,
       useModularPromptArchitecture,
       submittedTrainingPackId
@@ -13434,7 +13869,9 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       return;
     }
 
-    const entitlements = computeEntitlements(db, user, now);
+    const entitlements = computeEntitlements(db, user, now, {
+      actingOrgId: accessContext.actingOrgId,
+    });
     if (!entitlements.canStartSimulation) {
       if (!isQuotaLockReason(entitlements.lockReason)) {
         response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
@@ -13448,26 +13885,30 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       rawDurationSeconds = Math.min(rawDurationSeconds, maxSimulationMinutes * 60);
     }
 
-    db.usageSessions.push({
-      id: `sess_${uuid()}`,
-      userId: user.id,
-      orgId: user.orgId,
-      segmentId: body.segmentId,
-      scenarioId: body.scenarioId,
-      trainingId,
-      trainingPackId: persistedTrainingPack?.id ?? null,
-      startedAt: sessionStart.toISOString(),
-      endedAt: sessionEnd.toISOString(),
-      rawDurationSeconds,
-      createdAt: now.toISOString()
-    });
-    syncTrainingPackAssignmentsForUserPack(db, user.orgId, user.id, persistedTrainingPack?.id ?? null);
+    if (!accessContext.isSuperUser) {
+      db.usageSessions.push({
+        id: `sess_${uuid()}`,
+        userId: user.id,
+        orgId: accessContext.actingOrgId,
+        segmentId: body.segmentId,
+        scenarioId: body.scenarioId,
+        trainingId,
+        trainingPackId: persistedTrainingPack?.id ?? null,
+        startedAt: sessionStart.toISOString(),
+        endedAt: sessionEnd.toISOString(),
+        rawDurationSeconds,
+        createdAt: now.toISOString()
+      });
+      syncTrainingPackAssignmentsForUserPack(db, accessContext.actingOrgId, user.id, persistedTrainingPack?.id ?? null);
+    }
     clearSimulationAiBudgetGrace(user.id);
     clearSimulationOrgMonthlyOverrunGrace(user.id);
 
-    const refreshed = computeEntitlements(db, user, now);
+    const refreshed = computeEntitlements(db, user, now, {
+      actingOrgId: accessContext.actingOrgId,
+    });
     response.status(201).json({
-      recorded: true,
+      recorded: !accessContext.isSuperUser,
       billedSecondsAdded: Math.max(
         0,
         refreshed.usage.billedSecondsToday - entitlements.usage.billedSecondsToday
@@ -13482,7 +13923,7 @@ app.get("/usage", requireAdmin, async (_request: Request, response: Response) =>
     const now = new Date();
     const aiUsageEvents = db.aiUsageEvents ?? [];
 
-    const rows = db.users.map((user) => {
+    const rows = db.users.filter((user) => user.isSuperUser !== true).map((user) => {
       const entitlements = computeEntitlements(db, user, now);
       const timezone = materializeUserTimezone(user, now);
       const dayKey = getDayKey(now, timezone);

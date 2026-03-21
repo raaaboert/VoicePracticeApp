@@ -15,7 +15,7 @@ export type OrgStatus = (typeof ORG_STATUSES)[number];
 export const ORG_USER_ROLES = ["org_admin", "user_admin", "user"] as const;
 export type OrgUserRole = (typeof ORG_USER_ROLES)[number];
 
-export const DASHBOARD_ACCESS_TYPES = ["platform_admin", "customer_dashboard_user"] as const;
+export const DASHBOARD_ACCESS_TYPES = ["platform_admin", "super_user", "customer_dashboard_user"] as const;
 export type DashboardAccessType = (typeof DASHBOARD_ACCESS_TYPES)[number];
 
 export const ORG_JOIN_REQUEST_STATUSES = ["pending", "approved", "rejected", "expired"] as const;
@@ -220,6 +220,7 @@ export interface UserProfile {
   email: string;
   emailVerifiedAt: string | null;
   isPlatformAdmin?: boolean;
+  isSuperUser?: boolean;
   // Explicit customer-side dashboard authorization. This is separate from mobile/app org role.
   dashboardAccessEnabled?: boolean;
   accountType: AccountType;
@@ -568,6 +569,7 @@ export interface DashboardViewer {
   userId: string;
   email: string;
   isPlatformAdmin: boolean;
+  isSuperUser: boolean;
   orgId: string | null;
   orgName: string | null;
 }
@@ -596,6 +598,7 @@ export interface WebAuthSessionUser {
   email: string;
   emailVerifiedAt: string | null;
   isPlatformAdmin: boolean;
+  isSuperUser: boolean;
   dashboardAccessEnabled: boolean;
   accountType: AccountType;
   orgId: string | null;
@@ -1128,6 +1131,35 @@ export interface CreateUserRequest {
   orgRole?: OrgUserRole;
   isPlatformAdmin?: boolean;
   dashboardAccessEnabled?: boolean;
+}
+
+export interface SuperUserSummary {
+  userId: string;
+  email: string;
+  status: UserStatus;
+  emailVerifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SuperUserListResponse {
+  generatedAt: string;
+  rows: SuperUserSummary[];
+}
+
+export interface CreateSuperUserRequest {
+  email: string;
+}
+
+export interface SuperUserOrgOption {
+  orgId: string;
+  orgName: string;
+  orgStatus: OrgStatus;
+}
+
+export interface SuperUserOrgOptionsResponse {
+  generatedAt: string;
+  orgs: SuperUserOrgOption[];
 }
 
 export interface UpdateUserRequest {

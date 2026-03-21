@@ -23,6 +23,7 @@ import {
   ORG_USER_ROLE_LABELS,
   secondsToWholeMinutes,
 } from "@voicepractice/shared";
+import type { SuperUserOrgOption } from "@voicepractice/shared";
 import {
   AI_VOICE_GENDER_OPTIONS,
   AI_VOICE_OPTIONS,
@@ -41,6 +42,7 @@ import {
   fetchMobileConfig,
   fetchMobileUser,
   fetchScoreSummary,
+  fetchSuperUserOrgOptions,
   fetchOrgAdminAnalytics,
   fetchOrgAdminAccessRequests,
   fetchOrgAdminDashboard,
@@ -61,6 +63,7 @@ import {
   updateMobileSettings,
   verifyMobileEmail,
   getApiBaseUrl,
+  setActiveSuperUserOrgId,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
@@ -71,15 +74,18 @@ import {
 import {
   saveActiveIndustryBaselineContext,
   clearUserId,
+  clearSuperUserActiveOrgId,
   loadActiveSegment,
   loadColorScheme,
   loadMobileAuthToken,
+  loadSuperUserActiveOrgId,
   loadUserId,
   loadVoiceGender,
   loadVoiceProfile,
   saveActiveSegment,
   saveColorScheme,
   saveMobileAuthToken,
+  saveSuperUserActiveOrgId,
   saveUserId,
   saveVoiceGender,
   saveVoiceProfile,
@@ -122,6 +128,7 @@ type Screen =
   | "onboarding"
   | "verify_email"
   | "domain_match"
+  | "superuser_org_select"
   | "setup"
   | "simulation"
   | "scorecard"
@@ -643,6 +650,14 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
   const [entitlements, setEntitlements] = useState<UserEntitlementsResponse | null>(null);
+  const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
+  const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
+  const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
+  const [superUserOrgSearch, setSuperUserOrgSearch] = useState("");
+  const [superUserOrgError, setSuperUserOrgError] = useState<string | null>(null);
+  const [superUserOrgNotice, setSuperUserOrgNotice] = useState<string | null>(null);
+  const [isSuperUserOrgLoading, setIsSuperUserOrgLoading] = useState(false);
+  const [superUserOrgReturnScreen, setSuperUserOrgReturnScreen] = useState<Screen | null>(null);
 
   const [selectedTrainingId, setSelectedTrainingId] = useState("");
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
@@ -1044,6 +1059,20 @@ export default function App() {
     }
     return map;
   }, [activeOrgCustomScenarios, enabledSegments]);
+  const filteredSuperUserOrgOptions = useMemo(() => {
+    const needle = superUserOrgSearch.trim().toLowerCase();
+    if (!needle) {
+      return superUserOrgOptions;
+    }
+
+    return superUserOrgOptions.filter((org) =>
+      `${org.orgName} ${org.orgId}`.toLowerCase().includes(needle),
+    );
+  }, [superUserOrgOptions, superUserOrgSearch]);
+  const activeSuperUserOrg = useMemo(
+    () => superUserOrgOptions.find((org) => org.orgId === activeSuperUserOrgId) ?? null,
+    [activeSuperUserOrgId, superUserOrgOptions],
+  );
   const industryIdsByRoleSegmentId = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const entry of activeRoleIndustryLinks) {
@@ -1539,8 +1568,116 @@ export default function App() {
     selectedAdminUserId,
   ]);
 
+  const loadSuperUserOrgOptionsForSession = useCallback(async (userId: string, authToken: string) => {
+    const payload = await fetchSuperUserOrgOptions(userId, authToken);
+    setSuperUserOrgOptions(payload.orgs);
+    return payload.orgs;
+  }, []);
+
+  const openSuperUserOrgSelector = useCallback(
+    async (
+      nextUser: UserProfile,
+      authToken: string,
+      options?: {
+        preferredOrgId?: string | null;
+        preserveActiveContext?: boolean;
+        returnScreen?: Screen | null;
+        notice?: string | null;
+      },
+    ) => {
+      setIsSuperUserOrgLoading(true);
+      setSuperUserOrgError(null);
+      setSuperUserOrgNotice(options?.notice ?? null);
+      setSuperUserOrgReturnScreen(options?.returnScreen ?? null);
+
+      try {
+        const orgs = await loadSuperUserOrgOptionsForSession(nextUser.id, authToken);
+        const preferredOrgId = options?.preferredOrgId?.trim() ?? "";
+        const preferredExists = preferredOrgId ? orgs.some((org) => org.orgId === preferredOrgId) : false;
+        setSelectedSuperUserOrgId(preferredExists ? preferredOrgId : (orgs[0]?.orgId ?? ""));
+        setSuperUserOrgSearch("");
+        if (!options?.preserveActiveContext) {
+          setActiveSuperUserOrgId(null);
+          setActiveSuperUserOrgIdState(null);
+          await clearSuperUserActiveOrgId();
+          setEntitlements(null);
+        }
+        setScreen("superuser_org_select");
+      } catch (caught) {
+        const message = getErrorMessage(caught, "Could not load enterprise account environments.");
+        setSuperUserOrgError(message);
+        void submitAutoErrorReport("superuser_orgs.load", caught, {
+          screen: "superuser_org_select",
+        });
+        throw caught;
+      } finally {
+        setIsSuperUserOrgLoading(false);
+      }
+    },
+    [loadSuperUserOrgOptionsForSession, submitAutoErrorReport],
+  );
+
+  const activateSuperUserOrgContext = useCallback(
+    async (
+      nextUser: UserProfile,
+      authToken: string,
+      orgId: string,
+      options?: {
+        nextScreen?: Screen;
+        notice?: string | null;
+      },
+    ) => {
+      const trimmedOrgId = orgId.trim();
+      if (!trimmedOrgId) {
+        setSuperUserOrgError("Select an enterprise account environment first.");
+        return false;
+      }
+
+      const previousActiveOrgId = activeSuperUserOrgId;
+      setIsSuperUserOrgLoading(true);
+      setSuperUserOrgError(null);
+
+      try {
+        setActiveSuperUserOrgId(trimmedOrgId);
+        const [nextEntitlements, scopedConfig] = await Promise.all([
+          fetchEntitlements(nextUser.id, authToken),
+          fetchMobileConfig(nextUser.id, authToken),
+        ]);
+        await saveSuperUserActiveOrgId(trimmedOrgId);
+        setActiveSuperUserOrgIdState(trimmedOrgId);
+        setSelectedSuperUserOrgId(trimmedOrgId);
+        setEntitlements(nextEntitlements);
+        setConfig(scopedConfig);
+        setSuperUserOrgNotice(options?.notice ?? null);
+        setSuperUserOrgReturnScreen(null);
+        setScreen(options?.nextScreen ?? superUserOrgReturnScreen ?? "home");
+        return true;
+      } catch (caught) {
+        setActiveSuperUserOrgId(previousActiveOrgId);
+        const message = getErrorMessage(caught, "Could not activate the selected enterprise environment.");
+        setSuperUserOrgError(message);
+        void submitAutoErrorReport("superuser_orgs.activate", caught, {
+          screen: "superuser_org_select",
+          details: { orgId: trimmedOrgId },
+        });
+        return false;
+      } finally {
+        setIsSuperUserOrgLoading(false);
+      }
+    },
+    [activeSuperUserOrgId, submitAutoErrorReport, superUserOrgReturnScreen],
+  );
+
   const resetSessionToOnboarding = useCallback(async (notice?: string) => {
     await clearUserId();
+    setActiveSuperUserOrgId(null);
+    setActiveSuperUserOrgIdState(null);
+    setSuperUserOrgOptions([]);
+    setSelectedSuperUserOrgId("");
+    setSuperUserOrgSearch("");
+    setSuperUserOrgError(null);
+    setSuperUserOrgNotice(null);
+    setSuperUserOrgReturnScreen(null);
     setUser(null);
     setEntitlements(null);
     setMobileAuthToken(null);
@@ -1615,6 +1752,11 @@ export default function App() {
       ]);
 
       if (!storedUserId || !storedMobileToken) {
+        setActiveSuperUserOrgId(null);
+        setActiveSuperUserOrgIdState(null);
+        setSuperUserOrgOptions([]);
+        setSelectedSuperUserOrgId("");
+        await clearSuperUserActiveOrgId();
         setUser(null);
         setEntitlements(null);
         setMobileAuthToken(null);
@@ -1638,6 +1780,36 @@ export default function App() {
         setVerificationNotice("Check your inbox for a 6-digit code, then verify to continue.");
         setVerificationError(null);
         setScreen("verify_email");
+        return;
+      }
+
+      if (userPayload.isSuperUser) {
+        const orgs = await loadSuperUserOrgOptionsForSession(userPayload.id, storedMobileToken);
+        const storedOrgId = await loadSuperUserActiveOrgId();
+        const validStoredOrgId =
+          storedOrgId && orgs.some((org) => org.orgId === storedOrgId)
+            ? storedOrgId
+            : null;
+
+        if (validStoredOrgId) {
+          const activated = await activateSuperUserOrgContext(userPayload, storedMobileToken, validStoredOrgId, {
+            nextScreen: "home",
+          });
+          if (activated) {
+            return;
+          }
+        }
+
+        setActiveSuperUserOrgId(null);
+        setActiveSuperUserOrgIdState(null);
+        await clearSuperUserActiveOrgId();
+        setSelectedSuperUserOrgId(orgs[0]?.orgId ?? "");
+        setSuperUserOrgSearch("");
+        setSuperUserOrgError(null);
+        setSuperUserOrgNotice(null);
+        setSuperUserOrgReturnScreen(null);
+        setEntitlements(null);
+        setScreen("superuser_org_select");
         return;
       }
 
@@ -1676,7 +1848,13 @@ export default function App() {
     } finally {
       setIsBootLoading(false);
     }
-  }, [detectedTimezone, resetSessionToOnboarding, submitAutoErrorReport]);
+  }, [
+    activateSuperUserOrgContext,
+    detectedTimezone,
+    loadSuperUserOrgOptionsForSession,
+    resetSessionToOnboarding,
+    submitAutoErrorReport,
+  ]);
 
   useEffect(() => {
     if (hasInitializedRef.current) {
@@ -1691,7 +1869,7 @@ export default function App() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!user || !mobileAuthToken) {
+    if (!user || !mobileAuthToken || user.isSuperUser) {
       return;
     }
 
@@ -1765,7 +1943,7 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user?.id]);
+  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user?.id, user?.isSuperUser]);
 
   useEffect(() => {
     if (!user || user.emailVerifiedAt) {
@@ -1796,6 +1974,17 @@ export default function App() {
       setScreen("home");
     }
   }, [screen, user]);
+
+  useEffect(() => {
+    if (superUserOrgOptions.length === 0) {
+      setSelectedSuperUserOrgId("");
+      return;
+    }
+
+    if (!superUserOrgOptions.some((org) => org.orgId === selectedSuperUserOrgId)) {
+      setSelectedSuperUserOrgId(superUserOrgOptions[0].orgId);
+    }
+  }, [selectedSuperUserOrgId, superUserOrgOptions]);
 
   useEffect(() => {
     if (scenarioCatalogTab === "custom" && !hasCustomScenarioOptions) {
@@ -1926,6 +2115,14 @@ export default function App() {
         return;
       }
 
+      if (onboarded.user.isSuperUser) {
+        setDomainMatch(null);
+        await openSuperUserOrgSelector(onboarded.user, onboarded.authToken, {
+          preserveActiveContext: false,
+        });
+        return;
+      }
+
       const nextEntitlements = await fetchEntitlements(onboarded.user.id, onboarded.authToken);
       const scopedConfig = await fetchMobileConfig(onboarded.user.id, onboarded.authToken).catch(
         async () => fetchAppConfig(),
@@ -1933,7 +2130,7 @@ export default function App() {
 
       setConfig(scopedConfig);
       setEntitlements(nextEntitlements);
-      if (onboarded.domainMatch && onboarded.user.accountType === "individual") {
+      if (onboarded.domainMatch && onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -1974,6 +2171,14 @@ export default function App() {
       setPendingVerificationUserId(null);
       setVerificationExpiresAt(null);
       setVerificationNotice("Email verified.");
+      if (payload.user.isSuperUser) {
+        setDomainMatch(null);
+        await openSuperUserOrgSelector(payload.user, payload.authToken, {
+          preserveActiveContext: false,
+        });
+        return;
+      }
+
       const nextEntitlements = await fetchEntitlements(payload.user.id, payload.authToken);
       const scopedConfig = await fetchMobileConfig(payload.user.id, payload.authToken).catch(
         async () => fetchAppConfig(),
@@ -1981,7 +2186,7 @@ export default function App() {
       setConfig(scopedConfig);
       setEntitlements(nextEntitlements);
 
-      if (payload.domainMatch && payload.user.accountType === "individual") {
+      if (payload.domainMatch && payload.user.accountType === "individual" && !payload.user.isSuperUser) {
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -2620,6 +2825,11 @@ export default function App() {
               </Pressable>
             </View>
             <Text style={styles.menuBody}>Plan: {currentTier?.label ?? "Free"}</Text>
+            {user?.isSuperUser && activeSuperUserOrg ? (
+              <Text style={styles.menuBody}>
+                Environment: {activeSuperUserOrg.orgName} ({activeSuperUserOrg.orgStatus})
+              </Text>
+            ) : null}
             <Text style={styles.menuBody}>
               {timeAllotmentUsage.mode === "monthly_org"
                 ? `Org remaining this cycle: ${formatSecondsAsClock(timeAllotmentUsage.remainingSeconds ?? 0)}`
@@ -2736,6 +2946,16 @@ export default function App() {
       {entitlements?.lockReason ? (
         <View style={styles.errorCard}>
           <Text style={styles.errorText}>{entitlements.lockReason}</Text>
+        </View>
+      ) : null}
+
+      {user?.isSuperUser && activeSuperUserOrg ? (
+        <View style={styles.card}>
+          <Text style={styles.label}>Environment</Text>
+          <Text style={styles.title}>{activeSuperUserOrg.orgName}</Text>
+          <Text style={styles.body}>
+            Status: {activeSuperUserOrg.orgStatus === "active" ? "Active" : "Deactivated"}
+          </Text>
         </View>
       ) : null}
 
@@ -2916,6 +3136,81 @@ export default function App() {
           </Pressable>
         </View>
       </ScrollView>
+    </KeyboardAvoidingView>
+  );
+
+  const renderSuperUserOrgSelect = () => (
+    <KeyboardAvoidingView
+      style={styles.fill}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={20}
+    >
+      <View style={styles.topRow}>
+        {superUserOrgReturnScreen ? (
+          <Pressable style={styles.ghostButton} onPress={() => setScreen(superUserOrgReturnScreen)}>
+            <Text style={styles.ghostButtonText}>Back</Text>
+          </Pressable>
+        ) : (
+          <Pressable style={styles.ghostButton} onPress={() => { void resetSessionToOnboarding(); }}>
+            <Text style={styles.ghostButtonText}>Reset</Text>
+          </Pressable>
+        )}
+        <Text style={styles.topTitle}>Select Environment</Text>
+        <View style={styles.spacer} />
+      </View>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <View style={styles.card}>
+          <Text style={styles.title}>Enterprise Account</Text>
+          <Text style={styles.body}>
+            Super users work inside a selected enterprise environment. Choose the customer account you want to inspect or test.
+          </Text>
+          <TextInput
+            value={superUserOrgSearch}
+            onChangeText={setSuperUserOrgSearch}
+            placeholder="Search enterprise accounts"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="none"
+            style={styles.input}
+          />
+          {superUserOrgNotice ? <Text style={styles.successText}>{superUserOrgNotice}</Text> : null}
+          {superUserOrgError ? <Text style={styles.errorText}>{superUserOrgError}</Text> : null}
+          {filteredSuperUserOrgOptions.length === 0 ? (
+            <Text style={styles.body}>(No enterprise accounts match your search.)</Text>
+          ) : (
+            <View style={{ gap: 10, marginTop: 8 }}>
+              {filteredSuperUserOrgOptions.map((org) => (
+                <Pressable
+                  key={org.orgId}
+                  style={[styles.optionCard, selectedSuperUserOrgId === org.orgId ? styles.selectedCard : null]}
+                  onPress={() => setSelectedSuperUserOrgId(org.orgId)}
+                >
+                  <View style={styles.planRow}>
+                    <Text style={styles.optionTitle}>{org.orgName}</Text>
+                    <Text style={styles.planBadge}>{org.orgStatus === "active" ? "Active" : "Deactivated"}</Text>
+                  </View>
+                  <Text style={styles.body}>{org.orgId}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
+      </ScrollView>
+      <Pressable
+        style={[styles.primaryButton, isSuperUserOrgLoading ? styles.disabled : null]}
+        disabled={isSuperUserOrgLoading || !user || !mobileAuthToken || !selectedSuperUserOrgId}
+        onPress={() => {
+          if (!user || !mobileAuthToken) {
+            return;
+          }
+          void activateSuperUserOrgContext(user, mobileAuthToken, selectedSuperUserOrgId, {
+            nextScreen: superUserOrgReturnScreen ?? "home",
+          });
+        }}
+      >
+        <Text style={styles.primaryButtonText}>
+          {isSuperUserOrgLoading ? "Loading..." : "Continue"}
+        </Text>
+      </Pressable>
     </KeyboardAvoidingView>
   );
 
@@ -3159,62 +3454,64 @@ export default function App() {
           </Pressable>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.title}>Enterprise Access</Text>
-          <Text style={styles.body}>
-            If your company has an enterprise subscription for your email domain, enter the org join code to request
-            access. Requests expire after 7 days and can be resent.
-          </Text>
-          <TextInput
-            value={orgJoinCodeInput}
-            onChangeText={setOrgJoinCodeInput}
-            placeholder="Join code"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="characters"
-            style={styles.input}
-          />
-          <Pressable
-            style={[styles.primaryButton, isOrgRequestSaving ? styles.disabled : null]}
-            disabled={isOrgRequestSaving}
-            onPress={() => {
-              void submitOrgDomainRequest();
-            }}
-          >
-            <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Access"}</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.ghostButton, orgAccessRequestsLoading ? styles.disabled : null]}
-            disabled={orgAccessRequestsLoading}
-            onPress={() => {
-              void refreshMyOrgAccessRequests();
-            }}
-          >
-            <Text style={styles.ghostButtonText}>{orgAccessRequestsLoading ? "Refreshing..." : "Refresh Requests"}</Text>
-          </Pressable>
+        {user?.isSuperUser ? null : (
+          <View style={styles.card}>
+            <Text style={styles.title}>Enterprise Access</Text>
+            <Text style={styles.body}>
+              If your company has an enterprise subscription for your email domain, enter the org join code to request
+              access. Requests expire after 7 days and can be resent.
+            </Text>
+            <TextInput
+              value={orgJoinCodeInput}
+              onChangeText={setOrgJoinCodeInput}
+              placeholder="Join code"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="characters"
+              style={styles.input}
+            />
+            <Pressable
+              style={[styles.primaryButton, isOrgRequestSaving ? styles.disabled : null]}
+              disabled={isOrgRequestSaving}
+              onPress={() => {
+                void submitOrgDomainRequest();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Access"}</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.ghostButton, orgAccessRequestsLoading ? styles.disabled : null]}
+              disabled={orgAccessRequestsLoading}
+              onPress={() => {
+                void refreshMyOrgAccessRequests();
+              }}
+            >
+              <Text style={styles.ghostButtonText}>{orgAccessRequestsLoading ? "Refreshing..." : "Refresh Requests"}</Text>
+            </Pressable>
 
-          {orgRequestNotice ? <Text style={styles.successText}>{orgRequestNotice}</Text> : null}
-          {orgRequestError ? <Text style={styles.errorText}>{orgRequestError}</Text> : null}
+            {orgRequestNotice ? <Text style={styles.successText}>{orgRequestNotice}</Text> : null}
+            {orgRequestError ? <Text style={styles.errorText}>{orgRequestError}</Text> : null}
 
-          {myOrgAccessRequests.length === 0 ? (
-            <Text style={styles.body}>(No requests yet.)</Text>
-          ) : (
-            <View style={{ gap: 10, marginTop: 8 }}>
-              {myOrgAccessRequests.slice(0, 10).map((row) => (
-                <View key={row.id} style={styles.optionCard}>
-                  <Text style={styles.optionTitle}>
-                    {row.orgName} - {row.status}
-                  </Text>
-                  <Text style={styles.body}>
-                    Domain: {row.emailDomain}{"\n"}
-                    Requested: {formatDateLabel(row.createdAt)}{"\n"}
-                    Expires: {formatDateLabel(row.expiresAt)}{"\n"}
-                    {row.decisionReason ? `Note: ${row.decisionReason}` : "Note: -"}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          )}
-        </View>
+            {myOrgAccessRequests.length === 0 ? (
+              <Text style={styles.body}>(No requests yet.)</Text>
+            ) : (
+              <View style={{ gap: 10, marginTop: 8 }}>
+                {myOrgAccessRequests.slice(0, 10).map((row) => (
+                  <View key={row.id} style={styles.optionCard}>
+                    <Text style={styles.optionTitle}>
+                      {row.orgName} - {row.status}
+                    </Text>
+                    <Text style={styles.body}>
+                      Domain: {row.emailDomain}{"\n"}
+                      Requested: {formatDateLabel(row.createdAt)}{"\n"}
+                      Expires: {formatDateLabel(row.expiresAt)}{"\n"}
+                      {row.decisionReason ? `Note: ${row.decisionReason}` : "Note: -"}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
 
         <Pressable
           style={[styles.ghostButton, styles.signOutButton]}
@@ -3239,6 +3536,33 @@ export default function App() {
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        {user?.isSuperUser ? (
+          <View style={styles.card}>
+            <Text style={styles.title}>Environment</Text>
+            <Text style={styles.body}>
+              Choose which enterprise account environment you want to inspect in the app.
+            </Text>
+            <Text style={styles.body}>
+              Current: {activeSuperUserOrg ? `${activeSuperUserOrg.orgName} (${activeSuperUserOrg.orgStatus})` : "None selected"}
+            </Text>
+            <Pressable
+              style={styles.primaryButton}
+              onPress={() => {
+                if (!user || !mobileAuthToken) {
+                  return;
+                }
+                void openSuperUserOrgSelector(user, mobileAuthToken, {
+                  preferredOrgId: activeSuperUserOrgId,
+                  preserveActiveContext: true,
+                  returnScreen: "settings",
+                }).catch(() => undefined);
+              }}
+            >
+              <Text style={styles.primaryButtonText}>Change Environment</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         <View style={styles.card}>
           <Text style={styles.title}>Appearance</Text>
           <Text style={styles.body}>Choose your app color scheme.</Text>
@@ -4539,6 +4863,10 @@ export default function App() {
 
     if (screen === "domain_match") {
       return renderDomainMatch();
+    }
+
+    if (screen === "superuser_org_select") {
+      return renderSuperUserOrgSelect();
     }
 
     if (screen === "simulation" && simulationConfig && user && mobileAuthToken) {

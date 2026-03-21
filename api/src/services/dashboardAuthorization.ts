@@ -2,7 +2,7 @@ import { ApiDatabase, DashboardViewer, UserProfile } from "@voicepractice/shared
 
 // Durable dashboard authorization projection. Keep this even after authn is replaced.
 export function canDashboardViewerAccessOrg(viewer: DashboardViewer, orgId: string): boolean {
-  if (viewer.accessType === "platform_admin") {
+  if (viewer.accessType === "platform_admin" || viewer.accessType === "super_user") {
     return true;
   }
 
@@ -20,6 +20,19 @@ export function resolveDashboardViewer(db: ApiDatabase, user: UserProfile): Dash
       userId: user.id,
       email: user.email,
       isPlatformAdmin: true,
+      isSuperUser: false,
+      orgId: null,
+      orgName: null
+    };
+  }
+
+  if (user.isSuperUser === true) {
+    return {
+      accessType: "super_user",
+      userId: user.id,
+      email: user.email,
+      isPlatformAdmin: false,
+      isSuperUser: true,
       orgId: null,
       orgName: null
     };
@@ -39,6 +52,7 @@ export function resolveDashboardViewer(db: ApiDatabase, user: UserProfile): Dash
     userId: user.id,
     email: user.email,
     isPlatformAdmin: false,
+    isSuperUser: false,
     orgId: org.id,
     orgName: org.name
   };
