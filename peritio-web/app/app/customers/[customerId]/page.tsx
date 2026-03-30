@@ -20,7 +20,7 @@ export default async function CustomerDetailPage({
   params: Promise<{ customerId: string }>;
 }) {
   const viewer = await getDashboardViewer();
-  if (!viewer?.isSuperUser) {
+  if (viewer?.accessType !== "super_user") {
     redirect("/app/dashboard");
   }
 

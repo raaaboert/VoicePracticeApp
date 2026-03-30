@@ -34,6 +34,10 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = await verifyWebAuthCode(email, code);
+    if (!result.dashboardViewer) {
+      return NextResponse.json({ error: "Dashboard access is not enabled for this account." }, { status: 403 });
+    }
+
     const response = NextResponse.json({
       ok: true,
       session: result.session,

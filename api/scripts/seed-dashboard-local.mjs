@@ -14,6 +14,16 @@ function requireEnv(name) {
   return value;
 }
 
+function requireDashboardSuperUserEmail() {
+  const explicitSuperUserEmail = process.env.PERITIO_LOCAL_SUPER_USER_EMAIL?.trim();
+  if (explicitSuperUserEmail) {
+    return explicitSuperUserEmail;
+  }
+
+  // Backward compatibility for existing local setups that still use the legacy env name.
+  return requireEnv("PERITIO_LOCAL_PLATFORM_ADMIN_EMAIL");
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -110,6 +120,7 @@ function createBaseUser(userInput, now) {
     email: userInput.email.toLowerCase(),
     emailVerifiedAt: now,
     isPlatformAdmin: userInput.isPlatformAdmin,
+    isSuperUser: userInput.isSuperUser === true,
     dashboardAccessEnabled: userInput.dashboardAccessEnabled === true,
     accountType: userInput.accountType,
     tier: userInput.tier,
@@ -129,7 +140,7 @@ function createBaseUser(userInput, now) {
   };
 }
 
-function ensurePlatformAdminUser(db, userInput) {
+function ensureDashboardSuperUser(db, userInput) {
   const now = nowIso();
   let user = db.users.find((entry) => entry.email.toLowerCase() === userInput.email.toLowerCase());
   if (!user) {
@@ -140,7 +151,8 @@ function ensurePlatformAdminUser(db, userInput) {
 
   user.email = userInput.email.toLowerCase();
   user.emailVerifiedAt = now;
-  user.isPlatformAdmin = true;
+  user.isPlatformAdmin = false;
+  user.isSuperUser = true;
   user.dashboardAccessEnabled = false;
   user.status = "active";
   user.timezone = user.timezone || "America/Denver";
@@ -160,6 +172,7 @@ function ensureCustomerDashboardUser(db, userInput) {
   user.email = userInput.email.toLowerCase();
   user.emailVerifiedAt = now;
   user.isPlatformAdmin = false;
+  user.isSuperUser = false;
   user.dashboardAccessEnabled = userInput.dashboardAccessEnabled === true;
   user.accountType = "enterprise";
   user.tier = "enterprise";
@@ -189,7 +202,7 @@ if ("dashboardCredentials" in db) {
   delete db.dashboardCredentials;
 }
 
-const platformAdminEmail = requireEnv("PERITIO_LOCAL_PLATFORM_ADMIN_EMAIL").toLowerCase();
+const superUserEmail = requireDashboardSuperUserEmail().toLowerCase();
 const customerEmail = requireEnv("PERITIO_LOCAL_CUSTOMER_EMAIL").toLowerCase();
 const secondCustomerEmail = requireEnv("PERITIO_LOCAL_SECOND_CUSTOMER_EMAIL").toLowerCase();
 
@@ -217,10 +230,11 @@ const secondaryOrg = ensureOrg(db, {
   renewalTotalUsd: 18000,
 });
 
-const platformAdmin = ensurePlatformAdminUser(db, {
-  id: "usr_dashboard_local_platform_admin",
-  email: platformAdminEmail,
-  isPlatformAdmin: true,
+const superUser = ensureDashboardSuperUser(db, {
+  id: "usr_dashboard_local_super_user",
+  email: superUserEmail,
+  isPlatformAdmin: false,
+  isSuperUser: true,
   dashboardAccessEnabled: false,
   accountType: "individual",
   tier: "pro_plus",
@@ -253,6 +267,6 @@ const secondaryCustomer = ensureCustomerDashboardUser(db, {
 saveDatabase(dbPath, db);
 
 console.log("Seeded local dashboard identities:");
-console.log(`- platform_admin: ${platformAdmin.email}`);
+console.log(`- super_user: ${superUser.email}`);
 console.log(`- customer (primary): ${primaryCustomer.email} -> ${primaryOrg.name} (${primaryOrg.id})`);
 console.log(`- customer (secondary): ${secondaryCustomer.email} -> ${secondaryOrg.name} (${secondaryOrg.id})`);

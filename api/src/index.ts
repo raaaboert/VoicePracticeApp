@@ -116,8 +116,9 @@ import {
   UserStatus,
   USAGE_BILLING_INCREMENT_SECONDS,
   UsageSessionRecord,
+  WebAuthChallengeType,
   WebAuthRequestCodeRequest,
-  WebAuthRequestCodeResponse,
+  WebAuthDeliveryMode,
   WebAuthSessionResponse,
   WebAuthVerifyCodeRequest,
   WebAuthVerifyCodeResponse,
@@ -165,6 +166,7 @@ import {
 } from "./services/promptOrchestrator.js";
 import {
   canDashboardViewerAccessOrg,
+  resolveDashboardAccessEligibility,
   resolveDashboardViewer
 } from "./services/dashboardAuthorization.js";
 import {
@@ -172,6 +174,9 @@ import {
   buildNormalizedSimulationScoreThemesFromArtifact,
 } from "./services/coachingThemeNormalization.js";
 import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services/authCodeDelivery.js";
+import {
+  handleDashboardWebAuthCodeRequest,
+} from "./services/dashboardWebAuthRequest.js";
 import { hashScryptPassword, verifyScryptPassword } from "./services/passwordHash.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
@@ -1686,6 +1691,7 @@ interface RateLimiterOptions {
   windowMs: number;
   max: number;
   keySelector?: (request: Request) => string;
+  onLimitExceeded?: (request: Request, retryAfterSeconds: number) => void;
 }
 
 const rateLimitByKey = new Map<string, RateLimitState>();
@@ -1793,6 +1799,7 @@ function createRateLimiter(options: RateLimiterOptions) {
 
     if (state.count > max) {
       const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
+      options.onLimitExceeded?.(request, retryAfterSeconds);
       response.setHeader("Retry-After", String(retryAfterSeconds));
       response.status(429).json({
         error: "Too many requests. Please wait and retry."
@@ -3270,7 +3277,7 @@ async function issueEmailVerification(
   user: UserProfile,
   now: Date,
   experience: "dashboard" | "mobile"
-): Promise<{ expiresAt: string; delivery: WebAuthRequestCodeResponse["delivery"] }> {
+): Promise<{ expiresAt: string; delivery: WebAuthDeliveryMode }> {
   const nowIsoValue = now.toISOString();
   const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
   const code = createVerificationCode();
@@ -3296,6 +3303,24 @@ async function issueEmailVerification(
       experience
     })
   };
+}
+
+function logDashboardWebAuthRequestIgnored(email: string, reason: string): void {
+  const normalizedEmail = email.trim().toLowerCase() || "<empty>";
+  logWarnThrottled(
+    `web-auth-request:${reason}:${normalizedEmail}`,
+    `[web-auth][request-code] ignored request for ${normalizedEmail}: ${reason}`,
+    60 * 1000
+  );
+}
+
+function logDashboardWebAuthRequestRateLimited(request: Request, retryAfterSeconds: number): void {
+  const clientIp = getClientIp(request) || "unknown";
+  logWarnThrottled(
+    `web-auth-request:rate-limited:${clientIp}`,
+    `[web-auth][request-code] rate limited client ${clientIp}; retry_after_seconds=${retryAfterSeconds}`,
+    60 * 1000
+  );
 }
 
 function normalizePersistedCoachingText(value: unknown): string | null {
@@ -4922,7 +4947,7 @@ async function buildDashboardCustomerInsights(db: ApiDatabase, org: EnterpriseOr
 }
 
 function listDashboardAccessibleOrgs(db: ApiDatabase, viewer: DashboardViewer): EnterpriseOrg[] {
-  return viewer.accessType === "platform_admin" || viewer.accessType === "super_user"
+  return viewer.accessType === "super_user"
     ? db.orgs.slice().sort((left, right) => left.name.localeCompare(right.name))
     : db.orgs.filter((org) => org.id === viewer.orgId);
 }
@@ -5036,7 +5061,7 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
     coachingInsights: buildDashboardCoachingInsights({
       currentScores: recentScores,
       previousScores,
-      includeNormalizationDiagnostics: viewer.accessType === "platform_admin"
+      includeNormalizationDiagnostics: viewer.accessType === "super_user"
     })
   };
 }
@@ -7426,7 +7451,8 @@ const authLoginRateLimiter = createRateLimiter({
 const webAuthRequestCodeRateLimiter = createRateLimiter({
   name: "web-auth-request-code",
   windowMs: 15 * 60 * 1000,
-  max: 12
+  max: 12,
+  onLimitExceeded: logDashboardWebAuthRequestRateLimited
 });
 
 const webAuthVerifyCodeRateLimiter = createRateLimiter({
@@ -7725,61 +7751,58 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
   }
 
   await withDatabase(async (db) => {
-    const user = db.users.find((entry) => entry.email.toLowerCase() === email);
-    if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return;
-    }
-
-    if (user.status !== "active") {
-      response.status(403).json({ error: "This account is not active." });
-      return;
-    }
-
-    if (user.accountType === "enterprise" && !isSuperUser(user)) {
-      const org = getOrgById(db, user.orgId);
-      if (!org || org.status !== "active") {
-        response.status(403).json({ error: "This enterprise account is not active." });
-        return;
-      }
-    }
-
-    const now = new Date();
-    let payload: WebAuthRequestCodeResponse;
-    if (user.emailVerifiedAt) {
-      const challenge = webAuthService.issueSignInChallenge(db, user, EMAIL_VERIFICATION_TTL_MINUTES, now);
-      payload = {
-        ok: true,
-        challengeType: "sign_in",
-        expiresAt: challenge.expiresAt,
-        delivery: await authCodeDelivery.sendWebSignInCode({
-          email: user.email,
-          code: challenge.code,
-          expiresAt: challenge.expiresAt
-        })
-      };
-    } else {
-      const verification = await issueEmailVerification(db, user, now, "dashboard");
-      payload = {
-        ok: true,
-        challengeType: "email_verification",
-        expiresAt: verification.expiresAt,
-        delivery: verification.delivery
-      };
-    }
-
-    appendWebAuditEvent(db, user, {
-      action: "web_auth.code_requested",
-      orgId: user.orgId,
-      userId: user.id,
-      message: `Issued ${payload.challengeType} code for ${user.email}.`,
-      metadata: {
-        challengeType: payload.challengeType,
-        expiresAt: payload.expiresAt
-      }
+    const result = await handleDashboardWebAuthCodeRequest({
+      db,
+      email,
+      now: new Date(),
+      issueSignInCode: async (user, now) => {
+        const challenge = webAuthService.issueSignInChallenge(db, user, EMAIL_VERIFICATION_TTL_MINUTES, now);
+        return {
+          expiresAt: challenge.expiresAt,
+          delivery: await authCodeDelivery.sendWebSignInCode({
+            email: user.email,
+            code: challenge.code,
+            expiresAt: challenge.expiresAt
+          })
+        };
+      },
+      issueEmailVerificationCode: async (user, now) => issueEmailVerification(db, user, now, "dashboard"),
     });
 
-    response.json(payload);
+    if (result.outcome === "issued") {
+      appendWebAuditEvent(db, result.user, {
+        action: "web_auth.code_requested",
+        orgId: result.user.orgId,
+        userId: result.user.id,
+        message: `Issued ${result.challengeType} code for ${result.user.email}.`,
+        metadata: {
+          challengeType: result.challengeType,
+          expiresAt: result.expiresAt,
+          delivery: result.delivery,
+        }
+      });
+      response.json(result.response);
+    } else if (result.outcome === "delivery_failed") {
+      logWarnThrottled(
+        `web-auth-request:delivery-failed:${result.user.id}`,
+        `[web-auth][request-code] ${result.reason} for ${result.user.email}: ${result.error.message}`,
+        60 * 1000
+      );
+      appendWebAuditEvent(db, result.user, {
+        action: "web_auth.code_request_failed",
+        orgId: result.user.orgId,
+        userId: result.user.id,
+        message: `Failed to issue dashboard auth code for ${result.user.email}.`,
+        metadata: {
+          reason: result.reason,
+          error: result.error.message,
+        }
+      });
+      response.status(result.statusCode).json({ error: result.publicMessage });
+    } else {
+      logDashboardWebAuthRequestIgnored(email, result.reason);
+      response.json(result.response);
+    }
   });
 });
 
@@ -7800,21 +7823,14 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
       return;
     }
 
-    if (user.status !== "active") {
-      response.status(403).json({ error: "This account is not active." });
+    const dashboardEligibility = resolveDashboardAccessEligibility(db, user);
+    if (!dashboardEligibility.eligible) {
+      response.status(403).json({ error: "Dashboard access is not enabled for this account." });
       return;
     }
 
-    if (user.accountType === "enterprise" && !isSuperUser(user)) {
-      const org = getOrgById(db, user.orgId);
-      if (!org || org.status !== "active") {
-        response.status(403).json({ error: "This enterprise account is not active." });
-        return;
-      }
-    }
-
     const now = new Date();
-    let challengeType: WebAuthRequestCodeResponse["challengeType"];
+    let challengeType: WebAuthChallengeType;
     if (user.emailVerifiedAt) {
       const result = webAuthService.verifyLatestSignInChallenge(db, user, code, now);
       if (result === "missing") {

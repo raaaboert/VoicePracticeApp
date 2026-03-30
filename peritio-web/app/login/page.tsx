@@ -36,7 +36,7 @@ export default async function LoginPage({
           </p>
           {dashboardAccessMissing ? (
             <p className="form-error">
-              You are signed in, but dashboard access is not enabled on this user record yet.
+              You are signed in, but this account does not currently have dashboard access.
             </p>
           ) : null}
           <LoginForm />
@@ -46,7 +46,7 @@ export default async function LoginPage({
           <p className="eyebrow">Inside this shell</p>
           <h2>Customer insight scaffolding</h2>
           <ul className="bullet-list">
-            <li>Platform admin can review any customer account</li>
+            <li>Super users can review customer accounts across the dashboard</li>
             <li>Customer users are limited to their own organization</li>
             <li>Company, user, and scenario reporting structure is already in place</li>
             <li>Settings space is ready for theme control and future preferences</li>

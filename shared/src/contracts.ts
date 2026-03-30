@@ -15,7 +15,7 @@ export type OrgStatus = (typeof ORG_STATUSES)[number];
 export const ORG_USER_ROLES = ["org_admin", "user_admin", "user"] as const;
 export type OrgUserRole = (typeof ORG_USER_ROLES)[number];
 
-export const DASHBOARD_ACCESS_TYPES = ["platform_admin", "super_user", "customer_dashboard_user"] as const;
+export const DASHBOARD_ACCESS_TYPES = ["super_user", "customer_dashboard_user"] as const;
 export type DashboardAccessType = (typeof DASHBOARD_ACCESS_TYPES)[number];
 
 export const ORG_JOIN_REQUEST_STATUSES = ["pending", "approved", "rejected", "expired"] as const;
@@ -577,15 +577,17 @@ export interface DashboardViewer {
 export const WEB_AUTH_DELIVERY_MODES = ["log_only", "email"] as const;
 export type WebAuthDeliveryMode = (typeof WEB_AUTH_DELIVERY_MODES)[number];
 
+export const WEB_AUTH_REQUEST_CODE_STATUSES = ["acknowledged", "code_sent"] as const;
+export type WebAuthRequestCodeStatus = (typeof WEB_AUTH_REQUEST_CODE_STATUSES)[number];
+
 export interface WebAuthRequestCodeRequest {
   email: string;
 }
 
 export interface WebAuthRequestCodeResponse {
   ok: true;
-  challengeType: WebAuthChallengeType;
-  expiresAt: string;
-  delivery: WebAuthDeliveryMode;
+  status: WebAuthRequestCodeStatus;
+  message: string;
 }
 
 export interface WebAuthVerifyCodeRequest {

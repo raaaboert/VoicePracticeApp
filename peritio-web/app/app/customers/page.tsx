@@ -8,7 +8,7 @@ import { formatDate, formatScore, formatSignedPercent, formatUsageMinutes } from
 
 export default async function CustomersPage() {
   const viewer = await getDashboardViewer();
-  if (!viewer?.isSuperUser) {
+  if (viewer?.accessType !== "super_user") {
     redirect("/app/dashboard");
   }
   const customers = await listAccessibleCustomers();

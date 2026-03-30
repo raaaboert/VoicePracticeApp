@@ -1,0 +1,145 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { ApiDatabase, UserProfile } from "@voicepractice/shared";
+
+import {
+  canDashboardViewerAccessOrg,
+  resolveDashboardAccessEligibility,
+  resolveDashboardViewer,
+} from "./dashboardAuthorization.js";
+
+function createDb(params?: {
+  users?: UserProfile[];
+  orgs?: Array<{ id: string; name: string; status: "active" | "disabled" }>;
+}): ApiDatabase {
+  return {
+    users: params?.users ?? [],
+    orgs: (params?.orgs ?? []).map((org) => ({
+      id: org.id,
+      name: org.name,
+      status: org.status,
+    })),
+  } as ApiDatabase;
+}
+
+function createUser(overrides?: Partial<UserProfile>): UserProfile {
+  return {
+    id: "user_1",
+    email: "user@example.com",
+    emailVerifiedAt: "2026-03-30T00:00:00.000Z",
+    isPlatformAdmin: false,
+    isSuperUser: false,
+    dashboardAccessEnabled: true,
+    accountType: "enterprise",
+    tier: "enterprise",
+    status: "active",
+    orgId: "org_a",
+    orgRole: "org_admin",
+    timezone: "America/Denver",
+    pendingTimezone: null,
+    pendingTimezoneEffectiveAt: null,
+    planAnchorAt: "2026-03-01T00:00:00.000Z",
+    manualBonusSeconds: 0,
+    dailySecondsCapOverride: null,
+    allowDailyOverageThisCycle: false,
+    dailyOverageExpiresAt: null,
+    createdAt: "2026-03-01T00:00:00.000Z",
+    updatedAt: "2026-03-30T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("tenant dashboard viewer remains scoped to its own org", () => {
+  const user = createUser();
+  const db = createDb({
+    users: [user],
+    orgs: [
+      { id: "org_a", name: "Org A", status: "active" },
+      { id: "org_b", name: "Org B", status: "active" },
+    ],
+  });
+
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.ok(viewer);
+  assert.equal(viewer.accessType, "customer_dashboard_user");
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
+});
+
+test("mixed platform_admin plus tenant-valid user keeps tenant-scoped dashboard access only", () => {
+  const user = createUser({
+    id: "user_mixed",
+    email: "mixed@example.com",
+    isPlatformAdmin: true,
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [
+      { id: "org_a", name: "Org A", status: "active" },
+      { id: "org_b", name: "Org B", status: "active" },
+    ],
+  });
+
+  const eligibility = resolveDashboardAccessEligibility(db, user);
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.equal(eligibility.eligible, true);
+  assert.equal(eligibility.reason, "customer_dashboard_user");
+  assert.ok(viewer);
+  assert.equal(viewer.accessType, "customer_dashboard_user");
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
+});
+
+test("super users retain cross-account dashboard access", () => {
+  const user = createUser({
+    id: "user_super",
+    email: "super@example.com",
+    isSuperUser: true,
+    dashboardAccessEnabled: false,
+    accountType: "individual",
+    tier: "pro_plus",
+    orgId: null,
+    orgRole: "user",
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [
+      { id: "org_a", name: "Org A", status: "active" },
+      { id: "org_b", name: "Org B", status: "active" },
+    ],
+  });
+
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.ok(viewer);
+  assert.equal(viewer.accessType, "super_user");
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), true);
+});
+
+test("legacy platform_admin alone no longer resolves to a dashboard viewer", () => {
+  const user = createUser({
+    id: "user_platform_admin",
+    email: "platform-admin@example.com",
+    isPlatformAdmin: true,
+    dashboardAccessEnabled: false,
+    accountType: "individual",
+    tier: "pro_plus",
+    orgId: null,
+    orgRole: "user",
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [{ id: "org_a", name: "Org A", status: "active" }],
+  });
+
+  const eligibility = resolveDashboardAccessEligibility(db, user);
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.equal(eligibility.eligible, false);
+  assert.equal(eligibility.reason, "not_enterprise_user");
+  assert.equal(viewer, null);
+});

@@ -29,12 +29,9 @@ export function DashboardShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const sessionLabel = viewer.isSuperUser
-    ? "Super User"
-    : viewer.accessType === "platform_admin"
-      ? "Platform Admin"
-      : viewer.orgName ?? "Customer";
-  const navItems = viewer.isSuperUser
+  const hasCrossAccountAccess = viewer.accessType === "super_user";
+  const sessionLabel = hasCrossAccountAccess ? "Super User" : viewer.orgName ?? "Customer";
+  const navItems = hasCrossAccountAccess
     ? [BASE_NAV_ITEMS[0], { href: "/app/customers", label: "Customers" }, BASE_NAV_ITEMS[1]]
     : BASE_NAV_ITEMS;
 
@@ -71,9 +68,7 @@ export function DashboardShell({
         <div className="sidebar-note">
           <p className="eyebrow">Access</p>
           <p>
-            {viewer.accessType === "platform_admin"
-              ? "You can review every customer account currently in your reporting scope."
-              : viewer.isSuperUser
+            {hasCrossAccountAccess
               ? "You can review every customer account currently in your reporting scope."
               : "You are limited to your own customer account and its reporting views."}
           </p>

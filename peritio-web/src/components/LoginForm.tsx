@@ -29,20 +29,19 @@ export function LoginForm() {
     }
 
     const payload = (await response.json()) as {
-      challengeType: "sign_in" | "email_verification";
-      expiresAt: string;
-      delivery: "log_only" | "email";
+      status: "acknowledged" | "code_sent";
+      message: string;
     };
-    const deliveryMessage =
-      payload.delivery === "email"
-        ? "Check your inbox for the one-time code."
-        : "In local development, the API logs the code.";
-    setStep("verify_code");
-    setNotice(
-      payload.challengeType === "email_verification"
-        ? `We sent a verification code. Enter it below to verify this email and start a web session. ${deliveryMessage}`
-        : `We sent a sign-in code. Enter it below to continue. ${deliveryMessage}`
-    );
+    if (payload.status === "code_sent") {
+      setStep("verify_code");
+      setNotice(
+        `${payload.message} Enter the 6-digit code below to continue.`
+      );
+      return;
+    }
+
+    setStep("request_code");
+    setNotice(payload.message);
   };
 
   const verifyCode = async () => {
