@@ -12,9 +12,8 @@ import {
 } from "./dashboardAuthorization.js";
 import { AuthCodeDeliveryError } from "./authCodeDelivery.js";
 
-export const DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE = "If that account is eligible, a code has been sent.";
-export const DASHBOARD_WEB_AUTH_REQUEST_CODE_DELIVERY_FAILURE_MESSAGE =
-  "We couldn't send a code right now. Please try again.";
+export const DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE =
+  "If that account is eligible, a code has been sent. Enter the code below to continue.";
 
 export type DashboardWebAuthRequestResult =
   | {
@@ -33,26 +32,16 @@ export type DashboardWebAuthRequestResult =
       delivery: WebAuthDeliveryMode;
     }
   | {
+      response: WebAuthRequestCodeResponse;
       outcome: "delivery_failed";
       reason: "sign_in_delivery_failed" | "email_verification_delivery_failed";
       user: UserProfile;
       error: Error;
-      publicMessage: string;
-      statusCode: number;
     };
 
-function buildAcknowledgedResponse(): WebAuthRequestCodeResponse {
+function buildPublicResponse(): WebAuthRequestCodeResponse {
   return {
     ok: true,
-    status: "acknowledged",
-    message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
-  };
-}
-
-function buildCodeSentResponse(): WebAuthRequestCodeResponse {
-  return {
-    ok: true,
-    status: "code_sent",
     message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
   };
 }
@@ -78,14 +67,14 @@ export async function handleDashboardWebAuthCodeRequest(params: {
     delivery: WebAuthDeliveryMode;
   }>;
 }): Promise<DashboardWebAuthRequestResult> {
-  const acknowledgedResponse = buildAcknowledgedResponse();
+  const publicResponse = buildPublicResponse();
   const normalizedEmail = params.email.trim().toLowerCase();
   const user =
     params.db.users.find((entry) => entry.email.toLowerCase() === normalizedEmail) ?? null;
 
   if (!user) {
     return {
-      response: acknowledgedResponse,
+      response: publicResponse,
       outcome: "acknowledged",
       reason: "user_not_found",
       user: null,
@@ -95,7 +84,7 @@ export async function handleDashboardWebAuthCodeRequest(params: {
   const eligibility = resolveDashboardAccessEligibility(params.db, user);
   if (!eligibility.eligible) {
     return {
-      response: acknowledgedResponse,
+      response: publicResponse,
       outcome: "acknowledged",
       reason: eligibility.reason,
       user: null,
@@ -106,7 +95,7 @@ export async function handleDashboardWebAuthCodeRequest(params: {
     if (user.emailVerifiedAt) {
       const issued = await params.issueSignInCode(user, params.now);
       return {
-        response: buildCodeSentResponse(),
+        response: publicResponse,
         outcome: "issued",
         reason: "eligible",
         user,
@@ -118,7 +107,7 @@ export async function handleDashboardWebAuthCodeRequest(params: {
 
     const issued = await params.issueEmailVerificationCode(user, params.now);
     return {
-      response: buildCodeSentResponse(),
+      response: publicResponse,
       outcome: "issued",
       reason: "eligible",
       user,
@@ -132,12 +121,11 @@ export async function handleDashboardWebAuthCodeRequest(params: {
     }
 
     return {
+      response: publicResponse,
       outcome: "delivery_failed",
       reason: user.emailVerifiedAt ? "sign_in_delivery_failed" : "email_verification_delivery_failed",
       user,
       error: normalizeError(error),
-      publicMessage: DASHBOARD_WEB_AUTH_REQUEST_CODE_DELIVERY_FAILURE_MESSAGE,
-      statusCode: error.statusCode || 503,
     };
   }
 }

@@ -3,6 +3,8 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { resolveLoginFormRequestCodeSuccess } from "@/src/components/loginFormState";
+
 type LoginStep = "request_code" | "verify_code";
 
 export function LoginForm() {
@@ -28,20 +30,13 @@ export function LoginForm() {
       throw new Error(payload?.error || "Could not send sign-in code.");
     }
 
-    const payload = (await response.json()) as {
-      status: "acknowledged" | "code_sent";
-      message: string;
-    };
-    if (payload.status === "code_sent") {
-      setStep("verify_code");
-      setNotice(
-        `${payload.message} Enter the 6-digit code below to continue.`
-      );
-      return;
-    }
-
-    setStep("request_code");
-    setNotice(payload.message);
+    const payload = (await response.json()) as { message: string };
+    const nextState = resolveLoginFormRequestCodeSuccess({
+      ok: true,
+      message: payload.message,
+    });
+    setStep(nextState.step);
+    setNotice(nextState.notice);
   };
 
   const verifyCode = async () => {
@@ -54,8 +49,7 @@ export function LoginForm() {
     });
 
     if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(payload?.error || "Could not verify code.");
+      throw new Error("Could not verify code. Request a new code and try again.");
     }
 
     router.replace("/app/dashboard");

@@ -143,3 +143,22 @@ test("legacy platform_admin alone no longer resolves to a dashboard viewer", () 
   assert.equal(eligibility.reason, "not_enterprise_user");
   assert.equal(viewer, null);
 });
+
+test("dashboard-ineligible enterprise user does not resolve a dashboard viewer", () => {
+  const user = createUser({
+    id: "user_disabled_org",
+    email: "disabled-org@example.com",
+    orgId: "org_disabled",
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [{ id: "org_disabled", name: "Disabled Org", status: "disabled" }],
+  });
+
+  const eligibility = resolveDashboardAccessEligibility(db, user);
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.equal(eligibility.eligible, false);
+  assert.equal(eligibility.reason, "inactive_org");
+  assert.equal(viewer, null);
+});

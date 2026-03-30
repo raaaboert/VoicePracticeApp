@@ -3323,6 +3323,8 @@ function logDashboardWebAuthRequestRateLimited(request: Request, retryAfterSecon
   );
 }
 
+const DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE = "Could not verify code. Request a new code and try again.";
+
 function normalizePersistedCoachingText(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -7798,7 +7800,7 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
           error: result.error.message,
         }
       });
-      response.status(result.statusCode).json({ error: result.publicMessage });
+      response.json(result.response);
     } else {
       logDashboardWebAuthRequestIgnored(email, result.reason);
       response.json(result.response);
@@ -7819,13 +7821,13 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
   await withDatabase(async (db) => {
     const user = db.users.find((entry) => entry.email.toLowerCase() === email);
     if (!user) {
-      response.status(404).json({ error: "User not found." });
+      response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
       return;
     }
 
     const dashboardEligibility = resolveDashboardAccessEligibility(db, user);
     if (!dashboardEligibility.eligible) {
-      response.status(403).json({ error: "Dashboard access is not enabled for this account." });
+      response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
       return;
     }
 
@@ -7834,15 +7836,15 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     if (user.emailVerifiedAt) {
       const result = webAuthService.verifyLatestSignInChallenge(db, user, code, now);
       if (result === "missing") {
-        response.status(400).json({ error: "No pending sign-in code. Request a new code first." });
+        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
       }
       if (result === "expired") {
-        response.status(400).json({ error: "Sign-in code expired. Request a new code." });
+        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
       }
       if (result === "invalid") {
-        response.status(400).json({ error: "Invalid sign-in code." });
+        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
       }
 
@@ -7850,15 +7852,15 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     } else {
       const result = verifyLatestEmailVerification(db, user, code, now);
       if (result === "missing") {
-        response.status(400).json({ error: "No pending verification code. Request a new code first." });
+        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
       }
       if (result === "expired") {
-        response.status(400).json({ error: "Verification code expired. Request a new code." });
+        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
       }
       if (result === "invalid") {
-        response.status(400).json({ error: "Invalid verification code." });
+        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
       }
 

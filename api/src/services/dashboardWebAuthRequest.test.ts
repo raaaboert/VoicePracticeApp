@@ -5,7 +5,6 @@ import { ApiDatabase, UserProfile, WebAuthRequestCodeResponse } from "@voiceprac
 
 import { AuthCodeDeliveryError } from "./authCodeDelivery.js";
 import {
-  DASHBOARD_WEB_AUTH_REQUEST_CODE_DELIVERY_FAILURE_MESSAGE,
   DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
   handleDashboardWebAuthCodeRequest,
 } from "./dashboardWebAuthRequest.js";
@@ -73,11 +72,11 @@ test("dashboard request-code returns the same public response for unknown and in
 
   const expectedPublicResponse: WebAuthRequestCodeResponse = {
     ok: true,
-    status: "acknowledged",
     message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
   };
 
   let issuedSignInCodes = 0;
+  let issuedEmailVerificationCodes = 0;
   const request = (email: string) =>
     handleDashboardWebAuthCodeRequest({
       db,
@@ -91,7 +90,11 @@ test("dashboard request-code returns the same public response for unknown and in
         };
       },
       issueEmailVerificationCode: async () => {
-        throw new Error("Email verification should not be used in this test.");
+        issuedEmailVerificationCodes += 1;
+        return {
+          expiresAt: "2026-03-30T12:15:00.000Z",
+          delivery: "email",
+        };
       },
     });
 
@@ -108,20 +111,17 @@ test("dashboard request-code returns the same public response for unknown and in
   assert.deepEqual(unknownResult.response, expectedPublicResponse);
   assert.deepEqual(inactiveUserResult.response, expectedPublicResponse);
   assert.deepEqual(inactiveOrgResult.response, expectedPublicResponse);
-  assert.deepEqual(eligibleResult.response, {
-    ok: true,
-    status: "code_sent",
-    message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
-  });
+  assert.deepEqual(eligibleResult.response, expectedPublicResponse);
 
   assert.equal(unknownResult.reason, "user_not_found");
   assert.equal(inactiveUserResult.reason, "inactive_user");
   assert.equal(inactiveOrgResult.reason, "inactive_org");
   assert.equal(eligibleResult.challengeType, "sign_in");
   assert.equal(issuedSignInCodes, 1);
+  assert.equal(issuedEmailVerificationCodes, 0);
 });
 
-test("dashboard request-code returns an explicit failure when eligible delivery fails", async () => {
+test("dashboard request-code returns the same public response when eligible delivery fails", async () => {
   const eligibleUser = createUser();
   const db = createDb({
     users: [eligibleUser],
@@ -142,8 +142,10 @@ test("dashboard request-code returns an explicit failure when eligible delivery 
 
   assert.equal(result.outcome, "delivery_failed");
   assert.equal(result.reason, "sign_in_delivery_failed");
-  assert.equal(result.publicMessage, DASHBOARD_WEB_AUTH_REQUEST_CODE_DELIVERY_FAILURE_MESSAGE);
-  assert.equal(result.statusCode, 502);
+  assert.deepEqual(result.response, {
+    ok: true,
+    message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
+  });
   assert.match(result.error.message, /Resend delivery failed/);
 });
 
@@ -185,7 +187,6 @@ test("dashboard request-code issues an email verification code for an eligible u
   assert.equal(result.challengeType, "email_verification");
   assert.deepEqual(result.response, {
     ok: true,
-    status: "code_sent",
     message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
   });
   assert.equal(emailVerificationRequests, 1);

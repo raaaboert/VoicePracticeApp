@@ -577,16 +577,12 @@ export interface DashboardViewer {
 export const WEB_AUTH_DELIVERY_MODES = ["log_only", "email"] as const;
 export type WebAuthDeliveryMode = (typeof WEB_AUTH_DELIVERY_MODES)[number];
 
-export const WEB_AUTH_REQUEST_CODE_STATUSES = ["acknowledged", "code_sent"] as const;
-export type WebAuthRequestCodeStatus = (typeof WEB_AUTH_REQUEST_CODE_STATUSES)[number];
-
 export interface WebAuthRequestCodeRequest {
   email: string;
 }
 
 export interface WebAuthRequestCodeResponse {
   ok: true;
-  status: WebAuthRequestCodeStatus;
   message: string;
 }
 
