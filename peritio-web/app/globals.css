@@ -646,15 +646,68 @@ main {
 
 .customer-directory-grid {
   display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 360px));
+  gap: 1.15rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 384px));
   justify-content: start;
   align-items: start;
 }
 
-.customer-directory-grid .detail-card {
+.customer-directory-card {
+  display: grid;
+  gap: 0.95rem;
   width: 100%;
-  max-width: 360px;
+  max-width: 384px;
+  padding: 1.35rem;
+}
+
+.customer-directory-card-header {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.customer-directory-card-title {
+  margin: 0;
+  line-height: 1.15;
+}
+
+.customer-directory-card-status {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.customer-directory-contact {
+  display: grid;
+  gap: 0.16rem;
+  margin: 0;
+}
+
+.customer-directory-contact-label {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.customer-directory-contact-value {
+  color: var(--text-muted);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.customer-directory-metrics {
+  margin: 0;
+  gap: 0.9rem 1rem;
+}
+
+.customer-directory-summary {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.customer-directory-link {
+  align-self: start;
 }
 
 .dashboard-training-meta {

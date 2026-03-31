@@ -4,17 +4,13 @@ import Link from "next/link";
 import { useDeferredValue, useState } from "react";
 import { DashboardCustomerSummary } from "@voicepractice/shared";
 
-import { formatDate, formatScore, formatSignedPercent, formatUsageMinutes } from "@/src/lib/formatters";
+import { formatDate, formatScore, formatUsageMinutes } from "@/src/lib/formatters";
 import {
   CustomerDirectorySortOption,
   CustomerDirectoryStatusFilter,
   DEFAULT_CUSTOMER_DIRECTORY_CONTROLS,
   getVisibleCustomers,
 } from "@/src/components/customerDirectoryState";
-
-function formatStatusLabel(status: DashboardCustomerSummary["orgStatus"]): string {
-  return status === "active" ? "Active" : "Inactive";
-}
 
 export function CustomersDirectory({ customers }: { customers: DashboardCustomerSummary[] }) {
   const [searchTerm, setSearchTerm] = useState(DEFAULT_CUSTOMER_DIRECTORY_CONTROLS.searchTerm);
@@ -115,23 +111,20 @@ export function CustomersDirectory({ customers }: { customers: DashboardCustomer
       {visibleCustomers.length > 0 ? (
         <section className="customer-directory-grid">
           {visibleCustomers.map((customer) => (
-            <article key={customer.orgId} className="detail-card">
-              <div className="pill-row">
-                <span className="pill">{customer.industryLabels[0] ?? "General"}</span>
-                <span className={`pill${customer.orgStatus === "active" ? " accent" : ""}`}>
-                  {formatStatusLabel(customer.orgStatus)}
-                </span>
-                {customer.scoreDeltaLast30Days !== null ? (
-                  <span className="pill accent">{formatSignedPercent(customer.scoreDeltaLast30Days)}</span>
-                ) : (
-                  <span className="pill">New score window</span>
-                )}
-              </div>
-              <h2>{customer.orgName}</h2>
-              <p>
-                Contact: {customer.contactName} - {customer.contactEmail}
-              </p>
-              <dl className="inline-stats">
+            <article key={customer.orgId} className="detail-card customer-directory-card">
+              <header className="customer-directory-card-header">
+                <h2 className="customer-directory-card-title">{customer.orgName}</h2>
+                {customer.orgStatus !== "active" ? (
+                  <p className="customer-directory-card-status">Inactive account</p>
+                ) : null}
+                <p className="customer-directory-contact">
+                  <span className="customer-directory-contact-label">Primary contact</span>
+                  <span className="customer-directory-contact-value">
+                    {customer.contactName} | {customer.contactEmail}
+                  </span>
+                </p>
+              </header>
+              <dl className="inline-stats customer-directory-metrics">
                 <div>
                   <dt>Users</dt>
                   <dd>
@@ -147,7 +140,7 @@ export function CustomersDirectory({ customers }: { customers: DashboardCustomer
                   <dd>{customer.averageScoreThisPeriod !== null ? formatScore(customer.averageScoreThisPeriod) : "-"}</dd>
                 </div>
               </dl>
-              <dl className="inline-stats">
+              <dl className="inline-stats customer-directory-metrics">
                 <div>
                   <dt>Packs</dt>
                   <dd>
@@ -163,11 +156,10 @@ export function CustomersDirectory({ customers }: { customers: DashboardCustomer
                   <dd>{formatDate(customer.latestActivityAt)}</dd>
                 </div>
               </dl>
-              <p className="small-copy">
-                {customer.simulationsLast30Days} simulations in the last 30 days. Renewal window ends{" "}
-                {formatDate(customer.nextRenewalAt)}.
+              <p className="small-copy customer-directory-summary">
+                {customer.simulationsLast30Days} simulations in the last 30 days. Renewal ends {formatDate(customer.nextRenewalAt)}.
               </p>
-              <Link className="inline-link" href={`/app/customers/${customer.orgId}`}>
+              <Link className="inline-link customer-directory-link" href={`/app/customers/${customer.orgId}`}>
                 View account dashboard
               </Link>
             </article>
