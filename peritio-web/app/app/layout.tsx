@@ -3,7 +3,8 @@ import { redirect } from "next/navigation";
 import { ReactNode } from "react";
 
 import { DashboardShell } from "@/src/components/DashboardShell";
-import { assertDashboardAuthConfig, getWebAuthSession } from "@/src/lib/auth";
+import { assertDashboardAuthConfig, getWebAuthBearerToken, getWebAuthSession } from "@/src/lib/auth";
+import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { ensureAppHostRequest } from "@/src/lib/serverHostGuards";
 
 export const metadata: Metadata = {
@@ -17,13 +18,14 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   await ensureAppHostRequest("/app");
   assertDashboardAuthConfig();
 
-  const authSession = await getWebAuthSession();
-  if (!authSession) {
+  const token = await getWebAuthBearerToken();
+  if (!token) {
     redirect("/login");
   }
 
-  if (!authSession.dashboardViewer) {
-    redirect("/login?reason=no-dashboard-access");
+  const authSession = await getWebAuthSession();
+  if (!authSession || !authSession.dashboardViewer) {
+    redirect(buildDashboardSessionResetPath());
   }
 
   return <DashboardShell viewer={authSession.dashboardViewer}>{children}</DashboardShell>;

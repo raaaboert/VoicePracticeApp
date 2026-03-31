@@ -113,7 +113,7 @@ export function CustomersDirectory({ customers }: { customers: DashboardCustomer
       </section>
 
       {visibleCustomers.length > 0 ? (
-        <section className="info-grid">
+        <section className="customer-directory-grid">
           {visibleCustomers.map((customer) => (
             <article key={customer.orgId} className="detail-card">
               <div className="pill-row">

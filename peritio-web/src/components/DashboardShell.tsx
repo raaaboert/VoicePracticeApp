@@ -5,6 +5,7 @@ import { ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { DashboardViewer } from "@voicepractice/shared";
 
+import { DashboardSessionGuard } from "@/src/components/DashboardSessionGuard";
 import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
 
 const BASE_NAV_ITEMS = [
@@ -43,6 +44,7 @@ export function DashboardShell({
 
   return (
     <main className="app-shell">
+      <DashboardSessionGuard />
       <aside className="app-sidebar">
         <div className="brand-block">
           <div className="brand-mark">P</div>

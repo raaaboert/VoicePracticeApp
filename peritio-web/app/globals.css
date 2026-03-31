@@ -644,6 +644,19 @@ main {
   margin-top: 1rem;
 }
 
+.customer-directory-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 360px));
+  justify-content: start;
+  align-items: start;
+}
+
+.customer-directory-grid .detail-card {
+  width: 100%;
+  max-width: 360px;
+}
+
 .dashboard-training-meta {
   display: grid;
   gap: 0.7rem;

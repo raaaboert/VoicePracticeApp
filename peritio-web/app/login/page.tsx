@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
 import { LoginForm } from "@/src/components/LoginForm";
-import { assertDashboardAuthConfig, getWebAuthSession } from "@/src/lib/auth";
+import { assertDashboardAuthConfig, getWebAuthBearerToken, getWebAuthSession } from "@/src/lib/auth";
+import { buildDashboardSessionResetPath, parseDashboardLoginReason } from "@/src/lib/dashboardSession";
 import { ensureAppHostRequest } from "@/src/lib/serverHostGuards";
 
 export const metadata: Metadata = {
@@ -17,11 +18,17 @@ export default async function LoginPage({
   await ensureAppHostRequest("/login");
   assertDashboardAuthConfig();
   const params = await searchParams;
-  const dashboardAccessMissing = params.reason === "no-dashboard-access";
+  const reason = parseDashboardLoginReason(params.reason);
+  const dashboardAccessMissing = reason === "no-dashboard-access";
+  const sessionExpired = reason === "session-expired";
 
+  const token = await getWebAuthBearerToken();
   const authSession = await getWebAuthSession();
   if (authSession?.dashboardViewer) {
     redirect("/app/dashboard");
+  }
+  if (token && !authSession) {
+    redirect(buildDashboardSessionResetPath());
   }
 
   return (
@@ -37,6 +44,10 @@ export default async function LoginPage({
           {dashboardAccessMissing ? (
             <p className="form-error">
               You are signed in, but this account does not currently have dashboard access.
+            </p>
+          ) : sessionExpired ? (
+            <p className="form-error">
+              Your dashboard session expired or your access changed. Sign in again to continue.
             </p>
           ) : null}
           <LoginForm />
