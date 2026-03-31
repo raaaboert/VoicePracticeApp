@@ -24,6 +24,10 @@ export function canDashboardViewerAccessOrg(viewer: DashboardViewer, orgId: stri
   return viewer.orgId === orgId;
 }
 
+export function canDashboardViewerAccessCustomerDirectory(viewer: DashboardViewer): boolean {
+  return viewer.accessType === "super_user";
+}
+
 export function resolveDashboardAccessEligibility(db: ApiDatabase, user: UserProfile): DashboardAccessEligibility {
   if (user.status !== "active") {
     return {

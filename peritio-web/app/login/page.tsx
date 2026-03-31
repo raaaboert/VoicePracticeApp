@@ -31,8 +31,8 @@ export default async function LoginPage({
           <p className="eyebrow">Peritio</p>
           <h1>Dashboard access</h1>
           <p className="login-copy">
-            Sign in with your email address and a one-time code. Access is resolved from the same user, account, and
-            organization model used by the existing admin system.
+            Sign in with your email address and a one-time code. After a successful verification, this browser stays
+            trusted for 14 days unless you sign out or your dashboard access changes.
           </p>
           {dashboardAccessMissing ? (
             <p className="form-error">

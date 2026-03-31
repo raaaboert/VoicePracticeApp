@@ -165,6 +165,7 @@ import {
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
 import {
+  canDashboardViewerAccessCustomerDirectory,
   canDashboardViewerAccessOrg,
   resolveDashboardAccessEligibility,
   resolveDashboardViewer
@@ -177,6 +178,7 @@ import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services
 import {
   handleDashboardWebAuthCodeRequest,
 } from "./services/dashboardWebAuthRequest.js";
+import { DASHBOARD_TRUSTED_SESSION_MINUTES } from "./services/dashboardSessionPolicy.js";
 import { hashScryptPassword, verifyScryptPassword } from "./services/passwordHash.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
@@ -220,7 +222,7 @@ const ADMIN_BOOTSTRAP_PASSWORD = runtimeConfig.adminBootstrapPassword;
 const ADMIN_TOKEN_SECRET = runtimeConfig.adminTokenSecret;
 const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
 const WEB_AUTH_TOKEN_SECRET = runtimeConfig.webAuthTokenSecret;
-const WEB_AUTH_TOKEN_TTL_MINUTES = runtimeConfig.webAuthTokenTtlMinutes;
+const DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES = DASHBOARD_TRUSTED_SESSION_MINUTES;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
 const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
@@ -3438,11 +3440,77 @@ function buildWebAuthSessionUser(user: UserProfile): WebAuthSessionResponse["ses
   };
 }
 
-function buildWebAuthSessionResponse(db: ApiDatabase, user: UserProfile): WebAuthSessionResponse {
+function getWebAuthRequestUserAgent(request: Request): string | null {
+  const header = request.get("user-agent");
+  const trimmed = header?.trim();
+  return trimmed || null;
+}
+
+function buildWebAuthSessionRequestMetadata(request: Request): {
+  userAgent: string | null;
+  ipAddress: string | null;
+} {
   return {
-    session: buildWebAuthSessionUser(user),
-    dashboardViewer: resolveDashboardViewer(db, user)
+    userAgent: getWebAuthRequestUserAgent(request),
+    ipAddress: getClientIp(request)
   };
+}
+
+interface AuthenticatedWebSessionContext {
+  db: ApiDatabase;
+  token: WebAuthTokenPayload;
+  user: UserProfile;
+  sessionId: string;
+}
+
+async function loadAuthenticatedWebSessionContext(
+  request: Request,
+  response: Response
+): Promise<AuthenticatedWebSessionContext | null> {
+  const token = getIncomingWebAuthToken(request);
+  if (!token) {
+    response.status(401).json({ error: "Missing web auth token." });
+    return null;
+  }
+
+  const payload = webAuthService.verifyToken(token);
+  if (!payload) {
+    response.status(401).json({ error: "Invalid or expired web auth token." });
+    return null;
+  }
+
+  return await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    const sessionRecord = webAuthService.getActiveSessionRecord(db, payload, new Date());
+    if (!sessionRecord) {
+      response.status(401).json({ error: "Invalid or expired web auth token." });
+      return null;
+    }
+
+    const user = getUserById(db, payload.sub);
+    if (!user || user.status !== "active" || !user.emailVerifiedAt) {
+      webAuthService.revokeSession(db, sessionRecord.sessionId);
+      await saveDatabase(db);
+      response.status(401).json({ error: "Web auth session is no longer valid." });
+      return null;
+    }
+
+    const touched = webAuthService.touchSession(
+      sessionRecord,
+      new Date(),
+      buildWebAuthSessionRequestMetadata(request)
+    );
+    if (touched) {
+      await saveDatabase(db);
+    }
+
+    return {
+      db,
+      token: payload,
+      user,
+      sessionId: sessionRecord.sessionId
+    };
+  });
 }
 
 async function requireAdmin(request: AdminAuthRequest, response: Response, next: NextFunction): Promise<void> {
@@ -3470,37 +3538,17 @@ async function requireAdmin(request: AdminAuthRequest, response: Response, next:
 }
 
 async function requireWebAuth(request: WebAuthRequest, response: Response, next: NextFunction): Promise<void> {
-  const token = getIncomingWebAuthToken(request);
-  if (!token) {
-    response.status(401).json({ error: "Missing web auth token." });
-    return;
-  }
-
-  const payload = webAuthService.verifyToken(token);
-  if (!payload) {
-    response.status(401).json({ error: "Invalid or expired web auth token." });
-    return;
-  }
-
-  const db = await loadDatabase();
-  const sessionRecord = webAuthService.getActiveSessionRecord(db, payload);
-  if (!sessionRecord) {
-    response.status(401).json({ error: "Invalid or expired web auth token." });
-    return;
-  }
-
-  const user = getUserById(db, payload.sub);
-  if (!user || user.status !== "active" || !user.emailVerifiedAt) {
-    response.status(401).json({ error: "Web auth session is no longer valid." });
+  const context = await loadAuthenticatedWebSessionContext(request, response);
+  if (!context) {
     return;
   }
 
   request.webAuth = {
-    token: payload,
-    user,
-    sessionId: sessionRecord.sessionId
+    token: context.token,
+    user: context.user,
+    sessionId: context.sessionId
   };
-  request.webAuthToken = token;
+  request.webAuthToken = getIncomingWebAuthToken(request) ?? undefined;
   next();
 }
 
@@ -3509,38 +3557,22 @@ async function requireDashboardAuth(
   response: Response,
   next: NextFunction
 ): Promise<void> {
-  const token = getIncomingWebAuthToken(request);
-  if (!token) {
-    response.status(401).json({ error: "Missing web auth token." });
+  const context = await loadAuthenticatedWebSessionContext(request, response);
+  if (!context) {
     return;
   }
 
-  const webPayload = webAuthService.verifyToken(token);
-  if (!webPayload) {
-    response.status(401).json({ error: "Invalid or expired web auth token." });
-    return;
-  }
-
-  const db = await loadDatabase();
-  const sessionRecord = webAuthService.getActiveSessionRecord(db, webPayload);
-  if (!sessionRecord) {
-    response.status(401).json({ error: "Invalid or expired web auth token." });
-    return;
-  }
-
-  const user = getUserById(db, webPayload.sub);
-  if (!user || user.status !== "active" || !user.emailVerifiedAt) {
-    response.status(401).json({ error: "Dashboard user not found." });
-    return;
-  }
-
-  const viewer = resolveDashboardViewer(db, user);
+  const viewer = resolveDashboardViewer(context.db, context.user);
   if (!viewer) {
+    await withDatabaseLock(async () => {
+      webAuthService.revokeSession(context.db, context.sessionId);
+      await saveDatabase(context.db);
+    });
     response.status(403).json({ error: "Dashboard access is not enabled for this account." });
     return;
   }
 
-  request.dashboard = { token: webPayload, user, viewer };
+  request.dashboard = { token: context.token, user: context.user, viewer };
   next();
 }
 
@@ -7876,7 +7908,25 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
       challengeType = "email_verification";
     }
 
-    const { token, expiresAt, sessionId } = webAuthService.issueSession(db, user, WEB_AUTH_TOKEN_TTL_MINUTES, now);
+    const viewer = resolveDashboardViewer(db, user);
+    if (!viewer) {
+      response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
+      return;
+    }
+
+    const sessionRequestMetadata = buildWebAuthSessionRequestMetadata(request);
+    const { token, expiresAt, sessionId } = webAuthService.issueSession(
+      db,
+      user,
+      DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES,
+      now,
+      {
+        accessType: viewer.accessType,
+        orgId: viewer.orgId,
+        userAgent: sessionRequestMetadata.userAgent,
+        ipAddress: sessionRequestMetadata.ipAddress
+      }
+    );
     appendWebAuditEvent(db, user, {
       action: "web_auth.session_created",
       orgId: user.orgId,
@@ -7885,28 +7935,28 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
       metadata: {
         challengeType,
         sessionId,
-        expiresAt
+        expiresAt,
+        accessType: viewer.accessType,
+        dashboardOrgId: viewer.orgId,
+        clientIp: sessionRequestMetadata.ipAddress,
+        userAgent: sessionRequestMetadata.userAgent
       }
     });
 
     const payload: WebAuthVerifyCodeResponse = {
       token,
       expiresAt,
-      ...buildWebAuthSessionResponse(db, user)
+      session: buildWebAuthSessionUser(user),
+      dashboardViewer: viewer
     };
     response.json(payload);
   });
 });
 
-app.get("/web/auth/session", requireWebAuth, async (request: WebAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
-    const user = getUserById(db, request.webAuth!.user.id);
-    if (!user || user.status !== "active" || !user.emailVerifiedAt) {
-      response.status(401).json({ error: "Web auth session is no longer valid." });
-      return;
-    }
-
-    response.json(buildWebAuthSessionResponse(db, user));
+app.get("/web/auth/session", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  response.json({
+    session: buildWebAuthSessionUser(request.dashboard!.user),
+    dashboardViewer: request.dashboard!.viewer
   });
 });
 
@@ -7944,6 +7994,11 @@ app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: 
 });
 
 app.get("/dashboard/customers", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  if (!canDashboardViewerAccessCustomerDirectory(request.dashboard!.viewer)) {
+    response.status(403).json({ error: "Customer directory is only available to super users." });
+    return;
+  }
+
   await withDatabaseRead(async (db) => {
     const payload: DashboardCustomerListResponse = {
       viewer: request.dashboard!.viewer,
@@ -7954,6 +8009,11 @@ app.get("/dashboard/customers", requireDashboardAuth, async (request: DashboardA
 });
 
 app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  if (!canDashboardViewerAccessCustomerDirectory(request.dashboard!.viewer)) {
+    response.status(403).json({ error: "Customer directory is only available to super users." });
+    return;
+  }
+
   await withDatabaseRead(async (db) => {
     const orgId = request.params.orgId;
     const org = getOrgById(db, orgId);
@@ -10077,6 +10137,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       return;
     }
 
+    const beforeDashboardViewer = resolveDashboardViewer(db, user);
     const before = {
       email: user.email,
       isPlatformAdmin: user.isPlatformAdmin === true,
@@ -10227,6 +10288,15 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
         user.pendingTimezone = timezone;
         user.pendingTimezoneEffectiveAt = computeNextRenewalAt(user.planAnchorAt, now);
       }
+    }
+
+    const afterDashboardViewer = resolveDashboardViewer(db, user);
+    const dashboardScopeChanged =
+      (beforeDashboardViewer?.accessType ?? null) !== (afterDashboardViewer?.accessType ?? null)
+      || (beforeDashboardViewer?.orgId ?? null) !== (afterDashboardViewer?.orgId ?? null);
+    if (beforeDashboardViewer && (!afterDashboardViewer || dashboardScopeChanged)) {
+      webAuthService.revokeUserSessions(db, user.id);
+      db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
     }
 
     user.updatedAt = now.toISOString();

@@ -10,6 +10,7 @@ import {
   DashboardUserReportResponse,
 } from "@voicepractice/shared";
 
+import { buildDashboardAggregateScopeContext } from "@/src/components/dashboardReportingScope";
 import { MetricCard } from "@/src/components/MetricCard";
 import { formatDateTime, formatScore, formatUsageMinutes } from "@/src/lib/formatters";
 
@@ -144,6 +145,11 @@ export function DashboardReportingWorkspace({
 }) {
   const searchParams = useSearchParams();
   const trainings = trainingWorkspace?.trainings ?? [];
+  const viewer = overview?.viewer ?? userReport?.viewer ?? trainingWorkspace?.viewer ?? null;
+  const isSuperUser = viewer?.accessType === "super_user";
+  const aggregateScopeContext = isSuperUser
+    ? buildDashboardAggregateScopeContext(overview?.customers ?? [])
+    : null;
   const multipleOrgsInScope = new Set(trainings.map((training) => training.orgId)).size > 1;
   const [activeTab, setActiveTab] = useState<DashboardReportTab>(() =>
     normalizeDashboardTab(searchParams.get("tab"))
@@ -203,9 +209,39 @@ export function DashboardReportingWorkspace({
         <div>
           <p className="eyebrow">Reporting</p>
           <h1>Training performance</h1>
-          <p className="page-description">Review performance by training, user, and company.</p>
+          <p className="page-description">
+            {isSuperUser
+              ? "Review aggregate performance across the customer accounts currently in scope. Use Customers for account-specific drilldown."
+              : "Review performance by training, user, and company."}
+          </p>
         </div>
       </header>
+
+      {aggregateScopeContext ? (
+        <section className="section-card">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Reporting scope</p>
+              <h2>Aggregate customer view</h2>
+              <p className="section-copy">{aggregateScopeContext.description}</p>
+            </div>
+          </div>
+
+          <div className="pill-row">
+            <span className="pill accent">{aggregateScopeContext.customerCount} customer accounts</span>
+            <span className="pill">{aggregateScopeContext.activeCustomerCount} active</span>
+            {aggregateScopeContext.inactiveCustomerCount > 0 ? (
+              <span className="pill">{aggregateScopeContext.inactiveCustomerCount} inactive</span>
+            ) : null}
+          </div>
+
+          <div className="dashboard-scope-copy">
+            <p>{aggregateScopeContext.detail}</p>
+            {aggregateScopeContext.activityNote ? <p>{aggregateScopeContext.activityNote}</p> : null}
+            <p>Use Customers when you need to inspect one account&apos;s dashboard and activity in detail.</p>
+          </div>
+        </section>
+      ) : null}
 
       <section className="section-card">
         <div className="tab-row" role="tablist" aria-label="Dashboard reporting views">
@@ -272,7 +308,11 @@ export function DashboardReportingWorkspace({
               ) : (
                 <div className="empty-state-panel">
                   <h3>No trainings available</h3>
-                  <p>No trainings are available for your current reporting scope yet.</p>
+                  <p>
+                    {isSuperUser
+                      ? "No trainings are available across the customer accounts currently in scope yet."
+                      : "No trainings are available for your current reporting scope yet."}
+                  </p>
                 </div>
               )}
             </div>
@@ -315,7 +355,11 @@ export function DashboardReportingWorkspace({
                   <div>
                     <p className="eyebrow">Training</p>
                     <h2>Performance summary</h2>
-                    <p className="section-copy">Performance for this training.</p>
+                    <p className="section-copy">
+                      {isSuperUser
+                        ? "Performance for the selected training inside the current aggregate customer scope."
+                        : "Performance for this training."}
+                    </p>
                   </div>
                 </div>
 
@@ -382,7 +426,11 @@ export function DashboardReportingWorkspace({
                   <div>
                     <p className="eyebrow">Users</p>
                     <h2>User performance</h2>
-                    <p className="section-copy">Recent activity inside this training.</p>
+                    <p className="section-copy">
+                      {isSuperUser
+                        ? "Recent activity inside the selected training across the current customer scope."
+                        : "Recent activity inside this training."}
+                    </p>
                   </div>
                 </div>
 
@@ -508,7 +556,11 @@ export function DashboardReportingWorkspace({
               <div>
                 <p className="eyebrow">Users</p>
                 <h2>User performance</h2>
-                <p className="section-copy">Performance across your current reporting scope.</p>
+                <p className="section-copy">
+                  {isSuperUser
+                    ? "Performance across all customer accounts currently in scope."
+                    : "Performance across your current reporting scope."}
+                </p>
               </div>
             </div>
 
@@ -563,7 +615,11 @@ export function DashboardReportingWorkspace({
             ) : (
               <div className="empty-state-panel">
                 <h3>No user reporting yet</h3>
-                <p>User activity will appear here once attempts are recorded in your reporting scope.</p>
+                <p>
+                  {isSuperUser
+                    ? "User activity will appear here once attempts are recorded across the customer accounts currently in scope."
+                    : "User activity will appear here once attempts are recorded in your reporting scope."}
+                </p>
               </div>
             )}
           </section>
@@ -602,7 +658,11 @@ export function DashboardReportingWorkspace({
               <div>
                 <p className="eyebrow">Company</p>
                 <h2>Top trainings by activity</h2>
-                <p className="section-copy">Training activity across your current reporting scope.</p>
+                <p className="section-copy">
+                  {isSuperUser
+                    ? "Training activity across all customer accounts currently in scope."
+                    : "Training activity across your current reporting scope."}
+                </p>
               </div>
             </div>
 
@@ -650,7 +710,11 @@ export function DashboardReportingWorkspace({
             ) : (
               <div className="empty-state-panel">
                 <h3>No training activity yet</h3>
-                <p>Training-level company reporting will appear here as activity is recorded.</p>
+                <p>
+                  {isSuperUser
+                    ? "Training-level aggregate reporting will appear here as activity is recorded across customer accounts in scope."
+                    : "Training-level company reporting will appear here as activity is recorded."}
+                </p>
               </div>
             )}
           </section>

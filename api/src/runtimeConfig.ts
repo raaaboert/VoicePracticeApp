@@ -19,7 +19,6 @@ export interface RuntimeConfig {
   webAuthTokenSecret: string;
   mobileTokenSecret: string;
   adminTokenTtlMinutes: number;
-  webAuthTokenTtlMinutes: number;
   authCodeDeliveryProvider: AuthCodeDeliveryProvider;
   webAuthCodeDeliveryProvider: AuthCodeDeliveryProvider | null;
   mobileEmailVerificationDeliveryProvider: AuthCodeDeliveryProvider | null;
@@ -297,7 +296,6 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     webAuthTokenSecret,
     mobileTokenSecret,
     adminTokenTtlMinutes: toInt(env.ADMIN_TOKEN_TTL_MINUTES, 720),
-    webAuthTokenTtlMinutes: toInt(env.WEB_AUTH_TOKEN_TTL_MINUTES, 720),
     authCodeDeliveryProvider,
     webAuthCodeDeliveryProvider,
     mobileEmailVerificationDeliveryProvider,

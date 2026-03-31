@@ -61,7 +61,6 @@ ADMIN_BOOTSTRAP_PASSWORD=admin
 ADMIN_TOKEN_SECRET=replace_me_for_production
 ADMIN_TOKEN_TTL_MINUTES=720
 WEB_AUTH_TOKEN_SECRET=replace_me_for_shared_web_auth
-WEB_AUTH_TOKEN_TTL_MINUTES=720
 AUTH_CODE_DELIVERY_PROVIDER=log_only
 WEB_AUTH_CODE_DELIVERY_PROVIDER=
 MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER=
@@ -101,6 +100,7 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - For the lowest-risk dashboard rollout, keep `AUTH_CODE_DELIVERY_PROVIDER=log_only`, set `WEB_AUTH_CODE_DELIVERY_PROVIDER=resend`, and leave `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER` blank or `log_only`.
 - If either the default provider or any override is `resend`, `RESEND_API_KEY` and `AUTH_CODE_FROM_EMAIL` are required.
 - `WEB_AUTH_TOKEN_SECRET` is required for shared web OTP sessions and must be strong in hosted environments.
+- Dashboard shared web sessions use a fixed trusted 14-day lifetime for returning browsers.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
 - AI budget caps default in production when `OPENAI_API_KEY` is set (`120` per-user calls/day, `1500` global calls/day, `250000` per-user tokens/day, `2000000` global tokens/day).

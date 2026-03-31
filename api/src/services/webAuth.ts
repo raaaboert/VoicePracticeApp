@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 
-import { ApiDatabase, UserProfile, WebAuthChallengeRecord, WebAuthSessionRecord } from "@voicepractice/shared";
+import {
+  ApiDatabase,
+  DashboardAccessType,
+  UserProfile,
+  WebAuthChallengeRecord,
+  WebAuthSessionRecord
+} from "@voicepractice/shared";
 import { v4 as uuid } from "uuid";
 
 export interface WebAuthTokenPayload {
@@ -9,6 +15,17 @@ export interface WebAuthTokenPayload {
   sub: string;
   exp: number;
 }
+
+export interface WebAuthSessionMetadata {
+  accessType: DashboardAccessType | null;
+  orgId: string | null;
+  userAgent?: string | null;
+  ipAddress?: string | null;
+}
+
+const MAX_WEB_AUTH_USER_AGENT_LENGTH = 255;
+const MAX_WEB_AUTH_IP_LENGTH = 64;
+const WEB_AUTH_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 15 * 60 * 1000;
 
 function base64UrlEncode(value: string): string {
   return Buffer.from(value).toString("base64url");
@@ -40,16 +57,65 @@ export function createWebAuthService(params: {
     return crypto.createHmac("sha256", codeSecret).update(`${userId}:${email}:${code}`).digest("hex");
   }
 
-  function issueSession(db: ApiDatabase, user: UserProfile, ttlMinutes: number, now: Date) {
+  function sanitizeUserAgent(value: string | null | undefined): string | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    return trimmed.slice(0, MAX_WEB_AUTH_USER_AGENT_LENGTH);
+  }
+
+  function sanitizeIpAddress(value: string | null | undefined): string | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    return trimmed.slice(0, MAX_WEB_AUTH_IP_LENGTH);
+  }
+
+  function normalizeSessionMetadata(metadata?: Partial<WebAuthSessionMetadata>) {
+    return {
+      accessType: metadata?.accessType ?? null,
+      orgId: metadata?.orgId ?? null,
+      userAgent: sanitizeUserAgent(metadata?.userAgent),
+      ipAddress: sanitizeIpAddress(metadata?.ipAddress),
+    };
+  }
+
+  function issueSession(
+    db: ApiDatabase,
+    user: UserProfile,
+    ttlMinutes: number,
+    now: Date,
+    metadata?: WebAuthSessionMetadata
+  ) {
     const createdAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
     const sessionId = `websess_${uuid()}`;
+    const normalizedMetadata = normalizeSessionMetadata(metadata);
     const record: WebAuthSessionRecord = {
       sessionId,
       userId: user.id,
+      accessType: normalizedMetadata.accessType,
+      orgId: normalizedMetadata.orgId,
       createdAt,
       updatedAt: createdAt,
-      expiresAt
+      lastSeenAt: createdAt,
+      expiresAt,
+      createdUserAgent: normalizedMetadata.userAgent,
+      lastSeenUserAgent: normalizedMetadata.userAgent,
+      createdIp: normalizedMetadata.ipAddress,
+      lastSeenIp: normalizedMetadata.ipAddress,
     };
     db.webAuthSessions.push(record);
 
@@ -152,18 +218,56 @@ export function createWebAuthService(params: {
     return "ok";
   }
 
-  function getActiveSessionRecord(db: ApiDatabase, payload: WebAuthTokenPayload): WebAuthSessionRecord | null {
+  function getActiveSessionRecord(db: ApiDatabase, payload: WebAuthTokenPayload, now = new Date()): WebAuthSessionRecord | null {
     const record = (db.webAuthSessions ?? []).find((entry) => entry.sessionId === payload.sid && entry.userId === payload.sub);
     if (!record) {
       return null;
     }
 
     const expiresAtMs = new Date(record.expiresAt).getTime();
-    if (Number.isNaN(expiresAtMs) || expiresAtMs <= Date.now()) {
+    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
       return null;
     }
 
     return record;
+  }
+
+  function touchSession(record: WebAuthSessionRecord, now: Date, metadata?: Omit<WebAuthSessionMetadata, "accessType" | "orgId">): boolean {
+    const nowIso = now.toISOString();
+    const normalizedMetadata = normalizeSessionMetadata(metadata);
+    const previousLastSeenAt = typeof record.lastSeenAt === "string" && record.lastSeenAt.trim()
+      ? record.lastSeenAt
+      : record.updatedAt;
+    const previousUserAgent =
+      typeof record.lastSeenUserAgent === "string" && record.lastSeenUserAgent.trim()
+        ? record.lastSeenUserAgent
+        : (typeof record.createdUserAgent === "string" ? record.createdUserAgent : null);
+    const previousIp =
+      typeof record.lastSeenIp === "string" && record.lastSeenIp.trim()
+        ? record.lastSeenIp
+        : (typeof record.createdIp === "string" ? record.createdIp : null);
+    const lastSeenMs = new Date(previousLastSeenAt).getTime();
+    const shouldPersistByTime =
+      Number.isNaN(lastSeenMs) || now.getTime() - lastSeenMs >= WEB_AUTH_SESSION_ACTIVITY_WRITE_INTERVAL_MS;
+    const userAgentChanged = normalizedMetadata.userAgent !== previousUserAgent;
+    const ipChanged = normalizedMetadata.ipAddress !== previousIp;
+
+    if (!shouldPersistByTime && !userAgentChanged && !ipChanged) {
+      return false;
+    }
+
+    record.lastSeenAt = nowIso;
+    record.updatedAt = nowIso;
+    record.lastSeenUserAgent = normalizedMetadata.userAgent;
+    record.lastSeenIp = normalizedMetadata.ipAddress;
+    if (typeof record.createdUserAgent !== "string") {
+      record.createdUserAgent = normalizedMetadata.userAgent;
+    }
+    if (typeof record.createdIp !== "string") {
+      record.createdIp = normalizedMetadata.ipAddress;
+    }
+
+    return true;
   }
 
   function revokeSession(db: ApiDatabase, sessionId: string): void {
@@ -180,6 +284,7 @@ export function createWebAuthService(params: {
     issueSignInChallenge,
     verifyLatestSignInChallenge,
     getActiveSessionRecord,
+    touchSession,
     revokeSession,
     revokeUserSessions
   };

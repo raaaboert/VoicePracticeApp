@@ -4,6 +4,7 @@ import test from "node:test";
 import { ApiDatabase, UserProfile } from "@voicepractice/shared";
 
 import {
+  canDashboardViewerAccessCustomerDirectory,
   canDashboardViewerAccessOrg,
   resolveDashboardAccessEligibility,
   resolveDashboardViewer,
@@ -64,6 +65,7 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
 
   assert.ok(viewer);
   assert.equal(viewer.accessType, "customer_dashboard_user");
+  assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
 });
@@ -89,6 +91,7 @@ test("mixed platform_admin plus tenant-valid user keeps tenant-scoped dashboard 
   assert.equal(eligibility.reason, "customer_dashboard_user");
   assert.ok(viewer);
   assert.equal(viewer.accessType, "customer_dashboard_user");
+  assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
 });
@@ -116,6 +119,7 @@ test("super users retain cross-account dashboard access", () => {
 
   assert.ok(viewer);
   assert.equal(viewer.accessType, "super_user");
+  assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), true);
 });
@@ -160,5 +164,43 @@ test("dashboard-ineligible enterprise user does not resolve a dashboard viewer",
 
   assert.equal(eligibility.eligible, false);
   assert.equal(eligibility.reason, "inactive_org");
+  assert.equal(viewer, null);
+});
+
+test("enterprise user without dashboard access does not resolve a dashboard viewer", () => {
+  const user = createUser({
+    id: "user_dashboard_disabled",
+    email: "no-dashboard@example.com",
+    dashboardAccessEnabled: false,
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [{ id: "org_a", name: "Org A", status: "active" }],
+  });
+
+  const eligibility = resolveDashboardAccessEligibility(db, user);
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.equal(eligibility.eligible, false);
+  assert.equal(eligibility.reason, "dashboard_access_disabled");
+  assert.equal(viewer, null);
+});
+
+test("disabled enterprise user does not resolve a dashboard viewer", () => {
+  const user = createUser({
+    id: "user_disabled",
+    email: "disabled@example.com",
+    status: "disabled",
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [{ id: "org_a", name: "Org A", status: "active" }],
+  });
+
+  const eligibility = resolveDashboardAccessEligibility(db, user);
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.equal(eligibility.eligible, false);
+  assert.equal(eligibility.reason, "inactive_user");
   assert.equal(viewer, null);
 });

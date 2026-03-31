@@ -11,6 +11,29 @@ import {
 } from "@/src/lib/domain";
 import { WEB_AUTH_SESSION_COOKIE_NAME } from "@/src/lib/authConstants";
 
+function hasUnexpiredWebAuthCookie(request: NextRequest): boolean {
+  const token = request.cookies.get(WEB_AUTH_SESSION_COOKIE_NAME)?.value ?? "";
+  if (!token) {
+    return false;
+  }
+
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return false;
+  }
+
+  try {
+    const encodedPayload = (parts[1] ?? "").replace(/-/g, "+").replace(/_/g, "/");
+    const paddedPayload = encodedPayload.padEnd(encodedPayload.length + ((4 - (encodedPayload.length % 4)) % 4), "=");
+    const payload = JSON.parse(atob(paddedPayload)) as {
+      exp?: number;
+    };
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp) && payload.exp > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   if (isSystemPath(pathname)) {
@@ -57,7 +80,7 @@ export function middleware(request: NextRequest) {
 
   if (hostKind === "app") {
     if (pathname === "/") {
-      const hasSessionCookie = Boolean(request.cookies.get(WEB_AUTH_SESSION_COOKIE_NAME)?.value);
+      const hasSessionCookie = hasUnexpiredWebAuthCookie(request);
       return NextResponse.redirect(
         buildAbsoluteUrlForHost({
           host: getConfiguredAppHost(),

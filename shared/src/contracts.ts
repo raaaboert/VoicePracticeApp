@@ -483,9 +483,16 @@ export interface WebAuthChallengeRecord {
 export interface WebAuthSessionRecord {
   sessionId: string;
   userId: string;
+  accessType: DashboardAccessType | null;
+  orgId: string | null;
   createdAt: string;
   updatedAt: string;
+  lastSeenAt: string;
   expiresAt: string;
+  createdUserAgent: string | null;
+  lastSeenUserAgent: string | null;
+  createdIp: string | null;
+  lastSeenIp: string | null;
 }
 
 export interface EnterpriseJoinRequestRecord {
