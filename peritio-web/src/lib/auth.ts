@@ -1,6 +1,7 @@
 import "server-only";
 
 import { cookies } from "next/headers";
+import type { DashboardApiErrorCode } from "@/src/lib/dashboardApiErrors";
 import {
   DashboardAttemptDetailResponse,
   DashboardOverviewResponse,
@@ -19,6 +20,10 @@ import {
   WebAuthVerifyCodeResponse,
 } from "@voicepractice/shared";
 import { WEB_AUTH_SESSION_COOKIE_NAME } from "@/src/lib/authConstants";
+import {
+  isDashboardScopeDeniedStatus,
+  isDashboardSessionInvalidStatus,
+} from "@/src/lib/dashboardApiErrors";
 
 export class DashboardAccessDeniedError extends Error {
   constructor(message = "Access denied.") {
@@ -29,11 +34,20 @@ export class DashboardAccessDeniedError extends Error {
 
 export class DashboardApiError extends Error {
   status: number;
+  code: DashboardApiErrorCode | null;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code: DashboardApiErrorCode | null = null) {
     super(message);
     this.name = "DashboardApiError";
     this.status = status;
+    this.code = code;
+  }
+}
+
+export class DashboardSessionInvalidError extends Error {
+  constructor(message = "Dashboard session is no longer valid.") {
+    super(message);
+    this.name = "DashboardSessionInvalidError";
   }
 }
 
@@ -54,9 +68,39 @@ export function assertDashboardAuthConfig(): void {
   void getApiBaseUrl();
 }
 
-async function parseErrorMessage(response: Response): Promise<string> {
-  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-  return payload?.error || `Dashboard API request failed (${response.status}).`;
+async function parseErrorPayload(
+  response: Response
+): Promise<{ message: string; code: DashboardApiErrorCode | null }> {
+  const payload = (await response.json().catch(() => null)) as
+    | { error?: string; code?: string }
+    | null;
+
+  const code = payload?.code;
+  const normalizedCode =
+    code === "dashboard_scope_denied" || code === "dashboard_session_invalid" || code === "web_auth_invalid"
+      ? code
+      : null;
+
+  return {
+    message: payload?.error || `Dashboard API request failed (${response.status}).`,
+    code: normalizedCode,
+  };
+}
+
+function requireDashboardApiToken(token: string | null): string {
+  if (!token) {
+    throw new DashboardSessionInvalidError();
+  }
+
+  return token;
+}
+
+function isInvalidDashboardSessionError(error: unknown): boolean {
+  return error instanceof DashboardApiError && isDashboardSessionInvalidStatus(error.status, error.code);
+}
+
+function isProtectedDashboardAuthFailure(error: unknown): boolean {
+  return error instanceof DashboardApiError && (error.status === 401 || error.status === 403);
 }
 
 async function fetchDashboardApi<T>(
@@ -81,7 +125,8 @@ async function fetchDashboardApi<T>(
   });
 
   if (!response.ok) {
-    throw new DashboardApiError(response.status, await parseErrorMessage(response));
+    const payload = await parseErrorPayload(response);
+    throw new DashboardApiError(response.status, payload.message, payload.code);
   }
 
   return (await response.json()) as T;
@@ -166,17 +211,18 @@ export async function getDashboardViewer(): Promise<DashboardViewer | null> {
 }
 
 export async function listAccessibleCustomers(): Promise<DashboardCustomerSummary[]> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return [];
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     const payload = await fetchDashboardApi<DashboardCustomerListResponse>("/dashboard/customers", { token });
     return payload.customers;
   } catch (error) {
-    if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
-      return [];
+    if (isInvalidDashboardSessionError(error)) {
+      throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
+    }
+
+    if (error instanceof DashboardApiError && isDashboardScopeDeniedStatus(error.status, error.code)) {
+      throw new DashboardAccessDeniedError(error.message);
     }
 
     throw error;
@@ -184,10 +230,7 @@ export async function listAccessibleCustomers(): Promise<DashboardCustomerSummar
 }
 
 export async function getAccessibleCustomerDetail(customerId: string): Promise<DashboardCustomerDetailResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardCustomerDetailResponse>(`/dashboard/customers/${customerId}`, {
@@ -195,8 +238,12 @@ export async function getAccessibleCustomerDetail(customerId: string): Promise<D
     });
   } catch (error) {
     if (error instanceof DashboardApiError) {
-      if (error.status === 404 || error.status === 401) {
+      if (error.status === 404) {
         return null;
+      }
+
+      if (isInvalidDashboardSessionError(error)) {
+        throw new DashboardSessionInvalidError(error.message);
       }
 
       if (error.status === 403) {
@@ -209,16 +256,13 @@ export async function getAccessibleCustomerDetail(customerId: string): Promise<D
 }
 
 export async function getDashboardOverview(): Promise<DashboardOverviewResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardOverviewResponse>("/dashboard/overview", { token });
   } catch (error) {
-    if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
-      return null;
+    if (isProtectedDashboardAuthFailure(error)) {
+      throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
     }
 
     throw error;
@@ -226,16 +270,13 @@ export async function getDashboardOverview(): Promise<DashboardOverviewResponse 
 }
 
 export async function getDashboardTrainingReport(): Promise<DashboardTrainingReportResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingReportResponse>("/dashboard/training", { token });
   } catch (error) {
-    if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
-      return null;
+    if (isProtectedDashboardAuthFailure(error)) {
+      throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
     }
 
     throw error;
@@ -243,16 +284,13 @@ export async function getDashboardTrainingReport(): Promise<DashboardTrainingRep
 }
 
 export async function getDashboardTrainingWorkspace(): Promise<DashboardTrainingWorkspaceResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingWorkspaceResponse>("/dashboard/reporting/trainings", { token });
   } catch (error) {
-    if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
-      return null;
+    if (isProtectedDashboardAuthFailure(error)) {
+      throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
     }
 
     throw error;
@@ -260,10 +298,7 @@ export async function getDashboardTrainingWorkspace(): Promise<DashboardTraining
 }
 
 export async function getDashboardTrainingPackDetail(trainingPackId: string): Promise<DashboardTrainingPackDetailResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingPackDetailResponse>(
@@ -272,8 +307,12 @@ export async function getDashboardTrainingPackDetail(trainingPackId: string): Pr
     );
   } catch (error) {
     if (error instanceof DashboardApiError) {
-      if (error.status === 404 || error.status === 401) {
+      if (error.status === 404) {
         return null;
+      }
+
+      if (isInvalidDashboardSessionError(error)) {
+        throw new DashboardSessionInvalidError(error.message);
       }
 
       if (error.status === 403) {
@@ -289,10 +328,7 @@ export async function getDashboardTrainingPackAssignmentDetail(
   trainingPackId: string,
   assignmentId: string
 ): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingPackAssignmentDetailResponse>(
@@ -301,8 +337,12 @@ export async function getDashboardTrainingPackAssignmentDetail(
     );
   } catch (error) {
     if (error instanceof DashboardApiError) {
-      if (error.status === 404 || error.status === 401) {
+      if (error.status === 404) {
         return null;
+      }
+
+      if (isInvalidDashboardSessionError(error)) {
+        throw new DashboardSessionInvalidError(error.message);
       }
 
       if (error.status === 403) {
@@ -315,16 +355,13 @@ export async function getDashboardTrainingPackAssignmentDetail(
 }
 
 export async function getDashboardUserReport(): Promise<DashboardUserReportResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardUserReportResponse>("/dashboard/users", { token });
   } catch (error) {
-    if (error instanceof DashboardApiError && (error.status === 401 || error.status === 403)) {
-      return null;
+    if (isProtectedDashboardAuthFailure(error)) {
+      throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
     }
 
     throw error;
@@ -332,17 +369,18 @@ export async function getDashboardUserReport(): Promise<DashboardUserReportRespo
 }
 
 export async function getDashboardUserDetail(userId: string): Promise<DashboardUserDetailResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardUserDetailResponse>(`/dashboard/users/${encodeURIComponent(userId)}`, { token });
   } catch (error) {
     if (error instanceof DashboardApiError) {
-      if (error.status === 404 || error.status === 401) {
+      if (error.status === 404) {
         return null;
+      }
+
+      if (isInvalidDashboardSessionError(error)) {
+        throw new DashboardSessionInvalidError(error.message);
       }
 
       if (error.status === 403) {
@@ -355,17 +393,18 @@ export async function getDashboardUserDetail(userId: string): Promise<DashboardU
 }
 
 export async function getDashboardAttemptDetail(attemptId: string): Promise<DashboardAttemptDetailResponse | null> {
-  const token = await getWebAuthBearerToken();
-  if (!token) {
-    return null;
-  }
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardAttemptDetailResponse>(`/dashboard/attempts/${encodeURIComponent(attemptId)}`, { token });
   } catch (error) {
     if (error instanceof DashboardApiError) {
-      if (error.status === 404 || error.status === 401) {
+      if (error.status === 404) {
         return null;
+      }
+
+      if (isInvalidDashboardSessionError(error)) {
+        throw new DashboardSessionInvalidError(error.message);
       }
 
       if (error.status === 403) {

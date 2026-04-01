@@ -406,7 +406,8 @@ export interface AiUsageEvent {
   createdAt: string;
 }
 
-export type AuditActorType = "platform_admin" | "mobile_user" | "web_user" | "system";
+export const AUDIT_ACTOR_TYPES = ["platform_admin", "mobile_user", "web_user", "system"] as const;
+export type AuditActorType = (typeof AUDIT_ACTOR_TYPES)[number];
 
 export interface AuditEvent {
   id: string;
@@ -575,7 +576,6 @@ export interface DashboardViewer {
   accessType: DashboardAccessType;
   userId: string;
   email: string;
-  isPlatformAdmin: boolean;
   isSuperUser: boolean;
   orgId: string | null;
   orgName: string | null;
@@ -619,14 +619,6 @@ export interface WebAuthVerifyCodeResponse extends WebAuthSessionResponse {
   expiresAt: string;
 }
 
-export interface DashboardCustomerUserSummary {
-  userId: string;
-  email: string;
-  status: UserStatus;
-  orgRole: OrgUserRole;
-  dashboardAccessEnabled: boolean;
-}
-
 export interface DashboardCustomerSummary {
   orgId: string;
   orgName: string;
@@ -648,7 +640,7 @@ export interface DashboardCustomerSummary {
   activeTrainingPackCount: number;
   customScenarioCount: number;
   latestActivityAt: string | null;
-  customerUsers: DashboardCustomerUserSummary[];
+  customerUserEmails: string[];
 }
 
 export interface DashboardCustomerListResponse {
@@ -1347,14 +1339,19 @@ export interface ApiDatabase {
   orgTrainingScenarioAttachments: OrgTrainingScenarioAttachmentRecord[];
   trainingPackAssignments: TrainingPackAssignmentRecord[];
   usageSessions: UsageSessionRecord[];
-  scoreRecords: SimulationScoreRecord[];
-  aiUsageEvents: AiUsageEvent[];
-  auditEvents: AuditEvent[];
-  supportCases: SupportCaseRecord[];
+  // Legacy compatibility field while dedicated score-record storage is rolled out.
+  scoreRecords?: SimulationScoreRecord[];
+  // Legacy compatibility field while dedicated AI-usage storage is rolled out.
+  aiUsageEvents?: AiUsageEvent[];
+  // Legacy compatibility field while dedicated audit-event storage is rolled out.
+  auditEvents?: AuditEvent[];
+  // Legacy compatibility field while dedicated support-case storage is rolled out.
+  supportCases?: SupportCaseRecord[];
   mobileAuthTokens: MobileAuthRecord[];
   emailVerifications: EmailVerificationRecord[];
   webAuthChallenges: WebAuthChallengeRecord[];
-  webAuthSessions: WebAuthSessionRecord[];
+  // Legacy compatibility field while dedicated web auth session storage is rolled out.
+  webAuthSessions?: WebAuthSessionRecord[];
   enterpriseJoinRequests: EnterpriseJoinRequestRecord[];
   admin: {
     passwordHash: string | null;

@@ -62,14 +62,14 @@ export function ThemeSettingsPanel() {
       <section className="section-card">
         <div className="section-header">
           <div>
-            <p className="eyebrow">TODO</p>
+            <p className="eyebrow">Coming next</p>
             <h2>Account preferences</h2>
             <p className="section-copy">
-              Profile controls, notification preferences, and tenant-level dashboard defaults will be added once the
-              shared web auth/session foundation is connected to live account preferences.
+              Profile controls, notification preferences, and dashboard defaults will appear here as account-level
+              preferences roll out.
             </p>
           </div>
-          <span className="pill muted">Phase 2 integration</span>
+          <span className="pill muted">More settings soon</span>
         </div>
       </section>
     </div>

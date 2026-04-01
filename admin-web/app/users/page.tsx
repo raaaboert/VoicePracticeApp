@@ -309,8 +309,8 @@ export default function UsersPage() {
             </div>
           </div>
           <p className="small" style={{ marginTop: 0 }}>
-            Customer dashboard access is managed per user inside each enterprise account. Platform-admin dashboard access
-            still remains a backend-controlled flag.
+            Customer dashboard access is managed per user inside each enterprise account. Cross-account dashboard
+            visibility is reserved for super users configured in Settings.
           </p>
           <div className="table-wrap">
             <table className="data-table">

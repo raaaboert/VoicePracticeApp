@@ -35,7 +35,7 @@ function buildCustomerSearchIndex(customer: DashboardCustomerSummary): string {
     customer.contactEmail,
     getContactDomain(customer.contactEmail),
     ...customer.industryLabels,
-    ...customer.customerUsers.map((user) => user.email),
+    ...customer.customerUserEmails,
   ]
     .join(" ")
     .toLowerCase();

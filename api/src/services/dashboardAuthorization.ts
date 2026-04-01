@@ -98,7 +98,6 @@ export function resolveDashboardViewer(db: ApiDatabase, user: UserProfile): Dash
     accessType: user.isSuperUser === true ? "super_user" : "customer_dashboard_user",
     userId: user.id,
     email: user.email,
-    isPlatformAdmin: false,
     isSuperUser: user.isSuperUser === true,
     orgId: eligibility.org?.id ?? null,
     orgName: eligibility.org?.name ?? null,

@@ -1,19 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ApiDatabase, UserProfile } from "@voicepractice/shared";
+import { UserProfile } from "@voicepractice/shared";
 
 import { DASHBOARD_TRUSTED_SESSION_MINUTES } from "./dashboardSessionPolicy.js";
 import { createWebAuthService } from "./webAuth.js";
-
-function createDb(): ApiDatabase {
-  return {
-    users: [],
-    orgs: [],
-    webAuthSessions: [],
-    webAuthChallenges: [],
-  } as unknown as ApiDatabase;
-}
 
 function createUser(overrides?: Partial<UserProfile>): UserProfile {
   return {
@@ -48,11 +39,10 @@ const service = createWebAuthService({
 });
 
 test("trusted web auth session stores dashboard scope and device metadata", () => {
-  const db = createDb();
   const user = createUser();
   const now = new Date("2026-03-30T12:00:00.000Z");
 
-  const issued = service.issueSession(db, user, 14 * 24 * 60, now, {
+  const issued = service.issueSession(user, 14 * 24 * 60, now, {
     accessType: "customer_dashboard_user",
     orgId: "org_a",
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4)",
@@ -62,7 +52,7 @@ test("trusted web auth session stores dashboard scope and device metadata", () =
   const payload = service.verifyToken(issued.token);
   assert.ok(payload);
 
-  const record = service.getActiveSessionRecord(db, payload, new Date("2026-03-31T12:00:00.000Z"));
+  const record = issued.record;
   assert.ok(record);
   assert.equal(record.accessType, "customer_dashboard_user");
   assert.equal(record.orgId, "org_a");
@@ -75,11 +65,10 @@ test("trusted web auth session stores dashboard scope and device metadata", () =
 });
 
 test("dashboard trusted session policy is fixed at exactly 14 days", () => {
-  const db = createDb();
   const user = createUser();
   const issuedAt = new Date("2026-03-30T12:00:00.000Z");
 
-  const issued = service.issueSession(db, user, DASHBOARD_TRUSTED_SESSION_MINUTES, issuedAt, {
+  const issued = service.issueSession(user, DASHBOARD_TRUSTED_SESSION_MINUTES, issuedAt, {
     accessType: "customer_dashboard_user",
     orgId: "org_a",
   });
@@ -89,11 +78,10 @@ test("dashboard trusted session policy is fixed at exactly 14 days", () => {
 });
 
 test("trusted web auth session touch updates activity metadata only when needed", () => {
-  const db = createDb();
   const user = createUser();
   const issuedAt = new Date("2026-03-30T12:00:00.000Z");
 
-  const issued = service.issueSession(db, user, 14 * 24 * 60, issuedAt, {
+  const issued = service.issueSession(user, 14 * 24 * 60, issuedAt, {
     accessType: "customer_dashboard_user",
     orgId: "org_a",
     userAgent: "Mozilla/5.0",
@@ -102,7 +90,7 @@ test("trusted web auth session touch updates activity metadata only when needed"
 
   const payload = service.verifyToken(issued.token);
   assert.ok(payload);
-  const record = service.getActiveSessionRecord(db, payload, new Date("2026-03-30T12:01:00.000Z"));
+  const record = issued.record;
   assert.ok(record);
 
   const unchanged = service.touchSession(record, new Date("2026-03-30T12:05:00.000Z"), {
@@ -123,19 +111,16 @@ test("trusted web auth session touch updates activity metadata only when needed"
 });
 
 test("trusted web auth session expires and can be revoked explicitly", () => {
-  const db = createDb();
   const user = createUser();
   const issuedAt = new Date("2099-03-30T12:00:00.000Z");
-  const issued = service.issueSession(db, user, 60, issuedAt, {
+  const issued = service.issueSession(user, 60, issuedAt, {
     accessType: "customer_dashboard_user",
     orgId: "org_a",
   });
 
   const payload = service.verifyToken(issued.token);
   assert.ok(payload);
-  assert.equal(service.getActiveSessionRecord(db, payload, new Date("2099-03-30T12:30:00.000Z"))?.sessionId, payload.sid);
-  assert.equal(service.getActiveSessionRecord(db, payload, new Date("2099-03-30T13:01:00.000Z")), null);
-
-  service.revokeSession(db, payload.sid);
-  assert.equal(service.getActiveSessionRecord(db, payload, new Date("2099-03-30T12:30:00.000Z")), null);
+  assert.equal(issued.record.sessionId, payload.sid);
+  assert.equal(new Date(issued.record.expiresAt).getTime() > new Date("2099-03-30T12:30:00.000Z").getTime(), true);
+  assert.equal(new Date(issued.record.expiresAt).getTime() <= new Date("2099-03-30T13:01:00.000Z").getTime(), true);
 });

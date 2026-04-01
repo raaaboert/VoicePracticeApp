@@ -5,7 +5,8 @@ import { notFound, redirect } from "next/navigation";
 import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSection";
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
-import { DashboardAccessDeniedError, getDashboardUserDetail } from "@/src/lib/auth";
+import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardUserDetail } from "@/src/lib/auth";
+import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { formatDateTime, formatRawSeconds, formatScore, formatUsageMinutes } from "@/src/lib/formatters";
 
 function formatAssignmentStatus(status: string): string {
@@ -34,6 +35,10 @@ export default async function UserDetailPage({
   try {
     payload = await getDashboardUserDetail(userId);
   } catch (error) {
+    if (error instanceof DashboardSessionInvalidError) {
+      redirect(buildDashboardSessionResetPath());
+    }
+
     if (error instanceof DashboardAccessDeniedError) {
       redirect("/app/access-denied?reason=user-scope");
     }

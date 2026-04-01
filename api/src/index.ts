@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid";
 import multer from "multer";
 import {
   ACCOUNT_TYPES,
+  AUDIT_ACTOR_TYPES,
   AuditEvent,
   ApiDatabase,
   AiUsageEvent,
@@ -22,7 +23,6 @@ import {
   DashboardTrainingAttributionSummary,
   DashboardCustomerTrainingPackSummary,
   DashboardCustomerTrendPoint,
-  DashboardCustomerUserSummary,
   DashboardCustomerUserPerformanceSummary,
   DashboardOverviewResponse,
   DashboardPortfolioScenarioSummary,
@@ -124,8 +124,6 @@ import {
   WebAuthVerifyCodeResponse,
   calculateBilledSecondsFromRaw,
   createDefaultConfig,
-  getDayKey,
-  getMonthKey,
   getRoleSegmentIdsForIndustries,
   getTierById,
   humanDailyResetLabel,
@@ -158,6 +156,11 @@ import {
 } from "./openaiClient.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
+import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
+import { createAuditEventStore } from "./storage/auditEventStore.js";
+import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
+import { createSupportCaseStore } from "./storage/supportCaseStore.js";
+import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
 import {
@@ -180,6 +183,17 @@ import {
 } from "./services/dashboardWebAuthRequest.js";
 import { DASHBOARD_TRUSTED_SESSION_MINUTES } from "./services/dashboardSessionPolicy.js";
 import { hashScryptPassword, verifyScryptPassword } from "./services/passwordHash.js";
+import { createAiUsageEventAccess, sumAiUsageEventTokens } from "./services/aiUsageEvents.js";
+import {
+  buildDashboardAttemptDetailAttempt as buildDashboardAttemptDetailAttemptPayload,
+  buildDashboardAttemptHistoryRowFromScore as buildDashboardAttemptHistoryRowFromScorePayload,
+  resolveDashboardAttemptActivityAssignmentStatus
+} from "./services/dashboardAttemptDetails.js";
+import { createPostCommitEffectRegistry, runPostCommitEffects } from "./services/postCommitEffects.js";
+import type { PostCommitEffect } from "./services/postCommitEffects.js";
+import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
+import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
+import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
 import {
@@ -325,9 +339,56 @@ const trainingPackStore = createTrainingPackStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
+const auditEventStore = createAuditEventStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const aiUsageEventStore = createAiUsageEventStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const supportCaseStore = createSupportCaseStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const scoreRecordStore = createScoreRecordStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const webAuthSessionStore = createWebAuthSessionStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
 const webAuthService = createWebAuthService({
   tokenSecret: WEB_AUTH_TOKEN_SECRET,
   codeSecret: MOBILE_TOKEN_SECRET
+});
+const aiUsageEventAccess = createAiUsageEventAccess(aiUsageEventStore);
+const usageSessionAccess = createUsageSessionAccess();
+const scoreRecordAccess = createScoreRecordAccess(scoreRecordStore);
+const simulationHistoryAccess = createSimulationHistoryAccess({
+  usageSessionAccess,
+  scoreRecordAccess
 });
 const authCodeDelivery = createAuthCodeDeliveryService({
   defaultProvider: runtimeConfig.authCodeDeliveryProvider,
@@ -1627,6 +1688,52 @@ interface AppendAuditEventInput {
   metadata?: Record<string, unknown> | null;
 }
 
+const pendingAuditEventsByDb = new WeakMap<ApiDatabase, AuditEvent[]>();
+const pendingPostCommitEffectsByDb = createPostCommitEffectRegistry<ApiDatabase>();
+
+function getPendingAuditEvents(db: ApiDatabase): AuditEvent[] {
+  return pendingAuditEventsByDb.get(db) ?? [];
+}
+
+function queuePendingAuditEvent(db: ApiDatabase, event: AuditEvent): void {
+  const pending = pendingAuditEventsByDb.get(db);
+  if (pending) {
+    pending.push(event);
+    return;
+  }
+
+  pendingAuditEventsByDb.set(db, [event]);
+}
+
+function drainPendingAuditEvents(db: ApiDatabase): AuditEvent[] {
+  const pending = pendingAuditEventsByDb.get(db) ?? [];
+  pendingAuditEventsByDb.delete(db);
+  return pending;
+}
+
+function queueDatabasePostCommitEffect(db: ApiDatabase, effect: PostCommitEffect): void {
+  const description = effect.description.trim();
+  if (!description) {
+    return;
+  }
+
+  pendingPostCommitEffectsByDb.queue(db, {
+    ...effect,
+    description
+  });
+}
+
+async function runDatabasePostCommitEffects(effects: readonly PostCommitEffect[]): Promise<void> {
+  await runPostCommitEffects(effects, {
+    onFailure: (effect, error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logWarn(
+        `[cross-store][${effect.category}] ${effect.description} failed after primary app-state save: ${message}`
+      );
+    }
+  });
+}
+
 function appendAuditEvent(db: ApiDatabase, input: AppendAuditEventInput): void {
   const event: AuditEvent = {
     id: `audit_${uuid()}`,
@@ -1640,10 +1747,7 @@ function appendAuditEvent(db: ApiDatabase, input: AppendAuditEventInput): void {
     createdAt: nowIso()
   };
 
-  db.auditEvents.push(event);
-  if (db.auditEvents.length > MAX_AUDIT_EVENTS) {
-    db.auditEvents.splice(0, db.auditEvents.length - MAX_AUDIT_EVENTS);
-  }
+  queuePendingAuditEvent(db, event);
 }
 
 function appendPlatformAuditEvent(
@@ -1964,14 +2068,9 @@ function createDefaultDatabase(): ApiDatabase {
     orgTrainingScenarioAttachments: [],
     trainingPackAssignments: [],
     usageSessions: [],
-    scoreRecords: [],
-    aiUsageEvents: [],
-    auditEvents: [],
-    supportCases: [],
     mobileAuthTokens: [],
     emailVerifications: [],
     webAuthChallenges: [],
-    webAuthSessions: [],
     enterpriseJoinRequests: [],
     admin: {
       passwordHash: null,
@@ -2012,7 +2111,7 @@ function ensureDemoEnterpriseData(db: {
   orgs: EnterpriseOrg[];
   config: AppConfig;
   usageSessions: UsageSessionRecord[];
-  scoreRecords: SimulationScoreRecord[];
+  scoreRecords?: SimulationScoreRecord[];
 }, now: string): void {
   const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
   const defaultIndustryIds = getConfiguredActiveIndustryIds(db.config);
@@ -2359,6 +2458,10 @@ function ensureDemoEnterpriseData(db: {
     }
   ];
 
+  if (!Array.isArray(db.scoreRecords)) {
+    db.scoreRecords = [];
+  }
+
   for (const score of demoScores) {
     if (db.scoreRecords.some((existing) => existing.id === score.id)) {
       continue;
@@ -2564,30 +2667,38 @@ function purgeDemoSeedData(db: ApiDatabase): void {
       (session.orgId === null || !demoOrgIds.has(session.orgId))
   );
 
-  db.scoreRecords = db.scoreRecords.filter(
-    (record) =>
-      !hasPrefixedId(record.id, "score_demo_") &&
-      !demoUserIds.has(record.userId) &&
-      (record.orgId === null || !demoOrgIds.has(record.orgId))
-  );
+  if (Array.isArray(db.scoreRecords)) {
+    db.scoreRecords = db.scoreRecords.filter(
+      (record) =>
+        !hasPrefixedId(record.id, "score_demo_") &&
+        !demoUserIds.has(record.userId) &&
+        (record.orgId === null || !demoOrgIds.has(record.orgId))
+    );
+  }
 
-  db.aiUsageEvents = db.aiUsageEvents.filter(
-    (event) => !demoUserIds.has(event.userId) && (event.orgId === null || !demoOrgIds.has(event.orgId))
-  );
+  if (Array.isArray(db.aiUsageEvents)) {
+    db.aiUsageEvents = db.aiUsageEvents.filter(
+      (event) => !demoUserIds.has(event.userId) && (event.orgId === null || !demoOrgIds.has(event.orgId))
+    );
+  }
 
-  db.auditEvents = db.auditEvents.filter(
-    (event) =>
-      (event.userId === null || !demoUserIds.has(event.userId)) &&
-      (event.orgId === null || !demoOrgIds.has(event.orgId)) &&
-      (event.actorType !== "mobile_user" || event.actorId === null || !demoUserIds.has(event.actorId))
-  );
+  if (Array.isArray(db.auditEvents)) {
+    db.auditEvents = db.auditEvents.filter(
+      (event) =>
+        (event.userId === null || !demoUserIds.has(event.userId)) &&
+        (event.orgId === null || !demoOrgIds.has(event.orgId)) &&
+        (event.actorType !== "mobile_user" || event.actorId === null || !demoUserIds.has(event.actorId))
+    );
+  }
 
-  db.supportCases = db.supportCases.filter(
-    (row) =>
-      !hasPrefixedId(row.id, "case_demo_") &&
-      !demoUserIds.has(row.userId) &&
-      (row.orgId === null || !demoOrgIds.has(row.orgId))
-  );
+  if (Array.isArray(db.supportCases)) {
+    db.supportCases = db.supportCases.filter(
+      (row) =>
+        !hasPrefixedId(row.id, "case_demo_") &&
+        !demoUserIds.has(row.userId) &&
+        (row.orgId === null || !demoOrgIds.has(row.orgId))
+    );
+  }
 
   db.mobileAuthTokens = db.mobileAuthTokens.filter((row) => !demoUserIds.has(row.userId));
   db.emailVerifications = db.emailVerifications.filter((row) => !demoUserIds.has(row.userId));
@@ -2884,8 +2995,17 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     validTrainingIds,
     now
   );
+  const legacySupportCases = Array.isArray((candidate as Partial<ApiDatabase>).supportCases)
+    ? (candidate as Partial<ApiDatabase>).supportCases ?? []
+    : null;
+  const legacyAiUsageEvents = Array.isArray((candidate as Partial<ApiDatabase>).aiUsageEvents)
+    ? (candidate as Partial<ApiDatabase>).aiUsageEvents ?? []
+    : null;
+  const legacyScoreRecords = Array.isArray((candidate as Partial<ApiDatabase>).scoreRecords)
+    ? (candidate as Partial<ApiDatabase>).scoreRecords ?? []
+    : null;
 
-  const normalized = {
+  const normalized: ApiDatabase = {
     config,
     users: normalizedUsers,
     orgs: normalizedOrgs,
@@ -2909,18 +3029,9 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
         }))
       : [],
     usageSessions: Array.isArray(candidate.usageSessions) ? candidate.usageSessions : fallback.usageSessions,
-    scoreRecords: Array.isArray((candidate as Partial<ApiDatabase>).scoreRecords)
-      ? (candidate as Partial<ApiDatabase>).scoreRecords ?? []
-      : fallback.scoreRecords,
-    aiUsageEvents: Array.isArray((candidate as Partial<ApiDatabase>).aiUsageEvents)
-      ? (candidate as Partial<ApiDatabase>).aiUsageEvents ?? []
-      : [],
     auditEvents: Array.isArray((candidate as Partial<ApiDatabase>).auditEvents)
       ? (candidate as Partial<ApiDatabase>).auditEvents ?? []
-      : [],
-    supportCases: Array.isArray((candidate as Partial<ApiDatabase>).supportCases)
-      ? (candidate as Partial<ApiDatabase>).supportCases ?? []
-      : [],
+      : undefined,
     mobileAuthTokens:
       Array.isArray(candidate.mobileAuthTokens) ? candidate.mobileAuthTokens : fallback.mobileAuthTokens,
     emailVerifications: Array.isArray(candidate.emailVerifications)
@@ -2933,7 +3044,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     webAuthSessions:
       Array.isArray((candidate as Partial<ApiDatabase>).webAuthSessions)
         ? (candidate as Partial<ApiDatabase>).webAuthSessions ?? []
-        : [],
+        : undefined,
     enterpriseJoinRequests: Array.isArray(candidate.enterpriseJoinRequests)
       ? candidate.enterpriseJoinRequests
       : fallback.enterpriseJoinRequests,
@@ -2951,6 +3062,15 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
           : []
     }
   };
+  if (legacyAiUsageEvents) {
+    normalized.aiUsageEvents = legacyAiUsageEvents;
+  }
+  if (legacyScoreRecords) {
+    normalized.scoreRecords = legacyScoreRecords;
+  }
+  if (legacySupportCases) {
+    normalized.supportCases = legacySupportCases;
+  }
 
   purgeDemoSeedData(normalized);
   purgeExpiredSupportTranscripts(normalized, now);
@@ -2996,10 +3116,20 @@ async function loadDatabase(options?: { forceStorageRead?: boolean }): Promise<A
   return loaded;
 }
 
+function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
+  const snapshot = { ...db };
+  delete (snapshot as Partial<ApiDatabase>).aiUsageEvents;
+  delete (snapshot as Partial<ApiDatabase>).scoreRecords;
+  delete (snapshot as Partial<ApiDatabase>).webAuthSessions;
+  delete (snapshot as Partial<ApiDatabase>).auditEvents;
+  delete (snapshot as Partial<ApiDatabase>).supportCases;
+  return snapshot;
+}
+
 async function saveDatabase(db: ApiDatabase): Promise<void> {
   databaseCache = db;
   const storage = getOrCreateDatabaseStorage();
-  await storage.save(db);
+  await storage.save(buildPersistedDatabaseSnapshot(db));
 }
 
 async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
@@ -3025,19 +3155,173 @@ async function withDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T)
 }
 
 async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
-  return await withDatabaseLock(async () => {
+  const completed = await withDatabaseLock(async () => {
     const db = await loadDatabase();
-    const result = await handler(db);
-    await saveDatabase(db);
-    return result;
+    try {
+      const result = await handler(db);
+      const pendingAuditEvents = drainPendingAuditEvents(db);
+      if (pendingAuditEvents.length > 0) {
+        await auditEventStore.appendEvents(pendingAuditEvents, { maxRecords: MAX_AUDIT_EVENTS });
+      }
+      await saveDatabase(db);
+      return {
+        result,
+        postCommitEffects: pendingPostCommitEffectsByDb.drain(db)
+      };
+    } catch (error) {
+      drainPendingAuditEvents(db);
+      pendingPostCommitEffectsByDb.discard(db);
+      throw error;
+    }
   });
+
+  /**
+   * Cross-store sequencing policy:
+   * 1. Primary app-state mutations and authoritative extracted-store writes happen inside the handler.
+   * 2. Secondary audit events are flushed before the monolithic app-state save.
+   * 3. Fail-closed revocations and orphan cleanup run only after the primary save succeeds, outside the lock.
+   */
+  await runDatabasePostCommitEffects(completed.postCommitEffects);
+  return completed.result;
 }
 
 const withDatabase = withDatabaseWrite;
 
+async function migrateLegacyAuditEventsFromAppState(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    if (!Object.prototype.hasOwnProperty.call(db, "auditEvents")) {
+      return;
+    }
+
+    const legacyAuditEvents = Array.isArray(db.auditEvents) ? db.auditEvents : [];
+    const migration = await auditEventStore.importLegacyEvents(legacyAuditEvents, {
+      maxRecords: MAX_AUDIT_EVENTS
+    });
+    delete (db as Partial<ApiDatabase>).auditEvents;
+    await saveDatabase(db);
+
+    if (legacyAuditEvents.length > 0 || migration.trimmedCount > 0) {
+      logWarn(
+        `[audit][migration] moved ${migration.importedCount} legacy events to dedicated storage; `
+        + `trimmed ${migration.trimmedCount} events beyond the ${MAX_AUDIT_EVENTS} record cap.`
+      );
+    }
+  });
+}
+
+async function migrateLegacyAiUsageEventsFromAppState(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    if (!Object.prototype.hasOwnProperty.call(db, "aiUsageEvents")) {
+      return;
+    }
+
+    const legacyAiUsageEvents = Array.isArray(db.aiUsageEvents) ? db.aiUsageEvents : [];
+    const migration = await aiUsageEventStore.importLegacyEvents(legacyAiUsageEvents, { now: new Date() });
+    delete (db as Partial<ApiDatabase>).aiUsageEvents;
+    await saveDatabase(db);
+
+    if (legacyAiUsageEvents.length > 0 || migration.prunedCount > 0) {
+      logWarn(
+        `[ai-usage][migration] moved ${migration.importedCount} legacy AI usage events to dedicated storage; `
+        + `pruned ${migration.prunedCount} events outside the retention window.`
+      );
+    }
+  });
+}
+
+async function migrateLegacyScoreRecordsFromAppState(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    if (!Object.prototype.hasOwnProperty.call(db, "scoreRecords")) {
+      return;
+    }
+
+    const legacyScoreRecords = Array.isArray(db.scoreRecords) ? db.scoreRecords : [];
+    const migration = await scoreRecordStore.importLegacyRecords(legacyScoreRecords);
+    delete (db as Partial<ApiDatabase>).scoreRecords;
+    await saveDatabase(db);
+
+    if (legacyScoreRecords.length > 0) {
+      logWarn(
+        `[score-records][migration] moved ${migration.importedCount} legacy score records to dedicated storage.`
+      );
+    }
+  });
+}
+
+async function migrateLegacyWebAuthSessionsFromAppState(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    if (!Object.prototype.hasOwnProperty.call(db, "webAuthSessions")) {
+      return;
+    }
+
+    const legacySessions = Array.isArray(db.webAuthSessions) ? db.webAuthSessions : [];
+    const migration = await webAuthSessionStore.importLegacySessions(legacySessions, { now: new Date() });
+    delete (db as Partial<ApiDatabase>).webAuthSessions;
+    await saveDatabase(db);
+
+    if (legacySessions.length > 0 || migration.skippedExpiredCount > 0) {
+      logWarn(
+        `[web-auth][migration] moved ${migration.importedCount} legacy sessions to dedicated storage; `
+        + `skipped ${migration.skippedExpiredCount} expired sessions.`
+      );
+    }
+  });
+}
+
+async function migrateLegacySupportCasesFromAppState(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    if (!Object.prototype.hasOwnProperty.call(db, "supportCases")) {
+      return;
+    }
+
+    const legacySupportCases = Array.isArray(db.supportCases) ? db.supportCases : [];
+    const migration = await supportCaseStore.importLegacyCases(legacySupportCases, { now: new Date() });
+    delete (db as Partial<ApiDatabase>).supportCases;
+    await saveDatabase(db);
+
+    if (legacySupportCases.length > 0) {
+      logWarn(
+        `[support][migration] moved ${migration.importedCount} legacy support cases to dedicated storage.`
+      );
+    }
+  });
+}
+
+async function revokeWebAuthSessionById(sessionId: string): Promise<void> {
+  const normalizedSessionId = sessionId.trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  await webAuthSessionStore.revokeSession(normalizedSessionId);
+}
+
+async function revokeWebAuthSessionsForUserId(userId: string): Promise<void> {
+  const normalizedUserId = userId.trim();
+  if (!normalizedUserId) {
+    return;
+  }
+
+  await webAuthSessionStore.revokeUserSessions(normalizedUserId);
+}
+
+async function revokeWebAuthSessionsForUserIds(userIds: string[]): Promise<void> {
+  await webAuthSessionStore.revokeSessionsForUsers(userIds);
+}
+
 async function refreshDatabaseReadiness(): Promise<void> {
   const wasReady = isDatabaseReady;
   try {
+    await auditEventStore.initialize();
+    await aiUsageEventStore.initialize();
+    await scoreRecordStore.initialize();
+    await supportCaseStore.initialize();
+    await webAuthSessionStore.initialize();
     await loadDatabase({ forceStorageRead: true });
     isDatabaseReady = true;
     databaseReadyError = null;
@@ -3469,48 +3753,56 @@ async function loadAuthenticatedWebSessionContext(
 ): Promise<AuthenticatedWebSessionContext | null> {
   const token = getIncomingWebAuthToken(request);
   if (!token) {
-    response.status(401).json({ error: "Missing web auth token." });
+    response.status(401).json({ error: "Missing web auth token.", code: "web_auth_invalid" });
     return null;
   }
 
   const payload = webAuthService.verifyToken(token);
   if (!payload) {
-    response.status(401).json({ error: "Invalid or expired web auth token." });
+    response.status(401).json({ error: "Invalid or expired web auth token.", code: "web_auth_invalid" });
     return null;
   }
 
-  return await withDatabaseLock(async () => {
-    const db = await loadDatabase();
-    const sessionRecord = webAuthService.getActiveSessionRecord(db, payload, new Date());
-    if (!sessionRecord) {
-      response.status(401).json({ error: "Invalid or expired web auth token." });
-      return null;
-    }
+  const now = new Date();
+  const sessionRecord = await webAuthSessionStore.getActiveSession(payload.sid, payload.sub, now);
+  if (!sessionRecord) {
+    response.status(401).json({ error: "Invalid or expired web auth token.", code: "web_auth_invalid" });
+    return null;
+  }
 
+  const context = await withDatabaseRead(async (db) => {
     const user = getUserById(db, payload.sub);
     if (!user || user.status !== "active" || !user.emailVerifiedAt) {
-      webAuthService.revokeSession(db, sessionRecord.sessionId);
-      await saveDatabase(db);
-      response.status(401).json({ error: "Web auth session is no longer valid." });
       return null;
-    }
-
-    const touched = webAuthService.touchSession(
-      sessionRecord,
-      new Date(),
-      buildWebAuthSessionRequestMetadata(request)
-    );
-    if (touched) {
-      await saveDatabase(db);
     }
 
     return {
       db,
-      token: payload,
-      user,
-      sessionId: sessionRecord.sessionId
+      user
     };
   });
+
+  if (!context) {
+    await revokeWebAuthSessionById(sessionRecord.sessionId);
+    response.status(401).json({ error: "Web auth session is no longer valid.", code: "web_auth_invalid" });
+    return null;
+  }
+
+  const touched = webAuthService.touchSession(
+    sessionRecord,
+    now,
+    buildWebAuthSessionRequestMetadata(request)
+  );
+  if (touched) {
+    await webAuthSessionStore.saveSession(sessionRecord);
+  }
+
+  return {
+    db: context.db,
+    token: payload,
+    user: context.user,
+    sessionId: sessionRecord.sessionId
+  };
 }
 
 async function requireAdmin(request: AdminAuthRequest, response: Response, next: NextFunction): Promise<void> {
@@ -3526,8 +3818,8 @@ async function requireAdmin(request: AdminAuthRequest, response: Response, next:
     return;
   }
 
-  const db = await loadDatabase();
-  if (!(db.admin.activeSessionIds ?? []).includes(payload.sid)) {
+  const hasActiveSession = await withDatabaseRead(async (db) => (db.admin.activeSessionIds ?? []).includes(payload.sid));
+  if (!hasActiveSession) {
     response.status(401).json({ error: "Invalid or expired admin token." });
     return;
   }
@@ -3564,11 +3856,11 @@ async function requireDashboardAuth(
 
   const viewer = resolveDashboardViewer(context.db, context.user);
   if (!viewer) {
-    await withDatabaseLock(async () => {
-      webAuthService.revokeSession(context.db, context.sessionId);
-      await saveDatabase(context.db);
+    await revokeWebAuthSessionById(context.sessionId);
+    response.status(403).json({
+      error: "Dashboard access is not enabled for this account.",
+      code: "dashboard_session_invalid",
     });
-    response.status(403).json({ error: "Dashboard access is not enabled for this account." });
     return;
   }
 
@@ -3763,25 +4055,33 @@ function minIsoDate(values: Array<string | null | undefined>): string | null {
   return bestValue;
 }
 
-function filterOrgUsageSessions(db: ApiDatabase, orgId: string, startMs: number, endMs: number): UsageSessionRecord[] {
-  return db.usageSessions.filter((session) => {
-    if (session.orgId !== orgId) {
-      return false;
-    }
+function listUsageSessions(
+  db: Pick<ApiDatabase, "usageSessions">,
+  query?: Parameters<typeof usageSessionAccess.list>[1]
+): UsageSessionRecord[] {
+  return usageSessionAccess.list(db, query);
+}
 
-    const startedAtMs = new Date(session.startedAt).getTime();
-    return Number.isFinite(startedAtMs) && startedAtMs >= startMs && startedAtMs < endMs;
+function listScoreRecords(
+  db: Pick<ApiDatabase, "scoreRecords">,
+  query?: Parameters<typeof scoreRecordAccess.list>[1]
+): SimulationScoreRecord[] {
+  return scoreRecordAccess.list(db, query);
+}
+
+function filterOrgUsageSessions(db: ApiDatabase, orgId: string, startMs: number, endMs: number): UsageSessionRecord[] {
+  return usageSessionAccess.listByOrgRange(db, {
+    orgId,
+    startedAtFrom: new Date(startMs),
+    startedAtBefore: new Date(endMs)
   });
 }
 
 function filterOrgScoreRecords(db: ApiDatabase, orgId: string, startMs: number, endMs: number): SimulationScoreRecord[] {
-  return (db.scoreRecords ?? []).filter((record) => {
-    if (record.orgId !== orgId) {
-      return false;
-    }
-
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= startMs && endedAtMs < endMs;
+  return scoreRecordAccess.listByOrgRange(db, {
+    orgId,
+    endedAtFrom: new Date(startMs),
+    endedAtBefore: new Date(endMs)
   });
 }
 
@@ -3868,13 +4168,7 @@ function buildTrainingPackAttributionSummary(params: {
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
 }): DashboardTrainingAttributionSummary {
-  return {
-    mode: "forward_only",
-    attributedUsageSessionsLast30Days: params.usageSessions.filter((session) => Boolean(session.trainingPackId)).length,
-    unattributedUsageSessionsLast30Days: params.usageSessions.filter((session) => !session.trainingPackId).length,
-    attributedScoresLast30Days: params.scoreRecords.filter((record) => Boolean(record.trainingPackId)).length,
-    unattributedScoresLast30Days: params.scoreRecords.filter((record) => !record.trainingPackId).length
-  };
+  return simulationHistoryAccess.buildTrainingPackAttributionSummary(params);
 }
 
 function resolveTrainingPackRequiredScenarioIds(
@@ -3913,27 +4207,7 @@ function resolveTrainingPackAssignmentCompletionAt(
   assignment: TrainingPackAssignmentRecord,
   scoreRecords: SimulationScoreRecord[]
 ): string | null {
-  const requiredScenarioIds = new Set(assignment.requiredScenarioIds);
-  if (requiredScenarioIds.size === 0) {
-    return null;
-  }
-
-  const seenScenarioIds = new Set<string>();
-  const sortedScores = scoreRecords
-    .slice()
-    .sort((left, right) => new Date(left.endedAt).getTime() - new Date(right.endedAt).getTime());
-
-  for (const record of sortedScores) {
-    if (!requiredScenarioIds.has(record.scenarioId)) {
-      continue;
-    }
-    seenScenarioIds.add(record.scenarioId);
-    if (seenScenarioIds.size >= requiredScenarioIds.size) {
-      return record.endedAt;
-    }
-  }
-
-  return null;
+  return simulationHistoryAccess.resolveTrainingPackAssignmentCompletionAt(assignment, scoreRecords);
 }
 
 function computeTrainingPackAssignmentProgress(params: {
@@ -3945,130 +4219,30 @@ function computeTrainingPackAssignmentProgress(params: {
   recentSessions: UsageSessionRecord[];
   recentScores: SimulationScoreRecord[];
 }): DashboardTrainingPackAssignmentProgressRow {
-  const { db, assignment, scenarioCatalog } = params;
-  const user = getUserById(db, assignment.userId);
-  const assignedAtMs = new Date(assignment.assignedAt).getTime();
-  const filterAfterAssignment = <T extends { userId: string; trainingPackId?: string | null; startedAt?: string; endedAt: string }>(
-    entries: T[],
-    resolveActivityAt: (entry: T) => string
-  ): T[] =>
-    entries.filter((entry) => {
-      if (entry.userId !== assignment.userId || entry.trainingPackId !== assignment.trainingPackId) {
-        return false;
-      }
-      const activityAtMs = new Date(resolveActivityAt(entry)).getTime();
-      return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
-    });
-
-  const relevantAllSessions = filterAfterAssignment(params.allSessions, (entry) => entry.startedAt ?? entry.endedAt);
-  const relevantAllScores = filterAfterAssignment(params.allScores, (entry) => entry.endedAt);
-  const relevantRecentSessions = filterAfterAssignment(params.recentSessions, (entry) => entry.startedAt ?? entry.endedAt);
-  const relevantRecentScores = filterAfterAssignment(params.recentScores, (entry) => entry.endedAt);
-  const earliestActivityAt = minIsoDate([
-    ...relevantAllSessions.map((session) => session.startedAt),
-    ...relevantAllScores.map((record) => record.endedAt)
-  ]);
-  const completionAt = assignment.completedAt ?? resolveTrainingPackAssignmentCompletionAt(assignment, relevantAllScores);
-  const startedAt = assignment.startedAt ?? earliestActivityAt;
-  const completedScenarioIds = new Set<string>(
-    relevantAllScores
-      .filter((record) => assignment.requiredScenarioIds.includes(record.scenarioId))
-      .map((record) => record.scenarioId)
-  );
-  const requiredScenarioCount = assignment.requiredScenarioIds.length;
-  const completionSupported = requiredScenarioCount > 0;
-  const status: TrainingPackAssignmentProgressStatus = completionAt
-    ? "completed"
-    : startedAt
-      ? "in_progress"
-      : "not_started";
-  const normalizedStatus: TrainingPackAssignmentProgressStatus = completionSupported
-    ? status
-    : startedAt
-      ? "in_progress"
-      : "not_started";
-  const billedSeconds = relevantRecentSessions.reduce(
-    (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
-    0
-  );
-  const latestSession = relevantRecentSessions
-    .slice()
-    .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
-  const latestScore = relevantRecentScores
-    .slice()
-    .sort((left, right) => new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime())[0];
-  const latestActivityAt = maxIsoDate([latestSession?.endedAt ?? null, latestScore?.endedAt ?? null]);
-  const latestScenarioId = latestScore?.scenarioId ?? latestSession?.scenarioId ?? null;
-
-  return {
-    assignmentId: assignment.id,
-    userId: assignment.userId,
-    email: user?.email ?? assignment.userId,
-    userStatus: user?.status ?? "disabled",
-    status: normalizedStatus,
-    assignedAt: assignment.assignedAt,
-    startedAt,
-    completedAt: completionSupported ? completionAt : null,
-    requiredScenarioCount,
-    completedScenarioCount: completedScenarioIds.size,
-    attemptsLast30Days: relevantRecentSessions.length,
-    scoredAttemptsLast30Days: relevantRecentScores.length,
-    averageScoreLast30Days: averageScore(relevantRecentScores),
-    latestActivityAt,
-    latestScenarioTitle: latestScenarioId ? scenarioCatalog.get(latestScenarioId)?.title ?? latestScenarioId : null
-  };
+  const user = getUserById(params.db, params.assignment.userId);
+  return simulationHistoryAccess.computeTrainingPackAssignmentProgress({
+    assignment: params.assignment,
+    user: user ? { email: user.email, status: user.status } : null,
+    scenarioCatalog: params.scenarioCatalog,
+    allSessions: params.allSessions,
+    allScores: params.allScores,
+    recentSessions: params.recentSessions,
+    recentScores: params.recentScores
+  });
 }
 
 function syncTrainingPackAssignmentLifecycle(
   db: ApiDatabase,
   assignment: TrainingPackAssignmentRecord
 ): TrainingPackAssignmentRecord {
-  const assignedAtMs = new Date(assignment.assignedAt).getTime();
-  const sessions = db.usageSessions.filter((session) => {
-    if (session.userId !== assignment.userId || session.trainingPackId !== assignment.trainingPackId) {
-      return false;
-    }
-    const activityAtMs = new Date(session.startedAt).getTime();
-    return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
-  });
-  const scores = (db.scoreRecords ?? []).filter((record) => {
-    if (record.userId !== assignment.userId || record.trainingPackId !== assignment.trainingPackId) {
-      return false;
-    }
-    const activityAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(activityAtMs) && activityAtMs >= assignedAtMs;
-  });
-
-  const earliestActivityAt = minIsoDate([
-    ...sessions.map((session) => session.startedAt),
-    ...scores.map((record) => record.endedAt)
-  ]);
-  const computedCompletedAt = resolveTrainingPackAssignmentCompletionAt(assignment, scores);
-  const nextStartedAt = minIsoDate([assignment.startedAt, earliestActivityAt]);
-  const nextCompletedAt = minIsoDate([assignment.completedAt, computedCompletedAt]);
-
-  if (nextStartedAt !== assignment.startedAt) {
-    assignment.startedAt = nextStartedAt;
-  }
-  if (assignment.requiredScenarioIds.length > 0) {
-    if (nextCompletedAt !== assignment.completedAt) {
-      assignment.completedAt = nextCompletedAt;
-    }
-  } else if (assignment.completedAt !== null) {
-    assignment.completedAt = null;
-  }
-
-  return assignment;
+  return simulationHistoryAccess.syncTrainingPackAssignmentLifecycle(db, assignment);
 }
 
 function projectTrainingPackAssignmentLifecycle(
   db: ApiDatabase,
   assignment: TrainingPackAssignmentRecord
 ): TrainingPackAssignmentRecord {
-  return syncTrainingPackAssignmentLifecycle(db, {
-    ...assignment,
-    requiredScenarioIds: assignment.requiredScenarioIds.slice()
-  });
+  return simulationHistoryAccess.projectTrainingPackAssignmentLifecycle(db, assignment);
 }
 
 function syncTrainingPackAssignmentsForUserPack(
@@ -4274,32 +4448,25 @@ async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg
     .sort((left, right) => left.email.localeCompare(right.email));
   const activeUserCount = customerUsers.filter((user) => user.status === "active").length;
   const dashboardUserCount = customerUsers.filter((user) => user.dashboardAccessEnabled === true).length;
-  const simulationsLast30Days = db.usageSessions.filter((session) => {
-    if (session.orgId !== normalizedOrg.id) {
-      return false;
-    }
-
-    const startedAtMs = new Date(session.startedAt).getTime();
-    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold;
+  const simulationsLast30Days = usageSessionAccess.listByOrgRange(db, {
+    orgId: normalizedOrg.id,
+    startedAtFrom: new Date(last30DaysThreshold)
   }).length;
 
-  const scoresThisPeriod = (db.scoreRecords ?? []).filter((record) => {
-    if (record.orgId !== normalizedOrg.id) {
-      return false;
-    }
-
-    const endedAtMs = new Date(record.endedAt).getTime();
-    const periodStartMs = new Date(billing.periodStartAt).getTime();
-    const periodEndMs = new Date(billing.periodEndAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= periodStartMs && endedAtMs < periodEndMs;
+  const scoresThisPeriod = scoreRecordAccess.listByOrgRange(db, {
+    orgId: normalizedOrg.id,
+    endedAtFrom: new Date(billing.periodStartAt),
+    endedAtBefore: new Date(billing.periodEndAt)
   });
   const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime());
   const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
   const trainingPacks = await listTrainingPacksForDashboardOrg(normalizedOrg.id);
   const customScenarioCount = ensureOrgCustomScenarioCollection(normalizedOrg).filter((scenario) => scenario.enabled !== false).length;
+  const orgSessions = listUsageSessions(db, { orgId: normalizedOrg.id });
+  const orgScores = listScoreRecords(db, { orgId: normalizedOrg.id });
   const latestActivityAt = maxIsoDate([
-    ...db.usageSessions.filter((session) => session.orgId === normalizedOrg.id).map((session) => session.endedAt),
-    ...(db.scoreRecords ?? []).filter((record) => record.orgId === normalizedOrg.id).map((record) => record.endedAt)
+    ...orgSessions.map((session) => session.endedAt),
+    ...orgScores.map((record) => record.endedAt)
   ]);
 
   return {
@@ -4326,15 +4493,7 @@ async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg
     activeTrainingPackCount: trainingPacks.filter((pack) => pack.active === true).length,
     customScenarioCount,
     latestActivityAt,
-    customerUsers: customerUsers.map(
-      (user): DashboardCustomerUserSummary => ({
-        userId: user.id,
-        email: user.email,
-        status: user.status,
-        orgRole: user.orgRole,
-        dashboardAccessEnabled: user.dashboardAccessEnabled === true
-      })
-    )
+    customerUserEmails: customerUsers.map((user) => user.email)
   };
 }
 
@@ -4536,8 +4695,8 @@ async function buildDashboardTrainingPackRows(
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const allPackSessions = db.usageSessions.filter((session) => session.orgId === org.id && Boolean(session.trainingPackId));
-  const allPackScores = (db.scoreRecords ?? []).filter((record) => record.orgId === org.id && Boolean(record.trainingPackId));
+  const allPackSessions = listUsageSessions(db, { orgId: org.id }).filter((session) => Boolean(session.trainingPackId));
+  const allPackScores = listScoreRecords(db, { orgId: org.id }).filter((record) => Boolean(record.trainingPackId));
   const currentSessions = allPackSessions.filter((session) => {
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
@@ -5014,7 +5173,7 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const activeCustomers = customers.length;
+  const activeCustomers = customers.filter((customer) => customer.orgStatus === "active").length;
   const activeUsers = customers.reduce((total, customer) => total + customer.activeUserCount, 0);
   const dashboardUsers = customers.reduce((total, customer) => total + customer.dashboardUserCount, 0);
   const monthlyUsageMinutes = customers.reduce((total, customer) => total + customer.usedMinutesThisPeriod, 0);
@@ -5049,21 +5208,21 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
       return (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
     })
     .slice(0, 6);
-  const recentSessions = db.usageSessions.filter((session) => {
+  const recentSessions = listUsageSessions(db).filter((session) => {
     if (!session.orgId || !accessibleOrgIds.has(session.orgId)) {
       return false;
     }
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
-  const recentScores = (db.scoreRecords ?? []).filter((record) => {
+  const recentScores = listScoreRecords(db).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
     const endedAtMs = new Date(record.endedAt).getTime();
     return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
   });
-  const previousScores = (db.scoreRecords ?? []).filter((record) => {
+  const previousScores = listScoreRecords(db).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
@@ -5147,14 +5306,14 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
       scopedScores.forEach((record) => engagedLearnerIds.add(record.userId));
     }
   }
-  const recentSessions = db.usageSessions.filter((session) => {
+  const recentSessions = listUsageSessions(db).filter((session) => {
     if (!session.orgId || !orgIds.has(session.orgId)) {
       return false;
     }
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
-  const recentScores = (db.scoreRecords ?? []).filter((record) => {
+  const recentScores = listScoreRecords(db).filter((record) => {
     if (!record.orgId || !orgIds.has(record.orgId)) {
       return false;
     }
@@ -5235,8 +5394,8 @@ async function buildDashboardTrainingPackDetail(
     return null;
   }
 
-  const allPackSessions = db.usageSessions.filter((session) => session.orgId === org.id && session.trainingPackId === pack.id);
-  const allPackScores = (db.scoreRecords ?? []).filter((record) => record.orgId === org.id && record.trainingPackId === pack.id);
+  const allPackSessions = listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id });
+  const allPackScores = listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id });
   const recentPackSessions = allPackSessions.filter((session) => {
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
@@ -5314,73 +5473,13 @@ function findRelatedUsageSessionForScore(
   sessions: UsageSessionRecord[],
   score: SimulationScoreRecord
 ): UsageSessionRecord | null {
-  const exact = sessions.find(
-    (session) =>
-      session.userId === score.userId &&
-      session.scenarioId === score.scenarioId &&
-      (session.trainingPackId ?? null) === (score.trainingPackId ?? null) &&
-      session.startedAt === score.startedAt &&
-      session.endedAt === score.endedAt
-  );
-  if (exact) {
-    return exact;
-  }
-
-  const scoreStartedMs = new Date(score.startedAt).getTime();
-  const scoreEndedMs = new Date(score.endedAt).getTime();
-  let best: { session: UsageSessionRecord; delta: number } | null = null;
-
-  for (const session of sessions) {
-    if (
-      session.userId !== score.userId ||
-      session.scenarioId !== score.scenarioId ||
-      (session.trainingPackId ?? null) !== (score.trainingPackId ?? null)
-    ) {
-      continue;
-    }
-
-    const startedDelta = Math.abs(new Date(session.startedAt).getTime() - scoreStartedMs);
-    const endedDelta = Math.abs(new Date(session.endedAt).getTime() - scoreEndedMs);
-    const delta = startedDelta + endedDelta;
-    if (!Number.isFinite(delta) || delta > 10 * 60 * 1000) {
-      continue;
-    }
-    if (!best || delta < best.delta) {
-      best = { session, delta };
-    }
-  }
-
-  return best?.session ?? null;
+  return simulationHistoryAccess.findRelatedUsageSessionForScore(sessions, score);
 }
 
 function buildTrainingPackTitleMap(packs: TrainingPack[]): Map<string, string> {
   const titles = new Map<string, string>();
   packs.forEach((pack) => titles.set(pack.id, pack.title));
   return titles;
-}
-
-function resolveAttemptActivityAssignmentStatus(params: {
-  assignment: TrainingPackAssignmentRecord | null;
-  activityAt: string;
-  scenarioId: string;
-  isScored: boolean;
-}): DashboardAttemptHistoryRow["assignmentContextStatus"] {
-  const { assignment, activityAt, scenarioId, isScored } = params;
-  if (!assignment) {
-    return "not_assignment_scoped";
-  }
-
-  const assignedAtMs = new Date(assignment.assignedAt).getTime();
-  const activityAtMs = new Date(activityAt).getTime();
-  if (!Number.isFinite(activityAtMs) || activityAtMs < assignedAtMs) {
-    return "outside_assignment_window";
-  }
-
-  if (isScored && assignment.requiredScenarioIds.includes(scenarioId)) {
-    return "counts_toward_completion";
-  }
-
-  return "within_assignment_window";
 }
 
 function findAssignmentForUserPackActivity(
@@ -5419,41 +5518,15 @@ function buildDashboardAttemptHistoryRowFromScore(params: {
   relatedSession: UsageSessionRecord | null;
   assignment: TrainingPackAssignmentRecord | null;
 }): DashboardAttemptHistoryRow {
-  const { score, user, org, scenarioCatalog, trainingPackTitles, relatedSession, assignment } = params;
-  const scenarioMeta = scenarioCatalog.get(score.scenarioId);
-
-  return {
-    activityId: score.id,
-    activityKind: "scored_attempt",
-    userId: user.id,
-    userEmail: user.email,
-    userStatus: user.status,
-    orgId: org?.id ?? null,
-    orgName: org?.name ?? null,
-    scenarioId: score.scenarioId,
-    scenarioTitle: scenarioMeta?.title ?? score.scenarioId,
-    segmentId: score.segmentId,
-    segmentLabel: scenarioMeta?.segmentLabel ?? score.segmentId,
-    trainingPackId: score.trainingPackId ?? null,
-    trainingPackTitle: score.trainingPackId ? trainingPackTitles.get(score.trainingPackId) ?? score.trainingPackId : null,
-    packAttributed: Boolean(score.trainingPackId),
-    assignmentId: assignment?.id ?? null,
-    assignmentContextStatus: resolveAttemptActivityAssignmentStatus({
-      assignment,
-      activityAt: score.endedAt,
-      scenarioId: score.scenarioId,
-      isScored: true
-    }),
-    startedAt: score.startedAt,
-    endedAt: score.endedAt,
-    rawDurationSeconds: relatedSession?.rawDurationSeconds ?? null,
-    overallScore: score.overallScore,
-    summary: score.summary ?? null,
-    coachingPriority: score.coachingArtifact?.coachingPriority ?? null,
-    model: score.model ?? null,
-    promptVersion: score.promptVersion ?? null,
-    rubricVersion: score.rubricVersion ?? null
-  };
+  return buildDashboardAttemptHistoryRowFromScorePayload({
+    score: params.score,
+    user: params.user,
+    org: params.org,
+    scenarioCatalog: params.scenarioCatalog,
+    trainingPackTitles: params.trainingPackTitles,
+    relatedSession: params.relatedSession,
+    assignment: params.assignment
+  });
 }
 
 function buildDashboardAttemptHistoryRowFromSession(params: {
@@ -5483,7 +5556,7 @@ function buildDashboardAttemptHistoryRowFromSession(params: {
     trainingPackTitle: session.trainingPackId ? trainingPackTitles.get(session.trainingPackId) ?? session.trainingPackId : null,
     packAttributed: Boolean(session.trainingPackId),
     assignmentId: assignment?.id ?? null,
-    assignmentContextStatus: resolveAttemptActivityAssignmentStatus({
+    assignmentContextStatus: resolveDashboardAttemptActivityAssignmentStatus({
       assignment,
       activityAt: session.endedAt,
       scenarioId: session.scenarioId,
@@ -5516,23 +5589,6 @@ function sortDashboardAttemptHistoryRows(rows: DashboardAttemptHistoryRow[]): Da
     });
 }
 
-function deriveScoreSignals(record: SimulationScoreRecord): DashboardAttemptDetailResponse["attempt"]["derivedSignals"] {
-  const categories = [
-    { key: "persuasion", label: "Persuasion", value: record.persuasion },
-    { key: "clarity", label: "Clarity", value: record.clarity },
-    { key: "empathy", label: "Empathy", value: record.empathy },
-    { key: "assertiveness", label: "Assertiveness", value: record.assertiveness }
-  ].sort((left, right) => right.value - left.value);
-
-  const strongest = categories[0];
-  const weakest = categories[categories.length - 1];
-  return {
-    strongestCategory: strongest?.label ?? null,
-    weakestCategory: weakest?.label ?? null,
-    coachingFocus: record.coachingArtifact?.coachingPriority ?? (weakest ? `Focus next on ${weakest.label.toLowerCase()}.` : null)
-  };
-}
-
 async function buildDashboardTrainingPackAssignmentDetail(
   db: ApiDatabase,
   viewer: DashboardViewer,
@@ -5561,12 +5617,16 @@ async function buildDashboardTrainingPackAssignmentDetail(
     return null;
   }
 
-  const packSessions = db.usageSessions.filter(
-    (session) => session.orgId === org.id && session.userId === assignment.userId && session.trainingPackId === pack.id
-  );
-  const packScores = (db.scoreRecords ?? []).filter(
-    (record) => record.orgId === org.id && record.userId === assignment.userId && record.trainingPackId === pack.id
-  );
+  const packSessions = listUsageSessions(db, {
+    orgId: org.id,
+    userId: assignment.userId,
+    trainingPackId: pack.id
+  });
+  const packScores = listScoreRecords(db, {
+    orgId: org.id,
+    userId: assignment.userId,
+    trainingPackId: pack.id
+  });
   const projectedAssignment = projectTrainingPackAssignmentLifecycle(db, assignment);
   const assignmentRow = computeTrainingPackAssignmentProgress({
     db,
@@ -5663,8 +5723,8 @@ async function buildDashboardUserDetail(
   const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const trainingPackTitles = buildTrainingPackTitleMap(packs);
-  const userSessions = db.usageSessions.filter((session) => session.userId === user.id && session.orgId === org.id);
-  const userScores = (db.scoreRecords ?? []).filter((record) => record.userId === user.id && record.orgId === org.id);
+  const userSessions = listUsageSessions(db, { userId: user.id, orgId: org.id });
+  const userScores = listScoreRecords(db, { userId: user.id, orgId: org.id });
   const now = Date.now();
   const last30DaysThreshold = now - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now - 60 * 24 * 60 * 60 * 1000;
@@ -5748,7 +5808,7 @@ async function buildDashboardAttemptDetail(
   viewer: DashboardViewer,
   attemptId: string
 ): Promise<DashboardAttemptDetailResponse | null> {
-  const score = (db.scoreRecords ?? []).find((entry) => entry.id === attemptId);
+  const score = scoreRecordAccess.getById(db, attemptId);
   if (!score || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
     return null;
   }
@@ -5762,37 +5822,20 @@ async function buildDashboardAttemptDetail(
   const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const trainingPackTitles = buildTrainingPackTitleMap(packs);
-  const attempt = buildDashboardAttemptHistoryRowFromScore({
-    db,
+  const attempt = buildDashboardAttemptDetailAttemptPayload({
     score,
     user,
     org,
     scenarioCatalog,
     trainingPackTitles,
-    relatedSession: findRelatedUsageSessionForScore(
-      db.usageSessions.filter((session) => session.userId === score.userId && session.orgId === org.id),
-      score
-    ),
+    industryLabelById: new Map(Object.entries(INDUSTRY_LABELS)),
+    relatedSession: findRelatedUsageSessionForScore(listUsageSessions(db, { userId: score.userId, orgId: org.id }), score),
     assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
   });
 
   return {
     viewer,
-    attempt: {
-      ...attempt,
-      industryId: score.industryId ?? null,
-      industryLabel: score.industryId ? INDUSTRY_LABELS[score.industryId] ?? score.industryId : null,
-      scoreBreakdown: {
-        overallScore: score.overallScore,
-        persuasion: score.persuasion,
-        clarity: score.clarity,
-        empathy: score.empathy,
-        assertiveness: score.assertiveness
-      },
-      derivedSignals: deriveScoreSignals(score),
-      coachingArtifact: score.coachingArtifact ?? null,
-      transcriptAvailable: false
-    }
+    attempt
   };
 }
 
@@ -5804,21 +5847,21 @@ async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = db.usageSessions.filter((session) => {
+  const recentSessions = listUsageSessions(db).filter((session) => {
     if (!session.orgId || !accessibleOrgIds.has(session.orgId)) {
       return false;
     }
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
-  const recentScores = (db.scoreRecords ?? []).filter((record) => {
+  const recentScores = listScoreRecords(db).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
     const endedAtMs = new Date(record.endedAt).getTime();
     return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
   });
-  const previousScores = (db.scoreRecords ?? []).filter((record) => {
+  const previousScores = listScoreRecords(db).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
@@ -6390,37 +6433,19 @@ function aiRoleMatchesTraineeRole(aiRole: string, traineeSegmentLabel: string): 
 }
 
 function computeUserUsage(db: ApiDatabase, user: UserProfile, now: Date, timezone: string) {
-  const dayKey = getDayKey(now, timezone);
-  const monthKey = getMonthKey(now, timezone);
-  const userSessions = db.usageSessions.filter((session) => session.userId === user.id);
-  const todaySessions = userSessions.filter(
-    (session) => getDayKey(new Date(session.endedAt), timezone) === dayKey
-  );
-  const monthSessions = userSessions.filter(
-    (session) => getMonthKey(new Date(session.endedAt), timezone) === monthKey
-  );
-
-  const rawSecondsToday = sumRawSeconds(todaySessions);
-  const rawSecondsThisMonth = sumRawSeconds(monthSessions);
-
-  return {
-    rawSecondsToday,
-    billedSecondsToday: calculateBilledSecondsFromRaw(rawSecondsToday),
-    rawSecondsThisMonth,
-    billedSecondsThisMonth: calculateBilledSecondsFromRaw(rawSecondsThisMonth),
-    dayKey,
-    monthKey
-  };
+  return usageSessionAccess.computeUserUsageSnapshot(db, {
+    userId: user.id,
+    now,
+    timeZone: timezone
+  });
 }
 
 function computeOrgBilledToday(db: ApiDatabase, orgId: string, now: Date, timezone: string): number {
-  const dayKey = getDayKey(now, timezone);
-  const orgSessions = db.usageSessions.filter(
-    (session) => session.orgId === orgId && getDayKey(new Date(session.endedAt), timezone) === dayKey
-  );
-
-  const rawSeconds = sumRawSeconds(orgSessions);
-  return calculateBilledSecondsFromRaw(rawSeconds);
+  return usageSessionAccess.computeOrgBilledToday(db, {
+    orgId,
+    now,
+    timeZone: timezone
+  });
 }
 
 function resolveTierDefinition(db: ApiDatabase, tierId: string): TierDefinition {
@@ -6594,13 +6619,6 @@ function computeEntitlements(
   };
 }
 
-interface AiBudgetSnapshot {
-  userCallsToday: number;
-  userTokensToday: number;
-  globalCallsToday: number;
-  globalTokensToday: number;
-}
-
 function pruneExpiredSimulationAiBudgetGrace(nowMs = Date.now()): void {
   for (const [userId, expiresAtMs] of simulationAiBudgetGraceByUserId.entries()) {
     if (expiresAtMs <= nowMs) {
@@ -6712,54 +6730,11 @@ function isQuotaLockReason(lockReason: string | null | undefined): boolean {
   );
 }
 
-function computeAiBudgetSnapshot(db: ApiDatabase, user: UserProfile, now: Date): AiBudgetSnapshot {
-  const userTimezone = materializeUserTimezone(user, now);
-  const userDayKey = getDayKey(now, userTimezone);
-  const globalDayKey = getDayKey(now, "UTC");
-
-  let userCallsToday = 0;
-  let userTokensToday = 0;
-  let globalCallsToday = 0;
-  let globalTokensToday = 0;
-
-  for (const event of db.aiUsageEvents ?? []) {
-    const createdAt = parseIsoDateOrNull(event.createdAt);
-    if (!createdAt) {
-      continue;
-    }
-
-    const tokens = Math.max(0, clampNonNegativeInteger(event.totalTokens, 0));
-    const eventGlobalDayKey = getDayKey(createdAt, "UTC");
-    if (eventGlobalDayKey === globalDayKey) {
-      globalCallsToday += 1;
-      globalTokensToday += tokens;
-    }
-
-    if (event.userId !== user.id) {
-      continue;
-    }
-
-    const eventUserDayKey = getDayKey(createdAt, userTimezone);
-    if (eventUserDayKey === userDayKey) {
-      userCallsToday += 1;
-      userTokensToday += tokens;
-    }
-  }
-
-  return {
-    userCallsToday,
-    userTokensToday,
-    globalCallsToday,
-    globalTokensToday
-  };
-}
-
-function resolveAiBudgetLimitError(
-  db: ApiDatabase,
+async function resolveAiBudgetLimitError(
   user: UserProfile,
   now: Date,
   options?: { allowDuringActiveSimulation?: boolean }
-): string | null {
+): Promise<string | null> {
   if (user.accountType === "enterprise") {
     return null;
   }
@@ -6768,7 +6743,11 @@ function resolveAiBudgetLimitError(
     return null;
   }
 
-  const budget = computeAiBudgetSnapshot(db, user, now);
+  const budget = await aiUsageEventAccess.computeBudgetSnapshot({
+    userId: user.id,
+    now,
+    userTimeZone: materializeUserTimezone(user, now)
+  });
 
   if (
     OPENAI_MAX_DAILY_CALLS_PER_USER !== null &&
@@ -7080,8 +7059,8 @@ function validateContentDeletes(
     const recentUsageHits = new Set<string>();
     const recentScoreHits = new Set<string>();
     const allRecords = [
-      ...db.usageSessions.map((entry) => ({ segmentId: entry.segmentId, scenarioId: entry.scenarioId, endedAt: entry.endedAt })),
-      ...db.scoreRecords.map((entry) => ({ segmentId: entry.segmentId, scenarioId: entry.scenarioId, endedAt: entry.endedAt }))
+      ...usageSessionAccess.listRecentActivityReferences(db, { since: new Date(cutoffMs) }),
+      ...scoreRecordAccess.listRecentActivityReferences(db, { since: new Date(cutoffMs) })
     ];
 
     for (const row of allRecords) {
@@ -7174,48 +7153,15 @@ function resolveOrgBillingAnchorAt(org: EnterpriseOrg, now: Date): string {
 }
 
 function buildOrgUsageSnapshot(db: ApiDatabase, org: EnterpriseOrg, now: Date): OrgUsageSnapshot {
-  const anchorAt = resolveOrgBillingAnchorAt(org, now);
-  const period = computeMonthlyPeriodBounds(anchorAt, now);
-  const periodStartMs = new Date(period.periodStartAt).getTime();
-  const periodEndMs = new Date(period.periodEndAt).getTime();
-
-  const sessions = db.usageSessions.filter((session) => {
-    if (session.orgId !== org.id) {
-      return false;
-    }
-
-    const startedAtMs = new Date(session.startedAt).getTime();
-    if (Number.isNaN(startedAtMs)) {
-      return false;
-    }
-
-    return startedAtMs >= periodStartMs && startedAtMs < periodEndMs;
+  return usageSessionAccess.buildOrgUsageSnapshot(db, {
+    orgId: org.id,
+    billingAnchorAt: resolveOrgBillingAnchorAt(org, now),
+    allottedMinutes: normalizeMonthlyMinutesAllotted(
+      org.monthlyMinutesAllotted,
+      deriveDefaultMonthlyMinutesAllotted(org)
+    ),
+    now
   });
-
-  const usedSeconds = sessions.reduce(
-    (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
-    0
-  );
-  const usedMinutes = usedSeconds / 60;
-  const allottedMinutes = normalizeMonthlyMinutesAllotted(
-    org.monthlyMinutesAllotted,
-    deriveDefaultMonthlyMinutesAllotted(org)
-  );
-  const allottedSeconds = allottedMinutes * 60;
-  const usagePercent = allottedSeconds > 0 ? (usedSeconds / allottedSeconds) * 100 : 0;
-  const remainingMinutes = Math.max(0, allottedMinutes - usedMinutes);
-
-  return {
-    periodStartAt: period.periodStartAt,
-    periodEndAt: period.periodEndAt,
-    nextRenewalAt: period.nextRenewalAt,
-    usedSeconds,
-    usedMinutes,
-    allottedMinutes,
-    allottedSeconds,
-    remainingMinutes,
-    usagePercent
-  };
 }
 
 function getOrgAdmins(db: ApiDatabase, orgId: string): Array<{ id: string; email: string; status: UserStatus }> {
@@ -7229,13 +7175,13 @@ function getOrgAdmins(db: ApiDatabase, orgId: string): Array<{ id: string; email
     .sort((a, b) => a.email.localeCompare(b.email));
 }
 
-function findSoftLimitNotificationAudit(
+async function findSoftLimitNotificationAudit(
   db: ApiDatabase,
   orgId: string,
   thresholdPercent: number,
   periodStartAt: string
-): string | null {
-  const match = db.auditEvents.find((event) => {
+): Promise<string | null> {
+  const pendingMatch = getPendingAuditEvents(db).find((event) => {
     if (event.action !== "org.soft_limit.threshold_reached" || event.orgId !== orgId) {
       return false;
     }
@@ -7246,17 +7192,35 @@ function findSoftLimitNotificationAudit(
     return Number.isFinite(threshold) && threshold === thresholdPercent && periodStart === periodStartAt;
   });
 
-  return match?.createdAt ?? null;
+  if (pendingMatch) {
+    return pendingMatch.createdAt;
+  }
+
+  const queryFrom = parseIsoDateOrNull(periodStartAt);
+  const persistedEvents = await auditEventStore.listEvents({
+    orgId,
+    action: "org.soft_limit.threshold_reached",
+    from: queryFrom,
+    limit: 200
+  });
+  const persistedMatch = persistedEvents.find((event) => {
+    const metadata = event.metadata as Record<string, unknown> | null;
+    const threshold = Number(metadata?.thresholdPercent ?? NaN);
+    const periodStart = typeof metadata?.periodStartAt === "string" ? metadata.periodStartAt : "";
+    return Number.isFinite(threshold) && threshold === thresholdPercent && periodStart === periodStartAt;
+  });
+
+  return persistedMatch?.createdAt ?? null;
 }
 
-function ensureSoftLimitNotificationAudit(
+async function ensureSoftLimitNotificationAudit(
   db: ApiDatabase,
   org: EnterpriseOrg,
   thresholdPercent: number,
   usage: OrgUsageSnapshot,
   orgAdminEmails: string[]
-): string {
-  const existingCreatedAt = findSoftLimitNotificationAudit(db, org.id, thresholdPercent, usage.periodStartAt);
+): Promise<string> {
+  const existingCreatedAt = await findSoftLimitNotificationAudit(db, org.id, thresholdPercent, usage.periodStartAt);
   if (existingCreatedAt) {
     return existingCreatedAt;
   }
@@ -7405,12 +7369,15 @@ function revokeMobileAccessForUser(db: ApiDatabase, userId: string, reason: stri
   mobileUpdateReasonByUserId.delete(userId);
 }
 
-function revokeEnterpriseOrgUserAccess(db: ApiDatabase, orgId: string, reason: string): void {
+function revokeEnterpriseOrgUserAccess(db: ApiDatabase, orgId: string, reason: string): string[] {
+  const revokedUserIds: string[] = [];
   for (const user of db.users.filter((entry) => entry.accountType === "enterprise" && entry.orgId === orgId)) {
-    webAuthService.revokeUserSessions(db, user.id);
+    revokedUserIds.push(user.id);
     db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
     revokeMobileAccessForUser(db, user.id, reason);
   }
+
+  return revokedUserIds;
 }
 
 function emitMobileUpdateForUser(db: ApiDatabase, userId: string, reason: MobileUpdateReason): void {
@@ -7665,7 +7632,7 @@ app.post("/mobile/public/support/errors", mobilePublicErrorReportRateLimiter, as
       updatedAt: now
     };
 
-    db.supportCases.push(record);
+    await supportCaseStore.saveCase(record, { now: new Date(now) });
     appendAuditEvent(db, {
       actorType: "system",
       actorId: null,
@@ -7915,8 +7882,7 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     }
 
     const sessionRequestMetadata = buildWebAuthSessionRequestMetadata(request);
-    const { token, expiresAt, sessionId } = webAuthService.issueSession(
-      db,
+    const { record, token, expiresAt, sessionId } = webAuthService.issueSession(
       user,
       DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES,
       now,
@@ -7942,6 +7908,7 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
         userAgent: sessionRequestMetadata.userAgent
       }
     });
+    await webAuthSessionStore.saveSession(record);
 
     const payload: WebAuthVerifyCodeResponse = {
       token,
@@ -7961,8 +7928,8 @@ app.get("/web/auth/session", requireDashboardAuth, async (request: DashboardAuth
 });
 
 app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, response: Response) => {
+  await revokeWebAuthSessionById(request.webAuth!.sessionId);
   await withDatabase(async (db) => {
-    webAuthService.revokeSession(db, request.webAuth!.sessionId);
     appendWebAuditEvent(db, request.webAuth!.user, {
       action: "web_auth.logout",
       orgId: request.webAuth!.user.orgId,
@@ -7995,7 +7962,10 @@ app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: 
 
 app.get("/dashboard/customers", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   if (!canDashboardViewerAccessCustomerDirectory(request.dashboard!.viewer)) {
-    response.status(403).json({ error: "Customer directory is only available to super users." });
+    response.status(403).json({
+      error: "Customer directory is only available to super users.",
+      code: "dashboard_scope_denied",
+    });
     return;
   }
 
@@ -8010,7 +7980,10 @@ app.get("/dashboard/customers", requireDashboardAuth, async (request: DashboardA
 
 app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   if (!canDashboardViewerAccessCustomerDirectory(request.dashboard!.viewer)) {
-    response.status(403).json({ error: "Customer directory is only available to super users." });
+    response.status(403).json({
+      error: "Customer directory is only available to super users.",
+      code: "dashboard_scope_denied",
+    });
     return;
   }
 
@@ -8023,7 +7996,10 @@ app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: Das
     }
 
     if (!canDashboardViewerAccessOrg(request.dashboard!.viewer, orgId)) {
-      response.status(403).json({ error: "You do not have access to this customer account." });
+      response.status(403).json({
+        error: "You do not have access to this customer account.",
+        code: "dashboard_scope_denied",
+      });
       return;
     }
 
@@ -8258,7 +8234,6 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
   };
   const applyPerUserDailySecondsCapNextCycle = patch.applyPerUserDailySecondsCapNextCycle === true;
   const clearPendingPerUserDailySecondsCap = patch.clearPendingPerUserDailySecondsCap === true;
-
   await withDatabase(async (db) => {
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
@@ -8405,7 +8380,20 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
     }
 
     if (previousStatus !== org.status && org.status === "disabled") {
-      revokeEnterpriseOrgUserAccess(db, org.id, "Enterprise account access was deactivated.");
+      const revokedDashboardUserIds = revokeEnterpriseOrgUserAccess(
+        db,
+        org.id,
+        "Enterprise account access was deactivated."
+      );
+      if (revokedDashboardUserIds.length > 0) {
+        queueDatabasePostCommitEffect(db, {
+          category: "security_cleanup",
+          description: `Revoke dashboard sessions for disabled organization ${org.id}.`,
+          run: async () => {
+            await revokeWebAuthSessionsForUserIds(revokedDashboardUserIds);
+          }
+        });
+      }
     }
 
     org.updatedAt = nowIso();
@@ -9713,7 +9701,7 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
       .filter((user) => user.accountType === "enterprise" && user.orgId === normalizedOrg.id)
       .sort((a, b) => a.email.localeCompare(b.email));
 
-    const sessionsForOrg = db.usageSessions.filter((session) => session.orgId === normalizedOrg.id);
+    const sessionsForOrg = listUsageSessions(db, { orgId: normalizedOrg.id });
 
     const users = orgUsers.map((user) => {
       const sessionsInPeriod = sessionsForOrg.filter((session) => {
@@ -9811,18 +9799,19 @@ app.get("/orgs/:orgId/usage-billing", requireAdmin, async (request: Request, res
     const orgAdmins = getOrgAdmins(db, org.id);
     const orgAdminEmails = orgAdmins.map((entry) => entry.email);
     const thresholds = normalizeSoftLimitPercentTriggers(org.softLimitPercentTriggers);
-    const softLimits = thresholds.map((thresholdPercent) => {
+    const softLimits = [];
+    for (const thresholdPercent of thresholds) {
       const reached = usage.usagePercent >= thresholdPercent;
       const notifiedAt = reached
-        ? ensureSoftLimitNotificationAudit(db, org, thresholdPercent, usage, orgAdminEmails)
-        : findSoftLimitNotificationAudit(db, org.id, thresholdPercent, usage.periodStartAt);
+        ? await ensureSoftLimitNotificationAudit(db, org, thresholdPercent, usage, orgAdminEmails)
+        : await findSoftLimitNotificationAudit(db, org.id, thresholdPercent, usage.periodStartAt);
 
-      return {
+      softLimits.push({
         thresholdPercent,
         reached,
         notifiedAt
-      };
-    });
+      });
+    }
 
     const payload: OrgUsageBillingResponse = {
       generatedAt: now.toISOString(),
@@ -10002,10 +9991,16 @@ app.delete("/admin/settings/superusers/:userId", requireAdmin, async (request: R
     }
 
     revokeMobileAccessForUser(db, user.id, "Super user access was removed.");
-    webAuthService.revokeUserSessions(db, user.id);
     db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
     db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
     db.users = db.users.filter((entry) => entry.id !== user.id);
+    queueDatabasePostCommitEffect(db, {
+      category: "security_cleanup",
+      description: `Revoke dashboard sessions for removed super user ${user.id}.`,
+      run: async () => {
+        await revokeWebAuthSessionsForUserId(user.id);
+      }
+    });
 
     appendPlatformAuditEvent(db, {
       action: "settings.super_user.deleted",
@@ -10156,6 +10151,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     const now = new Date();
     materializeUserTimezone(user, now);
     let emailChanged = false;
+    let revokeDashboardSessions = false;
 
     if (typeof patch.email === "string") {
       const email = patch.email.trim().toLowerCase();
@@ -10173,7 +10169,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       if (email !== user.email) {
         user.email = email;
         user.emailVerifiedAt = null;
-        webAuthService.revokeUserSessions(db, user.id);
+        revokeDashboardSessions = true;
         db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
         db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
         emailChanged = true;
@@ -10215,7 +10211,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
 
       user.status = patch.status;
       if (user.status !== "active") {
-        webAuthService.revokeUserSessions(db, user.id);
+        revokeDashboardSessions = true;
         revokeMobileAccessForUser(db, user.id, "User access was disabled.");
       }
     }
@@ -10295,8 +10291,17 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       (beforeDashboardViewer?.accessType ?? null) !== (afterDashboardViewer?.accessType ?? null)
       || (beforeDashboardViewer?.orgId ?? null) !== (afterDashboardViewer?.orgId ?? null);
     if (beforeDashboardViewer && (!afterDashboardViewer || dashboardScopeChanged)) {
-      webAuthService.revokeUserSessions(db, user.id);
+      revokeDashboardSessions = true;
       db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
+    }
+    if (revokeDashboardSessions) {
+      queueDatabasePostCommitEffect(db, {
+        category: "security_cleanup",
+        description: `Revoke dashboard sessions for updated user ${user.id}.`,
+        run: async () => {
+          await revokeWebAuthSessionsForUserId(user.id);
+        }
+      });
     }
 
     user.updatedAt = now.toISOString();
@@ -10342,17 +10347,41 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     const user = db.users[userIndex];
 
     db.users.splice(userIndex, 1);
-    db.usageSessions = db.usageSessions.filter((session) => session.userId !== user.id);
-    db.scoreRecords = db.scoreRecords.filter((record) => record.userId !== user.id);
-    db.aiUsageEvents = db.aiUsageEvents.filter((event) => event.userId !== user.id);
-    db.supportCases = db.supportCases.filter((supportCase) => supportCase.userId !== user.id);
+    usageSessionAccess.deleteForUser(db, user.id);
     db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
     db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
     db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
-    db.webAuthSessions = (db.webAuthSessions ?? []).filter((record) => record.userId !== user.id);
     db.enterpriseJoinRequests = db.enterpriseJoinRequests
       .filter((record) => record.userId !== user.id)
       .map((record) => (record.decidedByUserId === user.id ? { ...record, decidedByUserId: null } : record));
+    queueDatabasePostCommitEffect(db, {
+      category: "security_cleanup",
+      description: `Revoke dashboard sessions for deleted user ${user.id}.`,
+      run: async () => {
+        await revokeWebAuthSessionsForUserId(user.id);
+      }
+    });
+    queueDatabasePostCommitEffect(db, {
+      category: "post_commit_cleanup",
+      description: `Delete score records for removed user ${user.id}.`,
+      run: async () => {
+        await scoreRecordAccess.deleteForUser(db, user.id);
+      }
+    });
+    queueDatabasePostCommitEffect(db, {
+      category: "post_commit_cleanup",
+      description: `Delete AI usage events for removed user ${user.id}.`,
+      run: async () => {
+        await aiUsageEventAccess.deleteForUser(user.id);
+      }
+    });
+    queueDatabasePostCommitEffect(db, {
+      category: "post_commit_cleanup",
+      description: `Delete support cases for removed user ${user.id}.`,
+      run: async () => {
+        await supportCaseStore.deleteCasesForUser(user.id);
+      }
+    });
 
     const waiters = mobileUpdateWaitersByUserId.get(user.id);
     if (waiters && waiters.size > 0) {
@@ -11255,7 +11284,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       }
     }
 
-    db.supportCases.push(record);
+    await supportCaseStore.saveCase(record, { now: new Date(now) });
     appendMobileAuditEvent(db, user, {
       action: "support.case_created",
       userId: user.id,
@@ -11282,39 +11311,46 @@ app.get("/mobile/users/:userId/updates", async (request: Request, response: Resp
   const timeoutMs = Math.max(1_000, Math.min(30_000, clampNonNegativeInteger(request.query.timeoutMs, 25_000)));
   const since = Math.max(0, clampNonNegativeInteger(request.query.cursor, 0));
 
-  const db = await loadDatabase();
-  const user = getUserById(db, request.params.userId);
-  if (!user) {
-    response.status(404).json({ error: "User not found." });
-    return;
-  }
+  const waitContext = await withDatabaseRead(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
 
-  if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-    response.status(401).json({ error: "Invalid mobile token." });
-    return;
-  }
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return null;
+    }
 
-  const currentCursor = getMobileUpdateCursor(user.id);
-  const hasCachedPayload = mobileUpdatePayloadByUserId.has(user.id);
+    const currentCursor = getMobileUpdateCursor(user.id);
+    const hasCachedPayload = mobileUpdatePayloadByUserId.has(user.id);
 
-  if (since > currentCursor || (since === 0 && currentCursor === 0 && !hasCachedPayload)) {
-    const resyncCursor = bumpMobileUpdateCursor(user.id, "resync");
-    const payload = buildMobileUpdatesPayload(db, user, resyncCursor, "resync");
-    mobileUpdatePayloadByUserId.set(user.id, payload);
-    response.setHeader("Cache-Control", "no-store");
-    response.json(payload);
-    return;
-  }
+    if (since > currentCursor || (since === 0 && currentCursor === 0 && !hasCachedPayload)) {
+      const resyncCursor = bumpMobileUpdateCursor(user.id, "resync");
+      const payload = buildMobileUpdatesPayload(db, user, resyncCursor, "resync");
+      mobileUpdatePayloadByUserId.set(user.id, payload);
+      response.setHeader("Cache-Control", "no-store");
+      response.json(payload);
+      return null;
+    }
 
-  if (currentCursor > since) {
-    const cached = mobileUpdatePayloadByUserId.get(user.id);
-    const reason = mobileUpdateReasonByUserId.get(user.id) ?? "unknown";
-    response.setHeader("Cache-Control", "no-store");
-    response.json(
-      cached && cached.cursor === currentCursor
-        ? cached
-        : buildMobileUpdatesPayload(db, user, currentCursor, reason),
-    );
+    if (currentCursor > since) {
+      const cached = mobileUpdatePayloadByUserId.get(user.id);
+      const reason = mobileUpdateReasonByUserId.get(user.id) ?? "unknown";
+      response.setHeader("Cache-Control", "no-store");
+      response.json(
+        cached && cached.cursor === currentCursor
+          ? cached
+          : buildMobileUpdatesPayload(db, user, currentCursor, reason),
+      );
+      return null;
+    }
+
+    return { userId: user.id };
+  });
+
+  if (!waitContext) {
     return;
   }
 
@@ -11323,8 +11359,8 @@ app.get("/mobile/users/:userId/updates", async (request: Request, response: Resp
     resolved: false,
     response,
     timeoutHandle: setTimeout(() => {
-      const cursor = getMobileUpdateCursor(user.id);
-      resolveWaiter(user.id, waiter, {
+      const cursor = getMobileUpdateCursor(waitContext.userId);
+      resolveWaiter(waitContext.userId, waiter, {
         cursor,
         changed: false,
         reason: null,
@@ -11333,7 +11369,7 @@ app.get("/mobile/users/:userId/updates", async (request: Request, response: Resp
     }, timeoutMs),
   };
 
-  resolveMobileWaitersSet(user.id).add(waiter);
+  resolveMobileWaitersSet(waitContext.userId).add(waiter);
 
   request.on("close", () => {
     if (waiter.resolved) {
@@ -11342,7 +11378,7 @@ app.get("/mobile/users/:userId/updates", async (request: Request, response: Resp
 
     waiter.resolved = true;
     clearTimeout(waiter.timeoutHandle);
-    cleanupWaiter(user.id, waiter);
+    cleanupWaiter(waitContext.userId, waiter);
   });
 });
 
@@ -11506,7 +11542,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
       allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
@@ -11557,7 +11593,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
             createdAt: nowIso()
           };
 
-          db.aiUsageEvents.push(event);
+          await aiUsageEventAccess.append(event);
         });
       } catch (persistError) {
         const message = persistError instanceof Error ? persistError.message : String(persistError);
@@ -11707,7 +11743,7 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
       allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
@@ -12179,7 +12215,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date());
+    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date());
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
       return null;
@@ -12302,7 +12338,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
             createdAt: nowIso()
           };
 
-          db.aiUsageEvents.push(event);
+          await aiUsageEventAccess.append(event);
           appendMobileAuditEvent(db, user, {
             action: "ai.simulation.opening.details",
             userId: user.id,
@@ -12444,7 +12480,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
       allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
@@ -12570,7 +12606,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
             createdAt: nowIso()
           };
 
-          db.aiUsageEvents.push(event);
+          await aiUsageEventAccess.append(event);
           appendMobileAuditEvent(db, user, {
             action: "ai.simulation.turn.details",
             userId: user.id,
@@ -12729,7 +12765,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       return null;
     }
 
-    const aiBudgetError = resolveAiBudgetLimitError(db, user, new Date(), {
+    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
       allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
@@ -12888,7 +12924,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
             throw new Error("User not found while saving score.");
           }
 
-          db.scoreRecords.push(record);
+          await scoreRecordAccess.append(db, record);
           syncTrainingPackAssignmentsForUserPack(db, context.actingOrgId, user.id, record.trainingPackId ?? null);
 
           const event: AiUsageEvent = {
@@ -12907,7 +12943,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
             createdAt: nowIso()
           };
 
-          db.aiUsageEvents.push(event);
+          await aiUsageEventAccess.append(event);
           appendMobileAuditEvent(db, user, {
             action: "ai.simulation.score.details",
             userId: user.id,
@@ -13068,7 +13104,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     };
 
     if (!accessContext.isSuperUser) {
-      db.scoreRecords.push(record);
+      await scoreRecordAccess.append(db, record);
       syncTrainingPackAssignmentsForUserPack(db, accessContext.actingOrgId, user.id, record.trainingPackId ?? null);
     }
     response.status(201).json(record);
@@ -13101,114 +13137,27 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
     const now = new Date();
     const periodEndAt = now.toISOString();
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
-    const periodStartMs = new Date(periodStartAt).getTime();
-    const periodEndMs = now.getTime();
-
-    const scoreRecords = (db.scoreRecords ?? []).filter((record) => {
-      if (record.userId !== user.id) {
-        return false;
-      }
-
-      if (segmentId && record.segmentId !== segmentId) {
-        return false;
-      }
-
-      const endedAtMs = new Date(record.endedAt).getTime();
-      if (Number.isNaN(endedAtMs)) {
-        return false;
-      }
-
-      return endedAtMs >= periodStartMs && endedAtMs < periodEndMs;
-    });
-
-    const safeScores = scoreRecords.map((record) => Math.max(0, Math.min(100, record.overallScore)));
-    const avgOverallScore = safeScores.length > 0 ? safeScores.reduce((a, b) => a + b, 0) / safeScores.length : null;
-
-    const toDayKeyUtc = (iso: string): string | null => {
-      const date = new Date(iso);
-      if (Number.isNaN(date.getTime())) {
-        return null;
-      }
-      return date.toISOString().slice(0, 10);
-    };
-
-    const byDay = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of scoreRecords) {
-      const dayKey = toDayKeyUtc(record.endedAt);
-      if (!dayKey) {
-        continue;
-      }
-      const current = byDay.get(dayKey) ?? { sessions: 0, totalScore: 0 };
-      byDay.set(dayKey, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
-
     const segmentLabelById = new Map(db.config.segments.map((segment) => [segment.id, segment.label]));
     const industryLabelById = new Map((db.config.industries ?? []).map((industry) => [industry.id, industry.label]));
-    const bySegment = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of scoreRecords) {
-      const current = bySegment.get(record.segmentId) ?? { sessions: 0, totalScore: 0 };
-      bySegment.set(record.segmentId, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
-
-    const byIndustry = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of scoreRecords) {
-      const industryId = typeof record.industryId === "string" ? record.industryId.trim() : "";
-      if (!industryId) {
-        continue;
-      }
-      const current = byIndustry.get(industryId) ?? { sessions: 0, totalScore: 0 };
-      byIndustry.set(industryId, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
+    const summary = scoreRecordAccess.buildUserScoreSummary({
+      db,
+      userId: user.id,
+      segmentId: segmentId || null,
+      periodStartAt: new Date(periodStartAt),
+      periodEndAt: now,
+      segmentLabelById,
+      industryLabelById
+    });
 
     response.json({
       generatedAt: now.toISOString(),
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
       filters: { segmentId: segmentId || null },
-      totals: { sessions: scoreRecords.length, avgOverallScore },
-      byDay: Array.from(byDay.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([dayKey, row]) => ({
-          dayKey,
-          sessions: row.sessions,
-          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-        })),
-      bySegment: Array.from(bySegment.entries())
-        .map(([id, row]) => ({
-          segmentId: id,
-          segmentLabel: segmentLabelById.get(id) ?? id,
-          sessions: row.sessions,
-          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-        }))
-        .sort((a, b) => b.sessions - a.sessions),
-      byIndustry: Array.from(byIndustry.entries())
-        .map(([industryId, row]) => ({
-          industryId,
-          industryLabel: industryLabelById.get(industryId) ?? industryId,
-          sessions: row.sessions,
-          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-        }))
-        .sort((a, b) => b.sessions - a.sessions),
-      recent: scoreRecords
-        .slice()
-        .sort((a, b) => new Date(b.endedAt).getTime() - new Date(a.endedAt).getTime())
-        .slice(0, 25)
-        .map((record) => ({
-          id: record.id,
-          endedAt: record.endedAt,
-          segmentId: record.segmentId,
-          scenarioId: record.scenarioId,
-          industryId: typeof record.industryId === "string" ? record.industryId : null,
-          overallScore: record.overallScore
-        }))
+      totals: summary.totals,
+      byDay: summary.byDay,
+      bySegment: summary.bySegment,
+      byIndustry: summary.byIndustry,
+      recent: summary.recent
     });
   });
 });
@@ -13531,36 +13480,15 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
     const periodStartMs = new Date(periodStartAt).getTime();
     const periodEndMs = now.getTime();
-
-    const sessions = db.usageSessions.filter((session) => {
-      if (session.userId !== target.id) {
-        return false;
-      }
-      const startedAtMs = new Date(session.startedAt).getTime();
-      if (Number.isNaN(startedAtMs)) {
-        return false;
-      }
-      return startedAtMs >= periodStartMs && startedAtMs < periodEndMs;
+    const activityWindow = simulationHistoryAccess.listActivityWindow(db, {
+      userId: target.id,
+      periodStartAt: new Date(periodStartAt),
+      periodEndAt: now
     });
-
-    const billedSeconds = sessions.reduce(
-      (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
-      0
-    );
-
-    const scores = (db.scoreRecords ?? []).filter((record) => {
-      if (record.userId !== target.id) {
-        return false;
-      }
-      const endedAtMs = new Date(record.endedAt).getTime();
-      if (Number.isNaN(endedAtMs)) {
-        return false;
-      }
-      return endedAtMs >= periodStartMs && endedAtMs < periodEndMs;
-    });
-
-    const safeScores = scores.map((record) => Math.max(0, Math.min(100, record.overallScore)));
-    const avgOverallScore = safeScores.length > 0 ? safeScores.reduce((a, b) => a + b, 0) / safeScores.length : null;
+    const sessions = activityWindow.usageSessions;
+    const scores = activityWindow.scoreRecords;
+    const billedSeconds = usageSessionAccess.sumBilledSeconds(sessions);
+    const avgOverallScore = scoreRecordAccess.computeAverageOverallScore(scores);
     const dailyOverageExpiresAt = target.dailyOverageExpiresAt;
     const allowDailyOverageThisCycle =
       target.allowDailyOverageThisCycle === true &&
@@ -13770,114 +13698,28 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
     const periodStartMs = new Date(periodStartAt).getTime();
     const periodEndMs = now.getTime();
 
-    const records = (db.scoreRecords ?? []).filter((record) => {
-      if (record.orgId !== org.id) {
-        return false;
-      }
-      const endedAtMs = new Date(record.endedAt).getTime();
-      if (Number.isNaN(endedAtMs)) {
-        return false;
-      }
-      return endedAtMs >= periodStartMs && endedAtMs < periodEndMs;
-    });
-
-    const safeScores = records.map((record) => Math.max(0, Math.min(100, record.overallScore)));
-    const orgAvgOverallScore = safeScores.length > 0 ? safeScores.reduce((a, b) => a + b, 0) / safeScores.length : null;
-
     const segmentLabelById = new Map(db.config.segments.map((segment) => [segment.id, segment.label]));
     const industryLabelById = new Map((db.config.industries ?? []).map((industry) => [industry.id, industry.label]));
-    const bySegment = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of records) {
-      const current = bySegment.get(record.segmentId) ?? { sessions: 0, totalScore: 0 };
-      bySegment.set(record.segmentId, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
-
-    const byIndustry = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of records) {
-      const industryId = typeof record.industryId === "string" ? record.industryId.trim() : "";
-      if (!industryId) {
-        continue;
-      }
-      const current = byIndustry.get(industryId) ?? { sessions: 0, totalScore: 0 };
-      byIndustry.set(industryId, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
-
-    const byUser = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of records) {
-      const current = byUser.get(record.userId) ?? { sessions: 0, totalScore: 0 };
-      byUser.set(record.userId, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
-
-    const userById = new Map(db.users.map((user) => [user.id, user]));
-    const topUsers = Array.from(byUser.entries())
-      .map(([userId, row]) => ({
-        userId,
-        email: userById.get(userId)?.email ?? userId,
-        sessions: row.sessions,
-        avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-      }))
-      .sort((a, b) => (b.avgOverallScore ?? 0) - (a.avgOverallScore ?? 0))
-      .slice(0, 5);
-
-    const toDayKeyUtc = (iso: string): string | null => {
-      const date = new Date(iso);
-      if (Number.isNaN(date.getTime())) {
-        return null;
-      }
-      return date.toISOString().slice(0, 10);
-    };
-
-    const trend = new Map<string, { sessions: number; totalScore: number }>();
-    for (const record of records) {
-      const dayKey = toDayKeyUtc(record.endedAt);
-      if (!dayKey) {
-        continue;
-      }
-      const current = trend.get(dayKey) ?? { sessions: 0, totalScore: 0 };
-      trend.set(dayKey, {
-        sessions: current.sessions + 1,
-        totalScore: current.totalScore + Math.max(0, Math.min(100, record.overallScore))
-      });
-    }
+    const userEmailById = new Map(db.users.map((user) => [user.id, user.email]));
+    const analytics = scoreRecordAccess.buildOrgScoreAnalytics({
+      db,
+      orgId: org.id,
+      periodStartAt: new Date(periodStartAt),
+      periodEndAt: now,
+      segmentLabelById,
+      industryLabelById,
+      userEmailById
+    });
 
     response.json({
       generatedAt: now.toISOString(),
       org: { id: org.id, name: org.name },
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
-      orgAvgOverallScore,
-      topUsers,
-      bySegment: Array.from(bySegment.entries())
-        .map(([segmentId, row]) => ({
-          segmentId,
-          segmentLabel: segmentLabelById.get(segmentId) ?? segmentId,
-          sessions: row.sessions,
-          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-        }))
-        .sort((a, b) => b.sessions - a.sessions),
-      byIndustry: Array.from(byIndustry.entries())
-        .map(([industryId, row]) => ({
-          industryId,
-          industryLabel: industryLabelById.get(industryId) ?? industryId,
-          sessions: row.sessions,
-          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-        }))
-        .sort((a, b) => b.sessions - a.sessions),
-      trendByDay: Array.from(trend.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([dayKey, row]) => ({
-          dayKey,
-          sessions: row.sessions,
-          avgOverallScore: row.sessions > 0 ? row.totalScore / row.sessions : null
-        }))
+      orgAvgOverallScore: analytics.orgAvgOverallScore,
+      topUsers: analytics.topUsers,
+      bySegment: analytics.bySegment,
+      byIndustry: analytics.byIndustry,
+      trendByDay: analytics.trendByDay
     });
   });
 });
@@ -13974,7 +13816,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     }
 
     if (!accessContext.isSuperUser) {
-      db.usageSessions.push({
+      usageSessionAccess.append(db, {
         id: `sess_${uuid()}`,
         userId: user.id,
         orgId: accessContext.actingOrgId,
@@ -14009,37 +13851,18 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
 app.get("/usage", requireAdmin, async (_request: Request, response: Response) => {
   await withDatabase(async (db) => {
     const now = new Date();
-    const aiUsageEvents = db.aiUsageEvents ?? [];
+    const rows = [];
 
-    const rows = db.users.filter((user) => user.isSuperUser !== true).map((user) => {
+    for (const user of db.users.filter((entry) => entry.isSuperUser !== true)) {
       const entitlements = computeEntitlements(db, user, now);
       const timezone = materializeUserTimezone(user, now);
-      const dayKey = getDayKey(now, timezone);
-      const monthKey = getMonthKey(now, timezone);
-      let tokensUsedToday = 0;
-      let tokensUsedThisMonth = 0;
+      const usageTotals = await aiUsageEventAccess.computeCurrentPeriodTotals({
+        userId: user.id,
+        now,
+        timeZone: timezone
+      });
 
-      for (const event of aiUsageEvents) {
-        if (event.userId !== user.id) {
-          continue;
-        }
-
-        const createdAt = parseIsoDateOrNull(event.createdAt);
-        if (!createdAt) {
-          continue;
-        }
-
-        const eventDayKey = getDayKey(createdAt, timezone);
-        const eventMonthKey = getMonthKey(createdAt, timezone);
-        if (eventDayKey === dayKey) {
-          tokensUsedToday += Math.max(0, clampNonNegativeInteger(event.totalTokens, 0));
-        }
-        if (eventMonthKey === monthKey) {
-          tokensUsedThisMonth += Math.max(0, clampNonNegativeInteger(event.totalTokens, 0));
-        }
-      }
-
-      return {
+      rows.push({
         userId: user.id,
         email: user.email,
         tier: user.tier,
@@ -14048,10 +13871,10 @@ app.get("/usage", requireAdmin, async (_request: Request, response: Response) =>
         minutesUsedToday: secondsToWholeMinutes(entitlements.usage.billedSecondsToday),
         minutesUsedThisMonth: secondsToWholeMinutes(entitlements.usage.billedSecondsThisMonth),
         dailySecondsRemaining: entitlements.usage.dailySecondsRemaining,
-        tokensUsedToday,
-        tokensUsedThisMonth
-      };
-    });
+        tokensUsedToday: usageTotals.tokensUsedToday,
+        tokensUsedThisMonth: usageTotals.tokensUsedThisMonth
+      });
+    }
 
     response.json({
       generatedAt: now.toISOString(),
@@ -14075,57 +13898,41 @@ app.get("/audit/events", requireAdmin, async (request: Request, response: Respon
     return;
   }
 
-  if (queryActorType && queryActorType !== "platform_admin" && queryActorType !== "mobile_user" && queryActorType !== "system") {
-    response.status(400).json({ error: "actorType must be platform_admin, mobile_user, or system." });
+  if (queryActorType && !AUDIT_ACTOR_TYPES.includes(queryActorType as (typeof AUDIT_ACTOR_TYPES)[number])) {
+    response.status(400).json({
+      error: `actorType must be one of: ${AUDIT_ACTOR_TYPES.join(", ")}.`,
+    });
     return;
   }
 
-  await withDatabaseRead(async (db) => {
-    const now = new Date();
-    const end = to ?? now;
-    const start = from ?? new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
-    const startMs = start.getTime();
-    const endMs = end.getTime();
+  const now = new Date();
+  const end = to ?? now;
+  const start = from ?? new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+  const events = await auditEventStore.listEvents({
+    orgId: queryOrgId || null,
+    actorId: queryActorId || null,
+    actorType: (queryActorType || null) as AuditEvent["actorType"] | null,
+    action: queryAction || null,
+    from: start,
+    to: end,
+    limit
+  });
 
+  await withDatabaseRead(async (db) => {
     const orgById = new Map(db.orgs.map((org) => [org.id, org]));
     const userById = new Map(db.users.map((user) => [user.id, user]));
 
-    const rows = (db.auditEvents ?? [])
-      .filter((event) => {
-        if (queryOrgId && event.orgId !== queryOrgId) {
-          return false;
-        }
-        if (queryActorId && event.actorId !== queryActorId) {
-          return false;
-        }
-        if (queryActorType && event.actorType !== queryActorType) {
-          return false;
-        }
-        if (queryAction && event.action !== queryAction) {
-          return false;
-        }
-
-        const createdAtMs = new Date(event.createdAt).getTime();
-        if (Number.isNaN(createdAtMs)) {
-          return false;
-        }
-
-        return createdAtMs >= startMs && createdAtMs <= endMs;
-      })
-      .slice()
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, limit)
-      .map((event) => {
-        const org = event.orgId ? orgById.get(event.orgId) : null;
-        const actorUser = event.actorId ? userById.get(event.actorId) : null;
-        const targetUser = event.userId ? userById.get(event.userId) : null;
-        return {
-          ...event,
-          orgName: org?.name ?? null,
-          actorEmail: actorUser?.email ?? null,
-          userEmail: targetUser?.email ?? null
-        };
-      });
+    const rows = events.map((event) => {
+      const org = event.orgId ? orgById.get(event.orgId) : null;
+      const actorUser = event.actorId ? userById.get(event.actorId) : null;
+      const targetUser = event.userId ? userById.get(event.userId) : null;
+      return {
+        ...event,
+        orgName: org?.name ?? null,
+        actorEmail: actorUser?.email ?? null,
+        userEmail: targetUser?.email ?? null
+      };
+    });
 
     response.json({
       generatedAt: now.toISOString(),
@@ -14310,6 +14117,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
 });
 
 app.get("/support/cases", requireAdmin, async (_request: Request, response: Response) => {
+  const supportCases = await supportCaseStore.listCases({ now: new Date() });
   await withDatabaseRead(async (db) => {
     const now = nowIso();
     const userById = new Map(db.users.map((user) => [user.id, user]));
@@ -14323,9 +14131,7 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
       }
     }
 
-    const cases = (db.supportCases ?? [])
-      .slice()
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    const cases = supportCases
       .map((entry) => {
         const user = userById.get(entry.userId);
         const org = entry.orgId ? orgById.get(entry.orgId) : undefined;
@@ -14356,13 +14162,13 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
 
 app.get("/support/cases/:caseId", requireAdmin, async (request: Request, response: Response) => {
   const caseId = request.params.caseId;
-  await withDatabaseRead(async (db) => {
-    const entry = (db.supportCases ?? []).find((row) => row.id === caseId);
-    if (!entry) {
-      response.status(404).json({ error: "Support case not found." });
-      return;
-    }
+  const entry = await supportCaseStore.getCaseById(caseId, { now: new Date() });
+  if (!entry) {
+    response.status(404).json({ error: "Support case not found." });
+    return;
+  }
 
+  await withDatabaseRead(async (db) => {
     const user = getUserById(db, entry.userId);
     const org = getOrgById(db, entry.orgId);
 
@@ -14410,72 +14216,27 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
     const orgById = new Map(db.orgs.map((org) => [org.id, org]));
     const userById = new Map(db.users.map((user) => [user.id, user]));
     const segmentLabelById = new Map(db.config.segments.map((segment) => [segment.id, segment.label]));
-
-    const filteredSessions = db.usageSessions.filter((session) => {
-      if (!session.orgId) {
-        return false;
-      }
-      if (queryOrgId && session.orgId !== queryOrgId) {
-        return false;
-      }
-      if (querySegmentId && session.segmentId !== querySegmentId) {
-        return false;
-      }
-
-      const startedAtMs = new Date(session.startedAt).getTime();
-      if (Number.isNaN(startedAtMs)) {
-        return false;
-      }
-
-      return startedAtMs >= periodStartMs && startedAtMs < periodEndMs;
+    const filteredActivity = simulationHistoryAccess.listActivityWindow(db, {
+      orgId: queryOrgId || undefined,
+      segmentId: querySegmentId || undefined,
+      periodStartAt: new Date(periodStartAt),
+      periodEndAt: now
     });
+    const filteredSessions = filteredActivity.usageSessions.filter((session) => Boolean(session.orgId));
+    const filteredScores = filteredActivity.scoreRecords.filter((record) => Boolean(record.orgId));
 
-    const filteredScores = (db.scoreRecords ?? []).filter((record) => {
-      if (!record.orgId) {
-        return false;
-      }
-      if (queryOrgId && record.orgId !== queryOrgId) {
-        return false;
-      }
-      if (querySegmentId && record.segmentId !== querySegmentId) {
-        return false;
-      }
-
-      const endedAtMs = new Date(record.endedAt).getTime();
-      if (Number.isNaN(endedAtMs)) {
-        return false;
-      }
-
-      return endedAtMs >= periodStartMs && endedAtMs < periodEndMs;
-    });
-
-    const filteredAiEvents = (db.aiUsageEvents ?? []).filter((event) => {
-      if (!event.orgId) {
-        return false;
-      }
-      if (queryOrgId && event.orgId !== queryOrgId) {
-        return false;
-      }
-      if (querySegmentId && event.segmentId !== querySegmentId) {
-        return false;
-      }
-
-      const createdAtMs = new Date(event.createdAt).getTime();
-      if (Number.isNaN(createdAtMs)) {
-        return false;
-      }
-
-      return createdAtMs >= periodStartMs && createdAtMs < periodEndMs;
-    });
+    const filteredAiEvents = (await aiUsageEventAccess.list({
+      orgId: queryOrgId || null,
+      segmentId: querySegmentId || null,
+      createdAtFrom: new Date(periodStartAt),
+      createdAtBefore: now
+    })).filter((event) => Boolean(event.orgId));
 
     const totalBilledSeconds = filteredSessions.reduce(
       (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
       0
     );
-    const totalAiTokens = filteredAiEvents.reduce(
-      (total, event) => total + Math.max(0, clampNonNegativeInteger(event.totalTokens, 0)),
-      0
-    );
+    const totalAiTokens = sumAiUsageEventTokens(filteredAiEvents);
     const totalAvgScore =
       filteredScores.length > 0
         ? filteredScores.reduce((total, record) => total + Math.max(0, Math.min(100, record.overallScore)), 0) /
@@ -14763,6 +14524,16 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 });
 
 void (async () => {
+  await auditEventStore.initialize();
+  await migrateLegacyAuditEventsFromAppState();
+  await aiUsageEventStore.initialize();
+  await migrateLegacyAiUsageEventsFromAppState();
+  await scoreRecordStore.initialize();
+  await migrateLegacyScoreRecordsFromAppState();
+  await supportCaseStore.initialize();
+  await migrateLegacySupportCasesFromAppState();
+  await webAuthSessionStore.initialize();
+  await migrateLegacyWebAuthSessionsFromAppState();
   await trainingPackStore.initialize();
 
   app.listen(PORT, () => {

@@ -65,6 +65,7 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
 
   assert.ok(viewer);
   assert.equal(viewer.accessType, "customer_dashboard_user");
+  assert.equal("isPlatformAdmin" in viewer, false);
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
@@ -91,6 +92,7 @@ test("mixed platform_admin plus tenant-valid user keeps tenant-scoped dashboard 
   assert.equal(eligibility.reason, "customer_dashboard_user");
   assert.ok(viewer);
   assert.equal(viewer.accessType, "customer_dashboard_user");
+  assert.equal("isPlatformAdmin" in viewer, false);
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
@@ -119,6 +121,7 @@ test("super users retain cross-account dashboard access", () => {
 
   assert.ok(viewer);
   assert.equal(viewer.accessType, "super_user");
+  assert.equal("isPlatformAdmin" in viewer, false);
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), true);

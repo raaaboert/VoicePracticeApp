@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { AuditActorType } from "@voicepractice/shared";
 import { EnterpriseOrg, UserProfile } from "@voicepractice/shared";
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
 import { useAdminMode } from "../../src/lib/adminMode";
-
-type AuditActorType = "platform_admin" | "mobile_user" | "system";
 
 interface AuditEventRow {
   id: string;
@@ -223,6 +222,7 @@ export default function LogsPage() {
             <select value={actorType} onChange={(event) => setActorType(event.target.value as "" | AuditActorType)}>
               <option value="">All actor types</option>
               <option value="platform_admin">Platform Admin</option>
+              <option value="web_user">Dashboard Web User</option>
               <option value="mobile_user">Mobile User</option>
               <option value="system">System</option>
             </select>

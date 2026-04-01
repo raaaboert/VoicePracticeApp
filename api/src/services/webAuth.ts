@@ -93,7 +93,6 @@ export function createWebAuthService(params: {
   }
 
   function issueSession(
-    db: ApiDatabase,
     user: UserProfile,
     ttlMinutes: number,
     now: Date,
@@ -117,7 +116,6 @@ export function createWebAuthService(params: {
       createdIp: normalizedMetadata.ipAddress,
       lastSeenIp: normalizedMetadata.ipAddress,
     };
-    db.webAuthSessions.push(record);
 
     const payload: WebAuthTokenPayload = {
       kind: "web",
@@ -130,6 +128,7 @@ export function createWebAuthService(params: {
     const signature = crypto.createHmac("sha256", tokenSecret).update(`${header}.${body}`).digest("base64url");
 
     return {
+      record,
       token: `${header}.${body}.${signature}`,
       expiresAt,
       sessionId
@@ -218,20 +217,6 @@ export function createWebAuthService(params: {
     return "ok";
   }
 
-  function getActiveSessionRecord(db: ApiDatabase, payload: WebAuthTokenPayload, now = new Date()): WebAuthSessionRecord | null {
-    const record = (db.webAuthSessions ?? []).find((entry) => entry.sessionId === payload.sid && entry.userId === payload.sub);
-    if (!record) {
-      return null;
-    }
-
-    const expiresAtMs = new Date(record.expiresAt).getTime();
-    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-      return null;
-    }
-
-    return record;
-  }
-
   function touchSession(record: WebAuthSessionRecord, now: Date, metadata?: Omit<WebAuthSessionMetadata, "accessType" | "orgId">): boolean {
     const nowIso = now.toISOString();
     const normalizedMetadata = normalizeSessionMetadata(metadata);
@@ -270,22 +255,11 @@ export function createWebAuthService(params: {
     return true;
   }
 
-  function revokeSession(db: ApiDatabase, sessionId: string): void {
-    db.webAuthSessions = (db.webAuthSessions ?? []).filter((entry) => entry.sessionId !== sessionId);
-  }
-
-  function revokeUserSessions(db: ApiDatabase, userId: string): void {
-    db.webAuthSessions = (db.webAuthSessions ?? []).filter((entry) => entry.userId !== userId);
-  }
-
   return {
     issueSession,
     verifyToken,
     issueSignInChallenge,
     verifyLatestSignInChallenge,
-    getActiveSessionRecord,
     touchSession,
-    revokeSession,
-    revokeUserSessions
   };
 }

@@ -26,28 +26,20 @@ The durable parts of the dashboard foundation are:
 
 - shared user identity by email
 - verified-email gating via `emailVerifiedAt`
-- explicit dashboard authorization via `dashboardAccessEnabled` and `isPlatformAdmin`
-- server-scoped customer access and customer endpoints
+- explicit dashboard authorization via server-side viewer resolution
+- tenant-scoped customer dashboard users and `super_user` cross-account access
+- Customers as the super-user-only org drilldown path
 
 The shared `/web/auth/*` OTP flow is the only auth path used by `peritio-web`.
 
-## First live deployment shape
-
-For the first live pass, deploy only the dashboard app:
-
-- keep the existing root `peritio.ai` site exactly as-is
-- add only `app.peritio.ai` to the Vercel project for `peritio-web`
-- point `PERITIO_API_BASE_URL` at the existing Render API
-- keep OTP delivery on the API in `log_only` mode so codes are read from Render logs manually
-
-This app can still keep `PERITIO_PUBLIC_HOST=peritio.ai` for redirect behavior even if the root domain is not attached to this Vercel project.
+The dashboard now uses a hardened OTP request/verify flow plus trusted 14-day browser sessions for returning users.
 
 ## OTP delivery
 
 The API owns OTP delivery behind `api/src/services/authCodeDelivery.ts`.
 
 - Local/dev: keep `AUTH_CODE_DELIVERY_PROVIDER=log_only`
-- Lowest-risk dashboard email rollout: keep `AUTH_CODE_DELIVERY_PROVIDER=log_only` and set `WEB_AUTH_CODE_DELIVERY_PROVIDER=resend`
+- Hosted dashboard: prefer `WEB_AUTH_CODE_DELIVERY_PROVIDER=resend` when you are ready to deliver real OTP emails
 - Mobile onboarding verification can stay on `log_only` until you are ready by leaving `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER` blank or setting it to `log_only`
 - Later, if you also want the practice app to email verification codes, set `MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER=resend`
 
@@ -70,7 +62,7 @@ PERITIO_APP_HOST=app.peritio.ai
 PERITIO_PUBLIC_HOST=peritio.ai
 ```
 
-First live app deployment values:
+Hosted dashboard values:
 
 ```bash
 PERITIO_API_BASE_URL=https://voicepractice-api-dev.onrender.com
@@ -120,8 +112,8 @@ During local development the API logs the one-time sign-in or verification code 
 - `peritio-web` is intended to deploy as its own Vercel project from this monorepo
 - Vercel project root directory should be `peritio-web`
 - because the app imports `@voicepractice/shared` from outside the project folder, enable Vercel's "Include files outside the root directory" setting for this project
-- for the first live pass, add only `app.peritio.ai` as a project domain
-- do not add `peritio.ai` to this Vercel project yet
+- keep `app.peritio.ai` as the authenticated dashboard host
+- keep the root `peritio.ai` site isolated from this project unless you intentionally move the public site here later
 
 ## Data/storage notes
 

@@ -27,7 +27,7 @@ function createCustomer(overrides?: Partial<DashboardCustomerSummary>): Dashboar
     activeTrainingPackCount: 2,
     customScenarioCount: 1,
     latestActivityAt: "2026-03-29T10:00:00.000Z",
-    customerUsers: [],
+    customerUserEmails: [],
     ...overrides,
   };
 }

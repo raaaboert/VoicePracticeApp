@@ -43,9 +43,9 @@ function isPathAllowedForMode(pathname: string, mode: AdminMode): boolean {
     pathname.startsWith("/users")
     || pathname.startsWith("/settings")
     || pathname.startsWith("/usage")
-    || pathname.startsWith("/support")
     || pathname.startsWith("/content")
     || pathname.startsWith("/stats")
+    || pathname.startsWith("/support")
     || pathname.startsWith("/logs")
     || pathname.startsWith("/prompt-preview")
   );
@@ -218,7 +218,7 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
               aria-label="Settings"
               title="Settings"
             >
-              ⚙
+              {"\u2699"}
             </Link>
             <button
               onClick={() => {

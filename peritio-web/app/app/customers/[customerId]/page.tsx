@@ -5,7 +5,8 @@ import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSectio
 import { CustomerDetailTabs } from "@/src/components/CustomerDetailTabs";
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
-import { DashboardAccessDeniedError, getAccessibleCustomerDetail, getDashboardViewer } from "@/src/lib/auth";
+import { DashboardAccessDeniedError, DashboardSessionInvalidError, getAccessibleCustomerDetail, getDashboardViewer } from "@/src/lib/auth";
+import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { formatDate, formatDateTime, formatScore, formatSignedPercent, formatUsageMinutes } from "@/src/lib/formatters";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -20,7 +21,11 @@ export default async function CustomerDetailPage({
   params: Promise<{ customerId: string }>;
 }) {
   const viewer = await getDashboardViewer();
-  if (viewer?.accessType !== "super_user") {
+  if (!viewer) {
+    redirect(buildDashboardSessionResetPath());
+  }
+
+  if (viewer.accessType !== "super_user") {
     redirect("/app/dashboard");
   }
 
@@ -29,6 +34,10 @@ export default async function CustomerDetailPage({
   try {
     payload = await getAccessibleCustomerDetail(customerId);
   } catch (error) {
+    if (error instanceof DashboardSessionInvalidError) {
+      redirect(buildDashboardSessionResetPath());
+    }
+
     if (error instanceof DashboardAccessDeniedError) {
       redirect("/app/access-denied?reason=customer-scope");
     }
@@ -47,7 +56,7 @@ export default async function CustomerDetailPage({
       <PageHeader
         eyebrow="Customer detail"
         title={customer.orgName}
-        description="This account page now uses live protected org usage, user performance, scenario activity, and forward-only training-pack attribution."
+        description="Review current account usage, learner performance, scenario activity, and coaching signals for this customer."
         actions={
           <div className="pill-row">
             <span className="pill">{customer.industryLabels.join(", ") || "General"}</span>
@@ -60,7 +69,7 @@ export default async function CustomerDetailPage({
         <MetricCard
           label="Active users"
           value={`${customer.activeUserCount}`}
-          meta={`${customer.totalUserCount} total users · ${customer.dashboardUserCount} dashboard-enabled`}
+          meta={`${customer.totalUserCount} total users | ${customer.dashboardUserCount} dashboard-enabled`}
         />
         <MetricCard
           label="Usage this period"
@@ -91,19 +100,19 @@ export default async function CustomerDetailPage({
             <p className="eyebrow">Account notes</p>
             <h2>Current account state</h2>
             <p className="section-copy">
-              These notes are derived from the current protected account record rather than seeded placeholder content.
+              Use these notes to quickly confirm account status, activity level, and training coverage.
             </p>
           </div>
         </div>
         <ul className="bullet-list">
           <li>
-            Primary contact is {customer.contactName} ({customer.contactEmail}).
+            Primary contact: {customer.contactName} ({customer.contactEmail}).
           </li>
           <li>
             Renewal window ends {formatDate(customer.nextRenewalAt)}. Latest recorded activity was {formatDateTime(customer.latestActivityAt)}.
           </li>
           <li>
-            {customer.simulationsLast30Days} simulations were recorded in the last 30 days, with {insights.scenarios.length} scenario rows returning live activity.
+            {customer.simulationsLast30Days} simulations were recorded in the last 30 days, with {insights.scenarios.length} scenario rows returning activity in the current reporting window.
           </li>
           <li>
             {insights.trainingPackAttribution.attributedScoresLast30Days} scored attempts in the current 30-day window were linked to a training pack.{" "}

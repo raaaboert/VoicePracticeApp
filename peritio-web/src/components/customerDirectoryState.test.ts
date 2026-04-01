@@ -27,15 +27,7 @@ function createCustomer(overrides?: Partial<DashboardCustomerSummary>): Dashboar
     activeTrainingPackCount: 2,
     customScenarioCount: 1,
     latestActivityAt: "2026-03-29T10:00:00.000Z",
-    customerUsers: [
-      {
-        userId: "usr_alpha_admin",
-        email: "owner@alphahealth.com",
-        status: "active",
-        orgRole: "org_admin",
-        dashboardAccessEnabled: true,
-      },
-    ],
+    customerUserEmails: ["owner@alphahealth.com"],
     ...overrides,
   };
 }
@@ -50,15 +42,7 @@ test("customer directory search matches org name, contact email, domain, and acc
       contactEmail: "ops@bravo.example",
       industryLabels: ["Manufacturing"],
       latestActivityAt: "2026-03-28T10:00:00.000Z",
-      customerUsers: [
-        {
-          userId: "usr_bravo_admin",
-          email: "manager@bravo.example",
-          status: "active",
-          orgRole: "org_admin",
-          dashboardAccessEnabled: true,
-        },
-      ],
+      customerUserEmails: ["manager@bravo.example"],
     }),
   ];
 

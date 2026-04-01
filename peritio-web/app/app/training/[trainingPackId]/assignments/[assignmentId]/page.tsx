@@ -4,7 +4,8 @@ import { notFound, redirect } from "next/navigation";
 
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
-import { DashboardAccessDeniedError, getDashboardTrainingPackAssignmentDetail } from "@/src/lib/auth";
+import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardTrainingPackAssignmentDetail } from "@/src/lib/auth";
+import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { formatDateTime, formatRawSeconds, formatScore } from "@/src/lib/formatters";
 
 function formatAssignmentStatus(status: string): string {
@@ -46,6 +47,10 @@ export default async function TrainingPackAssignmentDetailPage({
   try {
     payload = await getDashboardTrainingPackAssignmentDetail(trainingPackId, assignmentId);
   } catch (error) {
+    if (error instanceof DashboardSessionInvalidError) {
+      redirect(buildDashboardSessionResetPath());
+    }
+
     if (error instanceof DashboardAccessDeniedError) {
       redirect("/app/access-denied?reason=assignment-scope");
     }

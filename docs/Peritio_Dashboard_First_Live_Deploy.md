@@ -1,5 +1,8 @@
 # Peritio Dashboard First Live Deploy
 
+Historical reference only. This document describes the first live deployment shape and should not be treated as the
+current source of truth for Peritio auth, hosting, or operator workflow.
+
 This document is for the first live deployment of the Peritio dashboard at:
 
 - `app.peritio.ai`

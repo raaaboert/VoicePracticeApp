@@ -7,7 +7,7 @@ export default function SettingsPage() {
       <PageHeader
         eyebrow="Settings"
         title="Workspace settings"
-        description="The settings surface is in place now so appearance controls and future dashboard preferences have a stable home."
+        description="Manage appearance preferences today and keep future workspace settings in one place."
       />
 
       <ThemeSettingsPanel />

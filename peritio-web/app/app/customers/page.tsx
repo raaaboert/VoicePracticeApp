@@ -3,15 +3,34 @@ import { redirect } from "next/navigation";
 import { CustomersDirectory } from "@/src/components/CustomersDirectory";
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
-import { getDashboardViewer, listAccessibleCustomers } from "@/src/lib/auth";
+import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardViewer, listAccessibleCustomers } from "@/src/lib/auth";
+import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
 export default async function CustomersPage() {
   const viewer = await getDashboardViewer();
-  if (viewer?.accessType !== "super_user") {
+  if (!viewer) {
+    redirect(buildDashboardSessionResetPath());
+  }
+
+  if (viewer.accessType !== "super_user") {
     redirect("/app/dashboard");
   }
 
-  const customers = await listAccessibleCustomers();
+  let customers;
+  try {
+    customers = await listAccessibleCustomers();
+  } catch (error) {
+    if (error instanceof DashboardSessionInvalidError) {
+      redirect(buildDashboardSessionResetPath());
+    }
+
+    if (error instanceof DashboardAccessDeniedError) {
+      redirect("/app/dashboard");
+    }
+
+    throw error;
+  }
+
   const customerCount = customers.length;
   const totalActiveUsers = customers.reduce((total, customer) => total + customer.activeUserCount, 0);
   const activeTrainingPacks = customers.reduce((total, customer) => total + customer.activeTrainingPackCount, 0);

@@ -88,6 +88,7 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
   - `file` via `DB_PATH`
   - `postgres` via `DATABASE_URL` (durable, recommended for hosted deployments)
 - For the hosted Peritio dashboard, use `postgres`. Training-pack lifecycle/reporting is limited when `STORAGE_PROVIDER=file`.
+- Treat simulation-history domains (`usageSessions`, `scoreRecords`) as `postgres`-preferred for any future extraction work. Under `STORAGE_PROVIDER=file`, assume dev/demo/small-scale operation only for those domains because the current extracted-store pattern relies on full sidecar rewrites.
 - For hosted production APIs, prefer direct Postgres (`:5432`) when available, or pooler session mode (`:5432`) if direct routing is unavailable.
 - Avoid transaction pooler (`:6543`) for long-lived always-on API instances.
 - URL-encode any special characters in `DATABASE_URL` passwords (`!` -> `%21`, `@` -> `%40`, etc.).

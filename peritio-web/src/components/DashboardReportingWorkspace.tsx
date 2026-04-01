@@ -47,11 +47,11 @@ function buildTrainingPerformanceSummary(training: DashboardTrainingWorkspaceRow
   const weakestArea = training.insights.weakestArea?.label;
 
   if (strongestArea && weakestArea && strongestArea !== weakestArea) {
-    return `Your team performs strongly in ${strongestArea} but has the most room to improve in ${weakestArea}.`;
+    return `Current reporting scope performs strongly in ${strongestArea} but has the most room to improve in ${weakestArea}.`;
   }
 
   if (strongestArea) {
-    return `Your team performs most strongly in ${strongestArea} in this training.`;
+    return `Current reporting scope performs most strongly in ${strongestArea} in this training.`;
   }
 
   if (weakestArea) {
@@ -542,11 +542,11 @@ export function DashboardReportingWorkspace({
             <MetricCard
               label="Average score"
               value={
-                userSummary?.averageScoreLast30Days !== null && userSummary?.averageScoreLast30Days !== undefined
-                  ? formatScore(userSummary.averageScoreLast30Days)
+                companySummary?.averageScoreThisPeriod !== null && companySummary?.averageScoreThisPeriod !== undefined
+                  ? formatScore(companySummary.averageScoreThisPeriod)
                   : "-"
               }
-              meta="Last 30 days"
+              meta="Current reporting period"
               tone="positive"
             />
           </section>

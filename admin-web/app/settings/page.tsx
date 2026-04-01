@@ -127,8 +127,8 @@ export default function SettingsPage() {
           <div>
             <h3>Super Users</h3>
             <p className="small">
-              Super users sign in with the normal email verification flow, can inspect all customer accounts, and are
-              excluded from customer usage tracking.
+              Super users sign in with the normal email verification flow, can inspect all customer accounts, and do
+              not rely on customer-org dashboard access flags.
             </p>
           </div>
           <div className="card-actions">
@@ -171,7 +171,7 @@ export default function SettingsPage() {
         <div className="card-header">
           <div>
             <h3>Current Super Users ({rows.length})</h3>
-            <p className="small">These accounts are outside customer org structure and retain access even if a customer account is deactivated.</p>
+            <p className="small">These accounts are outside customer org structure and remain dashboard-eligible even if a customer org is deactivated.</p>
           </div>
         </div>
         <div className="table-wrap">

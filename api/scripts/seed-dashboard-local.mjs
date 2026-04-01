@@ -37,13 +37,9 @@ function loadDatabase(filePath) {
       trainingPackAssignments: [],
       usageSessions: [],
       scoreRecords: [],
-      aiUsageEvents: [],
-      auditEvents: [],
-      supportCases: [],
       mobileAuthTokens: [],
       emailVerifications: [],
       webAuthChallenges: [],
-      webAuthSessions: [],
       enterpriseJoinRequests: [],
       admin: {
         passwordHash: null,
@@ -197,9 +193,23 @@ db.users = Array.isArray(db.users) ? db.users : [];
 db.orgs = Array.isArray(db.orgs) ? db.orgs : [];
 db.trainingPackAssignments = Array.isArray(db.trainingPackAssignments) ? db.trainingPackAssignments : [];
 db.webAuthChallenges = Array.isArray(db.webAuthChallenges) ? db.webAuthChallenges : [];
-db.webAuthSessions = Array.isArray(db.webAuthSessions) ? db.webAuthSessions : [];
 if ("dashboardCredentials" in db) {
   delete db.dashboardCredentials;
+}
+if ("auditEvents" in db) {
+  delete db.auditEvents;
+}
+if ("aiUsageEvents" in db) {
+  delete db.aiUsageEvents;
+}
+if ("scoreRecords" in db) {
+  delete db.scoreRecords;
+}
+if ("supportCases" in db) {
+  delete db.supportCases;
+}
+if ("webAuthSessions" in db) {
+  delete db.webAuthSessions;
 }
 
 const superUserEmail = requireDashboardSuperUserEmail().toLowerCase();
