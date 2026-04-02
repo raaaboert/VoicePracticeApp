@@ -27,6 +27,7 @@ export async function createOpeningLine(params: {
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
+  correlationId?: string;
 }): Promise<{ assistantText: string; trainingPackId: string | null }> {
   const payload = await fetchAiOpeningLine({
     userId: params.userId,
@@ -38,6 +39,7 @@ export async function createOpeningLine(params: {
     industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
     personaStyle: params.personaStyle,
+    correlationId: params.correlationId,
   });
 
   return {
@@ -59,6 +61,7 @@ export async function generateAssistantReply(params: {
   personaStyle: PersonaStyle;
   history: DialogueMessage[];
   trainingPackId?: string | null;
+  correlationId?: string;
 }): Promise<string> {
   const payload = await fetchAiTurn({
     userId: params.userId,
@@ -72,6 +75,7 @@ export async function generateAssistantReply(params: {
     personaStyle: params.personaStyle,
     history: params.history,
     trainingPackId: params.trainingPackId ?? undefined,
+    correlationId: params.correlationId,
   });
 
   return payload.assistantText?.trim() ?? "";
@@ -82,6 +86,7 @@ export async function transcribeAudio(params: {
   authToken: string;
   audioUri: string;
   preferredMimeType?: string;
+  correlationId?: string;
 }): Promise<string> {
   const defaultMimeType = Platform.OS === "web" ? "audio/webm" : "audio/m4a";
   const mimeType = params.preferredMimeType ?? defaultMimeType;
@@ -91,6 +96,7 @@ export async function transcribeAudio(params: {
     authToken: params.authToken,
     audioUri: params.audioUri,
     mimeType,
+    correlationId: params.correlationId,
   });
 }
 

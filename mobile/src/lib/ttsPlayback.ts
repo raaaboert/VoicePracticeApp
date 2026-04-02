@@ -24,6 +24,7 @@ interface SpeakWithTtsFallbackParams {
   preset: RemoteTtsPreset;
   userId: string;
   authToken: string;
+  correlationId?: string;
   remoteTtsEnabled: boolean;
   remoteAiConfigured: boolean;
   allowRemoteTts?: boolean;
@@ -94,10 +95,12 @@ function resolveRemotePlaybackRate(profile: AiVoiceProfile): number {
 function logTtsTiming(payload: {
   source: TtsSource;
   preset: RemoteTtsPreset;
-  phase: "request_start" | "bytes_received" | "audio_loaded" | "play_started";
+  correlationId?: string;
+  phase: "request_start" | "bytes_received" | "file_written" | "audio_loaded" | "play_started";
   assistantTextReceivedAtMs: number;
   tsMs?: number;
   requestMs?: number;
+  fileWriteMs?: number;
   loadMs?: number;
   startupMs?: number;
   bytes?: number;
@@ -108,10 +111,12 @@ function logTtsTiming(payload: {
   console.log("[TTS-TIMING]", {
     source: payload.source,
     preset: payload.preset,
+    correlationId: payload.correlationId ?? null,
     phase: payload.phase,
     tsMs,
     elapsedMs,
     ...(typeof payload.requestMs === "number" ? { requestMs: payload.requestMs } : {}),
+    ...(typeof payload.fileWriteMs === "number" ? { fileWriteMs: payload.fileWriteMs } : {}),
     ...(typeof payload.loadMs === "number" ? { loadMs: payload.loadMs } : {}),
     ...(typeof payload.startupMs === "number" ? { startupMs: payload.startupMs } : {}),
     ...(typeof payload.bytes === "number" ? { bytes: payload.bytes } : {}),
@@ -175,6 +180,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         logTtsTiming({
           source: params.source,
           preset: params.preset,
+          correlationId: params.correlationId,
           phase: "request_start",
           assistantTextReceivedAtMs,
           tsMs: requestStartedAtMs,
@@ -185,12 +191,14 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           text: params.text,
           preset: params.preset,
           signal: params.abortSignal,
+          correlationId: params.correlationId,
         });
         throwIfCancelled();
         const audioBytesReceivedAtMs = Date.now();
         logTtsTiming({
           source: params.source,
           preset: params.preset,
+          correlationId: params.correlationId,
           phase: "bytes_received",
           assistantTextReceivedAtMs,
           tsMs: audioBytesReceivedAtMs,
@@ -205,19 +213,40 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
 
       const fileUri = `${cacheDirectory}vp-tts-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`;
       remoteTtsFileRef.current = fileUri;
+      const fileWriteStartedAtMs = Date.now();
       await FileSystem.writeAsStringAsync(fileUri, bytesToBase64(ttsAudio.bytes), {
         encoding: FileSystem.EncodingType.Base64,
+      });
+      const fileWrittenAtMs = Date.now();
+      logTtsTiming({
+        source: params.source,
+        preset: params.preset,
+        correlationId: params.correlationId,
+        phase: "file_written",
+        assistantTextReceivedAtMs,
+        tsMs: fileWrittenAtMs,
+        requestMs: fileWrittenAtMs - requestStartedAtMs,
+        fileWriteMs: fileWrittenAtMs - fileWriteStartedAtMs,
+        bytes: ttsAudio.bytes.byteLength,
       });
       throwIfCancelled();
 
       const sound = new Audio.Sound();
       remoteTtsSoundRef.current = sound;
       const audioLoadStartedAtMs = Date.now();
-      await sound.loadAsync({ uri: fileUri }, { shouldPlay: false });
+      const remotePlaybackRate = resolveRemotePlaybackRate(params.voiceProfile);
+      await sound.loadAsync({
+        uri: fileUri,
+      }, {
+        shouldPlay: false,
+        rate: remotePlaybackRate,
+        shouldCorrectPitch: true,
+      });
       const audioLoadedAtMs = Date.now();
       logTtsTiming({
         source: params.source,
         preset: params.preset,
+        correlationId: params.correlationId,
         phase: "audio_loaded",
         assistantTextReceivedAtMs,
         tsMs: audioLoadedAtMs,
@@ -225,14 +254,8 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         loadMs: audioLoadedAtMs - audioLoadStartedAtMs,
       });
       throwIfCancelled();
-      const remotePlaybackRate = resolveRemotePlaybackRate(params.voiceProfile);
       // eslint-disable-next-line no-console
       console.log(`[TTS-PLAY] profile=${params.voiceProfile} rate=${remotePlaybackRate}`);
-      try {
-        await sound.setRateAsync(remotePlaybackRate, true);
-      } catch {
-        // Ignore rate-control errors and continue with default playback speed.
-      }
       await new Promise<void>((resolve, reject) => {
         let playbackStartedMarked = false;
         const markPlaybackStarted = (startedAtMs: number) => {
@@ -243,6 +266,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           logTtsTiming({
             source: params.source,
             preset: params.preset,
+            correlationId: params.correlationId,
             phase: "play_started",
             assistantTextReceivedAtMs,
             tsMs: startedAtMs,

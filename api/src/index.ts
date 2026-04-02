@@ -204,6 +204,7 @@ import {
   SimulationSessionValidationError,
   touchRecognizedSimulationSession
 } from "./services/simulationSessionLifecycle.js";
+import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/simulationHotPath.js";
 import {
   pruneStaleRecognizedSimulationSessions,
   repairOrphanedUserScopedHistory
@@ -281,7 +282,8 @@ const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS = 4_000;
-const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN = 800;
+const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING = 160;
+const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_TURN = 220;
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE = 1200;
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL?.trim() || "tts-1";
 const TTS_TEXT_MAX_CHARS = 4_000;
@@ -504,20 +506,24 @@ function logSimulationAiMetrics(params: {
   startedAtMs: number;
   requestedModel: string;
   apiPathUsed: SimulationApiPath;
+  correlationId: string;
+  messageCount: number;
+  promptChars: number;
+  maxOutputTokens: number;
   completion?: SimulationCompletionResult;
   error?: unknown;
 }): number {
   const latencyMs = Math.max(0, Date.now() - params.startedAtMs);
-  if (runtimeConfig.isProduction) {
-    return latencyMs;
-  }
-
   const logPayload: Record<string, unknown> = {
     event: "ai-simulation",
+    correlationId: params.correlationId,
     route: params.route,
     requestedModel: params.requestedModel,
     apiPathUsed: params.apiPathUsed,
     latencyMs,
+    messageCount: params.messageCount,
+    promptChars: params.promptChars,
+    maxOutputTokens: params.maxOutputTokens,
     responseModel: params.completion?.model ?? "unknown",
     tokenUsage: params.completion
       ? {
@@ -551,6 +557,8 @@ async function requestSimulationCompletion(params: {
   const requestStartedAt = Date.now();
   const requestedModel = OPENAI_SIMULATION_MODEL;
   const apiPathUsed: SimulationApiPath = shouldUseResponsesApiForSimulation(requestedModel) ? "responses" : "chat";
+  const promptChars = params.messages.reduce((total, message) => total + message.content.length, 0);
+  const messageCount = params.messages.length;
 
   try {
     const completion =
@@ -573,6 +581,10 @@ async function requestSimulationCompletion(params: {
       startedAtMs: requestStartedAt,
       requestedModel,
       apiPathUsed,
+      correlationId: params.correlationId,
+      messageCount,
+      promptChars,
+      maxOutputTokens: params.maxOutputTokens,
       completion
     });
 
@@ -616,6 +628,10 @@ async function requestSimulationCompletion(params: {
       startedAtMs: requestStartedAt,
       requestedModel,
       apiPathUsed,
+      correlationId: params.correlationId,
+      messageCount,
+      promptChars,
+      maxOutputTokens: params.maxOutputTokens,
       error
     });
     throw error;
@@ -832,6 +848,21 @@ async function touchRecognizedSimulationSessionBestEffort(params: {
     const message = error instanceof Error ? error.message : String(error);
     logWarnThrottled(params.logKey, `[simulation-session] failed to touch recognized session: ${message}`);
   }
+}
+
+function runSimulationPostResponseTask(
+  task: () => Promise<void>,
+  options: {
+    logKey: string;
+    description: string;
+  },
+): void {
+  setImmediate(() => {
+    void task().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logWarnThrottled(options.logKey, `[simulation-post-response] ${options.description}: ${message}`);
+    });
+  });
 }
 
 function parseTtsPreset(value: unknown): TtsPreset | null {
@@ -11543,15 +11574,17 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
   }
 
   const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
+  const transcriptionStartedAtMs = Date.now();
   // eslint-disable-next-line no-console
-  console.log(`[request-hit] route=transcribe userId=${userId}`);
+  console.log(`[request-hit] route=transcribe userId=${userId} correlationId=${correlationId}`);
   const file = (request as unknown as { file?: { buffer: Buffer; originalname: string; mimetype: string } }).file;
   if (!file?.buffer) {
     response.status(400).json({ error: "Audio file is required." });
     return;
   }
 
-  const context = await withDatabase(async (db) => {
+  const context = await withDatabaseRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -11603,10 +11636,25 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       fileName: file.originalname || "voice-input.m4a",
       mimeType: file.mimetype || "audio/m4a"
     });
+    // eslint-disable-next-line no-console
+    console.log(
+      `[ai-transcription] ${JSON.stringify({
+        event: "ai-transcription",
+        correlationId,
+        userId,
+        durationMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
+        bytes: file.buffer.byteLength,
+        mimeType: file.mimetype || "audio/m4a",
+        textLength: text.trim().length
+      })}`
+    );
+
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json({ text });
 
     if (!context.isSuperUser) {
-      try {
-        await withDatabase(async (db) => {
+      runSimulationPostResponseTask(async () => {
+        await withDatabaseWrite(async (db) => {
           const user = getUserById(db, context.user.id);
           if (!user) {
             return;
@@ -11630,13 +11678,11 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
 
           await aiUsageEventAccess.append(event);
         });
-      } catch (persistError) {
-        const message = persistError instanceof Error ? persistError.message : String(persistError);
-        logWarnThrottled("ai-usage:transcribe", `[ai-usage] failed to persist transcribe event: ${message}`);
-      }
+      }, {
+        logKey: "ai-usage:transcribe",
+        description: "failed to persist transcribe event"
+      });
     }
-
-    response.json({ text });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Transcription failed.";
     response.status(503).json({ error: message });
@@ -11647,7 +11693,7 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
   const userId = request.params.userId;
   const correlationId = resolveSimulationCorrelationId(request);
   // eslint-disable-next-line no-console
-  console.log(`[request-hit] route=tts userId=${userId}`);
+  console.log(`[request-hit] route=tts userId=${userId} correlationId=${correlationId}`);
 
   const respondWithTtsError = (params: {
     status: number;
@@ -11741,7 +11787,7 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     return;
   }
 
-  const context = await withDatabase(async (db) => {
+  const context = await withDatabaseRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       respondWithTtsError({
@@ -11836,6 +11882,7 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       `[ai-tts] correlationId=${correlationId} preset=${preset} bytes=${ttsResult.audioBuffer.byteLength} durationEstimateSec=${durationEstimateSec}`
     );
 
+    response.setHeader("X-Correlation-Id", correlationId);
     response.setHeader("Content-Type", "audio/mpeg");
     response.setHeader("Cache-Control", "no-store");
     response.status(200).send(ttsResult.audioBuffer);
@@ -12203,8 +12250,9 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
 
   const userId = request.params.userId;
   const correlationId = resolveSimulationCorrelationId(request);
+  const routeStartedAtMs = Date.now();
   // eslint-disable-next-line no-console
-  console.log(`[request-hit] route=opening userId=${userId}`);
+  console.log(`[request-hit] route=opening userId=${userId} correlationId=${correlationId}`);
   const body = request.body as {
     scenarioId?: string;
     trainingId?: string;
@@ -12227,84 +12275,140 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     return;
   }
 
-  const context = await withDatabase(async (db) => {
-    const user = getUserById(db, userId);
-    if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return null;
-    }
-
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return null;
-    }
-
-    const accessContext = resolveMobileAccessContext(db, user, request, response, {
-      requireSuperUserOrgSelection: true,
-    });
-    if (!accessContext) {
-      return null;
-    }
-
-    const entitlements = computeEntitlements(db, user, new Date(), {
-      actingOrgId: accessContext.actingOrgId,
-    });
-    if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
-      return null;
-    }
-
-    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date());
-    if (aiBudgetError) {
-      response.status(429).json({ error: aiBudgetError });
-      return null;
-    }
-
-    const org = accessContext.actingOrg;
-    if (org) {
-      await ensureOrgTrainingWorkspace(db, org);
-    }
-
-    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
-    if (!resolvedScenario) {
-      response.status(400).json({ error: "Invalid scenario for this account." });
-      return null;
-    }
-    const useModularPromptArchitecture =
-      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
-
-    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
-      configForUser,
-      resolvedScenario.allowedIndustryIds,
-      body.industryId,
-      body.industryBaseline,
-      {
-        preferClientBaselineSnapshot: !useModularPromptArchitecture,
-        canonicalIndustryDefinitions: db.config.industries
+  const loadOpeningContext = async (
+    allowTrainingWorkspaceBootstrap: boolean,
+  ): Promise<
+    | {
+        bootstrapOrgId: string;
       }
-    );
-    return {
-      user,
-      org,
-      actingOrgId: accessContext.actingOrgId,
-      isSuperUser: accessContext.isSuperUser,
-      segment: resolvedScenario.segment,
-      scenario: resolvedScenario.scenario,
-      difficulty: difficulty ?? configForUser.defaultDifficulty,
-      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
-      industryId: industryPromptContext.industryId,
-      industryLabel: industryPromptContext.industryLabel,
-      industryBaseline: industryPromptContext.industryBaseline,
-      counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
-      maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
-      useModularPromptArchitecture
-    };
-  });
+    | {
+        user: UserProfile;
+        org: EnterpriseOrg | null;
+        actingOrgId: string | null;
+        isSuperUser: boolean;
+        segment: SegmentDefinition;
+        scenario: Scenario;
+        difficulty: Difficulty;
+        personaStyle: PersonaStyle;
+        industryId: string | null;
+        industryLabel: string | null;
+        industryBaseline: string | null;
+        counterpartBehaviorGuidance: string | null;
+        maxSimulationMinutes: number | null;
+        useModularPromptArchitecture: boolean;
+        workspaceBootstrapPerformed: boolean;
+      }
+    | null
+  > => {
+    return await withDatabaseRead(async (db) => {
+      const user = getUserById(db, userId);
+      if (!user) {
+        response.status(404).json({ error: "User not found." });
+        return null;
+      }
 
-  if (!context) {
+      if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+        response.status(401).json({ error: "Invalid mobile token." });
+        return null;
+      }
+
+      const accessContext = resolveMobileAccessContext(db, user, request, response, {
+        requireSuperUserOrgSelection: true,
+      });
+      if (!accessContext) {
+        return null;
+      }
+
+      const entitlements = computeEntitlements(db, user, new Date(), {
+        actingOrgId: accessContext.actingOrgId,
+      });
+      if (!entitlements.canStartSimulation) {
+        response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+        return null;
+      }
+
+      const aiBudgetError = await resolveAiBudgetLimitError(user, new Date());
+      if (aiBudgetError) {
+        response.status(429).json({ error: aiBudgetError });
+        return null;
+      }
+
+      const org = accessContext.actingOrg;
+      const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
+      const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
+      if (!resolvedScenario) {
+        const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
+          configForUser,
+          org,
+          scenarioId,
+          existingOrgTrainingCount: org ? listOrgTrainingRecords(db, org.id).length : 0,
+        });
+        if (shouldBootstrapTrainingWorkspace && org && !allowTrainingWorkspaceBootstrap) {
+          return { bootstrapOrgId: org.id };
+        }
+
+        response.status(400).json({ error: "Invalid scenario for this account." });
+        return null;
+      }
+      const useModularPromptArchitecture =
+        USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
+
+      const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
+        configForUser,
+        resolvedScenario.allowedIndustryIds,
+        body.industryId,
+        body.industryBaseline,
+        {
+          preferClientBaselineSnapshot: false,
+          canonicalIndustryDefinitions: db.config.industries
+        }
+      );
+      return {
+        user,
+        org,
+        actingOrgId: accessContext.actingOrgId,
+        isSuperUser: accessContext.isSuperUser,
+        segment: resolvedScenario.segment,
+        scenario: resolvedScenario.scenario,
+        difficulty: difficulty ?? configForUser.defaultDifficulty,
+        personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
+        industryId: industryPromptContext.industryId,
+        industryLabel: industryPromptContext.industryLabel,
+        industryBaseline: industryPromptContext.industryBaseline,
+        counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
+        maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
+        useModularPromptArchitecture,
+        workspaceBootstrapPerformed: allowTrainingWorkspaceBootstrap,
+      };
+    });
+  };
+
+  let contextResult = await loadOpeningContext(false);
+  if (contextResult && "bootstrapOrgId" in contextResult) {
+    const bootstrapOrgId = contextResult.bootstrapOrgId;
+    await withDatabaseWrite(async (db) => {
+      const org = getOrgById(db, bootstrapOrgId);
+      if (org) {
+        await ensureOrgTrainingWorkspace(db, org);
+      }
+    });
+    contextResult = await loadOpeningContext(true);
+  }
+
+  if (!contextResult || "bootstrapOrgId" in contextResult) {
     return;
   }
+  const context = contextResult;
+
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "opening",
+    correlationId,
+    stage: "context_ready",
+    elapsedMs: Date.now() - routeStartedAtMs,
+    workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
+    useModularPromptArchitecture: context.useModularPromptArchitecture,
+  });
 
   const activeTrainingPack = await getActiveTrainingPackForOrg(context.actingOrgId, context.useModularPromptArchitecture, {
     scenarioId: context.scenario.id,
@@ -12335,20 +12439,51 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           }),
           openingPrompt: buildOpeningPrompt(context.scenario)
         };
+    const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING);
+    const promptMessages = [
+      { role: "system" as const, content: prompts.systemPrompt },
+      { role: "user" as const, content: prompts.openingPrompt }
+    ];
     const { completion, latencyMs } = await requestSimulationCompletion({
       route: "opening",
-      messages: [
-        { role: "system", content: prompts.systemPrompt },
-        { role: "user", content: prompts.openingPrompt }
-      ],
-      maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
+      messages: promptMessages,
+      maxOutputTokens,
       temperature: 0.8,
       correlationId
     });
 
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json({
+      assistantText: completion.text,
+      usage: completion.usage,
+      model: completion.model,
+      promptVersion: AI_PROMPT_VERSION,
+      trainingPack: activeTrainingPack
+        ? {
+            applied: true,
+            id: activeTrainingPack.id,
+            title: activeTrainingPack.title
+          }
+        : {
+            applied: false
+          }
+    });
+    activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "opening",
+      correlationId,
+      stage: "response_sent",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      modelLatencyMs: latencyMs,
+      workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
+      promptChars: promptMessages.reduce((total, message) => total + message.content.length, 0),
+      maxOutputTokens,
+    });
+
     if (!context.isSuperUser) {
-      try {
-        await withDatabase(async (db) => {
+      runSimulationPostResponseTask(async () => {
+        await withDatabaseWrite(async (db) => {
           const user = getUserById(db, context.user.id);
           if (!user) {
             return;
@@ -12391,34 +12526,22 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
             }
           });
         });
-      } catch (persistError) {
-        const message = persistError instanceof Error ? persistError.message : String(persistError);
-        logWarnThrottled("ai-usage:opening", `[ai-usage] failed to persist opening event: ${message}`);
-      }
+      }, {
+        logKey: "ai-usage:opening",
+        description: "failed to persist opening event"
+      });
     }
 
-    await touchRecognizedSimulationSessionBestEffort({
-      simulationSessionId,
-      trainingPackId: activeTrainingPack?.id ?? null,
-      logKey: "simulation-session:opening"
+    runSimulationPostResponseTask(async () => {
+      await touchRecognizedSimulationSessionBestEffort({
+        simulationSessionId,
+        trainingPackId: activeTrainingPack?.id ?? null,
+        logKey: "simulation-session:opening"
+      });
+    }, {
+      logKey: "simulation-session:opening",
+      description: "failed to touch recognized session after opening"
     });
-
-    response.json({
-      assistantText: completion.text,
-      usage: completion.usage,
-      model: completion.model,
-      promptVersion: AI_PROMPT_VERSION,
-      trainingPack: activeTrainingPack
-        ? {
-            applied: true,
-            id: activeTrainingPack.id,
-            title: activeTrainingPack.title
-          }
-        : {
-            applied: false
-          }
-    });
-    activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
     response.status(503).json({ error: message });
@@ -12439,8 +12562,9 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
 
   const userId = request.params.userId;
   const correlationId = resolveSimulationCorrelationId(request);
+  const routeStartedAtMs = Date.now();
   // eslint-disable-next-line no-console
-  console.log(`[request-hit] route=turn userId=${userId}`);
+  console.log(`[request-hit] route=turn userId=${userId} correlationId=${correlationId}`);
   const body = request.body as {
     scenarioId?: string;
     trainingId?: string;
@@ -12497,87 +12621,144 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     return;
   }
 
-  const context = await withDatabase(async (db) => {
-    const user = getUserById(db, userId);
-    if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return null;
-    }
-
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return null;
-    }
-
-    const accessContext = resolveMobileAccessContext(db, user, request, response, {
-      requireSuperUserOrgSelection: true,
-    });
-    if (!accessContext) {
-      return null;
-    }
-
-    const entitlements = computeEntitlements(db, user, new Date(), {
-      allowDuringActiveSimulation: true,
-      actingOrgId: accessContext.actingOrgId
-    });
-    if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
-      return null;
-    }
-
-    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
-      allowDuringActiveSimulation: true
-    });
-    if (aiBudgetError) {
-      response.status(429).json({ error: aiBudgetError });
-      return null;
-    }
-
-    const org = accessContext.actingOrg;
-    if (org) {
-      await ensureOrgTrainingWorkspace(db, org);
-    }
-
-    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
-    if (!resolvedScenario) {
-      response.status(400).json({ error: "Invalid scenario for this account." });
-      return null;
-    }
-    const useModularPromptArchitecture =
-      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
-
-    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
-      configForUser,
-      resolvedScenario.allowedIndustryIds,
-      body.industryId,
-      body.industryBaseline,
-      {
-        preferClientBaselineSnapshot: !useModularPromptArchitecture,
-        canonicalIndustryDefinitions: db.config.industries
+  const loadTurnContext = async (
+    allowTrainingWorkspaceBootstrap: boolean,
+  ): Promise<
+    | {
+        bootstrapOrgId: string;
       }
-    );
-    return {
-      user,
-      org,
-      actingOrgId: accessContext.actingOrgId,
-      isSuperUser: accessContext.isSuperUser,
-      segment: resolvedScenario.segment,
-      scenario: resolvedScenario.scenario,
-      difficulty: difficulty ?? configForUser.defaultDifficulty,
-      personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
-      industryId: industryPromptContext.industryId,
-      industryLabel: industryPromptContext.industryLabel,
-      industryBaseline: industryPromptContext.industryBaseline,
-      counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
-      maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
-      useModularPromptArchitecture
-    };
-  });
+    | {
+        user: UserProfile;
+        org: EnterpriseOrg | null;
+        actingOrgId: string | null;
+        isSuperUser: boolean;
+        segment: SegmentDefinition;
+        scenario: Scenario;
+        difficulty: Difficulty;
+        personaStyle: PersonaStyle;
+        industryId: string | null;
+        industryLabel: string | null;
+        industryBaseline: string | null;
+        counterpartBehaviorGuidance: string | null;
+        maxSimulationMinutes: number | null;
+        useModularPromptArchitecture: boolean;
+        workspaceBootstrapPerformed: boolean;
+      }
+    | null
+  > => {
+    return await withDatabaseRead(async (db) => {
+      const user = getUserById(db, userId);
+      if (!user) {
+        response.status(404).json({ error: "User not found." });
+        return null;
+      }
 
-  if (!context) {
+      if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+        response.status(401).json({ error: "Invalid mobile token." });
+        return null;
+      }
+
+      const accessContext = resolveMobileAccessContext(db, user, request, response, {
+        requireSuperUserOrgSelection: true,
+      });
+      if (!accessContext) {
+        return null;
+      }
+
+      const entitlements = computeEntitlements(db, user, new Date(), {
+        allowDuringActiveSimulation: true,
+        actingOrgId: accessContext.actingOrgId
+      });
+      if (!entitlements.canStartSimulation) {
+        response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+        return null;
+      }
+
+      const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
+        allowDuringActiveSimulation: true
+      });
+      if (aiBudgetError) {
+        response.status(429).json({ error: aiBudgetError });
+        return null;
+      }
+
+      const org = accessContext.actingOrg;
+      const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
+      const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
+      if (!resolvedScenario) {
+        const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
+          configForUser,
+          org,
+          scenarioId,
+          existingOrgTrainingCount: org ? listOrgTrainingRecords(db, org.id).length : 0,
+        });
+        if (shouldBootstrapTrainingWorkspace && org && !allowTrainingWorkspaceBootstrap) {
+          return { bootstrapOrgId: org.id };
+        }
+
+        response.status(400).json({ error: "Invalid scenario for this account." });
+        return null;
+      }
+      const useModularPromptArchitecture =
+        USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
+
+      const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
+        configForUser,
+        resolvedScenario.allowedIndustryIds,
+        body.industryId,
+        body.industryBaseline,
+        {
+          preferClientBaselineSnapshot: false,
+          canonicalIndustryDefinitions: db.config.industries
+        }
+      );
+      return {
+        user,
+        org,
+        actingOrgId: accessContext.actingOrgId,
+        isSuperUser: accessContext.isSuperUser,
+        segment: resolvedScenario.segment,
+        scenario: resolvedScenario.scenario,
+        difficulty: difficulty ?? configForUser.defaultDifficulty,
+        personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
+        industryId: industryPromptContext.industryId,
+        industryLabel: industryPromptContext.industryLabel,
+        industryBaseline: industryPromptContext.industryBaseline,
+        counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
+        maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
+        useModularPromptArchitecture,
+        workspaceBootstrapPerformed: allowTrainingWorkspaceBootstrap,
+      };
+    });
+  };
+
+  let contextResult = await loadTurnContext(false);
+  if (contextResult && "bootstrapOrgId" in contextResult) {
+    const bootstrapOrgId = contextResult.bootstrapOrgId;
+    await withDatabaseWrite(async (db) => {
+      const org = getOrgById(db, bootstrapOrgId);
+      if (org) {
+        await ensureOrgTrainingWorkspace(db, org);
+      }
+    });
+    contextResult = await loadTurnContext(true);
+  }
+
+  if (!contextResult || "bootstrapOrgId" in contextResult) {
     return;
   }
+  const context = contextResult;
+
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "turn",
+    correlationId,
+    stage: "context_ready",
+    elapsedMs: Date.now() - routeStartedAtMs,
+    workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
+    historyCount: history.length,
+    useModularPromptArchitecture: context.useModularPromptArchitecture,
+  });
 
   const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
     orgId: context.actingOrgId,
@@ -12609,20 +12790,43 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         });
 
     const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
+    const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_TURN);
+    const promptMessages = [
+      { role: "system" as const, content: systemPrompt },
+      ...history.map((message) => ({ role: message.role, content: message.content })),
+    ];
     const { completion, latencyMs } = await requestSimulationCompletion({
       route: "turn",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...history.map((message) => ({ role: message.role, content: message.content }))
-      ],
-      maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING_TURN),
+      messages: promptMessages,
+      maxOutputTokens,
       temperature,
       correlationId
     });
 
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json({
+      assistantText: completion.text,
+      usage: completion.usage,
+      model: completion.model,
+      promptVersion: AI_PROMPT_VERSION
+    });
+    activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "turn",
+      correlationId,
+      stage: "response_sent",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      modelLatencyMs: latencyMs,
+      workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
+      historyCount: history.length,
+      promptChars: promptMessages.reduce((total, message) => total + message.content.length, 0),
+      maxOutputTokens,
+    });
+
     if (!context.isSuperUser) {
-      try {
-        await withDatabase(async (db) => {
+      runSimulationPostResponseTask(async () => {
+        await withDatabaseWrite(async (db) => {
           const user = getUserById(db, context.user.id);
           if (!user) {
             return;
@@ -12666,25 +12870,22 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
             }
           });
         });
-      } catch (persistError) {
-        const message = persistError instanceof Error ? persistError.message : String(persistError);
-        logWarnThrottled("ai-usage:turn", `[ai-usage] failed to persist turn event: ${message}`);
-      }
+      }, {
+        logKey: "ai-usage:turn",
+        description: "failed to persist turn event"
+      });
     }
 
-    await touchRecognizedSimulationSessionBestEffort({
-      simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
-      trainingPackId: activeTrainingPack?.id ?? null,
-      logKey: "simulation-session:turn"
+    runSimulationPostResponseTask(async () => {
+      await touchRecognizedSimulationSessionBestEffort({
+        simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+        trainingPackId: activeTrainingPack?.id ?? null,
+        logKey: "simulation-session:turn"
+      });
+    }, {
+      logKey: "simulation-session:turn",
+      description: "failed to touch recognized session after turn"
     });
-
-    response.json({
-      assistantText: completion.text,
-      usage: completion.usage,
-      model: completion.model,
-      promptVersion: AI_PROMPT_VERSION
-    });
-    activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
     response.status(503).json({ error: message });
@@ -12849,7 +13050,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       body.industryId,
       body.industryBaseline,
       {
-        preferClientBaselineSnapshot: !useModularPromptArchitecture,
+        preferClientBaselineSnapshot: false,
         canonicalIndustryDefinitions: db.config.industries
       }
     );

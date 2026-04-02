@@ -2916,8 +2916,8 @@ export default function App() {
           <LinearGradient colors={heroGradientColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.heroCard}>
             <View style={styles.heroGlowOne} />
             <View style={styles.heroGlowTwo} />
-            <Text style={styles.heroTitle}>CounterMatch</Text>
-            <Text style={styles.heroSubtitle}>Build Confidence Under Pressure</Text>
+            <Text style={styles.heroTitle}>Peritio</Text>
+            <Text style={styles.heroSubtitle}>Professional Training Simplified</Text>
             <View style={styles.heroRule} />
             <Text style={styles.heroBody}>
               Practice high-stakes professional conversations by voice with dynamic AI role-play.

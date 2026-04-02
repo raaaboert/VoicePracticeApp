@@ -113,11 +113,17 @@ interface TimezoneResponse {
   items: string[];
 }
 
+interface RequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+}
+
 async function requestJson<T>(
   path: string,
   init?: RequestInit,
   authToken?: string,
-  options?: { timeoutMs?: number; signal?: AbortSignal },
+  options?: RequestOptions,
 ): Promise<T> {
   const apiBase = API_BASE_URL.trim();
   if (!apiBase) {
@@ -141,6 +147,7 @@ async function requestJson<T>(
         ...(init?.headers ?? {}),
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         ...(activeSuperUserOrgId ? { "X-Superuser-Org-Id": activeSuperUserOrgId } : {}),
+        ...(options?.headers ?? {}),
       },
     });
 
@@ -192,7 +199,7 @@ async function requestFormData<T>(
   path: string,
   formData: FormData,
   authToken: string,
-  options?: { timeoutMs?: number; signal?: AbortSignal },
+  options?: RequestOptions,
 ): Promise<T> {
   const apiBase = API_BASE_URL.trim();
   if (!apiBase) {
@@ -214,6 +221,7 @@ async function requestFormData<T>(
       headers: {
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         ...(activeSuperUserOrgId ? { "X-Superuser-Org-Id": activeSuperUserOrgId } : {}),
+        ...(options?.headers ?? {}),
       },
       body: formData,
     });
@@ -283,7 +291,7 @@ async function requestJsonWithRetry<T>(
   path: string,
   init: RequestInit | undefined,
   authToken: string | undefined,
-  options: { timeoutMs?: number; signal?: AbortSignal } | undefined,
+  options: RequestOptions | undefined,
   retryOptions: { attempts: number; initialDelayMs: number },
 ): Promise<T> {
   for (let attempt = 1; attempt <= retryOptions.attempts; attempt += 1) {
@@ -474,6 +482,7 @@ export async function startSimulationSession(
   userId: string,
   input: StartSimulationSessionRequest,
   authToken: string,
+  options?: { correlationId?: string },
 ): Promise<StartSimulationSessionResponse> {
   return requestJson<StartSimulationSessionResponse>(
     `/mobile/users/${encodeURIComponent(userId)}/simulation-sessions/start`,
@@ -482,6 +491,7 @@ export async function startSimulationSession(
       body: JSON.stringify(input),
     },
     authToken,
+    options?.correlationId ? { headers: { "X-Correlation-Id": options.correlationId } } : undefined,
   );
 }
 
@@ -501,6 +511,7 @@ export async function transcribeAudioViaApi(params: {
   authToken: string;
   audioUri: string;
   mimeType: string;
+  correlationId?: string;
 }): Promise<string> {
   const formData = new FormData();
   const resolvedMimeType = params.mimeType || (Platform.OS === "web" ? "audio/webm" : "audio/m4a");
@@ -528,7 +539,10 @@ export async function transcribeAudioViaApi(params: {
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/transcribe`,
     formData,
     params.authToken,
-    { timeoutMs: 30_000 },
+    {
+      timeoutMs: 30_000,
+      ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
+    },
   );
   return payload.text?.trim() ?? "";
 }
@@ -549,6 +563,7 @@ export async function fetchAiOpeningLine(params: {
   industryBaseline?: string;
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
+  correlationId?: string;
 }): Promise<{
   assistantText: string;
   model: string;
@@ -564,13 +579,16 @@ export async function fetchAiOpeningLine(params: {
         scenarioId: params.scenarioId,
         simulationSessionId: params.simulationSessionId,
         ...(params.trainingId ? { trainingId: params.trainingId } : {}),
-        ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
+        ...(params.industryId ? { industryId: params.industryId } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
       }),
     },
     params.authToken,
-    { timeoutMs: 30_000 },
+    {
+      timeoutMs: 30_000,
+      ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
+    },
   );
 }
 
@@ -586,6 +604,7 @@ export async function fetchAiTurn(params: {
   personaStyle: PersonaStyle;
   history: DialogueMessage[];
   trainingPackId?: string;
+  correlationId?: string;
 }): Promise<{
   assistantText: string;
   model: string;
@@ -600,7 +619,7 @@ export async function fetchAiTurn(params: {
         scenarioId: params.scenarioId,
         simulationSessionId: params.simulationSessionId,
         ...(params.trainingId ? { trainingId: params.trainingId } : {}),
-        ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
+        ...(params.industryId ? { industryId: params.industryId } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
         ...(params.trainingPackId ? { trainingPackId: params.trainingPackId } : {}),
@@ -611,7 +630,10 @@ export async function fetchAiTurn(params: {
       }),
     },
     params.authToken,
-    { timeoutMs: 30_000 },
+    {
+      timeoutMs: 30_000,
+      ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
+    },
   );
 }
 
@@ -649,7 +671,7 @@ export async function fetchAiScore(params: {
         scenarioId: params.scenarioId,
         simulationSessionId: params.simulationSessionId,
         ...(params.trainingId ? { trainingId: params.trainingId } : {}),
-        ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
+        ...(params.industryId ? { industryId: params.industryId } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
         startedAt: params.startedAt,
@@ -672,6 +694,7 @@ export async function fetchAiTtsAudio(params: {
   text: string;
   preset: RemoteTtsPreset;
   signal?: AbortSignal;
+  correlationId?: string;
 }): Promise<{ bytes: Uint8Array; contentType: string }> {
   const apiBase = API_BASE_URL.trim();
   if (!apiBase) {
@@ -695,6 +718,7 @@ export async function fetchAiTtsAudio(params: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${params.authToken}`,
         ...(activeSuperUserOrgId ? { "X-Superuser-Org-Id": activeSuperUserOrgId } : {}),
+        ...(params.correlationId ? { "X-Correlation-Id": params.correlationId } : {}),
       },
       body: JSON.stringify({
         text: params.text,
