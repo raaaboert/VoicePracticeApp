@@ -8,24 +8,20 @@ import {
   sumRawSeconds
 } from "@voicepractice/shared";
 
-// Future extraction note:
-// usageSessions is still authoritative simulation-usage truth. It is hot append + scan-heavy,
-// and any physical move must preserve current billing/entitlement semantics exactly. If this
-// domain is extracted later, STORAGE_PROVIDER=file should be treated as a dev/demo/small-scale
-// mode; hosted and higher-volume deployments should assume postgres.
+import {
+  matchesUsageSessionQuery,
+  UsageSessionAppendResult,
+  UsageSessionQuery,
+  UsageSessionStore
+} from "../storage/usageSessionStore.js";
 
-export interface UsageSessionQuery {
-  userId?: string;
-  orgId?: string | null;
-  segmentId?: string;
-  scenarioId?: string;
-  trainingId?: string | null;
-  trainingPackId?: string | null;
-  startedAtFrom?: Date | null;
-  startedAtBefore?: Date | null;
-  endedAtFrom?: Date | null;
-  endedAtBefore?: Date | null;
-}
+// usageSessions extraction note:
+// This access layer is intentionally snapshot-backed so billing, entitlement, and reporting reads
+// can preserve current sync semantics while persistence authority moves out of the monolithic
+// app-state blob. STORAGE_PROVIDER=file remains a dev/demo/small-scale mode for this domain;
+// postgres is the serious hosted path. Without explicit refresh/invalidation, the snapshot model
+// is only suitable for a single API process per logical environment.
+export type { UsageSessionQuery } from "../storage/usageSessionStore.js";
 
 export interface UserUsageSnapshot {
   rawSecondsToday: number;
@@ -55,8 +51,9 @@ export interface UsageSessionActivityReference {
 }
 
 export interface UsageSessionAccess {
-  append(db: Pick<ApiDatabase, "usageSessions">, session: UsageSessionRecord): void;
-  deleteForUser(db: Pick<ApiDatabase, "usageSessions">, userId: string): number;
+  append(db: Pick<ApiDatabase, "usageSessions">, session: UsageSessionRecord): Promise<UsageSessionAppendResult>;
+  deleteForUser(db: Pick<ApiDatabase, "usageSessions">, userId: string): Promise<number>;
+  getById(db: Pick<ApiDatabase, "usageSessions">, sessionId: string): UsageSessionRecord | null;
   list(db: Pick<ApiDatabase, "usageSessions">, query?: UsageSessionQuery): UsageSessionRecord[];
   listByUserRange(
     db: Pick<ApiDatabase, "usageSessions">,
@@ -85,79 +82,66 @@ export interface UsageSessionAccess {
   sumBilledSeconds(sessions: readonly UsageSessionRecord[]): number;
 }
 
-function toMillis(value: string | null | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = new Date(value).getTime();
-  return Number.isFinite(parsed) ? parsed : null;
+interface LegacyUsageSessionContainer {
+  usageSessions?: UsageSessionRecord[];
 }
 
-function matchesDateLowerBound(value: string, lowerBound: Date | null | undefined): boolean {
-  if (!lowerBound) {
-    return true;
-  }
-  const valueMs = toMillis(value);
-  return valueMs !== null && valueMs >= lowerBound.getTime();
+function readLegacyUsageSessions(db: LegacyUsageSessionContainer): UsageSessionRecord[] {
+  return Array.isArray(db.usageSessions) ? db.usageSessions : [];
 }
 
-function matchesDateUpperBound(value: string, upperBound: Date | null | undefined): boolean {
-  if (!upperBound) {
-    return true;
-  }
-  const valueMs = toMillis(value);
-  return valueMs !== null && valueMs < upperBound.getTime();
-}
-
-function matchesUsageSessionQuery(session: UsageSessionRecord, query: UsageSessionQuery): boolean {
-  if (query.userId && session.userId !== query.userId) {
-    return false;
-  }
-  if (query.orgId !== undefined && session.orgId !== query.orgId) {
-    return false;
-  }
-  if (query.segmentId && session.segmentId !== query.segmentId) {
-    return false;
-  }
-  if (query.scenarioId && session.scenarioId !== query.scenarioId) {
-    return false;
-  }
-  if (query.trainingId !== undefined && (session.trainingId ?? null) !== query.trainingId) {
-    return false;
-  }
-  if (query.trainingPackId !== undefined && (session.trainingPackId ?? null) !== query.trainingPackId) {
-    return false;
-  }
-  if (!matchesDateLowerBound(session.startedAt, query.startedAtFrom)) {
-    return false;
-  }
-  if (!matchesDateUpperBound(session.startedAt, query.startedAtBefore)) {
-    return false;
-  }
-  if (!matchesDateLowerBound(session.endedAt, query.endedAtFrom)) {
-    return false;
-  }
-  if (!matchesDateUpperBound(session.endedAt, query.endedAtBefore)) {
-    return false;
-  }
-  return true;
-}
-
-export function createUsageSessionAccess(): UsageSessionAccess {
+export function createUsageSessionAccess(store?: UsageSessionStore | null): UsageSessionAccess {
   return {
-    append(db: Pick<ApiDatabase, "usageSessions">, session: UsageSessionRecord): void {
-      db.usageSessions.push(session);
+    async append(db: Pick<ApiDatabase, "usageSessions">, session: UsageSessionRecord): Promise<UsageSessionAppendResult> {
+      if (store) {
+        return await store.appendRecord(session);
+      }
+
+      const legacyDb = db as LegacyUsageSessionContainer;
+      if (!Array.isArray(legacyDb.usageSessions)) {
+        legacyDb.usageSessions = [];
+      }
+
+      const existing = legacyDb.usageSessions.find((entry) => entry.id === session.id);
+      if (existing) {
+        return {
+          created: false,
+          record: existing
+        };
+      }
+
+      legacyDb.usageSessions.push(session);
+      return {
+        created: true,
+        record: session
+      };
     },
 
-    deleteForUser(db: Pick<ApiDatabase, "usageSessions">, userId: string): number {
-      const before = db.usageSessions.length;
-      db.usageSessions = db.usageSessions.filter((session) => session.userId !== userId);
-      return before - db.usageSessions.length;
+    async deleteForUser(db: Pick<ApiDatabase, "usageSessions">, userId: string): Promise<number> {
+      if (store) {
+        return await store.deleteRecordsForUser(userId);
+      }
+
+      const legacyDb = db as LegacyUsageSessionContainer;
+      const before = readLegacyUsageSessions(legacyDb).length;
+      legacyDb.usageSessions = readLegacyUsageSessions(legacyDb).filter((session) => session.userId !== userId);
+      return before - readLegacyUsageSessions(legacyDb).length;
+    },
+
+    getById(db: Pick<ApiDatabase, "usageSessions">, sessionId: string): UsageSessionRecord | null {
+      if (store) {
+        return store.getRecordById(sessionId);
+      }
+
+      return readLegacyUsageSessions(db as LegacyUsageSessionContainer).find((session) => session.id === sessionId) ?? null;
     },
 
     list(db: Pick<ApiDatabase, "usageSessions">, query: UsageSessionQuery = {}): UsageSessionRecord[] {
-      return db.usageSessions.filter((session) => matchesUsageSessionQuery(session, query));
+      if (store) {
+        return store.listRecords(query);
+      }
+
+      return readLegacyUsageSessions(db as LegacyUsageSessionContainer).filter((session) => matchesUsageSessionQuery(session, query));
     },
 
     listByUserRange(

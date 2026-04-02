@@ -49,6 +49,7 @@ export interface SimulationScorecard {
 }
 
 export interface SimulationConfig {
+  simulationSessionId: string;
   scenario: Scenario;
   industryId: string;
   industryLabel: string;
@@ -64,6 +65,7 @@ export interface SimulationConfig {
 }
 
 export interface SessionTiming {
+  simulationSessionId: string;
   startedAt: string;
   endedAt: string;
   rawDurationSeconds: number;

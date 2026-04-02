@@ -12,7 +12,7 @@ import {
   createLocalAssistantReply,
   createLocalOpeningLine,
 } from "../lib/mockAi";
-import { createSupportCase, fetchAiTtsAudio, getApiBaseUrl } from "../lib/api";
+import { createSupportCase, fetchAiTtsAudio, getApiBaseUrl, startSimulationSession } from "../lib/api";
 import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
 import {
   speakWithRemoteTtsFallback,
@@ -759,11 +759,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         appendMessage({ id: createMessageId(), role: "user", content: userText });
 
         if (sessionActiveRef.current && !unmountedRef.current) {
-          const reply = useLiveApiThisTurn
+            const reply = useLiveApiThisTurn
             ? (logSimulationApiCall("generateAssistantReply"),
               await generateAssistantReply({
                 userId,
                 authToken,
+                simulationSessionId: config.simulationSessionId,
                 scenario: config.scenario,
                 trainingId: config.trainingId ?? null,
                 industryId: config.industryId,
@@ -875,6 +876,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             const openingPayload = await createOpeningLine({
               userId,
               authToken,
+              simulationSessionId: config.simulationSessionId,
               scenario: config.scenario,
               trainingId: config.trainingId ?? null,
               industryId: config.industryId,
@@ -899,6 +901,19 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           }
         }
       }
+
+      const recognizedStartPromise = startSimulationSession(
+        userId,
+        {
+          simulationSessionId: config.simulationSessionId,
+          segmentId: config.scenario.segmentId,
+          scenarioId: config.scenario.id,
+          trainingId: config.trainingId ?? null,
+          trainingPackId: sessionTrainingPackIdRef.current,
+          clientStartedAt: new Date().toISOString(),
+        },
+        authToken,
+      ).then(() => undefined);
 
       if (openingLine) {
         const assistantTextReceivedAtMs = Date.now();
@@ -936,6 +951,17 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         setStatus("AI is speaking...");
         await speakPromise;
         showOpeningMessage();
+      }
+
+      try {
+        await recognizedStartPromise;
+      } catch (startError) {
+        setError(getErrorMessage(startError, "Could not register simulation start."));
+        void submitAutoErrorReport("simulation.session_start", startError, {
+          simulationSessionId: config.simulationSessionId,
+          scenarioId: config.scenario.id,
+        });
+        return;
       }
     }
 
@@ -979,6 +1005,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       sessionStartedAtRef.current = null;
       setElapsedSeconds(rawDurationSeconds);
       onSessionComplete([...messagesRef.current], config, {
+        simulationSessionId: config.simulationSessionId,
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         rawDurationSeconds,
@@ -1071,6 +1098,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         const openingPayload = await createOpeningLine({
           userId,
           authToken,
+          simulationSessionId: config.simulationSessionId,
           scenario: config.scenario,
           trainingId: config.trainingId ?? null,
           industryId: config.industryId,

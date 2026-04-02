@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { UsageSessionRecord } from "@voicepractice/shared";
 
 import { createUsageSessionAccess } from "./usageSessionAccess.js";
+import { createUsageSessionStore } from "../storage/usageSessionStore.js";
 
 function createSession(overrides: Partial<UsageSessionRecord> = {}): UsageSessionRecord {
   return {
@@ -17,11 +21,12 @@ function createSession(overrides: Partial<UsageSessionRecord> = {}): UsageSessio
     startedAt: overrides.startedAt ?? "2026-03-31T10:00:00.000Z",
     endedAt: overrides.endedAt ?? "2026-03-31T10:05:00.000Z",
     rawDurationSeconds: overrides.rawDurationSeconds ?? 305,
+    billedSecondsAdded: overrides.billedSecondsAdded,
     createdAt: overrides.createdAt ?? "2026-03-31T10:05:00.000Z"
   };
 }
 
-test("usageSessionAccess lists, appends, deletes, and reports recent activity references", () => {
+test("usageSessionAccess lists, appends, deletes, and reports recent activity references", async () => {
   const access = createUsageSessionAccess();
   const db = {
     usageSessions: [
@@ -38,7 +43,7 @@ test("usageSessionAccess lists, appends, deletes, and reports recent activity re
     ]
   };
 
-  access.append(
+  await access.append(
     db,
     createSession({
       id: "sess_3",
@@ -55,7 +60,7 @@ test("usageSessionAccess lists, appends, deletes, and reports recent activity re
     { segmentId: "segment_1", scenarioId: "scenario_1", endedAt: "2026-04-02T09:03:00.000Z" }
   ]);
 
-  assert.equal(access.deleteForUser(db, "user_1"), 2);
+  assert.equal(await access.deleteForUser(db, "user_1"), 2);
   assert.equal(db.usageSessions.length, 1);
 });
 
@@ -125,4 +130,77 @@ test("usageSessionAccess computes user and org usage snapshots with current bill
   assert.equal(orgSnapshot.allottedSeconds, 6000);
   assert.equal(orgSnapshot.periodStartAt, "2026-03-15T00:00:00.000Z");
   assert.equal(orgSnapshot.periodEndAt, "2026-04-15T00:00:00.000Z");
+});
+
+test("usageSessionAccess preserves sync read semantics while using the real store-backed path", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-usage-session-access-"));
+  try {
+    const store = createUsageSessionStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    await store.initialize();
+    await store.importLegacyRecords([
+      createSession({ id: "sess_a", rawDurationSeconds: 305 }),
+      createSession({
+        id: "sess_b",
+        userId: "user_2",
+        orgId: "org_2",
+        segmentId: "segment_2",
+        scenarioId: "scenario_2",
+        startedAt: "2026-04-01T11:00:00.000Z",
+        endedAt: "2026-04-01T11:05:00.000Z",
+        createdAt: "2026-04-01T11:05:00.000Z"
+      })
+    ]);
+
+    const access = createUsageSessionAccess(store);
+    const db = { usageSessions: [] as UsageSessionRecord[] };
+
+    assert.equal(access.getById(db, "sess_b")?.scenarioId, "scenario_2");
+    assert.deepEqual(
+      access.listByUserRange(db, { userId: "user_1" }).map((record) => record.id),
+      ["sess_a"]
+    );
+
+    const duplicate = await access.append(
+      db,
+      createSession({
+        id: "sess_a",
+        rawDurationSeconds: 900,
+        billedSecondsAdded: 900
+      })
+    );
+    assert.equal(duplicate.created, false);
+    assert.equal(duplicate.record.rawDurationSeconds, 305);
+    assert.equal(duplicate.record.billedSecondsAdded, undefined);
+
+    const created = await access.append(
+      db,
+      createSession({
+        id: "sess_c",
+        userId: "user_1",
+        startedAt: "2026-04-02T09:00:00.000Z",
+        endedAt: "2026-04-02T09:03:00.000Z",
+        createdAt: "2026-04-02T09:03:00.000Z",
+        billedSecondsAdded: 15
+      })
+    );
+    assert.equal(created.created, true);
+    assert.equal(created.record.billedSecondsAdded, 15);
+
+    assert.deepEqual(
+      access.list(db).map((record) => record.id),
+      ["sess_a", "sess_b", "sess_c"]
+    );
+
+    assert.equal(await access.deleteForUser(db, "user_1"), 2);
+    assert.deepEqual(access.list(db).map((record) => record.id), ["sess_b"]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });

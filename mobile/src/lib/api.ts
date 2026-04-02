@@ -11,6 +11,8 @@ import {
   PersonaStyle,
   RecordUsageSessionRequest,
   RecordSimulationScoreRequest,
+  StartSimulationSessionRequest,
+  StartSimulationSessionResponse,
   SuperUserOrgOptionsResponse,
   UserEntitlementsResponse,
   UserProfile,
@@ -468,6 +470,21 @@ export async function recordUsageSession(
   }, authToken);
 }
 
+export async function startSimulationSession(
+  userId: string,
+  input: StartSimulationSessionRequest,
+  authToken: string,
+): Promise<StartSimulationSessionResponse> {
+  return requestJson<StartSimulationSessionResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/simulation-sessions/start`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    authToken,
+  );
+}
+
 export async function recordSimulationScore(
   userId: string,
   input: RecordSimulationScoreRequest,
@@ -525,6 +542,7 @@ interface AiUsagePayload {
 export async function fetchAiOpeningLine(params: {
   userId: string;
   authToken: string;
+  simulationSessionId: string;
   scenarioId: string;
   trainingId?: string;
   industryId?: string;
@@ -544,6 +562,7 @@ export async function fetchAiOpeningLine(params: {
       method: "POST",
       body: JSON.stringify({
         scenarioId: params.scenarioId,
+        simulationSessionId: params.simulationSessionId,
         ...(params.trainingId ? { trainingId: params.trainingId } : {}),
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,
@@ -558,6 +577,7 @@ export async function fetchAiOpeningLine(params: {
 export async function fetchAiTurn(params: {
   userId: string;
   authToken: string;
+  simulationSessionId: string;
   scenarioId: string;
   trainingId?: string;
   industryId?: string;
@@ -578,6 +598,7 @@ export async function fetchAiTurn(params: {
       method: "POST",
       body: JSON.stringify({
         scenarioId: params.scenarioId,
+        simulationSessionId: params.simulationSessionId,
         ...(params.trainingId ? { trainingId: params.trainingId } : {}),
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,
@@ -597,6 +618,7 @@ export async function fetchAiTurn(params: {
 export async function fetchAiScore(params: {
   userId: string;
   authToken: string;
+  simulationSessionId: string;
   scenarioId: string;
   trainingId?: string;
   industryId?: string;
@@ -625,6 +647,7 @@ export async function fetchAiScore(params: {
       method: "POST",
       body: JSON.stringify({
         scenarioId: params.scenarioId,
+        simulationSessionId: params.simulationSessionId,
         ...(params.trainingId ? { trainingId: params.trainingId } : {}),
         ...(params.industryId ? { industryId: params.industryId, industryBaseline: params.industryBaseline ?? "" } : {}),
         difficulty: params.difficulty,

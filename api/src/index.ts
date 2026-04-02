@@ -87,6 +87,7 @@ import {
   MobileUpdateSettingsRequest,
   MobileVerifyEmailRequest,
   RecordUsageSessionRequest,
+  StartSimulationSessionRequest,
   RecordSimulationScoreRequest,
   Scenario,
   SegmentDefinition,
@@ -159,7 +160,9 @@ import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
+import { createSimulationSessionStore } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
+import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
@@ -194,6 +197,13 @@ import type { PostCommitEffect } from "./services/postCommitEffects.js";
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
+import {
+  completeRecognizedSimulationUsage,
+  normalizeSimulationSessionId,
+  registerRecognizedSimulationSessionStart,
+  SimulationSessionValidationError,
+  touchRecognizedSimulationSession
+} from "./services/simulationSessionLifecycle.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
 import {
@@ -363,6 +373,22 @@ const supportCaseStore = createSupportCaseStore({
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
 });
+const simulationSessionStore = createSimulationSessionStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const usageSessionStore = createUsageSessionStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
 const scoreRecordStore = createScoreRecordStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -384,7 +410,7 @@ const webAuthService = createWebAuthService({
   codeSecret: MOBILE_TOKEN_SECRET
 });
 const aiUsageEventAccess = createAiUsageEventAccess(aiUsageEventStore);
-const usageSessionAccess = createUsageSessionAccess();
+const usageSessionAccess = createUsageSessionAccess(usageSessionStore);
 const scoreRecordAccess = createScoreRecordAccess(scoreRecordStore);
 const simulationHistoryAccess = createSimulationHistoryAccess({
   usageSessionAccess,
@@ -721,6 +747,12 @@ function detectSimulationPayloadType(
 }
 
 function resolveSimulationSessionId(request: Request, body: Record<string, unknown>): string {
+  const bodySimulationSessionId =
+    typeof body.simulationSessionId === "string" ? body.simulationSessionId.trim() : "";
+  if (bodySimulationSessionId) {
+    return bodySimulationSessionId.slice(0, 120);
+  }
+
   const bodySessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (bodySessionId) {
     return bodySessionId.slice(0, 120);
@@ -771,6 +803,31 @@ function resolveSimulationCorrelationId(request: Request): string {
   }
 
   return `cid_${uuid().replace(/-/g, "").slice(0, 10)}`;
+}
+
+function resolveRecognizedSimulationSessionId(request: Request, body: Record<string, unknown>): string | null {
+  return normalizeSimulationSessionId(resolveSimulationSessionId(request, body));
+}
+
+async function touchRecognizedSimulationSessionBestEffort(params: {
+  simulationSessionId: string | null;
+  trainingPackId?: string | null;
+  logKey: string;
+}): Promise<void> {
+  if (!params.simulationSessionId) {
+    return;
+  }
+
+  try {
+    await touchRecognizedSimulationSession(simulationSessionStore, {
+      simulationSessionId: params.simulationSessionId,
+      trainingPackId: params.trainingPackId ?? null,
+      lastSeenAt: nowIso()
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarnThrottled(params.logKey, `[simulation-session] failed to touch recognized session: ${message}`);
+  }
 }
 
 function parseTtsPreset(value: unknown): TtsPreset | null {
@@ -2067,6 +2124,8 @@ function createDefaultDatabase(): ApiDatabase {
     orgTrainingPackAttachments: [],
     orgTrainingScenarioAttachments: [],
     trainingPackAssignments: [],
+    // Legacy compatibility placeholder. Persisted app-state snapshots strip usageSessions once the
+    // dedicated store takes authority, but the in-memory shape stays stable for shared helpers.
     usageSessions: [],
     mobileAuthTokens: [],
     emailVerifications: [],
@@ -2110,7 +2169,6 @@ function ensureDemoEnterpriseData(db: {
   users: UserProfile[];
   orgs: EnterpriseOrg[];
   config: AppConfig;
-  usageSessions: UsageSessionRecord[];
   scoreRecords?: SimulationScoreRecord[];
 }, now: string): void {
   const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
@@ -2213,118 +2271,9 @@ function ensureDemoEnterpriseData(db: {
   }
 
   const nowDate = new Date(now);
-  const demoSessions: Array<{
-    id: string;
-    userId: string;
-    orgId: string;
-    segmentId: string;
-    scenarioId: string;
-    rawDurationSeconds: number;
-    daysAgo: number;
-  }> = [
-    {
-      id: "sess_demo_people_admin_1",
-      userId: "usr_demo_people_admin",
-      orgId: "org_demo_people",
-      segmentId: "solution_manager",
-      scenarioId: "sm_undermining_report",
-      rawDurationSeconds: 18 * 60,
-      daysAgo: 16
-    },
-    {
-      id: "sess_demo_people_mgr_1",
-      userId: "usr_demo_people_mgr",
-      orgId: "org_demo_people",
-      segmentId: "project_manager",
-      scenarioId: "pm_team_conflict",
-      rawDurationSeconds: 12 * 60,
-      daysAgo: 12
-    },
-    {
-      id: "sess_demo_people_hr_1",
-      userId: "usr_demo_people_hr",
-      orgId: "org_demo_people",
-      segmentId: "solution_manager",
-      scenarioId: "sm_scope_creep_client",
-      rawDurationSeconds: 9 * 60,
-      daysAgo: 8
-    },
-    {
-      id: "sess_demo_sales_admin_1",
-      userId: "usr_demo_sales_admin",
-      orgId: "org_demo_sales",
-      segmentId: "sales_engineer",
-      scenarioId: "se_unfixable_issue",
-      rawDurationSeconds: 22 * 60,
-      daysAgo: 14
-    },
-    {
-      id: "sess_demo_sales_rep_1",
-      userId: "usr_demo_sales_rep",
-      orgId: "org_demo_sales",
-      segmentId: "sales_representative",
-      scenarioId: "sales_discount_pushback",
-      rawDurationSeconds: 15 * 60,
-      daysAgo: 10
-    },
-    {
-      id: "sess_demo_sales_se_1",
-      userId: "usr_demo_sales_se",
-      orgId: "org_demo_sales",
-      segmentId: "sales_engineer",
-      scenarioId: "se_repeating_questions",
-      rawDurationSeconds: 11 * 60,
-      daysAgo: 6
-    },
-    {
-      id: "sess_demo_medical_admin_1",
-      userId: "usr_demo_medical_admin",
-      orgId: "org_demo_medical",
-      segmentId: "doctor",
-      scenarioId: "doctor_erratic_family_member",
-      rawDurationSeconds: 20 * 60,
-      daysAgo: 15
-    },
-    {
-      id: "sess_demo_medical_nurse_1",
-      userId: "usr_demo_medical_nurse",
-      orgId: "org_demo_medical",
-      segmentId: "nurse",
-      scenarioId: "nurse_vaccine_conspiracy",
-      rawDurationSeconds: 13 * 60,
-      daysAgo: 9
-    },
-    {
-      id: "sess_demo_medical_doc_1",
-      userId: "usr_demo_medical_doc",
-      orgId: "org_demo_medical",
-      segmentId: "doctor",
-      scenarioId: "doctor_unsuccessful_surgery",
-      rawDurationSeconds: 16 * 60,
-      daysAgo: 5
-    }
-  ];
-
-  for (const session of demoSessions) {
-    if (db.usageSessions.some((existing) => existing.id === session.id)) {
-      continue;
-    }
-
-    const startedAt = new Date(nowDate.getTime() - session.daysAgo * 24 * 60 * 60 * 1000);
-    const endedAt = new Date(startedAt.getTime() + session.rawDurationSeconds * 1000);
-
-    db.usageSessions.push({
-      id: session.id,
-      userId: session.userId,
-      orgId: session.orgId,
-      segmentId: session.segmentId,
-      scenarioId: session.scenarioId,
-      startedAt: startedAt.toISOString(),
-      endedAt: endedAt.toISOString(),
-      rawDurationSeconds: session.rawDurationSeconds,
-      createdAt: endedAt.toISOString()
-    });
-  }
+  // This legacy demo helper intentionally no longer seeds usageSessions directly. Extracted
+  // usage-session storage is authoritative, so any future demo-usage seeding must go through the
+  // dedicated store/access path rather than mutating db.usageSessions in memory.
 
   const demoScores: Array<{
     id: string;
@@ -2660,6 +2609,8 @@ function purgeDemoSeedData(db: ApiDatabase): void {
     (attachment) => !demoOrgIds.has(attachment.orgId) && remainingTrainingIds.has(attachment.trainingId)
   );
 
+  // Legacy compatibility only: extracted usageSessions are authoritative. This cleanup exists so
+  // pre-extraction app-state snapshots cannot reintroduce demo sessions during boot migration.
   db.usageSessions = db.usageSessions.filter(
     (session) =>
       !hasPrefixedId(session.id, "sess_demo_") &&
@@ -3028,6 +2979,8 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
           completedAt: normalizeOptionalIsoDate(assignment.completedAt)
         }))
       : [],
+    // Legacy compatibility field only. Dedicated usage-session storage becomes authoritative after
+    // boot migration, but the in-memory shape stays stable for helpers/tests that still expect it.
     usageSessions: Array.isArray(candidate.usageSessions) ? candidate.usageSessions : fallback.usageSessions,
     auditEvents: Array.isArray((candidate as Partial<ApiDatabase>).auditEvents)
       ? (candidate as Partial<ApiDatabase>).auditEvents ?? []
@@ -3118,6 +3071,7 @@ async function loadDatabase(options?: { forceStorageRead?: boolean }): Promise<A
 
 function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
   const snapshot = { ...db };
+  delete (snapshot as Partial<ApiDatabase>).usageSessions;
   delete (snapshot as Partial<ApiDatabase>).aiUsageEvents;
   delete (snapshot as Partial<ApiDatabase>).scoreRecords;
   delete (snapshot as Partial<ApiDatabase>).webAuthSessions;
@@ -3231,6 +3185,26 @@ async function migrateLegacyAiUsageEventsFromAppState(): Promise<void> {
   });
 }
 
+async function migrateLegacyUsageSessionsFromAppState(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    if (!Object.prototype.hasOwnProperty.call(db, "usageSessions")) {
+      return;
+    }
+
+    const legacyUsageSessions = Array.isArray(db.usageSessions) ? db.usageSessions : [];
+    const migration = await usageSessionStore.importLegacyRecords(legacyUsageSessions);
+    delete (db as Partial<ApiDatabase>).usageSessions;
+    await saveDatabase(db);
+
+    if (legacyUsageSessions.length > 0) {
+      logWarn(
+        `[usage-sessions][migration] moved ${migration.importedCount} legacy usage sessions to dedicated storage.`
+      );
+    }
+  });
+}
+
 async function migrateLegacyScoreRecordsFromAppState(): Promise<void> {
   await withDatabaseLock(async () => {
     const db = await loadDatabase();
@@ -3319,6 +3293,8 @@ async function refreshDatabaseReadiness(): Promise<void> {
   try {
     await auditEventStore.initialize();
     await aiUsageEventStore.initialize();
+    await simulationSessionStore.initialize();
+    await usageSessionStore.initialize();
     await scoreRecordStore.initialize();
     await supportCaseStore.initialize();
     await webAuthSessionStore.initialize();
@@ -10347,7 +10323,6 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     const user = db.users[userIndex];
 
     db.users.splice(userIndex, 1);
-    usageSessionAccess.deleteForUser(db, user.id);
     db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
     db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
     db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
@@ -10359,6 +10334,20 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
       description: `Revoke dashboard sessions for deleted user ${user.id}.`,
       run: async () => {
         await revokeWebAuthSessionsForUserId(user.id);
+      }
+    });
+    queueDatabasePostCommitEffect(db, {
+      category: "post_commit_cleanup",
+      description: `Delete usage sessions for removed user ${user.id}.`,
+      run: async () => {
+        await usageSessionAccess.deleteForUser(db, user.id);
+      }
+    });
+    queueDatabasePostCommitEffect(db, {
+      category: "post_commit_cleanup",
+      description: `Delete recognized simulation sessions for removed user ${user.id}.`,
+      run: async () => {
+        await simulationSessionStore.deleteSessionsForUser(user.id);
       }
     });
     queueDatabasePostCommitEffect(db, {
@@ -12177,7 +12166,11 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     personaStyle?: unknown;
     industryId?: unknown;
     industryBaseline?: unknown;
+    simulationSessionId?: unknown;
+    sessionId?: unknown;
   };
+  const requestBodyRecord = body as Record<string, unknown>;
+  const simulationSessionId = resolveRecognizedSimulationSessionId(request, requestBodyRecord);
   const scenarioId = body.scenarioId?.trim();
   const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
@@ -12357,6 +12350,12 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
         logWarnThrottled("ai-usage:opening", `[ai-usage] failed to persist opening event: ${message}`);
       }
     }
+
+    await touchRecognizedSimulationSessionBestEffort({
+      simulationSessionId,
+      trainingPackId: activeTrainingPack?.id ?? null,
+      logKey: "simulation-session:opening"
+    });
 
     response.json({
       assistantText: completion.text,
@@ -12626,6 +12625,12 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         logWarnThrottled("ai-usage:turn", `[ai-usage] failed to persist turn event: ${message}`);
       }
     }
+
+    await touchRecognizedSimulationSessionBestEffort({
+      simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+      trainingPackId: activeTrainingPack?.id ?? null,
+      logKey: "simulation-session:turn"
+    });
 
     response.json({
       assistantText: completion.text,
@@ -12967,6 +12972,12 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
         return;
       }
     }
+
+    await touchRecognizedSimulationSessionBestEffort({
+      simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+      trainingPackId: record.trainingPackId ?? null,
+      logKey: "simulation-session:score"
+    });
 
     response.status(201).json({
       scorecard,
@@ -13724,9 +13735,130 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
   });
 });
 
-app.post("/usage/sessions", async (request: Request, response: Response) => {
-  const body = request.body as RecordUsageSessionRequest;
+app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+  const body = request.body as StartSimulationSessionRequest & { sessionId?: unknown };
+  const bodyRecord = body as unknown as Record<string, unknown>;
+  const simulationSessionId = resolveRecognizedSimulationSessionId(request, bodyRecord);
+  const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
+  const submittedTrainingPackId =
+    typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
+  const clientStartedAt = body.clientStartedAt ?? null;
+
+  if (!simulationSessionId || !body.segmentId || !body.scenarioId) {
+    response.status(400).json({ error: "simulationSessionId, segmentId, and scenarioId are required." });
+    return;
+  }
+
+  const parsedClientStartedAt = clientStartedAt ? parseIsoDateOrNull(clientStartedAt) : null;
+  if (clientStartedAt && !parsedClientStartedAt) {
+    response.status(400).json({ error: "clientStartedAt must be a valid ISO timestamp." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return;
+    }
+
+    const org = accessContext.actingOrg;
+    if (org) {
+      await ensureOrgTrainingWorkspace(db, org);
+    }
+
+    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);
+    if (!resolvedScenario) {
+      response.status(400).json({ error: "Invalid scenario for simulation session start." });
+      return;
+    }
+    if (resolvedScenario.segment.id !== body.segmentId) {
+      response.status(400).json({ error: "Invalid segment for simulation session start." });
+      return;
+    }
+
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      actingOrgId: accessContext.actingOrgId,
+    });
+    if (!entitlements.canStartSimulation) {
+      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      return;
+    }
+
+    const useModularPromptArchitecture =
+      USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
+    const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
+      orgId: accessContext.actingOrgId,
+      scenarioId: body.scenarioId,
+      useModularPromptArchitecture,
+      submittedTrainingPackId
+    });
+
+    if (accessContext.isSuperUser) {
+      response.status(201).json({
+        recognized: false,
+        simulationSessionId,
+        status: null,
+        serverStartedAt: null
+      });
+      return;
+    }
+
+    let session;
+    try {
+      session = await registerRecognizedSimulationSessionStart(simulationSessionStore, {
+        simulationSessionId,
+        userId: user.id,
+        orgId: accessContext.actingOrgId,
+        segmentId: body.segmentId,
+        scenarioId: body.scenarioId,
+        trainingId,
+        trainingPackId: persistedTrainingPack?.id ?? submittedTrainingPackId,
+        clientStartedAt: parsedClientStartedAt?.toISOString() ?? null,
+        now: new Date()
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.toLowerCase().includes("simulation session")) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+
+    response.status(201).json({
+      recognized: true,
+      simulationSessionId,
+      status: session.status,
+      serverStartedAt: session.serverStartedAt
+    });
+  });
+});
+
+app.post("/usage/sessions", async (request: Request, response: Response) => {
+  const body = request.body as RecordUsageSessionRequest & { sessionId?: unknown };
+  const authToken = getIncomingMobileToken(request);
+  const bodyRecord = body as unknown as Record<string, unknown>;
+  const simulationSessionId = resolveRecognizedSimulationSessionId(request, bodyRecord);
   const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const submittedTrainingPackId =
     typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
@@ -13736,8 +13868,8 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     return;
   }
 
-  if (!body.userId || !body.segmentId || !body.scenarioId) {
-    response.status(400).json({ error: "userId, segmentId, and scenarioId are required." });
+  if (!simulationSessionId || !body.userId || !body.segmentId || !body.scenarioId) {
+    response.status(400).json({ error: "simulationSessionId, userId, segmentId, and scenarioId are required." });
     return;
   }
 
@@ -13815,21 +13947,50 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       rawDurationSeconds = Math.min(rawDurationSeconds, maxSimulationMinutes * 60);
     }
 
+    const normalizedStartedAt = sessionStart.toISOString();
+    const normalizedEndedAt = sessionEnd.toISOString();
+    let appendResult: Awaited<ReturnType<typeof usageSessionAccess.append>> | null = null;
+
     if (!accessContext.isSuperUser) {
-      usageSessionAccess.append(db, {
-        id: `sess_${uuid()}`,
-        userId: user.id,
-        orgId: accessContext.actingOrgId,
-        segmentId: body.segmentId,
-        scenarioId: body.scenarioId,
-        trainingId,
-        trainingPackId: persistedTrainingPack?.id ?? null,
-        startedAt: sessionStart.toISOString(),
-        endedAt: sessionEnd.toISOString(),
-        rawDurationSeconds,
-        createdAt: now.toISOString()
-      });
-      syncTrainingPackAssignmentsForUserPack(db, accessContext.actingOrgId, user.id, persistedTrainingPack?.id ?? null);
+      try {
+        const completion = await completeRecognizedSimulationUsage({
+          simulationSessionStore,
+          usageSessionAccess,
+          db,
+          simulationSessionId,
+          userId: user.id,
+          orgId: accessContext.actingOrgId,
+          segmentId: body.segmentId,
+          scenarioId: body.scenarioId,
+          trainingId,
+          submittedTrainingPackId,
+          resolvedTrainingPackId: persistedTrainingPack?.id ?? null,
+          startedAt: normalizedStartedAt,
+          endedAt: normalizedEndedAt,
+          rawDurationSeconds,
+          beforeUsage: entitlements.usage,
+          maxSimulationMinutes,
+          timeZone: entitlements.usage.timezoneUsed,
+          now
+        });
+        appendResult = completion.usageResult;
+      } catch (error) {
+        if (error instanceof SimulationSessionValidationError) {
+          response.status(error.statusCode).json({ error: error.message, code: error.code });
+          return;
+        }
+        throw error;
+      }
+
+      // Training-assignment activity fields are secondary derived state. We intentionally
+      // reapply this sync even on idempotent replays so a retry can heal a prior monolith-save
+      // failure after the authoritative usage-session store write has already succeeded.
+      syncTrainingPackAssignmentsForUserPack(
+        db,
+        accessContext.actingOrgId,
+        user.id,
+        appendResult.record.trainingPackId ?? null
+      );
     }
     clearSimulationAiBudgetGrace(user.id);
     clearSimulationOrgMonthlyOverrunGrace(user.id);
@@ -13837,12 +13998,17 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     const refreshed = computeEntitlements(db, user, now, {
       actingOrgId: accessContext.actingOrgId,
     });
+    const billedSecondsAdded = accessContext.isSuperUser
+      ? 0
+      : appendResult?.created === false
+        ? appendResult.record.billedSecondsAdded ?? Math.max(
+            0,
+            refreshed.usage.billedSecondsToday - entitlements.usage.billedSecondsToday
+          )
+        : Math.max(0, refreshed.usage.billedSecondsToday - entitlements.usage.billedSecondsToday);
     response.status(201).json({
       recorded: !accessContext.isSuperUser,
-      billedSecondsAdded: Math.max(
-        0,
-        refreshed.usage.billedSecondsToday - entitlements.usage.billedSecondsToday
-      ),
+      billedSecondsAdded,
       entitlements: refreshed
     });
   });
@@ -14528,6 +14694,9 @@ void (async () => {
   await migrateLegacyAuditEventsFromAppState();
   await aiUsageEventStore.initialize();
   await migrateLegacyAiUsageEventsFromAppState();
+  await simulationSessionStore.initialize();
+  await usageSessionStore.initialize();
+  await migrateLegacyUsageSessionsFromAppState();
   await scoreRecordStore.initialize();
   await migrateLegacyScoreRecordsFromAppState();
   await supportCaseStore.initialize();

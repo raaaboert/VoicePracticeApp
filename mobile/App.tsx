@@ -123,6 +123,10 @@ const loadSharingModule = async (): Promise<SharingModule | null> => {
   }
 };
 
+function createSimulationSessionId(): string {
+  return `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 type Screen =
   | "home"
   | "onboarding"
@@ -2393,6 +2397,7 @@ export default function App() {
       }
 
       setSimulationConfig({
+        simulationSessionId: createSimulationSessionId(),
         scenario,
         industryId,
         industryLabel,
@@ -2486,6 +2491,7 @@ export default function App() {
       void (async () => {
         try {
           const payload = await recordUsageSession({
+            simulationSessionId: timing.simulationSessionId,
             userId: user.id,
             segmentId: completedConfig.scenario.segmentId,
             scenarioId: completedConfig.scenario.id,
@@ -2552,6 +2558,7 @@ export default function App() {
           const result = await evaluateSimulation({
             userId: user.id,
             authToken: mobileAuthToken,
+            simulationSessionId: timing.simulationSessionId,
             scenario: completedConfig.scenario,
             industryId: completedConfig.industryId,
             industryBaseline: completedConfig.industryBaseline,

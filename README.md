@@ -92,6 +92,8 @@ powershell -ExecutionPolicy Bypass -File .\\scripts\\stop-local-stack.ps1
   - password can be changed in admin `Config` page
 - Usage metering uses 15-second billing increments with round-down behavior.
 - Timezone changes are deferred until next monthly plan renewal.
+- Persistence checkpoint: `scoreRecords` and `usageSessions` are extracted, with `usageSessions` using a store-backed recognized-session lifecycle plus idempotent finalization for billing/access truth. See [docs/Peritio_Persistence_Architecture_Checkpoint_2026-04-01.md](/Users/Robert/Desktop/Visual_Studio_Apps/VoicePracticeApp/docs/Peritio_Persistence_Architecture_Checkpoint_2026-04-01.md).
+- `usageSessions` and `scoreRecords` still use snapshot-backed in-process reads for synchronous reporting/entitlement code. Treat hosted deployments as single-API-process unless a future pass adds explicit refresh/invalidation.
 
 ## Smoke Test
 

@@ -19,6 +19,7 @@ export function isOpenAiConfigured(): boolean {
 export async function createOpeningLine(params: {
   userId: string;
   authToken: string;
+  simulationSessionId: string;
   scenario: Scenario;
   trainingId?: string | null;
   industryId?: string;
@@ -30,6 +31,7 @@ export async function createOpeningLine(params: {
   const payload = await fetchAiOpeningLine({
     userId: params.userId,
     authToken: params.authToken,
+    simulationSessionId: params.simulationSessionId,
     scenarioId: params.scenario.id,
     trainingId: params.trainingId ?? undefined,
     industryId: params.industryId,
@@ -47,6 +49,7 @@ export async function createOpeningLine(params: {
 export async function generateAssistantReply(params: {
   userId: string;
   authToken: string;
+  simulationSessionId: string;
   scenario: Scenario;
   trainingId?: string | null;
   industryId?: string;
@@ -60,6 +63,7 @@ export async function generateAssistantReply(params: {
   const payload = await fetchAiTurn({
     userId: params.userId,
     authToken: params.authToken,
+    simulationSessionId: params.simulationSessionId,
     scenarioId: params.scenario.id,
     trainingId: params.trainingId ?? undefined,
     industryId: params.industryId,
@@ -93,6 +97,7 @@ export async function transcribeAudio(params: {
 export async function evaluateSimulation(params: {
   userId: string;
   authToken: string;
+  simulationSessionId: string;
   scenario: Scenario;
   trainingId?: string | null;
   industryId?: string;
@@ -119,6 +124,7 @@ export async function evaluateSimulation(params: {
   return fetchAiScore({
     userId: params.userId,
     authToken: params.authToken,
+    simulationSessionId: params.simulationSessionId,
     scenarioId: params.scenario.id,
     trainingId: params.trainingId ?? undefined,
     industryId: params.industryId,

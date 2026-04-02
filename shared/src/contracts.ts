@@ -357,7 +357,26 @@ export interface UsageSessionRecord {
   startedAt: string;
   endedAt: string;
   rawDurationSeconds: number;
+  billedSecondsAdded?: number;
   createdAt: string;
+}
+
+export type SimulationSessionStatus = "started" | "usage_recorded";
+
+export interface SimulationSessionRecord {
+  simulationSessionId: string;
+  userId: string;
+  orgId: string | null;
+  segmentId: string;
+  scenarioId: string;
+  trainingId?: string | null;
+  trainingPackId?: string | null;
+  clientStartedAt?: string | null;
+  serverStartedAt: string;
+  lastSeenAt: string;
+  status: SimulationSessionStatus;
+  usageRecordedAt?: string | null;
+  usageSessionRecordId?: string | null;
 }
 
 export interface SimulationScoreRecord {
@@ -1280,6 +1299,7 @@ export interface MobileSubmitOrgJoinRequest {
 }
 
 export interface RecordUsageSessionRequest {
+  simulationSessionId: string;
   userId: string;
   segmentId: string;
   scenarioId: string;
@@ -1288,6 +1308,22 @@ export interface RecordUsageSessionRequest {
   startedAt: string;
   endedAt: string;
   rawDurationSeconds: number;
+}
+
+export interface StartSimulationSessionRequest {
+  simulationSessionId: string;
+  segmentId: string;
+  scenarioId: string;
+  trainingId?: string | null;
+  trainingPackId?: string | null;
+  clientStartedAt?: string | null;
+}
+
+export interface StartSimulationSessionResponse {
+  recognized: boolean;
+  simulationSessionId: string;
+  status: SimulationSessionStatus | null;
+  serverStartedAt: string | null;
 }
 
 export interface RecordSimulationScoreRequest {
@@ -1338,19 +1374,20 @@ export interface ApiDatabase {
   orgTrainingPackAttachments: OrgTrainingPackAttachmentRecord[];
   orgTrainingScenarioAttachments: OrgTrainingScenarioAttachmentRecord[];
   trainingPackAssignments: TrainingPackAssignmentRecord[];
+  // Legacy compatibility field; extracted usage-session storage is authoritative.
   usageSessions: UsageSessionRecord[];
-  // Legacy compatibility field while dedicated score-record storage is rolled out.
+  // Legacy compatibility field; extracted score-record storage is authoritative.
   scoreRecords?: SimulationScoreRecord[];
-  // Legacy compatibility field while dedicated AI-usage storage is rolled out.
+  // Legacy compatibility field; extracted AI-usage storage is authoritative.
   aiUsageEvents?: AiUsageEvent[];
-  // Legacy compatibility field while dedicated audit-event storage is rolled out.
+  // Legacy compatibility field; extracted audit-event storage is authoritative.
   auditEvents?: AuditEvent[];
-  // Legacy compatibility field while dedicated support-case storage is rolled out.
+  // Legacy compatibility field; extracted support-case storage is authoritative.
   supportCases?: SupportCaseRecord[];
   mobileAuthTokens: MobileAuthRecord[];
   emailVerifications: EmailVerificationRecord[];
   webAuthChallenges: WebAuthChallengeRecord[];
-  // Legacy compatibility field while dedicated web auth session storage is rolled out.
+  // Legacy compatibility field; extracted web-auth session storage is authoritative.
   webAuthSessions?: WebAuthSessionRecord[];
   enterpriseJoinRequests: EnterpriseJoinRequestRecord[];
   admin: {

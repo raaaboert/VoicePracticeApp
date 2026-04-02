@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import type {
@@ -24,7 +27,11 @@ import {
 
 import { createScoreRecordAccess } from "./scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./simulationHistory.js";
+import { completeRecognizedSimulationUsage, registerRecognizedSimulationSessionStart } from "./simulationSessionLifecycle.js";
 import { createUsageSessionAccess } from "./usageSessionAccess.js";
+import { createSimulationSessionStore } from "../storage/simulationSessionStore.js";
+import { createUsageSessionStore } from "../storage/usageSessionStore.js";
+import { buildUsageSessionDeterministicId, computeUsageSessionBilledSecondsAdded } from "./usageSessionWriteModel.js";
 
 type UsageSessionReadinessDb = Pick<ApiDatabase, "config" | "orgs" | "users" | "usageSessions"> & {
   scoreRecords: SimulationScoreRecord[];
@@ -53,6 +60,8 @@ type EntitlementParitySnapshot = {
     billedSecondsToday: number;
     rawSecondsThisMonth: number;
     billedSecondsThisMonth: number;
+    dayKey: string;
+    monthKey: string;
     dailySecondsRemaining: number | null;
     orgBillingPeriodStartAt: string | null;
     orgBillingPeriodEndAt: string | null;
@@ -405,6 +414,31 @@ function createUsageSessionCutoverDb(legacyDb: UsageSessionReadinessDb): UsageSe
   });
 
   return cutoverDb;
+}
+
+function createStoreBackedUsageSessionDb(
+  legacyDb: UsageSessionReadinessDb,
+  listRecords: () => UsageSessionRecord[]
+): UsageSessionReadinessDb {
+  const storeBackedDb = {
+    config: cloneJson(legacyDb.config),
+    orgs: cloneJson(legacyDb.orgs),
+    users: cloneJson(legacyDb.users),
+    scoreRecords: cloneJson(legacyDb.scoreRecords)
+  } as UsageSessionReadinessDb;
+
+  Object.defineProperty(storeBackedDb, "usageSessions", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return listRecords();
+    },
+    set(_nextValue: UsageSessionRecord[]) {
+      throw new Error("Store-backed usageSessions view is read-only in readiness tests.");
+    }
+  });
+
+  return storeBackedDb;
 }
 
 function clampNonNegativeInteger(value: unknown, fallback = 0): number {
@@ -1715,4 +1749,280 @@ test("usageSessions readiness preserves admin, dashboard, mobile, training-progr
   const cutoverDb = createUsageSessionCutoverDb(createRepresentativeDb());
 
   assert.deepEqual(buildUsageOutputsReadinessSnapshot(cutoverDb), buildUsageOutputsReadinessSnapshot(legacyDb));
+});
+
+test("usageSessions extraction preserves billing, entitlement, retry, and downstream output parity through the real store-backed path", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-usage-session-store-readiness-"));
+  try {
+    const legacyDb = createRepresentativeDb();
+    const store = createUsageSessionStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    await store.initialize();
+    await store.importLegacyRecords(legacyDb.usageSessions);
+
+    const storeBackedAccess = createUsageSessionAccess(store);
+    const storeBackedDb = createStoreBackedUsageSessionDb(legacyDb, () => store.listRecords());
+
+    assert.deepEqual(buildUsageOutputsReadinessSnapshot(storeBackedDb), buildUsageOutputsReadinessSnapshot(legacyDb));
+
+    const session = createSession({
+      id: "ignored_for_store_write",
+      userId: "user_1",
+      orgId: "org_1",
+      trainingPackId: "pack_1",
+      scenarioId: "scenario_2",
+      startedAt: "2026-03-31T12:00:00.000Z",
+      endedAt: "2026-03-31T12:02:29.000Z",
+      rawDurationSeconds: 149,
+      createdAt: "2026-03-31T12:02:29.000Z"
+    });
+    const now = new Date("2026-03-31T20:00:00.000Z");
+    const legacyWriteDb = createRepresentativeDb();
+    const legacyWrite = buildUsageSessionWriteRouteParitySnapshot({
+      db: legacyWriteDb,
+      userId: "user_1",
+      orgId: "org_1",
+      now,
+      session
+    });
+
+    const before = buildEntitlementsParitySnapshot({
+      db: storeBackedDb,
+      userId: "user_1",
+      now
+    });
+    const beforeOrgUsage = buildOrgUsageSnapshotForParity(storeBackedDb, createOrg(), now);
+    const clampedRawDurationSeconds = before.limits.maxSimulationMinutes === null
+      ? Math.max(0, Math.floor(session.rawDurationSeconds))
+      : Math.min(Math.max(0, Math.floor(session.rawDurationSeconds)), before.limits.maxSimulationMinutes * 60);
+    const normalizedStartedAt = new Date(session.startedAt).toISOString();
+    const normalizedEndedAt = new Date(session.endedAt).toISOString();
+    const deterministicId = buildUsageSessionDeterministicId({
+      userId: "user_1",
+      orgId: "org_1",
+      segmentId: session.segmentId,
+      scenarioId: session.scenarioId,
+      trainingId: session.trainingId ?? null,
+      submittedTrainingPackId: session.trainingPackId ?? null,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      requestedRawDurationSeconds: session.rawDurationSeconds
+    });
+    const appended = await storeBackedAccess.append(storeBackedDb, {
+      ...session,
+      id: deterministicId,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      rawDurationSeconds: clampedRawDurationSeconds,
+      billedSecondsAdded: computeUsageSessionBilledSecondsAdded({
+        beforeUsage: before.usage,
+        sessionEndedAt: normalizedEndedAt,
+        sessionRawDurationSeconds: clampedRawDurationSeconds,
+        timeZone: before.usage.timezoneUsed
+      })
+    });
+    const after = buildEntitlementsParitySnapshot({
+      db: storeBackedDb,
+      userId: "user_1",
+      now
+    });
+    const afterOrgUsage = buildOrgUsageSnapshotForParity(storeBackedDb, createOrg(), now);
+
+    assert.equal(appended.created, true);
+    assert.deepEqual(
+      {
+        recorded: true,
+        storedRawDurationSeconds: appended.record.rawDurationSeconds,
+        billedSecondsAdded: appended.record.billedSecondsAdded ?? 0,
+        beforeOrgUsedSecondsThisPeriod: beforeOrgUsage.usedSeconds,
+        afterOrgUsedSecondsThisPeriod: afterOrgUsage.usedSeconds,
+        entitlements: after
+      },
+      legacyWrite
+    );
+
+    const recordsAfterFirstWrite = store.listRecords().length;
+    const replay = await storeBackedAccess.append(storeBackedDb, {
+      ...session,
+      id: deterministicId,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      rawDurationSeconds: clampedRawDurationSeconds,
+      billedSecondsAdded: appended.record.billedSecondsAdded
+    });
+    const afterReplay = buildEntitlementsParitySnapshot({
+      db: storeBackedDb,
+      userId: "user_1",
+      now
+    });
+
+    assert.equal(replay.created, false);
+    assert.equal(replay.record.id, deterministicId);
+    assert.equal(replay.record.billedSecondsAdded, appended.record.billedSecondsAdded);
+    assert.equal(store.listRecords().length, recordsAfterFirstWrite);
+    assert.deepEqual(afterReplay, after);
+
+    assert.deepEqual(
+      buildUsageOutputsReadinessSnapshot(storeBackedDb),
+      buildUsageOutputsReadinessSnapshot(legacyWriteDb)
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("simulation session integrity v1 preserves usage write and downstream output parity through recognized start and completion", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-simulation-session-readiness-"));
+  try {
+    const legacyDb = createRepresentativeDb();
+    const usageStore = createUsageSessionStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    const simulationSessionStore = createSimulationSessionStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    await usageStore.initialize();
+    await simulationSessionStore.initialize();
+    await usageStore.importLegacyRecords(legacyDb.usageSessions);
+
+    const storeBackedAccess = createUsageSessionAccess(usageStore);
+    const storeBackedDb = createStoreBackedUsageSessionDb(legacyDb, () => usageStore.listRecords());
+    const session = createSession({
+      id: "ignored_for_lifecycle",
+      userId: "user_1",
+      orgId: "org_1",
+      trainingPackId: "pack_1",
+      scenarioId: "scenario_2",
+      startedAt: "2026-03-31T12:00:00.000Z",
+      endedAt: "2026-03-31T12:02:29.000Z",
+      rawDurationSeconds: 149,
+      createdAt: "2026-03-31T12:02:29.000Z"
+    });
+    const now = new Date("2026-03-31T20:00:00.000Z");
+    const legacyWriteDb = createRepresentativeDb();
+    const legacyWrite = buildUsageSessionWriteRouteParitySnapshot({
+      db: legacyWriteDb,
+      userId: "user_1",
+      orgId: "org_1",
+      now,
+      session
+    });
+
+    const before = buildEntitlementsParitySnapshot({
+      db: storeBackedDb,
+      userId: "user_1",
+      now
+    });
+    const beforeOrgUsage = buildOrgUsageSnapshotForParity(storeBackedDb, createOrg(), now);
+    const clampedRawDurationSeconds = before.limits.maxSimulationMinutes === null
+      ? Math.max(0, Math.floor(session.rawDurationSeconds))
+      : Math.min(Math.max(0, Math.floor(session.rawDurationSeconds)), before.limits.maxSimulationMinutes * 60);
+    const normalizedStartedAt = new Date(session.startedAt).toISOString();
+    const normalizedEndedAt = new Date(session.endedAt).toISOString();
+
+    await registerRecognizedSimulationSessionStart(simulationSessionStore, {
+      simulationSessionId: "sim_parity",
+      userId: "user_1",
+      orgId: "org_1",
+      segmentId: session.segmentId,
+      scenarioId: session.scenarioId,
+      trainingId: session.trainingId ?? null,
+      trainingPackId: session.trainingPackId ?? null,
+      clientStartedAt: normalizedStartedAt,
+      now: new Date("2026-03-31T12:00:00.000Z")
+    });
+
+    const completed = await completeRecognizedSimulationUsage({
+      simulationSessionStore,
+      usageSessionAccess: storeBackedAccess,
+      db: storeBackedDb,
+      simulationSessionId: "sim_parity",
+      userId: "user_1",
+      orgId: "org_1",
+      segmentId: session.segmentId,
+      scenarioId: session.scenarioId,
+      trainingId: session.trainingId ?? null,
+      submittedTrainingPackId: session.trainingPackId ?? null,
+      resolvedTrainingPackId: session.trainingPackId ?? null,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      rawDurationSeconds: clampedRawDurationSeconds,
+      beforeUsage: before.usage,
+      maxSimulationMinutes: before.limits.maxSimulationMinutes,
+      timeZone: before.usage.timezoneUsed,
+      now
+    });
+
+    const after = buildEntitlementsParitySnapshot({
+      db: storeBackedDb,
+      userId: "user_1",
+      now
+    });
+    const afterOrgUsage = buildOrgUsageSnapshotForParity(storeBackedDb, createOrg(), now);
+
+    assert.equal(completed.usageResult.created, true);
+    assert.deepEqual(
+      {
+        recorded: true,
+        storedRawDurationSeconds: completed.usageResult.record.rawDurationSeconds,
+        billedSecondsAdded: completed.usageResult.record.billedSecondsAdded ?? 0,
+        beforeOrgUsedSecondsThisPeriod: beforeOrgUsage.usedSeconds,
+        afterOrgUsedSecondsThisPeriod: afterOrgUsage.usedSeconds,
+        entitlements: after
+      },
+      legacyWrite
+    );
+
+    const replay = await completeRecognizedSimulationUsage({
+      simulationSessionStore,
+      usageSessionAccess: storeBackedAccess,
+      db: storeBackedDb,
+      simulationSessionId: "sim_parity",
+      userId: "user_1",
+      orgId: "org_1",
+      segmentId: session.segmentId,
+      scenarioId: session.scenarioId,
+      trainingId: session.trainingId ?? null,
+      submittedTrainingPackId: session.trainingPackId ?? null,
+      resolvedTrainingPackId: session.trainingPackId ?? null,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      rawDurationSeconds: clampedRawDurationSeconds,
+      beforeUsage: before.usage,
+      maxSimulationMinutes: before.limits.maxSimulationMinutes,
+      timeZone: before.usage.timezoneUsed,
+      now: new Date("2026-03-31T20:01:00.000Z")
+    });
+    const afterReplay = buildEntitlementsParitySnapshot({
+      db: storeBackedDb,
+      userId: "user_1",
+      now
+    });
+
+    assert.equal(replay.usageResult.created, false);
+    assert.equal(replay.usageResult.record.id, completed.usageResult.record.id);
+    assert.deepEqual(afterReplay, after);
+    assert.deepEqual(
+      buildUsageOutputsReadinessSnapshot(storeBackedDb),
+      buildUsageOutputsReadinessSnapshot(legacyWriteDb)
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });

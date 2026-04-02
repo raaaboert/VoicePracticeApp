@@ -701,16 +701,16 @@ function buildAdminOrgUsageParitySnapshot(
   };
 }
 
-function buildUsageWriteParitySnapshot(
+async function buildUsageWriteParitySnapshot(
   db: SimulationHistoryParityDb,
   session: UsageSessionRecord
-): {
+): Promise<{
   beforeBilledSecondsToday: number;
   afterBilledSecondsToday: number;
   billedSecondsAdded: number;
   beforeOrgUsedSeconds: number;
   afterOrgUsedSeconds: number;
-} {
+}> {
   const beforeUsage = usageSessionAccess.computeUserUsageSnapshot(db, {
     userId: session.userId,
     now: new Date("2026-03-31T20:00:00.000Z"),
@@ -723,7 +723,7 @@ function buildUsageWriteParitySnapshot(
     now: new Date("2026-03-31T20:00:00.000Z")
   });
 
-  usageSessionAccess.append(db, session);
+  await usageSessionAccess.append(db, session);
 
   const afterUsage = usageSessionAccess.computeUserUsageSnapshot(db, {
     userId: session.userId,
@@ -896,10 +896,10 @@ test("simulation-history readiness preserves route-shaped score outputs, attempt
   ]);
 });
 
-test("simulation-history readiness preserves usage-driven billing math, admin-org usage outputs, and recent-activity safety references", () => {
+test("simulation-history readiness preserves usage-driven billing math, admin-org usage outputs, and recent-activity safety references", async () => {
   const db = createRepresentativeDb();
 
-  const usageWrite = buildUsageWriteParitySnapshot(
+  const usageWrite = await buildUsageWriteParitySnapshot(
     db,
     createSession({
       id: "sess_new",
@@ -1137,7 +1137,7 @@ test("simulation-history readiness preserves representative snapshots across reo
 
   assert.deepEqual(buildReadinessSnapshot(reorderedDb), buildReadinessSnapshot(db));
 
-  usageSessionAccess.deleteForUser(reorderedDb, "user_1");
+  await usageSessionAccess.deleteForUser(reorderedDb, "user_1");
   await scoreRecordAccess.deleteForUser(reorderedDb, "user_1");
 
   const summary = buildMobileScoreSummaryParitySnapshot(reorderedDb, "user_1");
