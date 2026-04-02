@@ -66,6 +66,11 @@ import {
   setActiveSuperUserOrgId,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
+import { createSimulationCorrelationId } from "./src/lib/simulationInteractionModel";
+import {
+  getLongPollFailureReportDecision,
+  getMissingUsageRecordFields,
+} from "./src/lib/simulationDiagnostics";
 import {
   speakWithRemoteTtsFallback,
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
@@ -641,6 +646,9 @@ export default function App() {
   const homeMenuSlide = useRef(new Animated.Value(0)).current;
   const mobileUpdatesCursorRef = useRef(0);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
+  const longPollFailureCountRef = useRef(0);
+  const longPollFirstFailureAtRef = useRef<number | null>(null);
+  const longPollLastErrorRef = useRef<string | null>(null);
   const hasInitializedRef = useRef(false);
   const sampleVoiceIdentifierRef = useRef<string | undefined>(undefined);
   const sampleRemoteTtsSoundRef = useRef<Audio.Sound | null>(null);
@@ -1894,6 +1902,21 @@ export default function App() {
             return;
           }
 
+          if (longPollFailureCountRef.current > 0) {
+            // eslint-disable-next-line no-console
+            console.log("[mobile-updates.long-poll] recovered", {
+              failures: longPollFailureCountRef.current,
+              sinceFirstFailureMs:
+                longPollFirstFailureAtRef.current === null
+                  ? null
+                  : Math.max(0, Date.now() - longPollFirstFailureAtRef.current),
+              lastError: longPollLastErrorRef.current,
+            });
+            longPollFailureCountRef.current = 0;
+            longPollFirstFailureAtRef.current = null;
+            longPollLastErrorRef.current = null;
+          }
+
           mobileUpdatesCursorRef.current = payload.cursor;
 
           if (payload.changed) {
@@ -1929,12 +1952,38 @@ export default function App() {
             return;
           }
 
-          void submitAutoErrorReport("mobile_updates.long_poll", caught, {
-            screen,
-            details: {
-              cursor: mobileUpdatesCursorRef.current,
-            },
+          const failureCount = longPollFailureCountRef.current + 1;
+          longPollFailureCountRef.current = failureCount;
+          const firstFailureAtMs = longPollFirstFailureAtRef.current ?? Date.now();
+          longPollFirstFailureAtRef.current = firstFailureAtMs;
+          longPollLastErrorRef.current = message || getErrorMessage(caught, "Unknown long-poll error.");
+          const sinceFirstFailureMs = Math.max(0, Date.now() - firstFailureAtMs);
+          const decision = getLongPollFailureReportDecision({
+            consecutiveFailures: failureCount,
+            sinceFirstFailureMs,
           });
+
+          if (decision.shouldReport) {
+            void submitAutoErrorReport("mobile_updates.long_poll", caught, {
+              screen,
+              details: {
+                cursor: mobileUpdatesCursorRef.current,
+                consecutiveFailures: failureCount,
+                sinceFirstFailureMs,
+                reportReason: decision.reason,
+                willRetry: true,
+              },
+            });
+          } else {
+            // eslint-disable-next-line no-console
+            console.warn("[mobile-updates.long-poll] transient failure suppressed", {
+              cursor: mobileUpdatesCursorRef.current,
+              consecutiveFailures: failureCount,
+              sinceFirstFailureMs,
+              reportReason: decision.reason,
+              error: message || null,
+            });
+          }
 
           await new Promise((resolve) => setTimeout(resolve, 1500));
         }
@@ -1946,6 +1995,9 @@ export default function App() {
     return () => {
       cancelled = true;
       controller.abort();
+      longPollFailureCountRef.current = 0;
+      longPollFirstFailureAtRef.current = null;
+      longPollLastErrorRef.current = null;
     };
   }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user?.id, user?.isSuperUser]);
 
@@ -2490,7 +2542,7 @@ export default function App() {
     if (user && mobileAuthToken) {
       void (async () => {
         try {
-          const payload = await recordUsageSession({
+          const usagePayload = {
             simulationSessionId: timing.simulationSessionId,
             userId: user.id,
             segmentId: completedConfig.scenario.segmentId,
@@ -2500,7 +2552,39 @@ export default function App() {
             startedAt: timing.startedAt,
             endedAt: timing.endedAt,
             rawDurationSeconds: timing.rawDurationSeconds,
-          }, mobileAuthToken);
+          };
+          const missingFields = getMissingUsageRecordFields(usagePayload);
+          const usageCorrelationId = createSimulationCorrelationId(
+            timing.simulationSessionId || completedConfig.simulationSessionId,
+            "usage-record",
+          );
+
+          if (missingFields.length > 0) {
+            const guardError = new Error("Skipped usage recording because required session fields were missing.");
+            setScorecardError("Session usage could not be finalized because required context was missing.");
+            void submitAutoErrorReport("simulation.usage_record_guard", guardError, {
+              screen: "scorecard",
+              details: {
+                flowStage: "scorecard.session_complete",
+                triggeredBy: "session_end",
+                missingFields,
+                simulationSessionId: usagePayload.simulationSessionId || null,
+                userIdPresent: Boolean(usagePayload.userId),
+                segmentIdPresent: Boolean(usagePayload.segmentId),
+                scenarioIdPresent: Boolean(usagePayload.scenarioId),
+                trainingIdPresent: Boolean(usagePayload.trainingId),
+                trainingPackIdPresent: Boolean(usagePayload.trainingPackId),
+                correlationId: usageCorrelationId,
+              },
+            });
+            return;
+          }
+
+          const payload = await recordUsageSession(
+            usagePayload,
+            mobileAuthToken,
+            { correlationId: usageCorrelationId },
+          );
           setEntitlements(payload.entitlements);
         } catch (caught) {
           const message = getErrorMessage(caught, "Usage update failed after session.");
@@ -2508,6 +2592,9 @@ export default function App() {
           void submitAutoErrorReport("simulation.usage_record", caught, {
             screen: "scorecard",
             details: {
+              flowStage: "scorecard.session_complete",
+              triggeredBy: "session_end",
+              simulationSessionId: timing.simulationSessionId,
               segmentId: completedConfig.scenario.segmentId,
               scenarioId: completedConfig.scenario.id,
             },

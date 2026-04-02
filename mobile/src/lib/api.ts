@@ -463,6 +463,7 @@ export async function submitOrgAccessRequest(
 export async function recordUsageSession(
   input: RecordUsageSessionRequest,
   authToken: string,
+  options?: { correlationId?: string },
 ): Promise<{
   recorded: boolean;
   billedSecondsAdded: number;
@@ -475,7 +476,7 @@ export async function recordUsageSession(
   }>("/usage/sessions", {
     method: "POST",
     body: JSON.stringify(input),
-  }, authToken);
+  }, authToken, options?.correlationId ? { headers: { "X-Correlation-Id": options.correlationId } } : undefined);
 }
 
 export async function startSimulationSession(

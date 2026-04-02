@@ -23,6 +23,7 @@ import {
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
 } from "../lib/simulationInteractionModel";
+import { buildNoTranscriptDiagnostics } from "../lib/simulationDiagnostics";
 import {
   getSimulationTranscriptionMimeType,
   SIMULATION_RECORDING_OPTIONS,
@@ -125,6 +126,11 @@ function normalizeTranscriptForComparison(value: string): string {
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function getFileExtensionFromUri(uri: string): string | null {
+  const match = uri.trim().match(/(\.[a-z0-9]+)(?:\?.*)?$/i);
+  return match ? match[1].toLowerCase() : null;
 }
 
 function appearsToEchoAssistantReply(userText: string, history: DialogueMessage[]): boolean {
@@ -366,12 +372,70 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     Speech.stop();
   }, [stopRemoteTtsPlayback]);
 
+  const handleTtsCancellation = useCallback((details: {
+    correlationId?: string | null;
+    reason: string;
+    expected: boolean;
+    likelyUserFacing: boolean;
+    sourceKind?: string | null;
+    playbackStarted: boolean;
+    fallbackAttempted: boolean;
+    fallbackSucceeded: boolean;
+    chunkIndex?: number | null;
+    chunkCount?: number | null;
+    sessionEnding: boolean;
+    screenChanging: boolean;
+    abortSignaled: boolean;
+    summary: string;
+  }) => {
+    const correlationId = details.correlationId?.trim() || createSimulationCorrelationId(config.simulationSessionId, "tts-cancel");
+    logSimulationTiming({
+      correlationId,
+      phase: "tts_cancelled",
+      details: {
+        reason: details.reason,
+        expected: details.expected,
+        likelyUserFacing: details.likelyUserFacing,
+        sourceKind: details.sourceKind ?? null,
+        playbackStarted: details.playbackStarted,
+        fallbackAttempted: details.fallbackAttempted,
+        fallbackSucceeded: details.fallbackSucceeded,
+        chunkIndex: details.chunkIndex ?? null,
+        chunkCount: details.chunkCount ?? null,
+        sessionEnding: details.sessionEnding,
+        screenChanging: details.screenChanging,
+        abortSignaled: details.abortSignaled,
+      },
+    });
+
+    if (details.expected) {
+      return;
+    }
+
+    void submitAutoErrorReport("simulation.tts_cancelled", new Error(details.summary), {
+      simulationSessionId: config.simulationSessionId,
+      correlationId,
+      reason: details.reason,
+      sourceKind: details.sourceKind ?? null,
+      playbackStarted: details.playbackStarted,
+      fallbackAttempted: details.fallbackAttempted,
+      fallbackSucceeded: details.fallbackSucceeded,
+      chunkIndex: details.chunkIndex ?? null,
+      chunkCount: details.chunkCount ?? null,
+      likelyUserFacing: details.likelyUserFacing,
+      sessionEnding: details.sessionEnding,
+      screenChanging: details.screenChanging,
+    });
+  }, [config.simulationSessionId, logSimulationTiming, submitAutoErrorReport]);
+
   const speakSingleUtterance = async (
     text: string,
     assistantTextReceivedAtMs?: number,
     onPlaybackStart?: () => void,
     prefetchedRemoteAudio?: { bytes: Uint8Array; contentType: string } | null,
     correlationId?: string,
+    chunkIndex?: number,
+    chunkCount?: number,
   ): Promise<void> => {
     const requestGeneration = ttsRequestGenerationRef.current;
     const abortController = new AbortController();
@@ -389,6 +453,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         userId,
         authToken,
         correlationId,
+        simulationSessionId: config.simulationSessionId,
         remoteTtsEnabled: config.remoteTtsEnabled,
         remoteAiConfigured: apiConfigured,
         allowRemoteTts: !useLocalMockMode,
@@ -400,6 +465,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         assistantTextReceivedAtMs,
         prefetchedRemoteAudio,
         abortSignal: abortController.signal,
+        chunkIndex,
+        chunkCount,
+        describeCancellation: () => ({
+          superseded: ttsRequestGenerationRef.current !== requestGeneration,
+          sessionEnding: simulationClosedRef.current,
+          screenChanging: unmountedRef.current,
+        }),
+        onRemoteCancellation: handleTtsCancellation,
         isCancelled: () =>
           ttsRequestGenerationRef.current !== requestGeneration || simulationClosedRef.current || unmountedRef.current,
         onPlaybackStart: () => {
@@ -508,6 +581,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         },
         prefetchedRemoteAudio,
         correlationId,
+        index,
+        chunks.length,
       );
       if (index === 0) {
         handlePlaybackStart();
@@ -731,9 +806,17 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     const submitStartedAtMs = turnSubmitStartedAtRef.current;
     const finalizeTrigger: TurnFinalizeTrigger = "submit";
     const effectiveSubmitStartedAtMs = submitStartedAtMs ?? Date.now();
+    const transcriptionMimeType = getSimulationTranscriptionMimeType(Platform.OS);
     let audioModeResetPromise: Promise<void> | null = null;
     let recordingFinalizeCompletedAtMs: number | null = null;
     let audioBytes: number | undefined;
+    let audioFileExtension: string | null = null;
+    let turnDurationSeconds = 0;
+    let transcriptionAttempted = false;
+    let transcriptionFailed = false;
+    let transcriptionErrorMessage: string | null = null;
+    let usedLocalTranscriptionFallback = false;
+    let localTranscriptionFallbackReason: string | null = null;
     let transcribeRequestStartedAtMs: number | null = null;
     let transcribeResponseAtMs: number | null = null;
     let assistantRequestStartedAtMs: number | null = null;
@@ -793,10 +876,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (!audioUri) {
         throw new Error("Recorded audio file could not be read.");
       }
-      const turnDurationSeconds = Math.max(
+      turnDurationSeconds = Math.max(
         1,
         Math.round((Date.now() - turnStartedAtRef.current) / 1000),
       );
+      audioFileExtension = getFileExtensionFromUri(audioUri);
       const audioFileInfoPromise = FileSystem.getInfoAsync(audioUri).catch(() => null);
       logSimulationTiming({
         correlationId,
@@ -820,6 +904,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       }
       if (useLiveApiThisTurn && shouldAttemptTranscription) {
         try {
+          transcriptionAttempted = true;
           setStatus("Transcribing your response...");
           transcribeRequestStartedAtMs = Date.now();
           logSimulationTiming({
@@ -833,7 +918,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               userId,
               authToken,
               audioUri,
-              preferredMimeType: getSimulationTranscriptionMimeType(Platform.OS),
+              preferredMimeType: transcriptionMimeType,
               correlationId,
             })
           ).trim();
@@ -848,9 +933,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             },
           });
         } catch (transcriptionError) {
+          transcriptionAttempted = true;
+          transcriptionFailed = true;
+          transcriptionErrorMessage = getErrorMessage(transcriptionError, "Transcription failed.");
           if (isApiError(transcriptionError)) {
             setUseLocalMockMode(true);
             usedMockModeDuringSessionRef.current = true;
+            usedLocalTranscriptionFallback = true;
+            localTranscriptionFallbackReason = "api_error_local_fallback";
             setError(null);
             setStatus("Live AI unavailable. Switched to local test mode.");
             useLiveApiThisTurn = false;
@@ -869,6 +959,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           }
         }
       } else if (!useLiveApiThisTurn && shouldAttemptTranscription) {
+        usedLocalTranscriptionFallback = true;
+        localTranscriptionFallbackReason = "local_test_mode";
         userText = buildLocalCapturedText(turnDurationSeconds);
         transcriptChars = userText.length;
       }
@@ -886,6 +978,26 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           details: {
             audioBytes,
           },
+        });
+      }
+
+      if (!userText && transcriptionAttempted) {
+        // eslint-disable-next-line no-console
+        console.warn("[simulation-no-transcript]", {
+          simulationSessionId: config.simulationSessionId,
+          correlationId,
+          ...buildNoTranscriptDiagnostics({
+            audioBytes: audioBytes ?? null,
+            recordingDurationSeconds: turnDurationSeconds,
+            contentType: transcriptionMimeType,
+            fileExtension: audioFileExtension,
+            remoteTranscriptionAttempted: transcriptionAttempted,
+            transcriptionRequestFailed: transcriptionFailed,
+            transcriptionErrorMessage,
+            transcriptText: userText,
+            usedLocalFallback: usedLocalTranscriptionFallback,
+            localFallbackReason: localTranscriptionFallbackReason,
+          }),
         });
       }
 
@@ -1015,7 +1127,33 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (isPlaceholderTranscriptError(turnError)) {
         setStatus("Transcription missing. Please verify REMOTE mode.");
       }
-      void submitAutoErrorReport("simulation.turn_finalize", turnError);
+      void submitAutoErrorReport("simulation.turn_finalize", turnError, {
+        simulationSessionId: config.simulationSessionId,
+        correlationId,
+        trigger: finalizeTrigger,
+        audioBytes: audioBytes ?? null,
+        turnDurationSeconds,
+        remoteTranscriptionAttempted: transcriptionAttempted,
+        transcriptionRequestFailed: transcriptionFailed,
+        transcriptionErrorMessage,
+        usedLocalTranscriptionFallback,
+        localTranscriptionFallbackReason,
+        noTranscriptDiagnostics:
+          isPlaceholderTranscriptError(turnError) || (transcriptionAttempted && transcriptChars === 0)
+            ? buildNoTranscriptDiagnostics({
+                audioBytes: audioBytes ?? null,
+                recordingDurationSeconds: turnDurationSeconds,
+                contentType: transcriptionMimeType,
+                fileExtension: audioFileExtension,
+                remoteTranscriptionAttempted: transcriptionAttempted,
+                transcriptionRequestFailed: transcriptionFailed,
+                transcriptionErrorMessage,
+                transcriptText: "",
+                usedLocalFallback: usedLocalTranscriptionFallback,
+                localFallbackReason: localTranscriptionFallbackReason,
+              })
+            : null,
+      });
       emitTurnSummary({
         outcome: "error",
         errorMessage: turnErrorMessage,

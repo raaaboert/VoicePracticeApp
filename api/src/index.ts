@@ -829,6 +829,24 @@ function resolveRecognizedSimulationSessionId(request: Request, body: Record<str
   return normalizeSimulationSessionId(resolveSimulationSessionId(request, body));
 }
 
+function listMissingUsageSessionFields(params: {
+  simulationSessionId: string | null;
+  userId: string | null;
+  segmentId: string | null;
+  scenarioId: string | null;
+}): Array<"simulationSessionId" | "userId" | "segmentId" | "scenarioId"> {
+  const requiredFields = [
+    { field: "simulationSessionId" as const, value: params.simulationSessionId },
+    { field: "userId" as const, value: params.userId },
+    { field: "segmentId" as const, value: params.segmentId },
+    { field: "scenarioId" as const, value: params.scenarioId },
+  ];
+
+  return requiredFields
+    .filter((entry) => typeof entry.value !== "string" || !entry.value.trim())
+    .map((entry) => entry.field);
+}
+
 async function touchRecognizedSimulationSessionBestEffort(params: {
   simulationSessionId: string | null;
   trainingPackId?: string | null;
@@ -11665,6 +11683,17 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
         textLength: text.trim().length
       })}`
     );
+    if (!text.trim()) {
+      // eslint-disable-next-line no-console
+      console.warn("[simulation-transcribe-empty]", {
+        correlationId,
+        userId,
+        bytes: file.buffer.byteLength,
+        mimeType: file.mimetype || "audio/m4a",
+        fileName: file.originalname || "voice-input.m4a",
+        suspiciouslyTinyAudio: file.buffer.byteLength <= 4_096,
+      });
+    }
 
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({ text });
@@ -12699,6 +12728,15 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   });
 
   if (placeholderDetected) {
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-no-transcript]", {
+      route: "turn",
+      correlationId,
+      sessionId,
+      payloadMode: payloadType.mode,
+      payloadFlags: payloadType,
+      placeholderDetected,
+    });
     response.status(422).json({
       error: "No transcribed user text received. Transcription may have failed or client is sending placeholder.",
       hint: "Run transcription first and send real user transcript text in history. Do not send placeholder text like 'Voice input captured ...'."
@@ -13077,6 +13115,16 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   });
 
   if (placeholderDetected) {
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-no-transcript]", {
+      route: "score",
+      correlationId,
+      sessionId,
+      payloadMode: payloadType.mode,
+      payloadFlags: payloadType,
+      placeholderDetected,
+      placeholderDetectedInHistory,
+    });
     response.status(422).json({
       error: "No transcribed user text received. Transcription may have failed or client is sending placeholder.",
       hint: "Submit score only when history includes real transcribed user text. Do not send placeholder text like 'Voice input captured ...'."
@@ -13085,6 +13133,16 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   }
 
   if (placeholderDetectedInHistory) {
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-no-transcript]", {
+      route: "score",
+      correlationId,
+      sessionId,
+      payloadMode: payloadType.mode,
+      payloadFlags: payloadType,
+      placeholderDetected,
+      placeholderDetectedInHistory,
+    });
     response.status(422).json({
       error:
         "No transcribed user text received in full history. This session appears to include local mock transcript text, so score tracking is disabled.",
@@ -14214,7 +14272,11 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
   const body = request.body as RecordUsageSessionRequest & { sessionId?: unknown };
   const authToken = getIncomingMobileToken(request);
   const bodyRecord = body as unknown as Record<string, unknown>;
+  const correlationId = resolveSimulationCorrelationId(request);
   const simulationSessionId = resolveRecognizedSimulationSessionId(request, bodyRecord);
+  const userId = typeof body.userId === "string" && body.userId.trim() ? body.userId.trim() : null;
+  const segmentId = typeof body.segmentId === "string" && body.segmentId.trim() ? body.segmentId.trim() : null;
+  const scenarioId = typeof body.scenarioId === "string" && body.scenarioId.trim() ? body.scenarioId.trim() : null;
   const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const submittedTrainingPackId =
     typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
@@ -14224,13 +14286,39 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     return;
   }
 
-  if (!simulationSessionId || !body.userId || !body.segmentId || !body.scenarioId) {
-    response.status(400).json({ error: "simulationSessionId, userId, segmentId, and scenarioId are required." });
+  const missingFields = listMissingUsageSessionFields({
+    simulationSessionId,
+    userId,
+    segmentId,
+    scenarioId,
+  });
+  if (missingFields.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn("[usage-session] missing_required_fields", {
+      correlationId,
+      missingFields,
+      simulationSessionId,
+      userIdPresent: Boolean(userId),
+      segmentIdPresent: Boolean(segmentId),
+      scenarioIdPresent: Boolean(scenarioId),
+      trainingIdPresent: Boolean(trainingId),
+      trainingPackIdPresent: Boolean(submittedTrainingPackId),
+    });
+    response.status(400).json({
+      error: "simulationSessionId, userId, segmentId, and scenarioId are required.",
+      code: "missing_required_fields",
+      missingFields,
+    });
     return;
   }
 
+  const requiredSimulationSessionId = simulationSessionId as string;
+  const requiredUserId = userId as string;
+  const requiredSegmentId = segmentId as string;
+  const requiredScenarioId = scenarioId as string;
+
   await withDatabase(async (db) => {
-    const user = getUserById(db, body.userId);
+    const user = getUserById(db, requiredUserId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
       return;
@@ -14254,12 +14342,12 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     }
 
     const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);
+    const resolvedScenario = resolveMobileScenarioForUser(configForUser, requiredScenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for usage session." });
       return;
     }
-    if (resolvedScenario.segment.id !== body.segmentId) {
+    if (resolvedScenario.segment.id !== requiredSegmentId) {
       response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
@@ -14267,7 +14355,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
       orgId: accessContext.actingOrgId,
-      scenarioId: body.scenarioId,
+      scenarioId: requiredScenarioId,
       useModularPromptArchitecture,
       submittedTrainingPackId
     });
@@ -14313,11 +14401,11 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
           simulationSessionStore,
           usageSessionAccess,
           db,
-          simulationSessionId,
+          simulationSessionId: requiredSimulationSessionId,
           userId: user.id,
           orgId: accessContext.actingOrgId,
-          segmentId: body.segmentId,
-          scenarioId: body.scenarioId,
+          segmentId: requiredSegmentId,
+          scenarioId: requiredScenarioId,
           trainingId,
           submittedTrainingPackId,
           resolvedTrainingPackId: persistedTrainingPack?.id ?? null,

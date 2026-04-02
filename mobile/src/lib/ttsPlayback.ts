@@ -6,6 +6,7 @@ import { Platform } from "react-native";
 import { getVoiceSpeechTuning, selectSpeechVoiceIdentifier } from "../data/preferences";
 import type { AiVoiceGender, AiVoiceProfile } from "../types";
 import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
+import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
 
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
@@ -27,6 +28,7 @@ interface SpeakWithTtsFallbackParams {
   userId: string;
   authToken: string;
   correlationId?: string;
+  simulationSessionId?: string;
   remoteTtsEnabled: boolean;
   remoteAiConfigured: boolean;
   allowRemoteTts?: boolean;
@@ -39,6 +41,14 @@ interface SpeakWithTtsFallbackParams {
   prefetchedRemoteAudio?: { bytes: Uint8Array; contentType: string } | null;
   abortSignal?: AbortSignal;
   isCancelled?: () => boolean;
+  chunkIndex?: number;
+  chunkCount?: number;
+  describeCancellation?: () => {
+    superseded?: boolean;
+    sessionEnding?: boolean;
+    screenChanging?: boolean;
+  };
+  onRemoteCancellation?: (details: TtsCancellationAnalysis) => void;
   onPlaybackStart?: (details: { source: TtsSource; mode: "remote" | "fallback"; startedAtMs: number }) => void;
 }
 
@@ -185,6 +195,10 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
     throwIfCancelled();
     logTtsMode(params.source, params.preset, "remote", "remoteCallStarted");
     const requestStartedAtMs = Date.now();
+    let playbackStarted = false;
+    let sourceKind: RemoteAudioSourceKind | null = null;
+    let fallbackAttempted = false;
+    let fallbackSucceeded = false;
     try {
       let ttsAudio = params.prefetchedRemoteAudio ?? null;
       if (!ttsAudio) {
@@ -232,6 +246,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
             return;
           }
           playbackStartedMarked = true;
+          playbackStarted = true;
           logTtsTiming({
             source: params.source,
             preset: params.preset,
@@ -283,6 +298,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         sourceUri: string;
         preparationStartedAtMs: number;
       }): Promise<void> => {
+        sourceKind = paramsForSource.sourceKind;
         const playbackSession = createPlaybackSession();
         const sourcePreparedAtMs = Date.now();
         logTtsTiming({
@@ -342,13 +358,14 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           });
           return;
         } catch (inlinePlaybackError) {
+          fallbackAttempted = true;
           inlineRemoteAudioPlaybackSupported = false;
           await stopRemoteTtsPlayback({
             remoteTtsSoundRef,
             remoteTtsFileRef,
           });
           if (isCancelled()) {
-            return;
+            throw new TtsPlaybackCancelledError();
           }
           // eslint-disable-next-line no-console
           console.log("[TTS-MODE]", {
@@ -393,6 +410,9 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         sourceUri: fileUri,
         preparationStartedAtMs: fileWriteStartedAtMs,
       });
+      if (fallbackAttempted) {
+        fallbackSucceeded = true;
+      }
 
       await stopRemoteTtsPlayback({
         remoteTtsSoundRef,
@@ -401,6 +421,25 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
       return;
     } catch (error) {
       if (error instanceof TtsPlaybackCancelledError || isCancelled()) {
+        const cancellationState = params.describeCancellation?.() ?? {};
+        const cancellationDetails = analyzeTtsCancellation({
+          source: params.source,
+          correlationId: params.correlationId ?? null,
+          simulationSessionId: params.simulationSessionId ?? null,
+          sourceKind,
+          playbackStarted,
+          fallbackAttempted,
+          fallbackSucceeded,
+          chunkIndex: typeof params.chunkIndex === "number" ? params.chunkIndex : null,
+          chunkCount: typeof params.chunkCount === "number" ? params.chunkCount : null,
+          abortSignaled: Boolean(params.abortSignal?.aborted),
+          superseded: Boolean(cancellationState.superseded),
+          sessionEnding: Boolean(cancellationState.sessionEnding),
+          screenChanging: Boolean(cancellationState.screenChanging),
+        });
+        // eslint-disable-next-line no-console
+        console.warn("[TTS-CANCEL]", cancellationDetails);
+        params.onRemoteCancellation?.(cancellationDetails);
         await stopRemoteTtsPlayback({
           remoteTtsSoundRef,
           remoteTtsFileRef,
