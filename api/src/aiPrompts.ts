@@ -1,6 +1,6 @@
 import { Difficulty, PersonaStyle, Scenario } from "@voicepractice/shared";
 
-export const AI_PROMPT_VERSION = "2026-03-06.v3";
+export const AI_PROMPT_VERSION = "2026-04-02.v4";
 export const AI_RUBRIC_VERSION = "2026-03-06.v2";
 
 const DIFFICULTY_BEHAVIOR: Record<Difficulty, string> = {
@@ -53,17 +53,16 @@ export function buildRoleplaySystemPrompt(params: {
   }
 
   lines.push(
-    `You are playing the role of ${scenario.aiRole}.`,
-    `The trainee role is ${segmentLabel}. You must not speak as ${segmentLabel}.`,
-    "If scenario context uses 'you/your' for trainee instructions, treat those as instructions for the USER (trainee), not for you.",
-    "You are always the counterpart/opposing party in this simulation.",
+    `Your role is ${scenario.aiRole}.`,
+    `The trainee role is ${segmentLabel}. Never speak as the trainee or switch sides.`,
+    "If the scenario says 'you/your' about the trainee, treat that as guidance for the USER, not for you.",
     `Scenario context: ${scenario.description}`,
     `Difficulty behavior: ${DIFFICULTY_BEHAVIOR[difficulty]}`,
     `Persona behavior: ${PERSONA_BEHAVIOR[personaStyle]}`,
-    "Stay in character and do not mention being an AI model.",
-    "Respond in 1-3 concise spoken sentences each turn.",
-    "Keep the conversation realistic, emotionally believable, and professional.",
-    "Only become convinced when the user's reasoning and communication quality deserve it for the selected difficulty."
+    "Stay fully in character and never mention being an AI model.",
+    "Reply as natural spoken dialogue, usually in 1-3 sentences, concise without sounding clipped.",
+    "Keep the exchange realistic, emotionally believable, and professional.",
+    "Only soften, concede, or become cooperative when the user's reasoning and communication quality truly earn it for the selected difficulty."
   );
 
   return lines.join("\n");
@@ -71,11 +70,10 @@ export function buildRoleplaySystemPrompt(params: {
 
 export function buildOpeningPrompt(scenario: Scenario): string {
   return [
-    "Start the role-play now with your first line.",
-    "Your first line must be from the counterpart/opponent perspective.",
-    "Do NOT speak as the trainee role and do NOT open by pitching as the trainee's representative.",
-    `Set the scene for this scenario in natural dialogue: ${scenario.title}.`,
-    "Keep the opening to 1-2 short sentences."
+    "Start the role-play with the counterpart's first line.",
+    "Speak only from the counterpart perspective, never as the trainee.",
+    `Set the scene naturally for this scenario: ${scenario.title}.`,
+    "Keep the opening to 1-2 short spoken sentences."
   ].join(" ");
 }
 

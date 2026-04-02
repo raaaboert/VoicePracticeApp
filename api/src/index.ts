@@ -2063,7 +2063,8 @@ function normalizeDialogueHistory(value: unknown, options?: NormalizeDialogueHis
       continue;
     }
 
-    safe.push({ role, content: trimmed.slice(0, 2_500) });
+    const normalizedWhitespace = trimmed.replace(/\s+/g, " ");
+    safe.push({ role, content: normalizedWhitespace.slice(0, 2_500) });
   }
 
   const maxTurns = options?.maxTurns;
@@ -4203,6 +4204,13 @@ async function resolvePersistedTrainingPackForScenario(params: {
   if (submittedTrainingPackId) {
     if (!params.orgId) {
       return null;
+    }
+    const activePack = await getActiveTrainingPackForOrg(params.orgId, params.useModularPromptArchitecture, {
+      scenarioId: params.scenarioId,
+      onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+    });
+    if (activePack?.id === submittedTrainingPackId) {
+      return activePack;
     }
     const packs = await listTrainingPacksForDashboardOrg(params.orgId);
     const submittedPack = packs.find((pack) => pack.id === submittedTrainingPackId);
@@ -6975,7 +6983,7 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
       configuredBaseline ??
       canonicalServerBaseline ??
       defaultIndustryBaseline ??
-      `No specific industry baseline is configured for ${selectedIndustry.label}.`;
+      null;
 
     return {
       industryId: selectedIndustry.id,
@@ -11790,7 +11798,7 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
 
   const body = request.body as { text?: unknown; preset?: unknown };
   const preset = parseTtsPreset(body.preset);
-  const text = typeof body.text === "string" ? body.text.trim() : "";
+  const text = typeof body.text === "string" ? body.text.trim().replace(/\s+/g, " ") : "";
 
   if (!preset) {
     respondWithTtsError({
@@ -12469,10 +12477,16 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     useModularPromptArchitecture: context.useModularPromptArchitecture,
   });
 
-  const activeTrainingPack = await getActiveTrainingPackForOrg(context.actingOrgId, context.useModularPromptArchitecture, {
-    scenarioId: context.scenario.id,
-    onSkip: (message) => logWarnThrottled("training-pack:scope", message)
-  });
+  const trainingPackLookupStartedAtMs = Date.now();
+  const activeTrainingPack = context.useModularPromptArchitecture
+    ? await getActiveTrainingPackForOrg(context.actingOrgId, true, {
+        scenarioId: context.scenario.id,
+        onSkip: (message) => logWarnThrottled("training-pack:scope", message)
+      })
+    : null;
+  const trainingPackLookupMs = context.useModularPromptArchitecture
+    ? Date.now() - trainingPackLookupStartedAtMs
+    : 0;
 
   try {
     const prompts = context.useModularPromptArchitecture
@@ -12503,6 +12517,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       { role: "system" as const, content: prompts.systemPrompt },
       { role: "user" as const, content: prompts.openingPrompt }
     ];
+    const promptChars = promptMessages.reduce((total, message) => total + message.content.length, 0);
     const { completion, latencyMs } = await requestSimulationCompletion({
       route: "opening",
       messages: promptMessages,
@@ -12536,7 +12551,10 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       elapsedMs: Date.now() - routeStartedAtMs,
       modelLatencyMs: latencyMs,
       workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
-      promptChars: promptMessages.reduce((total, message) => total + message.content.length, 0),
+      promptChars,
+      systemPromptChars: prompts.systemPrompt.length,
+      openingPromptChars: prompts.openingPrompt.length,
+      trainingPackLookupMs,
       maxOutputTokens,
     });
 
@@ -12827,12 +12845,18 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     useModularPromptArchitecture: context.useModularPromptArchitecture,
   });
 
-  const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
-    orgId: context.actingOrgId,
-    scenarioId: context.scenario.id,
-    useModularPromptArchitecture: context.useModularPromptArchitecture,
-    submittedTrainingPackId
-  });
+  const trainingPackLookupStartedAtMs = Date.now();
+  const activeTrainingPack = context.useModularPromptArchitecture
+    ? await resolvePersistedTrainingPackForScenario({
+        orgId: context.actingOrgId,
+        scenarioId: context.scenario.id,
+        useModularPromptArchitecture: true,
+        submittedTrainingPackId
+      })
+    : null;
+  const trainingPackLookupMs = context.useModularPromptArchitecture
+    ? Date.now() - trainingPackLookupStartedAtMs
+    : 0;
 
   try {
     const systemPrompt = context.useModularPromptArchitecture
@@ -12862,6 +12886,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       { role: "system" as const, content: systemPrompt },
       ...history.map((message) => ({ role: message.role, content: message.content })),
     ];
+    const historyChars = history.reduce((total, message) => total + message.content.length, 0);
+    const promptChars = systemPrompt.length + historyChars;
     const { completion, latencyMs } = await requestSimulationCompletion({
       route: "turn",
       messages: promptMessages,
@@ -12887,7 +12913,10 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       modelLatencyMs: latencyMs,
       workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
       historyCount: history.length,
-      promptChars: promptMessages.reduce((total, message) => total + message.content.length, 0),
+      historyChars,
+      promptChars,
+      systemPromptChars: systemPrompt.length,
+      trainingPackLookupMs,
       maxOutputTokens,
     });
 

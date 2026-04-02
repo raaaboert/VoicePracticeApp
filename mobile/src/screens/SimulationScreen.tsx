@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
+import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
@@ -22,6 +23,10 @@ import {
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
 } from "../lib/simulationInteractionModel";
+import {
+  getSimulationTranscriptionMimeType,
+  SIMULATION_RECORDING_OPTIONS,
+} from "../lib/simulationRecordingProfile";
 import { buildSimulationTurnTimingSummary, SimulationTurnSummaryMode } from "../lib/simulationTimingSummary";
 import {
   speakWithRemoteTtsFallback,
@@ -465,6 +470,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         return;
       }
       playbackStartHandled = true;
+      startPrefetchForChunk(2);
       onPlaybackStart?.();
     };
     const startPrefetchForChunk = (targetIndex: number) => {
@@ -670,7 +676,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       await cancelPendingTts();
       await setAudioMode(true);
       const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.prepareToRecordAsync(SIMULATION_RECORDING_OPTIONS);
       await recording.startAsync();
       recordingRef.current = recording;
       finalizeRequestedRef.current = false;
@@ -725,7 +731,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     const submitStartedAtMs = turnSubmitStartedAtRef.current;
     const finalizeTrigger: TurnFinalizeTrigger = "submit";
     const effectiveSubmitStartedAtMs = submitStartedAtMs ?? Date.now();
+    let audioModeResetPromise: Promise<void> | null = null;
     let recordingFinalizeCompletedAtMs: number | null = null;
+    let audioBytes: number | undefined;
     let transcribeRequestStartedAtMs: number | null = null;
     let transcribeResponseAtMs: number | null = null;
     let assistantRequestStartedAtMs: number | null = null;
@@ -776,13 +784,10 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       });
       await recording.stopAndUnloadAsync();
       recordingRef.current = null;
-      await setAudioMode(false);
-      recordingFinalizeCompletedAtMs = Date.now();
-      logSimulationTiming({
-        correlationId,
-        phase: "recording_finalize_complete",
-        startedAtMs: effectiveSubmitStartedAtMs,
+      audioModeResetPromise = setAudioMode(false).catch(() => {
+        // Ignore mode reset errors and allow the turn pipeline to continue.
       });
+      recordingFinalizeCompletedAtMs = Date.now();
 
       const audioUri = recording.getURI();
       if (!audioUri) {
@@ -792,6 +797,15 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         1,
         Math.round((Date.now() - turnStartedAtRef.current) / 1000),
       );
+      const audioFileInfoPromise = FileSystem.getInfoAsync(audioUri).catch(() => null);
+      logSimulationTiming({
+        correlationId,
+        phase: "recording_finalize_complete",
+        startedAtMs: effectiveSubmitStartedAtMs,
+        details: {
+          turnDurationSeconds,
+        },
+      });
       const inferredVoiceWithoutMeter =
         !meteringSeenRef.current && (turnDurationSeconds >= 3 || finalizeTrigger === "submit");
       const shouldAttemptTranscription =
@@ -819,7 +833,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               userId,
               authToken,
               audioUri,
-              preferredMimeType: Platform.OS === "web" ? "audio/webm" : "audio/m4a",
+              preferredMimeType: getSimulationTranscriptionMimeType(Platform.OS),
               correlationId,
             })
           ).trim();
@@ -857,6 +871,22 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       } else if (!useLiveApiThisTurn && shouldAttemptTranscription) {
         userText = buildLocalCapturedText(turnDurationSeconds);
         transcriptChars = userText.length;
+      }
+
+      const audioFileInfo = await audioFileInfoPromise;
+      audioBytes =
+        audioFileInfo?.exists && typeof audioFileInfo.size === "number" && Number.isFinite(audioFileInfo.size)
+          ? audioFileInfo.size
+          : undefined;
+      if (typeof audioBytes === "number") {
+        logSimulationTiming({
+          correlationId,
+          phase: "recording_payload_measured",
+          startedAtMs: effectiveSubmitStartedAtMs,
+          details: {
+            audioBytes,
+          },
+        });
       }
 
       if (userText && appearsToEchoAssistantReply(userText, messagesRef.current)) {
@@ -941,6 +971,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               phase: "tts_pipeline_start",
               startedAtMs: effectiveSubmitStartedAtMs,
             });
+            if (audioModeResetPromise) {
+              await audioModeResetPromise;
+            }
             ttsPipelineStartedAtMs = Date.now();
             const speakPromise = speakAssistantResponse(
               reply,
@@ -989,6 +1022,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       });
       continueLoop = sessionActiveRef.current;
     } finally {
+      if (audioModeResetPromise) {
+        await audioModeResetPromise;
+      }
       processingRef.current = false;
       finalizeRequestedRef.current = false;
       turnSubmitStartedAtRef.current = null;

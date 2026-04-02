@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import { Difficulty, DialogueMessage, PersonaStyle, Scenario, SimulationScorecard } from "../types";
 import { fetchAiOpeningLine, fetchAiScore, fetchAiTurn, transcribeAudioViaApi } from "./api";
+import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
 
 // Remote AI calls now go through the Node API. This flag simply controls whether the app
 // should attempt calling the backend or stay in local test mode.
@@ -88,7 +89,7 @@ export async function transcribeAudio(params: {
   preferredMimeType?: string;
   correlationId?: string;
 }): Promise<string> {
-  const defaultMimeType = Platform.OS === "web" ? "audio/webm" : "audio/m4a";
+  const defaultMimeType = getSimulationTranscriptionMimeType(Platform.OS);
   const mimeType = params.preferredMimeType ?? defaultMimeType;
 
   return transcribeAudioViaApi({

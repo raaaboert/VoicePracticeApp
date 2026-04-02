@@ -39,6 +39,17 @@ runTest("splits a long multi-sentence reply at the first suitable sentence bound
   assert(chunks[1].startsWith("What would make"), "second chunk should carry the remainder of the reply");
 });
 
+runTest("keeps longer replies split into natural sentence-bounded chunks without over-fragmenting", () => {
+  const text =
+    "I hear the hesitation, and I do not expect you to change course blindly. We can start with one narrow pilot so your team sees the workflow in action before committing more broadly. If the pilot misses your standards, you keep full control over what happens next.";
+  const chunks = splitTextForRemoteTtsFastStart(text);
+
+  assert(chunks.length >= 2, "expected a longer reply to split into multiple chunks");
+  assert(chunks.length <= 3, "longer replies should not fragment into too many requests");
+  assert(chunks.every((chunk) => /[.!?]$/.test(chunk)), "each chunk should end at a sentence boundary");
+  assert(chunks[0].length < chunks.join(" ").length, "the first chunk should stay smaller than the full reply");
+});
+
 runTest("does not split when the remainder would be too short to justify a second request", () => {
   const text =
     "I hear your concern, and I want to address it carefully. Brief tail.";
@@ -47,4 +58,24 @@ runTest("does not split when the remainder would be too short to justify a secon
     [text],
     "very short remainders should stay in one request",
   );
+});
+
+runTest("does not split a long single-sentence reply with no natural pause", () => {
+  const text =
+    "I understand the concern and I want to help you evaluate the risk carefully while we work through the decision step by step without forcing an artificial break in the middle of the thought";
+  assertDeepEqual(
+    splitTextForRemoteTtsFastStart(text),
+    [text],
+    "single-sentence replies should stay intact",
+  );
+});
+
+runTest("splits a long single-sentence reply at a natural clause boundary when that speeds first audio", () => {
+  const text =
+    "I understand the concern, and I do not want to rush you into a decision, but we can start with a narrow pilot that gives your team real evidence before you commit more broadly.";
+  const chunks = splitTextForRemoteTtsFastStart(text);
+
+  assert(chunks.length >= 2, "expected a long clause-heavy sentence to split");
+  assert(/[,;:]$/.test(chunks[0]), "the first chunk should end on a natural clause boundary");
+  assert(chunks.join(" ") === text, "chunking should preserve the original reply text");
 });
