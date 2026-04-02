@@ -2,7 +2,7 @@ import {
   createSimulationCorrelationId,
   getPrimarySimulationAction,
   getSimulationStartPlan,
-  getTurnFinalizeFallbackReason,
+  getTurnRecordingSafetySignal,
 } from "./simulationInteractionModel";
 
 function assert(condition: boolean, message: string): void {
@@ -87,59 +87,59 @@ runTest("busy simulation states disable the primary button instead of ending the
   );
 });
 
-runTest("fallback turn finalization no longer fires on short silence", () => {
-  const noFallback = getTurnFinalizeFallbackReason({
+runTest("long pause becomes a guidance signal instead of an auto-submit trigger", () => {
+  const noSignal = getTurnRecordingSafetySignal({
     elapsedMs: 8_000,
     silenceMs: 2_300,
     heardVoice: true,
     meteringSeen: true,
     minTurnDurationMs: 1_600,
-    backupSilenceCutoffMs: 6_500,
-    softMaxTurnDurationMs: 35_000,
-    absoluteMaxTurnDurationMs: 60_000,
+    longPauseNoticeMs: 6_500,
+    softTurnNoticeMs: 35_000,
+    absoluteTurnNoticeMs: 60_000,
   });
-  assert(noFallback === null, "short silence should not end the turn anymore");
+  assert(noSignal === null, "short silence should not raise a guidance signal yet");
 
-  const backupSilence = getTurnFinalizeFallbackReason({
+  const longPause = getTurnRecordingSafetySignal({
     elapsedMs: 9_000,
     silenceMs: 6_700,
     heardVoice: true,
     meteringSeen: true,
     minTurnDurationMs: 1_600,
-    backupSilenceCutoffMs: 6_500,
-    softMaxTurnDurationMs: 35_000,
-    absoluteMaxTurnDurationMs: 60_000,
+    longPauseNoticeMs: 6_500,
+    softTurnNoticeMs: 35_000,
+    absoluteTurnNoticeMs: 60_000,
   });
-  assert(backupSilence === "backup-silence", "long silence should still trigger the backup path");
+  assert(longPause === "long-pause", "long silence should surface a manual-submit reminder");
 });
 
-runTest("turn duration fallback wins before absolute safety cap", () => {
+runTest("long-turn safety signals stay advisory instead of auto-submitting", () => {
   assert(
-    getTurnFinalizeFallbackReason({
+    getTurnRecordingSafetySignal({
       elapsedMs: 35_000,
       silenceMs: 0,
       heardVoice: false,
       meteringSeen: false,
       minTurnDurationMs: 1_600,
-      backupSilenceCutoffMs: 6_500,
-      softMaxTurnDurationMs: 35_000,
-      absoluteMaxTurnDurationMs: 60_000,
+      longPauseNoticeMs: 6_500,
+      softTurnNoticeMs: 35_000,
+      absoluteTurnNoticeMs: 60_000,
     }) === "soft-limit",
-    "soft turn limit should trigger before the absolute cap",
+    "soft turn length should surface a reminder before the absolute warning",
   );
 
   assert(
-    getTurnFinalizeFallbackReason({
+    getTurnRecordingSafetySignal({
       elapsedMs: 60_000,
       silenceMs: 0,
       heardVoice: false,
       meteringSeen: false,
       minTurnDurationMs: 1_600,
-      backupSilenceCutoffMs: 6_500,
-      softMaxTurnDurationMs: 35_000,
-      absoluteMaxTurnDurationMs: 60_000,
+      longPauseNoticeMs: 6_500,
+      softTurnNoticeMs: 35_000,
+      absoluteTurnNoticeMs: 60_000,
     }) === "absolute-limit",
-    "absolute limit should still be the final safety stop",
+    "absolute turn length should remain a stronger advisory signal",
   );
 });
 

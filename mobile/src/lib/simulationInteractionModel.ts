@@ -5,7 +5,8 @@ export interface SimulationStartProgress {
   recognizedStartRegistered: boolean;
 }
 
-export type TurnFinalizeTrigger = "submit" | "backup-silence" | "soft-limit" | "absolute-limit";
+export type TurnFinalizeTrigger = "submit";
+export type TurnRecordingSafetySignal = "long-pause" | "soft-limit" | "absolute-limit";
 
 export interface PrimarySimulationAction {
   kind: "start" | "submit" | "busy";
@@ -51,21 +52,21 @@ export function getPrimarySimulationAction(params: {
   };
 }
 
-export function getTurnFinalizeFallbackReason(params: {
+export function getTurnRecordingSafetySignal(params: {
   elapsedMs: number;
   silenceMs: number | null;
   heardVoice: boolean;
   meteringSeen: boolean;
   minTurnDurationMs: number;
-  backupSilenceCutoffMs: number;
-  softMaxTurnDurationMs: number;
-  absoluteMaxTurnDurationMs: number;
-}): Exclude<TurnFinalizeTrigger, "submit"> | null {
-  if (params.elapsedMs >= params.absoluteMaxTurnDurationMs) {
+  longPauseNoticeMs: number;
+  softTurnNoticeMs: number;
+  absoluteTurnNoticeMs: number;
+}): TurnRecordingSafetySignal | null {
+  if (params.elapsedMs >= params.absoluteTurnNoticeMs) {
     return "absolute-limit";
   }
 
-  if (params.elapsedMs >= params.softMaxTurnDurationMs) {
+  if (params.elapsedMs >= params.softTurnNoticeMs) {
     return "soft-limit";
   }
 
@@ -74,9 +75,9 @@ export function getTurnFinalizeFallbackReason(params: {
     params.heardVoice &&
     params.elapsedMs >= params.minTurnDurationMs &&
     typeof params.silenceMs === "number" &&
-    params.silenceMs >= params.backupSilenceCutoffMs
+    params.silenceMs >= params.longPauseNoticeMs
   ) {
-    return "backup-silence";
+    return "long-pause";
   }
 
   return null;

@@ -11628,6 +11628,15 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
   if (!context) {
     return;
   }
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "transcribe",
+    correlationId,
+    stage: "context_ready",
+    elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
+    bytes: file.buffer.byteLength,
+    mimeType: file.mimetype || "audio/m4a",
+  });
 
   try {
     const text = await requestTranscription({
@@ -11651,6 +11660,16 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
 
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({ text });
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "transcribe",
+      correlationId,
+      stage: "response_sent",
+      elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
+      bytes: file.buffer.byteLength,
+      mimeType: file.mimetype || "audio/m4a",
+      textLength: text.trim().length,
+    });
 
     if (!context.isSuperUser) {
       runSimulationPostResponseTask(async () => {
@@ -11685,6 +11704,16 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Transcription failed.";
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "transcribe",
+      correlationId,
+      stage: "error",
+      elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
+      bytes: file.buffer.byteLength,
+      mimeType: file.mimetype || "audio/m4a",
+      error: message,
+    });
     response.status(503).json({ error: message });
   }
 });
@@ -11692,6 +11721,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
 app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {
   const userId = request.params.userId;
   const correlationId = resolveSimulationCorrelationId(request);
+  const routeStartedAtMs = Date.now();
   // eslint-disable-next-line no-console
   console.log(`[request-hit] route=tts userId=${userId} correlationId=${correlationId}`);
 
@@ -11841,6 +11871,15 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
   if (!context) {
     return;
   }
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "tts",
+    correlationId,
+    stage: "context_ready",
+    elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
+    textChars: text.length,
+    preset,
+  });
 
   let ttsCallStartedAtMs: number | null = null;
   try {
@@ -11886,6 +11925,16 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     response.setHeader("Content-Type", "audio/mpeg");
     response.setHeader("Cache-Control", "no-store");
     response.status(200).send(ttsResult.audioBuffer);
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "tts",
+      correlationId,
+      stage: "response_sent",
+      elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
+      bytes: ttsResult.audioBuffer.byteLength,
+      textChars: text.length,
+      preset,
+    });
   } catch (error) {
     if (typeof ttsCallStartedAtMs === "number") {
       const ttsCallEndedAtMs = Date.now();
@@ -11903,6 +11952,16 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       });
     }
     const message = error instanceof Error ? error.message : "Text-to-speech failed.";
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "tts",
+      correlationId,
+      stage: "error",
+      elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
+      textChars: text.length,
+      preset,
+      error: message,
+    });
     if (error instanceof OpenAiSpeechRequestError) {
       respondWithTtsError({
         status: 503,
@@ -12544,6 +12603,14 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "opening",
+      correlationId,
+      stage: "error",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      error: message,
+    });
     response.status(503).json({ error: message });
   }
 });
@@ -12888,6 +12955,15 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "turn",
+      correlationId,
+      stage: "error",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      historyCount: history.length,
+      error: message,
+    });
     response.status(503).json({ error: message });
   }
 });
