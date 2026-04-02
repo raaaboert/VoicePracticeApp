@@ -172,6 +172,51 @@ test("simulation session lifecycle rejects completion without a recognized start
   }
 });
 
+test("simulation session lifecycle rejects stale or future start registration payloads", async () => {
+  const { tempDir, simulationSessionStore } = await createStores();
+  try {
+    await assert.rejects(
+      registerRecognizedSimulationSessionStart(simulationSessionStore, {
+        simulationSessionId: "sim_expired_start",
+        userId: "user_1",
+        orgId: "org_1",
+        segmentId: "segment_1",
+        scenarioId: "scenario_1",
+        trainingId: null,
+        trainingPackId: null,
+        clientStartedAt: "2026-04-01T09:30:00.000Z",
+        now: new Date("2026-04-01T10:00:00.000Z")
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SimulationSessionValidationError);
+        assert.equal(error.code, "session_start_registration_expired");
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      registerRecognizedSimulationSessionStart(simulationSessionStore, {
+        simulationSessionId: "sim_future_start",
+        userId: "user_1",
+        orgId: "org_1",
+        segmentId: "segment_1",
+        scenarioId: "scenario_1",
+        trainingId: null,
+        trainingPackId: null,
+        clientStartedAt: "2026-04-01T10:05:00.000Z",
+        now: new Date("2026-04-01T10:00:00.000Z")
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SimulationSessionValidationError);
+        assert.equal(error.code, "session_start_future_timestamp");
+        return true;
+      }
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("simulation session lifecycle preserves local/mock-style completion without AI touches but rejects unreasonable timing drift and mismatched context", async () => {
   const { tempDir, usageStore, simulationSessionStore } = await createStores();
   try {
@@ -280,6 +325,48 @@ test("simulation session lifecycle preserves local/mock-style completion without
       (error: unknown) => {
         assert.ok(error instanceof SimulationSessionValidationError);
         assert.equal(error.code, "session_context_mismatch");
+        return true;
+      }
+    );
+
+    await simulationSessionStore.upsertStartedSession(
+      buildSimulationSessionStartRecord({
+        simulationSessionId: "sim_server_backdated",
+        userId: "user_1",
+        orgId: "org_1",
+        segmentId: "segment_1",
+        scenarioId: "scenario_1",
+        trainingId: null,
+        trainingPackId: null,
+        clientStartedAt: null,
+        now: new Date("2026-04-01T10:10:00.000Z")
+      })
+    );
+
+    await assert.rejects(
+      completeRecognizedSimulationUsage({
+        simulationSessionStore,
+        usageSessionAccess,
+        db,
+        simulationSessionId: "sim_server_backdated",
+        userId: "user_1",
+        orgId: "org_1",
+        segmentId: "segment_1",
+        scenarioId: "scenario_1",
+        trainingId: null,
+        submittedTrainingPackId: null,
+        resolvedTrainingPackId: null,
+        startedAt: "2026-04-01T10:05:00.000Z",
+        endedAt: "2026-04-01T10:12:00.000Z",
+        rawDurationSeconds: 420,
+        beforeUsage: createBeforeUsage(),
+        maxSimulationMinutes: 20,
+        timeZone: "UTC",
+        now: new Date("2026-04-01T10:12:01.000Z")
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SimulationSessionValidationError);
+        assert.equal(error.code, "session_server_start_drift");
         return true;
       }
     );

@@ -13,6 +13,8 @@ import type {
 export const SIMULATION_SESSION_ID_MAX_LENGTH = 120;
 export const SIMULATION_SESSION_COMPLETION_FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
 export const SIMULATION_SESSION_START_DRIFT_TOLERANCE_MS = 2 * 60 * 1000;
+export const SIMULATION_SESSION_START_REGISTRATION_PAST_TOLERANCE_MS = 15 * 60 * 1000;
+export const SIMULATION_SESSION_START_REGISTRATION_FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
 export const SIMULATION_SESSION_DURATION_TOLERANCE_SECONDS = 30;
 export const SIMULATION_SESSION_COMPLETION_WINDOW_GRACE_MINUTES = 20;
 export const SIMULATION_SESSION_FALLBACK_COMPLETION_WINDOW_MS = 8 * 60 * 60 * 1000;
@@ -108,7 +110,52 @@ export async function registerRecognizedSimulationSessionStart(
   store: SimulationSessionStore,
   params: BuildSimulationSessionStartRecordParams
 ): Promise<SimulationSessionRecord> {
-  return await store.upsertStartedSession(buildSimulationSessionStartRecord(params));
+  const simulationSessionId = normalizeSimulationSessionId(params.simulationSessionId);
+  if (!simulationSessionId) {
+    throw new SimulationSessionValidationError(
+      400,
+      "invalid_simulation_session_id",
+      "simulationSessionId is required."
+    );
+  }
+
+  let normalizedClientStartedAt: string | null = null;
+  if (params.clientStartedAt) {
+    const parsedClientStartedAt = new Date(params.clientStartedAt);
+    if (!Number.isFinite(parsedClientStartedAt.getTime())) {
+      throw new SimulationSessionValidationError(
+        400,
+        "session_start_invalid_timestamp",
+        "Simulation session start time must be a valid ISO timestamp."
+      );
+    }
+
+    if (parsedClientStartedAt.getTime() > params.now.getTime() + SIMULATION_SESSION_START_REGISTRATION_FUTURE_TOLERANCE_MS) {
+      throw new SimulationSessionValidationError(
+        400,
+        "session_start_future_timestamp",
+        "Simulation session start time is too far in the future."
+      );
+    }
+
+    if (parsedClientStartedAt.getTime() < params.now.getTime() - SIMULATION_SESSION_START_REGISTRATION_PAST_TOLERANCE_MS) {
+      throw new SimulationSessionValidationError(
+        409,
+        "session_start_registration_expired",
+        "Simulation session start registration expired. Restart the simulation and try again."
+      );
+    }
+
+    normalizedClientStartedAt = parsedClientStartedAt.toISOString();
+  }
+
+  return await store.upsertStartedSession(
+    buildSimulationSessionStartRecord({
+      ...params,
+      simulationSessionId,
+      clientStartedAt: normalizedClientStartedAt
+    })
+  );
 }
 
 export async function touchRecognizedSimulationSession(
@@ -201,6 +248,18 @@ function assertRecognizedSimulationSessionTiming(
       409,
       "session_start_drift",
       "Simulation completion start time does not plausibly match the recognized session."
+    );
+  }
+
+  const serverStartedAt = new Date(session.serverStartedAt);
+  if (
+    Number.isFinite(serverStartedAt.getTime()) &&
+    params.startedAt.getTime() < serverStartedAt.getTime() - SIMULATION_SESSION_START_DRIFT_TOLERANCE_MS
+  ) {
+    throw new SimulationSessionValidationError(
+      409,
+      "session_server_start_drift",
+      "Simulation completion start time predates the recognized server start window."
     );
   }
 

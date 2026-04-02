@@ -83,8 +83,21 @@ test("file simulation session store upserts, touches, finalizes, and deletes by 
         userId: "user_2"
       })
     );
+    await store.upsertStartedSession(
+      createSession({
+        simulationSessionId: "sim_stale",
+        userId: "user_2",
+        lastSeenAt: "2026-03-28T10:00:00.000Z"
+      })
+    );
 
     assert.equal((await store.getById("sim_1"))?.usageSessionRecordId, "usagesim_1");
+    assert.deepEqual(
+      (await store.listSessions()).map((entry) => entry.simulationSessionId).sort(),
+      ["sim_1", "sim_2", "sim_stale"]
+    );
+    assert.equal(await store.pruneStartedSessionsLastSeenBefore(new Date("2026-03-30T00:00:00.000Z")), 1);
+    assert.equal(await store.getById("sim_stale"), null);
     assert.equal(await store.deleteSessionsForUser("user_1"), 1);
     assert.equal(await store.getById("sim_1"), null);
     assert.equal((await store.getById("sim_2"))?.userId, "user_2");

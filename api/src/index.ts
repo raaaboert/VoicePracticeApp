@@ -204,6 +204,10 @@ import {
   SimulationSessionValidationError,
   touchRecognizedSimulationSession
 } from "./services/simulationSessionLifecycle.js";
+import {
+  pruneStaleRecognizedSimulationSessions,
+  repairOrphanedUserScopedHistory
+} from "./services/integrityMaintenance.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
 import {
@@ -3261,6 +3265,48 @@ async function migrateLegacySupportCasesFromAppState(): Promise<void> {
     if (legacySupportCases.length > 0) {
       logWarn(
         `[support][migration] moved ${migration.importedCount} legacy support cases to dedicated storage.`
+      );
+    }
+  });
+}
+
+async function runStartupUsageIntegrityMaintenance(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    const orphanRepair = await repairOrphanedUserScopedHistory({
+      db,
+      usageSessionAccess,
+      simulationSessionStore,
+      scoreRecordAccess,
+      aiUsageEventAccess,
+      supportCaseStore
+    });
+    const staleSessionPrune = await pruneStaleRecognizedSimulationSessions({
+      simulationSessionStore,
+      now: new Date()
+    });
+
+    const hasOrphanRepair =
+      orphanRepair.orphanedUsageSessionsDeleted > 0
+      || orphanRepair.orphanedSimulationSessionsDeleted > 0
+      || orphanRepair.orphanedScoreRecordsDeleted > 0
+      || orphanRepair.orphanedAiUsageEventsDeleted > 0
+      || orphanRepair.orphanedSupportCasesDeleted > 0;
+    if (hasOrphanRepair) {
+      logWarn(
+        `[integrity][startup] cleaned orphaned user-scoped history `
+        + `(usage=${orphanRepair.orphanedUsageSessionsDeleted}, `
+        + `recognized_sessions=${orphanRepair.orphanedSimulationSessionsDeleted}, `
+        + `scores=${orphanRepair.orphanedScoreRecordsDeleted}, `
+        + `ai_usage=${orphanRepair.orphanedAiUsageEventsDeleted}, `
+        + `support=${orphanRepair.orphanedSupportCasesDeleted}).`
+      );
+    }
+
+    if (staleSessionPrune.prunedStartedSessions > 0) {
+      logWarn(
+        `[integrity][startup] pruned ${staleSessionPrune.prunedStartedSessions} stale started simulation sessions `
+        + `last seen before ${staleSessionPrune.cutoffAt}.`
       );
     }
   });
@@ -13838,6 +13884,10 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         now: new Date()
       });
     } catch (error) {
+      if (error instanceof SimulationSessionValidationError) {
+        response.status(error.statusCode).json({ error: error.message, code: error.code });
+        return;
+      }
       if (error instanceof Error && error.message.toLowerCase().includes("simulation session")) {
         response.status(409).json({ error: error.message });
         return;
@@ -14704,6 +14754,7 @@ void (async () => {
   await webAuthSessionStore.initialize();
   await migrateLegacyWebAuthSessionsFromAppState();
   await trainingPackStore.initialize();
+  await runStartupUsageIntegrityMaintenance();
 
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console

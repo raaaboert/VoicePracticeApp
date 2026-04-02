@@ -22,9 +22,11 @@ export interface SimulationSessionFinalizeParams {
 export interface SimulationSessionStore {
   initialize(): Promise<void>;
   getById(simulationSessionId: string): Promise<SimulationSessionRecord | null>;
+  listSessions(): Promise<SimulationSessionRecord[]>;
   upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord>;
   touchSession(params: SimulationSessionTouchParams): Promise<SimulationSessionRecord | null>;
   markUsageRecorded(params: SimulationSessionFinalizeParams): Promise<SimulationSessionRecord | null>;
+  pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number>;
   deleteSessionsForUser(userId: string): Promise<number>;
 }
 
@@ -258,9 +260,11 @@ async function ensureParentDirectory(filePath: string): Promise<void> {
 abstract class BaseSimulationSessionStore implements SimulationSessionStore {
   abstract initialize(): Promise<void>;
   abstract getById(simulationSessionId: string): Promise<SimulationSessionRecord | null>;
+  abstract listSessions(): Promise<SimulationSessionRecord[]>;
   abstract upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord>;
   abstract touchSession(params: SimulationSessionTouchParams): Promise<SimulationSessionRecord | null>;
   abstract markUsageRecorded(params: SimulationSessionFinalizeParams): Promise<SimulationSessionRecord | null>;
+  abstract pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number>;
   abstract deleteSessionsForUser(userId: string): Promise<number>;
 }
 
@@ -294,6 +298,14 @@ class FileSimulationSessionStore extends BaseSimulationSessionStore {
       await this.ensureInitialized();
       const payload = await this.loadPayload();
       return payload.records.find((record) => record.simulationSessionId === normalizedId) ?? null;
+    });
+  }
+
+  async listSessions(): Promise<SimulationSessionRecord[]> {
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      return payload.records.slice();
     });
   }
 
@@ -382,6 +394,32 @@ class FileSimulationSessionStore extends BaseSimulationSessionStore {
       await this.ensureInitialized();
       const payload = await this.loadPayload();
       const nextRecords = payload.records.filter((entry) => entry.userId !== normalizedUserId);
+      const deletedCount = payload.records.length - nextRecords.length;
+      if (deletedCount > 0) {
+        await this.savePayload({ records: nextRecords });
+      }
+      return deletedCount;
+    });
+  }
+
+  async pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number> {
+    const cutoffIso = normalizeIsoString(cutoff);
+    if (!cutoffIso) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      const cutoffMs = new Date(cutoffIso).getTime();
+      const nextRecords = payload.records.filter((entry) => {
+        if (entry.status !== "started") {
+          return true;
+        }
+
+        const lastSeenAtMs = new Date(entry.lastSeenAt).getTime();
+        return !Number.isFinite(lastSeenAtMs) || lastSeenAtMs >= cutoffMs;
+      });
       const deletedCount = payload.records.length - nextRecords.length;
       if (deletedCount > 0) {
         await this.savePayload({ records: nextRecords });
@@ -496,6 +534,33 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
       [normalizedId]
     );
     return result.rows[0] ? mapSimulationSessionRow(result.rows[0]) : null;
+  }
+
+  async listSessions(): Promise<SimulationSessionRecord[]> {
+    await this.ensureTable();
+    const result = await this.pool.query<SimulationSessionRow>(
+      `
+        SELECT
+          simulation_session_id,
+          user_id,
+          org_id,
+          segment_id,
+          scenario_id,
+          training_id,
+          training_pack_id,
+          client_started_at,
+          server_started_at,
+          last_seen_at,
+          status,
+          usage_recorded_at,
+          usage_session_record_id
+        FROM simulation_sessions
+        ORDER BY server_started_at ASC, simulation_session_id ASC
+      `
+    );
+    return result.rows
+      .map((row) => mapSimulationSessionRow(row))
+      .filter((entry): entry is SimulationSessionRecord => entry !== null);
   }
 
   async upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord> {
@@ -621,6 +686,25 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
     return result.rowCount ?? result.rows.length;
   }
 
+  async pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number> {
+    const cutoffIso = normalizeIsoString(cutoff);
+    if (!cutoffIso) {
+      return 0;
+    }
+
+    await this.ensureTable();
+    const result = await this.pool.query<{ simulation_session_id: string }>(
+      `
+        DELETE FROM simulation_sessions
+        WHERE status = 'started'
+          AND last_seen_at < $1::timestamptz
+        RETURNING simulation_session_id
+      `,
+      [cutoffIso]
+    );
+    return result.rowCount ?? result.rows.length;
+  }
+
   private async ensureTable(): Promise<void> {
     if (!this.ensureTablePromise) {
       this.ensureTablePromise = this.pool
@@ -665,6 +749,10 @@ class UnsupportedSimulationSessionStore extends BaseSimulationSessionStore {
     throw new Error("Simulation session storage provider is not supported.");
   }
 
+  async listSessions(): Promise<SimulationSessionRecord[]> {
+    throw new Error("Simulation session storage provider is not supported.");
+  }
+
   async upsertStartedSession(): Promise<SimulationSessionRecord> {
     throw new Error("Simulation session storage provider is not supported.");
   }
@@ -674,6 +762,10 @@ class UnsupportedSimulationSessionStore extends BaseSimulationSessionStore {
   }
 
   async markUsageRecorded(): Promise<SimulationSessionRecord | null> {
+    throw new Error("Simulation session storage provider is not supported.");
+  }
+
+  async pruneStartedSessionsLastSeenBefore(): Promise<number> {
     throw new Error("Simulation session storage provider is not supported.");
   }
 

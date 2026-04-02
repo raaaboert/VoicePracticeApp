@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "seed:dashboard-local": "node ./scripts/seed-dashboard-local.mjs",
+    "reset:pretester-history": "tsx ./scripts/reset-pretester-history.ts --local-file",
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
