@@ -145,3 +145,46 @@ test("file usage session store imports legacy usage sessions with immediate auth
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("file usage session store refreshSnapshot picks up out-of-band writes and deletes", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-usage-session-store-refresh-"));
+  try {
+    const dbPath = path.join(tempDir, "db.local.json");
+    const storeA = createUsageSessionStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    const storeB = createUsageSessionStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+
+    await storeA.initialize();
+    await storeA.appendRecord(createSession({ id: "sess_a" }));
+    await storeB.initialize();
+
+    await storeB.appendRecord(createSession({ id: "sess_b", createdAt: "2026-04-01T10:05:00.000Z" }));
+
+    assert.deepEqual(storeA.listRecords().map((record) => record.id), ["sess_a"]);
+
+    await storeA.refreshSnapshot();
+    assert.deepEqual(storeA.listRecords().map((record) => record.id), ["sess_a", "sess_b"]);
+
+    const deletedCount = await storeB.deleteRecordsForUser("user_1");
+    assert.equal(deletedCount, 2);
+    assert.deepEqual(storeA.listRecords().map((record) => record.id), ["sess_a", "sess_b"]);
+
+    await storeA.refreshSnapshot();
+    assert.deepEqual(storeA.listRecords(), []);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

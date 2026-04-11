@@ -47,22 +47,22 @@ function buildTrainingPerformanceSummary(training: DashboardTrainingWorkspaceRow
   const weakestArea = training.insights.weakestArea?.label;
 
   if (strongestArea && weakestArea && strongestArea !== weakestArea) {
-    return `Current reporting scope performs strongly in ${strongestArea} but has the most room to improve in ${weakestArea}.`;
+    return `Across completed scored attempts, the highest legacy rubric-category average is ${strongestArea}, while ${weakestArea} is currently the lowest.`;
   }
 
   if (strongestArea) {
-    return `Current reporting scope performs most strongly in ${strongestArea} in this training.`;
+    return `Across completed scored attempts, the highest legacy rubric-category average in this training is ${strongestArea}.`;
   }
 
   if (weakestArea) {
-    return `${weakestArea} is the clearest performance gap in this training so far.`;
+    return `Across completed scored attempts, ${weakestArea} is the lowest legacy rubric-category average in this training so far.`;
   }
 
   if (training.summary.totalAttemptsLast30Days > 0) {
-    return "Recent activity is available, but scored performance signals are still limited.";
+    return "Recent activity is available, but completed scored attempts are still limited.";
   }
 
-  return "Scored attempts will surface performance patterns here.";
+  return "Completed scored attempts will surface pattern summaries here.";
 }
 
 function buildTrainingRecommendedFocus(training: DashboardTrainingWorkspaceRow): string {
@@ -74,10 +74,10 @@ function buildTrainingRecommendedFocus(training: DashboardTrainingWorkspaceRow):
   }
 
   if (weakestArea) {
-    return `Recommended focus: Improve ${weakestArea} in the next round of practice.`;
+    return `Recommended focus: Use ${weakestArea} as the next legacy rubric coaching cue.`;
   }
 
-  return "Recommended focus: Gather more scored attempts to identify the next priority.";
+  return "Recommended focus: Gather more completed scored attempts to identify the next priority.";
 }
 
 function buildUserHighlights(users: DashboardUserReportResponse["users"]) {
@@ -324,7 +324,7 @@ export function DashboardReportingWorkspace({
                 <MetricCard
                   label="Total attempts"
                   value={`${selectedTraining.summary.totalAttemptsLast30Days}`}
-                  meta="Last 30 days"
+                  meta="All recorded attempts in the last 30 days"
                 />
                 <MetricCard
                   label="Average score"
@@ -333,7 +333,7 @@ export function DashboardReportingWorkspace({
                       ? formatScore(selectedTraining.summary.averageScoreLast30Days)
                       : "-"
                   }
-                  meta="Last 30 days"
+                  meta="Completed scored attempts only"
                   tone="positive"
                 />
                 <MetricCard
@@ -357,8 +357,8 @@ export function DashboardReportingWorkspace({
                     <h2>Performance summary</h2>
                     <p className="section-copy">
                       {isSuperUser
-                        ? "Performance for the selected training inside the current aggregate customer scope."
-                        : "Performance for this training."}
+                        ? "Performance for the selected training inside the current aggregate customer scope. Attempt counts reflect usage activity; score averages reflect only completed scored attempts."
+                        : "Performance for this training. Attempt counts reflect usage activity; score averages reflect only completed scored attempts."}
                     </p>
                   </div>
                 </div>
@@ -372,7 +372,7 @@ export function DashboardReportingWorkspace({
 
                 <div className="dashboard-insight-grid">
                   <article className="detail-card">
-                    <p className="metric-label">Strongest area</p>
+                    <p className="metric-label">Highest legacy category average</p>
                     <strong className="metric-value dashboard-insight-value">
                       {selectedTraining.insights.strongestArea?.label ?? "No scored attempts yet"}
                     </strong>
@@ -384,7 +384,7 @@ export function DashboardReportingWorkspace({
                     </p>
                   </article>
                   <article className="detail-card">
-                    <p className="metric-label">Weakest area</p>
+                    <p className="metric-label">Lowest legacy category average</p>
                     <strong className="metric-value dashboard-insight-value">
                       {selectedTraining.insights.weakestArea?.label ?? "No scored attempts yet"}
                     </strong>
@@ -536,7 +536,7 @@ export function DashboardReportingWorkspace({
             <MetricCard
               label="Total attempts"
               value={`${users.reduce((total, user) => total + user.simulationsLast30Days, 0)}`}
-              meta="Last 30 days"
+              meta="All recorded attempts in the last 30 days"
               tone="accent"
             />
             <MetricCard
@@ -546,7 +546,7 @@ export function DashboardReportingWorkspace({
                   ? formatScore(companySummary.averageScoreThisPeriod)
                   : "-"
               }
-              meta="Current reporting period"
+              meta="Completed scored attempts in the current reporting period"
               tone="positive"
             />
           </section>
@@ -558,8 +558,8 @@ export function DashboardReportingWorkspace({
                 <h2>User performance</h2>
                 <p className="section-copy">
                   {isSuperUser
-                    ? "Performance across all customer accounts currently in scope."
-                    : "Performance across your current reporting scope."}
+                    ? "Performance across all customer accounts currently in scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."
+                    : "Performance across your current reporting scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."}
                 </p>
               </div>
             </div>
@@ -567,13 +567,13 @@ export function DashboardReportingWorkspace({
             <div className="dashboard-signal-block">
               <h3>Highlights</h3>
               <p>
-                Top performer:{" "}
+                Highest recent conclusive average:{" "}
                 {topPerformer
                   ? `${topPerformer.email} (${formatScore(topPerformer.averageScoreLast30Days ?? 0)} avg)`
                   : "No scored user activity yet."}
               </p>
               <p>
-                Needs attention:{" "}
+                Lowest recent conclusive average:{" "}
                 {needsAttention
                   ? `${needsAttention.email} (${formatScore(needsAttention.averageScoreLast30Days ?? 0)} avg)`
                   : "More scored activity is needed for comparison."}
@@ -637,7 +637,7 @@ export function DashboardReportingWorkspace({
             <MetricCard
               label="Total attempts"
               value={`${companySummary?.simulationsLast30Days ?? 0}`}
-              meta="Last 30 days"
+              meta="All recorded attempts in the last 30 days"
               tone="accent"
             />
             <MetricCard label="Active users" value={`${companySummary?.activeUsers ?? 0}`} meta="Current reporting scope" />
@@ -648,7 +648,7 @@ export function DashboardReportingWorkspace({
                   ? formatScore(userSummary.averageScoreLast30Days)
                   : "-"
               }
-              meta="Last 30 days"
+              meta="Completed scored attempts in the last 30 days"
               tone="positive"
             />
           </section>
@@ -660,8 +660,8 @@ export function DashboardReportingWorkspace({
                 <h2>Top trainings by activity</h2>
                 <p className="section-copy">
                   {isSuperUser
-                    ? "Training activity across all customer accounts currently in scope."
-                    : "Training activity across your current reporting scope."}
+                    ? "Training activity across all customer accounts currently in scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."
+                    : "Training activity across your current reporting scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."}
                 </p>
               </div>
             </div>

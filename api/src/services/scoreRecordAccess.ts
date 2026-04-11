@@ -5,6 +5,10 @@ import {
   ScoreRecordQuery,
   ScoreRecordStore
 } from "../storage/scoreRecordStore.js";
+import {
+  hasOutcomeAwareSimulationScoreRecord,
+  isSuccessfulSimulationScoreRecord
+} from "./simulationScoring.js";
 
 // Future extraction note:
 // scoreRecords is still authoritative scored-attempt/coaching/completion truth. It is append-
@@ -33,6 +37,9 @@ export interface ScoreSummaryByLabelRow {
 export interface UserScoreSummary {
   totals: {
     sessions: number;
+    conclusiveSessions: number;
+    outcomeAwareSessions: number;
+    successfulSessions: number;
     avgOverallScore: number | null;
   };
   byDay: ScoreSummaryByDayRow[];
@@ -50,6 +57,9 @@ export interface UserScoreSummary {
 
 export interface OrgScoreAnalytics {
   orgAvgOverallScore: number | null;
+  conclusiveSessions: number;
+  outcomeAwareSessions: number;
+  successfulSessions: number;
   topUsers: Array<{
     userId: string;
     email: string;
@@ -219,7 +229,8 @@ export function createScoreRecordAccess(store?: ScoreRecordStore | null): ScoreR
         userId: params.userId,
         segmentId: params.segmentId ?? undefined,
         endedAtFrom: params.periodStartAt,
-        endedAtBefore: params.periodEndAt
+        endedAtBefore: params.periodEndAt,
+        conclusiveOnly: true
       });
 
       const byDay = new Map<string, { sessions: number; totalScore: number }>();
@@ -242,6 +253,9 @@ export function createScoreRecordAccess(store?: ScoreRecordStore | null): ScoreR
       return {
         totals: {
           sessions: records.length,
+          conclusiveSessions: records.length,
+          outcomeAwareSessions: records.filter((record) => hasOutcomeAwareSimulationScoreRecord(record)).length,
+          successfulSessions: records.filter((record) => isSuccessfulSimulationScoreRecord(record)).length,
           avgOverallScore: this.computeAverageOverallScore(records)
         },
         byDay: Array.from(byDay.entries())
@@ -294,7 +308,8 @@ export function createScoreRecordAccess(store?: ScoreRecordStore | null): ScoreR
       const records = this.listByOrgRange(params.db, {
         orgId: params.orgId,
         endedAtFrom: params.periodStartAt,
-        endedAtBefore: params.periodEndAt
+        endedAtBefore: params.periodEndAt,
+        conclusiveOnly: true
       });
 
       const bySegment = new Map<string, { sessions: number; totalScore: number }>();
@@ -318,6 +333,9 @@ export function createScoreRecordAccess(store?: ScoreRecordStore | null): ScoreR
 
       return {
         orgAvgOverallScore: this.computeAverageOverallScore(records),
+        conclusiveSessions: records.length,
+        outcomeAwareSessions: records.filter((record) => hasOutcomeAwareSimulationScoreRecord(record)).length,
+        successfulSessions: records.filter((record) => isSuccessfulSimulationScoreRecord(record)).length,
         topUsers: Array.from(byUser.entries())
           .map(([userId, row]) => ({
             userId,

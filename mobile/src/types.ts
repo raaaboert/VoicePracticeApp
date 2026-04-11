@@ -3,6 +3,7 @@ import {
   Difficulty,
   OrgCustomScenario,
   PersonaStyle,
+  SimulationCompletionLevel,
   Scenario,
   SegmentDefinition,
   TierDefinition,
@@ -38,7 +39,11 @@ export interface DialogueMessage {
 }
 
 export interface SimulationScorecard {
+  communicationScore: number;
+  outcomeScore: number;
   overallScore: number;
+  completionLevel: SimulationCompletionLevel;
+  objectiveAchieved: boolean;
   persuasion: number;
   clarity: number;
   empathy: number;
@@ -47,6 +52,32 @@ export interface SimulationScorecard {
   improvements: string[];
   summary: string;
 }
+
+export interface ScoredSimulationEvaluationResult {
+  status: "scored";
+  scorecard: SimulationScorecard;
+  record: {
+    id: string;
+    createdAt: string;
+    trainingPackId?: string | null;
+    model: string | null;
+    promptVersion: string | null;
+    rubricVersion: string | null;
+    usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+  };
+}
+
+export interface NotScoredSimulationEvaluationResult {
+  status: "not_scored";
+  reason: "insufficient_evidence";
+  userTurnCount: number;
+  minimumUserTurns: number;
+  message: string;
+}
+
+export type SimulationEvaluationResult =
+  | ScoredSimulationEvaluationResult
+  | NotScoredSimulationEvaluationResult;
 
 export interface SimulationConfig {
   simulationSessionId: string;

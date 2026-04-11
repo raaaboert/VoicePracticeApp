@@ -82,8 +82,8 @@ export default async function CustomerDetailPage({
           value={customer.averageScoreThisPeriod !== null ? formatScore(customer.averageScoreThisPeriod) : "-"}
           meta={
             customer.scoreDeltaLast30Days !== null
-              ? `${formatSignedPercent(customer.scoreDeltaLast30Days)} vs prior 30 days`
-              : "No prior 30-day comparison"
+              ? `${formatSignedPercent(customer.scoreDeltaLast30Days)} vs prior 30 days | conclusive scored attempts only`
+              : "Conclusive scored attempts only"
           }
           tone="positive"
         />
@@ -113,6 +113,9 @@ export default async function CustomerDetailPage({
           </li>
           <li>
             {customer.simulationsLast30Days} simulations were recorded in the last 30 days, with {insights.scenarios.length} scenario rows returning activity in the current reporting window.
+          </li>
+          <li>
+            Average score metrics use conclusive scored attempts only. A completed scored attempt can still miss the desired outcome, so score reporting should not be read as a success-rate metric.
           </li>
           <li>
             {insights.trainingPackAttribution.attributedScoresLast30Days} scored attempts in the current 30-day window were linked to a training pack.{" "}

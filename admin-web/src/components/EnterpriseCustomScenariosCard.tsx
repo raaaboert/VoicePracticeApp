@@ -43,6 +43,7 @@ interface BaseScenarioOption {
   id: string;
   title: string;
   description: string;
+  desiredOutcome?: string;
   aiRole: string;
   enabled: boolean;
   segmentId: string;
@@ -71,6 +72,7 @@ interface EditorFormState {
   applicableIndustryIds: string[];
   title: string;
   description: string;
+  desiredOutcome: string;
   aiRole: string;
   scoringGuidance: string;
   enabled: boolean;
@@ -190,6 +192,7 @@ function createEmptyEditorForm(config: AppConfig | null): EditorFormState {
     applicableIndustryIds: [],
     title: "",
     description: "",
+    desiredOutcome: "",
     aiRole: "",
     scoringGuidance: buildDefaultScoringGuidance({ industryContexts: defaultIndustryContexts }),
     enabled: false,
@@ -216,6 +219,7 @@ function editorFormFromScenario(scenario: OrgCustomScenario): EditorFormState {
     applicableIndustryIds: [...(scenario.applicableIndustryIds ?? [])],
     title: scenario.title,
     description: scenario.description,
+    desiredOutcome: scenario.desiredOutcome ?? "",
     aiRole: scenario.aiRole,
     scoringGuidance: scenario.scoringGuidance ?? "",
     enabled: scenario.enabled === true,
@@ -299,6 +303,7 @@ export function EnterpriseCustomScenariosCard({
           id: scenario.id,
           title: scenario.title,
           description: scenario.description,
+          desiredOutcome: scenario.desiredOutcome,
           aiRole: scenario.aiRole,
           enabled: scenario.enabled !== false,
           segmentId: segment.id,
@@ -321,7 +326,10 @@ export function EnterpriseCustomScenariosCard({
     const needle = baseScenarioSearch.trim().toLowerCase();
     if (!needle) return baseScenarioOptions;
     return baseScenarioOptions.filter((item) =>
-      [item.title, item.description, item.aiRole, item.segmentLabel].join(" ").toLowerCase().includes(needle),
+      [item.title, item.description, item.desiredOutcome ?? "", item.aiRole, item.segmentLabel]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
     );
   }, [baseScenarioOptions, baseScenarioSearch]);
 
@@ -339,7 +347,7 @@ export function EnterpriseCustomScenariosCard({
       if (roleFilter && scenario.segmentId !== roleFilter) return false;
       if (!needle) return true;
       const industriesText = (scenario.applicableIndustryIds ?? []).map((id) => industryById.get(id)?.label ?? id).join(" ");
-      return [scenario.title, scenario.description, scenario.aiRole, scenario.scoringGuidance, industriesText]
+      return [scenario.title, scenario.description, scenario.desiredOutcome ?? "", scenario.aiRole, scenario.scoringGuidance, industriesText]
         .join(" ")
         .toLowerCase()
         .includes(needle);
@@ -452,6 +460,7 @@ export function EnterpriseCustomScenariosCard({
         segmentId: base.segmentId,
         title: base.title,
         description: base.description,
+        desiredOutcome: base.desiredOutcome ?? "",
         aiRole: base.aiRole,
         scoringGuidance: !currentGuidance || currentGuidance === currentTemplate ? nextTemplate : prev.scoringGuidance,
         provenanceBaseScenarioTitle: base.title,
@@ -500,6 +509,7 @@ export function EnterpriseCustomScenariosCard({
         "Applicable Industries",
         "Applicable Industry Ids",
         "Description",
+        "Desired Outcome",
         "AI Role",
         "Scoring Guidance",
         "Status",
@@ -525,6 +535,7 @@ export function EnterpriseCustomScenariosCard({
         (scenario.applicableIndustryIds ?? []).map((id) => industryById.get(id)?.label ?? id).join(" | "),
         (scenario.applicableIndustryIds ?? []).join(" | "),
         scenario.description,
+        scenario.desiredOutcome ?? "",
         scenario.aiRole,
         scenario.scoringGuidance ?? "",
         scenario.enabled === true ? "active" : "inactive",
@@ -557,6 +568,7 @@ export function EnterpriseCustomScenariosCard({
           "Applicable Industries",
           "Applicable Industry Ids",
           "Description",
+          "Desired Outcome",
           "AI Role",
           "Scoring Guidance",
           "Status",
@@ -576,6 +588,7 @@ export function EnterpriseCustomScenariosCard({
           (scenario.applicableIndustryIds ?? []).map((id) => industryById.get(id)?.label ?? id).join(" | "),
           (scenario.applicableIndustryIds ?? []).join(" | "),
           scenario.description,
+          scenario.desiredOutcome ?? "",
           scenario.aiRole,
           scenario.scoringGuidance ?? "",
           scenario.enabled === true ? "active" : "inactive",
@@ -636,6 +649,7 @@ export function EnterpriseCustomScenariosCard({
         const payload: CreateOrgCustomScenarioRequest = {
           title: editorForm.title.trim(),
           description: editorForm.description.trim(),
+          desiredOutcome: editorForm.desiredOutcome.trim() || undefined,
           aiRole: editorForm.aiRole.trim(),
           scoringGuidance: editorForm.scoringGuidance.trim(),
           segmentId: editorForm.segmentId,
@@ -667,6 +681,7 @@ export function EnterpriseCustomScenariosCard({
         const payload: UpdateOrgCustomScenarioRequest = {
           title: editorForm.title.trim(),
           description: editorForm.description.trim(),
+          desiredOutcome: editorForm.desiredOutcome.trim() || undefined,
           aiRole: editorForm.aiRole.trim(),
           scoringGuidance: editorForm.scoringGuidance.trim(),
           segmentId: editorForm.segmentId,
@@ -722,6 +737,7 @@ export function EnterpriseCustomScenariosCard({
         draft: {
           title: editorForm.title.trim() || undefined,
           description: editorForm.description.trim() || undefined,
+          desiredOutcome: editorForm.desiredOutcome.trim() || undefined,
           aiRole: editorForm.aiRole.trim() || undefined,
           scoringGuidance: editorForm.scoringGuidance.trim() || undefined,
         },
@@ -749,6 +765,7 @@ export function EnterpriseCustomScenariosCard({
       ...prev,
       title: generationPreview.generated.title,
       description: generationPreview.generated.description,
+      desiredOutcome: generationPreview.generated.desiredOutcome ?? prev.desiredOutcome,
       aiRole: generationPreview.generated.aiRole,
       scoringGuidance: generationPreview.generated.scoringGuidance,
       creationMethod: "ai",
@@ -1079,6 +1096,18 @@ export function EnterpriseCustomScenariosCard({
                 />
               </div>
               <div style={{ gridColumn: "1 / -1" }}>
+                <label>Desired Outcome</label>
+                <textarea
+                  rows={4}
+                  value={editorForm.desiredOutcome}
+                  onChange={(event) => {
+                    setEditorForm((prev) => ({ ...prev, desiredOutcome: event.target.value }));
+                    setGenerationPreview(null);
+                  }}
+                  disabled={editorSaving}
+                />
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
                 <label>AI Role</label>
                 <textarea
                   rows={4}
@@ -1290,6 +1319,10 @@ export function EnterpriseCustomScenariosCard({
                   <textarea rows={5} readOnly value={generationPreview.generated.description} />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
+                  <label>Preview Desired Outcome</label>
+                  <textarea rows={3} readOnly value={generationPreview.generated.desiredOutcome ?? ""} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
                   <label>Preview AI Role</label>
                   <textarea rows={4} readOnly value={generationPreview.generated.aiRole} />
                 </div>
@@ -1399,7 +1432,7 @@ export function EnterpriseCustomScenariosCard({
               <input
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
-                placeholder="Search title, description, AI role, scoring guidance"
+                placeholder="Search title, description, desired outcome, AI role, scoring guidance"
               />
             </div>
             <div>

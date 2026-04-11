@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import { Difficulty, DialogueMessage, PersonaStyle, Scenario, SimulationScorecard } from "../types";
+import { Difficulty, DialogueMessage, PersonaStyle, Scenario, SimulationEvaluationResult } from "../types";
 import { fetchAiOpeningLine, fetchAiScore, fetchAiTurn, transcribeAudioViaApi } from "./api";
 import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
 
@@ -116,18 +116,7 @@ export async function evaluateSimulation(params: {
   endedAt: string;
   history: DialogueMessage[];
   trainingPackId?: string | null;
-}): Promise<{
-  scorecard: SimulationScorecard;
-  record: {
-    id: string;
-    createdAt: string;
-    trainingPackId?: string | null;
-    model: string | null;
-    promptVersion: string | null;
-    rubricVersion: string | null;
-    usage: { inputTokens: number; outputTokens: number; totalTokens: number };
-  };
-}> {
+}): Promise<SimulationEvaluationResult> {
   return fetchAiScore({
     userId: params.userId,
     authToken: params.authToken,

@@ -26,6 +26,7 @@ export interface UsageSessionAppendResult {
 
 export interface UsageSessionStore {
   initialize(): Promise<void>;
+  refreshSnapshot(): Promise<void>;
   importLegacyRecords(records: UsageSessionRecord[]): Promise<{ importedCount: number }>;
   appendRecord(record: UsageSessionRecord): Promise<UsageSessionAppendResult>;
   getRecordById(sessionId: string): UsageSessionRecord | null;
@@ -303,6 +304,7 @@ abstract class BaseUsageSessionStore implements UsageSessionStore {
   }
 
   abstract initialize(): Promise<void>;
+  abstract refreshSnapshot(): Promise<void>;
   abstract importLegacyRecords(records: UsageSessionRecord[]): Promise<{ importedCount: number }>;
   abstract appendRecord(record: UsageSessionRecord): Promise<UsageSessionAppendResult>;
   abstract deleteRecordsForUser(userId: string): Promise<number>;
@@ -327,6 +329,14 @@ class FileUsageSessionStore extends BaseUsageSessionStore {
       const payload = await this.loadPayload();
       this.setSnapshot(payload.records);
       this.initialized = true;
+    });
+  }
+
+  async refreshSnapshot(): Promise<void> {
+    await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      this.setSnapshot(payload.records);
     });
   }
 
@@ -473,6 +483,13 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
       await this.ensureTable();
       this.setSnapshot(await this.loadSnapshotFromDatabase());
       this.initialized = true;
+    });
+  }
+
+  async refreshSnapshot(): Promise<void> {
+    await this.withLock(async () => {
+      await this.ensureInitialized();
+      this.setSnapshot(await this.loadSnapshotFromDatabase());
     });
   }
 
@@ -765,6 +782,10 @@ class UnsupportedUsageSessionStore extends BaseUsageSessionStore {
     throw new Error("Usage session storage provider is not supported.");
   }
 
+  async refreshSnapshot(): Promise<void> {
+    throw new Error("Usage session storage provider is not supported.");
+  }
+
   async importLegacyRecords(): Promise<{ importedCount: number }> {
     throw new Error("Usage session storage provider is not supported.");
   }
@@ -780,8 +801,8 @@ class UnsupportedUsageSessionStore extends BaseUsageSessionStore {
 
 export function createUsageSessionStore(params: CreateUsageSessionStoreParams): UsageSessionStore {
   // `usageSessions` now have extracted persistence authority, but current reads are still served
-  // from an in-process snapshot to preserve synchronous entitlement and reporting semantics.
-  // Treat this as a single-process model unless a later pass adds explicit refresh/invalidation.
+  // from an in-process snapshot to preserve synchronous entitlement semantics.
+  // Reporting-critical routes should refresh this snapshot before composing payloads.
   if (params.provider === "postgres") {
     if (!params.databaseUrl) {
       throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");

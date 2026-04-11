@@ -96,8 +96,8 @@ export default async function TrainingPackDetailPage({
           value={`${pack.attemptsLast30Days}`}
           meta={
             pack.averageScoreLast30Days !== null
-              ? `${pack.scoredAttemptsLast30Days} scored | Avg ${formatScore(pack.averageScoreLast30Days)}`
-              : `${pack.scoredAttemptsLast30Days} scored`
+              ? `${pack.scoredAttemptsLast30Days} conclusive scored | Avg ${formatScore(pack.averageScoreLast30Days)}`
+              : `${pack.scoredAttemptsLast30Days} conclusive scored`
           }
         />
       </section>
@@ -124,6 +124,9 @@ export default async function TrainingPackDetailPage({
           </li>
           <li>
             Forward-only attribution: {pack.trainingPackAttribution.attributedScoresLast30Days} scored attempts in the current 30-day window are linked to this pack; {pack.trainingPackAttribution.unattributedScoresLast30Days} are not backfilled.
+          </li>
+          <li>
+            Score averages here are based on conclusive scored attempts. They summarize completed scoring events, not guaranteed objective achievement.
           </li>
         </ul>
       </section>
@@ -154,7 +157,7 @@ export default async function TrainingPackDetailPage({
                 <span style={{ width: `${Math.min(100, point.attempts * 8)}%` }} />
               </div>
               <p className="small-copy">
-                Avg score {point.averageScore !== null ? formatScore(point.averageScore) : "-"}
+                Avg conclusive score {point.averageScore !== null ? formatScore(point.averageScore) : "-"}
               </p>
             </article>
           ))}

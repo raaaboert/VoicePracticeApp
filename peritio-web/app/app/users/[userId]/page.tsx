@@ -74,7 +74,7 @@ export default async function UserDetailPage({
         <MetricCard
           label="Average score"
           value={user.averageScoreLast30Days !== null ? formatScore(user.averageScoreLast30Days) : "-"}
-          meta={`${user.scoredAttemptsLast30Days} scored attempts in the last 30 days`}
+          meta={`${user.scoredAttemptsLast30Days} conclusive scored attempts in the last 30 days`}
           tone="positive"
         />
         <MetricCard
@@ -147,9 +147,9 @@ export default async function UserDetailPage({
         <div className="section-header">
           <div>
             <p className="eyebrow">Attempts</p>
-            <h2>Recent scored attempts</h2>
+            <h2>Recent conclusive scored attempts</h2>
             <p className="section-copy">
-              These rows come from persisted score records, including saved score summaries and coaching priorities when available. Transcript text is not retained for normal dashboard review.
+              These rows come from persisted score records, including saved score summaries and coaching priorities when available. Transcript text is not retained for normal dashboard review. Score averages here reflect conclusive scored attempts, not guaranteed objective achievement.
             </p>
           </div>
         </div>
@@ -193,8 +193,8 @@ export default async function UserDetailPage({
           </div>
         ) : (
           <article className="detail-card">
-            <h3>No scored attempts found</h3>
-            <p>No persisted scored attempts were found for this user in the current dashboard scope.</p>
+            <h3>No conclusive scored attempts found</h3>
+            <p>No persisted conclusive scored attempts were found for this user in the current dashboard scope.</p>
           </article>
         )}
       </section>

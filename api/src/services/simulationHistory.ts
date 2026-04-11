@@ -9,6 +9,7 @@ import {
   UserStatus
 } from "@voicepractice/shared";
 
+import { isConclusiveSimulationScoreRecord } from "./simulationScoring.js";
 import type { ScoreRecordAccess, ScoreRecordQuery } from "./scoreRecordAccess.js";
 import type { UsageSessionAccess, UsageSessionQuery } from "./usageSessionAccess.js";
 
@@ -224,6 +225,7 @@ export function createSimulationHistoryAccess(params: {
 
       const seenScenarioIds = new Set<string>();
       const sortedScores = scoreRecords
+        .filter((record) => isConclusiveSimulationScoreRecord(record))
         .slice()
         .sort((left, right) => new Date(left.endedAt).getTime() - new Date(right.endedAt).getTime());
 
@@ -272,15 +274,17 @@ export function createSimulationHistoryAccess(params: {
         (entry) => entry.startedAt ?? entry.endedAt
       );
       const relevantRecentScores = filterAfterAssignment(paramsValue.recentScores, (entry) => entry.endedAt);
+      const relevantAllConclusiveScores = relevantAllScores.filter((record) => isConclusiveSimulationScoreRecord(record));
+      const relevantRecentConclusiveScores = relevantRecentScores.filter((record) => isConclusiveSimulationScoreRecord(record));
       const earliestActivityAt = minIsoDate([
         ...relevantAllSessions.map((session) => session.startedAt),
         ...relevantAllScores.map((record) => record.endedAt)
       ]);
       const completionAt =
-        assignment.completedAt ?? this.resolveTrainingPackAssignmentCompletionAt(assignment, relevantAllScores);
+        assignment.completedAt ?? this.resolveTrainingPackAssignmentCompletionAt(assignment, relevantAllConclusiveScores);
       const startedAt = assignment.startedAt ?? earliestActivityAt;
       const completedScenarioIds = new Set<string>(
-        relevantAllScores
+        relevantAllConclusiveScores
           .filter((record) => assignment.requiredScenarioIds.includes(record.scenarioId))
           .map((record) => record.scenarioId)
       );
@@ -317,8 +321,8 @@ export function createSimulationHistoryAccess(params: {
         requiredScenarioCount,
         completedScenarioCount: completedScenarioIds.size,
         attemptsLast30Days: relevantRecentSessions.length,
-        scoredAttemptsLast30Days: relevantRecentScores.length,
-        averageScoreLast30Days: averageScore(relevantRecentScores),
+        scoredAttemptsLast30Days: relevantRecentConclusiveScores.length,
+        averageScoreLast30Days: averageScore(relevantRecentConclusiveScores),
         latestActivityAt,
         latestScenarioTitle: latestScenarioId ? scenarioCatalog.get(latestScenarioId)?.title ?? latestScenarioId : null
       };

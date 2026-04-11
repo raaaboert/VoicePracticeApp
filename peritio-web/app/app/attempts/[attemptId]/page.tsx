@@ -21,6 +21,19 @@ function formatAssignmentContextStatus(status: string): string {
   return "Not Assignment Scoped";
 }
 
+function formatCompletionLevel(value: string | null): string {
+  if (value === "complete") {
+    return "Complete";
+  }
+  if (value === "partial") {
+    return "Partial";
+  }
+  if (value === "inconclusive") {
+    return "Inconclusive";
+  }
+  return "Not recorded";
+}
+
 export async function generateMetadata(): Promise<Metadata> {
   return {
     title: "Attempt Detail",
@@ -119,7 +132,7 @@ export default async function AttemptDetailPage({
             <p className="eyebrow">Scorecard</p>
             <h2>Persisted scoring detail</h2>
             <p className="section-copy">
-              This view shows only persisted score breakdown and saved coaching fields from the original scoring event. Raw simulation transcripts are not retained for normal dashboard review.
+              This view shows only persisted score breakdown and saved coaching fields from the original scoring event. Outcome-aware fields appear when they were stored; older score records may still contain only the legacy rubric categories. Raw simulation transcripts are not retained for normal dashboard review.
             </p>
           </div>
         </div>
@@ -127,7 +140,38 @@ export default async function AttemptDetailPage({
         {attempt.scoreBreakdown ? (
           <div className="info-grid">
             <article className="detail-card">
-              <h3>Score breakdown</h3>
+              <h3>Outcome-aware scores</h3>
+              {(attempt.scoreBreakdown.communicationScore !== null || attempt.scoreBreakdown.outcomeScore !== null) ? (
+                <dl className="inline-stats">
+                  <div>
+                    <dt>Communication</dt>
+                    <dd>{attempt.scoreBreakdown.communicationScore ?? "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Outcome</dt>
+                    <dd>{attempt.scoreBreakdown.outcomeScore ?? "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Completion</dt>
+                    <dd>{formatCompletionLevel(attempt.scoreBreakdown.completionLevel)}</dd>
+                  </div>
+                  <div>
+                    <dt>Objective achieved</dt>
+                    <dd>
+                      {attempt.scoreBreakdown.objectiveAchieved === null
+                        ? "Not recorded"
+                        : attempt.scoreBreakdown.objectiveAchieved
+                          ? "Yes"
+                          : "No"}
+                    </dd>
+                  </div>
+                </dl>
+              ) : (
+                <p>This historical score record predates the newer outcome-aware score fields.</p>
+              )}
+            </article>
+            <article className="detail-card">
+              <h3>Legacy rubric categories</h3>
               <dl className="inline-stats">
                 <div>
                   <dt>Persuasion</dt>
@@ -182,8 +226,8 @@ export default async function AttemptDetailPage({
             <article className="detail-card">
               <h3>Derived coaching signals</h3>
               <ul className="bullet-list">
-                <li>Strongest category: {attempt.derivedSignals.strongestCategory ?? "-"}</li>
-                <li>Weakest category: {attempt.derivedSignals.weakestCategory ?? "-"}</li>
+                <li>Highest legacy category: {attempt.derivedSignals.strongestCategory ?? "-"}</li>
+                <li>Lowest legacy category: {attempt.derivedSignals.weakestCategory ?? "-"}</li>
                 <li>Recommended focus: {attempt.derivedSignals.coachingFocus ?? "-"}</li>
               </ul>
             </article>

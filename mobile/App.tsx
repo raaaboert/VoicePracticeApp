@@ -66,6 +66,7 @@ import {
   setActiveSuperUserOrgId,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
+import { resolveSimulationScoreOutcome, shouldUsePracticeOnlyFallbackScore } from "./src/lib/simulationScoreHandling";
 import { createSimulationCorrelationId } from "./src/lib/simulationInteractionModel";
 import {
   getLongPollFailureReportDecision,
@@ -336,7 +337,11 @@ function fallbackScorecard(history: DialogueMessage[]): SimulationScorecard {
 
   if (userTurns === 0) {
     return {
+      communicationScore: 0,
+      outcomeScore: 0,
       overallScore: 0,
+      completionLevel: "inconclusive",
+      objectiveAchieved: false,
       persuasion: 1,
       clarity: 1,
       empathy: 1,
@@ -353,7 +358,11 @@ function fallbackScorecard(history: DialogueMessage[]): SimulationScorecard {
 
   const base = Math.min(100, 45 + userTurns * 8);
   return {
+    communicationScore: base,
+    outcomeScore: Math.max(0, base - 5),
     overallScore: base,
+    completionLevel: "partial",
+    objectiveAchieved: false,
     persuasion: Math.min(10, 3 + userTurns),
     clarity: Math.min(10, 3 + Math.floor(userTurns / 2)),
     empathy: Math.min(10, 2 + Math.floor(userTurns / 2)),
@@ -383,6 +392,7 @@ function toRuntimeScenarioFromCustomScenario(customScenario: OrgCustomScenario):
     title: customScenario.title,
     summary: customScenario.summary ?? customScenario.description,
     description: customScenario.description,
+    desiredOutcome: customScenario.desiredOutcome,
     aiRole: customScenario.aiRole,
     enabled: customScenario.enabled === true,
   };
@@ -2625,17 +2635,48 @@ export default function App() {
         });
       };
 
+      const markTranscriptAsNotScored = (reason: string) => {
+        setLastTranscript((prev) => {
+          if (!prev) {
+            return prev;
+          }
+
+          const updatedMeta = {
+            ...prev.meta,
+            model: "not-scored",
+            promptVersion: null,
+            rubricVersion: null,
+            inputTokens: null,
+            outputTokens: null,
+            totalTokens: null,
+          };
+          const updatedText = prev.text
+            .replace("AI Model: (pending)", "AI Model: not-scored")
+            .replace("Prompt Version: (pending)", "Prompt Version: -")
+            .replace("Rubric Version: (pending)", "Rubric Version: -")
+            .replace("Tokens (input/output/total): (pending)", "Tokens (input/output/total): n/a")
+            .concat(`Not Scored Reason: ${reason}\n`);
+          return { ...prev, meta: updatedMeta, text: updatedText };
+        });
+      };
+
       try {
+        const usePracticeOnlyFallback = shouldUsePracticeOnlyFallbackScore({
+          scoringEnabled,
+          usedMockMode,
+          apiConfigured,
+        });
+
         if (!scoringEnabled) {
           scoreError = "Scoring is currently disabled for your account. This session was not scored or tracked.";
-        } else if (usedMockMode) {
+        } else if (usedMockMode && usePracticeOnlyFallback) {
           finalScorecard = fallbackScorecard(history);
           scoreError =
-            "Local test/mock mode was used during this simulation. This score is for practice only and was not tracked.";
+            "Local test/mock mode was used during this simulation. This practice-only score was generated locally and was not tracked.";
           markTranscriptAsLocalFallback();
-        } else if (!apiConfigured) {
+        } else if (!apiConfigured && usePracticeOnlyFallback) {
           finalScorecard = fallbackScorecard(history);
-          scoreError = "Remote AI is disabled, so fallback scoring was used. This score was not tracked.";
+          scoreError = "Remote AI is disabled, so a practice-only local score was generated. It was not tracked.";
           markTranscriptAsLocalFallback();
         } else {
           if (!user || !mobileAuthToken) {
@@ -2658,39 +2699,49 @@ export default function App() {
             trainingId: timing.trainingId ?? null,
             trainingPackId: timing.trainingPackId ?? null,
           });
-          finalScorecard = result.scorecard;
+          const resolvedScoreOutcome = resolveSimulationScoreOutcome(result);
+          if (resolvedScoreOutcome.kind === "not_scored") {
+            finalScorecard = null;
+            scoreError = resolvedScoreOutcome.message;
+            markTranscriptAsNotScored(resolvedScoreOutcome.message ?? "Not enough evidence to score this session.");
+          } else if (result.status === "scored") {
+            finalScorecard = resolvedScoreOutcome.scorecard;
 
-          setLastTranscript((prev) => {
-            if (!prev) {
-              return prev;
-            }
+            setLastTranscript((prev) => {
+              if (!prev) {
+                return prev;
+              }
 
-            const updatedMeta = {
-              ...prev.meta,
-              model: result.record.model,
-              promptVersion: result.record.promptVersion,
-              rubricVersion: result.record.rubricVersion,
-              inputTokens: result.record.usage.inputTokens,
-              outputTokens: result.record.usage.outputTokens,
-              totalTokens: result.record.usage.totalTokens,
-            };
+              const updatedMeta = {
+                ...prev.meta,
+                model: result.record.model,
+                promptVersion: result.record.promptVersion,
+                rubricVersion: result.record.rubricVersion,
+                inputTokens: result.record.usage.inputTokens,
+                outputTokens: result.record.usage.outputTokens,
+                totalTokens: result.record.usage.totalTokens,
+              };
 
-            const updatedText = prev.text
-              .replace("AI Model: (pending)", `AI Model: ${result.record.model ?? "-"}`)
-              .replace("Prompt Version: (pending)", `Prompt Version: ${result.record.promptVersion ?? "-"}`)
-              .replace("Rubric Version: (pending)", `Rubric Version: ${result.record.rubricVersion ?? "-"}`)
-              .replace(
-                "Tokens (input/output/total): (pending)",
-                `Tokens (input/output/total): ${result.record.usage.inputTokens}/${result.record.usage.outputTokens}/${result.record.usage.totalTokens}`,
-              );
+              const updatedText = prev.text
+                .replace("AI Model: (pending)", `AI Model: ${result.record.model ?? "-"}`)
+                .replace("Prompt Version: (pending)", `Prompt Version: ${result.record.promptVersion ?? "-"}`)
+                .replace("Rubric Version: (pending)", `Rubric Version: ${result.record.rubricVersion ?? "-"}`)
+                .replace(
+                  "Tokens (input/output/total): (pending)",
+                  `Tokens (input/output/total): ${result.record.usage.inputTokens}/${result.record.usage.outputTokens}/${result.record.usage.totalTokens}`,
+                );
 
-            return { ...prev, meta: updatedMeta, text: updatedText };
-          });
+              return { ...prev, meta: updatedMeta, text: updatedText };
+            });
+          }
         }
       } catch (evaluationError) {
-        finalScorecard = fallbackScorecard(history);
-        scoreError = `${getErrorMessage(evaluationError, "Score generation failed. Fallback scoring used.")} This fallback score was not tracked.`;
-        markTranscriptAsLocalFallback();
+        finalScorecard = null;
+        scoreError = `${getErrorMessage(
+          evaluationError,
+          "Score generation failed, so no reliable scorecard was created for this session."
+        )} No local fallback score was shown.`;
+        markTranscriptAsNotScored(scoreError);
         void submitAutoErrorReport("simulation.score_generation", evaluationError, {
           screen: "scorecard",
           details: {

@@ -66,7 +66,7 @@ export function CustomerDetailTabs({
                   <span style={{ width: `${Math.min(100, point.usageMinutes / 12)}%` }} />
                 </div>
                 <p className="small-copy">
-                  {point.simulations} simulations | Avg score {point.averageScore !== null ? formatScore(point.averageScore) : "-"}
+                  {point.simulations} simulations | Avg conclusive score {point.averageScore !== null ? formatScore(point.averageScore) : "-"}
                 </p>
               </article>
             ))}
@@ -110,7 +110,7 @@ export function CustomerDetailTabs({
                     </div>
                   </dl>
                   <p>
-                    <strong>Scored attempts:</strong> {trainingPack.scoredAttemptsLast30Days} <strong>Avg score:</strong>{" "}
+                    <strong>Conclusive scored attempts:</strong> {trainingPack.scoredAttemptsLast30Days} <strong>Avg score:</strong>{" "}
                     {trainingPack.averageScoreLast30Days !== null ? formatScore(trainingPack.averageScoreLast30Days) : "-"}
                   </p>
                   <p>
@@ -187,7 +187,7 @@ export function CustomerDetailTabs({
                       <dd>{scenario.learnerCountLast30Days}</dd>
                     </div>
                     <div>
-                      <dt>Average score</dt>
+                      <dt>Avg conclusive score</dt>
                       <dd>{scenario.averageScoreLast30Days !== null ? formatScore(scenario.averageScoreLast30Days) : "-"}</dd>
                     </div>
                   </dl>
@@ -199,7 +199,7 @@ export function CustomerDetailTabs({
                     <strong>Top learner:</strong>{" "}
                     {scenario.topUserEmail
                       ? `${scenario.topUserEmail}${scenario.topUserAverageScore !== null ? ` (${formatScore(scenario.topUserAverageScore)})` : ""}`
-                      : "Not enough scored attempts yet"}
+                      : "Not enough conclusive scored attempts yet"}
                   </p>
                   <p className="small-copy">Latest activity: {formatDateTime(scenario.latestActivityAt)}</p>
                 </article>

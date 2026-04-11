@@ -3,6 +3,8 @@ import { promises as fs } from "node:fs";
 import { Pool, PoolClient } from "pg";
 
 import {
+  SIMULATION_COMPLETION_LEVELS,
+  SimulationCompletionLevel,
   SimulationScoreCoachingArtifact,
   SimulationScoreNormalizedThemes,
   SimulationScoreRecord
@@ -14,16 +16,21 @@ import { StorageProvider } from "../runtimeConfig.js";
 // This store is intentionally snapshot-backed so the existing sync reporting/composition seams can
 // preserve current behavior while persistence authority moves out of the monolithic app-state blob.
 // STORAGE_PROVIDER=file remains a dev/demo/small-scale mode for this domain; postgres is the
-// serious hosted path.
+// serious hosted path. Reporting-critical routes should refresh this snapshot before composing
+// payloads after out-of-band storage changes.
 
 export interface ScoreRecordQuery {
   userId?: string;
   orgId?: string | null;
   segmentId?: string;
   scenarioId?: string;
+  simulationSessionId?: string | null;
   trainingId?: string | null;
   trainingPackId?: string | null;
   industryId?: string | null;
+  completionLevel?: SimulationCompletionLevel | null;
+  objectiveAchieved?: boolean | null;
+  conclusiveOnly?: boolean;
   startedAtFrom?: Date | null;
   startedAtBefore?: Date | null;
   endedAtFrom?: Date | null;
@@ -32,6 +39,7 @@ export interface ScoreRecordQuery {
 
 export interface ScoreRecordStore {
   initialize(): Promise<void>;
+  refreshSnapshot(): Promise<void>;
   importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }>;
   appendRecord(record: SimulationScoreRecord): Promise<void>;
   getRecordById(scoreId: string): SimulationScoreRecord | null;
@@ -54,6 +62,7 @@ interface ScoreRecordFilePayload {
 
 interface ScoreRecordRow {
   id: string;
+  simulation_session_id: string | null;
   user_id: string;
   org_id: string | null;
   segment_id: string;
@@ -63,7 +72,11 @@ interface ScoreRecordRow {
   industry_id: string | null;
   started_at: string | Date;
   ended_at: string | Date;
+  communication_score: number | string | null;
+  outcome_score: number | string | null;
   overall_score: number | string;
+  completion_level: SimulationCompletionLevel | null;
+  objective_achieved: boolean | null;
   persuasion: number | string;
   clarity: number | string;
   empathy: number | string;
@@ -133,6 +146,25 @@ function normalizeOptionalNonNegativeInteger(value: unknown): number | undefined
   }
 
   return Math.max(0, Math.floor(normalized));
+}
+
+function normalizeOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function normalizeCompletionLevel(value: unknown): SimulationCompletionLevel | undefined {
+  const normalized = normalizeNullableString(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  return (SIMULATION_COMPLETION_LEVELS as readonly string[]).includes(normalized)
+    ? (normalized as SimulationCompletionLevel)
+    : undefined;
 }
 
 function normalizeStringArray(value: unknown): string[] {
@@ -211,6 +243,8 @@ function normalizeScoreRecord(candidate: unknown): SimulationScoreRecord | null 
   const startedAt = normalizeIsoString((candidate as { startedAt?: unknown }).startedAt);
   const endedAt = normalizeIsoString((candidate as { endedAt?: unknown }).endedAt);
   const createdAt = normalizeIsoString((candidate as { createdAt?: unknown }).createdAt);
+  const communicationScore = normalizeNumber((candidate as { communicationScore?: unknown }).communicationScore);
+  const outcomeScore = normalizeNumber((candidate as { outcomeScore?: unknown }).outcomeScore);
   const overallScore = normalizeNumber((candidate as { overallScore?: unknown }).overallScore);
   const persuasion = normalizeNumber((candidate as { persuasion?: unknown }).persuasion);
   const clarity = normalizeNumber((candidate as { clarity?: unknown }).clarity);
@@ -236,6 +270,8 @@ function normalizeScoreRecord(candidate: unknown): SimulationScoreRecord | null 
 
   return {
     id,
+    simulationSessionId:
+      normalizeNullableString((candidate as { simulationSessionId?: unknown }).simulationSessionId) ?? undefined,
     userId,
     orgId: normalizeNullableString((candidate as { orgId?: unknown }).orgId),
     segmentId,
@@ -246,7 +282,11 @@ function normalizeScoreRecord(candidate: unknown): SimulationScoreRecord | null 
     industryId: normalizeNullableString((candidate as { industryId?: unknown }).industryId) ?? undefined,
     startedAt,
     endedAt,
+    communicationScore: communicationScore ?? undefined,
+    outcomeScore: outcomeScore ?? undefined,
     overallScore,
+    completionLevel: normalizeCompletionLevel((candidate as { completionLevel?: unknown }).completionLevel),
+    objectiveAchieved: normalizeOptionalBoolean((candidate as { objectiveAchieved?: unknown }).objectiveAchieved),
     persuasion,
     clarity,
     empathy,
@@ -281,6 +321,9 @@ export function matchesScoreRecordQuery(record: SimulationScoreRecord, query: Sc
   if (query.scenarioId && record.scenarioId !== query.scenarioId) {
     return false;
   }
+  if (query.simulationSessionId !== undefined && (record.simulationSessionId ?? null) !== query.simulationSessionId) {
+    return false;
+  }
   if (query.trainingId !== undefined && (record.trainingId ?? null) !== query.trainingId) {
     return false;
   }
@@ -288,6 +331,15 @@ export function matchesScoreRecordQuery(record: SimulationScoreRecord, query: Sc
     return false;
   }
   if (query.industryId !== undefined && (record.industryId ?? null) !== query.industryId) {
+    return false;
+  }
+  if (query.completionLevel !== undefined && (record.completionLevel ?? null) !== query.completionLevel) {
+    return false;
+  }
+  if (query.objectiveAchieved !== undefined && (record.objectiveAchieved ?? null) !== query.objectiveAchieved) {
+    return false;
+  }
+  if (query.conclusiveOnly === true && record.completionLevel && record.completionLevel !== "complete") {
     return false;
   }
 
@@ -381,6 +433,7 @@ async function ensureParentDirectory(filePath: string): Promise<void> {
 function mapScoreRecordRow(row: ScoreRecordRow): SimulationScoreRecord | null {
   return normalizeScoreRecord({
     id: row.id,
+    simulationSessionId: row.simulation_session_id,
     userId: row.user_id,
     orgId: row.org_id,
     segmentId: row.segment_id,
@@ -390,7 +443,11 @@ function mapScoreRecordRow(row: ScoreRecordRow): SimulationScoreRecord | null {
     industryId: row.industry_id,
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    communicationScore: row.communication_score,
+    outcomeScore: row.outcome_score,
     overallScore: row.overall_score,
+    completionLevel: row.completion_level,
+    objectiveAchieved: row.objective_achieved,
     persuasion: row.persuasion,
     clarity: row.clarity,
     empathy: row.empathy,
@@ -431,6 +488,7 @@ abstract class BaseScoreRecordStore implements ScoreRecordStore {
   }
 
   abstract initialize(): Promise<void>;
+  abstract refreshSnapshot(): Promise<void>;
   abstract importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }>;
   abstract appendRecord(record: SimulationScoreRecord): Promise<void>;
   abstract deleteRecordsForUser(userId: string): Promise<number>;
@@ -455,6 +513,14 @@ class FileScoreRecordStore extends BaseScoreRecordStore {
       const payload = await this.loadPayload();
       this.setSnapshot(payload.records);
       this.initialized = true;
+    });
+  }
+
+  async refreshSnapshot(): Promise<void> {
+    await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      this.setSnapshot(payload.records);
     });
   }
 
@@ -595,6 +661,13 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
     });
   }
 
+  async refreshSnapshot(): Promise<void> {
+    await this.withLock(async () => {
+      await this.ensureInitialized();
+      this.setSnapshot(await this.loadSnapshotFromDatabase());
+    });
+  }
+
   async importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }> {
     return await this.withLock(async () => {
       await this.ensureInitialized();
@@ -695,6 +768,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
           `
             CREATE TABLE IF NOT EXISTS score_records (
               id TEXT PRIMARY KEY,
+              simulation_session_id TEXT NULL,
               user_id TEXT NOT NULL,
               org_id TEXT NULL,
               segment_id TEXT NOT NULL,
@@ -704,7 +778,11 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
               industry_id TEXT NULL,
               started_at TIMESTAMPTZ NOT NULL,
               ended_at TIMESTAMPTZ NOT NULL,
+              communication_score DOUBLE PRECISION NULL,
+              outcome_score DOUBLE PRECISION NULL,
               overall_score DOUBLE PRECISION NOT NULL,
+              completion_level TEXT NULL,
+              objective_achieved BOOLEAN NULL,
               persuasion DOUBLE PRECISION NOT NULL,
               clarity DOUBLE PRECISION NOT NULL,
               empathy DOUBLE PRECISION NOT NULL,
@@ -721,8 +799,15 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
               created_at TIMESTAMPTZ NOT NULL
             );
 
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS simulation_session_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS communication_score DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS outcome_score DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS completion_level TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS objective_achieved BOOLEAN NULL;
+
             CREATE INDEX IF NOT EXISTS idx_score_records_user_id ON score_records (user_id);
             CREATE INDEX IF NOT EXISTS idx_score_records_org_id ON score_records (org_id);
+            CREATE INDEX IF NOT EXISTS idx_score_records_simulation_session_id ON score_records (simulation_session_id);
             CREATE INDEX IF NOT EXISTS idx_score_records_training_pack_id ON score_records (training_pack_id);
             CREATE INDEX IF NOT EXISTS idx_score_records_scenario_id ON score_records (scenario_id);
             CREATE INDEX IF NOT EXISTS idx_score_records_segment_id ON score_records (segment_id);
@@ -741,6 +826,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
       `
         SELECT
           id,
+          simulation_session_id,
           user_id,
           org_id,
           segment_id,
@@ -750,7 +836,11 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
           industry_id,
           started_at,
           ended_at,
+          communication_score,
+          outcome_score,
           overall_score,
+          completion_level,
+          objective_achieved,
           persuasion,
           clarity,
           empathy,
@@ -799,6 +889,7 @@ async function upsertScoreRecordRow(
     `
       INSERT INTO score_records (
         id,
+        simulation_session_id,
         user_id,
         org_id,
         segment_id,
@@ -808,7 +899,11 @@ async function upsertScoreRecordRow(
         industry_id,
         started_at,
         ended_at,
+        communication_score,
+        outcome_score,
         overall_score,
+        completion_level,
+        objective_achieved,
         persuasion,
         clarity,
         empathy,
@@ -825,13 +920,15 @@ async function upsertScoreRecordRow(
         created_at
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8,
-        $9::timestamptz, $10::timestamptz,
-        $11, $12, $13, $14, $15,
-        $16, $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24, $25::timestamptz
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10::timestamptz, $11::timestamptz,
+        $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21,
+        $22, $23::jsonb, $24::jsonb, $25, $26, $27, $28, $29, $30, $31::timestamptz
       )
       ON CONFLICT (id) DO UPDATE
-        SET user_id = EXCLUDED.user_id,
+        SET simulation_session_id = EXCLUDED.simulation_session_id,
+            user_id = EXCLUDED.user_id,
             org_id = EXCLUDED.org_id,
             segment_id = EXCLUDED.segment_id,
             scenario_id = EXCLUDED.scenario_id,
@@ -840,7 +937,11 @@ async function upsertScoreRecordRow(
             industry_id = EXCLUDED.industry_id,
             started_at = EXCLUDED.started_at,
             ended_at = EXCLUDED.ended_at,
+            communication_score = EXCLUDED.communication_score,
+            outcome_score = EXCLUDED.outcome_score,
             overall_score = EXCLUDED.overall_score,
+            completion_level = EXCLUDED.completion_level,
+            objective_achieved = EXCLUDED.objective_achieved,
             persuasion = EXCLUDED.persuasion,
             clarity = EXCLUDED.clarity,
             empathy = EXCLUDED.empathy,
@@ -858,6 +959,7 @@ async function upsertScoreRecordRow(
     `,
     [
       record.id,
+      record.simulationSessionId ?? null,
       record.userId,
       record.orgId ?? null,
       record.segmentId,
@@ -867,7 +969,11 @@ async function upsertScoreRecordRow(
       record.industryId ?? null,
       record.startedAt,
       record.endedAt,
+      record.communicationScore ?? null,
+      record.outcomeScore ?? null,
       record.overallScore,
+      record.completionLevel ?? null,
+      record.objectiveAchieved ?? null,
       record.persuasion,
       record.clarity,
       record.empathy,
@@ -888,6 +994,10 @@ async function upsertScoreRecordRow(
 
 class UnsupportedScoreRecordStore extends BaseScoreRecordStore {
   async initialize(): Promise<void> {
+    throw new Error("Score record storage provider is not supported.");
+  }
+
+  async refreshSnapshot(): Promise<void> {
     throw new Error("Score record storage provider is not supported.");
   }
 

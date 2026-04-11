@@ -1,7 +1,7 @@
 import { Difficulty, PersonaStyle, Scenario } from "@voicepractice/shared";
 
-export const AI_PROMPT_VERSION = "2026-04-02.v4";
-export const AI_RUBRIC_VERSION = "2026-03-06.v2";
+export const AI_PROMPT_VERSION = "2026-04-09.v1";
+export const AI_RUBRIC_VERSION = "2026-04-09.v1";
 
 const DIFFICULTY_BEHAVIOR: Record<Difficulty, string> = {
   easy:
@@ -97,7 +97,7 @@ export function buildEvaluationSystemPrompt(params: {
 
   if ((params.industryBaseline?.trim() ?? "").length > 0) {
     lines.push(
-      `Industry baseline guidance (soft reference only; prioritize communication quality over domain specifics):\n${params.industryBaseline?.trim()}`
+      `Industry baseline guidance (use as contextual reference for domain fit; do not reward jargon alone):\n${params.industryBaseline?.trim()}`
     );
   }
 
@@ -109,6 +109,12 @@ export function buildEvaluationSystemPrompt(params: {
     `Persona style: ${params.personaStyle}`,
   );
 
+  if ((params.scenario.desiredOutcome?.trim() ?? "").length > 0) {
+    lines.push(
+      `Scenario desired outcome (evaluate whether the USER actually achieved this or a clearly equivalent successful resolution):\n${params.scenario.desiredOutcome?.trim()}`
+    );
+  }
+
   if ((params.scoringGuidance?.trim() ?? "").length > 0) {
     lines.push(
       `Scenario-specific scoring guidance (prioritize when evaluating the USER):\n${params.scoringGuidance?.trim()}`
@@ -118,8 +124,13 @@ export function buildEvaluationSystemPrompt(params: {
   lines.push(
     "Grade only the USER performance.",
     "Use the full transcript context and evaluate behavior across the entire conversation, not only the final turns.",
+    "Judge both communication quality and outcome quality. A strong opening is not enough if the broader conversation fails to reach a clear resolution.",
+    "Treat the required JSON schema below as authoritative even if any layered scoring guidance uses older rubric phrasing.",
+    'Set completionLevel using only these values: "inconclusive", "partial", "complete".',
+    'Use "complete" only when the transcript shows a clear end state or resolution. Use "partial" when there is enough evidence to judge communication and progress but the session ends before a clear resolution. Use "inconclusive" only when the transcript is too thin to judge outcome reliably.',
+    "Set objectiveAchieved to true only if the USER achieved the desired outcome or a clearly equivalent successful resolution.",
     "Return ONLY strict JSON with this exact schema:",
-    '{"overallScore":number(0-100),"persuasion":number(1-10),"clarity":number(1-10),"empathy":number(1-10),"assertiveness":number(1-10),"strengths":[string,string,string],"improvements":[string,string,string],"summary":string}',
+    '{"communicationScore":number(0-100),"outcomeScore":number(0-100),"overallScore":number(0-100),"completionLevel":"inconclusive"|"partial"|"complete","objectiveAchieved":boolean,"persuasion":number(1-10),"clarity":number(1-10),"empathy":number(1-10),"assertiveness":number(1-10),"strengths":[string,string,string],"improvements":[string,string,string],"summary":string}',
     "Use higher standards for hard difficulty.",
     "Keep strengths and improvements concrete and actionable."
   );

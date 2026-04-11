@@ -16,6 +16,7 @@ import type {
 
 import { createAiUsageEventAccess } from "./aiUsageEvents.js";
 import {
+  inspectDisposableSimulationHistory,
   pruneStaleRecognizedSimulationSessions,
   RECOGNIZED_SIMULATION_SESSION_STALE_RETENTION_MS,
   repairOrphanedUserScopedHistory,
@@ -339,6 +340,24 @@ test("integrity maintenance resets disposable pre-tester history while preservin
     await aiUsageEventAccess.append(createAiEvent({ id: "ai_keep", userId: "user_keep" }));
     await supportStore.saveCase(createSupportCase({ id: "case_keep", userId: "user_keep" }), { now: new Date("2026-04-01T00:00:00.000Z") });
 
+    const beforeInventory = await inspectDisposableSimulationHistory({
+      db,
+      usageSessionAccess,
+      simulationSessionStore,
+      scoreRecordAccess,
+      aiUsageEventAccess,
+      supportCaseStore: supportStore,
+      now: new Date("2026-04-01T12:00:00.000Z")
+    });
+    assert.deepEqual(beforeInventory, {
+      usageSessions: 1,
+      recognizedSimulationSessions: 1,
+      scoreRecords: 1,
+      aiUsageEvents: 1,
+      supportCases: 1,
+      assignmentProgressRows: 1
+    });
+
     const reset = await resetDisposablePreTesterHistory({
       db,
       usageSessionAccess,
@@ -371,6 +390,24 @@ test("integrity maintenance resets disposable pre-tester history while preservin
     assert.equal("scoreRecords" in db, false);
     assert.equal("aiUsageEvents" in db, false);
     assert.equal("supportCases" in db, false);
+
+    const afterInventory = await inspectDisposableSimulationHistory({
+      db,
+      usageSessionAccess,
+      simulationSessionStore,
+      scoreRecordAccess,
+      aiUsageEventAccess,
+      supportCaseStore: supportStore,
+      now: new Date("2026-04-01T12:00:00.000Z")
+    });
+    assert.deepEqual(afterInventory, {
+      usageSessions: 0,
+      recognizedSimulationSessions: 0,
+      scoreRecords: 0,
+      aiUsageEvents: 0,
+      supportCases: 0,
+      assignmentProgressRows: 0
+    });
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

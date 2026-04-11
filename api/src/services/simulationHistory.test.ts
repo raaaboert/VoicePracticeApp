@@ -39,7 +39,11 @@ function createScore(overrides: Partial<SimulationScoreRecord> = {}): Simulation
     industryId: overrides.industryId ?? null,
     startedAt: overrides.startedAt ?? "2026-03-31T10:00:00.000Z",
     endedAt: overrides.endedAt ?? "2026-03-31T10:05:00.000Z",
+    communicationScore: overrides.communicationScore,
+    outcomeScore: overrides.outcomeScore,
     overallScore: overrides.overallScore ?? 84,
+    completionLevel: overrides.completionLevel,
+    objectiveAchieved: overrides.objectiveAchieved,
     persuasion: overrides.persuasion ?? 8,
     clarity: overrides.clarity ?? 8,
     empathy: overrides.empathy ?? 8,
@@ -205,4 +209,47 @@ test("simulationHistoryAccess returns aligned activity windows across sessions a
   assert.equal(window.scoreRecords.length, 1);
   assert.equal(window.usageSessions[0]?.id, "sess_1");
   assert.equal(window.scoreRecords[0]?.id, "score_1");
+});
+
+test("simulationHistoryAccess counts only conclusive scores toward assignment completion and scored-attempt summaries", () => {
+  const access = createSimulationHistoryAccess({
+    usageSessionAccess: createUsageSessionAccess(),
+    scoreRecordAccess: createScoreRecordAccess()
+  });
+  const assignment = createAssignment();
+  const scores = [
+    createScore({
+      id: "score_partial",
+      trainingPackId: "pack_1",
+      scenarioId: "scenario_1",
+      completionLevel: "partial",
+      objectiveAchieved: false,
+      overallScore: 65
+    }),
+    createScore({
+      id: "score_complete",
+      trainingPackId: "pack_1",
+      scenarioId: "scenario_2",
+      completionLevel: "complete",
+      objectiveAchieved: true,
+      overallScore: 92
+    })
+  ];
+
+  const progress = access.computeTrainingPackAssignmentProgress({
+    assignment,
+    user: { email: "user@example.com", status: "active" },
+    scenarioCatalog: new Map([
+      ["scenario_1", { title: "Scenario One" }],
+      ["scenario_2", { title: "Scenario Two" }]
+    ]),
+    allSessions: [],
+    allScores: scores,
+    recentSessions: [],
+    recentScores: scores
+  });
+
+  assert.equal(progress.completedScenarioCount, 1);
+  assert.equal(progress.scoredAttemptsLast30Days, 1);
+  assert.equal(progress.status, "in_progress");
 });

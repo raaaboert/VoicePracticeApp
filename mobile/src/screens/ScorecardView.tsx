@@ -89,6 +89,21 @@ export function ScorecardView({
               <Text style={styles.scoreLabel}>Overall Score</Text>
               <Text style={styles.scoreValue}>{scorecard.overallScore}</Text>
               <Text style={styles.body}>out of 100</Text>
+              <Text style={styles.body}>
+                Communication {scorecard.communicationScore} | Outcome {scorecard.outcomeScore}
+              </Text>
+              <Text style={styles.body}>
+                {scorecard.completionLevel === "complete" ? "Complete" : scorecard.completionLevel === "partial" ? "Partial" : "Inconclusive"}
+                {" | "}
+                Objective achieved: {scorecard.objectiveAchieved ? "Yes" : "No"}
+              </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.label}>Legacy Rubric Categories</Text>
+              <Text style={styles.body}>
+                These four category scores are kept for compatibility with earlier scorecards.
+              </Text>
             </View>
 
             {[

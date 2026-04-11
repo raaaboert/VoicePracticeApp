@@ -175,7 +175,11 @@ function createScore(overrides: Partial<SimulationScoreRecord> = {}): Simulation
     industryId: overrides.industryId ?? null,
     startedAt: overrides.startedAt ?? "2026-03-31T10:00:00.000Z",
     endedAt: overrides.endedAt ?? "2026-03-31T10:05:00.000Z",
+    communicationScore: overrides.communicationScore ?? 88,
+    outcomeScore: overrides.outcomeScore ?? 72,
     overallScore: overrides.overallScore ?? 88,
+    completionLevel: overrides.completionLevel ?? "complete",
+    objectiveAchieved: overrides.objectiveAchieved ?? true,
     persuasion: overrides.persuasion ?? 8,
     clarity: overrides.clarity ?? 9,
     empathy: overrides.empathy ?? 8,
@@ -385,7 +389,11 @@ function buildAttemptDetailParitySnapshot(
   relatedSessionId: string | null;
   rawDurationSeconds: number | null;
   scoreBreakdown: {
+    communicationScore: number | null;
+    outcomeScore: number | null;
     overallScore: number;
+    completionLevel: string | null;
+    objectiveAchieved: boolean | null;
     persuasion: number;
     clarity: number;
     empathy: number;
@@ -434,7 +442,11 @@ function buildAttemptDetailParitySnapshot(
     relatedSessionId: relatedSession?.id ?? null,
     rawDurationSeconds: attempt.rawDurationSeconds,
     scoreBreakdown: attempt.scoreBreakdown ?? {
+      communicationScore: null,
+      outcomeScore: null,
       overallScore: -1,
+      completionLevel: null,
+      objectiveAchieved: null,
       persuasion: -1,
       clarity: -1,
       empathy: -1,
@@ -809,7 +821,11 @@ test("simulation-history readiness preserves route-shaped score outputs, attempt
     relatedSessionId: "sess_exact",
     rawDurationSeconds: 305,
     scoreBreakdown: {
+      communicationScore: 88,
+      outcomeScore: 72,
       overallScore: 88,
+      completionLevel: "complete",
+      objectiveAchieved: true,
       persuasion: 8,
       clarity: 9,
       empathy: 8,
@@ -823,6 +839,8 @@ test("simulation-history readiness preserves route-shaped score outputs, attempt
   assert.equal(fuzzyAttempt.coachingPriority, "empathy");
 
   assert.equal(summary.totals.sessions, 3);
+  assert.equal(summary.totals.outcomeAwareSessions, 3);
+  assert.equal(summary.totals.successfulSessions, 3);
   assert.equal(summary.totals.avgOverallScore, 256 / 3);
   assert.deepEqual(
     summary.byDay.map((entry) => [entry.dayKey, entry.sessions, entry.avgOverallScore]),
@@ -841,6 +859,9 @@ test("simulation-history readiness preserves route-shaped score outputs, attempt
   );
 
   assert.equal(analytics.orgAvgOverallScore, 81.5);
+  assert.equal(analytics.conclusiveSessions, 4);
+  assert.equal(analytics.outcomeAwareSessions, 4);
+  assert.equal(analytics.successfulSessions, 4);
   assert.deepEqual(analytics.topUsers, [
     { userId: "user_1", email: "user1@example.com", sessions: 3, avgOverallScore: 256 / 3 },
     { userId: "user_2", email: "admin@example.com", sessions: 1, avgOverallScore: 70 }
@@ -1145,12 +1166,21 @@ test("simulation-history readiness preserves representative snapshots across reo
   const stats = buildSimulationHistoryStatsParitySnapshot(reorderedDb, { orgId: "org_1" });
 
   assert.deepEqual(summary, {
-    totals: { sessions: 0, avgOverallScore: null },
+    totals: {
+      sessions: 0,
+      conclusiveSessions: 0,
+      outcomeAwareSessions: 0,
+      successfulSessions: 0,
+      avgOverallScore: null
+    },
     byDay: [],
     bySegment: [],
     byIndustry: [],
     recent: []
   });
+  assert.equal(analytics.conclusiveSessions, 1);
+  assert.equal(analytics.outcomeAwareSessions, 1);
+  assert.equal(analytics.successfulSessions, 1);
   assert.deepEqual(analytics.topUsers, [
     { userId: "user_2", email: "admin@example.com", sessions: 1, avgOverallScore: 70 }
   ]);

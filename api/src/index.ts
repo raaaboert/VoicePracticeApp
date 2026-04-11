@@ -206,11 +206,20 @@ import {
 } from "./services/simulationSessionLifecycle.js";
 import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/simulationHotPath.js";
 import {
+  buildAdditiveEvaluationScoringGuidance,
+  countUserTurnsForScoring,
+  isConclusiveSimulationScoreRecord,
+  MIN_USER_TURNS_FOR_SCORE,
+  normalizeSimulationScorecard,
+  type SimulationScorecard
+} from "./services/simulationScoring.js";
+import {
   pruneStaleRecognizedSimulationSessions,
   repairOrphanedUserScopedHistory
 } from "./services/integrityMaintenance.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
-import { computeWeightedOverallScore, getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
+import { normalizeDesiredOutcomeText } from "./services/scenarioTextNormalization.js";
+import { getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
 import {
   buildOrgTrainingSummaries,
   ensureOrgTrainingCollections,
@@ -1222,6 +1231,7 @@ function normalizeScenarioEntry(raw: unknown, segmentId: string, index: number):
   const aiRole = typeof candidate.aiRole === "string" && candidate.aiRole.trim()
     ? candidate.aiRole.trim()
     : "a conversation partner";
+  const desiredOutcome = normalizeDesiredOutcomeText(candidate.desiredOutcome);
 
   return {
     id: normalizeIdentifier(candidate.id, `${segmentId}_scenario_${index + 1}`),
@@ -1229,6 +1239,7 @@ function normalizeScenarioEntry(raw: unknown, segmentId: string, index: number):
     title,
     summary: buildScenarioSummary(description),
     description,
+    desiredOutcome,
     aiRole,
     enabled: candidate.enabled !== false
   };
@@ -1392,6 +1403,7 @@ function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: num
   const description = typeof candidate.description === "string" && candidate.description.trim()
     ? candidate.description.trim()
     : title;
+  const desiredOutcome = normalizeDesiredOutcomeText(candidate.desiredOutcome);
   const aiRole = typeof candidate.aiRole === "string" && candidate.aiRole.trim()
     ? candidate.aiRole.trim()
     : "a conversation partner";
@@ -1414,6 +1426,7 @@ function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: num
         ? candidate.summary.trim()
         : buildScenarioSummary(description),
     description,
+    desiredOutcome,
     aiRole,
     scoringGuidance,
     applicableIndustryIds: applicableIndustryIds as IndustryId[],
@@ -2112,60 +2125,8 @@ function extractJsonObject(text: string): string {
   return text.slice(start, end + 1);
 }
 
-interface SimulationScorecard {
-  overallScore: number;
-  persuasion: number;
-  clarity: number;
-  empathy: number;
-  assertiveness: number;
-  strengths: string[];
-  improvements: string[];
-  summary: string;
-}
-
 const MAX_PERSISTED_COACHING_ITEMS = 3;
 const MAX_PERSISTED_COACHING_TEXT_LENGTH = 160;
-
-function clamp(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-
-  return Math.max(min, Math.min(max, value));
-}
-
-function normalizeScorecard(raw: unknown): SimulationScorecard {
-  const candidate = (raw ?? {}) as Partial<SimulationScorecard>;
-
-  const safeList = (value: unknown, fallback: string): string[] => {
-    if (!Array.isArray(value)) {
-      return [fallback];
-    }
-
-    const items = value
-      .map((item) => (typeof item === "string" ? item.trim() : ""))
-      .filter(Boolean)
-      .slice(0, 4);
-
-    return items.length > 0 ? items : [fallback];
-  };
-
-  const summary =
-    typeof candidate.summary === "string" && candidate.summary.trim()
-      ? candidate.summary.trim()
-      : "Good effort. Keep improving clarity, evidence, and objection handling.";
-
-  return {
-    overallScore: clamp(Number(candidate.overallScore), 0, 100),
-    persuasion: clamp(Number(candidate.persuasion), 1, 10),
-    clarity: clamp(Number(candidate.clarity), 1, 10),
-    empathy: clamp(Number(candidate.empathy), 1, 10),
-    assertiveness: clamp(Number(candidate.assertiveness), 1, 10),
-    strengths: safeList(candidate.strengths, "Stayed engaged throughout the conversation."),
-    improvements: safeList(candidate.improvements, "Use clearer structure and stronger evidence."),
-    summary
-  };
-}
 
 function createDefaultDatabase(): ApiDatabase {
   const now = nowIso();
@@ -3162,6 +3123,45 @@ async function withDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T)
   });
 }
 
+async function refreshReportingSnapshots(): Promise<void> {
+  await usageSessionStore.refreshSnapshot();
+  await scoreRecordStore.refreshSnapshot();
+}
+
+async function withFreshReportingRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    await refreshReportingSnapshots();
+    const db = await loadDatabase({ forceStorageRead: true });
+    return await handler(db);
+  });
+}
+
+async function withFreshReportingWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  const completed = await withDatabaseLock(async () => {
+    await refreshReportingSnapshots();
+    const db = await loadDatabase({ forceStorageRead: true });
+    try {
+      const result = await handler(db);
+      const pendingAuditEvents = drainPendingAuditEvents(db);
+      if (pendingAuditEvents.length > 0) {
+        await auditEventStore.appendEvents(pendingAuditEvents, { maxRecords: MAX_AUDIT_EVENTS });
+      }
+      await saveDatabase(db);
+      return {
+        result,
+        postCommitEffects: pendingPostCommitEffectsByDb.drain(db)
+      };
+    } catch (error) {
+      drainPendingAuditEvents(db);
+      pendingPostCommitEffectsByDb.discard(db);
+      throw error;
+    }
+  });
+
+  await runDatabasePostCommitEffects(completed.postCommitEffects);
+  return completed.result;
+}
+
 async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
   const completed = await withDatabaseLock(async () => {
     const db = await loadDatabase();
@@ -4153,7 +4153,8 @@ function filterOrgScoreRecords(db: ApiDatabase, orgId: string, startMs: number, 
   return scoreRecordAccess.listByOrgRange(db, {
     orgId,
     endedAtFrom: new Date(startMs),
-    endedAtBefore: new Date(endMs)
+    endedAtBefore: new Date(endMs),
+    conclusiveOnly: true
   });
 }
 
@@ -4535,7 +4536,8 @@ async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg
   const scoresThisPeriod = scoreRecordAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     endedAtFrom: new Date(billing.periodStartAt),
-    endedAtBefore: new Date(billing.periodEndAt)
+    endedAtBefore: new Date(billing.periodEndAt),
+    conclusiveOnly: true
   });
   const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime());
   const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
@@ -4775,7 +4777,7 @@ async function buildDashboardTrainingPackRows(
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
   const allPackSessions = listUsageSessions(db, { orgId: org.id }).filter((session) => Boolean(session.trainingPackId));
-  const allPackScores = listScoreRecords(db, { orgId: org.id }).filter((record) => Boolean(record.trainingPackId));
+  const allPackScores = listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter((record) => Boolean(record.trainingPackId));
   const currentSessions = allPackSessions.filter((session) => {
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
@@ -5294,14 +5296,14 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
-  const recentScores = listScoreRecords(db).filter((record) => {
+  const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
     const endedAtMs = new Date(record.endedAt).getTime();
     return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
   });
-  const previousScores = listScoreRecords(db).filter((record) => {
+  const previousScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
@@ -5392,7 +5394,7 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
-  const recentScores = listScoreRecords(db).filter((record) => {
+  const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !orgIds.has(record.orgId)) {
       return false;
     }
@@ -5474,7 +5476,7 @@ async function buildDashboardTrainingPackDetail(
   }
 
   const allPackSessions = listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id });
-  const allPackScores = listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id });
+  const allPackScores = listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true });
   const recentPackSessions = allPackSessions.filter((session) => {
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
@@ -5704,7 +5706,8 @@ async function buildDashboardTrainingPackAssignmentDetail(
   const packScores = listScoreRecords(db, {
     orgId: org.id,
     userId: assignment.userId,
-    trainingPackId: pack.id
+    trainingPackId: pack.id,
+    conclusiveOnly: true
   });
   const projectedAssignment = projectTrainingPackAssignmentLifecycle(db, assignment);
   const assignmentRow = computeTrainingPackAssignmentProgress({
@@ -5803,7 +5806,7 @@ async function buildDashboardUserDetail(
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const trainingPackTitles = buildTrainingPackTitleMap(packs);
   const userSessions = listUsageSessions(db, { userId: user.id, orgId: org.id });
-  const userScores = listScoreRecords(db, { userId: user.id, orgId: org.id });
+  const userScores = listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true });
   const now = Date.now();
   const last30DaysThreshold = now - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now - 60 * 24 * 60 * 60 * 1000;
@@ -5888,7 +5891,7 @@ async function buildDashboardAttemptDetail(
   attemptId: string
 ): Promise<DashboardAttemptDetailResponse | null> {
   const score = scoreRecordAccess.getById(db, attemptId);
-  if (!score || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
+  if (!score || !isConclusiveSimulationScoreRecord(score) || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
     return null;
   }
 
@@ -5933,14 +5936,14 @@ async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
-  const recentScores = listScoreRecords(db).filter((record) => {
+  const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
     const endedAtMs = new Date(record.endedAt).getTime();
     return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
   });
-  const previousScores = listScoreRecords(db).filter((record) => {
+  const previousScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
       return false;
     }
@@ -6152,6 +6155,7 @@ function buildRuntimeScenarioFromOrgCustomScenario(
     title: customScenario.title,
     summary: customScenario.summary ?? buildScenarioSummary(customScenario.description),
     description: customScenario.description,
+    desiredOutcome: customScenario.desiredOutcome,
     aiRole: reinforcedAiRole,
     enabled: customScenario.enabled === true,
   };
@@ -6297,10 +6301,6 @@ function resolveScenarioScoringGuidanceForEvaluation(
   resolvedScenario: ResolvedMobileScenarioContext,
   selectedIndustryId: string | null
 ): string | null {
-  if (resolvedScenario.source === "custom") {
-    return resolvedScenario.scoringGuidance?.trim() || null;
-  }
-
   const allowedIndustryIds = uniqueStrings(resolvedScenario.allowedIndustryIds);
   const selectedIndustryIdTrimmed = typeof selectedIndustryId === "string" ? selectedIndustryId.trim() : "";
   const scopedIndustryIds =
@@ -6309,10 +6309,15 @@ function resolveScenarioScoringGuidanceForEvaluation(
       : allowedIndustryIds;
   const industryContexts = buildScoringIndustryContextsForIds(configForUser, scopedIndustryIds);
 
-  return buildDefaultScoringGuidance({
+  const standardGuidance = buildDefaultScoringGuidance({
     scenarioTitle: resolvedScenario.scenario.title,
     segmentLabel: resolvedScenario.segment.label,
     industryContexts
+  });
+
+  return buildAdditiveEvaluationScoringGuidance({
+    standardGuidance,
+    customGuidance: resolvedScenario.source === "custom" ? resolvedScenario.scoringGuidance : null
   });
 }
 
@@ -6335,7 +6340,7 @@ function buildCustomScenarioGenerationPromptPreview(input: {
   industries: IndustryDefinition[];
   sourceMode: OrgCustomScenarioSourceMode;
   base?: { segment: SegmentDefinition; scenario: Scenario } | null;
-  draft: { title?: string; description?: string; aiRole?: string; scoringGuidance?: string };
+  draft: { title?: string; description?: string; desiredOutcome?: string; aiRole?: string; scoringGuidance?: string };
   generationInputs: OrgCustomScenarioGenerationInputs | null;
 }): string {
   const industrySummary = input.industries
@@ -6352,6 +6357,7 @@ function buildCustomScenarioGenerationPromptPreview(input: {
         `Base Role: ${input.base.segment.label} (${input.base.segment.id})`,
         `Base Scenario Title: ${input.base.scenario.title}`,
         `Base Scenario Description: ${input.base.scenario.description}`,
+        `Base Scenario Desired Outcome: ${input.base.scenario.desiredOutcome?.trim() || "(blank)"}`,
         `Base Scenario AI Role: ${input.base.scenario.aiRole}`,
       ].join("\n")
     : "No base scenario selected (scratch mode).";
@@ -6394,6 +6400,7 @@ function buildCustomScenarioGenerationPromptPreview(input: {
   const draftLines = [
     `Draft Title (optional): ${(input.draft.title ?? "").trim() || "(blank)"}`,
     `Draft Description (optional): ${(input.draft.description ?? "").trim() || "(blank)"}`,
+    `Draft Desired Outcome (optional): ${(input.draft.desiredOutcome ?? "").trim() || "(blank)"}`,
     `Draft AI Role (optional): ${(input.draft.aiRole ?? "").trim() || "(blank)"}`,
     `Draft Scoring Guidance (optional): ${(input.draft.scoringGuidance ?? "").trim() || "(blank)"}`,
   ];
@@ -6417,10 +6424,11 @@ function buildCustomScenarioGenerationPromptPreview(input: {
     "",
     "Output Requirements:",
     "- Return JSON only (no markdown).",
-    '- Keys: "title", "description", "aiRole", "scoringGuidance".',
+    '- Keys: "title", "description", "desiredOutcome", "aiRole", "scoringGuidance".',
     `- The user/trainee plays the target role (${input.segment.label}); aiRole must be the COUNTERPART the user practices against.`,
     `- Never set aiRole to the trainee role (${input.segment.label}) or a synonym of it.`,
     "- Write description as scenario context/objective, not as instructions for the AI role to become the trainee.",
+    "- desiredOutcome should describe the concrete end state or resolution the trainee should try to achieve.",
     "- Keep the scenario applicable to the selected role and selected industries.",
     "- Do not invent regulated claims, guarantees, or unsupported product details.",
     "- Scoring guidance should focus on what the client wants measured and what good performance looks like.",
@@ -8023,14 +8031,14 @@ app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, res
 });
 
 app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload = await buildDashboardOverview(db, request.dashboard!.viewer);
     response.json(payload);
   });
 });
 
 app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabase(async (db) => {
+  await withFreshReportingWrite(async (db) => {
     for (const org of listDashboardAccessibleOrgs(db, request.dashboard!.viewer)) {
       await ensureOrgTrainingWorkspace(db, org);
     }
@@ -8048,7 +8056,7 @@ app.get("/dashboard/customers", requireDashboardAuth, async (request: DashboardA
     return;
   }
 
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload: DashboardCustomerListResponse = {
       viewer: request.dashboard!.viewer,
       customers: await listDashboardAccessibleCustomers(db, request.dashboard!.viewer)
@@ -8066,7 +8074,7 @@ app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: Das
     return;
   }
 
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const orgId = request.params.orgId;
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -8098,14 +8106,14 @@ app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: Das
 });
 
 app.get("/dashboard/training", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload = await buildDashboardTrainingReport(db, request.dashboard!.viewer);
     response.json(payload);
   });
 });
 
 app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload = await buildDashboardTrainingPackDetail(db, request.dashboard!.viewer, request.params.trainingPackId);
     if (!payload) {
       response.status(404).json({ error: "Training pack not found." });
@@ -8120,7 +8128,7 @@ app.get(
   "/dashboard/training/:trainingPackId/assignments/:assignmentId",
   requireDashboardAuth,
   async (request: DashboardAuthRequest, response: Response) => {
-    await withDatabaseRead(async (db) => {
+    await withFreshReportingRead(async (db) => {
       const payload = await buildDashboardTrainingPackAssignmentDetail(
         db,
         request.dashboard!.viewer,
@@ -8138,14 +8146,14 @@ app.get(
 );
 
 app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload = await buildDashboardUserReport(db, request.dashboard!.viewer);
     response.json(payload);
   });
 });
 
 app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload = await buildDashboardUserDetail(db, request.dashboard!.viewer, request.params.userId);
     if (!payload) {
       response.status(404).json({ error: "Dashboard user not found." });
@@ -8157,7 +8165,7 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
 });
 
 app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
-  await withDatabaseRead(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const payload = await buildDashboardAttemptDetail(db, request.dashboard!.viewer, request.params.attemptId);
     if (!payload) {
       response.status(404).json({ error: "Attempt detail not found." });
@@ -8961,6 +8969,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
     const draft = {
       title: sanitizeOptionalText(body.draft?.title, 300),
       description: sanitizeOptionalText(body.draft?.description, 8_000),
+      desiredOutcome: sanitizeOptionalText(body.draft?.desiredOutcome, 8_000),
       aiRole: sanitizeOptionalText(body.draft?.aiRole, 8_000),
       scoringGuidance: sanitizeOptionalText(body.draft?.scoringGuidance, 8_000),
     };
@@ -8993,11 +9002,12 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
 
   const systemPrompt = [
     "You are a training-scenario content writer for enterprise roleplay simulations.",
-    "Return ONLY valid JSON with keys: title, description, aiRole, scoringGuidance.",
+    "Return ONLY valid JSON with keys: title, description, desiredOutcome, aiRole, scoringGuidance.",
     "Do not wrap the JSON in markdown fences.",
     "Keep the scenario realistic, role-appropriate, and suitable for spoken simulation practice.",
     `The USER is the trainee in the target role (${context.segment.label}).`,
     "aiRole must be the opposing/conversation counterpart, never the trainee role.",
+    "desiredOutcome should capture the concrete result the trainee should try to achieve by the end of the scenario.",
     "Avoid illegal/defamatory claims, guarantees, fabricated product specs, or compliance violations.",
     "If draft content is supplied, improve and adapt it rather than discarding useful details.",
   ].join(" ");
@@ -9023,6 +9033,10 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
       context.draft.description ??
       context.base?.scenario.description ??
       `Create a roleplay scenario for ${context.segment.label} at ${context.org.name}.`;
+    const fallbackDesiredOutcome =
+      context.draft.desiredOutcome ??
+      context.base?.scenario.desiredOutcome ??
+      "";
     const fallbackAiRole =
       context.draft.aiRole ??
       context.base?.scenario.aiRole ??
@@ -9042,6 +9056,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
 
     const generatedTitle = toMultilineText(parsed.title, 300) || fallbackTitle;
     const generatedDescription = toMultilineText(parsed.description, 8_000) || fallbackDescription;
+    const generatedDesiredOutcome = toMultilineText(parsed.desiredOutcome, 8_000) || fallbackDesiredOutcome;
     const parsedAiRole = toMultilineText(parsed.aiRole, 8_000);
     const safeFallbackAiRole = aiRoleMatchesTraineeRole(fallbackAiRole, context.segment.label)
       ? `a realistic counterpart with objections and constraints for a ${context.segment.label}`
@@ -9056,6 +9071,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
       generated: {
         title: generatedTitle,
         description: generatedDescription,
+        desiredOutcome: generatedDesiredOutcome || undefined,
         aiRole: generatedAiRole,
         scoringGuidance: generatedScoringGuidance,
         summary: buildScenarioSummary(generatedDescription),
@@ -9097,6 +9113,7 @@ app.post("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request,
 
     const title = typeof body.title === "string" ? body.title.trim() : "";
     const description = typeof body.description === "string" ? body.description.trim() : "";
+    const desiredOutcome = normalizeDesiredOutcomeText(body.desiredOutcome);
     const aiRole = typeof body.aiRole === "string" ? body.aiRole.trim() : "";
     const scoringGuidance = typeof body.scoringGuidance === "string" ? body.scoringGuidance.trim() : "";
     const segmentId = typeof body.segmentId === "string" ? body.segmentId.trim() : "";
@@ -9173,6 +9190,7 @@ app.post("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request,
       title,
       summary: buildScenarioSummary(description),
       description,
+      desiredOutcome,
       aiRole,
       scoringGuidance,
       applicableIndustryIds,
@@ -9267,6 +9285,11 @@ app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (requ
         return;
       }
       current.description = nextDescription;
+    }
+
+    if (patch.desiredOutcome !== undefined) {
+      const nextDesiredOutcome = normalizeDesiredOutcomeText(patch.desiredOutcome);
+      current.desiredOutcome = nextDesiredOutcome;
     }
 
     if (patch.aiRole !== undefined) {
@@ -13079,6 +13102,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   const history = normalizeDialogueHistory(body.history, { maxTurns: null });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
+  const recognizedSessionId = resolveRecognizedSimulationSessionId(request, requestBodyRecord);
   const latestUserText = getLatestUserTextFromHistory(history);
   const placeholderDetected = hasPlaceholderOrMissingUserText(latestUserText);
   const placeholderDetectedInHistory = hasAnyPlaceholderUserText(history);
@@ -13151,6 +13175,8 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     });
     return;
   }
+
+  const userTurnCount = countUserTurnsForScoring(history);
 
   const context = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
@@ -13244,6 +13270,17 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     return;
   }
 
+  if (userTurnCount < MIN_USER_TURNS_FOR_SCORE) {
+    response.status(200).json({
+      status: "not_scored",
+      reason: "insufficient_evidence",
+      userTurnCount,
+      minimumUserTurns: MIN_USER_TURNS_FOR_SCORE,
+      message: `We need at least ${MIN_USER_TURNS_FOR_SCORE} real user responses to generate a reliable scorecard. This session was not scored.`
+    });
+    return;
+  }
+
   const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
     orgId: context.actingOrgId,
     scenarioId: context.scenario.id,
@@ -13296,15 +13333,16 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     });
 
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
-    const scorecard = normalizeScorecard(parsed);
     const scoringWeights = evaluationConfig?.scoringWeights ?? getDefaultScoringWeights();
-    scorecard.overallScore = computeWeightedOverallScore(scorecard, scoringWeights);
+    const scorecard = normalizeSimulationScorecard(parsed, scoringWeights);
     const coachingArtifact = buildSimulationScoreCoachingArtifactFromScorecard(scorecard);
     const normalizedCoachingThemes = buildNormalizedSimulationScoreThemesFromArtifact(coachingArtifact);
 
     const now = nowIso();
+    const scoreRecordId = recognizedSessionId ? `score_${recognizedSessionId}` : `score_${uuid()}`;
     const record: SimulationScoreRecord = {
-      id: `score_${uuid()}`,
+      id: scoreRecordId,
+      simulationSessionId: recognizedSessionId,
       userId: context.user.id,
       orgId: context.actingOrgId,
       segmentId: context.segment.id,
@@ -13314,7 +13352,11 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       industryId: context.industryId,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
+      communicationScore: scorecard.communicationScore,
+      outcomeScore: scorecard.outcomeScore,
       overallScore: scorecard.overallScore,
+      completionLevel: scorecard.completionLevel,
+      objectiveAchieved: scorecard.objectiveAchieved,
       persuasion: scorecard.persuasion,
       clarity: scorecard.clarity,
       empathy: scorecard.empathy,
@@ -13343,7 +13385,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
           syncTrainingPackAssignmentsForUserPack(db, context.actingOrgId, user.id, record.trainingPackId ?? null);
 
           const event: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: recognizedSessionId ? `ai_score_${recognizedSessionId}` : `ai_${uuid()}`,
             kind: "score",
             userId: user.id,
             orgId: context.actingOrgId,
@@ -13384,12 +13426,13 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     }
 
     await touchRecognizedSimulationSessionBestEffort({
-      simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+      simulationSessionId: recognizedSessionId,
       trainingPackId: record.trainingPackId ?? null,
       logKey: "simulation-session:score"
     });
 
     response.status(201).json({
+      status: "scored",
       scorecard,
       record: {
         id: record.id,
@@ -13414,6 +13457,13 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
 });
 
 app.post("/mobile/users/:userId/scores", async (request: Request, response: Response) => {
+  if (!ENABLE_INTERNAL_DEBUG_ENDPOINTS) {
+    response.status(410).json({
+      error: "Legacy manual score recording is disabled for normal testing. Use /mobile/users/:userId/ai/score."
+    });
+    return;
+  }
+
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -13492,19 +13542,27 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       submittedTrainingPackId
     });
 
-    const clampScore = (value: unknown, max: number): number => {
-      const parsed = Number(value);
-      if (!Number.isFinite(parsed)) {
-        return 0;
-      }
-      return Math.max(0, Math.min(max, parsed));
-    };
-
     const now = new Date();
     const coachingArtifact = normalizeSimulationScoreCoachingArtifact(body.coachingArtifact ?? null);
     const normalizedCoachingThemes = buildNormalizedSimulationScoreThemesFromArtifact(coachingArtifact);
+    const normalizedScorecard = normalizeSimulationScorecard(
+      {
+        communicationScore: body.communicationScore,
+        outcomeScore: body.outcomeScore,
+        overallScore: body.overallScore,
+        completionLevel: body.completionLevel,
+        objectiveAchieved: body.objectiveAchieved,
+        persuasion: body.persuasion,
+        clarity: body.clarity,
+        empathy: body.empathy,
+        assertiveness: body.assertiveness,
+        summary: body.summary
+      },
+      getDefaultScoringWeights()
+    );
     const record: SimulationScoreRecord = {
-      id: `score_${uuid()}`,
+      id: normalizeSimulationSessionId(body.simulationSessionId) ? `score_${normalizeSimulationSessionId(body.simulationSessionId)}` : `score_${uuid()}`,
+      simulationSessionId: normalizeSimulationSessionId(body.simulationSessionId) ?? undefined,
       userId: user.id,
       orgId: accessContext.actingOrgId,
       segmentId,
@@ -13513,11 +13571,15 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       trainingPackId: persistedTrainingPack?.id ?? null,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
-      overallScore: clampScore(body.overallScore, 100),
-      persuasion: clampScore(body.persuasion, 10),
-      clarity: clampScore(body.clarity, 10),
-      empathy: clampScore(body.empathy, 10),
-      assertiveness: clampScore(body.assertiveness, 10),
+      communicationScore: normalizedScorecard.communicationScore,
+      outcomeScore: normalizedScorecard.outcomeScore,
+      overallScore: normalizedScorecard.overallScore,
+      completionLevel: normalizedScorecard.completionLevel,
+      objectiveAchieved: normalizedScorecard.objectiveAchieved,
+      persuasion: normalizedScorecard.persuasion,
+      clarity: normalizedScorecard.clarity,
+      empathy: normalizedScorecard.empathy,
+      assertiveness: normalizedScorecard.assertiveness,
       summary: typeof body.summary === "string" && body.summary.trim() ? body.summary.trim() : undefined,
       coachingArtifact,
       normalizedCoachingThemes,
@@ -14137,6 +14199,9 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
       org: { id: org.id, name: org.name },
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
       orgAvgOverallScore: analytics.orgAvgOverallScore,
+      conclusiveSessions: analytics.conclusiveSessions,
+      outcomeAwareSessions: analytics.outcomeAwareSessions,
+      successfulSessions: analytics.successfulSessions,
       topUsers: analytics.topUsers,
       bySegment: analytics.bySegment,
       byIndustry: analytics.byIndustry,
@@ -14459,7 +14524,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
 });
 
 app.get("/usage", requireAdmin, async (_request: Request, response: Response) => {
-  await withDatabase(async (db) => {
+  await withFreshReportingRead(async (db) => {
     const now = new Date();
     const rows = [];
 

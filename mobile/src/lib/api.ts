@@ -18,7 +18,7 @@ import {
   UserProfile,
 } from "@voicepractice/shared";
 import { NativeModules, Platform } from "react-native";
-import { DialogueMessage, SimulationScorecard } from "../types";
+import { DialogueMessage, SimulationEvaluationResult } from "../types";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const TRANSIENT_ERROR_PATTERNS = [
@@ -501,6 +501,8 @@ export async function recordSimulationScore(
   input: RecordSimulationScoreRequest,
   authToken: string,
 ): Promise<unknown> {
+  // Legacy manual scoring path. Normal mobile scoring should use `fetchAiScore`, and the server
+  // now keeps this endpoint behind the internal-debug flag to avoid polluting real score history.
   return requestJson<unknown>(`/mobile/users/${encodeURIComponent(userId)}/scores`, {
     method: "POST",
     body: JSON.stringify(input),
@@ -652,18 +654,7 @@ export async function fetchAiScore(params: {
   endedAt: string;
   history: DialogueMessage[];
   trainingPackId?: string;
-}): Promise<{
-  scorecard: SimulationScorecard;
-  record: {
-    id: string;
-    createdAt: string;
-    trainingPackId?: string | null;
-    model: string | null;
-    promptVersion: string | null;
-    rubricVersion: string | null;
-    usage: AiUsagePayload;
-  };
-}> {
+}): Promise<SimulationEvaluationResult> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/score`,
     {
@@ -816,7 +807,13 @@ export async function fetchScoreSummary(
   generatedAt: string;
   period: { startAt: string; endAt: string; days: number };
   filters: { segmentId: string | null };
-  totals: { sessions: number; avgOverallScore: number | null };
+  totals: {
+    sessions: number;
+    conclusiveSessions: number;
+    outcomeAwareSessions: number;
+    successfulSessions: number;
+    avgOverallScore: number | null;
+  };
   byDay: Array<{ dayKey: string; sessions: number; avgOverallScore: number | null }>;
   bySegment: Array<{ segmentId: string; segmentLabel: string; sessions: number; avgOverallScore: number | null }>;
   byIndustry: Array<{ industryId: string; industryLabel: string; sessions: number; avgOverallScore: number | null }>;
@@ -1108,6 +1105,9 @@ export async function fetchOrgAdminAnalytics(
   org: { id: string; name: string };
   period: { startAt: string; endAt: string; days: number };
   orgAvgOverallScore: number | null;
+  conclusiveSessions: number;
+  outcomeAwareSessions: number;
+  successfulSessions: number;
   topUsers: Array<{ userId: string; email: string; sessions: number; avgOverallScore: number | null }>;
   bySegment: Array<{ segmentId: string; segmentLabel: string; sessions: number; avgOverallScore: number | null }>;
   byIndustry: Array<{ industryId: string; industryLabel: string; sessions: number; avgOverallScore: number | null }>;

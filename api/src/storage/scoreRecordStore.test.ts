@@ -160,3 +160,46 @@ test("file score record store imports legacy score records with immediate author
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("file score record store refreshSnapshot picks up out-of-band writes and deletes", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-score-record-store-refresh-"));
+  try {
+    const dbPath = path.join(tempDir, "db.local.json");
+    const storeA = createScoreRecordStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    const storeB = createScoreRecordStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+
+    await storeA.initialize();
+    await storeA.appendRecord(createScore({ id: "score_a" }));
+    await storeB.initialize();
+
+    await storeB.appendRecord(createScore({ id: "score_b", createdAt: "2026-04-01T10:05:00.000Z" }));
+
+    assert.deepEqual(storeA.listRecords().map((record) => record.id), ["score_a"]);
+
+    await storeA.refreshSnapshot();
+    assert.deepEqual(storeA.listRecords().map((record) => record.id), ["score_a", "score_b"]);
+
+    const deletedCount = await storeB.deleteRecordsForUser("user_1");
+    assert.equal(deletedCount, 2);
+    assert.deepEqual(storeA.listRecords().map((record) => record.id), ["score_a", "score_b"]);
+
+    await storeA.refreshSnapshot();
+    assert.deepEqual(storeA.listRecords(), []);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

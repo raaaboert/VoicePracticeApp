@@ -34,6 +34,15 @@ export interface PreTesterResetSummary {
   preservedOrgCount: number;
 }
 
+export interface DisposableSimulationHistoryInventory {
+  usageSessions: number;
+  recognizedSimulationSessions: number;
+  scoreRecords: number;
+  aiUsageEvents: number;
+  supportCases: number;
+  assignmentProgressRows: number;
+}
+
 interface IntegrityMaintenanceContext {
   db: ApiDatabase;
   usageSessionAccess: UsageSessionAccess;
@@ -66,6 +75,11 @@ function resetTrainingAssignmentProgress(db: ApiDatabase, nowIso: string): numbe
     }
   }
   return changedCount;
+}
+
+function countTrainingAssignmentProgress(db: ApiDatabase): number {
+  const assignments = Array.isArray(db.trainingPackAssignments) ? db.trainingPackAssignments : [];
+  return assignments.filter((assignment) => assignment.startedAt !== null || assignment.completedAt !== null).length;
 }
 
 export async function repairOrphanedUserScopedHistory(
@@ -139,6 +153,25 @@ export async function pruneStaleRecognizedSimulationSessions(
   return {
     prunedStartedSessions: await params.simulationSessionStore.pruneStartedSessionsLastSeenBefore(cutoff),
     cutoffAt: cutoff.toISOString()
+  };
+}
+
+export async function inspectDisposableSimulationHistory(
+  params: IntegrityMaintenanceContext & { now: Date }
+): Promise<DisposableSimulationHistoryInventory> {
+  const usageSessions = params.usageSessionAccess.list(params.db).length;
+  const recognizedSimulationSessions = (await params.simulationSessionStore.listSessions()).length;
+  const scoreRecords = params.scoreRecordAccess.list(params.db).length;
+  const aiUsageEvents = (await params.aiUsageEventAccess.list()).length;
+  const supportCases = (await params.supportCaseStore.listCases({ now: params.now })).length;
+
+  return {
+    usageSessions,
+    recognizedSimulationSessions,
+    scoreRecords,
+    aiUsageEvents,
+    supportCases,
+    assignmentProgressRows: countTrainingAssignmentProgress(params.db)
   };
 }
 

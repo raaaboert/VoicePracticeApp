@@ -130,9 +130,10 @@ export function buildTrainingPackBehavioralTriggerBlock(trainingPack: TrainingPa
 export function buildTrainingPackScoringWeightsBlock(weights: NormalizedScoringWeights): string {
   return [
     "TRAINING PACK SCORING WEIGHT OVERRIDES",
-    "Apply these normalized rubric weights when evaluating the USER:",
+    "Apply these normalized rubric weights when evaluating the USER's communication sub-scores:",
     ...TRAINING_PACK_SCORING_KEYS.map((key) => `- ${key}: ${weights[key].toFixed(4)}`),
-    "Use only these existing rubric keys. Do not create new scoring categories.",
+    "Use these weights for persuasion, clarity, empathy, and assertiveness only.",
+    "Still return the full required JSON schema, including communicationScore, outcomeScore, overallScore, completionLevel, and objectiveAchieved.",
   ].join("\n");
 }
 

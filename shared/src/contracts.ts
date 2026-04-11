@@ -65,6 +65,7 @@ export interface Scenario {
   title: string;
   summary?: string;
   description: string;
+  desiredOutcome?: string;
   aiRole: string;
   enabled?: boolean;
 }
@@ -108,6 +109,7 @@ export interface OrgCustomScenario {
   title: string;
   summary?: string;
   description: string;
+  desiredOutcome?: string;
   aiRole: string;
   scoringGuidance: string;
   applicableIndustryIds: IndustryId[];
@@ -379,8 +381,12 @@ export interface SimulationSessionRecord {
   usageSessionRecordId?: string | null;
 }
 
+export const SIMULATION_COMPLETION_LEVELS = ["inconclusive", "partial", "complete"] as const;
+export type SimulationCompletionLevel = (typeof SIMULATION_COMPLETION_LEVELS)[number];
+
 export interface SimulationScoreRecord {
   id: string;
+  simulationSessionId?: string | null;
   userId: string;
   orgId: string | null;
   segmentId: string;
@@ -390,7 +396,11 @@ export interface SimulationScoreRecord {
   industryId?: string | null;
   startedAt: string;
   endedAt: string;
+  communicationScore?: number;
+  outcomeScore?: number;
   overallScore: number;
+  completionLevel?: SimulationCompletionLevel;
+  objectiveAchieved?: boolean;
   persuasion: number;
   clarity: number;
   empathy: number;
@@ -1080,7 +1090,11 @@ export interface DashboardAttemptDetailResponse {
     industryId: string | null;
     industryLabel: string | null;
     scoreBreakdown: {
+      communicationScore: number | null;
+      outcomeScore: number | null;
       overallScore: number;
+      completionLevel: SimulationCompletionLevel | null;
+      objectiveAchieved: boolean | null;
       persuasion: number;
       clarity: number;
       empathy: number;
@@ -1212,6 +1226,7 @@ export interface GenerateOrgCustomScenarioRequest {
   draft?: {
     title?: string;
     description?: string;
+    desiredOutcome?: string;
     aiRole?: string;
     scoringGuidance?: string;
   };
@@ -1222,6 +1237,7 @@ export interface GenerateOrgCustomScenarioResponse {
   generated: {
     title: string;
     description: string;
+    desiredOutcome?: string;
     aiRole: string;
     scoringGuidance: string;
     summary: string;
@@ -1246,6 +1262,7 @@ export interface GenerateOrgCustomScenarioResponse {
 export interface CreateOrgCustomScenarioRequest {
   title?: string;
   description?: string;
+  desiredOutcome?: string;
   aiRole?: string;
   scoringGuidance?: string;
   segmentId?: string;
@@ -1257,6 +1274,7 @@ export interface CreateOrgCustomScenarioRequest {
 export interface UpdateOrgCustomScenarioRequest {
   title?: string;
   description?: string;
+  desiredOutcome?: string;
   aiRole?: string;
   scoringGuidance?: string;
   segmentId?: string;
@@ -1327,14 +1345,21 @@ export interface StartSimulationSessionResponse {
 }
 
 export interface RecordSimulationScoreRequest {
+  // Legacy manual scoring payload. The primary score path is the AI evaluation route; keep this
+  // shape only for backward-compatible internal/debug tooling, not normal product scoring flows.
   userId: string;
   segmentId: string;
   scenarioId: string;
+  simulationSessionId?: string | null;
   trainingId?: string | null;
   trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
+  communicationScore?: number;
+  outcomeScore?: number;
   overallScore: number;
+  completionLevel?: SimulationCompletionLevel;
+  objectiveAchieved?: boolean;
   persuasion: number;
   clarity: number;
   empathy: number;
@@ -1491,6 +1516,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "solution_manager",
         title: "Direct Report Undermining Decisions",
         description: "A direct report keeps undermining your decisions in front of the team.",
+        desiredOutcome:
+          "The direct report acknowledges the issue, aligns on expectations, and commits to changing the behavior.",
         aiRole: "a direct report who keeps undermining your decisions",
         enabled: true
       },
@@ -1499,6 +1526,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "solution_manager",
         title: "Frustrated Client With Scope Changes",
         description: "A client is frustrated after repeated scope changes and wants accountability.",
+        desiredOutcome:
+          "The client feels heard, agrees on accountability, and accepts a concrete plan for next steps.",
         aiRole: "a frustrated client upset about delays",
         enabled: true
       }
@@ -1515,6 +1544,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "project_manager",
         title: "Unmotivated Team Member",
         description: "A team member is unmotivated, disengaged, and missing deadlines.",
+        desiredOutcome:
+          "The team member re-engages, accepts clear accountability, and commits to an immediate improvement plan.",
         aiRole: "an unmotivated project team member",
         enabled: true
       },
@@ -1523,6 +1554,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "project_manager",
         title: "Conflict Between Team Members",
         description: "Two team members are in conflict and expect you to resolve it.",
+        desiredOutcome:
+          "The conflict is de-escalated and the teammate agrees to a specific path toward collaboration and follow-through.",
         aiRole: "a project team member in conflict with a colleague",
         enabled: true
       }
@@ -1539,6 +1572,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "sales_representative",
         title: "Discount Pushback",
         description: "A prospect is unhappy with the discount and keeps pushing for more.",
+        desiredOutcome:
+          "The prospect understands the value, reduces price resistance, and agrees to a concrete next step.",
         aiRole: "a potential customer unhappy with your discount offer",
         enabled: true
       },
@@ -1547,6 +1582,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "sales_representative",
         title: "False Rumors About Your Company",
         description: "A prospect heard damaging rumors and questions your credibility.",
+        desiredOutcome:
+          "The prospect regains confidence in your credibility and agrees to continue the buying conversation.",
         aiRole: "a skeptical customer influenced by false negative rumors",
         enabled: true
       }
@@ -1563,6 +1600,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "sales_engineer",
         title: "Client Keeps Asking Same Questions and Doesn't Get it",
         description: "A client keeps asking the same technical questions and still seems unconvinced.",
+        desiredOutcome:
+          "The client leaves with clarity on the technical issue and is ready to move forward without repeated confusion.",
         aiRole: "a client who repeatedly asks the same technical questions",
         enabled: true
       },
@@ -1571,6 +1610,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "sales_engineer",
         title: "Customer brings up issue that can't be fixed but for good reason",
         description: "A customer raises a limitation that cannot be changed due to valid constraints.",
+        desiredOutcome:
+          "The customer understands the constraint, sees the reasoning, and agrees on a practical path forward.",
         aiRole: "a customer frustrated by a product limitation that has to remain",
         enabled: true
       }
@@ -1587,6 +1628,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "nurse",
         title: "New, Young Doctor Thinks They Know Better Than you",
         description: "A new doctor dismisses your experience and ignores your guidance.",
+        desiredOutcome:
+          "The doctor recognizes your clinical concern and agrees to a respectful, safer course of action.",
         aiRole: "a new doctor who dismisses your clinical judgment",
         enabled: true
       },
@@ -1595,6 +1638,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "nurse",
         title: "Patient Is Angry About Vaccines And Spews Conspiracy Theories",
         description: "An angry patient challenges vaccine guidance with conspiracy claims.",
+        desiredOutcome:
+          "The patient feels de-escalated, understands the guidance more clearly, and is open to the recommended next step.",
         aiRole: "an upset patient repeating vaccine conspiracy claims",
         enabled: true
       }
@@ -1611,6 +1656,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "doctor",
         title: "Family Member Is Erratic And Afraid About Low Risk Procedure",
         description: "A family member becomes erratic and fearful about a low-risk procedure.",
+        desiredOutcome:
+          "The family member becomes calmer, understands the procedure more clearly, and is ready to proceed appropriately.",
         aiRole: "an anxious family member acting erratically before a low-risk procedure",
         enabled: true
       },
@@ -1619,6 +1666,8 @@ export const DEFAULT_SEGMENTS: SegmentDefinition[] = [
         segmentId: "doctor",
         title: "Tell Somone A Surgery Was Unsuccessful",
         description: "You need to communicate that a surgery was unsuccessful with empathy and clarity.",
+        desiredOutcome:
+          "The family member understands the outcome, feels respected, and can engage in the immediate next-step conversation.",
         aiRole: "a family member receiving difficult post-surgery news",
         enabled: true
       }
@@ -1680,7 +1729,7 @@ export function buildDefaultScoringGuidance(params?: {
   const industries = uniqueIndustryContexts(params?.industryContexts);
 
   const lines: string[] = [
-    "SCORING PARAMETERS v2 (Standard Default)",
+    "SCORING PARAMETERS v3 (Standard Default)",
     "",
     "Evaluator scope:",
     "- Evaluate USER performance only.",
@@ -1748,10 +1797,12 @@ export function buildDefaultScoringGuidance(params?: {
     "- Keep strengths and improvements specific and actionable.",
     "- Use stricter standards for hard difficulty than easy or medium.",
     "",
-    "Output compatibility rules:",
-    "- Preserve required output schema: overallScore, persuasion, clarity, empathy, assertiveness, strengths[3], improvements[3], summary.",
-    "- Map categories into required dimensions without dropping category coverage.",
-    "- overallScore should reflect weighted performance across all categories.",
+    "Output alignment rules:",
+    "- Follow the exact JSON schema and field requirements defined elsewhere in the prompt.",
+    "- Use these categories as evaluation lenses; they do not replace the required schema.",
+    "- Let communication quality inform persuasion, clarity, empathy, assertiveness, and communicationScore.",
+    "- Let outcome progress, desired-outcome attainment, and clear resolution evidence inform outcomeScore, completionLevel, objectiveAchieved, and the final overall judgment.",
+    "- Do not fall back to legacy output-only instructions or invent alternate schema fields.",
     ""
   );
 

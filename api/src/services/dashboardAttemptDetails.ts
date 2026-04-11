@@ -102,7 +102,9 @@ export function deriveDashboardAttemptScoreSignals(
   return {
     strongestCategory: strongest?.label ?? null,
     weakestCategory: weakest?.label ?? null,
-    coachingFocus: record.coachingArtifact?.coachingPriority ?? (weakest ? `Focus next on ${weakest.label.toLowerCase()}.` : null)
+    coachingFocus:
+      record.coachingArtifact?.coachingPriority
+      ?? (weakest ? `Use the lowest legacy rubric category as the next coaching cue: ${weakest.label.toLowerCase()}.` : null)
   };
 }
 
@@ -124,7 +126,11 @@ export function buildDashboardAttemptDetailAttempt(params: {
     industryId: score.industryId ?? null,
     industryLabel: score.industryId ? industryLabelById.get(score.industryId) ?? score.industryId : null,
     scoreBreakdown: {
+      communicationScore: score.communicationScore ?? null,
+      outcomeScore: score.outcomeScore ?? null,
       overallScore: score.overallScore,
+      completionLevel: score.completionLevel ?? null,
+      objectiveAchieved: score.objectiveAchieved ?? null,
       persuasion: score.persuasion,
       clarity: score.clarity,
       empathy: score.empathy,

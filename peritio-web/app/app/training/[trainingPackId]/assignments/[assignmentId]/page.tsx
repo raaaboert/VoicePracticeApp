@@ -98,7 +98,7 @@ export default async function TrainingPackAssignmentDetailPage({
         <MetricCard
           label="Average score"
           value={assignment.averageScoreLast30Days !== null ? formatScore(assignment.averageScoreLast30Days) : "-"}
-          meta={`${assignment.scoredAttemptsLast30Days} scored attempts in the last 30 days`}
+          meta={`${assignment.scoredAttemptsLast30Days} conclusive scored attempts in the last 30 days`}
         />
       </section>
 

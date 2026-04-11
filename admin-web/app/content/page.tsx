@@ -129,6 +129,7 @@ export default function ContentPage() {
   const [addScenarioMode, setAddScenarioMode] = useState(false);
   const [newScenarioTitle, setNewScenarioTitle] = useState("");
   const [newScenarioDescription, setNewScenarioDescription] = useState("");
+  const [newScenarioDesiredOutcome, setNewScenarioDesiredOutcome] = useState("");
   const [newScenarioAiRole, setNewScenarioAiRole] = useState("");
   const [newScenarioEnabled, setNewScenarioEnabled] = useState(true);
   const [editingScenarioId, setEditingScenarioId] = useState("");
@@ -493,6 +494,7 @@ export default function ContentPage() {
 
     const title = newScenarioTitle.trim();
     const description = newScenarioDescription.trim();
+    const desiredOutcome = newScenarioDesiredOutcome.trim();
     const aiRole = newScenarioAiRole.trim();
 
     if (!title || !description || !aiRole) {
@@ -507,6 +509,7 @@ export default function ContentPage() {
       segmentId: selectedRole.id,
       title,
       description,
+      desiredOutcome: desiredOutcome || undefined,
       aiRole,
       enabled: newScenarioEnabled
     };
@@ -520,6 +523,7 @@ export default function ContentPage() {
     await savePatch({ segments: nextRoles }, "Scenario added.");
     setNewScenarioTitle("");
     setNewScenarioDescription("");
+    setNewScenarioDesiredOutcome("");
     setNewScenarioAiRole("");
     setNewScenarioEnabled(true);
     setAddScenarioMode(false);
@@ -537,6 +541,8 @@ export default function ContentPage() {
 
     const title = editingScenarioDraft.title.trim();
     const description = editingScenarioDraft.description.trim();
+    const desiredOutcome =
+      typeof editingScenarioDraft.desiredOutcome === "string" ? editingScenarioDraft.desiredOutcome.trim() : "";
     const aiRole = editingScenarioDraft.aiRole.trim();
     if (!title || !description || !aiRole) {
       setError("Scenario, Description, and AI Role are required.");
@@ -554,6 +560,7 @@ export default function ContentPage() {
               ...scenario,
               title,
               description,
+              desiredOutcome: desiredOutcome || undefined,
               aiRole,
               enabled: editingScenarioDraft.enabled !== false
             }
@@ -635,7 +642,7 @@ export default function ContentPage() {
     }
 
     const rows: string[][] = [
-      ["Role", "Role Id", "Scenario", "Description", "AI Role", "Status"]
+      ["Role", "Role Id", "Scenario", "Description", "Desired Outcome", "AI Role", "Status"]
     ];
 
     const flattened = config.segments.flatMap((segment) =>
@@ -644,6 +651,7 @@ export default function ContentPage() {
         roleId: segment.id,
         scenarioTitle: scenario.title,
         description: scenario.description,
+        desiredOutcome: scenario.desiredOutcome ?? "",
         aiRole: scenario.aiRole,
         status: scenario.enabled === false ? "inactive" : "active"
       }))
@@ -659,7 +667,7 @@ export default function ContentPage() {
         return a.scenarioTitle.localeCompare(b.scenarioTitle, undefined, { sensitivity: "base" });
       })
       .forEach((row) => {
-        rows.push([row.roleLabel, row.roleId, row.scenarioTitle, row.description, row.aiRole, row.status]);
+        rows.push([row.roleLabel, row.roleId, row.scenarioTitle, row.description, row.desiredOutcome, row.aiRole, row.status]);
       });
 
     const blob = new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8;" });
@@ -1061,6 +1069,7 @@ export default function ContentPage() {
                     <tr>
                       <th>Scenario</th>
                       <th>Description</th>
+                      <th>Desired Outcome</th>
                       <th>AI Role</th>
                       <th>Status</th>
                       <th>Actions</th>
@@ -1077,6 +1086,13 @@ export default function ContentPage() {
                             rows={3}
                             value={newScenarioDescription}
                             onChange={(event) => setNewScenarioDescription(event.target.value)}
+                          />
+                        </td>
+                        <td>
+                          <textarea
+                            rows={3}
+                            value={newScenarioDesiredOutcome}
+                            onChange={(event) => setNewScenarioDesiredOutcome(event.target.value)}
                           />
                         </td>
                         <td>
@@ -1100,7 +1116,7 @@ export default function ContentPage() {
                     ) : null}
                     {scenariosForRole.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="small">
+                        <td colSpan={6} className="small">
                           {selectedRole ? "No scenarios for this role yet." : "Select a role to manage scenarios."}
                         </td>
                       </tr>
@@ -1132,6 +1148,19 @@ export default function ContentPage() {
                                 />
                               ) : (
                                 scenario.description
+                              )}
+                            </td>
+                            <td className="content-long-cell">
+                              {editing ? (
+                                <textarea
+                                  rows={3}
+                                  value={editingScenarioDraft.desiredOutcome ?? ""}
+                                  onChange={(event) =>
+                                    setEditingScenarioDraft({ ...editingScenarioDraft, desiredOutcome: event.target.value })
+                                  }
+                                />
+                              ) : (
+                                scenario.desiredOutcome ?? "-"
                               )}
                             </td>
                             <td className="content-long-cell">
