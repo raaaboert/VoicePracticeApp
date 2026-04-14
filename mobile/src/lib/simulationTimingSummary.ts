@@ -13,12 +13,18 @@ export interface SimulationTurnTimingSummaryInput {
   outcome: SimulationTurnSummaryOutcome;
   submitStartedAtMs: number;
   recordingFinalizeCompletedAtMs?: number | null;
+  unifiedSubmitRequestStartedAtMs?: number | null;
+  unifiedSubmitResponseAtMs?: number | null;
   transcribeRequestStartedAtMs?: number | null;
   transcribeResponseAtMs?: number | null;
   assistantRequestStartedAtMs?: number | null;
   assistantResponseAtMs?: number | null;
+  assistantTextCommittedAtMs?: number | null;
   ttsPipelineStartedAtMs?: number | null;
+  audioModeResetAwaitStartedAtMs?: number | null;
+  audioModeResetCompletedAtMs?: number | null;
   playbackStartedAtMs?: number | null;
+  speakingCompletedAtMs?: number | null;
   transcriptChars?: number;
   replyChars?: number;
   errorMessage?: string | null;
@@ -42,12 +48,20 @@ export function buildSimulationTurnTimingSummary(input: SimulationTurnTimingSumm
     transcriptChars: input.transcriptChars ?? 0,
     replyChars: input.replyChars ?? 0,
     submitToFinalizeMs: durationMs(input.submitStartedAtMs, input.recordingFinalizeCompletedAtMs),
+    unifiedSubmitRoundTripMs: durationMs(input.unifiedSubmitRequestStartedAtMs, input.unifiedSubmitResponseAtMs),
     transcribeRoundTripMs: durationMs(input.transcribeRequestStartedAtMs, input.transcribeResponseAtMs),
     submitToTranscriptMs: durationMs(input.submitStartedAtMs, input.transcribeResponseAtMs),
     assistantRoundTripMs: durationMs(input.assistantRequestStartedAtMs, input.assistantResponseAtMs),
     submitToAssistantMs: durationMs(input.submitStartedAtMs, input.assistantResponseAtMs),
+    assistantReadyToPlaybackMs: durationMs(input.assistantResponseAtMs, input.playbackStartedAtMs),
+    assistantReadyToVisibleMs: durationMs(input.assistantResponseAtMs, input.assistantTextCommittedAtMs),
+    submitToAssistantVisibleMs: durationMs(input.submitStartedAtMs, input.assistantTextCommittedAtMs),
+    visibleLeadBeforePlaybackMs: durationMs(input.assistantTextCommittedAtMs, input.playbackStartedAtMs),
     ttsStartupMs: durationMs(input.ttsPipelineStartedAtMs, input.playbackStartedAtMs),
+    audioModeResetWaitMs: durationMs(input.audioModeResetAwaitStartedAtMs, input.audioModeResetCompletedAtMs),
     submitToPlaybackMs: durationMs(input.submitStartedAtMs, input.playbackStartedAtMs),
+    submitToSpeakingCompleteMs: durationMs(input.submitStartedAtMs, input.speakingCompletedAtMs),
+    playbackToSpeakingCompleteMs: durationMs(input.playbackStartedAtMs, input.speakingCompletedAtMs),
     ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
   };
 }

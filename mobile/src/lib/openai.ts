@@ -1,11 +1,16 @@
 import { Platform } from "react-native";
 import { Difficulty, DialogueMessage, PersonaStyle, Scenario, SimulationEvaluationResult } from "../types";
-import { fetchAiOpeningLine, fetchAiScore, fetchAiTurn, transcribeAudioViaApi } from "./api";
+import { fetchAiOpeningLine, fetchAiScore, fetchAiTurn, submitSimulationTurnViaApi, transcribeAudioViaApi } from "./api";
+import type { PrefetchedRemoteSpeechChunk, RemoteTtsPreset, UnifiedSimulationTurnPayload } from "./api";
 import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
+import { shouldFallbackToLegacyUnifiedSubmit } from "./unifiedSubmit";
+
+export { shouldFallbackToLegacyUnifiedSubmit } from "./unifiedSubmit";
 
 // Remote AI calls now go through the Node API. This flag simply controls whether the app
 // should attempt calling the backend or stay in local test mode.
 const REMOTE_AI_ENABLED = process.env.EXPO_PUBLIC_REMOTE_AI_ENABLED === "true";
+const UNIFIED_SIMULATION_SUBMIT_ENABLED = process.env.EXPO_PUBLIC_SIMULATION_UNIFIED_SUBMIT_ENABLED !== "false";
 if (__DEV__) {
   // eslint-disable-next-line no-console
   console.log(
@@ -15,6 +20,10 @@ if (__DEV__) {
 
 export function isOpenAiConfigured(): boolean {
   return REMOTE_AI_ENABLED;
+}
+
+export function isUnifiedSimulationSubmitEnabled(): boolean {
+  return REMOTE_AI_ENABLED && UNIFIED_SIMULATION_SUBMIT_ENABLED;
 }
 
 export async function createOpeningLine(params: {
@@ -28,8 +37,9 @@ export async function createOpeningLine(params: {
   difficulty: Difficulty;
   segmentLabel: string;
   personaStyle: PersonaStyle;
+  speechPrefetchPreset?: RemoteTtsPreset | null;
   correlationId?: string;
-}): Promise<{ assistantText: string; trainingPackId: string | null }> {
+}): Promise<{ assistantText: string; trainingPackId: string | null; speechPrefetch: PrefetchedRemoteSpeechChunk | null }> {
   const payload = await fetchAiOpeningLine({
     userId: params.userId,
     authToken: params.authToken,
@@ -40,12 +50,14 @@ export async function createOpeningLine(params: {
     industryBaseline: params.industryBaseline,
     difficulty: params.difficulty,
     personaStyle: params.personaStyle,
+    speechPrefetch: params.speechPrefetchPreset ? { preset: params.speechPrefetchPreset } : null,
     correlationId: params.correlationId,
   });
 
   return {
     assistantText: payload.assistantText?.trim() ?? "",
     trainingPackId: payload.trainingPack?.applied === true ? payload.trainingPack.id ?? null : null,
+    speechPrefetch: payload.speechPrefetch,
   };
 }
 
@@ -62,8 +74,9 @@ export async function generateAssistantReply(params: {
   personaStyle: PersonaStyle;
   history: DialogueMessage[];
   trainingPackId?: string | null;
+  speechPrefetchPreset?: RemoteTtsPreset | null;
   correlationId?: string;
-}): Promise<string> {
+}): Promise<{ assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null }> {
   const payload = await fetchAiTurn({
     userId: params.userId,
     authToken: params.authToken,
@@ -76,10 +89,14 @@ export async function generateAssistantReply(params: {
     personaStyle: params.personaStyle,
     history: params.history,
     trainingPackId: params.trainingPackId ?? undefined,
+    speechPrefetch: params.speechPrefetchPreset ? { preset: params.speechPrefetchPreset } : null,
     correlationId: params.correlationId,
   });
 
-  return payload.assistantText?.trim() ?? "";
+  return {
+    assistantText: payload.assistantText?.trim() ?? "",
+    speechPrefetch: payload.speechPrefetch,
+  };
 }
 
 export async function transcribeAudio(params: {
@@ -97,6 +114,46 @@ export async function transcribeAudio(params: {
     authToken: params.authToken,
     audioUri: params.audioUri,
     mimeType,
+    correlationId: params.correlationId,
+  });
+}
+
+export async function submitRecordedSimulationTurn(params: {
+  userId: string;
+  authToken: string;
+  audioUri: string;
+  preferredMimeType?: string;
+  simulationSessionId: string;
+  scenario: Scenario;
+  trainingId?: string | null;
+  industryId?: string;
+  industryBaseline?: string;
+  difficulty: Difficulty;
+  segmentLabel: string;
+  personaStyle: PersonaStyle;
+  history: DialogueMessage[];
+  trainingPackId?: string | null;
+  speechPrefetchPreset?: RemoteTtsPreset | null;
+  correlationId?: string;
+}): Promise<UnifiedSimulationTurnPayload> {
+  const defaultMimeType = getSimulationTranscriptionMimeType(Platform.OS);
+  const mimeType = params.preferredMimeType ?? defaultMimeType;
+
+  return submitSimulationTurnViaApi({
+    userId: params.userId,
+    authToken: params.authToken,
+    audioUri: params.audioUri,
+    mimeType,
+    simulationSessionId: params.simulationSessionId,
+    scenarioId: params.scenario.id,
+    trainingId: params.trainingId ?? undefined,
+    industryId: params.industryId,
+    industryBaseline: params.industryBaseline,
+    difficulty: params.difficulty,
+    personaStyle: params.personaStyle,
+    history: params.history,
+    trainingPackId: params.trainingPackId ?? undefined,
+    speechPrefetch: params.speechPrefetchPreset ? { preset: params.speechPrefetchPreset } : null,
     correlationId: params.correlationId,
   });
 }

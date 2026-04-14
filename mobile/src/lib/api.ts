@@ -21,6 +21,8 @@ import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationEvaluationResult } from "../types";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_TURN_HISTORY_MESSAGES = 24;
+const MAX_TURN_HISTORY_MESSAGE_CHARS = 2_500;
 const TRANSIENT_ERROR_PATTERNS = [
   "request timed out",
   "request failed (429)",
@@ -109,6 +111,15 @@ export type RemoteTtsPreset =
   | "female-warm"
   | "female-bright";
 
+export interface PrefetchedRemoteSpeechChunk {
+  bytes: Uint8Array;
+  contentType: string;
+  preset?: RemoteTtsPreset | null;
+  chunkCount?: number | null;
+  firstChunkChars?: number | null;
+  ttsLatencyMs?: number | null;
+}
+
 interface TimezoneResponse {
   items: string[];
 }
@@ -117,6 +128,111 @@ interface RequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+}
+
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_INDEX_BY_CHAR = Object.fromEntries(
+  [...BASE64_ALPHABET].map((character, index) => [character, index]),
+) as Record<string, number>;
+
+function decodeBase64ToBytes(value: string): Uint8Array {
+  const normalized = value.trim().replace(/\s+/g, "");
+  if (!normalized) {
+    return new Uint8Array(0);
+  }
+
+  const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  const outputLength = Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+  const output = new Uint8Array(outputLength);
+  let outputIndex = 0;
+
+  for (let index = 0; index < normalized.length; index += 4) {
+    const chunk = normalized.slice(index, index + 4);
+    const a = BASE64_INDEX_BY_CHAR[chunk[0] ?? ""] ?? 0;
+    const b = BASE64_INDEX_BY_CHAR[chunk[1] ?? ""] ?? 0;
+    const c = chunk[2] === "=" ? 0 : BASE64_INDEX_BY_CHAR[chunk[2] ?? ""] ?? 0;
+    const d = chunk[3] === "=" ? 0 : BASE64_INDEX_BY_CHAR[chunk[3] ?? ""] ?? 0;
+    const value24 = (a << 18) | (b << 12) | (c << 6) | d;
+
+    if (outputIndex < outputLength) {
+      output[outputIndex] = (value24 >> 16) & 0xff;
+      outputIndex += 1;
+    }
+    if (chunk[2] !== "=" && outputIndex < outputLength) {
+      output[outputIndex] = (value24 >> 8) & 0xff;
+      outputIndex += 1;
+    }
+    if (chunk[3] !== "=" && outputIndex < outputLength) {
+      output[outputIndex] = value24 & 0xff;
+      outputIndex += 1;
+    }
+  }
+
+  return output;
+}
+
+function normalizeTurnHistoryForApi(history: DialogueMessage[]): Array<{ role: DialogueMessage["role"]; content: string }> {
+  return history
+    .slice(-MAX_TURN_HISTORY_MESSAGES)
+    .map((message) => ({
+      role: message.role,
+      content: message.content.trim().replace(/\s+/g, " ").slice(0, MAX_TURN_HISTORY_MESSAGE_CHARS),
+    }))
+    .filter((message) => message.content.length > 0);
+}
+
+function normalizeSpeechPrefetchPayload(value: unknown): PrefetchedRemoteSpeechChunk | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const payload = value as {
+    audioBase64?: unknown;
+    contentType?: unknown;
+    preset?: unknown;
+    chunkCount?: unknown;
+    firstChunkChars?: unknown;
+    ttsLatencyMs?: unknown;
+  };
+  const audioBase64 = typeof payload.audioBase64 === "string" ? payload.audioBase64.trim() : "";
+  const contentType = typeof payload.contentType === "string" ? payload.contentType.trim() : "";
+  const preset = typeof payload.preset === "string" ? payload.preset.trim() : "";
+  const chunkCount =
+    typeof payload.chunkCount === "number" && Number.isFinite(payload.chunkCount)
+      ? Math.max(1, Math.floor(payload.chunkCount))
+      : 1;
+  const firstChunkChars =
+    typeof payload.firstChunkChars === "number" && Number.isFinite(payload.firstChunkChars)
+      ? Math.max(0, Math.floor(payload.firstChunkChars))
+      : 0;
+  const ttsLatencyMs =
+    typeof payload.ttsLatencyMs === "number" && Number.isFinite(payload.ttsLatencyMs)
+      ? Math.max(0, Math.floor(payload.ttsLatencyMs))
+      : null;
+
+  if (
+    !audioBase64 ||
+    !contentType ||
+    !(
+      preset === "male-balanced" ||
+      preset === "male-warm" ||
+      preset === "male-bright" ||
+      preset === "female-balanced" ||
+      preset === "female-warm" ||
+      preset === "female-bright"
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    bytes: decodeBase64ToBytes(audioBase64),
+    contentType,
+    preset: preset as RemoteTtsPreset,
+    chunkCount,
+    firstChunkChars,
+    ttsLatencyMs,
+  };
 }
 
 async function requestJson<T>(
@@ -550,10 +666,201 @@ export async function transcribeAudioViaApi(params: {
   return payload.text?.trim() ?? "";
 }
 
+function normalizeUnifiedTurnRuntime(value: unknown): UnifiedSimulationTurnRuntimeDiagnostics | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const payload = value as {
+    path?: unknown;
+    transcriptionMs?: unknown;
+    cacheStatus?: unknown;
+    cacheReason?: unknown;
+    contextBuildMs?: unknown;
+    trainingPackLookupMs?: unknown;
+    modelLatencyMs?: unknown;
+    speechPrefetchTtsLatencyMs?: unknown;
+    routeElapsedMs?: unknown;
+  };
+  if (payload.path !== "unified_submit") {
+    return null;
+  }
+
+  const normalizeOptionalDuration = (candidate: unknown): number | null =>
+    typeof candidate === "number" && Number.isFinite(candidate) ? Math.max(0, Math.floor(candidate)) : null;
+
+  return {
+    path: "unified_submit",
+    transcriptionMs:
+      typeof payload.transcriptionMs === "number" && Number.isFinite(payload.transcriptionMs)
+        ? Math.max(0, Math.floor(payload.transcriptionMs))
+        : 0,
+    cacheStatus:
+      payload.cacheStatus === "hit" || payload.cacheStatus === "miss" || payload.cacheStatus === "bypass"
+        ? payload.cacheStatus
+        : "bypass",
+    cacheReason: typeof payload.cacheReason === "string" && payload.cacheReason.trim() ? payload.cacheReason.trim() : null,
+    contextBuildMs: normalizeOptionalDuration(payload.contextBuildMs),
+    trainingPackLookupMs: normalizeOptionalDuration(payload.trainingPackLookupMs),
+    modelLatencyMs: normalizeOptionalDuration(payload.modelLatencyMs),
+    speechPrefetchTtsLatencyMs: normalizeOptionalDuration(payload.speechPrefetchTtsLatencyMs),
+    routeElapsedMs: normalizeOptionalDuration(payload.routeElapsedMs),
+  };
+}
+
 interface AiUsagePayload {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+}
+
+export interface UnifiedSimulationTurnRuntimeDiagnostics {
+  path: "unified_submit";
+  transcriptionMs: number;
+  cacheStatus: "hit" | "miss" | "bypass";
+  cacheReason?: string | null;
+  contextBuildMs?: number | null;
+  trainingPackLookupMs?: number | null;
+  modelLatencyMs?: number | null;
+  speechPrefetchTtsLatencyMs?: number | null;
+  routeElapsedMs?: number | null;
+}
+
+export type UnifiedSimulationTurnPayload =
+  | {
+      outcome: "assistant_reply";
+      transcriptText: string;
+      assistantText: string;
+      model: string;
+      promptVersion: string;
+      usage: AiUsagePayload;
+      speechPrefetch: PrefetchedRemoteSpeechChunk | null;
+      runtime: UnifiedSimulationTurnRuntimeDiagnostics | null;
+    }
+  | {
+      outcome: "no_clear_speech";
+      transcriptText: string;
+      noClearSpeechReason: "empty_transcript" | "assistant_echo" | null;
+      runtime: UnifiedSimulationTurnRuntimeDiagnostics | null;
+    };
+
+export async function submitSimulationTurnViaApi(params: {
+  userId: string;
+  authToken: string;
+  audioUri: string;
+  mimeType: string;
+  simulationSessionId: string;
+  scenarioId: string;
+  trainingId?: string;
+  industryId?: string;
+  industryBaseline?: string;
+  difficulty: Difficulty;
+  personaStyle: PersonaStyle;
+  history: DialogueMessage[];
+  trainingPackId?: string;
+  speechPrefetch?: { preset: RemoteTtsPreset } | null;
+  correlationId?: string;
+}): Promise<UnifiedSimulationTurnPayload> {
+  const formData = new FormData();
+  const resolvedMimeType = params.mimeType || (Platform.OS === "web" ? "audio/webm" : "audio/m4a");
+
+  if (Platform.OS === "web") {
+    const localResponse = await fetch(params.audioUri);
+    const originalBlob = await localResponse.blob();
+    const blob =
+      originalBlob.type && originalBlob.type.length > 0
+        ? originalBlob
+        : new Blob([originalBlob], { type: resolvedMimeType });
+    formData.append("file", blob, "voice-input.webm");
+  } else {
+    formData.append(
+      "file",
+      {
+        uri: params.audioUri,
+        name: "voice-input.m4a",
+        type: resolvedMimeType,
+      } as any,
+    );
+  }
+
+  formData.append(
+    "payload",
+    JSON.stringify({
+      scenarioId: params.scenarioId,
+      simulationSessionId: params.simulationSessionId,
+      ...(params.trainingId ? { trainingId: params.trainingId } : {}),
+      ...(params.industryId ? { industryId: params.industryId } : {}),
+      difficulty: params.difficulty,
+      personaStyle: params.personaStyle,
+      ...(params.trainingPackId ? { trainingPackId: params.trainingPackId } : {}),
+      ...(params.speechPrefetch ? { speechPrefetch: { preset: params.speechPrefetch.preset } } : {}),
+      history: normalizeTurnHistoryForApi(params.history),
+    }),
+  );
+
+  const payload = await requestFormData<{
+    outcome?: unknown;
+    transcriptText?: unknown;
+    noClearSpeechReason?: unknown;
+    assistantText?: unknown;
+    model?: unknown;
+    promptVersion?: unknown;
+    usage?: unknown;
+    speechPrefetch?: unknown;
+    runtime?: unknown;
+  }>(
+    `/mobile/users/${encodeURIComponent(params.userId)}/ai/submit-turn`,
+    formData,
+    params.authToken,
+    {
+      timeoutMs: 75_000,
+      ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
+    },
+  );
+
+  const runtime = normalizeUnifiedTurnRuntime(payload.runtime);
+  const transcriptText = typeof payload.transcriptText === "string" ? payload.transcriptText.trim() : "";
+  if (payload.outcome === "assistant_reply") {
+    const usagePayload = payload.usage as {
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+      totalTokens?: unknown;
+    } | null;
+
+    return {
+      outcome: "assistant_reply",
+      transcriptText,
+      assistantText: typeof payload.assistantText === "string" ? payload.assistantText.trim() : "",
+      model: typeof payload.model === "string" ? payload.model.trim() : "",
+      promptVersion: typeof payload.promptVersion === "string" ? payload.promptVersion.trim() : "",
+      usage: {
+        inputTokens:
+          typeof usagePayload?.inputTokens === "number" && Number.isFinite(usagePayload.inputTokens)
+            ? Math.max(0, Math.floor(usagePayload.inputTokens))
+            : 0,
+        outputTokens:
+          typeof usagePayload?.outputTokens === "number" && Number.isFinite(usagePayload.outputTokens)
+            ? Math.max(0, Math.floor(usagePayload.outputTokens))
+            : 0,
+        totalTokens:
+          typeof usagePayload?.totalTokens === "number" && Number.isFinite(usagePayload.totalTokens)
+            ? Math.max(0, Math.floor(usagePayload.totalTokens))
+            : 0,
+      },
+      speechPrefetch: normalizeSpeechPrefetchPayload(payload.speechPrefetch),
+      runtime,
+    };
+  }
+
+  return {
+    outcome: "no_clear_speech",
+    transcriptText,
+    noClearSpeechReason:
+      payload.noClearSpeechReason === "empty_transcript" || payload.noClearSpeechReason === "assistant_echo"
+        ? payload.noClearSpeechReason
+        : null,
+    runtime,
+  };
 }
 
 export async function fetchAiOpeningLine(params: {
@@ -566,6 +873,7 @@ export async function fetchAiOpeningLine(params: {
   industryBaseline?: string;
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
+  speechPrefetch?: { preset: RemoteTtsPreset } | null;
   correlationId?: string;
 }): Promise<{
   assistantText: string;
@@ -573,8 +881,16 @@ export async function fetchAiOpeningLine(params: {
   promptVersion: string;
   usage: AiUsagePayload;
   trainingPack: { applied: boolean; id?: string; title?: string };
+  speechPrefetch: PrefetchedRemoteSpeechChunk | null;
 }> {
-  return requestJson(
+  const payload = await requestJson<{
+    assistantText: string;
+    model: string;
+    promptVersion: string;
+    usage: AiUsagePayload;
+    trainingPack: { applied: boolean; id?: string; title?: string };
+    speechPrefetch?: unknown;
+  }>(
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/opening`,
     {
       method: "POST",
@@ -585,14 +901,20 @@ export async function fetchAiOpeningLine(params: {
         ...(params.industryId ? { industryId: params.industryId } : {}),
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
+        ...(params.speechPrefetch ? { speechPrefetch: { preset: params.speechPrefetch.preset } } : {}),
       }),
     },
     params.authToken,
     {
-      timeoutMs: 30_000,
+      timeoutMs: 45_000,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
   );
+
+  return {
+    ...payload,
+    speechPrefetch: normalizeSpeechPrefetchPayload(payload.speechPrefetch),
+  };
 }
 
 export async function fetchAiTurn(params: {
@@ -607,14 +929,22 @@ export async function fetchAiTurn(params: {
   personaStyle: PersonaStyle;
   history: DialogueMessage[];
   trainingPackId?: string;
+  speechPrefetch?: { preset: RemoteTtsPreset } | null;
   correlationId?: string;
 }): Promise<{
   assistantText: string;
   model: string;
   promptVersion: string;
   usage: AiUsagePayload;
+  speechPrefetch: PrefetchedRemoteSpeechChunk | null;
 }> {
-  return requestJson(
+  const payload = await requestJson<{
+    assistantText: string;
+    model: string;
+    promptVersion: string;
+    usage: AiUsagePayload;
+    speechPrefetch?: unknown;
+  }>(
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/turn`,
     {
       method: "POST",
@@ -626,18 +956,21 @@ export async function fetchAiTurn(params: {
         difficulty: params.difficulty,
         personaStyle: params.personaStyle,
         ...(params.trainingPackId ? { trainingPackId: params.trainingPackId } : {}),
-        history: params.history.map((message) => ({
-          role: message.role,
-          content: message.content,
-        })),
+        ...(params.speechPrefetch ? { speechPrefetch: { preset: params.speechPrefetch.preset } } : {}),
+        history: normalizeTurnHistoryForApi(params.history),
       }),
     },
     params.authToken,
     {
-      timeoutMs: 30_000,
+      timeoutMs: 45_000,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
   );
+
+  return {
+    ...payload,
+    speechPrefetch: normalizeSpeechPrefetchPayload(payload.speechPrefetch),
+  };
 }
 
 export async function fetchAiScore(params: {

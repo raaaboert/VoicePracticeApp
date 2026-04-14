@@ -13,8 +13,22 @@ import {
   createLocalAssistantReply,
   createLocalOpeningLine,
 } from "../lib/mockAi";
-import { createSupportCase, fetchAiTtsAudio, getApiBaseUrl, startSimulationSession } from "../lib/api";
-import { createOpeningLine, generateAssistantReply, isOpenAiConfigured, transcribeAudio } from "../lib/openai";
+import {
+  createSupportCase,
+  fetchAiTtsAudio,
+  getApiBaseUrl,
+  startSimulationSession,
+} from "../lib/api";
+import type { PrefetchedRemoteSpeechChunk } from "../lib/api";
+import {
+  createOpeningLine,
+  generateAssistantReply,
+  isOpenAiConfigured,
+  isUnifiedSimulationSubmitEnabled,
+  shouldFallbackToLegacyUnifiedSubmit,
+  submitRecordedSimulationTurn,
+  transcribeAudio,
+} from "../lib/openai";
 import {
   createSimulationCorrelationId,
   getPrimarySimulationAction,
@@ -30,10 +44,13 @@ import {
 } from "../lib/simulationRecordingProfile";
 import { buildSimulationTurnTimingSummary, SimulationTurnSummaryMode } from "../lib/simulationTimingSummary";
 import {
+  preparePrefetchedRemoteAudioSource,
+  releasePreparedRemoteAudioSource,
   speakWithRemoteTtsFallback,
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
   toRemoteTtsPreset,
 } from "../lib/ttsPlayback";
+import type { PreparedRemoteAudioSource } from "../lib/ttsPlayback";
 import { splitTextForRemoteTtsFastStart } from "../lib/ttsFastStart";
 import { DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
@@ -197,6 +214,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
+  const unifiedSubmitEnabled = useMemo(() => isUnifiedSimulationSubmitEnabled(), []);
   const voiceOption = useMemo(() => getAiVoiceOption(config.voiceProfile), [config.voiceProfile]);
   const localTestMode = !apiConfigured || useLocalMockMode;
   const shouldUseFastStartRemoteTts =
@@ -224,6 +242,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const sessionStartedAtRef = useRef<Date | null>(null);
   const sessionTrainingPackIdRef = useRef<string | null>(null);
   const pendingOpeningLineRef = useRef<string | null>(null);
+  const pendingOpeningSpeechPrefetchRef = useRef<PrefetchedRemoteSpeechChunk | null>(null);
   const lastVoiceAtRef = useRef(0);
   const heardVoiceRef = useRef(false);
   const detectedVoiceRef = useRef(false);
@@ -351,6 +370,27 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     setMessages(messagesRef.current);
   };
 
+  const commitAssistantMessage = (params: {
+    message: DialogueMessage;
+    correlationId: string;
+    phase: string;
+    startedAtMs?: number | null;
+  }): number => {
+    if (!messagesRef.current.some((entry) => entry.id === params.message.id)) {
+      appendMessage(params.message);
+    }
+    const committedAtMs = Date.now();
+    logSimulationTiming({
+      correlationId: params.correlationId,
+      phase: params.phase,
+      startedAtMs: params.startedAtMs ?? committedAtMs,
+      details: {
+        messageChars: params.message.content.length,
+      },
+    });
+    return committedAtMs;
+  };
+
   const stopRemoteTtsPlayback = useCallback(async () => {
     await stopRemoteTtsPlaybackHelper({
       remoteTtsSoundRef,
@@ -431,8 +471,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
   const speakSingleUtterance = async (
     text: string,
     assistantTextReceivedAtMs?: number,
-    onPlaybackStart?: () => void,
-    prefetchedRemoteAudio?: { bytes: Uint8Array; contentType: string } | null,
+    onPlaybackStart?: (startedAtMs: number) => void,
+    prefetchedRemoteAudio?: PrefetchedRemoteSpeechChunk | null,
+    preparedRemoteSource?: PreparedRemoteAudioSource | null,
     correlationId?: string,
     chunkIndex?: number,
     chunkCount?: number,
@@ -464,6 +505,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         remoteTtsFileRef,
         assistantTextReceivedAtMs,
         prefetchedRemoteAudio,
+        preparedRemoteSource,
         abortSignal: abortController.signal,
         chunkIndex,
         chunkCount,
@@ -475,8 +517,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         onRemoteCancellation: handleTtsCancellation,
         isCancelled: () =>
           ttsRequestGenerationRef.current !== requestGeneration || simulationClosedRef.current || unmountedRef.current,
-        onPlaybackStart: () => {
-          onPlaybackStart?.();
+        onPlaybackStart: (details) => {
+          onPlaybackStart?.(details.startedAtMs);
         },
       });
     } finally {
@@ -491,8 +533,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       text: string,
       requestGeneration: number,
       preset: ReturnType<typeof toRemoteTtsPreset>,
+      assistantTextReceivedAtMs?: number,
       correlationId?: string,
-    ): Promise<{ bytes: Uint8Array; contentType: string } | null> => {
+      chunkIndex?: number,
+      chunkCount?: number,
+    ): Promise<PreparedRemoteAudioSource | null> => {
       if (!shouldUseFastStartRemoteTts || !text.trim()) {
         return null;
       }
@@ -519,7 +564,15 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         ) {
           return null;
         }
-        return prefetched;
+        return await preparePrefetchedRemoteAudioSource({
+          source: "simulation",
+          preset,
+          assistantTextReceivedAtMs,
+          prefetchedRemoteAudio: prefetched,
+          correlationId,
+          chunkIndex,
+          chunkCount,
+        });
       } catch {
         return null;
       }
@@ -532,12 +585,15 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     assistantTextReceivedAtMs?: number,
     onPlaybackStart?: () => void,
     correlationId?: string,
+    prefetchedFirstChunk?: PrefetchedRemoteSpeechChunk | null,
   ): Promise<void> => {
     const chunks = shouldUseFastStartRemoteTts ? splitTextForRemoteTtsFastStart(text) : [text];
     const requestGeneration = ttsRequestGenerationRef.current;
     const preset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
-    const prefetchedChunkByIndex = new Map<number, Promise<{ bytes: Uint8Array; contentType: string } | null>>();
+    const preparedChunkByIndex = new Map<number, Promise<PreparedRemoteAudioSource | null>>();
+    const resolvedPreparedChunkByIndex = new Map<number, PreparedRemoteAudioSource>();
     let playbackStartHandled = false;
+    let previousChunkCompletedAtMs: number | null = null;
     const handlePlaybackStart = () => {
       if (playbackStartHandled) {
         return;
@@ -550,44 +606,108 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (!shouldUseFastStartRemoteTts || targetIndex >= chunks.length) {
         return;
       }
-      if (prefetchedChunkByIndex.has(targetIndex)) {
+      if (preparedChunkByIndex.has(targetIndex)) {
         return;
       }
-      prefetchedChunkByIndex.set(
+      preparedChunkByIndex.set(
         targetIndex,
-        prefetchRemoteTtsChunk(chunks[targetIndex], requestGeneration, preset, correlationId),
+        prefetchRemoteTtsChunk(
+          chunks[targetIndex],
+          requestGeneration,
+          preset,
+          targetIndex === 0 ? assistantTextReceivedAtMs : Date.now(),
+          correlationId,
+          targetIndex,
+          chunks.length,
+        ),
       );
     };
 
+    if (prefetchedFirstChunk) {
+      preparedChunkByIndex.set(
+        0,
+        preparePrefetchedRemoteAudioSource({
+          source: "simulation",
+          preset,
+          assistantTextReceivedAtMs,
+          prefetchedRemoteAudio: prefetchedFirstChunk,
+          correlationId,
+          chunkIndex: 0,
+          chunkCount: chunks.length,
+        }),
+      );
+    }
     startPrefetchForChunk(1);
 
-    for (let index = 0; index < chunks.length; index += 1) {
-      const chunk = chunks[index];
-      let prefetchedRemoteAudio: { bytes: Uint8Array; contentType: string } | null = null;
-      if (index > 0) {
-        const prefetchedPromise = prefetchedChunkByIndex.get(index);
-        if (prefetchedPromise) {
-          prefetchedRemoteAudio = await prefetchedPromise;
-        }
-      }
-      await speakSingleUtterance(
-        chunk,
-        index === 0 ? assistantTextReceivedAtMs : Date.now(),
-        () => {
-          if (index === 0) {
-            handlePlaybackStart();
+    try {
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
+        const preparedPromise = preparedChunkByIndex.get(index);
+        if (preparedPromise) {
+          preparedRemoteAudio = await preparedPromise;
+          if (preparedRemoteAudio) {
+            resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
+            logSimulationTiming({
+              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+              phase: "tts_chunk_prepared",
+              details: {
+                chunkIndex: index,
+                chunkCount: chunks.length,
+                sourceKind: preparedRemoteAudio.sourceKind,
+              },
+            });
           }
-          startPrefetchForChunk(index + 1);
-        },
-        prefetchedRemoteAudio,
-        correlationId,
-        index,
-        chunks.length,
-      );
-      if (index === 0) {
-        handlePlaybackStart();
+        }
+        await speakSingleUtterance(
+          chunk,
+          index === 0 ? assistantTextReceivedAtMs : Date.now(),
+          (startedAtMs) => {
+            if (index === 0) {
+              handlePlaybackStart();
+            }
+            logSimulationTiming({
+              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+              phase: "tts_chunk_playback_started",
+              details: {
+                chunkIndex: index,
+                chunkCount: chunks.length,
+                boundaryGapMs:
+                  index > 0 && typeof previousChunkCompletedAtMs === "number"
+                    ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
+                    : null,
+              },
+            });
+            startPrefetchForChunk(index + 1);
+          },
+          preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
+          preparedRemoteAudio,
+          correlationId,
+          index,
+          chunks.length,
+        );
+        if (preparedRemoteAudio) {
+          resolvedPreparedChunkByIndex.delete(index);
+        }
+        if (index === 0) {
+          handlePlaybackStart();
+        }
+        previousChunkCompletedAtMs = Date.now();
+        logSimulationTiming({
+          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+          phase: "tts_chunk_completed",
+          details: {
+            chunkIndex: index,
+            chunkCount: chunks.length,
+          },
+        });
+        startPrefetchForChunk(index + 1);
       }
-      startPrefetchForChunk(index + 1);
+    } finally {
+      for (const [index, preparedChunk] of resolvedPreparedChunkByIndex) {
+        await releasePreparedRemoteAudioSource(preparedChunk);
+        resolvedPreparedChunkByIndex.delete(index);
+      }
     }
   };
 
@@ -817,15 +937,23 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
     let transcriptionErrorMessage: string | null = null;
     let usedLocalTranscriptionFallback = false;
     let localTranscriptionFallbackReason: string | null = null;
+    let unifiedSubmitRequestStartedAtMs: number | null = null;
+    let unifiedSubmitResponseAtMs: number | null = null;
     let transcribeRequestStartedAtMs: number | null = null;
     let transcribeResponseAtMs: number | null = null;
     let assistantRequestStartedAtMs: number | null = null;
     let assistantResponseAtMs: number | null = null;
+    let assistantTextCommittedAtMs: number | null = null;
     let ttsPipelineStartedAtMs: number | null = null;
+    let audioModeResetAwaitStartedAtMs: number | null = null;
+    let audioModeResetCompletedAtMs: number | null = null;
     let playbackStartedAtMs: number | null = null;
+    let speakingCompletedAtMs: number | null = null;
     let transcriptChars = 0;
     let replyChars = 0;
+    let measureRecordingPayload: () => Promise<void> = async () => {};
     let summaryMode: SimulationTurnSummaryMode = apiConfigured && !useLocalMockMode ? "remote" : "local_mock";
+    const remoteTtsPreset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
     let turnSummaryLogged = false;
     const emitTurnSummary = (params: {
       outcome: "playback_started" | "no_clear_speech" | "error" | "playback_signal_missing";
@@ -844,12 +972,18 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         outcome: params.outcome,
         submitStartedAtMs: effectiveSubmitStartedAtMs,
         recordingFinalizeCompletedAtMs,
+        unifiedSubmitRequestStartedAtMs,
+        unifiedSubmitResponseAtMs,
         transcribeRequestStartedAtMs,
         transcribeResponseAtMs,
         assistantRequestStartedAtMs,
         assistantResponseAtMs,
+        assistantTextCommittedAtMs,
         ttsPipelineStartedAtMs,
+        audioModeResetAwaitStartedAtMs,
+        audioModeResetCompletedAtMs,
         playbackStartedAtMs,
+        speakingCompletedAtMs,
         transcriptChars,
         replyChars,
         errorMessage: params.errorMessage ?? null,
@@ -882,6 +1016,26 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       );
       audioFileExtension = getFileExtensionFromUri(audioUri);
       const audioFileInfoPromise = FileSystem.getInfoAsync(audioUri).catch(() => null);
+      measureRecordingPayload = async () => {
+        if (typeof audioBytes === "number") {
+          return;
+        }
+        const audioFileInfo = await audioFileInfoPromise;
+        audioBytes =
+          audioFileInfo?.exists && typeof audioFileInfo.size === "number" && Number.isFinite(audioFileInfo.size)
+            ? audioFileInfo.size
+            : undefined;
+        if (typeof audioBytes === "number") {
+          logSimulationTiming({
+            correlationId,
+            phase: "recording_payload_measured",
+            startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              audioBytes,
+            },
+          });
+        }
+      };
       logSimulationTiming({
         correlationId,
         phase: "recording_finalize_complete",
@@ -898,11 +1052,128 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         inferredVoiceWithoutMeter;
 
       let userText = "";
+      let replyPayload: { assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null } | null = null;
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
+      let shouldAttemptLegacyRemotePath = useLiveApiThisTurn && shouldAttemptTranscription;
       if (!useLiveApiThisTurn) {
         usedMockModeDuringSessionRef.current = true;
       }
-      if (useLiveApiThisTurn && shouldAttemptTranscription) {
+      if (useLiveApiThisTurn && shouldAttemptTranscription && unifiedSubmitEnabled) {
+        try {
+          transcriptionAttempted = true;
+          setStatus("Processing your response...");
+          unifiedSubmitRequestStartedAtMs = Date.now();
+          transcribeRequestStartedAtMs = unifiedSubmitRequestStartedAtMs;
+          assistantRequestStartedAtMs = unifiedSubmitRequestStartedAtMs;
+          logSimulationTiming({
+            correlationId,
+            phase: "unified_submit_request_start",
+            startedAtMs: effectiveSubmitStartedAtMs,
+          });
+          logSimulationApiCall("submitRecordedSimulationTurn");
+          const unifiedPayload = await submitRecordedSimulationTurn({
+            userId,
+            authToken,
+            audioUri,
+            preferredMimeType: transcriptionMimeType,
+            simulationSessionId: config.simulationSessionId,
+            scenario: config.scenario,
+            trainingId: config.trainingId ?? null,
+            industryId: config.industryId,
+            industryBaseline: config.industryBaseline,
+            difficulty: config.difficulty,
+            segmentLabel: config.segmentLabel,
+            personaStyle: config.personaStyle,
+            history: [...messagesRef.current],
+            trainingPackId: sessionTrainingPackIdRef.current,
+            speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
+            correlationId,
+          });
+          unifiedSubmitResponseAtMs = Date.now();
+          transcribeResponseAtMs = unifiedSubmitResponseAtMs;
+          assistantResponseAtMs =
+            unifiedPayload.outcome === "assistant_reply" ? unifiedSubmitResponseAtMs : assistantResponseAtMs;
+          shouldAttemptLegacyRemotePath = false;
+          userText = unifiedPayload.transcriptText.trim();
+          transcriptChars = userText.length;
+          logSimulationTiming({
+            correlationId,
+            phase: "unified_submit_response",
+            startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              transcriptChars: userText.length,
+              outcome: unifiedPayload.outcome,
+              cacheStatus: unifiedPayload.runtime?.cacheStatus ?? null,
+              contextBuildMs: unifiedPayload.runtime?.contextBuildMs ?? null,
+              modelLatencyMs: unifiedPayload.runtime?.modelLatencyMs ?? null,
+            },
+          });
+          if (userText) {
+            logSimulationTiming({
+              correlationId,
+              phase: "transcribe_response",
+              startedAtMs: effectiveSubmitStartedAtMs,
+              details: {
+                transcriptChars: userText.length,
+              },
+            });
+          }
+          if (unifiedPayload.outcome === "assistant_reply") {
+            replyPayload = {
+              assistantText: unifiedPayload.assistantText,
+              speechPrefetch: unifiedPayload.speechPrefetch,
+            };
+            replyChars = unifiedPayload.assistantText.length;
+            logSimulationTiming({
+              correlationId,
+              phase: "assistant_response_received",
+              startedAtMs: effectiveSubmitStartedAtMs,
+              details: {
+                replyChars,
+                path: "unified_submit",
+                modelLatencyMs: unifiedPayload.runtime?.modelLatencyMs ?? null,
+                speechPrefetchTtsLatencyMs: unifiedPayload.runtime?.speechPrefetchTtsLatencyMs ?? null,
+              },
+            });
+          }
+        } catch (unifiedError) {
+          const shouldFallbackToLegacy = shouldFallbackToLegacyUnifiedSubmit(unifiedError);
+          if (shouldFallbackToLegacy) {
+            logSimulationTiming({
+              correlationId,
+              phase: "unified_submit_fallback_legacy",
+              startedAtMs: effectiveSubmitStartedAtMs,
+            });
+          } else {
+            transcriptionAttempted = true;
+            transcriptionFailed = true;
+            transcriptionErrorMessage = getErrorMessage(unifiedError, "Unified submit failed.");
+            if (isApiError(unifiedError)) {
+              setUseLocalMockMode(true);
+              usedMockModeDuringSessionRef.current = true;
+              usedLocalTranscriptionFallback = true;
+              localTranscriptionFallbackReason = "api_error_local_fallback";
+              setError(null);
+              setStatus("Live AI unavailable. Switched to local test mode.");
+              useLiveApiThisTurn = false;
+              shouldAttemptLegacyRemotePath = false;
+              summaryMode = "local_fallback";
+              if (detectedVoiceRef.current || heardVoiceRef.current || inferredVoiceWithoutMeter) {
+                userText = buildLocalCapturedText(turnDurationSeconds);
+                transcriptChars = userText.length;
+              }
+              logSimulationTiming({
+                correlationId,
+                phase: "transcribe_fallback_local_mode",
+                startedAtMs: effectiveSubmitStartedAtMs,
+              });
+            } else {
+              throw unifiedError;
+            }
+          }
+        }
+      }
+      if (shouldAttemptLegacyRemotePath) {
         try {
           transcriptionAttempted = true;
           setStatus("Transcribing your response...");
@@ -965,23 +1236,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         transcriptChars = userText.length;
       }
 
-      const audioFileInfo = await audioFileInfoPromise;
-      audioBytes =
-        audioFileInfo?.exists && typeof audioFileInfo.size === "number" && Number.isFinite(audioFileInfo.size)
-          ? audioFileInfo.size
-          : undefined;
-      if (typeof audioBytes === "number") {
-        logSimulationTiming({
-          correlationId,
-          phase: "recording_payload_measured",
-          startedAtMs: effectiveSubmitStartedAtMs,
-          details: {
-            audioBytes,
-          },
-        });
-      }
-
       if (!userText && transcriptionAttempted) {
+        await measureRecordingPayload();
         // eslint-disable-next-line no-console
         console.warn("[simulation-no-transcript]", {
           simulationSessionId: config.simulationSessionId,
@@ -1003,94 +1259,129 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       if (userText && appearsToEchoAssistantReply(userText, messagesRef.current)) {
         userText = "";
+        replyPayload = null;
       }
 
       if (userText) {
         appendMessage({ id: createMessageId(), role: "user", content: userText });
 
         if (sessionActiveRef.current && !unmountedRef.current) {
-          setStatus("Crafting AI reply...");
-          assistantRequestStartedAtMs = Date.now();
-          logSimulationTiming({
-            correlationId,
-            phase: "assistant_request_start",
-            startedAtMs: effectiveSubmitStartedAtMs,
-          });
-          const reply = useLiveApiThisTurn
-            ? (logSimulationApiCall("generateAssistantReply"),
-              await generateAssistantReply({
-                userId,
-                authToken,
-                simulationSessionId: config.simulationSessionId,
-                scenario: config.scenario,
-                trainingId: config.trainingId ?? null,
-                industryId: config.industryId,
-                industryBaseline: config.industryBaseline,
-                difficulty: config.difficulty,
-                segmentLabel: config.segmentLabel,
-                personaStyle: config.personaStyle,
-                history: [...messagesRef.current],
-                trainingPackId: sessionTrainingPackIdRef.current,
-                correlationId,
-              }))
-            : createLocalAssistantReply({
-                scenario: config.scenario,
-                difficulty: config.difficulty,
-                personaStyle: config.personaStyle,
-                turnIndex: messagesRef.current.filter((message) => message.role === "assistant").length,
-                userText,
-                recentAssistantMessages: messagesRef.current
-                  .filter((message) => message.role === "assistant")
-                  .map((message) => message.content),
-                turnDurationSeconds,
-              });
-          assistantResponseAtMs = Date.now();
-          replyChars = reply.length;
-          logSimulationTiming({
-            correlationId,
-            phase: "assistant_response_received",
-            startedAtMs: effectiveSubmitStartedAtMs,
-            details: {
-              replyChars: reply.length,
-            },
-          });
+          if (!replyPayload) {
+            setStatus("Crafting AI reply...");
+            assistantRequestStartedAtMs = Date.now();
+            logSimulationTiming({
+              correlationId,
+              phase: "assistant_request_start",
+              startedAtMs: effectiveSubmitStartedAtMs,
+            });
+            replyPayload = useLiveApiThisTurn
+              ? (logSimulationApiCall("generateAssistantReply"),
+                await generateAssistantReply({
+                  userId,
+                  authToken,
+                  simulationSessionId: config.simulationSessionId,
+                  scenario: config.scenario,
+                  trainingId: config.trainingId ?? null,
+                  industryId: config.industryId,
+                  industryBaseline: config.industryBaseline,
+                  difficulty: config.difficulty,
+                  segmentLabel: config.segmentLabel,
+                  personaStyle: config.personaStyle,
+                  history: [...messagesRef.current],
+                  trainingPackId: sessionTrainingPackIdRef.current,
+                  speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
+                  correlationId,
+                }))
+              : {
+                  assistantText: createLocalAssistantReply({
+                    scenario: config.scenario,
+                    difficulty: config.difficulty,
+                    personaStyle: config.personaStyle,
+                    turnIndex: messagesRef.current.filter((message) => message.role === "assistant").length,
+                    userText,
+                    recentAssistantMessages: messagesRef.current
+                      .filter((message) => message.role === "assistant")
+                      .map((message) => message.content),
+                    turnDurationSeconds,
+                  }),
+                  speechPrefetch: null,
+                };
+            assistantResponseAtMs = Date.now();
+            replyChars = replyPayload.assistantText.length;
+            logSimulationTiming({
+              correlationId,
+              phase: "assistant_response_received",
+              startedAtMs: effectiveSubmitStartedAtMs,
+              details: {
+                replyChars: replyPayload.assistantText.length,
+              },
+            });
+          }
+          const reply = replyPayload.assistantText;
+          const prefetchedAssistantSpeech = replyPayload.speechPrefetch;
 
           if (sessionActiveRef.current && !unmountedRef.current) {
             const assistantTextReceivedAtMs = Date.now();
+            const assistantMessage = { id: createMessageId(), role: "assistant" as const, content: reply };
+            let assistantMessageCommitted = false;
+            const commitAssistantMessageIfNeeded = () => {
+              if (assistantMessageCommitted || unmountedRef.current || simulationClosedRef.current) {
+                return;
+              }
+              assistantMessageCommitted = true;
+              assistantTextCommittedAtMs = commitAssistantMessage({
+                message: assistantMessage,
+                correlationId,
+                phase: "assistant_message_committed",
+                startedAtMs: effectiveSubmitStartedAtMs,
+              });
+            };
             // eslint-disable-next-line no-console
             console.log("[TTS-TIMING]", {
               source: "simulation",
-              preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+              preset: remoteTtsPreset,
               correlationId,
               phase: "assistant_text_received",
               tsMs: assistantTextReceivedAtMs,
               elapsedMs: 0,
             });
-            const assistantMessage = { id: createMessageId(), role: "assistant" as const, content: reply };
-            appendMessage(assistantMessage);
-            setStatus("AI response ready. Starting voice...");
+            setStatus("Preparing AI voice...");
             // eslint-disable-next-line no-console
             console.log("[TTS-TIMING]", {
               source: "simulation",
-              preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+              preset: remoteTtsPreset,
               correlationId,
               phase: "speak_invoked",
               tsMs: Date.now(),
               elapsedMs: Date.now() - assistantTextReceivedAtMs,
             });
+            ttsPipelineStartedAtMs = Date.now();
             logSimulationTiming({
               correlationId,
               phase: "tts_pipeline_start",
               startedAtMs: effectiveSubmitStartedAtMs,
             });
             if (audioModeResetPromise) {
+              audioModeResetAwaitStartedAtMs = Date.now();
               await audioModeResetPromise;
+              audioModeResetCompletedAtMs = Date.now();
+              logSimulationTiming({
+                correlationId,
+                phase: "audio_mode_reset_complete",
+                startedAtMs: effectiveSubmitStartedAtMs,
+                details: {
+                  waitMs: Math.max(0, audioModeResetCompletedAtMs - audioModeResetAwaitStartedAtMs),
+                },
+              });
+            } else {
+              audioModeResetAwaitStartedAtMs = Date.now();
+              audioModeResetCompletedAtMs = audioModeResetAwaitStartedAtMs;
             }
-            ttsPipelineStartedAtMs = Date.now();
             const speakPromise = speakAssistantResponse(
               reply,
               assistantTextReceivedAtMs,
               () => {
+                commitAssistantMessageIfNeeded();
                 setMode("speaking");
                 setStatus("AI is speaking...");
                 playbackStartedAtMs = Date.now();
@@ -1104,8 +1395,16 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
                 });
               },
               correlationId,
+              prefetchedAssistantSpeech,
             );
             await speakPromise;
+            speakingCompletedAtMs = Date.now();
+            logSimulationTiming({
+              correlationId,
+              phase: "assistant_speaking_complete",
+              startedAtMs: effectiveSubmitStartedAtMs,
+            });
+            commitAssistantMessageIfNeeded();
             if (!turnSummaryLogged) {
               emitTurnSummary({
                 outcome: "playback_signal_missing",
@@ -1127,6 +1426,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (isPlaceholderTranscriptError(turnError)) {
         setStatus("Transcription missing. Please verify REMOTE mode.");
       }
+      await measureRecordingPayload();
       void submitAutoErrorReport("simulation.turn_finalize", turnError, {
         simulationSessionId: config.simulationSessionId,
         correlationId,
@@ -1161,7 +1461,13 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       continueLoop = sessionActiveRef.current;
     } finally {
       if (audioModeResetPromise) {
+        if (!audioModeResetAwaitStartedAtMs) {
+          audioModeResetAwaitStartedAtMs = Date.now();
+        }
         await audioModeResetPromise;
+        if (!audioModeResetCompletedAtMs) {
+          audioModeResetCompletedAtMs = Date.now();
+        }
       }
       processingRef.current = false;
       finalizeRequestedRef.current = false;
@@ -1197,6 +1503,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       openingDelivered: openingDeliveredRef.current,
       recognizedStartRegistered: recognizedStartRegisteredRef.current,
     });
+    const remoteTtsPreset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
     const openingCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "opening");
     const startRegistrationCorrelationId = createSimulationCorrelationId(
       config.simulationSessionId,
@@ -1209,6 +1516,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
         if (localTestMode) {
           openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
           sessionTrainingPackIdRef.current = null;
+          pendingOpeningSpeechPrefetchRef.current = null;
         } else {
           try {
             logSimulationTiming({
@@ -1227,10 +1535,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               difficulty: config.difficulty,
               segmentLabel: config.segmentLabel,
               personaStyle: config.personaStyle,
+              speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
               correlationId: openingCorrelationId,
             });
             openingLine = openingPayload.assistantText;
             sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
+            pendingOpeningSpeechPrefetchRef.current = openingPayload.speechPrefetch;
             logSimulationTiming({
               correlationId: openingCorrelationId,
               phase: "opening_response_received",
@@ -1241,6 +1551,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
               usedMockModeDuringSessionRef.current = true;
               openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
               sessionTrainingPackIdRef.current = null;
+              pendingOpeningSpeechPrefetchRef.current = null;
             } else {
               setError(getErrorMessage(openingError, "Could not initialize simulation."));
               void submitAutoErrorReport("simulation.opening_line", openingError);
@@ -1252,22 +1563,34 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       if (openingLine) {
         const assistantTextReceivedAtMs = Date.now();
+        const openingSpeechPrefetch = pendingOpeningSpeechPrefetchRef.current;
+        const openingAssistantMessage = { id: createMessageId(), role: "assistant" as const, content: openingLine };
+        let openingMessageCommitted = false;
+        const commitOpeningAssistantMessageIfNeeded = () => {
+          if (openingMessageCommitted || unmountedRef.current || simulationClosedRef.current) {
+            return;
+          }
+          openingMessageCommitted = true;
+          commitAssistantMessage({
+            message: openingAssistantMessage,
+            correlationId: openingCorrelationId,
+            phase: "opening_message_committed",
+          });
+        };
         // eslint-disable-next-line no-console
         console.log("[TTS-TIMING]", {
           source: "simulation",
-          preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+          preset: remoteTtsPreset,
           correlationId: openingCorrelationId,
           phase: "assistant_text_received",
           tsMs: assistantTextReceivedAtMs,
           elapsedMs: 0,
         });
-        const openingAssistantMessage = { id: createMessageId(), role: "assistant" as const, content: openingLine };
-        appendMessage(openingAssistantMessage);
-        setStatus("AI response ready. Starting voice...");
+        setStatus("Preparing AI voice...");
         // eslint-disable-next-line no-console
         console.log("[TTS-TIMING]", {
           source: "simulation",
-          preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+          preset: remoteTtsPreset,
           correlationId: openingCorrelationId,
           phase: "speak_invoked",
           tsMs: Date.now(),
@@ -1281,6 +1604,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           openingLine,
           assistantTextReceivedAtMs,
           () => {
+            commitOpeningAssistantMessageIfNeeded();
             setMode("speaking");
             setStatus("AI is speaking...");
             logSimulationTiming({
@@ -1289,9 +1613,12 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             });
           },
           openingCorrelationId,
+          openingSpeechPrefetch,
         );
         pendingOpeningLineRef.current = null;
+        pendingOpeningSpeechPrefetchRef.current = null;
         await speakPromise;
+        commitOpeningAssistantMessageIfNeeded();
         openingDeliveredRef.current = true;
       }
     }
@@ -1457,6 +1784,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       recognizedStartRegisteredRef.current = false;
       localModeConfirmedRef.current = false;
       pendingOpeningLineRef.current = null;
+      pendingOpeningSpeechPrefetchRef.current = null;
       setElapsedSeconds(0);
       sessionCompletionInProgressRef.current = false;
       simulationClosedRef.current = false;
@@ -1468,6 +1796,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (localTestMode) {
         pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
         sessionTrainingPackIdRef.current = null;
+        pendingOpeningSpeechPrefetchRef.current = null;
         setMode("idle");
         setStatus("Scenario ready. Press Start Simulation.");
         setIsInitializing(false);
@@ -1487,6 +1816,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           difficulty: config.difficulty,
           segmentLabel: config.segmentLabel,
           personaStyle: config.personaStyle,
+          speechPrefetchPreset: shouldUseFastStartRemoteTts
+            ? toRemoteTtsPreset(config.voiceGender, config.voiceProfile)
+            : null,
           correlationId: createSimulationCorrelationId(config.simulationSessionId, "opening-prefetch"),
         });
 
@@ -1496,6 +1828,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
         pendingOpeningLineRef.current = openingPayload.assistantText;
         sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
+        pendingOpeningSpeechPrefetchRef.current = openingPayload.speechPrefetch;
         setMode("idle");
         setStatus("Scenario ready. Press Start Simulation.");
       } catch (initError) {
@@ -1504,6 +1837,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           usedMockModeDuringSessionRef.current = true;
           pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
           sessionTrainingPackIdRef.current = null;
+          pendingOpeningSpeechPrefetchRef.current = null;
           setMode("idle");
           setStatus("Local test mode ready. Press Start Simulation.");
           setError(null);

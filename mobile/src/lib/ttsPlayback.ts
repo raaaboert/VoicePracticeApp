@@ -6,6 +6,7 @@ import { Platform } from "react-native";
 import { getVoiceSpeechTuning, selectSpeechVoiceIdentifier } from "../data/preferences";
 import type { AiVoiceGender, AiVoiceProfile } from "../types";
 import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
+import type { PrefetchedRemoteSpeechChunk } from "./api";
 import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
 
 type TtsSource = "simulation" | "sample";
@@ -38,7 +39,8 @@ interface SpeakWithTtsFallbackParams {
   remoteTtsSoundRef?: MutableRefObject<Audio.Sound | null>;
   remoteTtsFileRef?: MutableRefObject<string | null>;
   assistantTextReceivedAtMs?: number;
-  prefetchedRemoteAudio?: { bytes: Uint8Array; contentType: string } | null;
+  prefetchedRemoteAudio?: PrefetchedRemoteSpeechChunk | null;
+  preparedRemoteSource?: PreparedRemoteAudioSource | null;
   abortSignal?: AbortSignal;
   isCancelled?: () => boolean;
   chunkIndex?: number;
@@ -50,6 +52,14 @@ interface SpeakWithTtsFallbackParams {
   };
   onRemoteCancellation?: (details: TtsCancellationAnalysis) => void;
   onPlaybackStart?: (details: { source: TtsSource; mode: "remote" | "fallback"; startedAtMs: number }) => void;
+}
+
+export interface PreparedRemoteAudioSource {
+  audio: PrefetchedRemoteSpeechChunk;
+  sourceKind: RemoteAudioSourceKind;
+  sourceUri: string;
+  cleanupFileUri: string | null;
+  preparedAtMs: number;
 }
 
 class TtsPlaybackCancelledError extends Error {
@@ -113,7 +123,14 @@ function logTtsTiming(payload: {
   source: TtsSource;
   preset: RemoteTtsPreset;
   correlationId?: string;
-  phase: "request_start" | "bytes_received" | "source_prepared" | "file_written" | "audio_loaded" | "play_started";
+  phase:
+    | "request_start"
+    | "bytes_received"
+    | "prefetched_bytes_ready"
+    | "source_prepared"
+    | "file_written"
+    | "audio_loaded"
+    | "play_started";
   assistantTextReceivedAtMs: number;
   tsMs?: number;
   requestMs?: number;
@@ -123,6 +140,8 @@ function logTtsTiming(payload: {
   loadMs?: number;
   startupMs?: number;
   bytes?: number;
+  chunkIndex?: number;
+  chunkCount?: number;
 }) {
   const tsMs = typeof payload.tsMs === "number" ? payload.tsMs : Date.now();
   const elapsedMs = tsMs - payload.assistantTextReceivedAtMs;
@@ -140,8 +159,112 @@ function logTtsTiming(payload: {
     ...(typeof payload.loadMs === "number" ? { loadMs: payload.loadMs } : {}),
     ...(typeof payload.startupMs === "number" ? { startupMs: payload.startupMs } : {}),
     ...(typeof payload.bytes === "number" ? { bytes: payload.bytes } : {}),
+    ...(typeof payload.chunkIndex === "number" ? { chunkIndex: payload.chunkIndex } : {}),
+    ...(typeof payload.chunkCount === "number" ? { chunkCount: payload.chunkCount } : {}),
     ...(payload.sourceKind ? { sourceKind: payload.sourceKind } : {}),
   });
+}
+
+async function writeRemoteAudioBytesToFile(bytes: Uint8Array): Promise<string> {
+  const cacheDirectory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+  if (!cacheDirectory) {
+    throw new Error("No writable cache directory available for TTS playback.");
+  }
+
+  const fileUri = `${cacheDirectory}vp-tts-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`;
+  await FileSystem.writeAsStringAsync(fileUri, bytesToBase64(bytes), {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  return fileUri;
+}
+
+export async function preparePrefetchedRemoteAudioSource(params: {
+  source: TtsSource;
+  preset: RemoteTtsPreset;
+  assistantTextReceivedAtMs?: number;
+  prefetchedRemoteAudio: PrefetchedRemoteSpeechChunk;
+  correlationId?: string;
+  chunkIndex?: number;
+  chunkCount?: number;
+}): Promise<PreparedRemoteAudioSource> {
+  const assistantTextReceivedAtMs = params.assistantTextReceivedAtMs ?? Date.now();
+  const preparationStartedAtMs = Date.now();
+  const shouldAttemptInlineAudio =
+    params.prefetchedRemoteAudio.contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
+
+  if (shouldAttemptInlineAudio) {
+    const sourcePreparedAtMs = Date.now();
+    const prepared = {
+      audio: params.prefetchedRemoteAudio,
+      sourceKind: "inline" as const,
+      sourceUri: buildInlineAudioDataUri(params.prefetchedRemoteAudio.contentType, params.prefetchedRemoteAudio.bytes),
+      cleanupFileUri: null,
+      preparedAtMs: sourcePreparedAtMs,
+    };
+    logTtsTiming({
+      source: params.source,
+      preset: params.preset,
+      correlationId: params.correlationId,
+      phase: "source_prepared",
+      assistantTextReceivedAtMs,
+      tsMs: sourcePreparedAtMs,
+      preparationMs: sourcePreparedAtMs - preparationStartedAtMs,
+      bytes: params.prefetchedRemoteAudio.bytes.byteLength,
+      sourceKind: "inline",
+      chunkIndex: params.chunkIndex,
+      chunkCount: params.chunkCount,
+    });
+    return prepared;
+  }
+
+  const fileWriteStartedAtMs = Date.now();
+  const fileUri = await writeRemoteAudioBytesToFile(params.prefetchedRemoteAudio.bytes);
+  const fileWrittenAtMs = Date.now();
+  logTtsTiming({
+    source: params.source,
+    preset: params.preset,
+    correlationId: params.correlationId,
+    phase: "file_written",
+    assistantTextReceivedAtMs,
+    tsMs: fileWrittenAtMs,
+    fileWriteMs: fileWrittenAtMs - fileWriteStartedAtMs,
+    bytes: params.prefetchedRemoteAudio.bytes.byteLength,
+    sourceKind: "file",
+    chunkIndex: params.chunkIndex,
+    chunkCount: params.chunkCount,
+  });
+  logTtsTiming({
+    source: params.source,
+    preset: params.preset,
+    correlationId: params.correlationId,
+    phase: "source_prepared",
+    assistantTextReceivedAtMs,
+    tsMs: fileWrittenAtMs,
+    preparationMs: fileWrittenAtMs - preparationStartedAtMs,
+    bytes: params.prefetchedRemoteAudio.bytes.byteLength,
+    sourceKind: "file",
+    chunkIndex: params.chunkIndex,
+    chunkCount: params.chunkCount,
+  });
+  return {
+    audio: params.prefetchedRemoteAudio,
+    sourceKind: "file",
+    sourceUri: fileUri,
+    cleanupFileUri: fileUri,
+    preparedAtMs: fileWrittenAtMs,
+  };
+}
+
+export async function releasePreparedRemoteAudioSource(prepared: PreparedRemoteAudioSource | null | undefined): Promise<void> {
+  if (!prepared?.cleanupFileUri) {
+    return;
+  }
+
+  try {
+    await FileSystem.deleteAsync(prepared.cleanupFileUri, { idempotent: true });
+  } catch {
+    // Ignore cleanup failures for discarded prefetched audio.
+  }
 }
 
 export async function stopRemoteTtsPlayback(params: {
@@ -200,7 +323,8 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
     let fallbackAttempted = false;
     let fallbackSucceeded = false;
     try {
-      let ttsAudio = params.prefetchedRemoteAudio ?? null;
+      let preparedRemoteSource = params.preparedRemoteSource ?? null;
+      let ttsAudio = preparedRemoteSource?.audio ?? params.prefetchedRemoteAudio ?? null;
       if (!ttsAudio) {
         logTtsTiming({
           source: params.source,
@@ -209,6 +333,8 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           phase: "request_start",
           assistantTextReceivedAtMs,
           tsMs: requestStartedAtMs,
+          chunkIndex: params.chunkIndex,
+          chunkCount: params.chunkCount,
         });
         ttsAudio = await fetchAiTtsAudio({
           userId: params.userId,
@@ -229,6 +355,21 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           tsMs: audioBytesReceivedAtMs,
           requestMs: audioBytesReceivedAtMs - requestStartedAtMs,
           bytes: ttsAudio.bytes.byteLength,
+          chunkIndex: params.chunkIndex,
+          chunkCount: params.chunkCount,
+        });
+      } else if (!preparedRemoteSource) {
+        logTtsTiming({
+          source: params.source,
+          preset: params.preset,
+          correlationId: params.correlationId,
+          phase: "prefetched_bytes_ready",
+          assistantTextReceivedAtMs,
+          tsMs: Date.now(),
+          requestMs: ttsAudio.ttsLatencyMs ?? undefined,
+          bytes: ttsAudio.bytes.byteLength,
+          chunkIndex: params.chunkIndex,
+          chunkCount: params.chunkCount,
         });
       }
       const remotePlaybackRate = resolveRemotePlaybackRate(params.voiceProfile);
@@ -256,6 +397,8 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
             tsMs: startedAtMs,
             requestMs: startedAtMs - requestStartedAtMs,
             startupMs: startedAtMs - audioLoadedAtMs,
+            chunkIndex: params.chunkIndex,
+            chunkCount: params.chunkCount,
           });
           params.onPlaybackStart?.({ source: params.source, mode: "remote", startedAtMs });
         };
@@ -297,22 +440,29 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         sourceKind: RemoteAudioSourceKind;
         sourceUri: string;
         preparationStartedAtMs: number;
+        cleanupFileUri?: string | null;
+        skipSourcePreparedLog?: boolean;
       }): Promise<void> => {
         sourceKind = paramsForSource.sourceKind;
+        remoteTtsFileRef.current = paramsForSource.cleanupFileUri ?? null;
         const playbackSession = createPlaybackSession();
         const sourcePreparedAtMs = Date.now();
-        logTtsTiming({
-          source: params.source,
-          preset: params.preset,
-          correlationId: params.correlationId,
-          phase: "source_prepared",
-          assistantTextReceivedAtMs,
-          tsMs: sourcePreparedAtMs,
-          requestMs: sourcePreparedAtMs - requestStartedAtMs,
-          preparationMs: sourcePreparedAtMs - paramsForSource.preparationStartedAtMs,
-          bytes: ttsAudio.bytes.byteLength,
-          sourceKind: paramsForSource.sourceKind,
-        });
+        if (!paramsForSource.skipSourcePreparedLog) {
+          logTtsTiming({
+            source: params.source,
+            preset: params.preset,
+            correlationId: params.correlationId,
+            phase: "source_prepared",
+            assistantTextReceivedAtMs,
+            tsMs: sourcePreparedAtMs,
+            requestMs: sourcePreparedAtMs - requestStartedAtMs,
+            preparationMs: sourcePreparedAtMs - paramsForSource.preparationStartedAtMs,
+            bytes: ttsAudio.bytes.byteLength,
+            sourceKind: paramsForSource.sourceKind,
+            chunkIndex: params.chunkIndex,
+            chunkCount: params.chunkCount,
+          });
+        }
         const audioLoadStartedAtMs = Date.now();
         const loadStatus = await playbackSession.sound.loadAsync({
           uri: paramsForSource.sourceUri,
@@ -333,12 +483,58 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
           requestMs: audioLoadedAtMs - requestStartedAtMs,
           loadMs: audioLoadedAtMs - audioLoadStartedAtMs,
           sourceKind: paramsForSource.sourceKind,
+          chunkIndex: params.chunkIndex,
+          chunkCount: params.chunkCount,
         });
         if (loadStatus.isLoaded && loadStatus.isPlaying) {
           playbackSession.markPlaybackStarted(audioLoadedAtMs);
         }
         await playbackSession.playbackFinished;
       };
+
+      if (preparedRemoteSource) {
+        try {
+          await loadAndPlayPreparedSource({
+            sourceKind: preparedRemoteSource.sourceKind,
+            sourceUri: preparedRemoteSource.sourceUri,
+            preparationStartedAtMs: preparedRemoteSource.preparedAtMs,
+            cleanupFileUri: preparedRemoteSource.cleanupFileUri,
+            skipSourcePreparedLog: true,
+          });
+          if (preparedRemoteSource.sourceKind === "inline") {
+            inlineRemoteAudioPlaybackSupported = true;
+          }
+          await stopRemoteTtsPlayback({
+            remoteTtsSoundRef,
+            remoteTtsFileRef,
+          });
+          return;
+        } catch (preparedPlaybackError) {
+          if (preparedRemoteSource.sourceKind === "inline") {
+            fallbackAttempted = true;
+            inlineRemoteAudioPlaybackSupported = false;
+            await stopRemoteTtsPlayback({
+              remoteTtsSoundRef,
+              remoteTtsFileRef,
+            });
+            if (isCancelled()) {
+              throw new TtsPlaybackCancelledError();
+            }
+            // eslint-disable-next-line no-console
+            console.log("[TTS-MODE]", {
+              source: params.source,
+              preset: params.preset,
+              mode: "remote",
+              reason: "inlineFallbackToFile",
+              correlationId: params.correlationId ?? null,
+              error: preparedPlaybackError instanceof Error ? preparedPlaybackError.message : String(preparedPlaybackError),
+            });
+            preparedRemoteSource = null;
+          } else {
+            throw preparedPlaybackError;
+          }
+        }
+      }
 
       const shouldAttemptInlineAudio =
         ttsAudio.contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
@@ -379,17 +575,8 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         }
       }
 
-      const cacheDirectory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
-      if (!cacheDirectory) {
-        throw new Error("No writable cache directory available for TTS playback.");
-      }
-
-      const fileUri = `${cacheDirectory}vp-tts-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`;
-      remoteTtsFileRef.current = fileUri;
       const fileWriteStartedAtMs = Date.now();
-      await FileSystem.writeAsStringAsync(fileUri, bytesToBase64(ttsAudio.bytes), {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const fileUri = await writeRemoteAudioBytesToFile(ttsAudio.bytes);
       const fileWrittenAtMs = Date.now();
       logTtsTiming({
         source: params.source,
@@ -402,6 +589,8 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         fileWriteMs: fileWrittenAtMs - fileWriteStartedAtMs,
         bytes: ttsAudio.bytes.byteLength,
         sourceKind: "file",
+        chunkIndex: params.chunkIndex,
+        chunkCount: params.chunkCount,
       });
       throwIfCancelled();
 
@@ -409,6 +598,7 @@ export async function speakWithRemoteTtsFallback(params: SpeakWithTtsFallbackPar
         sourceKind: "file",
         sourceUri: fileUri,
         preparationStartedAtMs: fileWriteStartedAtMs,
+        cleanupFileUri: fileUri,
       });
       if (fallbackAttempted) {
         fallbackSucceeded = true;

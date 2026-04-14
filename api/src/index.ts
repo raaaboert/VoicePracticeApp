@@ -137,7 +137,8 @@ import {
   sumRawSeconds,
   computeMonthlyPeriodBounds,
   computeNextRenewalAt,
-  buildDefaultScoringGuidance
+  buildDefaultScoringGuidance,
+  splitTextForRemoteTtsFastStart
 } from "@voicepractice/shared";
 import {
   AI_PROMPT_VERSION,
@@ -205,6 +206,7 @@ import {
   touchRecognizedSimulationSession
 } from "./services/simulationSessionLifecycle.js";
 import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/simulationHotPath.js";
+import { createSimulationRuntimeCache, type SimulationRuntimeCacheStatus } from "./services/simulationRuntimeCache.js";
 import {
   buildAdditiveEvaluationScoringGuidance,
   countUserTurnsForScoring,
@@ -355,6 +357,7 @@ const TTS_PRESET_SET = new Set<TtsPreset>(Object.keys(TTS_VOICE_BY_PRESET) as Tt
 const warningLogByKey = new Map<string, number>();
 const simulationAiBudgetGraceByUserId = new Map<string, number>();
 const simulationOrgMonthlyOverrunGraceByUserId = new Map<string, number>();
+const simulationRuntimeCache = createSimulationRuntimeCache();
 const PLACEHOLDER_USER_TEXT_PATTERN = /^voice input captured/i;
 const trainingPackStore = createTrainingPackStore({
   provider: STORAGE_PROVIDER,
@@ -719,6 +722,14 @@ function redactUserTextPreview(value: string | null | undefined): string {
     .slice(0, 60);
 }
 
+function normalizeTranscriptForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function getLatestUserTextFromHistory(history: DialogueTurn[]): string | null {
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const turn = history[index];
@@ -727,6 +738,33 @@ function getLatestUserTextFromHistory(history: DialogueTurn[]): string | null {
     }
   }
   return null;
+}
+
+function appearsToEchoAssistantHistory(userText: string, history: DialogueTurn[]): boolean {
+  const normalizedUser = normalizeTranscriptForComparison(userText);
+  if (!normalizedUser || normalizedUser.length < 24) {
+    return false;
+  }
+
+  const assistantMessages = history
+    .filter((message) => message.role === "assistant")
+    .slice(-2)
+    .map((message) => normalizeTranscriptForComparison(message.content))
+    .filter(Boolean);
+
+  return assistantMessages.some((assistantText) => {
+    if (!assistantText) {
+      return false;
+    }
+    if (assistantText.includes(normalizedUser) || normalizedUser.includes(assistantText)) {
+      return true;
+    }
+
+    const assistantTokens = new Set(assistantText.split(" "));
+    const userTokens = normalizedUser.split(" ");
+    const overlap = userTokens.filter((token) => assistantTokens.has(token)).length;
+    return userTokens.length >= 6 && overlap / userTokens.length >= 0.72;
+  });
 }
 
 function hasPlaceholderOrMissingUserText(text: string | null | undefined): boolean {
@@ -900,12 +938,383 @@ function parseTtsPreset(value: unknown): TtsPreset | null {
   return TTS_PRESET_SET.has(preset) ? preset : null;
 }
 
+interface SimulationSpeechPrefetchRequest {
+  preset: TtsPreset;
+}
+
+interface SimulationSpeechPrefetchPayload {
+  audioBase64: string;
+  contentType: string;
+  preset: TtsPreset;
+  chunkCount: number;
+  firstChunkChars: number;
+  ttsLatencyMs: number;
+}
+
+function parseSimulationSpeechPrefetchRequest(value: unknown): SimulationSpeechPrefetchRequest | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const preset = parseTtsPreset((value as { preset?: unknown }).preset);
+  if (!preset) {
+    return null;
+  }
+
+  return { preset };
+}
+
 function estimateTtsDurationSeconds(text: string): number {
   const tokens = text.trim().split(/\s+/).filter(Boolean).length;
   if (tokens <= 0) {
     return 0;
   }
   return Math.max(1, Number((tokens / 2.6).toFixed(1)));
+}
+
+async function maybeBuildSimulationSpeechPrefetch(params: {
+  route: "opening" | "turn";
+  correlationId: string;
+  text: string;
+  request: SimulationSpeechPrefetchRequest | null;
+}): Promise<SimulationSpeechPrefetchPayload | null> {
+  if (!ENABLE_REMOTE_TTS || !params.request) {
+    return null;
+  }
+
+  const trimmedText = params.text.trim();
+  if (!trimmedText) {
+    return null;
+  }
+
+  const chunks = splitTextForRemoteTtsFastStart(trimmedText);
+  const firstChunk = chunks[0]?.trim() ?? "";
+  if (!firstChunk) {
+    return null;
+  }
+
+  if (firstChunk.length > TTS_TEXT_MAX_CHARS) {
+    // eslint-disable-next-line no-console
+    console.log("[simulation-speech-prefetch]", {
+      route: params.route,
+      correlationId: params.correlationId,
+      stage: "skipped",
+      reason: "first_chunk_too_large",
+      firstChunkChars: firstChunk.length,
+      chunkCount: chunks.length,
+    });
+    return null;
+  }
+
+  const voice = TTS_VOICE_BY_PRESET[params.request.preset];
+  const startedAtMs = Date.now();
+  // eslint-disable-next-line no-console
+  console.log("[simulation-speech-prefetch]", {
+    route: params.route,
+    correlationId: params.correlationId,
+    stage: "start",
+    preset: params.request.preset,
+    firstChunkChars: firstChunk.length,
+    chunkCount: chunks.length,
+    model: OPENAI_TTS_MODEL,
+  });
+
+  try {
+    const ttsResult = await requestSpeechSynthesis({
+      model: OPENAI_TTS_MODEL,
+      voice,
+      text: firstChunk,
+      format: "mp3",
+    });
+    const completedAtMs = Date.now();
+    const ttsLatencyMs = completedAtMs - startedAtMs;
+    // eslint-disable-next-line no-console
+    console.log("[simulation-speech-prefetch]", {
+      route: params.route,
+      correlationId: params.correlationId,
+      stage: "ready",
+      preset: params.request.preset,
+      firstChunkChars: firstChunk.length,
+      chunkCount: chunks.length,
+      bytes: ttsResult.audioBuffer.byteLength,
+      ttsLatencyMs,
+      model: OPENAI_TTS_MODEL,
+    });
+
+    return {
+      audioBase64: ttsResult.audioBuffer.toString("base64"),
+      contentType: ttsResult.contentType,
+      preset: params.request.preset,
+      chunkCount: chunks.length,
+      firstChunkChars: firstChunk.length,
+      ttsLatencyMs,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Speech prefetch failed.";
+    // eslint-disable-next-line no-console
+    console.log("[simulation-speech-prefetch]", {
+      route: params.route,
+      correlationId: params.correlationId,
+      stage: "error",
+      preset: params.request.preset,
+      firstChunkChars: firstChunk.length,
+      chunkCount: chunks.length,
+      error: message,
+      model: OPENAI_TTS_MODEL,
+    });
+    return null;
+  }
+}
+
+interface SimulationRuntimeBundle {
+  segment: SegmentDefinition;
+  scenario: Scenario;
+  difficulty: Difficulty;
+  personaStyle: PersonaStyle;
+  industryId: string | null;
+  industryLabel: string | null;
+  industryBaseline: string | null;
+  counterpartBehaviorGuidance: string | null;
+  useModularPromptArchitecture: boolean;
+  activeTrainingPack: TrainingPack | null;
+  systemPrompt: string;
+  openingPrompt: string;
+  cacheStatus: SimulationRuntimeCacheStatus;
+  cacheReason: string | null;
+  contextBuildMs: number;
+  trainingPackLookupMs: number;
+}
+
+async function resolveSimulationRuntimeBundle(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  org: EnterpriseOrg | null;
+  actingOrgId: string | null;
+  scenarioId: string;
+  trainingId: string | null;
+  difficulty: Difficulty | null;
+  personaStyle: PersonaStyle | null;
+  requestedIndustryId: unknown;
+  requestedIndustryBaseline: unknown;
+  submittedTrainingPackId?: string | null;
+  simulationSessionId?: string | null;
+  response: Response;
+}): Promise<SimulationRuntimeBundle | { bootstrapOrgId: string } | null> {
+  const useModularPromptArchitecture =
+    USE_MODULAR_PROMPT_ARCHITECTURE_ENV && params.org?.enableModularPromptArchitecture === true;
+  const requestedIndustryId =
+    typeof params.requestedIndustryId === "string" && params.requestedIndustryId.trim()
+      ? params.requestedIndustryId.trim()
+      : null;
+  const submittedTrainingPackId =
+    typeof params.submittedTrainingPackId === "string" && params.submittedTrainingPackId.trim()
+      ? params.submittedTrainingPackId.trim()
+      : null;
+  const cacheResult =
+    params.difficulty && params.personaStyle
+      ? simulationRuntimeCache.read({
+          simulationSessionId: params.simulationSessionId ?? null,
+          userId: params.user.id,
+          actingOrgId: params.actingOrgId,
+          scenarioId: params.scenarioId,
+          trainingId: params.trainingId,
+          difficulty: params.difficulty,
+          personaStyle: params.personaStyle,
+          requestedIndustryId,
+          submittedTrainingPackId,
+          useModularPromptArchitecture,
+        })
+      : ({ status: "bypass", value: null, reason: "missing_effective_variant" } as const);
+  if (cacheResult.status === "hit" && cacheResult.value) {
+    return {
+      ...cacheResult.value,
+      cacheStatus: "hit",
+      cacheReason: null,
+      contextBuildMs: 0,
+      trainingPackLookupMs: 0,
+    };
+  }
+
+  const contextBuildStartedAtMs = Date.now();
+  const configForUser = resolveConfigForUser(params.db, params.user, params.actingOrgId);
+  const effectiveDifficulty = params.difficulty ?? configForUser.defaultDifficulty;
+  const effectivePersonaStyle = params.personaStyle ?? configForUser.defaultPersonaStyle;
+  const resolvedScenario = resolveMobileScenarioForUser(configForUser, params.scenarioId, params.trainingId);
+  if (!resolvedScenario) {
+    const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
+      configForUser,
+      org: params.org,
+      scenarioId: params.scenarioId,
+      existingOrgTrainingCount: params.org ? listOrgTrainingRecords(params.db, params.org.id).length : 0,
+    });
+    if (shouldBootstrapTrainingWorkspace && params.org) {
+      return { bootstrapOrgId: params.org.id };
+    }
+
+    params.response.status(400).json({ error: "Invalid scenario for this account." });
+    return null;
+  }
+
+  const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
+    configForUser,
+    resolvedScenario.allowedIndustryIds,
+    params.requestedIndustryId,
+    params.requestedIndustryBaseline,
+    {
+      preferClientBaselineSnapshot: false,
+      canonicalIndustryDefinitions: params.db.config.industries,
+    },
+  );
+  const counterpartBehaviorGuidance = resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario);
+  const trainingPackLookupStartedAtMs = Date.now();
+  const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
+    orgId: params.actingOrgId,
+    scenarioId: resolvedScenario.scenario.id,
+    useModularPromptArchitecture,
+    submittedTrainingPackId,
+  });
+  const trainingPackLookupMs = useModularPromptArchitecture
+    ? Date.now() - trainingPackLookupStartedAtMs
+    : 0;
+  const prompts = useModularPromptArchitecture
+    ? buildRoleplayPromptsWithOrchestrator({
+        scenario: resolvedScenario.scenario,
+        difficulty: effectiveDifficulty,
+        segmentLabel: resolvedScenario.segment.label,
+        personaStyle: effectivePersonaStyle,
+        industryLabel: industryPromptContext.industryLabel,
+        industryBaseline: industryPromptContext.industryBaseline,
+        counterpartBehaviorGuidance,
+        trainingPack: activeTrainingPack,
+      })
+    : {
+        systemPrompt: buildRoleplaySystemPrompt({
+          scenario: resolvedScenario.scenario,
+          difficulty: effectiveDifficulty,
+          segmentLabel: resolvedScenario.segment.label,
+          personaStyle: effectivePersonaStyle,
+          industryLabel: industryPromptContext.industryLabel,
+          industryBaseline: industryPromptContext.industryBaseline,
+          counterpartBehaviorGuidance,
+        }),
+        openingPrompt: buildOpeningPrompt(resolvedScenario.scenario),
+      };
+
+  const runtimeBundle = {
+    segment: resolvedScenario.segment,
+    scenario: resolvedScenario.scenario,
+    difficulty: effectiveDifficulty,
+    personaStyle: effectivePersonaStyle,
+    industryId: industryPromptContext.industryId,
+    industryLabel: industryPromptContext.industryLabel,
+    industryBaseline: industryPromptContext.industryBaseline,
+    counterpartBehaviorGuidance,
+    useModularPromptArchitecture,
+    activeTrainingPack,
+    systemPrompt: prompts.systemPrompt,
+    openingPrompt: prompts.openingPrompt,
+    cacheStatus: cacheResult.status === "bypass" ? "bypass" : "miss",
+    cacheReason: cacheResult.reason ?? null,
+    contextBuildMs: Math.max(0, Date.now() - contextBuildStartedAtMs),
+    trainingPackLookupMs,
+  } satisfies SimulationRuntimeBundle;
+
+  simulationRuntimeCache.write(
+    {
+      simulationSessionId: params.simulationSessionId ?? null,
+      userId: params.user.id,
+      actingOrgId: params.actingOrgId,
+      scenarioId: params.scenarioId,
+      trainingId: params.trainingId,
+      difficulty: effectiveDifficulty,
+      personaStyle: effectivePersonaStyle,
+      requestedIndustryId,
+      submittedTrainingPackId,
+      useModularPromptArchitecture,
+    },
+    {
+      segment: runtimeBundle.segment,
+      scenario: runtimeBundle.scenario,
+      difficulty: runtimeBundle.difficulty,
+      personaStyle: runtimeBundle.personaStyle,
+      industryId: runtimeBundle.industryId,
+      industryLabel: runtimeBundle.industryLabel,
+      industryBaseline: runtimeBundle.industryBaseline,
+      counterpartBehaviorGuidance: runtimeBundle.counterpartBehaviorGuidance,
+      useModularPromptArchitecture: runtimeBundle.useModularPromptArchitecture,
+      activeTrainingPack: runtimeBundle.activeTrainingPack,
+      systemPrompt: runtimeBundle.systemPrompt,
+      openingPrompt: runtimeBundle.openingPrompt,
+    },
+  );
+
+  return runtimeBundle;
+}
+
+async function transcribeSimulationAudioFile(params: {
+  file: { buffer: Buffer; originalname: string; mimetype: string };
+}): Promise<{ text: string; durationMs: number; mimeType: string; bytes: number }> {
+  const startedAtMs = Date.now();
+  const mimeType = params.file.mimetype || "audio/m4a";
+  const text = await requestTranscription({
+    model: OPENAI_TRANSCRIPTION_MODEL,
+    audioBuffer: params.file.buffer,
+    fileName: params.file.originalname || "voice-input.m4a",
+    mimeType,
+  });
+
+  return {
+    text,
+    durationMs: Math.max(0, Date.now() - startedAtMs),
+    mimeType,
+    bytes: params.file.buffer.byteLength,
+  };
+}
+
+async function generateSimulationTurnReply(params: {
+  correlationId: string;
+  history: DialogueTurn[];
+  runtime: SimulationRuntimeBundle;
+  requestedSpeechPrefetch: SimulationSpeechPrefetchRequest | null;
+}): Promise<{
+  assistantText: string;
+  completion: Awaited<ReturnType<typeof requestSimulationCompletion>>["completion"];
+  modelLatencyMs: number;
+  historyChars: number;
+  promptChars: number;
+  speechPrefetch: SimulationSpeechPrefetchPayload | null;
+}> {
+  const temperature = params.runtime.difficulty === "hard" ? 0.55 : 0.75;
+  const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_TURN);
+  const promptMessages = [
+    { role: "system" as const, content: params.runtime.systemPrompt },
+    ...params.history.map((message) => ({ role: message.role, content: message.content })),
+  ];
+  const historyChars = params.history.reduce((total, message) => total + message.content.length, 0);
+  const promptChars = params.runtime.systemPrompt.length + historyChars;
+  const { completion, latencyMs } = await requestSimulationCompletion({
+    route: "turn",
+    messages: promptMessages,
+    maxOutputTokens,
+    temperature,
+    correlationId: params.correlationId,
+  });
+  const assistantText = completion.text.trim();
+  const speechPrefetch = await maybeBuildSimulationSpeechPrefetch({
+    route: "turn",
+    correlationId: params.correlationId,
+    text: assistantText,
+    request: params.requestedSpeechPrefetch,
+  });
+
+  return {
+    assistantText,
+    completion,
+    modelLatencyMs: latencyMs,
+    historyChars,
+    promptChars,
+    speechPrefetch,
+  };
 }
 
 function logSimulationUserTextDiagnostics(params: {
@@ -6220,26 +6629,12 @@ function resolveMobileScenarioForUser(
         .map((entry) => entry.industryId),
     ) as IndustryId[];
 
-    const scoringIndustryContexts = allowedIndustryIds.map((industryId) => {
-      const industry = (configForUser.industries ?? []).find((entry) => entry.id === industryId);
-      return {
-        id: industryId,
-        label: industry?.label ?? industryId,
-        aiBaseline: industry?.aiBaseline ?? "",
-        standardScoringGuidance: industry?.standardScoringGuidance ?? ""
-      };
-    });
-
     return {
       source: "standard",
       segment,
       scenario,
       allowedIndustryIds,
-      scoringGuidance: buildDefaultScoringGuidance({
-        scenarioTitle: scenario.title,
-        segmentLabel: segment.label,
-        industryContexts: scoringIndustryContexts
-      }),
+      scoringGuidance: null,
     };
   }
 
@@ -11688,21 +12083,19 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
   });
 
   try {
-    const text = await requestTranscription({
-      model: OPENAI_TRANSCRIPTION_MODEL,
-      audioBuffer: file.buffer,
-      fileName: file.originalname || "voice-input.m4a",
-      mimeType: file.mimetype || "audio/m4a"
+    const transcription = await transcribeSimulationAudioFile({
+      file,
     });
+    const text = transcription.text;
     // eslint-disable-next-line no-console
     console.log(
       `[ai-transcription] ${JSON.stringify({
         event: "ai-transcription",
         correlationId,
         userId,
-        durationMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
-        bytes: file.buffer.byteLength,
-        mimeType: file.mimetype || "audio/m4a",
+        durationMs: transcription.durationMs,
+        bytes: transcription.bytes,
+        mimeType: transcription.mimeType,
         textLength: text.trim().length
       })}`
     );
@@ -11722,14 +12115,14 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
     response.json({ text });
     // eslint-disable-next-line no-console
     console.log("[simulation-route]", {
-      route: "transcribe",
-      correlationId,
-      stage: "response_sent",
-      elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
-      bytes: file.buffer.byteLength,
-      mimeType: file.mimetype || "audio/m4a",
-      textLength: text.trim().length,
-    });
+        route: "transcribe",
+        correlationId,
+        stage: "response_sent",
+        elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
+        bytes: transcription.bytes,
+        mimeType: transcription.mimeType,
+        textLength: text.trim().length,
+      });
 
     if (!context.isSuperUser) {
       runSimulationPostResponseTask(async () => {
@@ -11772,6 +12165,437 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
       bytes: file.buffer.byteLength,
       mimeType: file.mimetype || "audio/m4a",
+      error: message,
+    });
+    response.status(503).json({ error: message });
+  }
+});
+
+app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.single("file"), async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  if (!isRemoteAiConfigured()) {
+    response.status(503).json({ error: "Remote AI is disabled for this environment." });
+    return;
+  }
+
+  const file = (request as unknown as { file?: { buffer: Buffer; originalname: string; mimetype: string } }).file;
+  if (!file?.buffer) {
+    response.status(400).json({ error: "Audio file is required." });
+    return;
+  }
+
+  const userId = request.params.userId;
+  const correlationId = resolveSimulationCorrelationId(request);
+  const routeStartedAtMs = Date.now();
+  const rawPayload = typeof request.body?.payload === "string" ? request.body.payload.trim() : "";
+  if (!rawPayload) {
+    response.status(400).json({ error: "payload is required." });
+    return;
+  }
+
+  let parsedPayload: {
+    scenarioId?: string;
+    trainingId?: string;
+    difficulty?: unknown;
+    personaStyle?: unknown;
+    industryId?: unknown;
+    industryBaseline?: unknown;
+    trainingPackId?: unknown;
+    speechPrefetch?: unknown;
+    history?: unknown;
+    simulationSessionId?: unknown;
+    sessionId?: unknown;
+  };
+  try {
+    parsedPayload = JSON.parse(rawPayload) as typeof parsedPayload;
+  } catch {
+    response.status(400).json({ error: "payload must be valid JSON." });
+    return;
+  }
+
+  const payloadRecord = parsedPayload as Record<string, unknown>;
+  const simulationSessionId = resolveRecognizedSimulationSessionId(request, payloadRecord);
+  const scenarioId = parsedPayload.scenarioId?.trim();
+  const trainingId =
+    typeof parsedPayload.trainingId === "string" && parsedPayload.trainingId.trim()
+      ? parsedPayload.trainingId.trim()
+      : null;
+  const difficulty = isDifficulty(parsedPayload.difficulty) ? parsedPayload.difficulty : null;
+  const personaStyle = isPersonaStyle(parsedPayload.personaStyle) ? parsedPayload.personaStyle : null;
+  const submittedTrainingPackId =
+    typeof parsedPayload.trainingPackId === "string" && parsedPayload.trainingPackId.trim()
+      ? parsedPayload.trainingPackId.trim()
+      : null;
+  const requestedSpeechPrefetch = parseSimulationSpeechPrefetchRequest(parsedPayload.speechPrefetch);
+  const history = normalizeDialogueHistory(parsedPayload.history, { maxTurns: 24 });
+
+  if (!scenarioId) {
+    response.status(400).json({ error: "scenarioId is required." });
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=submit-turn userId=${userId} correlationId=${correlationId}`);
+
+  const accessContext = await withDatabaseRead(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return null;
+    }
+
+    const resolvedAccessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!resolvedAccessContext) {
+      return null;
+    }
+
+    const entitlements = computeEntitlements(db, user, new Date(), {
+      allowDuringActiveSimulation: true,
+      actingOrgId: resolvedAccessContext.actingOrgId,
+    });
+    if (!entitlements.canStartSimulation) {
+      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      return null;
+    }
+
+    const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
+      allowDuringActiveSimulation: true,
+    });
+    if (aiBudgetError) {
+      response.status(429).json({ error: aiBudgetError });
+      return null;
+    }
+
+    return {
+      userId: user.id,
+      actingOrgId: resolvedAccessContext.actingOrgId,
+      isSuperUser: resolvedAccessContext.isSuperUser,
+      maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
+    };
+  });
+
+  if (!accessContext) {
+    return;
+  }
+
+  const loadUnifiedRuntime = async (
+    allowTrainingWorkspaceBootstrap: boolean,
+  ): Promise<SimulationRuntimeBundle | { bootstrapOrgId: string } | null> => {
+    return await withDatabaseRead(async (db) => {
+      const user = getUserById(db, accessContext.userId);
+      if (!user) {
+        response.status(404).json({ error: "User not found." });
+        return null;
+      }
+
+      const org = accessContext.actingOrgId ? getOrgById(db, accessContext.actingOrgId) ?? null : null;
+      const runtime = await resolveSimulationRuntimeBundle({
+        db,
+        user,
+        org,
+        actingOrgId: accessContext.actingOrgId,
+        scenarioId,
+        trainingId,
+        difficulty,
+        personaStyle,
+        requestedIndustryId: parsedPayload.industryId,
+        requestedIndustryBaseline: parsedPayload.industryBaseline,
+        submittedTrainingPackId,
+        simulationSessionId,
+        response,
+      });
+
+      if (!runtime || "bootstrapOrgId" in runtime) {
+        const bootstrapRuntime =
+          runtime && "bootstrapOrgId" in runtime
+            ? runtime
+            : null;
+        if (bootstrapRuntime) {
+          return bootstrapRuntime;
+        }
+        return null;
+      }
+
+      return runtime;
+    });
+  };
+
+  const transcriptionPromise = transcribeSimulationAudioFile({ file });
+  let runtimePromise = loadUnifiedRuntime(false);
+  let runtime = await runtimePromise;
+  const bootstrapRuntime =
+    runtime && "bootstrapOrgId" in runtime
+      ? runtime
+      : null;
+  if (bootstrapRuntime) {
+    await withDatabaseWrite(async (db) => {
+      const org = getOrgById(db, bootstrapRuntime.bootstrapOrgId);
+      if (org) {
+        await ensureOrgTrainingWorkspace(db, org);
+      }
+    });
+    runtimePromise = loadUnifiedRuntime(true);
+    runtime = await runtimePromise;
+  }
+
+  const transcription = await transcriptionPromise;
+  if (!runtime || "bootstrapOrgId" in runtime) {
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "submit-turn",
+    correlationId,
+    stage: "context_ready",
+    elapsedMs: Date.now() - routeStartedAtMs,
+    cacheStatus: runtime.cacheStatus,
+    cacheReason: runtime.cacheReason,
+    contextBuildMs: runtime.contextBuildMs,
+    trainingPackLookupMs: runtime.trainingPackLookupMs,
+    historyCount: history.length,
+  });
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[ai-transcription] ${JSON.stringify({
+      event: "ai-transcription",
+      correlationId,
+      userId,
+      durationMs: transcription.durationMs,
+      bytes: transcription.bytes,
+      mimeType: transcription.mimeType,
+      textLength: transcription.text.trim().length,
+      route: "submit-turn",
+    })}`,
+  );
+
+  let transcriptText = transcription.text.trim();
+  let noClearSpeechReason: "empty_transcript" | "assistant_echo" | null = null;
+  if (!transcriptText) {
+    noClearSpeechReason = "empty_transcript";
+  } else if (appearsToEchoAssistantHistory(transcriptText, history)) {
+    transcriptText = "";
+    noClearSpeechReason = "assistant_echo";
+  }
+
+  if (noClearSpeechReason) {
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json({
+      outcome: "no_clear_speech",
+      transcriptText: "",
+      noClearSpeechReason,
+      runtime: {
+        path: "unified_submit",
+        transcriptionMs: transcription.durationMs,
+        cacheStatus: runtime.cacheStatus,
+        cacheReason: runtime.cacheReason,
+        contextBuildMs: runtime.contextBuildMs,
+        trainingPackLookupMs: runtime.trainingPackLookupMs,
+        routeElapsedMs: Date.now() - routeStartedAtMs,
+      },
+    });
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "submit-turn",
+      correlationId,
+      stage: "response_sent",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      outcome: "no_clear_speech",
+      noClearSpeechReason,
+      cacheStatus: runtime.cacheStatus,
+      transcriptionMs: transcription.durationMs,
+    });
+
+    if (!accessContext.isSuperUser) {
+      runSimulationPostResponseTask(async () => {
+        await withDatabaseWrite(async (db) => {
+          const user = getUserById(db, accessContext.userId);
+          if (!user) {
+            return;
+          }
+
+          const event: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "transcribe",
+            userId: user.id,
+            orgId: accessContext.actingOrgId,
+            segmentId: null,
+            scenarioId: null,
+            model: OPENAI_TRANSCRIPTION_MODEL,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            createdAt: nowIso(),
+          };
+
+          await aiUsageEventAccess.append(event);
+        });
+      }, {
+        logKey: "ai-usage:submit-turn-no-clear",
+        description: "failed to persist unified-submit transcribe event",
+      });
+    }
+    return;
+  }
+
+  const turnHistory = [...history, { role: "user" as const, content: transcriptText }];
+  try {
+    const turnResult = await generateSimulationTurnReply({
+      correlationId,
+      history: turnHistory,
+      runtime,
+      requestedSpeechPrefetch,
+    });
+
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json({
+      outcome: "assistant_reply",
+      transcriptText,
+      assistantText: turnResult.assistantText,
+      usage: turnResult.completion.usage,
+      model: turnResult.completion.model,
+      promptVersion: AI_PROMPT_VERSION,
+      speechPrefetch: turnResult.speechPrefetch,
+      runtime: {
+        path: "unified_submit",
+        transcriptionMs: transcription.durationMs,
+        cacheStatus: runtime.cacheStatus,
+        cacheReason: runtime.cacheReason,
+        contextBuildMs: runtime.contextBuildMs,
+        trainingPackLookupMs: runtime.trainingPackLookupMs,
+        modelLatencyMs: turnResult.modelLatencyMs,
+        speechPrefetchTtsLatencyMs: turnResult.speechPrefetch?.ttsLatencyMs ?? null,
+        routeElapsedMs: Date.now() - routeStartedAtMs,
+      },
+    });
+    activateSimulationAiBudgetGrace(accessContext.userId, accessContext.maxSimulationMinutes);
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "submit-turn",
+      correlationId,
+      stage: "response_sent",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      cacheStatus: runtime.cacheStatus,
+      cacheReason: runtime.cacheReason,
+      contextBuildMs: runtime.contextBuildMs,
+      trainingPackLookupMs: runtime.trainingPackLookupMs,
+      transcriptionMs: transcription.durationMs,
+      modelLatencyMs: turnResult.modelLatencyMs,
+      historyCount: turnHistory.length,
+      historyChars: turnResult.historyChars,
+      promptChars: turnResult.promptChars,
+      systemPromptChars: runtime.systemPrompt.length,
+      speechPrefetchRequested: Boolean(requestedSpeechPrefetch),
+      speechPrefetchAvailable: Boolean(turnResult.speechPrefetch),
+      speechPrefetchChunkCount: turnResult.speechPrefetch?.chunkCount ?? null,
+      speechPrefetchTtsLatencyMs: turnResult.speechPrefetch?.ttsLatencyMs ?? null,
+      speechPrefetchBytes: turnResult.speechPrefetch ? Buffer.byteLength(turnResult.speechPrefetch.audioBase64, "base64") : null,
+    });
+
+    if (!accessContext.isSuperUser) {
+      runSimulationPostResponseTask(async () => {
+        await withDatabaseWrite(async (db) => {
+          const user = getUserById(db, accessContext.userId);
+          if (!user) {
+            return;
+          }
+
+          const turnAiDetails = buildPersistedSimulationAiDetails({
+            requestedModel: OPENAI_SIMULATION_MODEL,
+            responseModel: turnResult.completion.model,
+            usage: turnResult.completion.usage,
+            latencyMs: turnResult.modelLatencyMs,
+          });
+
+          const transcribeEvent: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "transcribe",
+            userId: user.id,
+            orgId: accessContext.actingOrgId,
+            segmentId: null,
+            scenarioId: null,
+            model: OPENAI_TRANSCRIPTION_MODEL,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            createdAt: nowIso(),
+          };
+
+          const turnEvent: AiUsageEvent = {
+            id: `ai_${uuid()}`,
+            kind: "turn",
+            userId: user.id,
+            orgId: accessContext.actingOrgId,
+            segmentId: runtime.segment.id,
+            scenarioId: runtime.scenario.id,
+            model: turnAiDetails.responseModel,
+            promptVersion: AI_PROMPT_VERSION,
+            rubricVersion: null,
+            inputTokens: toUsageEventToken(turnAiDetails.tokenUsage.inputTokens),
+            outputTokens: toUsageEventToken(turnAiDetails.tokenUsage.outputTokens),
+            totalTokens: toUsageEventToken(turnAiDetails.tokenUsage.totalTokens),
+            createdAt: nowIso(),
+          };
+
+          await aiUsageEventAccess.append(transcribeEvent);
+          await aiUsageEventAccess.append(turnEvent);
+          appendMobileAuditEvent(db, user, {
+            action: "ai.simulation.turn.details",
+            userId: user.id,
+            orgId: accessContext.actingOrgId,
+            message: "Stored AI details for unified simulation turn.",
+            metadata: {
+              route: "submit-turn",
+              sessionId: simulationSessionId ?? resolveSimulationSessionId(request, payloadRecord),
+              segmentId: runtime.segment.id,
+              scenarioId: runtime.scenario.id,
+              aiDetails: turnAiDetails,
+            },
+          });
+        });
+      }, {
+        logKey: "ai-usage:submit-turn",
+        description: "failed to persist unified-submit ai events",
+      });
+    }
+
+    runSimulationPostResponseTask(async () => {
+      await touchRecognizedSimulationSessionBestEffort({
+        simulationSessionId,
+        trainingPackId: runtime.activeTrainingPack?.id ?? null,
+        logKey: "simulation-session:submit-turn",
+      });
+    }, {
+      logKey: "simulation-session:submit-turn",
+      description: "failed to touch recognized session after unified submit turn",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "AI request failed.";
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "submit-turn",
+      correlationId,
+      stage: "error",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      cacheStatus: runtime.cacheStatus,
+      historyCount: turnHistory.length,
       error: message,
     });
     response.status(503).json({ error: message });
@@ -12379,6 +13203,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     personaStyle?: unknown;
     industryId?: unknown;
     industryBaseline?: unknown;
+    speechPrefetch?: unknown;
     simulationSessionId?: unknown;
     sessionId?: unknown;
   };
@@ -12388,6 +13213,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
   const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const difficulty = isDifficulty(body.difficulty) ? body.difficulty : null;
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
+  const requestedSpeechPrefetch = parseSimulationSpeechPrefetchRequest(body.speechPrefetch);
 
   if (!scenarioId) {
     response.status(400).json({ error: "scenarioId is required." });
@@ -12402,19 +13228,10 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       }
     | {
         user: UserProfile;
-        org: EnterpriseOrg | null;
         actingOrgId: string | null;
         isSuperUser: boolean;
-        segment: SegmentDefinition;
-        scenario: Scenario;
-        difficulty: Difficulty;
-        personaStyle: PersonaStyle;
-        industryId: string | null;
-        industryLabel: string | null;
-        industryBaseline: string | null;
-        counterpartBehaviorGuidance: string | null;
         maxSimulationMinutes: number | null;
-        useModularPromptArchitecture: boolean;
+        runtime: SimulationRuntimeBundle;
         workspaceBootstrapPerformed: boolean;
       }
     | null
@@ -12453,50 +13270,29 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       }
 
       const org = accessContext.actingOrg;
-      const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-      const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
-      if (!resolvedScenario) {
-        const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
-          configForUser,
-          org,
-          scenarioId,
-          existingOrgTrainingCount: org ? listOrgTrainingRecords(db, org.id).length : 0,
-        });
-        if (shouldBootstrapTrainingWorkspace && org && !allowTrainingWorkspaceBootstrap) {
-          return { bootstrapOrgId: org.id };
-        }
-
-        response.status(400).json({ error: "Invalid scenario for this account." });
-        return null;
-      }
-      const useModularPromptArchitecture =
-        USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
-
-      const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
-        configForUser,
-        resolvedScenario.allowedIndustryIds,
-        body.industryId,
-        body.industryBaseline,
-        {
-          preferClientBaselineSnapshot: false,
-          canonicalIndustryDefinitions: db.config.industries
-        }
-      );
-      return {
+      const runtime = await resolveSimulationRuntimeBundle({
+        db,
         user,
         org,
         actingOrgId: accessContext.actingOrgId,
+        scenarioId,
+        trainingId,
+        difficulty,
+        personaStyle,
+        requestedIndustryId: body.industryId,
+        requestedIndustryBaseline: body.industryBaseline,
+        simulationSessionId,
+        response,
+      });
+      if (!runtime || "bootstrapOrgId" in runtime) {
+        return runtime;
+      }
+      return {
+        user,
+        actingOrgId: accessContext.actingOrgId,
         isSuperUser: accessContext.isSuperUser,
-        segment: resolvedScenario.segment,
-        scenario: resolvedScenario.scenario,
-        difficulty: difficulty ?? configForUser.defaultDifficulty,
-        personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
-        industryId: industryPromptContext.industryId,
-        industryLabel: industryPromptContext.industryLabel,
-        industryBaseline: industryPromptContext.industryBaseline,
-        counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
         maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
-        useModularPromptArchitecture,
+        runtime,
         workspaceBootstrapPerformed: allowTrainingWorkspaceBootstrap,
       };
     });
@@ -12526,48 +13322,18 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     stage: "context_ready",
     elapsedMs: Date.now() - routeStartedAtMs,
     workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
-    useModularPromptArchitecture: context.useModularPromptArchitecture,
+    useModularPromptArchitecture: context.runtime.useModularPromptArchitecture,
+    cacheStatus: context.runtime.cacheStatus,
+    cacheReason: context.runtime.cacheReason,
+    contextBuildMs: context.runtime.contextBuildMs,
+    trainingPackLookupMs: context.runtime.trainingPackLookupMs,
   });
 
-  const trainingPackLookupStartedAtMs = Date.now();
-  const activeTrainingPack = context.useModularPromptArchitecture
-    ? await getActiveTrainingPackForOrg(context.actingOrgId, true, {
-        scenarioId: context.scenario.id,
-        onSkip: (message) => logWarnThrottled("training-pack:scope", message)
-      })
-    : null;
-  const trainingPackLookupMs = context.useModularPromptArchitecture
-    ? Date.now() - trainingPackLookupStartedAtMs
-    : 0;
-
   try {
-    const prompts = context.useModularPromptArchitecture
-      ? buildRoleplayPromptsWithOrchestrator({
-          scenario: context.scenario,
-          difficulty: context.difficulty,
-          segmentLabel: context.segment.label,
-          personaStyle: context.personaStyle,
-          industryLabel: context.industryLabel,
-          industryBaseline: context.industryBaseline,
-          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance,
-          trainingPack: activeTrainingPack
-        })
-      : {
-          systemPrompt: buildRoleplaySystemPrompt({
-            scenario: context.scenario,
-            difficulty: context.difficulty,
-            segmentLabel: context.segment.label,
-            personaStyle: context.personaStyle,
-            industryLabel: context.industryLabel,
-            industryBaseline: context.industryBaseline,
-            counterpartBehaviorGuidance: context.counterpartBehaviorGuidance
-          }),
-          openingPrompt: buildOpeningPrompt(context.scenario)
-        };
     const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING);
     const promptMessages = [
-      { role: "system" as const, content: prompts.systemPrompt },
-      { role: "user" as const, content: prompts.openingPrompt }
+      { role: "system" as const, content: context.runtime.systemPrompt },
+      { role: "user" as const, content: context.runtime.openingPrompt }
     ];
     const promptChars = promptMessages.reduce((total, message) => total + message.content.length, 0);
     const { completion, latencyMs } = await requestSimulationCompletion({
@@ -12577,18 +13343,26 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       temperature: 0.8,
       correlationId
     });
+    const assistantText = completion.text.trim();
+    const speechPrefetch = await maybeBuildSimulationSpeechPrefetch({
+      route: "opening",
+      correlationId,
+      text: assistantText,
+      request: requestedSpeechPrefetch,
+    });
 
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({
-      assistantText: completion.text,
+      assistantText,
       usage: completion.usage,
       model: completion.model,
       promptVersion: AI_PROMPT_VERSION,
-      trainingPack: activeTrainingPack
+      speechPrefetch,
+      trainingPack: context.runtime.activeTrainingPack
         ? {
             applied: true,
-            id: activeTrainingPack.id,
-            title: activeTrainingPack.title
+            id: context.runtime.activeTrainingPack.id,
+            title: context.runtime.activeTrainingPack.title
           }
         : {
             applied: false
@@ -12604,10 +13378,18 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       modelLatencyMs: latencyMs,
       workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
       promptChars,
-      systemPromptChars: prompts.systemPrompt.length,
-      openingPromptChars: prompts.openingPrompt.length,
-      trainingPackLookupMs,
+      systemPromptChars: context.runtime.systemPrompt.length,
+      openingPromptChars: context.runtime.openingPrompt.length,
+      trainingPackLookupMs: context.runtime.trainingPackLookupMs,
       maxOutputTokens,
+      cacheStatus: context.runtime.cacheStatus,
+      cacheReason: context.runtime.cacheReason,
+      contextBuildMs: context.runtime.contextBuildMs,
+      speechPrefetchRequested: Boolean(requestedSpeechPrefetch),
+      speechPrefetchAvailable: Boolean(speechPrefetch),
+      speechPrefetchChunkCount: speechPrefetch?.chunkCount ?? null,
+      speechPrefetchTtsLatencyMs: speechPrefetch?.ttsLatencyMs ?? null,
+      speechPrefetchBytes: speechPrefetch ? Buffer.byteLength(speechPrefetch.audioBase64, "base64") : null,
     });
 
     if (!context.isSuperUser) {
@@ -12630,8 +13412,8 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
             kind: "opening",
             userId: user.id,
             orgId: context.actingOrgId,
-            segmentId: context.segment.id,
-            scenarioId: context.scenario.id,
+            segmentId: context.runtime.segment.id,
+            scenarioId: context.runtime.scenario.id,
             model: aiDetails.responseModel,
             promptVersion: AI_PROMPT_VERSION,
             rubricVersion: null,
@@ -12649,8 +13431,8 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
             message: "Stored AI details for simulation opening step.",
             metadata: {
               route: "opening",
-              segmentId: context.segment.id,
-              scenarioId: context.scenario.id,
+              segmentId: context.runtime.segment.id,
+              scenarioId: context.runtime.scenario.id,
               aiDetails
             }
           });
@@ -12664,7 +13446,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     runSimulationPostResponseTask(async () => {
       await touchRecognizedSimulationSessionBestEffort({
         simulationSessionId,
-        trainingPackId: activeTrainingPack?.id ?? null,
+        trainingPackId: context.runtime.activeTrainingPack?.id ?? null,
         logKey: "simulation-session:opening"
       });
     }, {
@@ -12710,6 +13492,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     industryId?: unknown;
     industryBaseline?: unknown;
     trainingPackId?: unknown;
+    speechPrefetch?: unknown;
     history?: unknown;
     sessionId?: unknown;
     transcript?: unknown;
@@ -12725,6 +13508,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   const personaStyle = isPersonaStyle(body.personaStyle) ? body.personaStyle : null;
   const submittedTrainingPackId =
     typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
+  const requestedSpeechPrefetch = parseSimulationSpeechPrefetchRequest(body.speechPrefetch);
   const history = normalizeDialogueHistory(body.history, { maxTurns: 24 });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
@@ -12775,19 +13559,10 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       }
     | {
         user: UserProfile;
-        org: EnterpriseOrg | null;
         actingOrgId: string | null;
         isSuperUser: boolean;
-        segment: SegmentDefinition;
-        scenario: Scenario;
-        difficulty: Difficulty;
-        personaStyle: PersonaStyle;
-        industryId: string | null;
-        industryLabel: string | null;
-        industryBaseline: string | null;
-        counterpartBehaviorGuidance: string | null;
         maxSimulationMinutes: number | null;
-        useModularPromptArchitecture: boolean;
+        runtime: SimulationRuntimeBundle;
         workspaceBootstrapPerformed: boolean;
       }
     | null
@@ -12829,50 +13604,30 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       }
 
       const org = accessContext.actingOrg;
-      const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-      const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
-      if (!resolvedScenario) {
-        const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
-          configForUser,
-          org,
-          scenarioId,
-          existingOrgTrainingCount: org ? listOrgTrainingRecords(db, org.id).length : 0,
-        });
-        if (shouldBootstrapTrainingWorkspace && org && !allowTrainingWorkspaceBootstrap) {
-          return { bootstrapOrgId: org.id };
-        }
-
-        response.status(400).json({ error: "Invalid scenario for this account." });
-        return null;
-      }
-      const useModularPromptArchitecture =
-        USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
-
-      const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
-        configForUser,
-        resolvedScenario.allowedIndustryIds,
-        body.industryId,
-        body.industryBaseline,
-        {
-          preferClientBaselineSnapshot: false,
-          canonicalIndustryDefinitions: db.config.industries
-        }
-      );
-      return {
+      const runtime = await resolveSimulationRuntimeBundle({
+        db,
         user,
         org,
         actingOrgId: accessContext.actingOrgId,
+        scenarioId,
+        trainingId,
+        difficulty,
+        personaStyle,
+        requestedIndustryId: body.industryId,
+        requestedIndustryBaseline: body.industryBaseline,
+        submittedTrainingPackId,
+        simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+        response,
+      });
+      if (!runtime || "bootstrapOrgId" in runtime) {
+        return runtime;
+      }
+      return {
+        user,
+        actingOrgId: accessContext.actingOrgId,
         isSuperUser: accessContext.isSuperUser,
-        segment: resolvedScenario.segment,
-        scenario: resolvedScenario.scenario,
-        difficulty: difficulty ?? configForUser.defaultDifficulty,
-        personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
-        industryId: industryPromptContext.industryId,
-        industryLabel: industryPromptContext.industryLabel,
-        industryBaseline: industryPromptContext.industryBaseline,
-        counterpartBehaviorGuidance: resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario),
         maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
-        useModularPromptArchitecture,
+        runtime,
         workspaceBootstrapPerformed: allowTrainingWorkspaceBootstrap,
       };
     });
@@ -12903,66 +13658,28 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     elapsedMs: Date.now() - routeStartedAtMs,
     workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
     historyCount: history.length,
-    useModularPromptArchitecture: context.useModularPromptArchitecture,
+    useModularPromptArchitecture: context.runtime.useModularPromptArchitecture,
+    cacheStatus: context.runtime.cacheStatus,
+    cacheReason: context.runtime.cacheReason,
+    contextBuildMs: context.runtime.contextBuildMs,
+    trainingPackLookupMs: context.runtime.trainingPackLookupMs,
   });
 
-  const trainingPackLookupStartedAtMs = Date.now();
-  const activeTrainingPack = context.useModularPromptArchitecture
-    ? await resolvePersistedTrainingPackForScenario({
-        orgId: context.actingOrgId,
-        scenarioId: context.scenario.id,
-        useModularPromptArchitecture: true,
-        submittedTrainingPackId
-      })
-    : null;
-  const trainingPackLookupMs = context.useModularPromptArchitecture
-    ? Date.now() - trainingPackLookupStartedAtMs
-    : 0;
-
   try {
-    const systemPrompt = context.useModularPromptArchitecture
-      ? buildRoleplayPromptsWithOrchestrator({
-          scenario: context.scenario,
-          difficulty: context.difficulty,
-          segmentLabel: context.segment.label,
-          personaStyle: context.personaStyle,
-          industryLabel: context.industryLabel,
-          industryBaseline: context.industryBaseline,
-          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance,
-          trainingPack: activeTrainingPack
-        }).systemPrompt
-      : buildRoleplaySystemPrompt({
-          scenario: context.scenario,
-          difficulty: context.difficulty,
-          segmentLabel: context.segment.label,
-          personaStyle: context.personaStyle,
-          industryLabel: context.industryLabel,
-          industryBaseline: context.industryBaseline,
-          counterpartBehaviorGuidance: context.counterpartBehaviorGuidance
-        });
-
-    const temperature = context.difficulty === "hard" ? 0.55 : 0.75;
-    const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_TURN);
-    const promptMessages = [
-      { role: "system" as const, content: systemPrompt },
-      ...history.map((message) => ({ role: message.role, content: message.content })),
-    ];
-    const historyChars = history.reduce((total, message) => total + message.content.length, 0);
-    const promptChars = systemPrompt.length + historyChars;
-    const { completion, latencyMs } = await requestSimulationCompletion({
-      route: "turn",
-      messages: promptMessages,
-      maxOutputTokens,
-      temperature,
-      correlationId
+    const turnResult = await generateSimulationTurnReply({
+      correlationId,
+      history,
+      runtime: context.runtime,
+      requestedSpeechPrefetch,
     });
 
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({
-      assistantText: completion.text,
-      usage: completion.usage,
-      model: completion.model,
-      promptVersion: AI_PROMPT_VERSION
+      assistantText: turnResult.assistantText,
+      usage: turnResult.completion.usage,
+      model: turnResult.completion.model,
+      promptVersion: AI_PROMPT_VERSION,
+      speechPrefetch: turnResult.speechPrefetch,
     });
     activateSimulationAiBudgetGrace(context.user.id, context.maxSimulationMinutes);
     // eslint-disable-next-line no-console
@@ -12971,14 +13688,21 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       correlationId,
       stage: "response_sent",
       elapsedMs: Date.now() - routeStartedAtMs,
-      modelLatencyMs: latencyMs,
+      modelLatencyMs: turnResult.modelLatencyMs,
       workspaceBootstrapPerformed: context.workspaceBootstrapPerformed,
       historyCount: history.length,
-      historyChars,
-      promptChars,
-      systemPromptChars: systemPrompt.length,
-      trainingPackLookupMs,
-      maxOutputTokens,
+      historyChars: turnResult.historyChars,
+      promptChars: turnResult.promptChars,
+      systemPromptChars: context.runtime.systemPrompt.length,
+      trainingPackLookupMs: context.runtime.trainingPackLookupMs,
+      cacheStatus: context.runtime.cacheStatus,
+      cacheReason: context.runtime.cacheReason,
+      contextBuildMs: context.runtime.contextBuildMs,
+      speechPrefetchRequested: Boolean(requestedSpeechPrefetch),
+      speechPrefetchAvailable: Boolean(turnResult.speechPrefetch),
+      speechPrefetchChunkCount: turnResult.speechPrefetch?.chunkCount ?? null,
+      speechPrefetchTtsLatencyMs: turnResult.speechPrefetch?.ttsLatencyMs ?? null,
+      speechPrefetchBytes: turnResult.speechPrefetch ? Buffer.byteLength(turnResult.speechPrefetch.audioBase64, "base64") : null,
     });
 
     if (!context.isSuperUser) {
@@ -12991,9 +13715,9 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
 
           const aiDetails = buildPersistedSimulationAiDetails({
             requestedModel: OPENAI_SIMULATION_MODEL,
-            responseModel: completion.model,
-            usage: completion.usage,
-            latencyMs
+            responseModel: turnResult.completion.model,
+            usage: turnResult.completion.usage,
+            latencyMs: turnResult.modelLatencyMs
           });
 
           const event: AiUsageEvent = {
@@ -13001,8 +13725,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
             kind: "turn",
             userId: user.id,
             orgId: context.actingOrgId,
-            segmentId: context.segment.id,
-            scenarioId: context.scenario.id,
+            segmentId: context.runtime.segment.id,
+            scenarioId: context.runtime.scenario.id,
             model: aiDetails.responseModel,
             promptVersion: AI_PROMPT_VERSION,
             rubricVersion: null,
@@ -13021,8 +13745,8 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
             metadata: {
               route: "turn",
               sessionId,
-              segmentId: context.segment.id,
-              scenarioId: context.scenario.id,
+              segmentId: context.runtime.segment.id,
+              scenarioId: context.runtime.scenario.id,
               aiDetails
             }
           });
@@ -13036,7 +13760,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
     runSimulationPostResponseTask(async () => {
       await touchRecognizedSimulationSessionBestEffort({
         simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
-        trainingPackId: activeTrainingPack?.id ?? null,
+        trainingPackId: context.runtime.activeTrainingPack?.id ?? null,
         logKey: "simulation-session:turn"
       });
     }, {
