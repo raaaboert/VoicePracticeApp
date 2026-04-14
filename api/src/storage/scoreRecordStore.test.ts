@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { Pool } from "pg";
 
 import { SimulationScoreRecord } from "@voicepractice/shared";
 
@@ -201,5 +202,86 @@ test("file score record store refreshSnapshot picks up out-of-band writes and de
     assert.deepEqual(storeA.listRecords(), []);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("postgres score record store appendRecord uses a valid placeholder set for score upserts", async () => {
+  const originalPoolQuery = Pool.prototype.query;
+  const originalPoolConnect = Pool.prototype.connect;
+
+  let capturedInsert:
+    | {
+        text: string;
+        values: unknown[];
+      }
+    | null = null;
+
+  try {
+    Pool.prototype.query = (async function query(
+      this: Pool,
+      text: string,
+      values?: unknown[]
+    ): Promise<{ rows: unknown[]; rowCount: number }> {
+      void this;
+      void text;
+      void values;
+      return { rows: [], rowCount: 0 };
+    }) as typeof Pool.prototype.query;
+
+    Pool.prototype.connect = (async function connect(this: Pool) {
+      void this;
+      return {
+        async query(text: string, values?: unknown[]) {
+          if (text.includes("INSERT INTO score_records")) {
+            capturedInsert = {
+              text,
+              values: Array.isArray(values) ? values : []
+            };
+          }
+          return { rows: [], rowCount: 0 };
+        },
+        release() {
+          return undefined;
+        }
+      };
+    }) as typeof Pool.prototype.connect;
+
+    const store = createScoreRecordStore({
+      provider: "postgres",
+      dbPath: "ignored-for-postgres.json",
+      databaseUrl: "postgres://example.invalid/test",
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+
+    await store.appendRecord(
+      createScore({
+        id: "score_pg",
+        simulationSessionId: "sim_123",
+        communicationScore: 81,
+        outcomeScore: 74,
+        completionLevel: "complete",
+        objectiveAchieved: true
+      })
+    );
+
+    if (!capturedInsert) {
+      assert.fail("expected appendRecord to issue a score_records insert");
+    }
+
+    const insert = capturedInsert as { text: string; values: unknown[] };
+    const placeholderMatches = insert.text.match(/\$(\d+)/g) ?? [];
+    const highestPlaceholder = placeholderMatches.reduce((max: number, token: string) => {
+      const current = Number(token.slice(1));
+      return Number.isFinite(current) ? Math.max(max, current) : max;
+    }, 0);
+
+    assert.equal(highestPlaceholder, insert.values.length);
+    assert.match(insert.text, /\$22::jsonb,\s*\$23::jsonb,\s*\$24,/);
+    assert.doesNotMatch(insert.text, /\$31::timestamptz/);
+  } finally {
+    Pool.prototype.query = originalPoolQuery;
+    Pool.prototype.connect = originalPoolConnect;
   }
 });
