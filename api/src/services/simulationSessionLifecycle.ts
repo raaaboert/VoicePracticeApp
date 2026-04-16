@@ -35,6 +35,7 @@ export interface BuildSimulationSessionStartRecordParams {
   simulationSessionId: string;
   userId: string;
   orgId: string | null;
+  divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
   trainingId: string | null;
@@ -50,6 +51,7 @@ export interface CompleteRecognizedSimulationUsageParams<Db extends object> {
   simulationSessionId: string;
   userId: string;
   orgId: string | null;
+  divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
   trainingId: string | null;
@@ -95,6 +97,7 @@ export function buildSimulationSessionStartRecord(
     simulationSessionId: params.simulationSessionId,
     userId: params.userId,
     orgId: params.orgId,
+    divisionId: params.divisionId ?? undefined,
     segmentId: params.segmentId,
     scenarioId: params.scenarioId,
     trainingId: params.trainingId ?? undefined,
@@ -290,6 +293,7 @@ function buildUsageSessionRecord(params: {
   simulationSessionId: string;
   userId: string;
   orgId: string | null;
+  divisionId: string | null;
   segmentId: string;
   scenarioId: string;
   trainingId: string | null;
@@ -305,6 +309,7 @@ function buildUsageSessionRecord(params: {
     id: buildUsageSessionIdFromSimulationSessionId(params.simulationSessionId),
     userId: params.userId,
     orgId: params.orgId,
+    divisionId: params.divisionId ?? undefined,
     segmentId: params.segmentId,
     scenarioId: params.scenarioId,
     trainingId: params.trainingId ?? undefined,
@@ -388,6 +393,7 @@ export async function completeRecognizedSimulationUsage<Db extends { usageSessio
     scenarioId: params.scenarioId,
     trainingId: params.trainingId,
     resolvedTrainingPackId: params.resolvedTrainingPackId,
+    divisionId: simulationSession.divisionId ?? params.divisionId ?? null,
     startedAt: params.startedAt,
     endedAt: params.endedAt,
     rawDurationSeconds: params.rawDurationSeconds,

@@ -47,6 +47,7 @@ interface SimulationSessionRow {
   simulation_session_id: string;
   user_id: string;
   org_id: string | null;
+  division_id: string | null;
   segment_id: string;
   scenario_id: string;
   training_id: string | null;
@@ -116,6 +117,7 @@ function normalizeSimulationSessionRecord(candidate: unknown): SimulationSession
     simulationSessionId,
     userId,
     orgId: normalizeNullableString((candidate as { orgId?: unknown }).orgId),
+    divisionId: normalizeNullableString((candidate as { divisionId?: unknown }).divisionId) ?? undefined,
     segmentId,
     scenarioId,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
@@ -136,6 +138,7 @@ function mapSimulationSessionRow(row: SimulationSessionRow): SimulationSessionRe
     simulationSessionId: row.simulation_session_id,
     userId: row.user_id,
     orgId: row.org_id,
+    divisionId: row.division_id,
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
     trainingId: row.training_id,
@@ -518,6 +521,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           simulation_session_id,
           user_id,
           org_id,
+          division_id,
           segment_id,
           scenario_id,
           training_id,
@@ -544,6 +548,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           simulation_session_id,
           user_id,
           org_id,
+          division_id,
           segment_id,
           scenario_id,
           training_id,
@@ -578,6 +583,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           simulation_session_id,
           user_id,
           org_id,
+          division_id,
           segment_id,
           scenario_id,
           training_id,
@@ -590,12 +596,13 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           usage_session_record_id
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7,
-          $8::timestamptz, $9::timestamptz, $10::timestamptz, $11, $12::timestamptz, $13
+          $1, $2, $3, $4, $5, $6, $7, $8,
+          $9::timestamptz, $10::timestamptz, $11::timestamptz, $12, $13::timestamptz, $14
         )
         ON CONFLICT (simulation_session_id) DO UPDATE
           SET user_id = EXCLUDED.user_id,
               org_id = EXCLUDED.org_id,
+              division_id = EXCLUDED.division_id,
               segment_id = EXCLUDED.segment_id,
               scenario_id = EXCLUDED.scenario_id,
               training_id = EXCLUDED.training_id,
@@ -611,6 +618,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
         nextRecord.simulationSessionId,
         nextRecord.userId,
         nextRecord.orgId ?? null,
+        nextRecord.divisionId ?? null,
         nextRecord.segmentId,
         nextRecord.scenarioId,
         nextRecord.trainingId ?? null,
@@ -714,6 +722,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               simulation_session_id TEXT PRIMARY KEY,
               user_id TEXT NOT NULL,
               org_id TEXT NULL,
+              division_id TEXT NULL,
               segment_id TEXT NOT NULL,
               scenario_id TEXT NOT NULL,
               training_id TEXT NULL,
@@ -726,6 +735,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               usage_session_record_id TEXT NULL
             );
 
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_user_id ON simulation_sessions (user_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_org_id ON simulation_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_id ON simulation_sessions (scenario_id);

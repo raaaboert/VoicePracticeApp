@@ -10,7 +10,11 @@ import {
   DashboardUserReportResponse,
 } from "@voicepractice/shared";
 
-import { buildDashboardAggregateScopeContext } from "@/src/components/dashboardReportingScope";
+import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
+import {
+  buildDashboardAggregateScopeContext,
+} from "@/src/components/dashboardReportingScope";
+import { canRenderDashboardWorkspaceDivisionFilter } from "@/src/components/dashboardDivisionFilterState";
 import { MetricCard } from "@/src/components/MetricCard";
 import { formatDateTime, formatScore, formatUsageMinutes } from "@/src/lib/formatters";
 
@@ -216,6 +220,17 @@ export function DashboardReportingWorkspace({
           </p>
         </div>
       </header>
+
+      {canRenderDashboardWorkspaceDivisionFilter({
+        viewer,
+        divisionScope: overview?.divisionScope ?? trainingWorkspace?.divisionScope ?? userReport?.divisionScope,
+      }) ? (
+        <DashboardDivisionFilter
+          divisionScope={overview?.divisionScope ?? trainingWorkspace?.divisionScope ?? userReport?.divisionScope}
+          title="Company and division view"
+          description="Company Total keeps the default company-wide dashboard. Division filters narrow this page to historically attributed activity only."
+        />
+      ) : null}
 
       {aggregateScopeContext ? (
         <section className="section-card">

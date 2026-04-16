@@ -13,6 +13,7 @@ function createSession(overrides: Partial<UsageSessionRecord> = {}): UsageSessio
     id: overrides.id ?? "sess_1",
     userId: overrides.userId ?? "user_1",
     orgId: overrides.orgId ?? "org_1",
+    divisionId: overrides.divisionId ?? null,
     segmentId: overrides.segmentId ?? "segment_1",
     scenarioId: overrides.scenarioId ?? "scenario_1",
     trainingId: overrides.trainingId ?? null,
@@ -58,6 +59,7 @@ test("file usage session store appends, queries, gets by id, and deletes by user
         id: "sess_b",
         userId: "user_2",
         orgId: "org_2",
+        divisionId: "division_2",
         segmentId: "segment_2",
         scenarioId: "scenario_2",
         trainingPackId: "pack_2",
@@ -79,6 +81,7 @@ test("file usage session store appends, queries, gets by id, and deletes by user
     );
 
     assert.equal(store.getRecordById("sess_b")?.trainingPackId, "pack_2");
+    assert.equal(store.getRecordById("sess_b")?.divisionId, "division_2");
     assert.deepEqual(
       store.listRecords({ userId: "user_1" }).map((record) => record.id),
       ["sess_a", "sess_c"]

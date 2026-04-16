@@ -5,6 +5,7 @@ import {
   AppConfig,
   CreateOrgTrainingRequest,
   ORG_TRAINING_STATUSES,
+  OrgDivisionRecord,
   OrgTrainingListResponse,
   OrgTrainingStatus,
   OrgTrainingSummary,
@@ -21,6 +22,8 @@ interface EnterpriseTrainingsWorkspaceProps {
   orgName?: string;
   config: AppConfig | null;
   orgUsers?: TrainingWorkspaceAssignableUser[];
+  divisions?: OrgDivisionRecord[];
+  divisionsEnabled?: boolean;
 }
 
 interface TrainingWorkspaceAssignableUser {
@@ -35,6 +38,7 @@ interface TrainingEditorState {
   name: string;
   status: OrgTrainingStatus;
   description: string;
+  divisionId: string;
 }
 
 const NEW_TRAINING_ID = "__new__";
@@ -63,6 +67,7 @@ function createEmptyTrainingEditor(): TrainingEditorState {
     name: "",
     status: "draft",
     description: "",
+    divisionId: "",
   };
 }
 
@@ -82,6 +87,7 @@ function editorFromTraining(training: OrgTrainingSummary): TrainingEditorState {
     name: training.name,
     status: training.status,
     description: sanitizeTrainingDescription(training.description),
+    divisionId: training.divisionId ?? "",
   };
 }
 
@@ -109,6 +115,8 @@ export function EnterpriseTrainingsWorkspace({
   orgName,
   config,
   orgUsers = [],
+  divisions = [],
+  divisionsEnabled = false,
 }: EnterpriseTrainingsWorkspaceProps) {
   const [trainings, setTrainings] = useState<OrgTrainingSummary[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
@@ -120,6 +128,14 @@ export function EnterpriseTrainingsWorkspace({
   const [editorState, setEditorState] = useState<TrainingEditorState>(() => createEmptyTrainingEditor());
   const [trainingSaving, setTrainingSaving] = useState(false);
   const [deletingTrainingId, setDeletingTrainingId] = useState<string | null>(null);
+  const activeDivisions = useMemo(() => divisions.filter((division) => division.active), [divisions]);
+  const divisionLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const division of divisions) {
+      map.set(division.id, division.name);
+    }
+    return map;
+  }, [divisions]);
 
   const refreshWorkspace = async (options?: { preserveTargetId?: string | null; preserveNotice?: boolean }) => {
     if (!orgId) {
@@ -224,6 +240,7 @@ export function EnterpriseTrainingsWorkspace({
             name,
             status: editorState.status,
             description: editorState.description.trim(),
+            divisionId: editorState.divisionId || null,
           } satisfies CreateOrgTrainingRequest),
         });
         replaceTrainingSummary(created, { select: true });
@@ -235,6 +252,7 @@ export function EnterpriseTrainingsWorkspace({
             name,
             status: editorState.status,
             description: editorState.description.trim(),
+            divisionId: editorState.divisionId || null,
           } satisfies UpdateOrgTrainingRequest),
         });
         replaceTrainingSummary(updated, { select: true });
@@ -356,6 +374,7 @@ export function EnterpriseTrainingsWorkspace({
               <thead>
                 <tr>
                   <th>Training Name</th>
+                  <th>Division</th>
                   <th>Created</th>
                   <th>Status</th>
                   <th>Updated</th>
@@ -367,7 +386,7 @@ export function EnterpriseTrainingsWorkspace({
               <tbody>
                 {filteredTrainings.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="small">
+                    <td colSpan={8} className="small">
                       No trainings match your search.
                     </td>
                   </tr>
@@ -401,6 +420,7 @@ export function EnterpriseTrainingsWorkspace({
                         </button>
                         <div className="small">{training.id}</div>
                       </td>
+                      <td>{divisionLabelById.get(training.divisionId ?? "") ?? "General / Unassigned"}</td>
                       <td>{formatDateTime(training.createdAt)}</td>
                       <td>{training.status}</td>
                       <td>{formatDateTime(training.updatedAt)}</td>
@@ -487,6 +507,10 @@ export function EnterpriseTrainingsWorkspace({
                   <strong>{selectedTraining.attachedCustomScenarioCount}</strong>
                 </div>
                 <div className="enterprise-summary-pill">
+                  <span className="small">Division</span>
+                  <strong>{divisionLabelById.get(selectedTraining.divisionId ?? "") ?? "General / Unassigned"}</strong>
+                </div>
+                <div className="enterprise-summary-pill">
                   <span className="small">Updated</span>
                   <strong>{formatDateTime(selectedTraining.updatedAt)}</strong>
                 </div>
@@ -522,6 +546,30 @@ export function EnterpriseTrainingsWorkspace({
                   ))}
                 </select>
               </div>
+              <div className="enterprise-detail-item">
+                <label>Division</label>
+                <select
+                  value={editorState.divisionId}
+                  onChange={(event) =>
+                    setEditorState((prev) => ({
+                      ...prev,
+                      divisionId: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="">General / Unassigned</option>
+                  {activeDivisions.map((division) => (
+                    <option key={division.id} value={division.id}>
+                      {division.name}
+                    </option>
+                  ))}
+                </select>
+                <div className="small" style={{ marginTop: 4 }}>
+                  {divisionsEnabled
+                    ? "Assigned divisions restrict visibility to matching users. Unassigned trainings remain general."
+                    : "Division assignments are retained, but live routing is currently disabled for this company."}
+                </div>
+              </div>
               <div className="enterprise-detail-item" style={{ gridColumn: "1 / -1" }}>
                 <label>Notes</label>
                 <textarea
@@ -536,6 +584,11 @@ export function EnterpriseTrainingsWorkspace({
 
           {!selectedTraining ? (
             <p className="small">Save the training first, then create and manage its packs and custom scenarios below.</p>
+          ) : null}
+          {selectedTraining ? (
+            <p className="small" style={{ marginTop: 12 }}>
+              Custom scenarios do not accept direct division assignments. They inherit routing from this training.
+            </p>
           ) : null}
         </div>
       )}

@@ -189,6 +189,7 @@ export interface EnterpriseOrg {
   softLimitPercentTriggers: number[];
   maxSimulationMinutes: number;
   enableModularPromptArchitecture?: boolean;
+  divisionsEnabled?: boolean;
   customScenarios?: OrgCustomScenario[];
   createdAt: string;
   updatedAt: string;
@@ -230,6 +231,7 @@ export interface UserProfile {
   status: UserStatus;
   orgId: string | null;
   orgRole: OrgUserRole;
+  divisionId?: string | null;
   timezone: string;
   pendingTimezone: string | null;
   pendingTimezoneEffectiveAt: string | null;
@@ -248,6 +250,26 @@ export interface OrgTrainingRecord {
   name: string;
   status: OrgTrainingStatus;
   description: string;
+  divisionId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrgDivisionRecord {
+  id: string;
+  orgId: string;
+  name: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string | null;
+}
+
+export interface OrgStandardScenarioDivisionAssignmentRecord {
+  id: string;
+  orgId: string;
+  scenarioId: string;
+  divisionId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -352,6 +374,7 @@ export interface UsageSessionRecord {
   id: string;
   userId: string;
   orgId: string | null;
+  divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
   trainingId?: string | null;
@@ -369,6 +392,7 @@ export interface SimulationSessionRecord {
   simulationSessionId: string;
   userId: string;
   orgId: string | null;
+  divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
   trainingId?: string | null;
@@ -389,6 +413,7 @@ export interface SimulationScoreRecord {
   simulationSessionId?: string | null;
   userId: string;
   orgId: string | null;
+  divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
   trainingId?: string | null;
@@ -424,6 +449,7 @@ export interface AiUsageEvent {
   kind: AiUsageEventKind;
   userId: string;
   orgId: string | null;
+  divisionId?: string | null;
   segmentId: string | null;
   scenarioId: string | null;
   model: string;
@@ -608,6 +634,18 @@ export interface DashboardViewer {
   isSuperUser: boolean;
   orgId: string | null;
   orgName: string | null;
+}
+
+export interface DashboardDivisionScopeOption {
+  id: string;
+  name: string;
+  active: boolean;
+  deletedAt?: string | null;
+}
+
+export interface DashboardDivisionScope {
+  appliedDivisionId: string | null;
+  divisions: DashboardDivisionScopeOption[];
 }
 
 export const WEB_AUTH_DELIVERY_MODES = ["log_only", "email"] as const;
@@ -817,6 +855,7 @@ export interface DashboardCustomerDetailResponse {
   viewer: DashboardViewer;
   customer: DashboardCustomerSummary;
   insights: DashboardCustomerInsights;
+  divisionScope?: DashboardDivisionScope;
 }
 
 export interface DashboardPortfolioScenarioSummary extends DashboardCustomerScenarioSummary {
@@ -840,6 +879,7 @@ export interface DashboardOverviewResponse {
   topScenarios: DashboardPortfolioScenarioSummary[];
   trainingPackAttribution: DashboardTrainingAttributionSummary;
   coachingInsights: DashboardCoachingInsights;
+  divisionScope?: DashboardDivisionScope;
 }
 
 export interface DashboardTrainingPackReportSummary extends DashboardCustomerTrainingPackSummary {
@@ -1001,6 +1041,7 @@ export interface DashboardTrainingWorkspaceResponse {
   viewer: DashboardViewer;
   generatedAt: string;
   trainings: DashboardTrainingWorkspaceRow[];
+  divisionScope?: DashboardDivisionScope;
 }
 
 export interface DashboardTrainingPackDetailResponse {
@@ -1062,6 +1103,7 @@ export interface DashboardUserReportResponse {
     averageScoreLast30Days: number | null;
   };
   users: DashboardUserReportRow[];
+  divisionScope?: DashboardDivisionScope;
 }
 
 export interface DashboardUserAssignmentSummaryRow {
@@ -1127,16 +1169,63 @@ export interface OrgTrainingListResponse {
   trainings: OrgTrainingSummary[];
 }
 
+export interface OrgDivisionListResponse {
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+    divisionsEnabled: boolean;
+  };
+  divisions: OrgDivisionRecord[];
+}
+
+export interface UpdateOrgDivisionSettingsRequest {
+  divisionsEnabled: boolean;
+}
+
+export interface CreateOrgDivisionRequest {
+  name: string;
+}
+
+export interface UpdateOrgDivisionRequest {
+  name: string;
+}
+
+export interface OrgStandardScenarioDivisionRow {
+  scenarioId: string;
+  segmentId: string;
+  segmentLabel: string;
+  title: string;
+  enabled: boolean;
+  divisionId: string | null;
+}
+
+export interface OrgStandardScenarioDivisionListResponse {
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+    divisionsEnabled: boolean;
+  };
+  rows: OrgStandardScenarioDivisionRow[];
+}
+
+export interface SetOrgStandardScenarioDivisionRequest {
+  divisionId: string | null;
+}
+
 export interface CreateOrgTrainingRequest {
   name?: string;
   status?: OrgTrainingStatus;
   description?: string;
+  divisionId?: string | null;
 }
 
 export interface UpdateOrgTrainingRequest {
   name?: string;
   status?: OrgTrainingStatus;
   description?: string;
+  divisionId?: string | null;
 }
 
 export interface SetOrgTrainingPackAttachmentsRequest {
@@ -1202,6 +1291,7 @@ export interface UpdateUserRequest {
   timezone?: string;
   orgId?: string | null;
   orgRole?: OrgUserRole;
+  divisionId?: string | null;
   manualBonusSeconds?: number;
   dailySecondsCapOverride?: number | null;
   allowDailyOverageThisCycle?: boolean;
@@ -1395,9 +1485,11 @@ export interface ApiDatabase {
   config: AppConfig;
   users: UserProfile[];
   orgs: EnterpriseOrg[];
+  orgDivisions: OrgDivisionRecord[];
   orgTrainings: OrgTrainingRecord[];
   orgTrainingPackAttachments: OrgTrainingPackAttachmentRecord[];
   orgTrainingScenarioAttachments: OrgTrainingScenarioAttachmentRecord[];
+  orgStandardScenarioDivisionAssignments: OrgStandardScenarioDivisionAssignmentRecord[];
   trainingPackAssignments: TrainingPackAssignmentRecord[];
   // Legacy compatibility field; extracted usage-session storage is authoritative.
   usageSessions: UsageSessionRecord[];

@@ -14,6 +14,7 @@ function createScore(overrides: Partial<SimulationScoreRecord> = {}): Simulation
     id: overrides.id ?? "score_1",
     userId: overrides.userId ?? "user_1",
     orgId: overrides.orgId ?? "org_1",
+    divisionId: overrides.divisionId ?? null,
     segmentId: overrides.segmentId ?? "segment_1",
     scenarioId: overrides.scenarioId ?? "scenario_1",
     trainingId: overrides.trainingId ?? null,
@@ -66,6 +67,7 @@ test("file score record store appends, queries, gets by id, and deletes by user"
         id: "score_b",
         userId: "user_2",
         orgId: "org_2",
+        divisionId: "division_2",
         segmentId: "segment_2",
         scenarioId: "scenario_2",
         trainingPackId: "pack_2",
@@ -85,6 +87,7 @@ test("file score record store appends, queries, gets by id, and deletes by user"
     );
 
     assert.equal(store.getRecordById("score_b")?.trainingPackId, "pack_2");
+    assert.equal(store.getRecordById("score_b")?.divisionId, "division_2");
     assert.deepEqual(
       store.listRecords({ userId: "user_1" }).map((record) => record.id),
       ["score_a", "score_c"]
@@ -278,8 +281,8 @@ test("postgres score record store appendRecord uses a valid placeholder set for 
     }, 0);
 
     assert.equal(highestPlaceholder, insert.values.length);
-    assert.match(insert.text, /\$22::jsonb,\s*\$23::jsonb,\s*\$24,/);
-    assert.doesNotMatch(insert.text, /\$31::timestamptz/);
+    assert.match(insert.text, /\$23::jsonb,\s*\$24::jsonb,\s*\$25,/);
+    assert.match(insert.text, /\$31::timestamptz/);
   } finally {
     Pool.prototype.query = originalPoolQuery;
     Pool.prototype.connect = originalPoolConnect;

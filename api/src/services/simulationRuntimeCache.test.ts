@@ -65,6 +65,7 @@ function createLookupInput(overrides?: Partial<{
 
 function createValue() {
   return {
+    source: "standard" as const,
     segment,
     scenario,
     difficulty: "medium" as Difficulty,
@@ -72,6 +73,7 @@ function createValue() {
     industryId: "sales",
     industryLabel: "Sales",
     industryBaseline: "baseline",
+    divisionId: null,
     counterpartBehaviorGuidance: "counterpart guidance",
     useModularPromptArchitecture: true,
     activeTrainingPack: null,

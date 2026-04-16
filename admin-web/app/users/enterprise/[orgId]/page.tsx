@@ -7,13 +7,17 @@ import {
   AppConfig,
   ORG_USER_ROLE_LABELS,
   ORG_USER_ROLES,
+  OrgDivisionListResponse,
   OrgUserRole,
   EnterpriseOrg,
+  OrgDivisionRecord,
   UserProfile,
   UserStatus,
   formatSecondsAsClock,
 } from "@voicepractice/shared";
 import { AdminShell } from "../../../../src/components/AdminShell";
+import { EnterpriseCompanyDivisionsCard } from "../../../../src/components/EnterpriseCompanyDivisionsCard";
+import { EnterpriseStandardScenarioDivisionCard } from "../../../../src/components/EnterpriseStandardScenarioDivisionCard";
 import { EnterpriseTrainingsWorkspace } from "../../../../src/components/EnterpriseTrainingsWorkspace";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../../../src/lib/api";
@@ -24,6 +28,7 @@ interface OrgDashboardUserRow {
   email: string;
   status: UserStatus;
   orgRole: OrgUserRole;
+  divisionId: string | null;
   dashboardAccessEnabled: boolean;
   dailySecondsCapOverride: number | null;
   effectiveDailySecondsCap: number;
@@ -163,6 +168,7 @@ export default function EnterpriseOrgPage() {
   }, [params]);
 
   const [dashboard, setDashboard] = useState<OrgDashboardResponse | null>(null);
+  const [divisionPayload, setDivisionPayload] = useState<OrgDivisionListResponse | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [industries, setIndustries] = useState<AppConfig["industries"]>([]);
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
@@ -208,12 +214,14 @@ export default function EnterpriseOrgPage() {
       setSuccessMessage(null);
     }
     try {
-      const [payload, configPayload, joinRequestsPayload] = await Promise.all([
+      const [payload, configPayload, joinRequestsPayload, divisionsPayload] = await Promise.all([
         adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`),
         adminFetch<AppConfig>("/config"),
         adminFetch<OrgJoinRequestsResponse>("/org-join-requests?status=pending"),
+        adminFetch<OrgDivisionListResponse>(`/orgs/${orgId}/divisions`),
       ]);
       setDashboard(payload);
+      setDivisionPayload(divisionsPayload);
       setConfig(configPayload);
       setIndustries(configPayload.industries ?? []);
       setOrgDomainInput(payload.org.emailDomain ?? "");
@@ -291,6 +299,17 @@ export default function EnterpriseOrgPage() {
     }
     return map;
   }, [industries]);
+  const activeDivisions = useMemo(
+    () => (divisionPayload?.divisions ?? []).filter((division) => division.active),
+    [divisionPayload]
+  );
+  const divisionLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const division of divisionPayload?.divisions ?? []) {
+      map.set(division.id, division.name);
+    }
+    return map;
+  }, [divisionPayload]);
 
   const segmentsActiveLabel =
     activeIndustries.length > 0
@@ -338,6 +357,7 @@ export default function EnterpriseOrgPage() {
         row.userId,
         row.orgRole,
         roleLabel,
+        divisionLabelById.get(row.divisionId ?? "") ?? row.divisionId ?? "",
         row.status,
         row.dashboardAccessEnabled ? "dashboard enabled" : "dashboard disabled",
       ]
@@ -345,7 +365,7 @@ export default function EnterpriseOrgPage() {
         .toLowerCase();
       return searchBlob.includes(deferredUserSearch);
     });
-  }, [dashboard?.users, deferredUserSearch]);
+  }, [dashboard?.users, deferredUserSearch, divisionLabelById]);
 
   const toggleCard = (key: EnterpriseCardKey) => {
     setCardExpanded((prev) => ({
@@ -412,6 +432,7 @@ export default function EnterpriseOrgPage() {
       Pick<
         UserProfile,
         "orgRole" | "status" | "dashboardAccessEnabled" | "dailySecondsCapOverride" | "allowDailyOverageThisCycle"
+        | "divisionId"
       >
     >,
   ) => {
@@ -438,6 +459,7 @@ export default function EnterpriseOrgPage() {
                   ...row,
                   status: updated.status,
                   orgRole: updated.orgRole,
+                  divisionId: updated.divisionId ?? null,
                   dashboardAccessEnabled: updated.dashboardAccessEnabled === true,
                   dailySecondsCapOverride: updated.dailySecondsCapOverride,
                   effectiveDailySecondsCap:
@@ -1101,6 +1123,13 @@ export default function EnterpriseOrgPage() {
             orgName={dashboard?.org.name}
             config={config}
             orgUsers={dashboard?.users ?? []}
+            divisions={divisionPayload?.divisions ?? []}
+            divisionsEnabled={divisionPayload?.org.divisionsEnabled === true}
+          />
+          <EnterpriseStandardScenarioDivisionCard
+            orgId={orgId}
+            divisions={divisionPayload?.divisions ?? []}
+            divisionsEnabled={divisionPayload?.org.divisionsEnabled === true}
           />
         </section>
 
@@ -1129,6 +1158,16 @@ export default function EnterpriseOrgPage() {
               authorization toggle and sign-in still requires a verified email.
             </p>
           </div>
+
+          <EnterpriseCompanyDivisionsCard
+            orgId={orgId}
+            orgName={dashboard?.org.name}
+            divisionsEnabled={divisionPayload?.org.divisionsEnabled === true}
+            divisions={divisionPayload?.divisions ?? []}
+            onChanged={async () => {
+              await load({ preserveSuccessMessage: true });
+            }}
+          />
 
           <div className="card">
             <div className="card-header">
@@ -1259,6 +1298,7 @@ export default function EnterpriseOrgPage() {
                     <tr>
                       <th>Email</th>
                       <th>Role</th>
+                      <th>Division</th>
                       <th>Dashboard Access</th>
                       <th>Locked Out</th>
                       <th>Daily Allotment</th>
@@ -1270,13 +1310,13 @@ export default function EnterpriseOrgPage() {
                   <tbody>
                 {(dashboard?.users ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="small">
+                    <td colSpan={9} className="small">
                       {loading ? "Loading..." : "No users found for this enterprise account."}
                     </td>
                   </tr>
                 ) : filteredOrgUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="small">
+                    <td colSpan={9} className="small">
                       No users match "{userSearch.trim()}".
                     </td>
                   </tr>
@@ -1301,6 +1341,25 @@ export default function EnterpriseOrgPage() {
                                 </option>
                               ))}
                             </select>
+                          </td>
+                          <td>
+                            <select
+                              value={user.divisionId ?? ""}
+                              disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                              onChange={(event) => {
+                                void patchEnterpriseUser(user.userId, { divisionId: event.target.value || null });
+                              }}
+                            >
+                              <option value="">General / Unassigned</option>
+                              {activeDivisions.map((division) => (
+                                <option key={division.id} value={division.id}>
+                                  {division.name}
+                                </option>
+                              ))}
+                            </select>
+                            {user.divisionId ? (
+                              <div className="small">{divisionLabelById.get(user.divisionId) ?? user.divisionId}</div>
+                            ) : null}
                           </td>
                           <td>
                             <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>

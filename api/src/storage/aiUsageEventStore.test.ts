@@ -14,6 +14,7 @@ function createEvent(overrides?: Partial<AiUsageEvent>): AiUsageEvent {
     kind: "turn",
     userId: "user_1",
     orgId: "org_1",
+    divisionId: null,
     segmentId: "segment_1",
     scenarioId: "scenario_1",
     model: "gpt-test",
@@ -44,6 +45,7 @@ test("file ai usage event store appends, reports correctly, and deletes per user
       createEvent({
         id: "evt_user_global",
         userId: "user_a",
+        divisionId: "division_1",
         totalTokens: 10,
         createdAt: "2026-03-31T01:00:00.000Z"
       }),
@@ -86,6 +88,7 @@ test("file ai usage event store appends, reports correctly, and deletes per user
       ranged.map((event) => event.id),
       ["evt_user_global"]
     );
+    assert.equal(ranged[0]?.divisionId, "division_1");
 
     const budget = await store.computeBudgetSnapshot({
       userId: "user_a",

@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSection";
 import { CustomerDetailTabs } from "@/src/components/CustomerDetailTabs";
+import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
 import { DashboardAccessDeniedError, DashboardSessionInvalidError, getAccessibleCustomerDetail, getDashboardViewer } from "@/src/lib/auth";
@@ -17,8 +18,10 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function CustomerDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ customerId: string }>;
+  searchParams: Promise<{ divisionId?: string }>;
 }) {
   const viewer = await getDashboardViewer();
   if (!viewer) {
@@ -30,9 +33,11 @@ export default async function CustomerDetailPage({
   }
 
   const { customerId } = await params;
+  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const divisionId = rawDivisionId ? rawDivisionId : null;
   let payload;
   try {
-    payload = await getAccessibleCustomerDetail(customerId);
+    payload = await getAccessibleCustomerDetail(customerId, divisionId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -93,6 +98,8 @@ export default async function CustomerDetailPage({
           meta={`${customer.customScenarioCount} custom scenarios available`}
         />
       </section>
+
+      <DashboardDivisionFilter divisionScope={payload.divisionScope} />
 
       <section className="section-card">
         <div className="section-header">

@@ -16,6 +16,7 @@ export interface SimulationRuntimeCacheLookupInput {
 }
 
 export interface SimulationRuntimeCacheValue {
+  source: "standard" | "custom";
   segment: SegmentDefinition;
   scenario: Scenario;
   difficulty: Difficulty;
@@ -23,6 +24,7 @@ export interface SimulationRuntimeCacheValue {
   industryId: string | null;
   industryLabel: string | null;
   industryBaseline: string | null;
+  divisionId: string | null;
   counterpartBehaviorGuidance: string | null;
   useModularPromptArchitecture: boolean;
   activeTrainingPack: TrainingPack | null;

@@ -103,6 +103,15 @@ function isProtectedDashboardAuthFailure(error: unknown): boolean {
   return error instanceof DashboardApiError && (error.status === 401 || error.status === 403);
 }
 
+function appendDivisionQuery(pathname: string, divisionId?: string | null): string {
+  if (!divisionId || !divisionId.trim()) {
+    return pathname;
+  }
+
+  const separator = pathname.includes("?") ? "&" : "?";
+  return `${pathname}${separator}divisionId=${encodeURIComponent(divisionId.trim())}`;
+}
+
 async function fetchDashboardApi<T>(
   pathname: string,
   init?: RequestInit & { token?: string | null }
@@ -229,13 +238,19 @@ export async function listAccessibleCustomers(): Promise<DashboardCustomerSummar
   }
 }
 
-export async function getAccessibleCustomerDetail(customerId: string): Promise<DashboardCustomerDetailResponse | null> {
+export async function getAccessibleCustomerDetail(
+  customerId: string,
+  divisionId?: string | null
+): Promise<DashboardCustomerDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
-    return await fetchDashboardApi<DashboardCustomerDetailResponse>(`/dashboard/customers/${customerId}`, {
+    return await fetchDashboardApi<DashboardCustomerDetailResponse>(
+      appendDivisionQuery(`/dashboard/customers/${customerId}`, divisionId),
+      {
       token,
-    });
+      }
+    );
   } catch (error) {
     if (error instanceof DashboardApiError) {
       if (error.status === 404) {
@@ -255,11 +270,11 @@ export async function getAccessibleCustomerDetail(customerId: string): Promise<D
   }
 }
 
-export async function getDashboardOverview(): Promise<DashboardOverviewResponse | null> {
+export async function getDashboardOverview(divisionId?: string | null): Promise<DashboardOverviewResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
-    return await fetchDashboardApi<DashboardOverviewResponse>("/dashboard/overview", { token });
+    return await fetchDashboardApi<DashboardOverviewResponse>(appendDivisionQuery("/dashboard/overview", divisionId), { token });
   } catch (error) {
     if (isProtectedDashboardAuthFailure(error)) {
       throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
@@ -283,11 +298,16 @@ export async function getDashboardTrainingReport(): Promise<DashboardTrainingRep
   }
 }
 
-export async function getDashboardTrainingWorkspace(): Promise<DashboardTrainingWorkspaceResponse | null> {
+export async function getDashboardTrainingWorkspace(
+  divisionId?: string | null
+): Promise<DashboardTrainingWorkspaceResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
-    return await fetchDashboardApi<DashboardTrainingWorkspaceResponse>("/dashboard/reporting/trainings", { token });
+    return await fetchDashboardApi<DashboardTrainingWorkspaceResponse>(
+      appendDivisionQuery("/dashboard/reporting/trainings", divisionId),
+      { token }
+    );
   } catch (error) {
     if (isProtectedDashboardAuthFailure(error)) {
       throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
@@ -354,11 +374,11 @@ export async function getDashboardTrainingPackAssignmentDetail(
   }
 }
 
-export async function getDashboardUserReport(): Promise<DashboardUserReportResponse | null> {
+export async function getDashboardUserReport(divisionId?: string | null): Promise<DashboardUserReportResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
-    return await fetchDashboardApi<DashboardUserReportResponse>("/dashboard/users", { token });
+    return await fetchDashboardApi<DashboardUserReportResponse>(appendDivisionQuery("/dashboard/users", divisionId), { token });
   } catch (error) {
     if (isProtectedDashboardAuthFailure(error)) {
       throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);

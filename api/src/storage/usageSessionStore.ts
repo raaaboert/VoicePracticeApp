@@ -51,6 +51,7 @@ interface UsageSessionRow {
   id: string;
   user_id: string;
   org_id: string | null;
+  division_id: string | null;
   segment_id: string;
   scenario_id: string;
   training_id: string | null;
@@ -136,6 +137,7 @@ function normalizeUsageSessionRecord(candidate: unknown): UsageSessionRecord | n
     id,
     userId,
     orgId: normalizeNullableString((candidate as { orgId?: unknown }).orgId),
+    divisionId: normalizeNullableString((candidate as { divisionId?: unknown }).divisionId) ?? undefined,
     segmentId,
     scenarioId,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
@@ -264,6 +266,7 @@ function mapUsageSessionRow(row: UsageSessionRow): UsageSessionRecord | null {
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
+    divisionId: row.division_id,
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
     trainingId: row.training_id,
@@ -549,6 +552,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             id,
             user_id,
             org_id,
+            division_id,
             segment_id,
             scenario_id,
             training_id,
@@ -560,14 +564,15 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             created_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
-            $8::timestamptz, $9::timestamptz, $10, $11, $12::timestamptz
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            $9::timestamptz, $10::timestamptz, $11, $12, $13::timestamptz
           )
           ON CONFLICT (id) DO NOTHING
           RETURNING
             id,
             user_id,
             org_id,
+            division_id,
             segment_id,
             scenario_id,
             training_id,
@@ -582,6 +587,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           normalized.id,
           normalized.userId,
           normalized.orgId ?? null,
+          normalized.divisionId ?? null,
           normalized.segmentId,
           normalized.scenarioId,
           normalized.trainingId ?? null,
@@ -654,6 +660,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
               id TEXT PRIMARY KEY,
               user_id TEXT NOT NULL,
               org_id TEXT NULL,
+              division_id TEXT NULL,
               segment_id TEXT NOT NULL,
               scenario_id TEXT NOT NULL,
               training_id TEXT NULL,
@@ -665,6 +672,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
               created_at TIMESTAMPTZ NOT NULL
             );
 
+            ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_user_id ON usage_sessions (user_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_id ON usage_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_training_pack_id ON usage_sessions (training_pack_id);
@@ -688,6 +696,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           id,
           user_id,
           org_id,
+          division_id,
           segment_id,
           scenario_id,
           training_id,
@@ -733,6 +742,7 @@ async function upsertUsageSessionRow(
         id,
         user_id,
         org_id,
+        division_id,
         segment_id,
         scenario_id,
         training_id,
@@ -744,12 +754,13 @@ async function upsertUsageSessionRow(
         created_at
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7,
-        $8::timestamptz, $9::timestamptz, $10, $11, $12::timestamptz
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9::timestamptz, $10::timestamptz, $11, $12, $13::timestamptz
       )
       ON CONFLICT (id) DO UPDATE
         SET user_id = EXCLUDED.user_id,
             org_id = EXCLUDED.org_id,
+            division_id = EXCLUDED.division_id,
             segment_id = EXCLUDED.segment_id,
             scenario_id = EXCLUDED.scenario_id,
             training_id = EXCLUDED.training_id,
@@ -764,6 +775,7 @@ async function upsertUsageSessionRow(
       record.id,
       record.userId,
       record.orgId ?? null,
+      record.divisionId ?? null,
       record.segmentId,
       record.scenarioId,
       record.trainingId ?? null,

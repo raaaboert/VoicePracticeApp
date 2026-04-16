@@ -23,6 +23,14 @@ export function normalizeOrgTrainingStatus(value: unknown, fallback: OrgTraining
     : fallback;
 }
 
+function normalizeNullableIdentifier(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 export function ensureOrgTrainingCollections(db: Partial<OrgTrainingCollections>): asserts db is OrgTrainingCollections {
   if (!Array.isArray(db.orgTrainings)) {
     db.orgTrainings = [];
@@ -44,32 +52,34 @@ export function normalizeOrgTrainingRecords(
     return [];
   }
 
-  return entries
-    .map((entry) => {
-      const candidate = (entry ?? {}) as Partial<OrgTrainingRecord>;
-      const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
-      const orgId = typeof candidate.orgId === "string" ? candidate.orgId.trim() : "";
-      const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
-      if (!id || !orgId || !name || !validOrgIds.has(orgId)) {
-        return null;
-      }
+  const normalized: OrgTrainingRecord[] = [];
+  for (const entry of entries) {
+    const candidate = (entry ?? {}) as Partial<OrgTrainingRecord>;
+    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+    const orgId = typeof candidate.orgId === "string" ? candidate.orgId.trim() : "";
+    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+    if (!id || !orgId || !name || !validOrgIds.has(orgId)) {
+      continue;
+    }
 
-      const createdAt =
-        typeof candidate.createdAt === "string" && candidate.createdAt.trim() ? candidate.createdAt : now;
-      const updatedAt =
-        typeof candidate.updatedAt === "string" && candidate.updatedAt.trim() ? candidate.updatedAt : createdAt;
+    const createdAt =
+      typeof candidate.createdAt === "string" && candidate.createdAt.trim() ? candidate.createdAt : now;
+    const updatedAt =
+      typeof candidate.updatedAt === "string" && candidate.updatedAt.trim() ? candidate.updatedAt : createdAt;
 
-      return {
-        id,
-        orgId,
-        name: name.slice(0, 160),
-        status: normalizeOrgTrainingStatus(candidate.status, "draft"),
-        description: typeof candidate.description === "string" ? candidate.description.trim().slice(0, 4_000) : "",
-        createdAt,
-        updatedAt,
-      } satisfies OrgTrainingRecord;
-    })
-    .filter((entry): entry is OrgTrainingRecord => Boolean(entry));
+    normalized.push({
+      id,
+      orgId,
+      name: name.slice(0, 160),
+      status: normalizeOrgTrainingStatus(candidate.status, "draft"),
+      description: typeof candidate.description === "string" ? candidate.description.trim().slice(0, 4_000) : "",
+      divisionId: normalizeNullableIdentifier(candidate.divisionId),
+      createdAt,
+      updatedAt,
+    });
+  }
+
+  return normalized;
 }
 
 export function normalizeOrgTrainingPackAttachments(
@@ -249,6 +259,7 @@ export function seedLegacyOrgTraining(params: {
     name: LEGACY_TEST_TRAINING_NAME,
     status: "active",
     description: LEGACY_TEST_TRAINING_DESCRIPTION,
+    divisionId: undefined,
     createdAt: params.now,
     updatedAt: params.now,
   };

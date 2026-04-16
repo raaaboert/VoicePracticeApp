@@ -74,9 +74,14 @@ import {
   MobileOnboardRequest,
   MobileOnboardResponse,
   AdminTrainingPackAssignmentsResponse,
+  CreateOrgDivisionRequest,
   CreateOrgTrainingRequest,
   OrgAccountsExportResponse,
   OrgAccountsExportRow,
+  OrgDivisionListResponse,
+  OrgDivisionRecord,
+  OrgStandardScenarioDivisionAssignmentRecord,
+  OrgStandardScenarioDivisionListResponse,
   OrgTrainingListResponse,
   OrgTrainingRecord,
   OrgTrainingSummary,
@@ -91,6 +96,7 @@ import {
   RecordSimulationScoreRequest,
   Scenario,
   SegmentDefinition,
+  SetOrgStandardScenarioDivisionRequest,
   SetOrgTrainingPackAttachmentsRequest,
   SetOrgTrainingScenarioAttachmentsRequest,
   SetTrainingPackAssignmentsRequest,
@@ -108,6 +114,8 @@ import {
   TIER_IDS,
   TierDefinition,
   RoleIndustryDefinition,
+  UpdateOrgDivisionRequest,
+  UpdateOrgDivisionSettingsRequest,
   UpdateOrgTrainingRequest,
   UpdateOrgCustomScenarioRequest,
   UpdateConfigRequest,
@@ -178,6 +186,10 @@ import {
   resolveDashboardViewer
 } from "./services/dashboardAuthorization.js";
 import {
+  filterRecordsByDivision,
+  resolveDashboardDivisionFilter,
+} from "./services/dashboardDivisionFiltering.js";
+import {
   buildDashboardCoachingInsights,
   buildNormalizedSimulationScoreThemesFromArtifact,
 } from "./services/coachingThemeNormalization.js";
@@ -235,6 +247,27 @@ import {
   replaceOrgTrainingScenarioAttachments,
   seedLegacyOrgTraining,
 } from "./services/orgTrainingWorkspace.js";
+import {
+  clearDivisionAssignmentsForDeletedDivision,
+  ensureOrgDivisionCollections,
+  findOrgStandardScenarioDivisionAssignmentRecord,
+  findOrgDivisionRecord,
+  isDivisionActive,
+  isDivisionVisibleToUser,
+  listOrgVisibleStandardScenarios,
+  listOrgDivisions,
+  normalizeOrgDivisionRecords,
+  normalizeOrgStandardScenarioDivisionAssignments,
+  resolveLiveDivisionAttribution,
+  resolveStandardScenarioActiveDivisionId,
+  resolveTrainingActiveDivisionId,
+  resolveUserActiveDivisionId,
+  sanitizeOrgDivisionName,
+} from "./services/orgDivisions.js";
+import {
+  doesRecognizedSimulationSessionMatchContext,
+  resolvePreferredSimulationDivisionId,
+} from "./services/simulationDivisionAnchoring.js";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config();
@@ -1067,6 +1100,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
 }
 
 interface SimulationRuntimeBundle {
+  source: "standard" | "custom";
   segment: SegmentDefinition;
   scenario: Scenario;
   difficulty: Difficulty;
@@ -1074,6 +1108,7 @@ interface SimulationRuntimeBundle {
   industryId: string | null;
   industryLabel: string | null;
   industryBaseline: string | null;
+  divisionId: string | null;
   counterpartBehaviorGuidance: string | null;
   useModularPromptArchitecture: boolean;
   activeTrainingPack: TrainingPack | null;
@@ -1201,6 +1236,7 @@ async function resolveSimulationRuntimeBundle(params: {
       };
 
   const runtimeBundle = {
+    source: resolvedScenario.source,
     segment: resolvedScenario.segment,
     scenario: resolvedScenario.scenario,
     difficulty: effectiveDifficulty,
@@ -1208,6 +1244,13 @@ async function resolveSimulationRuntimeBundle(params: {
     industryId: industryPromptContext.industryId,
     industryLabel: industryPromptContext.industryLabel,
     industryBaseline: industryPromptContext.industryBaseline,
+    divisionId: resolveSimulationDivisionIdForContext({
+      db: params.db,
+      user: params.user,
+      org: params.org,
+      trainingId: params.trainingId,
+      resolvedScenario,
+    }),
     counterpartBehaviorGuidance,
     useModularPromptArchitecture,
     activeTrainingPack,
@@ -1235,11 +1278,13 @@ async function resolveSimulationRuntimeBundle(params: {
     {
       segment: runtimeBundle.segment,
       scenario: runtimeBundle.scenario,
+      source: runtimeBundle.source,
       difficulty: runtimeBundle.difficulty,
       personaStyle: runtimeBundle.personaStyle,
       industryId: runtimeBundle.industryId,
       industryLabel: runtimeBundle.industryLabel,
       industryBaseline: runtimeBundle.industryBaseline,
+      divisionId: runtimeBundle.divisionId,
       counterpartBehaviorGuidance: runtimeBundle.counterpartBehaviorGuidance,
       useModularPromptArchitecture: runtimeBundle.useModularPromptArchitecture,
       activeTrainingPack: runtimeBundle.activeTrainingPack,
@@ -2071,7 +2116,8 @@ function ensureOrgContractFields(org: EnterpriseOrg): EnterpriseOrg {
       pendingPerUserDailySecondsCap !== null && pendingPerUserDailySecondsCapEffectiveAt
         ? pendingPerUserDailySecondsCapEffectiveAt
         : null,
-    enableModularPromptArchitecture: org.enableModularPromptArchitecture === true
+    enableModularPromptArchitecture: org.enableModularPromptArchitecture === true,
+    divisionsEnabled: org.divisionsEnabled === true
   };
 }
 
@@ -2544,9 +2590,11 @@ function createDefaultDatabase(): ApiDatabase {
     config,
     users: [],
     orgs: [],
+    orgDivisions: [],
     orgTrainings: [],
     orgTrainingPackAttachments: [],
     orgTrainingScenarioAttachments: [],
+    orgStandardScenarioDivisionAssignments: [],
     trainingPackAssignments: [],
     // Legacy compatibility placeholder. Persisted app-state snapshots strip usageSessions once the
     // dedicated store takes authority, but the in-memory shape stays stable for shared helpers.
@@ -2645,6 +2693,7 @@ function ensureDemoEnterpriseData(db: {
       renewalTotalUsd: 0,
       softLimitPercentTriggers: [75, 90],
       maxSimulationMinutes: DEFAULT_MAX_SIMULATION_MINUTES,
+      divisionsEnabled: false,
       customScenarios: [],
       createdAt: demoOrg.establishedAt,
       updatedAt: demoOrg.establishedAt
@@ -3328,36 +3377,73 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
         };
       })
   );
-
-  const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => ({
-    ...user,
-    isPlatformAdmin: (user as Partial<UserProfile>).isPlatformAdmin === true,
-    isSuperUser: (user as Partial<UserProfile>).isSuperUser === true,
-    dashboardAccessEnabled:
-      (user as Partial<UserProfile>).accountType === "enterprise"
-        ? (user as Partial<UserProfile>).dashboardAccessEnabled === true
-        : false,
-    manualBonusSeconds: clampNonNegativeInteger((user as Partial<UserProfile>).manualBonusSeconds, 0),
-    emailVerifiedAt:
-      typeof (user as Partial<UserProfile>).emailVerifiedAt === "string" ||
-      (user as Partial<UserProfile>).emailVerifiedAt === null
-        ? ((user as Partial<UserProfile>).emailVerifiedAt as string | null)
-        : (user as Partial<UserProfile>).createdAt ?? now,
-    dailySecondsCapOverride: normalizeOptionalSecondsCap((user as Partial<UserProfile>).dailySecondsCapOverride),
-    allowDailyOverageThisCycle: (user as Partial<UserProfile>).allowDailyOverageThisCycle === true,
-    dailyOverageExpiresAt: normalizeOptionalIsoDate((user as Partial<UserProfile>).dailyOverageExpiresAt),
-    orgRole:
-      (user as Partial<UserProfile>).accountType === "enterprise"
-        ? normalizeOrgUserRole((user as Partial<UserProfile>).orgRole)
-        : "user"
-  }));
   const validOrgIds = new Set(normalizedOrgs.map((org) => org.id));
+  const normalizedOrgDivisions = normalizeOrgDivisionRecords(
+    (candidate as Partial<ApiDatabase>).orgDivisions,
+    validOrgIds,
+    now
+  );
+  const activeDivisionIdsByOrg = new Map<string, Set<string>>();
+  for (const division of normalizedOrgDivisions) {
+    if (!division.active) {
+      continue;
+    }
+    const divisionIds = activeDivisionIdsByOrg.get(division.orgId) ?? new Set<string>();
+    divisionIds.add(division.id);
+    activeDivisionIdsByOrg.set(division.orgId, divisionIds);
+  }
+
+  const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => {
+    const candidateUser = user as Partial<UserProfile>;
+    const normalizedDivisionId =
+      typeof candidateUser.divisionId === "string" ? candidateUser.divisionId.trim() : null;
+    const activeDivisionIds =
+      candidateUser.accountType === "enterprise" && typeof candidateUser.orgId === "string"
+        ? activeDivisionIdsByOrg.get(candidateUser.orgId)
+        : null;
+
+    return {
+      ...user,
+      isPlatformAdmin: candidateUser.isPlatformAdmin === true,
+      isSuperUser: candidateUser.isSuperUser === true,
+      dashboardAccessEnabled: candidateUser.accountType === "enterprise" ? candidateUser.dashboardAccessEnabled === true : false,
+      manualBonusSeconds: clampNonNegativeInteger(candidateUser.manualBonusSeconds, 0),
+      emailVerifiedAt:
+        typeof candidateUser.emailVerifiedAt === "string" || candidateUser.emailVerifiedAt === null
+          ? (candidateUser.emailVerifiedAt as string | null)
+          : candidateUser.createdAt ?? now,
+      dailySecondsCapOverride: normalizeOptionalSecondsCap(candidateUser.dailySecondsCapOverride),
+      allowDailyOverageThisCycle: candidateUser.allowDailyOverageThisCycle === true,
+      dailyOverageExpiresAt: normalizeOptionalIsoDate(candidateUser.dailyOverageExpiresAt),
+      divisionId:
+        candidateUser.accountType === "enterprise" &&
+        typeof candidateUser.orgId === "string" &&
+        normalizedDivisionId &&
+        activeDivisionIds?.has(normalizedDivisionId)
+          ? normalizedDivisionId
+          : null,
+      orgRole: candidateUser.accountType === "enterprise" ? normalizeOrgUserRole(candidateUser.orgRole) : "user"
+    };
+  });
   const normalizedOrgTrainings = normalizeOrgTrainingRecords(
     (candidate as Partial<ApiDatabase>).orgTrainings,
     validOrgIds,
     now
-  );
+  ).map((training) => ({
+    ...training,
+    divisionId: activeDivisionIdsByOrg.get(training.orgId)?.has(training.divisionId ?? "") ? training.divisionId ?? null : null
+  }));
   const validTrainingIds = new Set(normalizedOrgTrainings.map((training) => training.id));
+  const validStandardScenarioIds = new Set(
+    config.segments.flatMap((segment) => (segment.scenarios ?? []).map((scenario) => scenario.id))
+  );
+  const normalizedOrgStandardScenarioDivisionAssignments = normalizeOrgStandardScenarioDivisionAssignments(
+    (candidate as Partial<ApiDatabase>).orgStandardScenarioDivisionAssignments,
+    validOrgIds,
+    new Set(normalizedOrgDivisions.filter((division) => division.active).map((division) => division.id)),
+    validStandardScenarioIds,
+    now
+  );
   const normalizedOrgTrainingPackAttachments = normalizeOrgTrainingPackAttachments(
     (candidate as Partial<ApiDatabase>).orgTrainingPackAttachments,
     validOrgIds,
@@ -3384,9 +3470,11 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     config,
     users: normalizedUsers,
     orgs: normalizedOrgs,
+    orgDivisions: normalizedOrgDivisions,
     orgTrainings: normalizedOrgTrainings,
     orgTrainingPackAttachments: normalizedOrgTrainingPackAttachments,
     orgTrainingScenarioAttachments: normalizedOrgTrainingScenarioAttachments,
+    orgStandardScenarioDivisionAssignments: normalizedOrgStandardScenarioDivisionAssignments,
     trainingPackAssignments: Array.isArray((candidate as Partial<ApiDatabase>).trainingPackAssignments)
       ? ((candidate as Partial<ApiDatabase>).trainingPackAssignments ?? []).map((assignment) => ({
           ...assignment,
@@ -4550,21 +4638,77 @@ function listScoreRecords(
   return scoreRecordAccess.list(db, query);
 }
 
-function filterOrgUsageSessions(db: ApiDatabase, orgId: string, startMs: number, endMs: number): UsageSessionRecord[] {
-  return usageSessionAccess.listByOrgRange(db, {
-    orgId,
-    startedAtFrom: new Date(startMs),
-    startedAtBefore: new Date(endMs)
-  });
+function filterOrgUsageSessions(
+  db: ApiDatabase,
+  orgId: string,
+  startMs: number,
+  endMs: number,
+  divisionId: string | null = null
+): UsageSessionRecord[] {
+  return filterRecordsByDivision(
+    usageSessionAccess.listByOrgRange(db, {
+      orgId,
+      startedAtFrom: new Date(startMs),
+      startedAtBefore: new Date(endMs)
+    }),
+    divisionId
+  );
 }
 
-function filterOrgScoreRecords(db: ApiDatabase, orgId: string, startMs: number, endMs: number): SimulationScoreRecord[] {
-  return scoreRecordAccess.listByOrgRange(db, {
-    orgId,
-    endedAtFrom: new Date(startMs),
-    endedAtBefore: new Date(endMs),
-    conclusiveOnly: true
-  });
+function filterOrgScoreRecords(
+  db: ApiDatabase,
+  orgId: string,
+  startMs: number,
+  endMs: number,
+  divisionId: string | null = null
+): SimulationScoreRecord[] {
+  return filterRecordsByDivision(
+    scoreRecordAccess.listByOrgRange(db, {
+      orgId,
+      endedAtFrom: new Date(startMs),
+      endedAtBefore: new Date(endMs),
+      conclusiveOnly: true
+    }),
+    divisionId
+  );
+}
+
+function filterDashboardAccessibleUsageSessions(
+  db: ApiDatabase,
+  orgIds: Set<string>,
+  startMs: number,
+  endMs: number,
+  divisionId: string | null = null
+): UsageSessionRecord[] {
+  return filterRecordsByDivision(
+    listUsageSessions(db).filter((session) => {
+      if (!session.orgId || !orgIds.has(session.orgId)) {
+        return false;
+      }
+      const startedAtMs = new Date(session.startedAt).getTime();
+      return Number.isFinite(startedAtMs) && startedAtMs >= startMs && startedAtMs < endMs;
+    }),
+    divisionId
+  );
+}
+
+function filterDashboardAccessibleScoreRecords(
+  db: ApiDatabase,
+  orgIds: Set<string>,
+  startMs: number,
+  endMs: number,
+  divisionId: string | null = null
+): SimulationScoreRecord[] {
+  return filterRecordsByDivision(
+    listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
+      if (!record.orgId || !orgIds.has(record.orgId)) {
+        return false;
+      }
+      const endedAtMs = new Date(record.endedAt).getTime();
+      return Number.isFinite(endedAtMs) && endedAtMs >= startMs && endedAtMs < endMs;
+    }),
+    divisionId
+  );
 }
 
 function formatDashboardMonthLabel(date: Date): string {
@@ -4925,11 +5069,15 @@ async function listTrainingPacksForDashboardOrg(orgId: string): Promise<Training
   }
 }
 
-async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg): Promise<DashboardCustomerSummary> {
+async function buildDashboardCustomerSummary(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  divisionId: string | null = null
+): Promise<DashboardCustomerSummary> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
   const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
-  const usage = buildOrgUsageSnapshot(db, normalizedOrg, now);
+  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId);
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now.getTime() - 60 * 24 * 60 * 60 * 1000;
   const customerUsers = db.users
@@ -4940,20 +5088,20 @@ async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg
   const simulationsLast30Days = usageSessionAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     startedAtFrom: new Date(last30DaysThreshold)
-  }).length;
+  }).filter((session) => !divisionId || (session.divisionId ?? null) === divisionId).length;
 
   const scoresThisPeriod = scoreRecordAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     endedAtFrom: new Date(billing.periodStartAt),
     endedAtBefore: new Date(billing.periodEndAt),
     conclusiveOnly: true
-  });
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime());
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
+  }).filter((record) => !divisionId || (record.divisionId ?? null) === divisionId);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime(), divisionId);
+  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
   const trainingPacks = await listTrainingPacksForDashboardOrg(normalizedOrg.id);
   const customScenarioCount = ensureOrgCustomScenarioCollection(normalizedOrg).filter((scenario) => scenario.enabled !== false).length;
-  const orgSessions = listUsageSessions(db, { orgId: normalizedOrg.id });
-  const orgScores = listScoreRecords(db, { orgId: normalizedOrg.id });
+  const orgSessions = filterRecordsByDivision(listUsageSessions(db, { orgId: normalizedOrg.id }), divisionId);
+  const orgScores = filterRecordsByDivision(listScoreRecords(db, { orgId: normalizedOrg.id }), divisionId);
   const latestActivityAt = maxIsoDate([
     ...orgSessions.map((session) => session.endedAt),
     ...orgScores.map((record) => record.endedAt)
@@ -4987,14 +5135,19 @@ async function buildDashboardCustomerSummary(db: ApiDatabase, org: EnterpriseOrg
   };
 }
 
-function buildDashboardCustomerTrend(db: ApiDatabase, org: EnterpriseOrg, now: Date): DashboardCustomerTrendPoint[] {
+function buildDashboardCustomerTrend(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  now: Date,
+  divisionId: string | null = null
+): DashboardCustomerTrendPoint[] {
   const points: DashboardCustomerTrendPoint[] = [];
 
   for (let offset = 2; offset >= 0; offset -= 1) {
     const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
-    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime());
-    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime());
+    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId);
+    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId);
     const billedSeconds = sessions.reduce(
       (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
       0
@@ -5017,13 +5170,14 @@ function buildDashboardCustomerUserRows(
   db: ApiDatabase,
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
-  now: Date
+  now: Date,
+  divisionId: string | null = null
 ): DashboardCustomerUserPerformanceSummary[] {
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
-  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime());
-  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime());
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime(), divisionId);
+  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime(), divisionId);
 
-  return db.users
+  const rows = db.users
     .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
     .sort((left, right) => left.email.localeCompare(right.email))
     .map((user): DashboardCustomerUserPerformanceSummary => {
@@ -5055,20 +5209,23 @@ function buildDashboardCustomerUserRows(
         lastScenarioTitle: latestScenarioId ? scenarioCatalog.get(latestScenarioId)?.title ?? latestScenarioId : null
       };
     });
+
+  return divisionId ? rows.filter((row) => row.simulationsLast30Days > 0 || row.averageScoreLast30Days !== null) : rows;
 }
 
 function buildDashboardCustomerScenarioRows(
   db: ApiDatabase,
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
-  now: Date
+  now: Date,
+  divisionId: string | null = null
 ): DashboardCustomerScenarioSummary[] {
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs);
-  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs);
-  const previousScores = filterOrgScoreRecords(db, org.id, previous30DaysThreshold, last30DaysThreshold);
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs, divisionId);
+  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs, divisionId);
+  const previousScores = filterOrgScoreRecords(db, org.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
 
   const aggregates = new Map<
     string,
@@ -5178,15 +5335,22 @@ async function buildDashboardTrainingPackRows(
   db: ApiDatabase,
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
-  now: Date
+  now: Date,
+  divisionId: string | null = null
 ): Promise<DashboardCustomerTrainingPackSummary[]> {
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const availableScenarioCount = scenarioCatalog.size;
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const allPackSessions = listUsageSessions(db, { orgId: org.id }).filter((session) => Boolean(session.trainingPackId));
-  const allPackScores = listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter((record) => Boolean(record.trainingPackId));
+  const allPackSessions = filterRecordsByDivision(
+    listUsageSessions(db, { orgId: org.id }).filter((session) => Boolean(session.trainingPackId)),
+    divisionId
+  );
+  const allPackScores = filterRecordsByDivision(
+    listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter((record) => Boolean(record.trainingPackId)),
+    divisionId
+  );
   const currentSessions = allPackSessions.filter((session) => {
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
@@ -5441,7 +5605,8 @@ function buildDashboardTrainingWorkspaceScenarioRows(params: {
 async function buildDashboardTrainingWorkspaceRowsForOrg(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  now: Date
+  now: Date,
+  divisionId: string | null = null
 ): Promise<DashboardTrainingWorkspaceRow[]> {
   ensureOrgTrainingCollections(db);
   const normalizedOrg = ensureOrgContractFields(org);
@@ -5453,11 +5618,11 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
+  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
 
-  return buildOrgTrainingSummaries({
+  const rows = buildOrgTrainingSummaries({
     db,
     orgId: normalizedOrg.id,
     validTrainingPackIds,
@@ -5555,16 +5720,21 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
       scenarios,
     };
   });
+
+  return divisionId
+    ? rows.filter((training) => training.summary.totalAttemptsLast30Days > 0 || training.summary.averageScoreLast30Days !== null)
+    : rows;
 }
 
 async function buildDashboardTrainingWorkspace(
   db: ApiDatabase,
-  viewer: DashboardViewer
+  viewer: DashboardViewer,
+  divisionId: string | null = null
 ): Promise<DashboardTrainingWorkspaceResponse> {
   const now = new Date();
   const trainings = (
     await Promise.all(
-      listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardTrainingWorkspaceRowsForOrg(db, org, now))
+      listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardTrainingWorkspaceRowsForOrg(db, org, now, divisionId))
     )
   )
     .flat()
@@ -5590,20 +5760,32 @@ async function buildDashboardTrainingWorkspace(
     viewer,
     generatedAt: now.toISOString(),
     trainings,
+    divisionScope:
+      viewer.accessType === "customer_dashboard_user" && viewer.orgId
+        ? resolveDashboardDivisionFilter({
+            db,
+            viewer,
+            requestedDivisionId: divisionId,
+          }).divisionScope
+        : undefined,
   };
 }
 
-async function buildDashboardCustomerInsights(db: ApiDatabase, org: EnterpriseOrg): Promise<DashboardCustomerInsights> {
+async function buildDashboardCustomerInsights(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  divisionId: string | null = null
+): Promise<DashboardCustomerInsights> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
-  const usage = buildOrgUsageSnapshot(db, normalizedOrg, now);
+  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId);
   const scenarioCatalog = buildDashboardScenarioCatalog(db, normalizedOrg);
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold);
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
+  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
 
   return {
     usage: {
@@ -5614,10 +5796,10 @@ async function buildDashboardCustomerInsights(db: ApiDatabase, org: EnterpriseOr
       allottedMinutesThisPeriod: usage.allottedMinutes,
       usagePercentThisPeriod: Math.round(usage.usagePercent * 10) / 10
     },
-    trend: buildDashboardCustomerTrend(db, normalizedOrg, now),
-    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now),
-    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now),
-    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now),
+    trend: buildDashboardCustomerTrend(db, normalizedOrg, now, divisionId),
+    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
+    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
+    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
     trainingPackAttribution: buildTrainingPackAttributionSummary({
       usageSessions: recentSessions,
       scoreRecords: recentScores
@@ -5656,8 +5838,14 @@ async function getDashboardAccessibleCustomer(
   return buildDashboardCustomerSummary(db, org);
 }
 
-async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardOverviewResponse> {
-  const customers = await listDashboardAccessibleCustomers(db, viewer);
+async function buildDashboardOverview(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  divisionId: string | null = null
+): Promise<DashboardOverviewResponse> {
+  const customers = await Promise.all(
+    listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardCustomerSummary(db, org, divisionId))
+  );
   const accessibleOrgIds = new Set(customers.map((customer) => customer.orgId));
   const now = new Date();
   const nowMs = now.getTime();
@@ -5679,7 +5867,13 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
           return [];
         }
 
-        const scenarios = buildDashboardCustomerScenarioRows(db, org, buildDashboardScenarioCatalog(db, org), now).slice(0, 5);
+        const scenarios = buildDashboardCustomerScenarioRows(
+          db,
+          org,
+          buildDashboardScenarioCatalog(db, org),
+          now,
+          divisionId
+        ).slice(0, 5);
         return scenarios.map(
           (scenario): DashboardPortfolioScenarioSummary => ({
             ...scenario,
@@ -5698,27 +5892,27 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
       return (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
     })
     .slice(0, 6);
-  const recentSessions = listUsageSessions(db).filter((session) => {
-    if (!session.orgId || !accessibleOrgIds.has(session.orgId)) {
-      return false;
-    }
-    const startedAtMs = new Date(session.startedAt).getTime();
-    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
-  });
-  const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
-    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
-      return false;
-    }
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
-  });
-  const previousScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
-    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
-      return false;
-    }
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
-  });
+  const recentSessions = filterDashboardAccessibleUsageSessions(
+    db,
+    accessibleOrgIds,
+    last30DaysThreshold,
+    nowMs,
+    divisionId
+  );
+  const recentScores = filterDashboardAccessibleScoreRecords(
+    db,
+    accessibleOrgIds,
+    last30DaysThreshold,
+    nowMs,
+    divisionId
+  );
+  const previousScores = filterDashboardAccessibleScoreRecords(
+    db,
+    accessibleOrgIds,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId
+  );
 
   return {
     viewer,
@@ -5745,7 +5939,15 @@ async function buildDashboardOverview(db: ApiDatabase, viewer: DashboardViewer):
       currentScores: recentScores,
       previousScores,
       includeNormalizationDiagnostics: viewer.accessType === "super_user"
-    })
+    }),
+    divisionScope:
+      viewer.accessType === "customer_dashboard_user" && viewer.orgId
+        ? resolveDashboardDivisionFilter({
+            db,
+            viewer,
+            requestedDivisionId: divisionId,
+          }).divisionScope
+        : undefined,
   };
 }
 
@@ -6330,7 +6532,11 @@ async function buildDashboardAttemptDetail(
   };
 }
 
-async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardUserReportResponse> {
+async function buildDashboardUserReport(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  divisionId: string | null = null
+): Promise<DashboardUserReportResponse> {
   const orgs = listDashboardAccessibleOrgs(db, viewer);
   const orgById = new Map(orgs.map((org) => [org.id, org] as const));
   const accessibleOrgIds = new Set(orgs.map((org) => org.id));
@@ -6338,27 +6544,15 @@ async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = listUsageSessions(db).filter((session) => {
-    if (!session.orgId || !accessibleOrgIds.has(session.orgId)) {
-      return false;
-    }
-    const startedAtMs = new Date(session.startedAt).getTime();
-    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
-  });
-  const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
-    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
-      return false;
-    }
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
-  });
-  const previousScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
-    if (!record.orgId || !accessibleOrgIds.has(record.orgId)) {
-      return false;
-    }
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
-  });
+  const recentSessions = filterDashboardAccessibleUsageSessions(db, accessibleOrgIds, last30DaysThreshold, nowMs, divisionId);
+  const recentScores = filterDashboardAccessibleScoreRecords(db, accessibleOrgIds, last30DaysThreshold, nowMs, divisionId);
+  const previousScores = filterDashboardAccessibleScoreRecords(
+    db,
+    accessibleOrgIds,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId
+  );
   const scenarioCatalogByOrg = new Map<string, Map<string, DashboardScenarioCatalogEntry>>(
     orgs.map((org) => [org.id, buildDashboardScenarioCatalog(db, org)])
   );
@@ -6419,6 +6613,7 @@ async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer
           latestTrainingPackId && trainingPackTitles ? trainingPackTitles.get(latestTrainingPackId) ?? latestTrainingPackId : null
       };
     })
+    .filter((row) => !divisionId || row.simulationsLast30Days > 0 || row.scoredAttemptsLast30Days > 0)
     .sort((left, right) => {
       const latestDelta =
         (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
@@ -6437,7 +6632,15 @@ async function buildDashboardUserReport(db: ApiDatabase, viewer: DashboardViewer
       simulationsLast30Days: users.reduce((total, user) => total + user.simulationsLast30Days, 0),
       averageScoreLast30Days: averageScore(recentScores)
     },
-    users
+    users,
+    divisionScope:
+      viewer.accessType === "customer_dashboard_user" && viewer.orgId
+        ? resolveDashboardDivisionFilter({
+            db,
+            viewer,
+            requestedDivisionId: divisionId,
+          }).divisionScope
+        : undefined,
   };
 }
 
@@ -6461,6 +6664,123 @@ function createOrgTrainingPackAttachmentId(): string {
 
 function createOrgTrainingScenarioAttachmentId(): string {
   return `training_scenario_attachment_${uuid()}`;
+}
+
+function createOrgDivisionId(): string {
+  return `division_${uuid()}`;
+}
+
+function createOrgStandardScenarioDivisionAssignmentId(): string {
+  return `standard_scenario_division_${uuid()}`;
+}
+
+function buildOrgDivisionListPayload(db: ApiDatabase, org: EnterpriseOrg): OrgDivisionListResponse {
+  ensureOrgDivisionCollections(db);
+  return {
+    generatedAt: nowIso(),
+    org: {
+      id: org.id,
+      name: org.name,
+      divisionsEnabled: org.divisionsEnabled === true,
+    },
+    divisions: listOrgDivisions(db, org.id, { includeDeleted: true }),
+  };
+}
+
+function resolveDivisionSelectionForOrg(
+  db: Pick<ApiDatabase, "orgDivisions">,
+  orgId: string,
+  divisionId: unknown
+): { ok: true; divisionId: string | null } | { ok: false; error: string } {
+  if (divisionId === undefined) {
+    return { ok: true, divisionId: null };
+  }
+  if (divisionId === null) {
+    return { ok: true, divisionId: null };
+  }
+  if (typeof divisionId !== "string") {
+    return { ok: false, error: "divisionId must be a string or null." };
+  }
+
+  const normalizedDivisionId = divisionId.trim();
+  if (!normalizedDivisionId) {
+    return { ok: true, divisionId: null };
+  }
+
+  const division = findOrgDivisionRecord(db, orgId, normalizedDivisionId);
+  if (!division || division.active !== true) {
+    return { ok: false, error: "divisionId must reference an active division in this company." };
+  }
+
+  return { ok: true, divisionId: division.id };
+}
+
+function countActiveOrgDivisions(db: Pick<ApiDatabase, "orgDivisions">, orgId: string): number {
+  return listOrgDivisions(db, orgId).length;
+}
+
+function buildOrgStandardScenarioDivisionListPayload(
+  db: ApiDatabase,
+  org: EnterpriseOrg
+): OrgStandardScenarioDivisionListResponse {
+  ensureOrgDivisionCollections(db);
+  const visibleRows = listOrgVisibleStandardScenarios({
+    config: db.config,
+    org,
+  });
+  const visibleScenarioIds = new Set(visibleRows.map((row) => row.scenarioId));
+  const rows = [
+    ...visibleRows.map((row) => ({
+      ...row,
+      divisionId: resolveStandardScenarioActiveDivisionId(db, org.id, row.scenarioId),
+    })),
+    ...db.orgStandardScenarioDivisionAssignments
+      .filter((entry) => entry.orgId === org.id && !visibleScenarioIds.has(entry.scenarioId))
+      .map((entry) => {
+        for (const segment of db.config.segments) {
+          const scenario = (segment.scenarios ?? []).find((candidate) => candidate.id === entry.scenarioId);
+          if (scenario) {
+            return {
+              scenarioId: scenario.id,
+              segmentId: segment.id,
+              segmentLabel: segment.label,
+              title: scenario.title,
+              enabled: scenario.enabled !== false,
+              divisionId: resolveStandardScenarioActiveDivisionId(db, org.id, scenario.id),
+            };
+          }
+        }
+        return null;
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null),
+  ]
+    .sort((left, right) => {
+      if (left.segmentLabel !== right.segmentLabel) {
+        return left.segmentLabel.localeCompare(right.segmentLabel, undefined, { sensitivity: "base" });
+      }
+      return left.title.localeCompare(right.title, undefined, { sensitivity: "base" });
+    });
+
+  return {
+    generatedAt: nowIso(),
+    org: {
+      id: org.id,
+      name: org.name,
+      divisionsEnabled: org.divisionsEnabled === true,
+    },
+    rows,
+  };
+}
+
+function isStandardScenarioVisibleToOrg(
+  db: Pick<ApiDatabase, "config">,
+  org: EnterpriseOrg,
+  scenarioId: string
+): boolean {
+  return listOrgVisibleStandardScenarios({
+    config: db.config,
+    org,
+  }).some((row) => row.scenarioId === scenarioId);
 }
 
 async function ensureOrgTrainingWorkspace(db: ApiDatabase, org: EnterpriseOrg): Promise<void> {
@@ -6727,6 +7047,60 @@ function resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario: ResolvedMo
   }
 
   return guidance.slice(0, MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS);
+}
+
+function resolveSimulationDivisionIdForContext(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  org: EnterpriseOrg | null;
+  trainingId?: string | null;
+  resolvedScenario: ResolvedMobileScenarioContext;
+}): string | null {
+  if (!params.org) {
+    return null;
+  }
+
+  return resolveLiveDivisionAttribution({
+    db: params.db,
+    orgId: params.org.id,
+    user: params.user,
+    trainingId: params.trainingId ?? null,
+    scenarioSource: params.resolvedScenario.source,
+    scenarioId: params.resolvedScenario.scenario.id,
+    divisionsEnabled: params.org.divisionsEnabled === true,
+  });
+}
+
+async function resolveAnchoredSimulationDivisionId(params: {
+  simulationSessionId: string | null;
+  userId: string;
+  orgId: string | null;
+  scenarioId: string;
+  trainingId: string | null;
+  fallbackDivisionId: string | null;
+}): Promise<string | null> {
+  if (!params.simulationSessionId) {
+    return params.fallbackDivisionId ?? null;
+  }
+
+  try {
+    const recognizedSession = await simulationSessionStore.getById(params.simulationSessionId);
+    return resolvePreferredSimulationDivisionId({
+      recognizedSession,
+      userId: params.userId,
+      orgId: params.orgId,
+      scenarioId: params.scenarioId,
+      trainingId: params.trainingId,
+      fallbackDivisionId: params.fallbackDivisionId,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarnThrottled(
+      "simulation-division-anchor",
+      `[simulation-division-anchor] failed to load recognized session ${params.simulationSessionId}: ${message}`
+    );
+    return params.fallbackDivisionId ?? null;
+  }
 }
 
 function buildCustomScenarioGenerationPromptPreview(input: {
@@ -7287,8 +7661,16 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: 
     enabledIndustryIds
   );
   const scopedIndustryIdSet = new Set(scopedIndustryIds);
+  const divisionsEnabled = org.divisionsEnabled === true;
+  const userDivisionId = divisionsEnabled ? resolveUserActiveDivisionId(db, org.id, user) : null;
   const mobileCustomScenarios = getMobileReadyOrgCustomScenarios(org, db.config);
-  const mobileTrainings = getMobileReadyOrgTrainings(db, org, db.config);
+  const mobileTrainings = getMobileReadyOrgTrainings(db, org, db.config).filter((training) =>
+    isDivisionVisibleToUser({
+      divisionsEnabled,
+      userDivisionId,
+      contentDivisionId: divisionsEnabled ? resolveTrainingActiveDivisionId(db, org.id, training.id) : null,
+    })
+  );
   const mobileTrainingScenarioIdSet = new Set(
     mobileTrainings.flatMap((training) => training.attachedCustomScenarioIds)
   );
@@ -7304,7 +7686,23 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: 
   for (const customScenario of trainingScopedCustomScenarios) {
     allowedRoleSegmentIds.add(customScenario.segmentId);
   }
-  const filteredSegments = db.config.segments.filter((segment) => allowedRoleSegmentIds.has(segment.id));
+  const filteredSegments = db.config.segments
+    .filter((segment) => allowedRoleSegmentIds.has(segment.id))
+    .map((segment) => {
+      if (!divisionsEnabled) {
+        return segment;
+      }
+      return {
+        ...segment,
+        scenarios: (segment.scenarios ?? []).filter((scenario) =>
+          isDivisionVisibleToUser({
+            divisionsEnabled,
+            userDivisionId,
+            contentDivisionId: resolveStandardScenarioActiveDivisionId(db, org.id, scenario.id),
+          })
+        ),
+      };
+    });
   const filteredIndustries = (db.config.industries ?? []).filter(
     (entry) => entry.enabled && (scopedIndustryIdSet.has(entry.id) || customIndustryIdSet.has(entry.id))
   );
@@ -7644,6 +8042,38 @@ function buildOrgUsageSnapshot(db: ApiDatabase, org: EnterpriseOrg, now: Date): 
     ),
     now
   });
+}
+
+function buildDashboardOrgUsageSnapshot(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  now: Date,
+  divisionId: string | null = null
+): OrgUsageSnapshot {
+  const baseSnapshot = buildOrgUsageSnapshot(db, org, now);
+  if (!divisionId) {
+    return baseSnapshot;
+  }
+
+  const filteredSessions = filterOrgUsageSessions(
+    db,
+    org.id,
+    new Date(baseSnapshot.periodStartAt).getTime(),
+    new Date(baseSnapshot.periodEndAt).getTime(),
+    divisionId
+  );
+  const usedSeconds = usageSessionAccess.sumBilledSeconds(filteredSessions);
+  const usedMinutes = usedSeconds / 60;
+  const usagePercent = baseSnapshot.allottedSeconds > 0 ? (usedSeconds / baseSnapshot.allottedSeconds) * 100 : 0;
+  const remainingMinutes = Math.max(0, baseSnapshot.allottedMinutes - usedMinutes);
+
+  return {
+    ...baseSnapshot,
+    usedSeconds,
+    usedMinutes,
+    usagePercent,
+    remainingMinutes,
+  };
 }
 
 function getOrgAdmins(db: ApiDatabase, orgId: string): Array<{ id: string; email: string; status: UserStatus }> {
@@ -8427,17 +8857,35 @@ app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, res
 
 app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardOverview(db, request.dashboard!.viewer);
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const payload = await buildDashboardOverview(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
 
 app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingWrite(async (db) => {
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
     for (const org of listDashboardAccessibleOrgs(db, request.dashboard!.viewer)) {
       await ensureOrgTrainingWorkspace(db, org);
     }
-    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!.viewer);
+    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -8491,10 +8939,22 @@ app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: Das
       return;
     }
 
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: orgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+
     const payload: DashboardCustomerDetailResponse = {
       viewer: request.dashboard!.viewer,
-      customer,
-      insights: await buildDashboardCustomerInsights(db, org)
+      customer: await buildDashboardCustomerSummary(db, org, divisionFilter.appliedDivisionId),
+      insights: await buildDashboardCustomerInsights(db, org, divisionFilter.appliedDivisionId),
+      divisionScope: divisionFilter.divisionScope,
     };
     response.json(payload);
   });
@@ -8542,7 +9002,16 @@ app.get(
 
 app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardUserReport(db, request.dashboard!.viewer);
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const payload = await buildDashboardUserReport(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -8688,6 +9157,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       renewalTotalUsd: normalizeRenewalTotalUsd(body.renewalTotalUsd, 0),
       softLimitPercentTriggers: normalizeSoftLimitPercentTriggers(body.softLimitPercentTriggers, [75, 90]),
       maxSimulationMinutes: normalizeMaxSimulationMinutes(body.maxSimulationMinutes),
+      divisionsEnabled: false,
       customScenarios: [],
       createdAt: now,
       updatedAt: now
@@ -8892,6 +9362,316 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       }
     });
     response.json(org);
+  });
+});
+
+app.get("/orgs/:orgId/divisions", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+
+  await withDatabaseRead(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    response.json(buildOrgDivisionListPayload(db, org));
+  });
+});
+
+app.patch("/orgs/:orgId/divisions/settings", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const body = request.body as UpdateOrgDivisionSettingsRequest;
+
+  if (typeof body.divisionsEnabled !== "boolean") {
+    response.status(400).json({ error: "divisionsEnabled must be a boolean." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    if (body.divisionsEnabled && countActiveOrgDivisions(db, org.id) === 0) {
+      response.status(400).json({ error: "Create at least one active division before enabling divisions." });
+      return;
+    }
+
+    org.divisionsEnabled = body.divisionsEnabled;
+    org.updatedAt = nowIso();
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.divisions.settings.updated",
+      orgId: org.id,
+      message: `${body.divisionsEnabled ? "Enabled" : "Disabled"} divisions for ${org.name}.`,
+      metadata: {
+        divisionsEnabled: body.divisionsEnabled,
+        activeDivisionCount: countActiveOrgDivisions(db, org.id),
+      },
+    });
+
+    response.json(buildOrgDivisionListPayload(db, org));
+  });
+});
+
+app.post("/orgs/:orgId/divisions", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const body = request.body as CreateOrgDivisionRequest;
+
+  await withDatabase(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const name = sanitizeOrgDivisionName(body.name);
+    if (!name) {
+      response.status(400).json({ error: "name is required." });
+      return;
+    }
+
+    const duplicate = db.orgDivisions.find(
+      (entry) => entry.orgId === org.id && entry.active && entry.name.localeCompare(name, undefined, { sensitivity: "base" }) === 0
+    );
+    if (duplicate) {
+      response.status(409).json({ error: "An active division with this name already exists." });
+      return;
+    }
+
+    const now = nowIso();
+    db.orgDivisions.push({
+      id: createOrgDivisionId(),
+      orgId: org.id,
+      name,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    });
+    org.updatedAt = now;
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.divisions.created",
+      orgId: org.id,
+      message: `Created division "${name}" for ${org.name}.`,
+      metadata: { divisionName: name },
+    });
+
+    response.status(201).json(buildOrgDivisionListPayload(db, org));
+  });
+});
+
+app.patch("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const divisionId = request.params.divisionId?.trim();
+  const body = request.body as UpdateOrgDivisionRequest;
+
+  if (!divisionId) {
+    response.status(400).json({ error: "divisionId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const division = findOrgDivisionRecord(db, org.id, divisionId);
+    if (!division) {
+      response.status(404).json({ error: "Division not found." });
+      return;
+    }
+
+    const name = sanitizeOrgDivisionName(body.name);
+    if (!name) {
+      response.status(400).json({ error: "name is required." });
+      return;
+    }
+
+    const duplicate = db.orgDivisions.find(
+      (entry) =>
+        entry.orgId === org.id &&
+        entry.id !== division.id &&
+        entry.active &&
+        entry.name.localeCompare(name, undefined, { sensitivity: "base" }) === 0
+    );
+    if (duplicate) {
+      response.status(409).json({ error: "An active division with this name already exists." });
+      return;
+    }
+
+    division.name = name;
+    division.updatedAt = nowIso();
+    org.updatedAt = division.updatedAt;
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.divisions.updated",
+      orgId: org.id,
+      message: `Updated division "${division.name}" for ${org.name}.`,
+      metadata: { divisionId: division.id, active: division.active },
+    });
+
+    response.json(buildOrgDivisionListPayload(db, org));
+  });
+});
+
+app.delete("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const divisionId = request.params.divisionId?.trim();
+
+  if (!divisionId) {
+    response.status(400).json({ error: "divisionId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    const division = findOrgDivisionRecord(db, org.id, divisionId);
+    if (!division || division.active !== true) {
+      response.status(404).json({ error: "Active division not found." });
+      return;
+    }
+
+    if (org.divisionsEnabled === true && countActiveOrgDivisions(db, org.id) <= 1) {
+      response.status(409).json({
+        error: "Disable divisions first or create another active division before deleting the last active division.",
+      });
+      return;
+    }
+
+    const now = nowIso();
+    division.active = false;
+    division.deletedAt = now;
+    division.updatedAt = now;
+    const cleared = clearDivisionAssignmentsForDeletedDivision({
+      db,
+      orgId: org.id,
+      divisionId: division.id,
+    });
+    org.updatedAt = now;
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.divisions.deleted",
+      orgId: org.id,
+      message: `Deleted division "${division.name}" for ${org.name}.`,
+      metadata: {
+        divisionId: division.id,
+        clearedUserCount: cleared.clearedUserCount,
+        clearedTrainingCount: cleared.clearedTrainingCount,
+        clearedStandardScenarioAssignmentCount: cleared.clearedStandardScenarioAssignmentCount,
+      },
+    });
+
+    response.json(buildOrgDivisionListPayload(db, org));
+  });
+});
+
+app.get("/orgs/:orgId/standard-scenarios/divisions", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+
+  await withDatabaseRead(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    response.json(buildOrgStandardScenarioDivisionListPayload(db, org));
+  });
+});
+
+app.put("/orgs/:orgId/standard-scenarios/:scenarioId/division", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const scenarioId = request.params.scenarioId?.trim();
+  const body = request.body as SetOrgStandardScenarioDivisionRequest;
+
+  if (!scenarioId) {
+    response.status(400).json({ error: "scenarioId is required." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    ensureOrgDivisionCollections(db);
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
+    if (!getConfigScenarioById(db.config, scenarioId)) {
+      response.status(404).json({ error: "Standard scenario not found." });
+      return;
+    }
+
+    const existing = findOrgStandardScenarioDivisionAssignmentRecord(db, org.id, scenarioId);
+    const selection = resolveDivisionSelectionForOrg(db, org.id, body.divisionId);
+    if (!selection.ok) {
+      response.status(400).json({ error: selection.error });
+      return;
+    }
+
+    if (
+      selection.divisionId !== null &&
+      !isStandardScenarioVisibleToOrg(db, org, scenarioId) &&
+      !existing
+    ) {
+      response.status(400).json({ error: "Standard scenario is not available to this company." });
+      return;
+    }
+
+    const now = nowIso();
+    if (selection.divisionId === null) {
+      db.orgStandardScenarioDivisionAssignments = db.orgStandardScenarioDivisionAssignments.filter(
+        (entry) => !(entry.orgId === org.id && entry.scenarioId === scenarioId)
+      );
+    } else if (existing) {
+      existing.divisionId = selection.divisionId;
+      existing.updatedAt = now;
+    } else {
+      const assignment: OrgStandardScenarioDivisionAssignmentRecord = {
+        id: createOrgStandardScenarioDivisionAssignmentId(),
+        orgId: org.id,
+        scenarioId,
+        divisionId: selection.divisionId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      db.orgStandardScenarioDivisionAssignments.push(assignment);
+    }
+
+    org.updatedAt = now;
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.standard_scenario_division.updated",
+      orgId: org.id,
+      message: `Updated division routing for standard scenario ${scenarioId} in ${org.name}.`,
+      metadata: {
+        scenarioId,
+        divisionId: selection.divisionId,
+      },
+    });
+
+    response.json({
+      scenarioId,
+      divisionId: selection.divisionId,
+    });
   });
 });
 
@@ -9865,6 +10645,11 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
       response.status(400).json({ error: "name is required." });
       return;
     }
+    const divisionSelection = resolveDivisionSelectionForOrg(db, org.id, body.divisionId);
+    if (!divisionSelection.ok) {
+      response.status(400).json({ error: divisionSelection.error });
+      return;
+    }
 
     const now = nowIso();
     const training: OrgTrainingRecord = {
@@ -9873,6 +10658,7 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
       name: name.slice(0, 160),
       status: normalizeOrgTrainingStatus(body.status, "draft"),
       description: typeof body.description === "string" ? body.description.trim().slice(0, 4_000) : "",
+      divisionId: divisionSelection.divisionId,
       createdAt: now,
       updatedAt: now,
     };
@@ -9924,7 +10710,7 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
       return;
     }
 
-    if (patch.name === undefined && patch.description === undefined && patch.status === undefined) {
+    if (patch.name === undefined && patch.description === undefined && patch.status === undefined && patch.divisionId === undefined) {
       response.status(400).json({ error: "At least one patch field is required." });
       return;
     }
@@ -9946,6 +10732,16 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
     }
     if (patch.status !== undefined) {
       training.status = normalizeOrgTrainingStatus(patch.status, training.status);
+    }
+    if (patch.divisionId !== undefined) {
+      const divisionSelection = resolveDivisionSelectionForOrg(db, org.id, patch.divisionId);
+      if (!divisionSelection.ok) {
+        response.status(400).json({ error: divisionSelection.error });
+        return;
+      }
+      training.divisionId = divisionSelection.divisionId;
+    } else if (!isDivisionActive(db, org.id, training.divisionId)) {
+      training.divisionId = null;
     }
 
     touchOrgTrainingRecord(training, nowIso());
@@ -10233,6 +11029,7 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
         email: user.email,
         status: user.status,
         orgRole: user.orgRole,
+        divisionId: user.divisionId ?? null,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         dailySecondsCapOverride: user.dailySecondsCapOverride,
         effectiveDailySecondsCap:
@@ -10588,6 +11385,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       status: "active",
       orgId,
       orgRole: body.accountType === "enterprise" ? normalizeOrgUserRole(body.orgRole) : "user",
+      divisionId: null,
       timezone,
       pendingTimezone: null,
       pendingTimezoneEffectiveAt: null,
@@ -10639,6 +11437,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       status: user.status,
       orgId: user.orgId,
       orgRole: user.orgRole,
+      divisionId: user.divisionId ?? null,
       manualBonusSeconds: user.manualBonusSeconds,
       dailySecondsCapOverride: user.dailySecondsCapOverride,
       allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
@@ -10740,10 +11539,24 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       }
     } else {
       user.orgRole = "user";
+      user.divisionId = null;
       user.dashboardAccessEnabled = false;
       user.dailySecondsCapOverride = null;
       user.allowDailyOverageThisCycle = false;
       user.dailyOverageExpiresAt = null;
+    }
+
+    if (user.accountType === "enterprise" && user.orgId) {
+      if (patch.divisionId !== undefined) {
+        const divisionSelection = resolveDivisionSelectionForOrg(db, user.orgId, patch.divisionId);
+        if (!divisionSelection.ok) {
+          response.status(400).json({ error: divisionSelection.error });
+          return;
+        }
+        user.divisionId = divisionSelection.divisionId;
+      } else if (!isDivisionActive(db, user.orgId, user.divisionId)) {
+        user.divisionId = null;
+      }
     }
 
     if (patch.manualBonusSeconds !== undefined) {
@@ -10819,6 +11632,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           status: user.status,
           orgId: user.orgId,
           orgRole: user.orgRole,
+          divisionId: user.divisionId ?? null,
           manualBonusSeconds: user.manualBonusSeconds,
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
@@ -12137,6 +12951,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
             kind: "transcribe",
             userId: user.id,
             orgId: context.actingOrgId,
+            divisionId: null,
             segmentId: null,
             scenarioId: null,
             model: OPENAI_TRANSCRIPTION_MODEL,
@@ -12421,6 +13236,14 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
 
     if (!accessContext.isSuperUser) {
       runSimulationPostResponseTask(async () => {
+        const anchoredDivisionId = await resolveAnchoredSimulationDivisionId({
+          simulationSessionId,
+          userId: accessContext.userId,
+          orgId: accessContext.actingOrgId,
+          scenarioId: runtime.scenario.id,
+          trainingId,
+          fallbackDivisionId: runtime.divisionId,
+        });
         await withDatabaseWrite(async (db) => {
           const user = getUserById(db, accessContext.userId);
           if (!user) {
@@ -12432,6 +13255,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
             kind: "transcribe",
             userId: user.id,
             orgId: accessContext.actingOrgId,
+            divisionId: anchoredDivisionId,
             segmentId: null,
             scenarioId: null,
             model: OPENAI_TRANSCRIPTION_MODEL,
@@ -12509,6 +13333,14 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
 
     if (!accessContext.isSuperUser) {
       runSimulationPostResponseTask(async () => {
+        const anchoredDivisionId = await resolveAnchoredSimulationDivisionId({
+          simulationSessionId,
+          userId: accessContext.userId,
+          orgId: accessContext.actingOrgId,
+          scenarioId: runtime.scenario.id,
+          trainingId,
+          fallbackDivisionId: runtime.divisionId,
+        });
         await withDatabaseWrite(async (db) => {
           const user = getUserById(db, accessContext.userId);
           if (!user) {
@@ -12527,6 +13359,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
             kind: "transcribe",
             userId: user.id,
             orgId: accessContext.actingOrgId,
+            divisionId: anchoredDivisionId,
             segmentId: null,
             scenarioId: null,
             model: OPENAI_TRANSCRIPTION_MODEL,
@@ -12543,6 +13376,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
             kind: "turn",
             userId: user.id,
             orgId: accessContext.actingOrgId,
+            divisionId: anchoredDivisionId,
             segmentId: runtime.segment.id,
             scenarioId: runtime.scenario.id,
             model: turnAiDetails.responseModel,
@@ -13394,6 +14228,14 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
 
     if (!context.isSuperUser) {
       runSimulationPostResponseTask(async () => {
+        const anchoredDivisionId = await resolveAnchoredSimulationDivisionId({
+          simulationSessionId,
+          userId: context.user.id,
+          orgId: context.actingOrgId,
+          scenarioId: context.runtime.scenario.id,
+          trainingId,
+          fallbackDivisionId: context.runtime.divisionId,
+        });
         await withDatabaseWrite(async (db) => {
           const user = getUserById(db, context.user.id);
           if (!user) {
@@ -13412,6 +14254,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
             kind: "opening",
             userId: user.id,
             orgId: context.actingOrgId,
+            divisionId: anchoredDivisionId,
             segmentId: context.runtime.segment.id,
             scenarioId: context.runtime.scenario.id,
             model: aiDetails.responseModel,
@@ -13512,6 +14355,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
   const history = normalizeDialogueHistory(body.history, { maxTurns: 24 });
   const requestBodyRecord = body as Record<string, unknown>;
   const sessionId = resolveSimulationSessionId(request, requestBodyRecord);
+  const recognizedSessionId = resolveRecognizedSimulationSessionId(request, requestBodyRecord);
   const latestUserText = getLatestUserTextFromHistory(history);
   const placeholderDetected = hasPlaceholderOrMissingUserText(latestUserText);
   const payloadType = detectSimulationPayloadType(request, requestBodyRecord);
@@ -13616,7 +14460,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         requestedIndustryId: body.industryId,
         requestedIndustryBaseline: body.industryBaseline,
         submittedTrainingPackId,
-        simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+        simulationSessionId: recognizedSessionId,
         response,
       });
       if (!runtime || "bootstrapOrgId" in runtime) {
@@ -13707,6 +14551,14 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
 
     if (!context.isSuperUser) {
       runSimulationPostResponseTask(async () => {
+        const anchoredDivisionId = await resolveAnchoredSimulationDivisionId({
+          simulationSessionId: recognizedSessionId,
+          userId: context.user.id,
+          orgId: context.actingOrgId,
+          scenarioId: context.runtime.scenario.id,
+          trainingId,
+          fallbackDivisionId: context.runtime.divisionId,
+        });
         await withDatabaseWrite(async (db) => {
           const user = getUserById(db, context.user.id);
           if (!user) {
@@ -13725,6 +14577,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
             kind: "turn",
             userId: user.id,
             orgId: context.actingOrgId,
+            divisionId: anchoredDivisionId,
             segmentId: context.runtime.segment.id,
             scenarioId: context.runtime.scenario.id,
             model: aiDetails.responseModel,
@@ -13759,7 +14612,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
 
     runSimulationPostResponseTask(async () => {
       await touchRecognizedSimulationSessionBestEffort({
-        simulationSessionId: resolveRecognizedSimulationSessionId(request, requestBodyRecord),
+        simulationSessionId: recognizedSessionId,
         trainingPackId: context.runtime.activeTrainingPack?.id ?? null,
         logKey: "simulation-session:turn"
       });
@@ -13980,12 +14833,20 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       isSuperUser: accessContext.isSuperUser,
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
+      resolvedScenarioSource: resolvedScenario.source,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
       industryLabel: industryPromptContext.industryLabel,
       industryBaseline: industryPromptContext.industryBaseline,
       scoringGuidance,
+      divisionId: resolveSimulationDivisionIdForContext({
+        db,
+        user,
+        org,
+        trainingId,
+        resolvedScenario,
+      }),
       useModularPromptArchitecture
     };
   });
@@ -14013,6 +14874,10 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
   });
 
   try {
+    const recognizedSession =
+      recognizedSessionId && !context.isSuperUser
+        ? await simulationSessionStore.getById(recognizedSessionId)
+        : null;
     const evaluationConfig = context.useModularPromptArchitecture
       ? buildEvaluationPromptWithOrchestrator({
           scenario: context.scenario,
@@ -14064,11 +14929,20 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
 
     const now = nowIso();
     const scoreRecordId = recognizedSessionId ? `score_${recognizedSessionId}` : `score_${uuid()}`;
+    const divisionId = resolvePreferredSimulationDivisionId({
+      recognizedSession,
+      userId: context.user.id,
+      orgId: context.actingOrgId,
+      scenarioId: context.scenario.id,
+      trainingId,
+      fallbackDivisionId: context.divisionId ?? null,
+    });
     const record: SimulationScoreRecord = {
       id: scoreRecordId,
       simulationSessionId: recognizedSessionId,
       userId: context.user.id,
       orgId: context.actingOrgId,
+      divisionId,
       segmentId: context.segment.id,
       scenarioId: context.scenario.id,
       trainingId,
@@ -14113,6 +14987,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
             kind: "score",
             userId: user.id,
             orgId: context.actingOrgId,
+            divisionId: record.divisionId ?? null,
             segmentId: context.segment.id,
             scenarioId: context.scenario.id,
             model: aiDetails.responseModel,
@@ -14198,6 +15073,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
   const body = request.body as RecordSimulationScoreRequest;
   const segmentId = body.segmentId?.trim();
   const scenarioId = body.scenarioId?.trim();
+  const recognizedSessionId = normalizeSimulationSessionId(body.simulationSessionId);
   const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
   const submittedTrainingPackId =
     typeof body.trainingPackId === "string" && body.trainingPackId.trim() ? body.trainingPackId.trim() : null;
@@ -14265,6 +15141,24 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       useModularPromptArchitecture,
       submittedTrainingPackId
     });
+    const recognizedSession =
+      recognizedSessionId && !accessContext.isSuperUser
+        ? await simulationSessionStore.getById(recognizedSessionId)
+        : null;
+    const divisionId = resolvePreferredSimulationDivisionId({
+      recognizedSession,
+      userId: user.id,
+      orgId: accessContext.actingOrgId,
+      scenarioId: resolvedScenario.scenario.id,
+      trainingId,
+      fallbackDivisionId: resolveSimulationDivisionIdForContext({
+        db,
+        user,
+        org,
+        trainingId,
+        resolvedScenario,
+      }),
+    });
 
     const now = new Date();
     const coachingArtifact = normalizeSimulationScoreCoachingArtifact(body.coachingArtifact ?? null);
@@ -14285,10 +15179,11 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       getDefaultScoringWeights()
     );
     const record: SimulationScoreRecord = {
-      id: normalizeSimulationSessionId(body.simulationSessionId) ? `score_${normalizeSimulationSessionId(body.simulationSessionId)}` : `score_${uuid()}`,
-      simulationSessionId: normalizeSimulationSessionId(body.simulationSessionId) ?? undefined,
+      id: recognizedSessionId ? `score_${recognizedSessionId}` : `score_${uuid()}`,
+      simulationSessionId: recognizedSessionId ?? undefined,
       userId: user.id,
       orgId: accessContext.actingOrgId,
+      divisionId,
       segmentId,
       scenarioId,
       trainingId,
@@ -15012,6 +15907,13 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       useModularPromptArchitecture,
       submittedTrainingPackId
     });
+    const divisionId = resolveSimulationDivisionIdForContext({
+      db,
+      user,
+      org,
+      trainingId,
+      resolvedScenario,
+    });
 
     if (accessContext.isSuperUser) {
       response.status(201).json({
@@ -15029,6 +15931,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         simulationSessionId,
         userId: user.id,
         orgId: accessContext.actingOrgId,
+        divisionId,
         segmentId: body.segmentId,
         scenarioId: body.scenarioId,
         trainingId,
@@ -15148,6 +16051,13 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       useModularPromptArchitecture,
       submittedTrainingPackId
     });
+    const divisionId = resolveSimulationDivisionIdForContext({
+      db,
+      user,
+      org,
+      trainingId,
+      resolvedScenario,
+    });
 
     const now = new Date();
     const parsedStart = parseIsoDateOrNull(body.startedAt);
@@ -15193,6 +16103,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
           simulationSessionId: requiredSimulationSessionId,
           userId: user.id,
           orgId: accessContext.actingOrgId,
+          divisionId,
           segmentId: requiredSegmentId,
           scenarioId: requiredScenarioId,
           trainingId,

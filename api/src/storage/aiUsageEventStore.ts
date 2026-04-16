@@ -69,6 +69,7 @@ interface AiUsageEventRow {
   kind: string;
   user_id: string;
   org_id: string | null;
+  division_id: string | null;
   segment_id: string | null;
   scenario_id: string | null;
   model: string;
@@ -160,6 +161,7 @@ function normalizeAiUsageEvent(candidate: unknown): AiUsageEvent | null {
     kind,
     userId,
     orgId: normalizeNullableString((candidate as { orgId?: unknown }).orgId),
+    divisionId: normalizeNullableString((candidate as { divisionId?: unknown }).divisionId) ?? undefined,
     segmentId: normalizeNullableString((candidate as { segmentId?: unknown }).segmentId),
     scenarioId: normalizeNullableString((candidate as { scenarioId?: unknown }).scenarioId),
     model,
@@ -504,6 +506,7 @@ function mapAiUsageEventRow(row: AiUsageEventRow): AiUsageEvent | null {
     kind: row.kind,
     userId: row.user_id,
     orgId: row.org_id,
+    divisionId: row.division_id,
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
     model: row.model,
@@ -643,6 +646,7 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
           kind,
           user_id,
           org_id,
+          division_id,
           segment_id,
           scenario_id,
           model,
@@ -709,6 +713,7 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
               kind TEXT NOT NULL,
               user_id TEXT NOT NULL,
               org_id TEXT NULL,
+              division_id TEXT NULL,
               segment_id TEXT NULL,
               scenario_id TEXT NULL,
               model TEXT NOT NULL,
@@ -720,6 +725,7 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
               created_at TIMESTAMPTZ NOT NULL
             );
 
+            ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_ai_usage_events_created_at ON ai_usage_events (created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_ai_usage_events_user_id ON ai_usage_events (user_id);
             CREATE INDEX IF NOT EXISTS idx_ai_usage_events_org_id ON ai_usage_events (org_id);
@@ -749,6 +755,7 @@ async function upsertAiUsageEventRow(
         kind,
         user_id,
         org_id,
+        division_id,
         segment_id,
         scenario_id,
         model,
@@ -759,11 +766,12 @@ async function upsertAiUsageEventRow(
         total_tokens,
         created_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::timestamptz)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::timestamptz)
       ON CONFLICT (id) DO UPDATE
         SET kind = EXCLUDED.kind,
             user_id = EXCLUDED.user_id,
             org_id = EXCLUDED.org_id,
+            division_id = EXCLUDED.division_id,
             segment_id = EXCLUDED.segment_id,
             scenario_id = EXCLUDED.scenario_id,
             model = EXCLUDED.model,
@@ -779,6 +787,7 @@ async function upsertAiUsageEventRow(
       event.kind,
       event.userId,
       event.orgId,
+      event.divisionId ?? null,
       event.segmentId,
       event.scenarioId,
       event.model,

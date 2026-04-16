@@ -13,6 +13,7 @@ function createSession(overrides: Partial<SimulationSessionRecord> = {}): Simula
     simulationSessionId: overrides.simulationSessionId ?? "sim_1",
     userId: overrides.userId ?? "user_1",
     orgId: overrides.orgId ?? "org_1",
+    divisionId: overrides.divisionId ?? null,
     segmentId: overrides.segmentId ?? "segment_1",
     scenarioId: overrides.scenarioId ?? "scenario_1",
     trainingId: overrides.trainingId ?? null,
@@ -39,8 +40,9 @@ test("file simulation session store upserts, touches, finalizes, and deletes by 
     });
     await store.initialize();
 
-    const created = await store.upsertStartedSession(createSession());
+    const created = await store.upsertStartedSession(createSession({ divisionId: "division_1" }));
     assert.equal(created.status, "started");
+    assert.equal(created.divisionId, "division_1");
 
     const merged = await store.upsertStartedSession(
       createSession({

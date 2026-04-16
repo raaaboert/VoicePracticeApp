@@ -65,6 +65,7 @@ interface ScoreRecordRow {
   simulation_session_id: string | null;
   user_id: string;
   org_id: string | null;
+  division_id: string | null;
   segment_id: string;
   scenario_id: string;
   training_id: string | null;
@@ -274,6 +275,7 @@ function normalizeScoreRecord(candidate: unknown): SimulationScoreRecord | null 
       normalizeNullableString((candidate as { simulationSessionId?: unknown }).simulationSessionId) ?? undefined,
     userId,
     orgId: normalizeNullableString((candidate as { orgId?: unknown }).orgId),
+    divisionId: normalizeNullableString((candidate as { divisionId?: unknown }).divisionId) ?? undefined,
     segmentId,
     scenarioId,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
@@ -436,6 +438,7 @@ function mapScoreRecordRow(row: ScoreRecordRow): SimulationScoreRecord | null {
     simulationSessionId: row.simulation_session_id,
     userId: row.user_id,
     orgId: row.org_id,
+    divisionId: row.division_id,
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
     trainingId: row.training_id,
@@ -771,6 +774,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
               simulation_session_id TEXT NULL,
               user_id TEXT NOT NULL,
               org_id TEXT NULL,
+              division_id TEXT NULL,
               segment_id TEXT NOT NULL,
               scenario_id TEXT NOT NULL,
               training_id TEXT NULL,
@@ -804,6 +808,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS outcome_score DOUBLE PRECISION NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS completion_level TEXT NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS objective_achieved BOOLEAN NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
 
             CREATE INDEX IF NOT EXISTS idx_score_records_user_id ON score_records (user_id);
             CREATE INDEX IF NOT EXISTS idx_score_records_org_id ON score_records (org_id);
@@ -829,6 +834,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
           simulation_session_id,
           user_id,
           org_id,
+          division_id,
           segment_id,
           scenario_id,
           training_id,
@@ -892,6 +898,7 @@ async function upsertScoreRecordRow(
         simulation_session_id,
         user_id,
         org_id,
+        division_id,
         segment_id,
         scenario_id,
         training_id,
@@ -920,16 +927,17 @@ async function upsertScoreRecordRow(
         created_at
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10::timestamptz, $11::timestamptz,
-        $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21,
-        $22::jsonb, $23::jsonb, $24, $25, $26, $27, $28, $29, $30::timestamptz
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11::timestamptz, $12::timestamptz,
+        $13, $14, $15, $16, $17,
+        $18, $19, $20, $21, $22,
+        $23::jsonb, $24::jsonb, $25, $26, $27, $28, $29, $30, $31::timestamptz
       )
       ON CONFLICT (id) DO UPDATE
         SET simulation_session_id = EXCLUDED.simulation_session_id,
             user_id = EXCLUDED.user_id,
             org_id = EXCLUDED.org_id,
+            division_id = EXCLUDED.division_id,
             segment_id = EXCLUDED.segment_id,
             scenario_id = EXCLUDED.scenario_id,
             training_id = EXCLUDED.training_id,
@@ -962,6 +970,7 @@ async function upsertScoreRecordRow(
       record.simulationSessionId ?? null,
       record.userId,
       record.orgId ?? null,
+      record.divisionId ?? null,
       record.segmentId,
       record.scenarioId,
       record.trainingId ?? null,
