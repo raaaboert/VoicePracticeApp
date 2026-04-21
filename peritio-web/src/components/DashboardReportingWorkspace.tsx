@@ -257,6 +257,7 @@ export function DashboardReportingWorkspace({
               <DashboardProofSection
                 title="Proof behind this training view"
                 description="Open the supporting tables when you need the exact user and scenario evidence."
+                preview="User and scenario proof stays hidden until you open it."
               >
                 <div className="dashboard-proof-stack">
                   <div className="dashboard-proof-block">
@@ -365,6 +366,7 @@ export function DashboardReportingWorkspace({
           <DashboardProofSection
             title="Proof behind this user view"
             description="Open the table when you need the full user list and the underlying attempt and score detail."
+            preview="The full user table stays hidden until you open it."
           >
             <div className="dashboard-proof-stack">
               <div className="dashboard-proof-block">
@@ -423,7 +425,7 @@ export function DashboardReportingWorkspace({
         <div className="tab-panel page-stack">
           <DashboardNarrativePanel
             eyebrow="Story"
-            title="What is happening across the company"
+            title="What leadership should conclude right now"
             narrative={companyNarrative}
           />
 
@@ -431,13 +433,14 @@ export function DashboardReportingWorkspace({
 
           <DashboardWhatMattersSection
             title="What matters most right now"
-            description="This view stays focused on the highest-value implications for leadership before the training table comes into play."
+            description="This view is meant to read like a short leadership briefing before any supporting table comes into play."
             items={companyNarrative.priorities}
           />
 
           <DashboardProofSection
             title="Proof behind this company view"
             description="Open the training table when you need the supporting evidence for usage breadth, score signals, and latest activity."
+            preview="Training-level proof stays hidden until you open it."
           >
             <div className="dashboard-proof-stack">
               <div className="dashboard-proof-block">

@@ -87,6 +87,7 @@ export default async function TrainingPackDetailPage({
       <DashboardProofSection
         title="Proof behind this training-pack view"
         description="Open the metadata, coaching, trend, and progress detail when you need the exact supporting evidence."
+        preview="Metadata, coaching, trend, and progress detail stay hidden until you open them."
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
@@ -108,6 +109,7 @@ export default async function TrainingPackDetailPage({
               description="These pack-level coaching aggregates use only pack-attributed score records that persisted a coaching artifact. They help explain the repeated coaching needs emerging inside this training program."
               insights={pack.coachingInsights}
               emptyMessage="This pack does not yet have enough artifact-backed scored attempts to produce coaching-theme aggregates."
+              embedded
             />
           </div>
 

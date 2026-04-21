@@ -44,17 +44,19 @@ export function CoachingInsightsSection({
   description,
   insights,
   emptyMessage,
+  embedded = false,
 }: {
   eyebrow: string;
   title: string;
   description: string;
   insights: DashboardCoachingInsights;
   emptyMessage: string;
+  embedded?: boolean;
 }) {
   const hasArtifactData = insights.artifactBackedScoresLast30Days > 0;
 
   return (
-    <section className="section-card">
+    <section className={embedded ? "dashboard-embedded-section" : "section-card"}>
       <div className="section-header">
         <div>
           <p className="eyebrow">{eyebrow}</p>

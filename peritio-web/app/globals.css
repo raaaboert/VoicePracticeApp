@@ -850,34 +850,90 @@ html[data-theme="light"] .dashboard-story-panel {
   background: var(--panel-muted);
 }
 
-.dashboard-priority-list {
+.dashboard-priority-stack {
   display: grid;
   gap: 1rem;
 }
 
-.dashboard-priority-item {
-  padding-left: 1rem;
-  border-left: 2px solid rgba(96, 165, 250, 0.35);
+.dashboard-priority-primary,
+.dashboard-priority-secondary {
+  border-radius: 18px;
+  border: 1px solid rgba(137, 167, 195, 0.16);
 }
 
-.dashboard-priority-item h3 {
+.dashboard-priority-primary {
+  padding: 1.2rem 1.25rem;
+  background: linear-gradient(180deg, rgba(44, 123, 229, 0.08) 0%, rgba(44, 123, 229, 0.02) 100%), var(--panel);
+}
+
+.dashboard-priority-secondary-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.dashboard-priority-secondary {
+  padding: 0.95rem 1rem;
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.dashboard-priority-kicker {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.dashboard-priority-primary h3,
+.dashboard-priority-secondary h3 {
   margin: 0 0 0.3rem;
-  font-size: 1rem;
 }
 
-.dashboard-priority-item p {
+.dashboard-priority-primary h3 {
+  font-size: 1.1rem;
+}
+
+.dashboard-priority-secondary h3 {
+  font-size: 0.98rem;
+}
+
+.dashboard-priority-primary p:last-child,
+.dashboard-priority-secondary p:last-child {
   margin: 0;
   color: var(--text-muted);
   line-height: 1.7;
 }
 
-html[data-theme="light"] .dashboard-priority-item {
-  border-left-color: rgba(29, 78, 216, 0.28);
+.dashboard-priority-tone-primary {
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.dashboard-priority-tone-caution {
+  border-color: rgba(245, 158, 11, 0.24);
+}
+
+.dashboard-priority-tone-watch {
+  border-color: rgba(94, 234, 212, 0.22);
+}
+
+html[data-theme="light"] .dashboard-priority-primary {
+  background: linear-gradient(180deg, rgba(29, 78, 216, 0.05) 0%, rgba(29, 78, 216, 0.01) 100%), var(--panel);
+}
+
+html[data-theme="light"] .dashboard-priority-secondary {
+  background: rgba(248, 250, 252, 0.9);
 }
 
 .dashboard-proof-section {
   padding: 0;
   overflow: hidden;
+  background: rgba(15, 23, 42, 0.18);
+  border: 1px solid rgba(137, 167, 195, 0.14);
+}
+
+.dashboard-proof-section:not([open]) {
+  background: rgba(15, 23, 42, 0.08);
+  border-style: dashed;
 }
 
 .dashboard-proof-summary {
@@ -886,7 +942,7 @@ html[data-theme="light"] .dashboard-priority-item {
   justify-content: space-between;
   gap: 1rem;
   align-items: flex-start;
-  padding: 1.35rem 1.4rem;
+  padding: 1rem 1.15rem;
   cursor: pointer;
 }
 
@@ -894,11 +950,25 @@ html[data-theme="light"] .dashboard-priority-item {
   display: none;
 }
 
+.dashboard-proof-summary-copy {
+  max-width: 60ch;
+}
+
+.dashboard-proof-preview {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
 .dashboard-proof-toggle {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(137, 167, 195, 0.18);
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text-muted);
   font-size: 0.8rem;
   letter-spacing: 0.08em;
@@ -915,15 +985,30 @@ html[data-theme="light"] .dashboard-priority-item {
   content: "-";
 }
 
+.dashboard-proof-section[open] .dashboard-proof-summary {
+  padding: 1.2rem 1.25rem 1rem;
+}
+
+.dashboard-proof-section[open] .dashboard-proof-toggle {
+  background: rgba(44, 123, 229, 0.08);
+}
+
 .dashboard-proof-body {
-  padding: 0 1.4rem 1.4rem;
+  padding: 0 1.25rem 1.25rem;
   border-top: 1px solid rgba(137, 167, 195, 0.14);
 }
 
 .dashboard-proof-stack {
   display: grid;
-  gap: 1.5rem;
-  margin-top: 1.2rem;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.dashboard-proof-block {
+  padding: 1rem 1rem 1.05rem;
+  border-radius: 18px;
+  border: 1px solid rgba(137, 167, 195, 0.14);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .dashboard-proof-block h3 {
@@ -935,6 +1020,11 @@ html[data-theme="light"] .dashboard-priority-item {
   margin: 0 0 0.9rem;
   color: var(--text-muted);
   line-height: 1.65;
+}
+
+.dashboard-embedded-section {
+  padding: 0;
+  background: transparent;
 }
 
 .dashboard-table th,

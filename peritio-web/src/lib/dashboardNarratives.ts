@@ -7,7 +7,7 @@ import {
   DashboardUserReportResponse,
 } from "@voicepractice/shared";
 
-import { formatDateTime, formatSignedPercent } from "@/src/lib/formatters";
+import { formatSignedPercent } from "@/src/lib/formatters";
 
 export interface DashboardNarrativeFactSet {
   subject: string;
@@ -24,7 +24,11 @@ export interface DashboardNarrativeSignal {
   context?: string;
 }
 
+export type DashboardNarrativePriorityTone = "primary" | "caution" | "watch";
+
 export interface DashboardNarrativePriority {
+  tone: DashboardNarrativePriorityTone;
+  label: string;
   title: string;
   detail: string;
 }
@@ -71,20 +75,33 @@ function compactPriorities(priorities: DashboardNarrativePriority[]): DashboardN
   return priorities.filter((item) => item.detail.trim().length > 0).slice(0, 3);
 }
 
+function makePriority(
+  tone: DashboardNarrativePriorityTone,
+  title: string,
+  detail: string
+): DashboardNarrativePriority {
+  return {
+    tone,
+    label: tone === "primary" ? "Primary takeaway" : tone === "caution" ? "Key caution" : "Watch next",
+    title,
+    detail,
+  };
+}
+
 function buildMovementSummary(delta: number | null): string {
   if (delta === null) {
-    return "More scored activity is needed before trend direction is reliable.";
+    return "Trend confidence is still limited.";
   }
 
   if (delta > 0) {
-    return `Recent scored movement is positive (${formatSignedPercent(delta)} versus the prior 30 days).`;
+    return `The recent score signal is improving (${formatSignedPercent(delta)} versus the prior 30 days).`;
   }
 
   if (delta < 0) {
-    return `Recent scored movement is softer (${formatSignedPercent(delta)} versus the prior 30 days).`;
+    return `The recent score signal has softened (${formatSignedPercent(delta)} versus the prior 30 days).`;
   }
 
-  return "Recent scored movement is flat versus the prior 30 days.";
+  return "The recent score signal is flat versus the prior 30 days.";
 }
 
 function countScoredScenarios(training: DashboardTrainingWorkspaceRow): number {
@@ -196,15 +213,12 @@ export function buildUserHighlights(users: DashboardUserReportResponse["users"])
 export function buildAggregateTrainingNarrative(training: DashboardTrainingWorkspaceRow | null): DashboardNarrative {
   if (!training) {
     return {
-      summary: "No training is selected yet. Choose a training to review current activity, scored evidence, and scenario coverage.",
+      summary: "No training is selected. Choose one to review live activity, confidence, and supporting proof.",
       signals: compactSignals([
         { label: "Activity", value: "No training selected", context: "Choose a training above" },
       ]),
       priorities: compactPriorities([
-        {
-          title: "Next step",
-          detail: "Select a training to see the current practice pattern and the supporting proof below.",
-        },
+        makePriority("primary", "Select a training", "Pick one training first. The dashboard only becomes meaningful once the scope is concrete."),
       ]),
       facts: {
         subject: "training",
@@ -229,26 +243,33 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
   const weakestArea = training.insights.weakestArea?.label ?? null;
   const lowestScenario = training.insights.lowestPerformingScenario?.title ?? null;
 
-  const summary = joinSentences([
+  const summary =
     totalAttempts === 0
-      ? "This training has not produced recent practice yet."
+      ? "This training is not getting real practice yet. Until activity shows up, the useful read is adoption rather than performance."
       : activeLearners <= 1
-        ? `Recent practice is visible, but it is concentrated in one learner with ${totalAttempts} attempts in the last 30 days.`
+        ? joinSentences([
+            "Practice is active, but still concentrated in one learner.",
+            enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
+              ? `The score read is usable, but it is still being shaped mostly by activity in ${topScenario?.title ?? "a narrow scenario set"}.`
+              : "It is too early to judge score movement confidently, so the safest read is where activity is appearing and where it is absent.",
+          ])
         : totalAttempts >= 8 && activeLearners >= 2
-          ? `This training is generating repeat practice across ${activeLearners} learners, with ${totalAttempts} attempts recorded in the last 30 days.`
-          : `This training is active, but recent volume is still modest at ${totalAttempts} attempts across ${activeLearners} learners.`,
-    topScenario
-      ? topScenarioShare >= 0.5
-        ? `Practice is currently centered on ${topScenario.title}, which accounts for most of the recent activity.`
-        : `${topScenario.title} is the clearest current usage driver, but practice is not fully concentrated in one scenario.`
-      : "There is not yet enough recent activity to identify a clear scenario leader.",
-    enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
-      ? `On the scored evidence available, ${strongestArea} is the strongest area while ${weakestArea} is the weakest.`
-      : "Scored coverage is still limited, so the safest read today is activity and scenario breadth rather than score movement.",
-    underusedScenarioCount > 0
-      ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} still show no recent activity, so adoption across the full training remains uneven.`
-      : null,
-  ]);
+          ? joinSentences([
+              `This training has real repeat practice across ${activeLearners} learners.`,
+              topScenario
+                ? topScenarioShare >= 0.5
+                  ? `${topScenario.title} is doing most of the work right now.`
+                  : `${topScenario.title} is the clearest usage center, but practice is not stuck in one scenario.`
+                : null,
+              enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
+                ? `${strongestArea} is currently the clearest strength signal, while ${weakestArea} is the main weakness to watch.`
+                : "Score coverage is still thin enough that activity breadth matters more than trend language.",
+            ])
+          : joinSentences([
+              "Practice is visible, but still early.",
+              topScenario ? `${topScenario.title} is the clearest activity center so far.` : "No single scenario is defining the training yet.",
+              "For now, the safest conclusion is about where practice is showing up rather than whether performance is moving.",
+            ]);
 
   return {
     summary,
@@ -259,41 +280,42 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
         context: "Last 30 days",
       },
       {
-        label: "Evidence",
+        label: "Confidence",
         value: `${scoredScenarioCount}/${training.summary.totalScenarioCount} scenarios scored`,
-        context: enoughFocusEvidence ? "Enough coverage for cautious score reads" : "Coverage is still thin",
+        context: enoughFocusEvidence ? "Enough coverage for a cautious score read" : "Still too thin for a strong score read",
       },
       {
-        label: "Main focus",
-        value: topScenario?.title ?? "No dominant scenario",
-        context: topScenario ? `${topScenarioAttempts} recent attempts` : "Activity has not concentrated yet",
+        label: "Focus",
+        value: topScenario?.title ?? "No dominant scenario yet",
+        context: topScenario ? `${topScenarioAttempts} recent attempts` : "Practice has not concentrated yet",
       },
     ]),
     priorities: compactPriorities([
-      {
-        title: "Practice concentration",
-        detail: topScenario
-          ? `${topScenario.title} is currently carrying the most practice${topScenarioShare >= 0.5 ? " and is taking a majority share of activity" : ""}.`
-          : "No single scenario is carrying enough recent traffic to define the training yet.",
-      },
-      {
-        title: "Performance read",
-        detail:
-          enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
-            ? `${strongestArea} is the clearest strength signal, while ${weakestArea} is the weakest scored area on current evidence.`
-            : "More completed scored attempts are needed before a score-led coaching focus is trustworthy.",
-      },
-      {
-        title: "Coverage gap",
-        detail:
-          underusedScenarioCount > 0
-            ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} remain quiet and may need a stronger rollout or clearer learner routing.`
-            : "Every scenario has at least some recent activity, so the main question is depth rather than coverage.",
-      },
+      makePriority(
+        "primary",
+        topScenario ? "Practice is concentrating" : "Practice is still forming",
+        topScenario
+          ? `${topScenario.title} is the clearest center of gravity${topScenarioShare >= 0.5 ? " and is taking most of the recent volume" : ""}.`
+          : "No single scenario is active enough yet to define how this training is really being used."
+      ),
+      makePriority(
+        "caution",
+        "Confidence is still limited",
+        enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
+          ? `${strongestArea} looks strongest and ${weakestArea} weakest, but the scored evidence is still early enough to keep that read cautious.`
+          : "There still are not enough completed scored attempts to treat the performance read as stable."
+      ),
+      makePriority(
+        "watch",
+        "Watch the quiet edge",
+        underusedScenarioCount > 0
+          ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} remain quiet, which is the clearest rollout gap in this training.`
+          : lowestScenario
+            ? `${lowestScenario} is the weakest scored scenario on current evidence and is the best next place to look.`
+            : "The next useful question is whether practice broadens beyond the current active scenarios."
+      ),
     ]),
-    note: enoughFocusEvidence && lowestScenario
-      ? `Watch next: ${lowestScenario} is the weakest scored scenario on the current evidence.`
-      : "Reliable time-based movement still needs more conclusive scored attempts.",
+    note: null,
     facts: {
       subject: training.name,
       activityLevel: totalAttempts === 0 ? "none" : activeLearners <= 1 ? "concentrated" : totalAttempts >= 8 ? "active" : "light",
@@ -318,16 +340,17 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
 
   if (users.length === 0 || totalAttempts === 0) {
     return {
-      summary: "No user reporting is available in the current 30-day window. User effort, score movement, and coaching signals will appear here once practice is recorded.",
+      summary: "No meaningful user pattern is visible yet. Once practice starts, this page will separate effort from score-backed movement.",
       signals: compactSignals([
         { label: "Activity", value: "No recent attempts", context: "Last 30 days" },
-        { label: "Evidence", value: "No comparison set", context: "Scored history has not formed yet" },
+        { label: "Confidence", value: "No comparison set", context: "Scored history has not formed yet" },
       ]),
       priorities: compactPriorities([
-        {
-          title: "What to watch",
-          detail: "Return here once users begin practicing so the dashboard can separate effort from score-backed progress.",
-        },
+        makePriority(
+          "primary",
+          "Wait for live usage",
+          "There is not enough user activity yet to say anything reliable beyond the absence of recent practice."
+        ),
       ]),
       facts: {
         subject: "users",
@@ -342,18 +365,15 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
 
   const summary = joinSentences([
     engagedUserAttemptShare >= 0.4 && mostEngaged
-      ? `Recent learner effort is concentrated in a small set of people, led by ${mostEngaged.email}.`
-      : `Recent learner effort is spread across the visible user set, with ${activeUsers} active ${pluralize(activeUsers, "user")} generating ${totalAttempts} attempts in the last 30 days.`,
-    mostEngaged
-      ? `${mostEngaged.email} is currently putting in the most recent practice with ${mostEngaged.simulationsLast30Days} simulations.`
-      : null,
-    highlights.improvingUser
-      ? `${highlights.improvingUser.email} shows the clearest positive score movement among users with enough scored history to compare.`
-      : comparisonCount >= 2
-        ? `There is enough scored history to compare a subset of users, but no one is separating clearly on positive score movement yet.`
-        : `Only ${comparisonCount} ${pluralize(comparisonCount, "user")} currently have enough scored history for reliable score comparison.`,
+      ? `Practice is being carried by a small slice of users, led by ${mostEngaged.email}.`
+      : "Practice is distributed across the visible users rather than resting on one person.",
+    comparisonCount >= 2
+      ? highlights.improvingUser
+        ? `${highlights.improvingUser.email} shows the clearest upward score signal in the current comparable set.`
+        : "A comparable score set is starting to form, but no one is separating clearly on improvement yet."
+      : "Score comparisons are still thin, so the safest read is effort first and score movement second.",
     highlights.needsAttention && comparisonCount >= 2 && (highlights.needsAttention.scoreDeltaLast30Days ?? 0) < 0
-      ? `${highlights.needsAttention.email} deserves closer coaching review because recent scored movement is negative.`
+      ? `${highlights.needsAttention.email} is the clearest coaching watchpoint right now.`
       : null,
   ]);
 
@@ -366,38 +386,42 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
         context: `${userCount} users in scope`,
       },
       {
-        label: "Evidence",
+        label: "Confidence",
         value: `${comparisonCount} comparable users`,
-        context: "Users with at least 2 conclusive scored attempts",
+        context: "At least 2 conclusive scored attempts each",
       },
       {
-        label: "Most engaged",
+        label: "Engagement lead",
         value: mostEngaged?.email ?? "No clear leader",
         context: mostEngaged ? `${mostEngaged.simulationsLast30Days} recent simulations` : "Recent effort is still forming",
       },
     ]),
     priorities: compactPriorities([
-      {
-        title: "Effort leader",
-        detail: mostEngaged
-          ? `${mostEngaged.email} is driving the most recent practice volume and is the clearest engagement anchor right now.`
-          : "No individual user has separated clearly on effort yet.",
-      },
-      {
-        title: "Positive movement",
-        detail: highlights.improvingUser
-          ? `${highlights.improvingUser.email} has the clearest upward score signal in the current comparable set.`
-          : "Score history is still too thin to call a clear improvement leader confidently.",
-      },
-      {
-        title: "Coaching attention",
-        detail:
-          highlights.needsAttention && comparisonCount >= 2
-            ? (highlights.needsAttention.scoreDeltaLast30Days ?? 0) < 0
-              ? `${highlights.needsAttention.email} is the clearest review candidate because recent scored movement has softened.`
-              : `${highlights.needsAttention.email} is on the lower end of the current comparison set and may need closer coaching attention.`
-            : "Keep attention on practice volume first until more users build a comparable scored history.",
-      },
+      makePriority(
+        "primary",
+        "Effort is the main signal",
+        mostEngaged
+          ? `${mostEngaged.email} is setting the pace on recent practice and is the clearest engagement anchor in scope.`
+          : "No single user is separating enough on effort to anchor the story yet."
+      ),
+      makePriority(
+        "caution",
+        "Do not overread score movement",
+        comparisonCount >= 2
+          ? highlights.improvingUser
+            ? "There is enough history to name an early improvement leader, but the comparison set is still small."
+            : "There is enough history for cautious comparison, but not enough separation to make a strong improvement claim."
+          : "Most users still do not have enough scored history for a reliable movement read."
+      ),
+      makePriority(
+        "watch",
+        "Watch who needs follow-up",
+        highlights.needsAttention && comparisonCount >= 2
+          ? (highlights.needsAttention.scoreDeltaLast30Days ?? 0) < 0
+            ? `${highlights.needsAttention.email} is the clearest coaching watchpoint because the recent score signal has softened.`
+            : `${highlights.needsAttention.email} sits at the weaker end of the current comparable set and is worth closer review.`
+          : "The next useful question is whether more users build enough scored history to make the comparison set real."
+      ),
     ]),
     note: "Users with fewer than 2 conclusive scored attempts are kept out of score-comparison language.",
     facts: {
@@ -433,19 +457,21 @@ export function buildAggregateCompanyNarrative(params: {
     (training) => training.status === "active" && training.summary.totalAttemptsLast30Days === 0
   ).length;
   const topScenario = params.overview?.topScenarios[0] ?? null;
+  const hasBroadTraction = activeTrainings.length >= 4 || (activeTrainings.length >= 2 && topTrainingShare < 0.6);
 
   if (totalAttempts === 0) {
     return {
-      summary: "The product is currently quiet in this reporting scope. No recent training activity, user effort, or scored evidence was recorded in the last 30 days.",
+      summary: "There is no meaningful traction yet. Without recent practice, this is still a rollout view rather than a performance view.",
       signals: compactSignals([
-        { label: "Activity", value: "No recent attempts", context: "Last 30 days" },
+        { label: "Traction", value: "No recent attempts", context: "Last 30 days" },
         { label: "Breadth", value: "0 active trainings", context: "No training has recent usage" },
       ]),
       priorities: compactPriorities([
-        {
-          title: "What to watch",
-          detail: "Return once usage starts so the dashboard can separate adoption breadth from score-backed performance signals.",
-        },
+        makePriority(
+          "primary",
+          "No live traction",
+          "This scope is still too quiet to judge adoption or performance. The next question is whether rollout is actually producing practice."
+        ),
       ]),
       facts: {
         subject: "company",
@@ -458,75 +484,80 @@ export function buildAggregateCompanyNarrative(params: {
     };
   }
 
-  const summary = joinSentences([
-    activeTrainings.length === 1 && topTraining
-      ? `Usage is real, but it is currently concentrated in ${topTraining.name}.`
-      : topTraining && topTrainingShare >= 0.6
-        ? `Usage is broad enough to see traction, but most recent practice is still concentrated in ${topTraining.name}.`
-        : activeTrainings.length <= 3
-          ? "Usage is active, but it is still concentrated in a small set of trainings."
-          : "Usage is spread across the current training footprint rather than resting on a single program.",
-    `${activeUsers} active ${pluralize(activeUsers, "user")} generated ${totalAttempts} attempts in the last 30 days.`,
+  const scoreRead =
     scoredAttemptsLast30Days < MIN_COMPANY_SCORE_EVIDENCE || comparisonUsers.length < 2
-      ? "Scored evidence is still limited, so company-wide performance movement is too early to call with confidence."
+      ? "Score evidence is still thin, so the safest leadership read is adoption breadth rather than performance movement."
       : positiveMovementUsers > negativeMovementUsers
-        ? "Across the users who have enough comparable history, the recent score signal is net positive."
+        ? "The early score signal is encouraging across the users who have enough comparable history."
         : negativeMovementUsers > positiveMovementUsers
-          ? "Across the users who have enough comparable history, the recent score signal is net negative."
-          : "Across the users who have enough comparable history, the recent score signal is mixed.",
-    underusedActiveTrainings > 0
-      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} show little or no recent activity and may need rollout attention.`
-      : null,
-  ]);
+          ? "The early score signal has softened across the comparable set and deserves leadership attention."
+          : "The score signal is mixed, so any coaching action should stay targeted rather than broad.";
+
+  const summary = hasBroadTraction
+    ? joinSentences([
+        "There is meaningful traction across the program.",
+        "Usage is broad enough to look real rather than accidental.",
+        scoreRead,
+      ])
+    : joinSentences([
+        topTraining
+          ? `There is real traction, but it is still narrow and centered on ${topTraining.name}.`
+          : "There is visible usage, but it is still narrow.",
+        "Leadership should read this as early rollout rather than broad adoption.",
+        scoreRead,
+      ]);
 
   return {
     summary,
     signals: compactSignals([
       {
-        label: "Activity",
+        label: "Traction",
         value: `${totalAttempts} attempts / ${activeUsers} active users`,
         context: "Last 30 days",
       },
       {
-        label: "Adoption breadth",
+        label: "Breadth",
         value: `${activeTrainings.length} active trainings`,
         context: `${params.trainings.length} trainings in scope`,
       },
       {
-        label: "Evidence",
+        label: "Confidence",
         value: `${comparisonUsers.length} comparable users`,
         context: scoredAttemptsLast30Days > 0 ? `${scoredAttemptsLast30Days} conclusive scored attempts` : "Scored history is still limited",
       },
     ]),
     priorities: compactPriorities([
-      {
-        title: "Concentration",
-        detail: topTraining
-          ? `${topTraining.name} is the clearest activity center right now${topTrainingShare >= 0.6 ? " and is carrying most recent practice" : ""}.`
-          : "No single training is active enough to define the current usage pattern.",
-      },
-      {
-        title: "Performance confidence",
-        detail:
-          scoredAttemptsLast30Days < MIN_COMPANY_SCORE_EVIDENCE || comparisonUsers.length < 2
-            ? "Keep the read focused on usage and rollout for now because score-backed movement is still thin."
-            : positiveMovementUsers > negativeMovementUsers
-              ? "The current comparable user set leans positive on recent scored movement."
-              : negativeMovementUsers > positiveMovementUsers
-                ? "The current comparable user set leans negative on recent scored movement and deserves leadership attention."
-                : "The current comparable user set is mixed, so coaching follow-up should stay targeted rather than broad.",
-      },
-      {
-        title: "What to watch next",
-        detail:
-          underusedActiveTrainings > 0
-            ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain underused, which suggests a rollout or enablement gap.`
-            : topScenario
-              ? `${topScenario.title} is the most active scenario in the current window and is the clearest live usage signal.`
-              : "There is no single scenario or rollout risk strong enough yet to outrank the broader usage picture.",
-      },
+      makePriority(
+        "primary",
+        hasBroadTraction ? "Traction is real" : "Traction is narrow",
+        hasBroadTraction
+          ? "Usage is spread across enough of the program to count as real traction rather than isolated activity."
+          : topTraining
+            ? `${topTraining.name} is carrying most of the current usage, so rollout breadth is still the main leadership question.`
+            : "Usage exists, but not across enough of the program to treat it as broad adoption."
+      ),
+      makePriority(
+        "caution",
+        "Confidence depends on scored depth",
+        scoredAttemptsLast30Days < MIN_COMPANY_SCORE_EVIDENCE || comparisonUsers.length < 2
+          ? "The score read is still too thin to support a strong performance story."
+          : positiveMovementUsers > negativeMovementUsers
+            ? "The comparable user set leans positive, but the signal is still early rather than settled."
+            : negativeMovementUsers > positiveMovementUsers
+              ? "The comparable user set leans negative, which is a real caution signal for leadership."
+              : "The comparable user set is mixed, so the safe move is focused coaching rather than broad conclusions."
+      ),
+      makePriority(
+        "watch",
+        "Leadership watchpoint",
+        underusedActiveTrainings > 0
+          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} are still quiet, which is the clearest rollout gap.`
+          : topScenario
+            ? `${topScenario.title} is the strongest live scenario signal; watch whether usage broadens beyond that current center of gravity.`
+            : "The next useful question is whether the current activity pattern broadens or stays narrow."
+      ),
     ]),
-    note: topScenario ? `${topScenario.title} is the most active scenario in the current reporting window.` : null,
+    note: null,
     facts: {
       subject: "company",
       activityLevel:
@@ -562,16 +593,17 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
 
   if (customer.simulationsLast30Days === 0) {
     return {
-      summary: "This account has not produced recent simulation usage yet. Use the rollout detail below to confirm whether the customer is configured but not yet active.",
+      summary: "This account is not showing real usage yet. Until activity appears, this is a rollout-readiness page more than a performance page.",
       signals: compactSignals([
         { label: "Activity", value: "No recent simulations", context: "Last 30 days" },
-        { label: "Evidence", value: "No score signal", context: "Scored history has not formed yet" },
+        { label: "Confidence", value: "No score signal", context: "Scored history has not formed yet" },
       ]),
       priorities: compactPriorities([
-        {
-          title: "Immediate takeaway",
-          detail: "This page is currently more about rollout readiness than performance because recent usage is not yet present.",
-        },
+        makePriority(
+          "primary",
+          "No live account traction",
+          "The next useful question is whether the account is configured but idle, or whether rollout has not really started."
+        ),
       ]),
       facts: {
         subject: customer.orgName,
@@ -585,17 +617,16 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
   }
 
   const summary = joinSentences([
-    activeTrainingRows.length === 1 && topTraining
-      ? `This account is active, but most recent usage is concentrated in ${topTraining.title}.`
-      : topTraining && topTrainingShare >= 0.6
-        ? `This account is active, but a majority of recent practice is concentrated in ${topTraining.title}.`
-        : "This account is active and usage is spread across more than one training area.",
-    `${customer.activeUserCount} active ${pluralize(customer.activeUserCount, "user")} generated ${customer.simulationsLast30Days} simulations in the last 30 days.`,
+    activeTrainingRows.length === 1 || topTrainingShare >= 0.6
+      ? topTraining
+        ? `This account is active, but usage is still concentrated in ${topTraining.title}.`
+        : "This account is active, but usage is still narrow."
+      : "This account has real usage across more than one training area.",
     totalScoredAttemptsLast30Days < MIN_CUSTOMER_SCORE_EVIDENCE
-      ? "Scored evidence is still limited, so performance conclusions should stay cautious."
+      ? "The score read is still early, so the safest conclusion is about adoption and focus rather than performance movement."
       : buildMovementSummary(customer.scoreDeltaLast30Days),
     underusedActiveTrainings > 0
-      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} show little or no recent engagement and may need a stronger rollout.`
+      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet, which is the clearest rollout gap.`
       : null,
   ]);
 
@@ -608,46 +639,45 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         context: `${customer.activeUserCount} active users in the last 30 days`,
       },
       {
-        label: "Evidence",
+        label: "Confidence",
         value: `${totalScoredAttemptsLast30Days} scored attempts`,
         context:
           totalScoredAttemptsLast30Days >= MIN_CUSTOMER_SCORE_EVIDENCE
-            ? "Enough volume for cautious score reads"
-            : "Keep the score read cautious",
+            ? "Enough volume for a cautious score read"
+            : "Still too thin for a strong score read",
       },
       {
-        label: "Main focus",
+        label: "Focus",
         value: topTraining?.title ?? topScenario?.title ?? "No dominant focus yet",
-        context: topTraining ? "Most active training" : topScenario ? "Most active scenario" : "Recent usage is still forming",
+        context: topTraining ? "Most active training" : topScenario ? "Most active scenario" : "Usage is still forming",
       },
     ]),
     priorities: compactPriorities([
-      {
-        title: "Usage center",
-        detail: topTraining
-          ? `${topTraining.title} is the clearest live training signal in this account right now.`
-          : "No training pack has separated clearly enough yet to define the account's usage center.",
-      },
-      {
-        title: "Performance confidence",
-        detail:
-          totalScoredAttemptsLast30Days < MIN_CUSTOMER_SCORE_EVIDENCE
-            ? "Use score data cautiously for now because the recent conclusive attempt count is still limited."
-            : buildMovementSummary(customer.scoreDeltaLast30Days),
-      },
-      {
-        title: "Leadership watchpoint",
-        detail:
-          underusedActiveTrainings > 0
-            ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet and are the clearest rollout risk.`
-            : insights.coachingInsights.repeatedFocusArea
-              ? `${insights.coachingInsights.repeatedFocusArea} is the most repeated coaching theme in artifact-backed scoring.`
-              : `Latest recorded activity was ${formatDateTime(customer.latestActivityAt)}.`,
-      },
+      makePriority(
+        "primary",
+        "Account traction",
+        topTraining
+          ? `The account is active, and ${topTraining.title} is the clearest center of gravity right now.`
+          : "The account is active, but no single training area has separated clearly yet."
+      ),
+      makePriority(
+        "caution",
+        "Score confidence stays limited",
+        totalScoredAttemptsLast30Days < MIN_CUSTOMER_SCORE_EVIDENCE
+          ? "Keep the score story cautious until the recent conclusive attempt count is larger."
+          : buildMovementSummary(customer.scoreDeltaLast30Days)
+      ),
+      makePriority(
+        "watch",
+        "Account watchpoint",
+        underusedActiveTrainings > 0
+          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet and deserve rollout attention.`
+          : insights.coachingInsights.repeatedFocusArea
+            ? `${insights.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in the current artifact-backed record.`
+            : "The next useful question is whether the current activity pattern broadens or stays narrow."
+      ),
     ]),
-    note: insights.coachingInsights.repeatedFocusArea
-      ? `${insights.coachingInsights.repeatedFocusArea} is the most repeated coaching theme in artifact-backed scoring.`
-      : null,
+    note: null,
     facts: {
       subject: customer.orgName,
       activityLevel:
@@ -675,24 +705,22 @@ export function buildTrainingPackNarrative(payload: DashboardTrainingPackDetailR
       })[0] ?? null;
   const neglectedRequiredScenarios = pack.scenarios.filter((scenario) => scenario.attemptsLast30Days === 0).length;
 
-  const summary = joinSentences([
+  const summary =
     pack.attemptsLast30Days === 0
-      ? "This training pack is assigned, but it is not yet producing recent practice."
-      : scoredAttempts < MIN_PACK_SCORE_EVIDENCE
-        ? "This training pack is active, but scored evidence is still too thin for a reliable performance call."
-        : (pack.scoreDeltaLast30Days ?? 0) > 0
-          ? "This training pack is active and the recent scored trend is positive."
-          : (pack.scoreDeltaLast30Days ?? 0) < 0
-            ? "This training pack is active, but recent scored performance has softened."
-            : "This training pack is active and generating repeat practice, but score movement is still mixed.",
-    `${pack.startedLearnerCount} of ${pack.assignedLearnerCount} assigned ${pluralize(pack.assignedLearnerCount, "learner")} have started, and ${pack.completedLearnerCount} have completed the pack.`,
-    mostUsedScenario && mostUsedScenario.attemptsLast30Days > 0
-      ? `${mostUsedScenario.title} is driving the most recent practice inside this pack.`
-      : "No single required scenario has separated clearly yet on recent activity.",
-    neglectedRequiredScenarios > 0
-      ? `${neglectedRequiredScenarios} required ${pluralize(neglectedRequiredScenarios, "scenario")} show no recent activity.`
-      : null,
-  ]);
+      ? "This pack is assigned, but it is not producing real recent practice yet. Until that changes, the only useful read is rollout."
+      : joinSentences([
+          scoredAttempts < MIN_PACK_SCORE_EVIDENCE
+            ? "This pack is active, but the score read is still early."
+            : (pack.scoreDeltaLast30Days ?? 0) > 0
+              ? "This pack is active and the recent score signal is moving the right way."
+              : (pack.scoreDeltaLast30Days ?? 0) < 0
+                ? "This pack is active, but the recent score signal has softened."
+                : "This pack is active, but the score signal is still mixed.",
+          `${pack.startedLearnerCount} of ${pack.assignedLearnerCount} assigned ${pluralize(pack.assignedLearnerCount, "learner")} have started.`,
+          mostUsedScenario
+            ? `${mostUsedScenario.title} is the clearest current practice center.`
+            : "No single required scenario is defining the pack yet.",
+        ]);
 
   return {
     summary,
@@ -703,39 +731,40 @@ export function buildTrainingPackNarrative(payload: DashboardTrainingPackDetailR
         context: `${pack.completedLearnerCount} completed`,
       },
       {
-        label: "Evidence",
+        label: "Confidence",
         value: `${scoredAttempts} scored attempts`,
-        context: scoredAttempts >= MIN_PACK_SCORE_EVIDENCE ? "Enough for cautious score reads" : "Trend remains thin",
+        context: scoredAttempts >= MIN_PACK_SCORE_EVIDENCE ? "Enough for a cautious score read" : "Still too thin for a trend call",
       },
       {
-        label: "Main focus",
+        label: "Focus",
         value: mostUsedScenario?.title ?? "No dominant scenario",
         context: mostUsedScenario ? `${mostUsedScenario.attemptsLast30Days} recent attempts` : "Recent practice is still dispersed",
       },
     ]),
     priorities: compactPriorities([
-      {
-        title: "Adoption signal",
-        detail: `${pack.startedLearnerCount} of ${pack.assignedLearnerCount} assigned learners have started, so the main adoption question is ${pack.assignedLearnerCount > 0 && pack.startedLearnerCount < pack.assignedLearnerCount ? "start coverage" : "depth of repeat practice"}.`,
-      },
-      {
-        title: "Performance confidence",
-        detail:
-          scoredAttempts >= MIN_PACK_SCORE_EVIDENCE
-            ? buildMovementSummary(pack.scoreDeltaLast30Days)
-            : "Score direction is still too thin to treat as a reliable trend.",
-      },
-      {
-        title: "Coverage gap",
-        detail:
-          neglectedRequiredScenarios > 0
-            ? `${neglectedRequiredScenarios} required ${pluralize(neglectedRequiredScenarios, "scenario")} remain quiet and are the clearest follow-up area.`
-            : "Every required scenario shows at least some recent activity, so the next question is quality rather than coverage.",
-      },
+      makePriority(
+        "primary",
+        "Adoption is the first read",
+        `${pack.startedLearnerCount} of ${pack.assignedLearnerCount} assigned learners have started, so the main question is still adoption depth before anything else.`
+      ),
+      makePriority(
+        "caution",
+        "Performance is still early",
+        scoredAttempts >= MIN_PACK_SCORE_EVIDENCE
+          ? buildMovementSummary(pack.scoreDeltaLast30Days)
+          : "Score direction is still too thin to treat as stable."
+      ),
+      makePriority(
+        "watch",
+        "Watch the coverage gap",
+        neglectedRequiredScenarios > 0
+          ? `${neglectedRequiredScenarios} required ${pluralize(neglectedRequiredScenarios, "scenario")} remain quiet and are the clearest next follow-up.`
+          : "The next useful question is whether repeat practice deepens inside the active scenarios."
+      ),
     ]),
     note: pack.coachingInsights.repeatedFocusArea
-      ? `${pack.coachingInsights.repeatedFocusArea} is the most repeated coaching theme in artifact-backed pack scoring.`
-      : buildMovementSummary(pack.scoreDeltaLast30Days),
+      ? `${pack.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in artifact-backed pack scoring.`
+      : null,
     facts: {
       subject: pack.title,
       activityLevel: pack.attemptsLast30Days === 0 ? "none" : pack.startedLearnerCount <= 1 ? "light" : "active",
@@ -764,29 +793,44 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
   const topPriority = coachingInsights.topCoachingPriorities[0]?.theme ?? coachingInsights.repeatedFocusArea ?? null;
   const startedAssignments = assignments.filter((assignment) => assignment.status !== "not_started").length;
 
-  const summary = joinSentences([
+  const summary =
     user.simulationsLast30Days === 0
-      ? "This user does not yet have recent visible practice in the dashboard scope."
-      : `This user has recorded ${user.simulationsLast30Days} simulations across ${user.uniqueScenariosLast30Days} ${pluralize(user.uniqueScenariosLast30Days, "scenario")} in the last 30 days.`,
-    dominantTraining || dominantScenario
-      ? joinSentences([
-          dominantTraining ? `Recent scored practice is centered on ${dominantTraining}.` : null,
-          dominantScenario ? `${dominantScenario} appears most often in the recent scored attempt set.` : null,
-        ])
-      : "Recent scored practice is not yet concentrated enough to call a dominant training or scenario.",
-    user.simulationsLast30Days > 0 && user.scoredAttemptsLast30Days < MIN_USER_COMPARISON_SCORED_ATTEMPTS
-      ? "There is still too little scored history to call improvement reliably, so the safest read is effort and practice focus."
-      : (user.scoreDeltaLast30Days ?? 0) > 0 && user.scoredAttemptsLast30Days >= MIN_USER_COMPARISON_SCORED_ATTEMPTS
-        ? "Recent scored movement is positive enough to treat as an early improvement signal."
-        : (user.scoreDeltaLast30Days ?? 0) < 0 && user.scoredAttemptsLast30Days >= MIN_USER_COMPARISON_SCORED_ATTEMPTS
-          ? "Recent scored performance has softened, so this user deserves closer coaching attention."
-          : user.simulationsLast30Days > 0
-            ? "Score movement is still inconclusive, so the current takeaway should stay cautious."
-            : null,
-    topStrength || topPriority
-      ? `${topStrength ? `The clearest repeated strength is ${topStrength}` : "A repeated strength is not yet established"}${topPriority ? `, while the main coaching priority is ${topPriority}` : ""}.`
-      : null,
-  ]);
+      ? "This user has no recent visible practice in the current scope. There is nothing reliable to conclude yet beyond the lack of recent activity."
+      : user.scoredAttemptsLast30Days < MIN_USER_COMPARISON_SCORED_ATTEMPTS
+        ? joinSentences([
+            "This user is practicing, but the scored history is still thin.",
+            dominantTraining || dominantScenario
+              ? `The safest read is current focus${dominantTraining ? ` in ${dominantTraining}` : ""}${dominantScenario ? `${dominantTraining ? " and" : " in"} ${dominantScenario}` : ""}.`
+              : "The safest read is current effort rather than improvement.",
+            topPriority ? `${topPriority} is the clearest coaching theme to keep in view.` : null,
+          ])
+        : (user.scoreDeltaLast30Days ?? 0) > 0
+          ? joinSentences([
+              "This user is practicing consistently and the recent score signal is moving the right way.",
+              dominantTraining || dominantScenario
+                ? `Most recent scored practice is centered on ${dominantTraining ?? dominantScenario}.`
+                : null,
+              topStrength && topPriority
+                ? `${topStrength} is the clearest repeated strength, while ${topPriority} remains the main coaching need.`
+                : topPriority
+                  ? `${topPriority} remains the clearest coaching need.`
+                  : null,
+            ])
+          : (user.scoreDeltaLast30Days ?? 0) < 0
+            ? joinSentences([
+                "This user is still active, but the recent score signal has softened.",
+                dominantTraining || dominantScenario
+                  ? `Most recent scored practice is centered on ${dominantTraining ?? dominantScenario}.`
+                  : null,
+                topPriority ? `${topPriority} is the coaching theme that matters most right now.` : "That makes coaching detail more important than the current average score.",
+              ])
+            : joinSentences([
+                "This user is practicing, but the performance signal is still inconclusive.",
+                dominantTraining || dominantScenario
+                  ? `Most recent scored practice is centered on ${dominantTraining ?? dominantScenario}.`
+                  : null,
+                topPriority ? `${topPriority} is the clearest coaching theme currently repeating.` : null,
+              ]);
 
   return {
     summary,
@@ -797,46 +841,49 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
         context: `${user.uniqueScenariosLast30Days} scenarios in the last 30 days`,
       },
       {
-        label: "Evidence",
+        label: "Confidence",
         value: `${user.scoredAttemptsLast30Days} scored attempts`,
         context:
           user.scoredAttemptsLast30Days >= MIN_USER_COMPARISON_SCORED_ATTEMPTS
-            ? "Enough for cautious score movement reads"
-            : "Trend remains too thin",
+            ? "Enough for a cautious movement read"
+            : "Still too thin for a trend call",
       },
       {
-        label: "Main focus",
+        label: "Focus",
         value: dominantTraining ?? dominantScenario ?? user.latestScenarioTitle ?? "No dominant focus yet",
         context: dominantTraining ? "Most frequent recent training" : dominantScenario ? "Most frequent recent scenario" : "Latest visible activity",
       },
     ]),
     priorities: compactPriorities([
-      {
-        title: "Repeated strength",
-        detail: topStrength
-          ? `${topStrength} is the clearest recurring positive signal in the artifact-backed coaching record.`
-          : "There is not yet enough artifact-backed coverage to name a repeated strength confidently.",
-      },
-      {
-        title: "Coaching priority",
-        detail: topPriority
-          ? `${topPriority} is the clearest repeated coaching need in the current visible history.`
-          : "The coaching record is still too thin to name one repeated priority confidently.",
-      },
-      {
-        title: "Execution context",
-        detail:
-          assignments.length > 0
-            ? `${startedAssignments} of ${assignments.length} active ${pluralize(assignments.length, "assignment")} have been started in the visible scope.`
-            : "This user does not currently have an active visible assignment, so practice should be read as broader behavior rather than pack progress.",
-      },
+      makePriority(
+        "primary",
+        "The clearest positive signal",
+        topStrength
+          ? `${topStrength} is the strongest repeated positive pattern in the artifact-backed coaching record.`
+          : user.simulationsLast30Days > 0
+            ? "The most reliable positive signal right now is continued practice rather than a repeated strength theme."
+            : "There is not enough recent activity to point to a positive signal yet."
+      ),
+      makePriority(
+        "caution",
+        "The main coaching caution",
+        topPriority
+          ? `${topPriority} is the clearest repeated coaching need in the visible history.`
+          : user.scoredAttemptsLast30Days < MIN_USER_COMPARISON_SCORED_ATTEMPTS
+            ? "The scored history is still too thin to make a strong coaching call."
+            : "No repeated coaching theme is strong enough yet to outrank the broader activity picture."
+      ),
+      makePriority(
+        "watch",
+        "What to watch next",
+        assignments.length > 0
+          ? `${startedAssignments} of ${assignments.length} active ${pluralize(assignments.length, "assignment")} have been started, so the next useful question is whether practice converts into assignment progress.`
+          : dominantTraining || dominantScenario
+            ? `Watch whether practice keeps deepening in ${dominantTraining ?? dominantScenario} or starts to broaden out.`
+            : "Watch whether a clearer practice focus emerges before trying to call a trend."
+      ),
     ]),
-    note:
-      topPriority && topStrength
-        ? `Repeated strength: ${topStrength}. Repeated coaching priority: ${topPriority}.`
-        : topPriority
-          ? `Repeated coaching priority: ${topPriority}.`
-          : null,
+    note: null,
     facts: {
       subject: user.email,
       activityLevel:

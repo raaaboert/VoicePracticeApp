@@ -90,6 +90,7 @@ export default async function CustomerDetailPage({
       <DashboardProofSection
         title="Proof behind this account view"
         description="Open the coaching detail, account tabs, and reporting notes when you need to inspect the underlying evidence."
+        preview="Coaching detail, account tabs, and reporting notes stay hidden until you open them."
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
@@ -99,6 +100,7 @@ export default async function CustomerDetailPage({
               description="These account-level coaching aggregates come only from persisted coaching artifacts inside this customer scope. They are useful for spotting repeated focus areas without retaining transcripts."
               insights={insights.coachingInsights}
               emptyMessage="This customer does not yet have enough new artifact-backed score records to produce coaching-theme aggregates."
+              embedded
             />
           </div>
 

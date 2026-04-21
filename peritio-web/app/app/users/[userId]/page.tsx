@@ -77,6 +77,7 @@ export default async function UserDetailPage({
       <DashboardProofSection
         title="Proof behind this user view"
         description="Open the full coaching, assignment, and attempt detail when you need the evidence behind the briefing."
+        preview="Coaching themes, assignments, and scored-attempt history stay hidden until you open them."
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
@@ -86,6 +87,7 @@ export default async function UserDetailPage({
               description="These user-level coaching aggregates come only from persisted coaching artifacts on scored attempts in the last 30 days. They highlight repeated themes without storing transcript history."
               insights={payload.coachingInsights}
               emptyMessage="This user does not yet have enough artifact-backed scored attempts in the last 30 days to show aggregate coaching themes."
+              embedded
             />
           </div>
 
