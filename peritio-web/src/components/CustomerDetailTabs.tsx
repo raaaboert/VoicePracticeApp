@@ -29,6 +29,16 @@ export function CustomerDetailTabs({
 
   return (
     <section className="section-card">
+      <div className="section-header">
+        <div>
+          <p className="eyebrow">Details</p>
+          <h2>Account breakdown</h2>
+          <p className="section-copy">
+            The detailed training, user, and scenario breakdown stays available below the narrative summary for deeper inspection.
+          </p>
+        </div>
+      </div>
+
       <div className="tab-row" role="tablist" aria-label="Customer detail views">
         <button
           type="button"

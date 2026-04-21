@@ -30,6 +30,7 @@ import {
   COLOR_SCHEME_OPTIONS,
   getAiVoiceOption,
 } from "./src/data/preferences";
+import { PeritioBrandMark, PERITIO_BRAND_COLORS } from "./src/components/PeritioBrandMark";
 import {
   DIFFICULTY_HINTS,
   DIFFICULTY_LABELS,
@@ -3044,41 +3045,31 @@ export default function App() {
         </View>
       </Modal>
 
-      {(() => {
-        const heroGradientColors: [string, string, string] =
-          colorScheme === "soft_light"
-            ? ["rgba(247, 251, 255, 0.99)", "rgba(225, 236, 255, 0.99)", "rgba(206, 222, 252, 0.99)"]
-            : ["rgba(31, 84, 133, 0.98)", "rgba(14, 45, 77, 0.98)", "rgba(9, 30, 52, 0.98)"];
-
-        return (
-          <LinearGradient colors={heroGradientColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.heroCard}>
-            <View style={styles.heroGlowOne} />
-            <View style={styles.heroGlowTwo} />
-            <Text style={styles.heroTitle}>Peritio</Text>
-            <Text style={styles.heroSubtitle}>Professional Training Simplified</Text>
-            <View style={styles.heroRule} />
-            <Text style={styles.heroBody}>
-              Practice high-stakes professional conversations by voice with dynamic AI role-play.
-            </Text>
-            <View style={styles.heroChipRow}>
-              <View style={styles.heroChip}>
-                <Text style={styles.heroChipText}>Live Voice</Text>
-              </View>
-              <View style={styles.heroChip}>
-                <Text style={styles.heroChipText}>Scenario Drills</Text>
-              </View>
-            </View>
-          </LinearGradient>
-        );
-      })()}
-
-      {activeSegment ? (
-        <View style={[styles.card, styles.segmentCard]}>
-          <Text style={styles.segmentLabel}>Active Role</Text>
-          <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
-          <Text style={styles.body}>{activeSegment.summary}</Text>
+      <LinearGradient
+        colors={[PERITIO_BRAND_COLORS.paper, "#ECE2D2"]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.heroCard}
+      >
+        <View style={styles.heroGuideFrame} />
+        <View style={styles.heroGuideVertical} />
+        <View style={styles.heroGuideHorizontal} />
+        <View style={styles.heroMarkFrame}>
+          <PeritioBrandMark size={104} variant="light" />
         </View>
-      ) : null}
+        <Text style={styles.heroKicker}>Peritio</Text>
+        <Text style={styles.heroTitle}>Precision practice for consequential conversations.</Text>
+        <Text style={styles.heroBody}>
+          Voice simulations with scored feedback for the moments where judgment, tone, and clarity matter.
+        </Text>
+        <View style={styles.heroMetaRow}>
+          <Text style={styles.heroMetaText}>Voice simulations</Text>
+          <View style={styles.heroMetaDot} />
+          <Text style={styles.heroMetaText}>Scenario drills</Text>
+          <View style={styles.heroMetaDot} />
+          <Text style={styles.heroMetaText}>Scored feedback</Text>
+        </View>
+      </LinearGradient>
 
       {!apiConfigured ? (
         <View style={styles.warningCard}>
@@ -3104,9 +3095,18 @@ export default function App() {
         </View>
       ) : null}
 
-      <Pressable style={styles.primaryButton} onPress={() => setScreen("setup")}>
-        <Text style={styles.primaryButtonText}>Let's get started</Text>
+      <Pressable style={styles.homePrimaryButton} onPress={() => setScreen("setup")}>
+        <Text style={styles.homePrimaryButtonText}>Continue to setup</Text>
       </Pressable>
+
+      {activeSegment ? (
+        <View style={[styles.card, styles.segmentCard]}>
+          <Text style={styles.segmentLabel}>Active role</Text>
+          <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+          <Text style={styles.body}>{activeSegment.summary}</Text>
+          <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
+        </View>
+      ) : null}
     </View>
   );
 
@@ -4977,9 +4977,13 @@ export default function App() {
   const renderContent = () => {
     if (isBootLoading) {
       return (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={theme.accent} />
-          <Text style={styles.body}>Loading app...</Text>
+        <View style={styles.bootRoot}>
+          <View style={styles.bootPanel}>
+            <PeritioBrandMark size={92} variant="light" />
+            <Text style={styles.bootWordmark}>Peritio</Text>
+            <Text style={styles.bootSubtitle}>Preparing your workspace...</Text>
+            <ActivityIndicator size="small" color={PERITIO_BRAND_COLORS.ink} />
+          </View>
         </View>
       );
     }
@@ -5114,55 +5118,68 @@ function createStyles(theme: ThemeTokens) {
     topTitle: { color: theme.text, fontSize: 19, fontWeight: "700" },
     card: { borderRadius: 16, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.panel, padding: 15, marginBottom: 14, gap: 9 },
     heroCard: {
-      borderRadius: 26,
-      borderWidth: 1.5,
-      borderColor: theme.accent,
-      paddingHorizontal: 18,
-      paddingVertical: 18,
+      borderRadius: 30,
+      borderWidth: 1,
+      borderColor: "rgba(15, 35, 58, 0.08)",
+      paddingHorizontal: 22,
+      paddingVertical: 28,
       marginBottom: 18,
       overflow: "hidden",
-      gap: 8,
-      shadowColor: theme.accent,
-      shadowOpacity: 0.18,
-      shadowRadius: 14,
-      shadowOffset: { width: 0, height: 6 },
-      elevation: 5,
+      gap: 10,
+      alignItems: "center",
+      shadowColor: PERITIO_BRAND_COLORS.ink,
+      shadowOpacity: 0.12,
+      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 10 },
+      elevation: 6,
     },
-    heroGlowOne: {
+    heroGuideFrame: {
       position: "absolute",
-      width: 220,
-      height: 220,
-      borderRadius: 999,
-      backgroundColor: "rgba(255, 255, 255, 0.16)",
-      top: -110,
-      right: -85,
-    },
-    heroGlowTwo: {
-      position: "absolute",
-      width: 150,
-      height: 150,
-      borderRadius: 999,
-      backgroundColor: "rgba(53, 194, 255, 0.18)",
-      bottom: -60,
-      left: -45,
-    },
-    heroTitle: { color: theme.text, fontSize: 42, fontWeight: "900", lineHeight: 44, letterSpacing: -0.5 },
-    heroRule: { width: 118, height: 4, borderRadius: 99, backgroundColor: theme.accent, opacity: 0.88, marginVertical: 2 },
-    heroSubtitle: { color: theme.text, fontSize: 21, fontWeight: "800", lineHeight: 26 },
-    heroBody: { color: theme.textMuted, fontSize: 14.5, lineHeight: 21 },
-    heroChipRow: { flexDirection: "row", gap: 8, marginTop: 4 },
-    heroChip: {
-      borderRadius: 999,
+      top: 18,
+      right: 18,
+      bottom: 18,
+      left: 18,
+      borderRadius: 24,
       borderWidth: 1,
-      borderColor: theme.border,
-      backgroundColor: "rgba(255, 255, 255, 0.28)",
-      paddingHorizontal: 10,
-      paddingVertical: 5,
+      borderColor: "rgba(15, 35, 58, 0.06)",
     },
-    heroChipText: { color: theme.text, fontSize: 11.5, fontWeight: "700" },
-    segmentCard: { marginTop: 10, borderColor: theme.accent, backgroundColor: theme.currentPlanCardBg },
-    segmentLabel: { color: theme.accent, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.7 },
+    heroGuideVertical: {
+      position: "absolute",
+      top: 0,
+      bottom: 0,
+      left: "50%",
+      width: 1,
+      backgroundColor: "rgba(15, 35, 58, 0.06)",
+    },
+    heroGuideHorizontal: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      top: "50%",
+      height: 1,
+      backgroundColor: "rgba(15, 35, 58, 0.05)",
+    },
+    heroMarkFrame: {
+      width: 148,
+      height: 148,
+      borderRadius: 34,
+      borderWidth: 1,
+      borderColor: "rgba(15, 35, 58, 0.08)",
+      backgroundColor: "rgba(255, 255, 255, 0.55)",
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 4,
+    },
+    heroKicker: { color: PERITIO_BRAND_COLORS.ink, fontSize: 12.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.2 },
+    heroTitle: { color: PERITIO_BRAND_COLORS.ink, fontSize: 32, fontWeight: "800", lineHeight: 36, letterSpacing: -0.8, textAlign: "center" },
+    heroBody: { color: "#415264", fontSize: 15, lineHeight: 22, textAlign: "center", maxWidth: 320 },
+    heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 2 },
+    heroMetaText: { color: "#415264", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.2 },
+    heroMetaDot: { width: 4, height: 4, borderRadius: 999, backgroundColor: PERITIO_BRAND_COLORS.brass },
+    segmentCard: { marginTop: 2, borderColor: "rgba(15, 35, 58, 0.08)", backgroundColor: "rgba(255, 255, 255, 0.72)" },
+    segmentLabel: { color: PERITIO_BRAND_COLORS.brass, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.9 },
     segmentTitle: { color: theme.text, fontSize: 24, fontWeight: "800", lineHeight: 28 },
+    segmentFootnote: { color: theme.textMuted, fontSize: 12.5, lineHeight: 18 },
     title: { color: theme.text, fontSize: 23, fontWeight: "700" },
     label: { color: theme.accent, fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 },
     body: { color: theme.textMuted, fontSize: 14.5, lineHeight: 21 },
@@ -5214,6 +5231,29 @@ function createStyles(theme: ThemeTokens) {
     successCard: { borderRadius: 14, borderWidth: 1, borderColor: "rgba(29, 154, 95, 0.45)", backgroundColor: "rgba(29, 154, 95, 0.12)", padding: 12, marginBottom: 12 },
     errorText: { color: theme.danger, fontSize: 13, marginBottom: 6 },
     successText: { color: theme.success, fontSize: 13, marginBottom: 6 },
+    bootRoot: { flex: 1, justifyContent: "center", alignItems: "center" },
+    bootPanel: {
+      width: "100%",
+      maxWidth: 360,
+      borderRadius: 30,
+      borderWidth: 1,
+      borderColor: "rgba(15, 35, 58, 0.08)",
+      backgroundColor: "rgba(248, 244, 236, 0.94)",
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 24,
+      paddingVertical: 28,
+      gap: 12,
+      shadowColor: PERITIO_BRAND_COLORS.ink,
+      shadowOpacity: 0.1,
+      shadowRadius: 16,
+      shadowOffset: { width: 0, height: 10 },
+      elevation: 6,
+    },
+    bootWordmark: { color: PERITIO_BRAND_COLORS.ink, fontSize: 28, fontWeight: "800", letterSpacing: -0.6 },
+    bootSubtitle: { color: "#5A6877", fontSize: 14.5, lineHeight: 21, textAlign: "center" },
+    homePrimaryButton: { minHeight: 54, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: PERITIO_BRAND_COLORS.ink, marginBottom: 14 },
+    homePrimaryButtonText: { color: PERITIO_BRAND_COLORS.paper, fontSize: 16, fontWeight: "800" },
     primaryButton: { minHeight: 52, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },
     primaryButtonText: { color: theme.primaryButtonText, fontSize: 16, fontWeight: "800" },
     disabled: { opacity: 0.55 },

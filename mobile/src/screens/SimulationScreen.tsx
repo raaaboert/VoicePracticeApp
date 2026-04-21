@@ -137,6 +137,12 @@ function buildLocalCapturedText(turnDurationSeconds: number): string {
   return `Voice input captured (${turnDurationSeconds}s) in local test mode.`;
 }
 
+function waitForUiPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 function normalizeTranscriptForComparison(value: string): string {
   return value
     .toLowerCase()
@@ -1264,10 +1270,14 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       if (userText) {
         appendMessage({ id: createMessageId(), role: "user", content: userText });
+        setStatus(replyPayload ? "Transcript ready. Preparing AI response..." : "Transcript ready. Crafting AI reply...");
 
         if (sessionActiveRef.current && !unmountedRef.current) {
+          if (replyPayload) {
+            await waitForUiPaint();
+          }
+
           if (!replyPayload) {
-            setStatus("Crafting AI reply...");
             assistantRequestStartedAtMs = Date.now();
             logSimulationTiming({
               correlationId,
@@ -1959,7 +1969,9 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       ? mode === "recording"
         ? "Voice-first mode with explicit turn control. The app keeps listening until you tap Submit Response."
         : mode === "thinking"
-          ? "Your response is being transcribed and the AI reply is being prepared."
+          ? messages[messages.length - 1]?.role === "user"
+            ? "Your transcript is ready. The AI reply is still being prepared."
+            : "Your response is being transcribed and the AI reply is being prepared."
           : "The AI response is readying for playback or currently speaking."
       : "Press Start Simulation to begin, then tap Submit Response to end each turn.";
 

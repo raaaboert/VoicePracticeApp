@@ -11,11 +11,16 @@ import {
 } from "@voicepractice/shared";
 
 import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
-import {
-  buildDashboardAggregateScopeContext,
-} from "@/src/components/dashboardReportingScope";
+import { DashboardNarrativePanel } from "@/src/components/DashboardNarrativePanel";
+import { buildDashboardAggregateScopeContext } from "@/src/components/dashboardReportingScope";
 import { canRenderDashboardWorkspaceDivisionFilter } from "@/src/components/dashboardDivisionFilterState";
 import { MetricCard } from "@/src/components/MetricCard";
+import {
+  buildAggregateCompanyNarrative,
+  buildAggregateTrainingNarrative,
+  buildAggregateUsersNarrative,
+  buildUserHighlights,
+} from "@/src/lib/dashboardNarratives";
 import { formatDateTime, formatScore, formatUsageMinutes } from "@/src/lib/formatters";
 
 type DashboardReportTab = "training" | "users" | "company";
@@ -46,98 +51,6 @@ function getTrainingOptionLabel(training: DashboardTrainingWorkspaceRow, multipl
   return multipleOrgs ? `${training.name} - ${training.orgName}` : training.name;
 }
 
-function buildTrainingPerformanceSummary(training: DashboardTrainingWorkspaceRow): string {
-  const strongestArea = training.insights.strongestArea?.label;
-  const weakestArea = training.insights.weakestArea?.label;
-
-  if (strongestArea && weakestArea && strongestArea !== weakestArea) {
-    return `Across completed scored attempts, the highest legacy rubric-category average is ${strongestArea}, while ${weakestArea} is currently the lowest.`;
-  }
-
-  if (strongestArea) {
-    return `Across completed scored attempts, the highest legacy rubric-category average in this training is ${strongestArea}.`;
-  }
-
-  if (weakestArea) {
-    return `Across completed scored attempts, ${weakestArea} is the lowest legacy rubric-category average in this training so far.`;
-  }
-
-  if (training.summary.totalAttemptsLast30Days > 0) {
-    return "Recent activity is available, but completed scored attempts are still limited.";
-  }
-
-  return "Completed scored attempts will surface pattern summaries here.";
-}
-
-function buildTrainingRecommendedFocus(training: DashboardTrainingWorkspaceRow): string {
-  const lowestScenario = training.insights.lowestPerformingScenario?.title;
-  const weakestArea = training.insights.weakestArea?.label;
-
-  if (lowestScenario) {
-    return `Recommended focus: Reinforce scenario ${lowestScenario}.`;
-  }
-
-  if (weakestArea) {
-    return `Recommended focus: Use ${weakestArea} as the next legacy rubric coaching cue.`;
-  }
-
-  return "Recommended focus: Gather more completed scored attempts to identify the next priority.";
-}
-
-function buildUserHighlights(users: DashboardUserReportResponse["users"]) {
-  const scoredUsers = users
-    .filter((user) => user.averageScoreLast30Days !== null && user.simulationsLast30Days > 0)
-    .slice()
-    .sort((left, right) => {
-      if ((right.averageScoreLast30Days ?? 0) !== (left.averageScoreLast30Days ?? 0)) {
-        return (right.averageScoreLast30Days ?? 0) - (left.averageScoreLast30Days ?? 0);
-      }
-
-      if (right.simulationsLast30Days !== left.simulationsLast30Days) {
-        return right.simulationsLast30Days - left.simulationsLast30Days;
-      }
-
-      return left.email.localeCompare(right.email);
-    });
-
-  const topPerformer = scoredUsers[0] ?? null;
-  const needsAttention = scoredUsers.length > 1 ? scoredUsers[scoredUsers.length - 1] : null;
-
-  return {
-    topPerformer,
-    needsAttention,
-  };
-}
-
-function buildCompanyTrend(
-  topTrainings: DashboardTrainingWorkspaceRow[],
-  totalAttemptsLast30Days: number
-): string[] {
-  if (totalAttemptsLast30Days <= 0 || topTrainings.length === 0) {
-    return ["Recent activity is limited in the current reporting window."];
-  }
-
-  const leadTraining = topTrainings[0];
-  const leadAttempts = leadTraining.summary.totalAttemptsLast30Days;
-  const leadShare = totalAttemptsLast30Days > 0 ? leadAttempts / totalAttemptsLast30Days : 0;
-
-  let summary = "Activity remains focused in the current reporting window.";
-  if (topTrainings.length === 1) {
-    summary = "Usage is currently concentrated in one active training.";
-  } else if (leadShare >= 0.6) {
-    summary = `Usage is currently concentrated in ${leadTraining.name}.`;
-  } else if (topTrainings.length <= 3) {
-    summary = "Activity is concentrated in a small set of active trainings.";
-  }
-
-  const latestActivityAt = leadTraining.summary.latestActivityAt;
-  if (!latestActivityAt) {
-    return [summary];
-  }
-
-  return [summary, `Latest recorded activity was ${formatDateTime(latestActivityAt)}.`];
-}
-
 export function DashboardReportingWorkspace({
   trainingWorkspace,
   userReport,
@@ -151,13 +64,9 @@ export function DashboardReportingWorkspace({
   const trainings = trainingWorkspace?.trainings ?? [];
   const viewer = overview?.viewer ?? userReport?.viewer ?? trainingWorkspace?.viewer ?? null;
   const isSuperUser = viewer?.accessType === "super_user";
-  const aggregateScopeContext = isSuperUser
-    ? buildDashboardAggregateScopeContext(overview?.customers ?? [])
-    : null;
+  const aggregateScopeContext = isSuperUser ? buildDashboardAggregateScopeContext(overview?.customers ?? []) : null;
   const multipleOrgsInScope = new Set(trainings.map((training) => training.orgId)).size > 1;
-  const [activeTab, setActiveTab] = useState<DashboardReportTab>(() =>
-    normalizeDashboardTab(searchParams.get("tab"))
-  );
+  const [activeTab, setActiveTab] = useState<DashboardReportTab>(() => normalizeDashboardTab(searchParams.get("tab")));
   const [selectedTrainingId, setSelectedTrainingId] = useState<string | null>(trainings[0]?.id ?? null);
 
   useEffect(() => {
@@ -175,8 +84,11 @@ export function DashboardReportingWorkspace({
     }
   }, [selectedTrainingId, trainings]);
 
-  const selectedTraining =
-    trainings.find((training) => training.id === selectedTrainingId) ?? trainings[0] ?? null;
+  const selectedTraining = trainings.find((training) => training.id === selectedTrainingId) ?? trainings[0] ?? null;
+  const selectedTrainingScoredScenarioCount =
+    selectedTraining?.scenarios.filter((scenario) => scenario.averageScoreLast30Days !== null).length ?? 0;
+  const selectedTrainingUnderusedScenarioCount =
+    selectedTraining?.scenarios.filter((scenario) => scenario.attemptsLast30Days === 0).length ?? 0;
 
   const trainingCountByUser = new Map<string, number>();
   for (const training of trainings) {
@@ -198,14 +110,35 @@ export function DashboardReportingWorkspace({
   const users = userReport?.users ?? [];
   const userSummary = userReport?.summary;
   const companySummary = overview?.summary;
-  const trainingPerformanceSummary = selectedTraining
-    ? buildTrainingPerformanceSummary(selectedTraining)
-    : null;
-  const trainingRecommendedFocus = selectedTraining
-    ? buildTrainingRecommendedFocus(selectedTraining)
-    : null;
-  const { topPerformer, needsAttention } = buildUserHighlights(users);
-  const companyTrend = buildCompanyTrend(topTrainings, companySummary?.simulationsLast30Days ?? 0);
+  const userHighlights = buildUserHighlights(users);
+  const trainingNarrative = buildAggregateTrainingNarrative(selectedTraining);
+  const usersNarrative = buildAggregateUsersNarrative(userReport);
+  const companyNarrative = buildAggregateCompanyNarrative({
+    overview,
+    trainings,
+    userReport,
+  });
+  const leadTraining = topTrainings[0] ?? null;
+  const activeTrainingCount = trainings.filter((training) => training.summary.totalAttemptsLast30Days > 0).length;
+  const underusedActiveTrainingCount = trainings.filter(
+    (training) => training.status === "active" && training.summary.totalAttemptsLast30Days === 0
+  ).length;
+  const comparisonCoverageCount = userHighlights.comparisonUsers.length;
+  const positiveMovementUsers = userHighlights.comparisonUsers.filter((user) => (user.scoreDeltaLast30Days ?? 0) > 0).length;
+  const negativeMovementUsers = userHighlights.comparisonUsers.filter((user) => (user.scoreDeltaLast30Days ?? 0) < 0).length;
+  const topScenario = overview?.topScenarios[0] ?? null;
+  const companyMovementLabel =
+    comparisonCoverageCount < 2
+      ? "Too early"
+      : positiveMovementUsers > negativeMovementUsers
+        ? "Net positive"
+        : negativeMovementUsers > positiveMovementUsers
+          ? "Needs review"
+          : "Mixed";
+  const companyMovementMeta =
+    comparisonCoverageCount < 2
+      ? "Fewer than 2 users have enough score history for comparison"
+      : `${comparisonCoverageCount} users have enough score history for comparison`;
 
   return (
     <div className="page-stack">
@@ -285,7 +218,7 @@ export function DashboardReportingWorkspace({
       </section>
 
       {activeTab === "training" ? (
-        <div className="tab-panel">
+        <div className="tab-panel page-stack">
           <section className="section-card">
             <div className="dashboard-selector-grid">
               <div className="dashboard-selector-field">
@@ -316,8 +249,7 @@ export function DashboardReportingWorkspace({
                     <span className="pill">Updated {formatDateTime(selectedTraining.updatedAt)}</span>
                   </div>
                   <p className="small-copy">
-                    {selectedTraining.attachedTrainingPackCount} attached packs and{" "}
-                    {selectedTraining.attachedCustomScenarioCount} attached custom scenarios.
+                    {selectedTraining.attachedTrainingPackCount} attached packs and {selectedTraining.attachedCustomScenarioCount} attached custom scenarios.
                   </p>
                 </div>
               ) : (
@@ -335,6 +267,16 @@ export function DashboardReportingWorkspace({
 
           {selectedTraining ? (
             <>
+              <DashboardNarrativePanel
+                eyebrow="Quick read"
+                title="What this training is doing now"
+                narrative={trainingNarrative}
+                badges={[
+                  `${selectedTraining.summary.totalAttemptsLast30Days} attempts`,
+                  `${selectedTraining.summary.activeLearnerCountLast30Days} active learners`,
+                ]}
+              />
+
               <section className="metric-grid metric-grid-primary">
                 <MetricCard
                   label="Total attempts"
@@ -348,7 +290,7 @@ export function DashboardReportingWorkspace({
                       ? formatScore(selectedTraining.summary.averageScoreLast30Days)
                       : "-"
                   }
-                  meta="Completed scored attempts only"
+                  meta="30-day average from conclusive scored attempts only"
                   tone="positive"
                 />
                 <MetricCard
@@ -358,79 +300,65 @@ export function DashboardReportingWorkspace({
                   tone="accent"
                 />
                 <MetricCard
-                  label="Scenarios in training"
-                  value={`${selectedTraining.summary.totalScenarioCount}`}
-                  meta="Attached or in use"
+                  label="Scored scenario coverage"
+                  value={`${selectedTrainingScoredScenarioCount}/${selectedTraining.summary.totalScenarioCount}`}
+                  meta="Scenarios with conclusive scored activity"
                   tone="warm"
                 />
               </section>
 
-              <section className="section-card dashboard-primary-section">
+              <section className="section-card">
                 <div className="section-header">
                   <div>
-                    <p className="eyebrow">Training</p>
-                    <h2>Performance summary</h2>
+                    <p className="eyebrow">Movement and focus</p>
+                    <h2>Where to look next</h2>
                     <p className="section-copy">
-                      {isSuperUser
-                        ? "Performance for the selected training inside the current aggregate customer scope. Attempt counts reflect usage activity; score averages reflect only completed scored attempts."
-                        : "Performance for this training. Attempt counts reflect usage activity; score averages reflect only completed scored attempts."}
+                      Use these signals to separate activity, evidence strength, and scenario coverage before opening the detail tables.
                     </p>
                   </div>
                 </div>
 
-                <div className="dashboard-signal-block dashboard-signal-block-strong">
-                  <p className="dashboard-signal-lead">{trainingPerformanceSummary}</p>
-                  {trainingRecommendedFocus ? (
-                    <p className="dashboard-signal-note">{trainingRecommendedFocus}</p>
-                  ) : null}
-                </div>
-
-                <div className="dashboard-insight-grid">
-                  <article className="detail-card">
-                    <p className="metric-label">Highest legacy category average</p>
-                    <strong className="metric-value dashboard-insight-value">
-                      {selectedTraining.insights.strongestArea?.label ?? "No scored attempts yet"}
-                    </strong>
-                    <p className="metric-meta">
-                      {selectedTraining.insights.strongestArea?.averageScoreLast30Days !== null &&
-                      selectedTraining.insights.strongestArea?.averageScoreLast30Days !== undefined
-                        ? `Avg ${formatScore(selectedTraining.insights.strongestArea.averageScoreLast30Days)}`
-                        : "Scores will appear after learners complete scored attempts."}
-                    </p>
-                  </article>
-                  <article className="detail-card">
-                    <p className="metric-label">Lowest legacy category average</p>
-                    <strong className="metric-value dashboard-insight-value">
-                      {selectedTraining.insights.weakestArea?.label ?? "No scored attempts yet"}
-                    </strong>
-                    <p className="metric-meta">
-                      {selectedTraining.insights.weakestArea?.averageScoreLast30Days !== null &&
-                      selectedTraining.insights.weakestArea?.averageScoreLast30Days !== undefined
-                        ? `Avg ${formatScore(selectedTraining.insights.weakestArea.averageScoreLast30Days)}`
-                        : "Scores will appear after learners complete scored attempts."}
-                    </p>
-                  </article>
+                <div className="info-grid">
                   <article className="detail-card">
                     <p className="metric-label">Most-used scenario</p>
                     <strong className="metric-value dashboard-insight-value">
-                      {selectedTraining.insights.mostUsedScenario?.title ?? "No attempts yet"}
+                      {selectedTraining.insights.mostUsedScenario?.title ?? "No recent activity"}
                     </strong>
                     <p className="metric-meta">
                       {selectedTraining.insights.mostUsedScenario
-                        ? `${selectedTraining.insights.mostUsedScenario.attemptsLast30Days ?? 0} attempts`
-                        : "This will populate as attempts are recorded."}
+                        ? `${selectedTraining.insights.mostUsedScenario.attemptsLast30Days ?? 0} attempts in the last 30 days`
+                        : "Scenario traction will appear here as learners practice."}
                     </p>
                   </article>
                   <article className="detail-card">
-                    <p className="metric-label">Lowest-performing scenario</p>
+                    <p className="metric-label">Score signal</p>
                     <strong className="metric-value dashboard-insight-value">
-                      {selectedTraining.insights.lowestPerformingScenario?.title ?? "No scored attempts yet"}
+                      {selectedTraining.insights.weakestArea?.label ?? "Too early to call"}
                     </strong>
                     <p className="metric-meta">
-                      {selectedTraining.insights.lowestPerformingScenario?.averageScoreLast30Days !== null &&
-                      selectedTraining.insights.lowestPerformingScenario?.averageScoreLast30Days !== undefined
-                        ? `Avg ${formatScore(selectedTraining.insights.lowestPerformingScenario.averageScoreLast30Days)}`
-                        : "Scores will appear after scenario activity is scored."}
+                      {selectedTrainingScoredScenarioCount >= 2
+                        ? "The weakest legacy scoring area on current scored activity."
+                        : "More scored scenario coverage is needed before the weakest area is reliable."}
+                    </p>
+                  </article>
+                  <article className="detail-card">
+                    <p className="metric-label">Coverage gap</p>
+                    <strong className="metric-value dashboard-insight-value">
+                      {selectedTrainingUnderusedScenarioCount === 0 ? "All active" : `${selectedTrainingUnderusedScenarioCount} quiet`}
+                    </strong>
+                    <p className="metric-meta">
+                      {selectedTrainingUnderusedScenarioCount === 0
+                        ? "Every scenario in this training shows at least some recent activity."
+                        : "Scenarios with no recent activity in the current window."}
+                    </p>
+                  </article>
+                  <article className="detail-card">
+                    <p className="metric-label">Evidence caution</p>
+                    <strong className="metric-value dashboard-insight-value">
+                      {selectedTrainingScoredScenarioCount >= 2 ? "Usable" : "Sparse"}
+                    </strong>
+                    <p className="metric-meta">
+                      This aggregate view is best for current activity and focus. Reliable time-based score movement needs more scored evidence.
                     </p>
                   </article>
                 </div>
@@ -439,12 +367,10 @@ export function DashboardReportingWorkspace({
               <section className="section-card">
                 <div className="section-header">
                   <div>
-                    <p className="eyebrow">Users</p>
-                    <h2>User performance</h2>
+                    <p className="eyebrow">Details</p>
+                    <h2>User activity inside this training</h2>
                     <p className="section-copy">
-                      {isSuperUser
-                        ? "Recent activity inside the selected training across the current customer scope."
-                        : "Recent activity inside this training."}
+                      Raw detail stays available below the story layer. Attempt counts reflect usage activity; score averages reflect only completed scored attempts.
                     </p>
                   </div>
                 </div>
@@ -473,9 +399,7 @@ export function DashboardReportingWorkspace({
                               </div>
                             </td>
                             <td>{user.attemptsLast30Days}</td>
-                            <td>
-                              {user.averageScoreLast30Days !== null ? formatScore(user.averageScoreLast30Days) : "-"}
-                            </td>
+                            <td>{user.averageScoreLast30Days !== null ? formatScore(user.averageScoreLast30Days) : "-"}</td>
                             <td>{formatDateTime(user.latestActivityAt)}</td>
                           </tr>
                         ))}
@@ -493,9 +417,11 @@ export function DashboardReportingWorkspace({
               <section className="section-card">
                 <div className="section-header">
                   <div>
-                    <p className="eyebrow">Scenarios</p>
+                    <p className="eyebrow">Details</p>
                     <h2>Scenario performance</h2>
-                    <p className="section-copy">Scenario-level performance for this training.</p>
+                    <p className="section-copy">
+                      Scenario-level detail is still available below the fold so you can inspect exactly where activity and scores are showing up.
+                    </p>
                   </div>
                 </div>
 
@@ -520,11 +446,7 @@ export function DashboardReportingWorkspace({
                               </div>
                             </td>
                             <td>{scenario.attemptsLast30Days}</td>
-                            <td>
-                              {scenario.averageScoreLast30Days !== null
-                                ? formatScore(scenario.averageScoreLast30Days)
-                                : "-"}
-                            </td>
+                            <td>{scenario.averageScoreLast30Days !== null ? formatScore(scenario.averageScoreLast30Days) : "-"}</td>
                             <td>{formatDateTime(scenario.latestActivityAt)}</td>
                           </tr>
                         ))}
@@ -544,24 +466,34 @@ export function DashboardReportingWorkspace({
       ) : null}
 
       {activeTab === "users" ? (
-        <div className="tab-panel">
-          <section className="metric-grid">
+        <div className="tab-panel page-stack">
+          <DashboardNarrativePanel
+            eyebrow="Quick read"
+            title="What learner effort looks like"
+            narrative={usersNarrative}
+            badges={[
+              `${userSummary?.userCount ?? users.length} users in scope`,
+              `${userSummary?.simulationsLast30Days ?? 0} attempts`,
+            ]}
+          />
+
+          <section className="metric-grid metric-grid-primary">
             <MetricCard label="Users in scope" value={`${userSummary?.userCount ?? users.length}`} meta="Reporting scope" />
             <MetricCard label="Active users" value={`${userSummary?.activeUserCount ?? 0}`} meta="Current account status" />
             <MetricCard
               label="Total attempts"
-              value={`${users.reduce((total, user) => total + user.simulationsLast30Days, 0)}`}
+              value={`${userSummary?.simulationsLast30Days ?? users.reduce((total, user) => total + user.simulationsLast30Days, 0)}`}
               meta="All recorded attempts in the last 30 days"
               tone="accent"
             />
             <MetricCard
-              label="Average score"
+              label="Average score (30 days)"
               value={
-                companySummary?.averageScoreThisPeriod !== null && companySummary?.averageScoreThisPeriod !== undefined
-                  ? formatScore(companySummary.averageScoreThisPeriod)
+                userSummary?.averageScoreLast30Days !== null && userSummary?.averageScoreLast30Days !== undefined
+                  ? formatScore(userSummary.averageScoreLast30Days)
                   : "-"
               }
-              meta="Completed scored attempts in the current reporting period"
+              meta="Weighted average from conclusive scored attempts only"
               tone="positive"
             />
           </section>
@@ -569,30 +501,68 @@ export function DashboardReportingWorkspace({
           <section className="section-card">
             <div className="section-header">
               <div>
-                <p className="eyebrow">Users</p>
-                <h2>User performance</h2>
+                <p className="eyebrow">Movement and focus</p>
+                <h2>Who stands out right now</h2>
                 <p className="section-copy">
-                  {isSuperUser
-                    ? "Performance across all customer accounts currently in scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."
-                    : "Performance across your current reporting scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."}
+                  These cards surface current effort, positive movement, and evidence strength without ranking users who do not yet have enough score history.
                 </p>
               </div>
             </div>
 
-            <div className="dashboard-signal-block">
-              <h3>Highlights</h3>
-              <p>
-                Highest recent conclusive average:{" "}
-                {topPerformer
-                  ? `${topPerformer.email} (${formatScore(topPerformer.averageScoreLast30Days ?? 0)} avg)`
-                  : "No scored user activity yet."}
-              </p>
-              <p>
-                Lowest recent conclusive average:{" "}
-                {needsAttention
-                  ? `${needsAttention.email} (${formatScore(needsAttention.averageScoreLast30Days ?? 0)} avg)`
-                  : "More scored activity is needed for comparison."}
-              </p>
+            <div className="info-grid">
+              <article className="detail-card">
+                <p className="metric-label">Most engaged</p>
+                <strong className="metric-value dashboard-insight-value">
+                  {userHighlights.mostEngaged?.email ?? "No recent activity"}
+                </strong>
+                <p className="metric-meta">
+                  {userHighlights.mostEngaged
+                    ? `${userHighlights.mostEngaged.simulationsLast30Days} simulations in the last 30 days`
+                    : "Recent learner effort will appear here when activity is recorded."}
+                </p>
+              </article>
+              <article className="detail-card">
+                <p className="metric-label">Positive movement</p>
+                <strong className="metric-value dashboard-insight-value">
+                  {userHighlights.improvingUser?.email ?? "Too early to call"}
+                </strong>
+                <p className="metric-meta">
+                  {userHighlights.improvingUser?.scoreDeltaLast30Days !== null &&
+                  userHighlights.improvingUser?.scoreDeltaLast30Days !== undefined
+                    ? `${formatScore(userHighlights.improvingUser.averageScoreLast30Days ?? 0)} avg | ${userHighlights.improvingUser.scoreDeltaLast30Days > 0 ? "+" : ""}${userHighlights.improvingUser.scoreDeltaLast30Days} vs prior 30 days`
+                    : "No user currently has enough positive score history to call out confidently."}
+                </p>
+              </article>
+              <article className="detail-card">
+                <p className="metric-label">Needs review</p>
+                <strong className="metric-value dashboard-insight-value">
+                  {userHighlights.needsAttention?.email ?? "Too early to compare"}
+                </strong>
+                <p className="metric-meta">
+                  {userHighlights.needsAttention
+                    ? userHighlights.needsAttention.scoreDeltaLast30Days !== null && userHighlights.needsAttention.scoreDeltaLast30Days < 0
+                      ? `${userHighlights.needsAttention.scoreDeltaLast30Days} vs prior 30 days`
+                      : `${formatScore(userHighlights.needsAttention.averageScoreLast30Days ?? 0)} avg in the comparison set`
+                    : "More conclusive scored attempts are needed before score-based coaching attention is reliable."}
+                </p>
+              </article>
+              <article className="detail-card">
+                <p className="metric-label">Comparison coverage</p>
+                <strong className="metric-value dashboard-insight-value">{comparisonCoverageCount}</strong>
+                <p className="metric-meta">Users with at least 2 conclusive scored attempts in the last 30 days.</p>
+              </article>
+            </div>
+          </section>
+
+          <section className="section-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Details</p>
+                <h2>User performance table</h2>
+                <p className="section-copy">
+                  Raw user-level detail remains accessible below the interpretation layer. Users with little or no scored activity still appear in the table.
+                </p>
+              </div>
             </div>
 
             {users.length > 0 ? (
@@ -642,8 +612,18 @@ export function DashboardReportingWorkspace({
       ) : null}
 
       {activeTab === "company" ? (
-        <div className="tab-panel">
-          <section className="metric-grid">
+        <div className="tab-panel page-stack">
+          <DashboardNarrativePanel
+            eyebrow="Quick read"
+            title="What is happening across the company"
+            narrative={companyNarrative}
+            badges={[
+              `${companySummary?.activeUsers ?? 0} active users`,
+              `${activeTrainingCount} active trainings with recent usage`,
+            ]}
+          />
+
+          <section className="metric-grid metric-grid-primary">
             <MetricCard
               label="Usage this period"
               value={formatUsageMinutes(companySummary?.monthlyUsageMinutes ?? 0)}
@@ -657,13 +637,13 @@ export function DashboardReportingWorkspace({
             />
             <MetricCard label="Active users" value={`${companySummary?.activeUsers ?? 0}`} meta="Current reporting scope" />
             <MetricCard
-              label="Average score"
+              label="Average score (30 days)"
               value={
                 userSummary?.averageScoreLast30Days !== null && userSummary?.averageScoreLast30Days !== undefined
                   ? formatScore(userSummary.averageScoreLast30Days)
                   : "-"
               }
-              meta="Completed scored attempts in the last 30 days"
+              meta="Weighted average from conclusive scored attempts only"
               tone="positive"
             />
           </section>
@@ -671,21 +651,63 @@ export function DashboardReportingWorkspace({
           <section className="section-card">
             <div className="section-header">
               <div>
-                <p className="eyebrow">Company</p>
-                <h2>Top trainings by activity</h2>
+                <p className="eyebrow">Movement and focus</p>
+                <h2>Where leadership should look next</h2>
                 <p className="section-copy">
-                  {isSuperUser
-                    ? "Training activity across all customer accounts currently in scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."
-                    : "Training activity across your current reporting scope. Attempt totals reflect usage activity; score averages reflect only completed scored attempts."}
+                  These signals separate current usage breadth, score evidence, and rollout gaps before you open the raw training table.
                 </p>
               </div>
             </div>
 
-            <div className="dashboard-signal-block">
-              <h3>Activity trend</h3>
-              {companyTrend.map((line) => (
-                <p key={line}>{line}</p>
-              ))}
+            <div className="info-grid">
+              <article className="detail-card">
+                <p className="metric-label">Lead training</p>
+                <strong className="metric-value dashboard-insight-value">{leadTraining?.name ?? "No recent activity"}</strong>
+                <p className="metric-meta">
+                  {leadTraining
+                    ? `${leadTraining.summary.totalAttemptsLast30Days} attempts | ${leadTraining.summary.activeLearnerCountLast30Days} active learners`
+                    : "A lead training will appear here as activity is recorded."}
+                </p>
+              </article>
+              <article className="detail-card">
+                <p className="metric-label">Activity breadth</p>
+                <strong className="metric-value dashboard-insight-value">{activeTrainingCount}</strong>
+                <p className="metric-meta">Trainings with recorded attempts in the last 30 days.</p>
+              </article>
+              <article className="detail-card">
+                <p className="metric-label">Score movement</p>
+                <strong className="metric-value dashboard-insight-value">{companyMovementLabel}</strong>
+                <p className="metric-meta">{companyMovementMeta}</p>
+              </article>
+              <article className="detail-card">
+                <p className="metric-label">Underused active training</p>
+                <strong className="metric-value dashboard-insight-value">
+                  {underusedActiveTrainingCount === 0 ? "None" : `${underusedActiveTrainingCount}`}
+                </strong>
+                <p className="metric-meta">
+                  {underusedActiveTrainingCount === 0
+                    ? "Every active training has at least some recent usage."
+                    : "Active trainings with no recent attempts in the current window."}
+                </p>
+              </article>
+            </div>
+
+            {topScenario ? (
+              <p className="small-copy" style={{ marginBottom: 0 }}>
+                The most active scenario right now is {topScenario.title}, with {topScenario.attemptsLast30Days} attempts recorded in the current 30-day window.
+              </p>
+            ) : null}
+          </section>
+
+          <section className="section-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Details</p>
+                <h2>Top trainings by activity</h2>
+                <p className="section-copy">
+                  Raw training-level detail stays accessible below the interpretation layer. Attempt totals reflect usage activity; score averages reflect only completed scored attempts.
+                </p>
+              </div>
             </div>
 
             {topTrainings.length > 0 ? (
@@ -711,11 +733,7 @@ export function DashboardReportingWorkspace({
                         <td>{training.orgName}</td>
                         <td>{training.summary.totalAttemptsLast30Days}</td>
                         <td>{training.summary.activeLearnerCountLast30Days}</td>
-                        <td>
-                          {training.summary.averageScoreLast30Days !== null
-                            ? formatScore(training.summary.averageScoreLast30Days)
-                            : "-"}
-                        </td>
+                        <td>{training.summary.averageScoreLast30Days !== null ? formatScore(training.summary.averageScoreLast30Days) : "-"}</td>
                         <td>{formatDateTime(training.summary.latestActivityAt)}</td>
                       </tr>
                     ))}

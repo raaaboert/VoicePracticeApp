@@ -5843,8 +5843,9 @@ async function buildDashboardOverview(
   viewer: DashboardViewer,
   divisionId: string | null = null
 ): Promise<DashboardOverviewResponse> {
+  const accessibleOrgs = listDashboardAccessibleOrgs(db, viewer);
   const customers = await Promise.all(
-    listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardCustomerSummary(db, org, divisionId))
+    accessibleOrgs.map((org) => buildDashboardCustomerSummary(db, org, divisionId))
   );
   const accessibleOrgIds = new Set(customers.map((customer) => customer.orgId));
   const now = new Date();
@@ -5856,9 +5857,17 @@ async function buildDashboardOverview(
   const dashboardUsers = customers.reduce((total, customer) => total + customer.dashboardUserCount, 0);
   const monthlyUsageMinutes = customers.reduce((total, customer) => total + customer.usedMinutesThisPeriod, 0);
   const simulationsLast30Days = customers.reduce((total, customer) => total + customer.simulationsLast30Days, 0);
-  const averageScoreCandidates = customers
-    .map((customer) => customer.averageScoreThisPeriod)
-    .filter((score): score is number => typeof score === "number");
+  const currentPeriodScores = accessibleOrgs.flatMap((org) => {
+    const normalizedOrg = ensureOrgContractFields(org);
+    const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
+
+    return scoreRecordAccess.listByOrgRange(db, {
+      orgId: normalizedOrg.id,
+      endedAtFrom: new Date(billing.periodStartAt),
+      endedAtBefore: new Date(billing.periodEndAt),
+      conclusiveOnly: true,
+    }).filter((record) => !divisionId || (record.divisionId ?? null) === divisionId);
+  });
   const topScenarios = (
     await Promise.all(
       customers.map(async (customer) => {
@@ -5922,10 +5931,7 @@ async function buildDashboardOverview(
       dashboardUsers,
       monthlyUsageMinutes: Math.round(monthlyUsageMinutes * 10) / 10,
       simulationsLast30Days,
-      averageScoreThisPeriod:
-        averageScoreCandidates.length > 0
-          ? Math.round(averageScoreCandidates.reduce((total, score) => total + score, 0) / averageScoreCandidates.length)
-          : null,
+      averageScoreThisPeriod: averageScore(currentPeriodScores),
       activeTrainingPackCount: customers.reduce((total, customer) => total + customer.activeTrainingPackCount, 0),
       customScenarioCount: customers.reduce((total, customer) => total + customer.customScenarioCount, 0)
     },

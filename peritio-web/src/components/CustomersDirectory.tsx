@@ -138,6 +138,7 @@ export function CustomersDirectory({ customers }: { customers: DashboardCustomer
                 <div>
                   <dt>Avg score</dt>
                   <dd>{customer.averageScoreThisPeriod !== null ? formatScore(customer.averageScoreThisPeriod) : "-"}</dd>
+                  <div className="table-subcopy">Current period</div>
                 </div>
               </dl>
               <dl className="inline-stats customer-directory-metrics">
