@@ -3113,8 +3113,15 @@ export default function App() {
 
       {activeSegment ? (
         <View style={[styles.card, styles.segmentCard]}>
-          <Text style={styles.segmentLabel}>Active role</Text>
-          <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+          <View style={styles.segmentHeaderRow}>
+            <View style={styles.segmentHeaderCopy}>
+              <Text style={styles.segmentLabel}>Active role</Text>
+              <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+            </View>
+            <View style={styles.segmentBadge}>
+              <Text style={styles.segmentBadgeText}>Ready</Text>
+            </View>
+          </View>
           <Text style={styles.body}>{activeSegment.summary}</Text>
           <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
         </View>
@@ -5036,6 +5043,7 @@ export default function App() {
       return (
         <SimulationScreen
           config={simulationConfig}
+          colorScheme={colorScheme}
           userId={user.id}
           authToken={mobileAuthToken}
           onExit={() => {
@@ -5132,54 +5140,77 @@ function createStyles(theme: ThemeTokens) {
     topTitle: { color: theme.text, fontSize: 19, fontWeight: "700" },
     card: { borderRadius: 16, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.panel, padding: 15, marginBottom: 14, gap: 9 },
     heroCard: {
-      borderRadius: 32,
+      borderRadius: 28,
       borderWidth: 1,
       borderColor: "rgba(244, 231, 206, 0.16)",
-      paddingHorizontal: 24,
-      paddingVertical: 30,
-      marginBottom: 20,
+      paddingHorizontal: 22,
+      paddingVertical: 24,
+      marginBottom: 18,
       overflow: "hidden",
-      gap: 12,
+      gap: 10,
       alignItems: "center",
       shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.2,
-      shadowRadius: 22,
-      shadowOffset: { width: 0, height: 12 },
-      elevation: 6,
+      shadowOpacity: 0.16,
+      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 10 },
+      elevation: 5,
     },
     heroMarkFrame: {
-      width: 168,
-      height: 168,
-      borderRadius: 36,
+      width: 152,
+      height: 152,
+      borderRadius: 30,
       borderWidth: 1,
       borderColor: "rgba(244, 231, 206, 0.2)",
       backgroundColor: "rgba(255, 255, 255, 0.03)",
       alignItems: "center",
       justifyContent: "center",
-      marginBottom: 8,
+      marginBottom: 4,
       shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.2,
-      shadowRadius: 18,
-      shadowOffset: { width: 0, height: 12 },
+      shadowOpacity: 0.18,
+      shadowRadius: 14,
+      shadowOffset: { width: 0, height: 10 },
       elevation: 3,
     },
-    heroMarkImage: { width: 148, height: 148, borderRadius: 28 },
-    heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.8 },
-    heroTitle: { color: APP_SURFACE_COLORS.cream, fontSize: 32, fontWeight: "800", lineHeight: 36, letterSpacing: -0.8, textAlign: "center" },
-    heroBody: { color: "rgba(248, 238, 217, 0.86)", fontSize: 15, lineHeight: 23, textAlign: "center", maxWidth: 320 },
-    heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 8 },
+    heroMarkImage: { width: 136, height: 136, borderRadius: 24 },
+    heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.4 },
+    heroTitle: { color: APP_SURFACE_COLORS.cream, fontSize: 30, fontWeight: "800", lineHeight: 34, letterSpacing: -0.7, textAlign: "center" },
+    heroBody: { color: "rgba(248, 238, 217, 0.86)", fontSize: 14.5, lineHeight: 22, textAlign: "center", maxWidth: 304 },
+    heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 4 },
     heroMetaChip: {
       borderRadius: 999,
       borderWidth: 1,
       borderColor: "rgba(244, 231, 206, 0.16)",
       backgroundColor: "rgba(28, 33, 28, 0.12)",
-      paddingHorizontal: 12,
-      paddingVertical: 8,
+      paddingHorizontal: 11,
+      paddingVertical: 7,
     },
-    heroMetaText: { color: "rgba(248, 238, 217, 0.84)", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.2 },
-    segmentCard: { marginTop: 6, borderColor: "rgba(116, 98, 69, 0.16)", backgroundColor: "rgba(255, 251, 244, 0.86)" },
+    heroMetaText: { color: "rgba(248, 238, 217, 0.84)", fontSize: 12, fontWeight: "700", letterSpacing: 0.2 },
+    segmentCard: {
+      marginTop: 2,
+      borderColor: "rgba(128, 106, 73, 0.22)",
+      backgroundColor: "rgba(255, 249, 239, 0.93)",
+      shadowColor: APP_SURFACE_COLORS.shadow,
+      shadowOpacity: 0.08,
+      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 6 },
+      elevation: 2,
+    },
+    segmentHeaderRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+    segmentHeaderCopy: { flex: 1, gap: 2 },
     segmentLabel: { color: "#9A7A4C", fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.9 },
     segmentTitle: { color: theme.text, fontSize: 24, fontWeight: "800", lineHeight: 28 },
+    segmentBadge: {
+      minHeight: 30,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: "rgba(128, 106, 73, 0.18)",
+      backgroundColor: "rgba(247, 238, 217, 0.96)",
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 11,
+      paddingVertical: 6,
+    },
+    segmentBadgeText: { color: "#7A623F", fontSize: 11.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
     segmentFootnote: { color: theme.textMuted, fontSize: 12.5, lineHeight: 18 },
     title: { color: theme.text, fontSize: 23, fontWeight: "700" },
     label: { color: theme.accent, fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 },
@@ -5261,17 +5292,17 @@ function createStyles(theme: ThemeTokens) {
     },
     homePrimaryButton: {
       minHeight: 54,
-      borderRadius: 18,
+      borderRadius: 16,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: APP_SURFACE_COLORS.sageDeep,
       borderWidth: 1,
       borderColor: "rgba(240, 223, 192, 0.18)",
-      marginBottom: 16,
+      marginBottom: 14,
       shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.12,
-      shadowRadius: 12,
-      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: 0.1,
+      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 7 },
       elevation: 3,
     },
     homePrimaryButtonText: { color: APP_SURFACE_COLORS.gold, fontSize: 16, fontWeight: "800", letterSpacing: 0.2 },
