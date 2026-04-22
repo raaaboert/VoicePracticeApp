@@ -12,8 +12,8 @@ export const COLOR_SCHEME_OPTIONS: Array<{
   },
   {
     id: "classic_blue",
-    label: "Classic Blue",
-    description: "Current blue gradient visual style.",
+    label: "Deep Sage",
+    description: "Dark sage interface with cream and green accents.",
   },
 ];
 

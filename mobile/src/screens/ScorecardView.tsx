@@ -21,11 +21,11 @@ interface ScorecardViewProps {
 }
 
 const COLORS = {
-  panel: "rgba(17, 37, 64, 0.84)",
-  border: "rgba(143, 183, 232, 0.28)",
-  text: "#eaf2ff",
-  textMuted: "#9eb6d5",
-  accent: "#35c2ff",
+  panel: "rgba(21, 30, 24, 0.86)",
+  border: "rgba(154, 174, 156, 0.26)",
+  text: "#eef4ec",
+  textMuted: "#aebdaf",
+  accent: "#8caf93",
   success: "#4dd6a8",
   warning: "#ffc25f",
 };
@@ -393,7 +393,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
     paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: "rgba(143, 183, 232, 0.2)",
+    borderTopColor: "rgba(154, 174, 156, 0.2)",
   },
   secondaryButton: {
     minHeight: 50,
@@ -402,7 +402,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderWidth: 1,
     borderColor: COLORS.border,
-    backgroundColor: "rgba(18, 42, 72, 0.66)",
+    backgroundColor: "rgba(27, 39, 31, 0.68)",
     paddingHorizontal: 12,
   },
   secondaryButtonText: {
@@ -419,7 +419,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accent,
   },
   buttonText: {
-    color: "#062235",
+    color: "#102017",
     fontWeight: "800",
     fontSize: 16,
   },
@@ -439,7 +439,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
-    backgroundColor: "rgba(10, 30, 55, 0.97)",
+    backgroundColor: "rgba(16, 26, 20, 0.97)",
     padding: 14,
     gap: 10,
   },
@@ -460,7 +460,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    backgroundColor: "rgba(18, 42, 72, 0.66)",
+    backgroundColor: "rgba(27, 39, 31, 0.68)",
   },
   modalCloseButtonText: {
     color: COLORS.text,
@@ -476,7 +476,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: COLORS.border,
-    backgroundColor: "rgba(8, 26, 44, 0.8)",
+    backgroundColor: "rgba(14, 23, 18, 0.82)",
     color: COLORS.text,
     minHeight: 110,
     paddingHorizontal: 12,
@@ -494,7 +494,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     borderColor: COLORS.border,
-    backgroundColor: "rgba(8, 26, 44, 0.8)",
+    backgroundColor: "rgba(14, 23, 18, 0.82)",
     alignItems: "center",
     justifyContent: "center",
     marginTop: 2,
@@ -504,7 +504,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.accent,
   },
   checkboxMark: {
-    color: "#062235",
+    color: "#102017",
     fontWeight: "900",
     fontSize: 14,
     marginTop: -1,

@@ -7,7 +7,6 @@ import {
   ActivityIndicator,
   Animated,
   Image,
-  ImageBackground,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -192,74 +191,74 @@ interface ThemeTokens {
 
 const APP_THEME_TOKENS: Record<AppColorScheme, ThemeTokens> = {
   soft_light: {
-    bgTop: "#f8f7f3",
-    bgBottom: "#ece9e2",
-    panel: "rgba(255, 255, 255, 0.94)",
-    border: "rgba(31, 41, 55, 0.18)",
-    text: "#1f2937",
-    textMuted: "#475467",
-    accent: "#1d4ed8",
+    bgTop: "#f5f1e8",
+    bgBottom: "#e6dfd2",
+    panel: "rgba(255, 255, 250, 0.94)",
+    border: "rgba(73, 89, 74, 0.16)",
+    text: "#1f2921",
+    textMuted: "#5f6a5f",
+    accent: "#596f5c",
     danger: "#b42318",
-    success: "#067647",
-    hint: "#5f6c80",
-    ghostButtonBg: "rgba(246, 248, 251, 0.95)",
+    success: "#40684b",
+    hint: "#6c776b",
+    ghostButtonBg: "rgba(247, 247, 241, 0.95)",
     menuOverlayBackdrop: "rgba(23, 29, 38, 0.34)",
-    menuOverlayCardBg: "rgba(255, 255, 255, 0.99)",
-    menuCloseBg: "rgba(242, 246, 252, 0.95)",
-    menuItemBg: "rgba(247, 250, 255, 0.95)",
-    selectedCardBg: "rgba(227, 238, 255, 0.96)",
-    currentPlanCardBg: "rgba(220, 233, 255, 0.98)",
-    planBadgeText: "#ffffff",
-    inputBg: "rgba(255, 255, 255, 0.95)",
-    inlineButtonBg: "rgba(244, 248, 255, 0.95)",
-    dropdownBg: "rgba(255, 255, 255, 0.95)",
-    dropdownChevron: "#475467",
+    menuOverlayCardBg: "rgba(255, 255, 252, 0.99)",
+    menuCloseBg: "rgba(242, 244, 236, 0.95)",
+    menuItemBg: "rgba(246, 248, 241, 0.95)",
+    selectedCardBg: "rgba(232, 238, 231, 0.96)",
+    currentPlanCardBg: "rgba(223, 232, 222, 0.98)",
+    planBadgeText: "#f8eed9",
+    inputBg: "rgba(255, 255, 252, 0.95)",
+    inlineButtonBg: "rgba(244, 247, 240, 0.95)",
+    dropdownBg: "rgba(255, 255, 252, 0.95)",
+    dropdownChevron: "#5f6a5f",
     dropdownModalBackdrop: "rgba(23, 29, 38, 0.4)",
-    dropdownModalCardBg: "rgba(255, 255, 255, 0.99)",
-    dropdownOptionBg: "rgba(247, 250, 255, 0.95)",
-    dropdownOptionSelectedBg: "rgba(223, 236, 255, 0.98)",
+    dropdownModalCardBg: "rgba(255, 255, 252, 0.99)",
+    dropdownOptionBg: "rgba(246, 248, 241, 0.95)",
+    dropdownOptionSelectedBg: "rgba(222, 231, 221, 0.98)",
     warningBorder: "rgba(180, 121, 25, 0.45)",
     warningBg: "rgba(255, 242, 219, 0.78)",
     warningText: "#8c5300",
     errorCardBorder: "rgba(180, 35, 24, 0.4)",
     errorCardBg: "rgba(255, 234, 230, 0.82)",
-    linkButtonBg: "rgba(246, 249, 255, 0.95)",
-    primaryButtonText: "#ffffff",
+    linkButtonBg: "rgba(245, 247, 241, 0.95)",
+    primaryButtonText: "#f8eed9",
   },
   classic_blue: {
-    bgTop: "#071225",
-    bgBottom: "#16365d",
-    panel: "rgba(17, 37, 64, 0.84)",
-    border: "rgba(143, 183, 232, 0.28)",
-    text: "#eaf2ff",
-    textMuted: "#9eb6d5",
-    accent: "#35c2ff",
+    bgTop: "#111814",
+    bgBottom: "#26332a",
+    panel: "rgba(21, 30, 24, 0.84)",
+    border: "rgba(154, 174, 156, 0.26)",
+    text: "#eef4ec",
+    textMuted: "#aebdaf",
+    accent: "#8caf93",
     danger: "#ff7c7c",
-    success: "#78e5b8",
-    hint: "#8fb4e5",
-    ghostButtonBg: "rgba(18, 40, 70, 0.5)",
+    success: "#8fcca0",
+    hint: "#9ab09c",
+    ghostButtonBg: "rgba(28, 41, 32, 0.56)",
     menuOverlayBackdrop: "rgba(5, 10, 18, 0.58)",
-    menuOverlayCardBg: "rgba(10, 30, 55, 0.97)",
-    menuCloseBg: "rgba(17, 39, 65, 0.9)",
-    menuItemBg: "rgba(19, 45, 74, 0.7)",
-    selectedCardBg: "rgba(25, 59, 99, 0.9)",
-    currentPlanCardBg: "rgba(21, 56, 92, 0.92)",
-    planBadgeText: "#062235",
-    inputBg: "rgba(8, 26, 44, 0.8)",
-    inlineButtonBg: "rgba(20, 44, 72, 0.74)",
-    dropdownBg: "rgba(8, 26, 44, 0.8)",
-    dropdownChevron: "#9eb6d5",
+    menuOverlayCardBg: "rgba(16, 26, 20, 0.97)",
+    menuCloseBg: "rgba(24, 36, 28, 0.9)",
+    menuItemBg: "rgba(28, 41, 32, 0.72)",
+    selectedCardBg: "rgba(38, 56, 42, 0.9)",
+    currentPlanCardBg: "rgba(34, 51, 38, 0.92)",
+    planBadgeText: "#102017",
+    inputBg: "rgba(14, 23, 18, 0.82)",
+    inlineButtonBg: "rgba(27, 39, 31, 0.76)",
+    dropdownBg: "rgba(14, 23, 18, 0.82)",
+    dropdownChevron: "#aebdaf",
     dropdownModalBackdrop: "rgba(5, 10, 18, 0.76)",
-    dropdownModalCardBg: "rgba(9, 26, 46, 0.98)",
-    dropdownOptionBg: "rgba(18, 40, 67, 0.72)",
-    dropdownOptionSelectedBg: "rgba(28, 75, 120, 0.95)",
+    dropdownModalCardBg: "rgba(14, 23, 18, 0.98)",
+    dropdownOptionBg: "rgba(26, 39, 30, 0.74)",
+    dropdownOptionSelectedBg: "rgba(47, 68, 50, 0.96)",
     warningBorder: "rgba(255, 194, 95, 0.5)",
     warningBg: "rgba(69, 49, 14, 0.48)",
     warningText: "#ffc25f",
     errorCardBorder: "rgba(255, 124, 124, 0.52)",
     errorCardBg: "rgba(79, 24, 24, 0.55)",
-    linkButtonBg: "rgba(18, 42, 72, 0.66)",
-    primaryButtonText: "#062235",
+    linkButtonBg: "rgba(27, 39, 31, 0.68)",
+    primaryButtonText: "#102017",
   },
 };
 
@@ -287,16 +286,16 @@ type ScenarioTrainingOption = {
 
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
-const APP_ICON_ART = require("./assets/peritio-app-icon.png");
-const APP_STARTUP_ART = require("./assets/peritio-startup-screen.png");
+const APP_ICON_ART = require("./peritio-source-icon.png");
+const APP_STARTUP_ART = require("./peritio-source-splash.png");
 const APP_SURFACE_COLORS = {
-  sage: "#667062",
-  sageDeep: "#566051",
-  sageEdge: "#495245",
-  gold: "#F0DFC0",
-  goldMuted: "#DBC8A6",
-  cream: "#F7EDD8",
-  shadow: "rgba(30, 35, 30, 0.34)",
+  sage: "#697364",
+  sageDeep: "#5a6357",
+  sageEdge: "#4e564a",
+  gold: "#F4E7CE",
+  goldMuted: "#E0CDAB",
+  cream: "#F8EED9",
+  shadow: "rgba(25, 29, 24, 0.34)",
 } as const;
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -3063,13 +3062,8 @@ export default function App() {
         end={{ x: 1, y: 1 }}
         style={styles.heroCard}
       >
-        <View style={styles.heroGlow} />
-        <View style={styles.heroGuideFrame} />
-        <View style={styles.heroGuideInnerFrame} />
-        <View style={styles.heroGuideLeftRail} />
-        <View style={styles.heroGuideRightRail} />
         <View style={styles.heroMarkFrame}>
-          <Image source={APP_ICON_ART} style={styles.heroMarkImage} resizeMode="cover" />
+          <Image source={APP_ICON_ART} style={styles.heroMarkImage} resizeMode="contain" />
         </View>
         <Text style={styles.heroKicker}>Peritio</Text>
         <Text style={styles.heroTitle}>Improve with precision.</Text>
@@ -4996,14 +4990,14 @@ export default function App() {
     if (isBootLoading) {
       return (
         <View style={styles.bootBleed}>
-          <ImageBackground source={APP_STARTUP_ART} resizeMode="cover" style={styles.bootRoot}>
-            <View style={styles.bootScrim} />
+          <View style={styles.bootRoot}>
+            <Image source={APP_STARTUP_ART} resizeMode="contain" style={styles.bootArt} />
             <View style={styles.bootStatusWrap}>
               <View style={styles.bootStatusHalo}>
                 <ActivityIndicator size="small" color={APP_SURFACE_COLORS.gold} />
               </View>
             </View>
-          </ImageBackground>
+          </View>
         </View>
       );
     }
@@ -5140,7 +5134,7 @@ function createStyles(theme: ThemeTokens) {
     heroCard: {
       borderRadius: 32,
       borderWidth: 1,
-      borderColor: "rgba(240, 223, 192, 0.16)",
+      borderColor: "rgba(244, 231, 206, 0.16)",
       paddingHorizontal: 24,
       paddingVertical: 30,
       marginBottom: 20,
@@ -5153,77 +5147,36 @@ function createStyles(theme: ThemeTokens) {
       shadowOffset: { width: 0, height: 12 },
       elevation: 6,
     },
-    heroGlow: {
-      position: "absolute",
-      inset: 0,
-      backgroundColor: "rgba(255, 255, 255, 0.02)",
-    },
-    heroGuideFrame: {
-      position: "absolute",
-      top: 18,
-      right: 18,
-      bottom: 18,
-      left: 18,
-      borderRadius: 26,
-      borderWidth: 1,
-      borderColor: "rgba(240, 223, 192, 0.16)",
-    },
-    heroGuideInnerFrame: {
-      position: "absolute",
-      top: 32,
-      right: 32,
-      bottom: 32,
-      left: 32,
-      borderRadius: 22,
-      borderWidth: 1,
-      borderColor: "rgba(240, 223, 192, 0.08)",
-    },
-    heroGuideLeftRail: {
-      position: "absolute",
-      left: 24,
-      top: 92,
-      bottom: 92,
-      width: 1,
-      backgroundColor: "rgba(240, 223, 192, 0.09)",
-    },
-    heroGuideRightRail: {
-      position: "absolute",
-      right: 24,
-      top: 76,
-      bottom: 116,
-      width: 1,
-      backgroundColor: "rgba(240, 223, 192, 0.08)",
-    },
     heroMarkFrame: {
-      width: 142,
-      height: 142,
-      borderRadius: 30,
+      width: 168,
+      height: 168,
+      borderRadius: 36,
       borderWidth: 1,
-      borderColor: "rgba(240, 223, 192, 0.18)",
-      backgroundColor: "rgba(255, 255, 255, 0.04)",
+      borderColor: "rgba(244, 231, 206, 0.2)",
+      backgroundColor: "rgba(255, 255, 255, 0.03)",
       alignItems: "center",
       justifyContent: "center",
-      marginBottom: 6,
+      marginBottom: 8,
       shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.18,
-      shadowRadius: 16,
-      shadowOffset: { width: 0, height: 10 },
+      shadowOpacity: 0.2,
+      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 12 },
       elevation: 3,
     },
-    heroMarkImage: { width: 122, height: 122, borderRadius: 24 },
-    heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.4 },
+    heroMarkImage: { width: 148, height: 148, borderRadius: 28 },
+    heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.8 },
     heroTitle: { color: APP_SURFACE_COLORS.cream, fontSize: 32, fontWeight: "800", lineHeight: 36, letterSpacing: -0.8, textAlign: "center" },
-    heroBody: { color: "rgba(247, 237, 216, 0.84)", fontSize: 15, lineHeight: 23, textAlign: "center", maxWidth: 320 },
+    heroBody: { color: "rgba(248, 238, 217, 0.86)", fontSize: 15, lineHeight: 23, textAlign: "center", maxWidth: 320 },
     heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 8 },
     heroMetaChip: {
       borderRadius: 999,
       borderWidth: 1,
-      borderColor: "rgba(240, 223, 192, 0.14)",
-      backgroundColor: "rgba(32, 38, 32, 0.14)",
+      borderColor: "rgba(244, 231, 206, 0.16)",
+      backgroundColor: "rgba(28, 33, 28, 0.12)",
       paddingHorizontal: 12,
       paddingVertical: 8,
     },
-    heroMetaText: { color: "rgba(247, 237, 216, 0.82)", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.2 },
+    heroMetaText: { color: "rgba(248, 238, 217, 0.84)", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.2 },
     segmentCard: { marginTop: 6, borderColor: "rgba(116, 98, 69, 0.16)", backgroundColor: "rgba(255, 251, 244, 0.86)" },
     segmentLabel: { color: "#9A7A4C", fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.9 },
     segmentTitle: { color: theme.text, fontSize: 24, fontWeight: "800", lineHeight: 28 },
@@ -5279,17 +5232,30 @@ function createStyles(theme: ThemeTokens) {
     successCard: { borderRadius: 14, borderWidth: 1, borderColor: "rgba(29, 154, 95, 0.45)", backgroundColor: "rgba(29, 154, 95, 0.12)", padding: 12, marginBottom: 12 },
     errorText: { color: theme.danger, fontSize: 13, marginBottom: 6 },
     successText: { color: theme.success, fontSize: 13, marginBottom: 6 },
-    bootBleed: { flex: 1, marginHorizontal: -16, marginBottom: -12, backgroundColor: APP_SURFACE_COLORS.sageDeep },
-    bootRoot: { flex: 1, justifyContent: "flex-end", alignItems: "center", paddingBottom: 42, backgroundColor: APP_SURFACE_COLORS.sageDeep, overflow: "hidden" },
-    bootScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(23, 29, 23, 0.08)" },
+    bootBleed: { flex: 1, marginHorizontal: -16, marginBottom: -12, backgroundColor: APP_SURFACE_COLORS.sage },
+    bootRoot: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 24,
+      paddingBottom: 28,
+      backgroundColor: APP_SURFACE_COLORS.sage,
+    },
+    bootArt: {
+      width: "100%",
+      maxWidth: 420,
+      maxHeight: 420,
+      aspectRatio: 1,
+      marginBottom: 22,
+    },
     bootStatusWrap: { alignItems: "center", justifyContent: "center" },
     bootStatusHalo: {
       width: 42,
       height: 42,
       borderRadius: 999,
       borderWidth: 1,
-      borderColor: "rgba(240, 223, 192, 0.14)",
-      backgroundColor: "rgba(33, 37, 33, 0.16)",
+      borderColor: "rgba(244, 231, 206, 0.16)",
+      backgroundColor: "rgba(32, 37, 31, 0.12)",
       alignItems: "center",
       justifyContent: "center",
     },

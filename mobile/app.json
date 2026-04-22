@@ -4,13 +4,13 @@
     "slug": "VoicePracticeApp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/peritio-app-icon.png",
+    "icon": "./peritio-source-icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/peritio-startup-screen.png",
-      "resizeMode": "cover",
-      "backgroundColor": "#566051"
+      "image": "./peritio-source-splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#697364"
     },
     "ios": {
       "supportsTablet": true,
@@ -20,8 +20,8 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/peritio-adaptive-icon.png",
-        "backgroundColor": "#566051"
+        "foregroundImage": "./assets/peritio-adaptive-foreground.png",
+        "backgroundColor": "#697364"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -33,7 +33,7 @@
       "package": "com.anonymous.VoicePracticeApp"
     },
     "web": {
-      "favicon": "./assets/peritio-favicon.png"
+      "favicon": "./peritio-source-icon.png"
     },
     "extra": {
       "eas": {

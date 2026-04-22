@@ -78,14 +78,14 @@ const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 
 const COLORS = {
-  panel: "rgba(17, 37, 64, 0.84)",
-  border: "rgba(143, 183, 232, 0.28)",
-  text: "#eaf2ff",
-  textMuted: "#9eb6d5",
-  accent: "#35c2ff",
+  panel: "rgba(21, 30, 24, 0.86)",
+  border: "rgba(154, 174, 156, 0.26)",
+  text: "#eef4ec",
+  textMuted: "#aebdaf",
+  accent: "#8caf93",
   danger: "#ff7c7c",
-  userBubble: "#245790",
-  aiBubble: "#163657",
+  userBubble: "#4d6552",
+  aiBubble: "#2a392d",
 };
 
 function createMessageId(): string {
@@ -2211,7 +2211,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(18, 40, 70, 0.5)",
+    backgroundColor: "rgba(28, 41, 32, 0.54)",
   },
   ghostButtonText: {
     color: COLORS.text,
@@ -2251,7 +2251,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   hint: {
-    color: "#8fb4e5",
+    color: "#9db1a0",
     textAlign: "center",
     fontSize: 12.5,
     marginBottom: 10,
@@ -2260,7 +2260,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: COLORS.border,
-    backgroundColor: "rgba(9, 26, 45, 0.62)",
+    backgroundColor: "rgba(14, 23, 18, 0.68)",
     paddingVertical: 10,
     paddingHorizontal: 12,
     marginBottom: 10,
@@ -2339,7 +2339,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: COLORS.border,
-    backgroundColor: "rgba(8, 23, 40, 0.62)",
+    backgroundColor: "rgba(13, 22, 17, 0.68)",
     marginBottom: 14,
   },
   chatScroll: {
@@ -2365,7 +2365,7 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
   },
   messageRole: {
-    color: "#bcddff",
+    color: "#d6ddcf",
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase",
@@ -2384,18 +2384,18 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accent,
   },
   submitButton: {
-    backgroundColor: "#49d7a8",
+    backgroundColor: "#6f9175",
   },
   busyButton: {
-    backgroundColor: "rgba(85, 134, 179, 0.78)",
+    backgroundColor: "rgba(109, 128, 111, 0.82)",
   },
   primaryButtonText: {
-    color: "#062235",
+    color: "#102017",
     fontWeight: "800",
     fontSize: 16,
   },
   primaryButtonTextLight: {
-    color: "#eaf2ff",
+    color: "#eef4ec",
   },
   secondaryActionButton: {
     minHeight: 50,
