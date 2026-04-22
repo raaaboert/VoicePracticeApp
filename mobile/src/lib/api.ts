@@ -742,6 +742,29 @@ export type UnifiedSimulationTurnPayload =
       transcriptText: string;
       noClearSpeechReason: "empty_transcript" | "assistant_echo" | null;
       runtime: UnifiedSimulationTurnRuntimeDiagnostics | null;
+    }
+  | {
+      outcome: "transcript_ready";
+      transcriptText: string;
+      runtime: UnifiedSimulationTurnRuntimeDiagnostics | null;
+    };
+
+export type AwaitedSimulationTurnPayload =
+  | {
+      outcome: "assistant_reply";
+      transcriptText: string;
+      assistantText: string;
+      model: string;
+      promptVersion: string;
+      usage: AiUsagePayload;
+      speechPrefetch: PrefetchedRemoteSpeechChunk | null;
+      runtime: UnifiedSimulationTurnRuntimeDiagnostics | null;
+    }
+  | {
+      outcome: "no_clear_speech";
+      transcriptText: string;
+      noClearSpeechReason: "empty_transcript" | "assistant_echo" | null;
+      runtime: UnifiedSimulationTurnRuntimeDiagnostics | null;
     };
 
 export async function submitSimulationTurnViaApi(params: {
@@ -759,6 +782,7 @@ export async function submitSimulationTurnViaApi(params: {
   history: DialogueMessage[];
   trainingPackId?: string;
   speechPrefetch?: { preset: RemoteTtsPreset } | null;
+  responseMode?: "complete" | "transcript_first_v1";
   correlationId?: string;
 }): Promise<UnifiedSimulationTurnPayload> {
   const formData = new FormData();
@@ -794,6 +818,7 @@ export async function submitSimulationTurnViaApi(params: {
       personaStyle: params.personaStyle,
       ...(params.trainingPackId ? { trainingPackId: params.trainingPackId } : {}),
       ...(params.speechPrefetch ? { speechPrefetch: { preset: params.speechPrefetch.preset } } : {}),
+      ...(params.responseMode === "transcript_first_v1" ? { responseMode: "transcript_first_v1" } : {}),
       history: normalizeTurnHistoryForApi(params.history),
     }),
   );
@@ -814,6 +839,88 @@ export async function submitSimulationTurnViaApi(params: {
     params.authToken,
     {
       timeoutMs: 75_000,
+      ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
+    },
+  );
+
+  const runtime = normalizeUnifiedTurnRuntime(payload.runtime);
+  const transcriptText = typeof payload.transcriptText === "string" ? payload.transcriptText.trim() : "";
+  if (payload.outcome === "assistant_reply") {
+    const usagePayload = payload.usage as {
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+      totalTokens?: unknown;
+    } | null;
+
+    return {
+      outcome: "assistant_reply",
+      transcriptText,
+      assistantText: typeof payload.assistantText === "string" ? payload.assistantText.trim() : "",
+      model: typeof payload.model === "string" ? payload.model.trim() : "",
+      promptVersion: typeof payload.promptVersion === "string" ? payload.promptVersion.trim() : "",
+      usage: {
+        inputTokens:
+          typeof usagePayload?.inputTokens === "number" && Number.isFinite(usagePayload.inputTokens)
+            ? Math.max(0, Math.floor(usagePayload.inputTokens))
+            : 0,
+        outputTokens:
+          typeof usagePayload?.outputTokens === "number" && Number.isFinite(usagePayload.outputTokens)
+            ? Math.max(0, Math.floor(usagePayload.outputTokens))
+            : 0,
+        totalTokens:
+          typeof usagePayload?.totalTokens === "number" && Number.isFinite(usagePayload.totalTokens)
+            ? Math.max(0, Math.floor(usagePayload.totalTokens))
+            : 0,
+      },
+      speechPrefetch: normalizeSpeechPrefetchPayload(payload.speechPrefetch),
+      runtime,
+    };
+  }
+
+  if (payload.outcome === "transcript_ready") {
+    return {
+      outcome: "transcript_ready",
+      transcriptText,
+      runtime,
+    };
+  }
+
+  return {
+    outcome: "no_clear_speech",
+    transcriptText,
+    noClearSpeechReason:
+      payload.noClearSpeechReason === "empty_transcript" || payload.noClearSpeechReason === "assistant_echo"
+        ? payload.noClearSpeechReason
+        : null,
+    runtime,
+  };
+}
+
+export async function awaitSimulationTurnResultViaApi(params: {
+  userId: string;
+  authToken: string;
+  correlationId: string;
+  signal?: AbortSignal;
+}): Promise<AwaitedSimulationTurnPayload> {
+  const payload = await requestJson<{
+    outcome?: unknown;
+    transcriptText?: unknown;
+    noClearSpeechReason?: unknown;
+    assistantText?: unknown;
+    model?: unknown;
+    promptVersion?: unknown;
+    usage?: unknown;
+    speechPrefetch?: unknown;
+    runtime?: unknown;
+  }>(
+    `/mobile/users/${encodeURIComponent(params.userId)}/ai/submit-turn-await/${encodeURIComponent(params.correlationId)}`,
+    {
+      method: "GET",
+    },
+    params.authToken,
+    {
+      timeoutMs: 75_000,
+      signal: params.signal,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
   );

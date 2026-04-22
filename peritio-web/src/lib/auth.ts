@@ -388,11 +388,17 @@ export async function getDashboardUserReport(divisionId?: string | null): Promis
   }
 }
 
-export async function getDashboardUserDetail(userId: string): Promise<DashboardUserDetailResponse | null> {
+export async function getDashboardUserDetail(
+  userId: string,
+  divisionId?: string | null
+): Promise<DashboardUserDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
-    return await fetchDashboardApi<DashboardUserDetailResponse>(`/dashboard/users/${encodeURIComponent(userId)}`, { token });
+    return await fetchDashboardApi<DashboardUserDetailResponse>(
+      appendDivisionQuery(`/dashboard/users/${encodeURIComponent(userId)}`, divisionId),
+      { token }
+    );
   } catch (error) {
     if (error instanceof DashboardApiError) {
       if (error.status === 404) {

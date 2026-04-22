@@ -15,6 +15,7 @@ import { DashboardNarrativePanel } from "@/src/components/DashboardNarrativePane
 import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignals";
 import { DashboardWhatMattersSection } from "@/src/components/DashboardWhatMattersSection";
+import { buildDashboardScopedUserDetailHref } from "@/src/components/dashboardDivisionFilterState";
 import { buildDashboardAggregateScopeContext } from "@/src/components/dashboardReportingScope";
 import { canRenderDashboardWorkspaceDivisionFilter } from "@/src/components/dashboardDivisionFilterState";
 import {
@@ -64,6 +65,11 @@ export function DashboardReportingWorkspace({
   const searchParams = useSearchParams();
   const trainings = trainingWorkspace?.trainings ?? [];
   const viewer = overview?.viewer ?? userReport?.viewer ?? trainingWorkspace?.viewer ?? null;
+  const appliedDivisionId =
+    overview?.divisionScope?.appliedDivisionId ??
+    trainingWorkspace?.divisionScope?.appliedDivisionId ??
+    userReport?.divisionScope?.appliedDivisionId ??
+    null;
   const isSuperUser = viewer?.accessType === "super_user";
   const aggregateScopeContext = isSuperUser ? buildDashboardAggregateScopeContext(overview?.customers ?? []) : null;
   const multipleOrgsInScope = new Set(trainings.map((training) => training.orgId)).size > 1;
@@ -112,6 +118,7 @@ export function DashboardReportingWorkspace({
     trainings,
     userReport,
   });
+  const buildUserDetailHref = (userId: string) => buildDashboardScopedUserDetailHref(userId, appliedDivisionId);
 
   return (
     <div className="page-stack">
@@ -281,7 +288,7 @@ export function DashboardReportingWorkspace({
                             {selectedTraining.users.map((user) => (
                               <tr key={user.userId}>
                                 <td>
-                                  <Link className="inline-link subtle" href={`/app/users/${user.userId}`}>
+                                  <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
                                     <strong>{user.email}</strong>
                                   </Link>
                                   <div className="table-subcopy">
@@ -381,7 +388,7 @@ export function DashboardReportingWorkspace({
                           <th>User</th>
                           <th>Attempts</th>
                           <th>Average score</th>
-                          <th>Trainings engaged</th>
+                          <th>Trainings with activity</th>
                           <th>Latest activity</th>
                         </tr>
                       </thead>
@@ -389,7 +396,7 @@ export function DashboardReportingWorkspace({
                         {users.map((user) => (
                           <tr key={user.userId}>
                             <td>
-                              <Link className="inline-link subtle" href={`/app/users/${user.userId}`}>
+                              <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
                                 <strong>{user.email}</strong>
                               </Link>
                               <div className="table-subcopy">

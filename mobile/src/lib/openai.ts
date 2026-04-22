@@ -1,6 +1,13 @@
 import { Platform } from "react-native";
 import { Difficulty, DialogueMessage, PersonaStyle, Scenario, SimulationEvaluationResult } from "../types";
-import { fetchAiOpeningLine, fetchAiScore, fetchAiTurn, submitSimulationTurnViaApi, transcribeAudioViaApi } from "./api";
+import {
+  awaitSimulationTurnResultViaApi,
+  fetchAiOpeningLine,
+  fetchAiScore,
+  fetchAiTurn,
+  submitSimulationTurnViaApi,
+  transcribeAudioViaApi,
+} from "./api";
 import type { PrefetchedRemoteSpeechChunk, RemoteTtsPreset, UnifiedSimulationTurnPayload } from "./api";
 import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
 import { shouldFallbackToLegacyUnifiedSubmit } from "./unifiedSubmit";
@@ -134,6 +141,7 @@ export async function submitRecordedSimulationTurn(params: {
   history: DialogueMessage[];
   trainingPackId?: string | null;
   speechPrefetchPreset?: RemoteTtsPreset | null;
+  responseMode?: "complete" | "transcript_first_v1";
   correlationId?: string;
 }): Promise<UnifiedSimulationTurnPayload> {
   const defaultMimeType = getSimulationTranscriptionMimeType(Platform.OS);
@@ -154,8 +162,47 @@ export async function submitRecordedSimulationTurn(params: {
     history: params.history,
     trainingPackId: params.trainingPackId ?? undefined,
     speechPrefetch: params.speechPrefetchPreset ? { preset: params.speechPrefetchPreset } : null,
+    responseMode: params.responseMode ?? "complete",
     correlationId: params.correlationId,
   });
+}
+
+export async function awaitSubmittedSimulationTurnReply(params: {
+  userId: string;
+  authToken: string;
+  correlationId: string;
+  signal?: AbortSignal;
+}): Promise<{
+  outcome: "assistant_reply" | "no_clear_speech";
+  transcriptText: string;
+  noClearSpeechReason?: "empty_transcript" | "assistant_echo" | null;
+  assistantText?: string;
+  speechPrefetch?: PrefetchedRemoteSpeechChunk | null;
+  runtime: UnifiedSimulationTurnPayload["runtime"];
+}> {
+  const payload = await awaitSimulationTurnResultViaApi({
+    userId: params.userId,
+    authToken: params.authToken,
+    correlationId: params.correlationId,
+    signal: params.signal,
+  });
+
+  if (payload.outcome === "assistant_reply") {
+    return {
+      outcome: "assistant_reply",
+      transcriptText: payload.transcriptText,
+      assistantText: payload.assistantText,
+      speechPrefetch: payload.speechPrefetch,
+      runtime: payload.runtime,
+    };
+  }
+
+  return {
+    outcome: "no_clear_speech",
+    transcriptText: payload.transcriptText,
+    noClearSpeechReason: payload.noClearSpeechReason,
+    runtime: payload.runtime,
+  };
 }
 
 export async function evaluateSimulation(params: {

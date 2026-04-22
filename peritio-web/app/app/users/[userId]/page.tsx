@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSection";
+import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
 import { DashboardNarrativePanel } from "@/src/components/DashboardNarrativePanel";
 import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignals";
@@ -31,13 +32,17 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function UserDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ userId: string }>;
+  searchParams: Promise<{ divisionId?: string }>;
 }) {
   const { userId } = await params;
+  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const divisionId = rawDivisionId ? rawDivisionId : null;
   let payload;
   try {
-    payload = await getDashboardUserDetail(userId);
+    payload = await getDashboardUserDetail(userId, divisionId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -62,6 +67,12 @@ export default async function UserDetailPage({
         eyebrow="User detail"
         title={user.email}
         description="This drilldown shows persisted score-backed attempt history and current assignment progress. Raw transcripts are not stored for normal dashboard review."
+      />
+
+      <DashboardDivisionFilter
+        divisionScope={payload.divisionScope}
+        title="User detail reporting lens"
+        description="Company Total keeps the full account view. Division filters keep this drilldown aligned with the historically attributed activity behind the aggregate dashboard."
       />
 
       <DashboardNarrativePanel eyebrow="Story" title="What a manager should conclude" narrative={narrative} />
@@ -129,7 +140,7 @@ export default async function UserDetailPage({
             ) : (
               <div className="empty-state-panel">
                 <h3>No active assignments</h3>
-                <p>This user does not currently have an active training-pack assignment in their visible customer scope.</p>
+                <p>This user does not currently have an active training-pack assignment in the current dashboard scope.</p>
               </div>
             )}
           </div>

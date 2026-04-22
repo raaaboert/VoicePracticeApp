@@ -22,6 +22,11 @@ export function buildDashboardDivisionSearch(
   return query ? `?${query}` : "";
 }
 
+export function buildDashboardScopedUserDetailHref(userId: string, divisionId: string | null): string {
+  const encodedUserId = encodeURIComponent(userId);
+  return `/app/users/${encodedUserId}${buildDashboardDivisionSearch("", divisionId)}`;
+}
+
 export function canRenderSingleScopeDivisionFilter(
   divisionScope: DashboardDivisionScope | null | undefined
 ): boolean {

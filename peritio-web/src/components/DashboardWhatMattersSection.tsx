@@ -18,7 +18,7 @@ export function DashboardWhatMattersSection({
   const [primary, ...secondary] = items;
 
   return (
-    <section className="section-card dashboard-priority-section">
+    <section className="dashboard-priority-section">
       <div className="section-header">
         <div>
           <p className="eyebrow">{eyebrow}</p>
@@ -32,20 +32,30 @@ export function DashboardWhatMattersSection({
           className={`dashboard-priority-primary dashboard-priority-tone-${primary.tone}`}
           key={`${primary.title}-${primary.detail}`}
         >
-          <p className="dashboard-priority-kicker">{primary.label}</p>
-          <h3>{primary.title}</h3>
+          <div className="dashboard-priority-heading">
+            <div>
+              <p className="dashboard-priority-kicker">{primary.label}</p>
+              <h3>{primary.title}</h3>
+            </div>
+            <span className="dashboard-priority-rank">01</span>
+          </div>
           <p>{primary.detail}</p>
         </article>
 
         {secondary.length > 0 ? (
           <div className="dashboard-priority-secondary-list">
-            {secondary.map((item) => (
+            {secondary.map((item, index) => (
               <article
                 key={`${item.title}-${item.detail}`}
                 className={`dashboard-priority-secondary dashboard-priority-tone-${item.tone}`}
               >
-                <p className="dashboard-priority-kicker">{item.label}</p>
-                <h3>{item.title}</h3>
+                <div className="dashboard-priority-heading">
+                  <div>
+                    <p className="dashboard-priority-kicker">{item.label}</p>
+                    <h3>{item.title}</h3>
+                  </div>
+                  <span className="dashboard-priority-rank">{String(index + 2).padStart(2, "0")}</span>
+                </div>
                 <p>{item.detail}</p>
               </article>
             ))}

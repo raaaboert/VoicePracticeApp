@@ -6,6 +6,8 @@ import * as FileSystem from "expo-file-system/legacy";
 import {
   ActivityIndicator,
   Animated,
+  Image,
+  ImageBackground,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -30,7 +32,6 @@ import {
   COLOR_SCHEME_OPTIONS,
   getAiVoiceOption,
 } from "./src/data/preferences";
-import { PeritioBrandMark, PERITIO_BRAND_COLORS } from "./src/components/PeritioBrandMark";
 import {
   DIFFICULTY_HINTS,
   DIFFICULTY_LABELS,
@@ -286,6 +287,17 @@ type ScenarioTrainingOption = {
 
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
+const APP_ICON_ART = require("./assets/peritio-app-icon.png");
+const APP_STARTUP_ART = require("./assets/peritio-startup-screen.png");
+const APP_SURFACE_COLORS = {
+  sage: "#667062",
+  sageDeep: "#566051",
+  sageEdge: "#495245",
+  gold: "#F0DFC0",
+  goldMuted: "#DBC8A6",
+  cream: "#F7EDD8",
+  shadow: "rgba(30, 35, 30, 0.34)",
+} as const;
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) {
@@ -1034,7 +1046,7 @@ export default function App() {
   );
   const theme = useMemo(() => APP_THEME_TOKENS[colorScheme], [colorScheme]);
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const statusBarStyle = colorScheme === "soft_light" ? "dark" : "light";
+  const statusBarStyle = isBootLoading || colorScheme === "classic_blue" ? "light" : "dark";
   const selectedVoiceOption = useMemo(() => getAiVoiceOption(voiceProfile), [voiceProfile]);
   const trainingSelectOptions = useMemo<SelectOption[]>(
     () =>
@@ -3046,28 +3058,34 @@ export default function App() {
       </Modal>
 
       <LinearGradient
-        colors={[PERITIO_BRAND_COLORS.paper, "#ECE2D2"]}
-        start={{ x: 0, y: 0 }}
+        colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
+        start={{ x: 0.04, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={styles.heroCard}
       >
+        <View style={styles.heroGlow} />
         <View style={styles.heroGuideFrame} />
-        <View style={styles.heroGuideVertical} />
-        <View style={styles.heroGuideHorizontal} />
+        <View style={styles.heroGuideInnerFrame} />
+        <View style={styles.heroGuideLeftRail} />
+        <View style={styles.heroGuideRightRail} />
         <View style={styles.heroMarkFrame}>
-          <PeritioBrandMark size={104} variant="light" />
+          <Image source={APP_ICON_ART} style={styles.heroMarkImage} resizeMode="cover" />
         </View>
         <Text style={styles.heroKicker}>Peritio</Text>
-        <Text style={styles.heroTitle}>Precision practice for consequential conversations.</Text>
+        <Text style={styles.heroTitle}>Improve with precision.</Text>
         <Text style={styles.heroBody}>
-          Voice simulations with scored feedback for the moments where judgment, tone, and clarity matter.
+          Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
         </Text>
         <View style={styles.heroMetaRow}>
-          <Text style={styles.heroMetaText}>Voice simulations</Text>
-          <View style={styles.heroMetaDot} />
-          <Text style={styles.heroMetaText}>Scenario drills</Text>
-          <View style={styles.heroMetaDot} />
-          <Text style={styles.heroMetaText}>Scored feedback</Text>
+          <View style={styles.heroMetaChip}>
+            <Text style={styles.heroMetaText}>Voice practice</Text>
+          </View>
+          <View style={styles.heroMetaChip}>
+            <Text style={styles.heroMetaText}>Scenario drills</Text>
+          </View>
+          <View style={styles.heroMetaChip}>
+            <Text style={styles.heroMetaText}>Scored feedback</Text>
+          </View>
         </View>
       </LinearGradient>
 
@@ -4977,13 +4995,15 @@ export default function App() {
   const renderContent = () => {
     if (isBootLoading) {
       return (
-        <View style={styles.bootRoot}>
-          <View style={styles.bootPanel}>
-            <PeritioBrandMark size={92} variant="light" />
-            <Text style={styles.bootWordmark}>Peritio</Text>
-            <Text style={styles.bootSubtitle}>Preparing your workspace...</Text>
-            <ActivityIndicator size="small" color={PERITIO_BRAND_COLORS.ink} />
-          </View>
+        <View style={styles.bootBleed}>
+          <ImageBackground source={APP_STARTUP_ART} resizeMode="cover" style={styles.bootRoot}>
+            <View style={styles.bootScrim} />
+            <View style={styles.bootStatusWrap}>
+              <View style={styles.bootStatusHalo}>
+                <ActivityIndicator size="small" color={APP_SURFACE_COLORS.gold} />
+              </View>
+            </View>
+          </ImageBackground>
         </View>
       );
     }
@@ -5118,20 +5138,25 @@ function createStyles(theme: ThemeTokens) {
     topTitle: { color: theme.text, fontSize: 19, fontWeight: "700" },
     card: { borderRadius: 16, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.panel, padding: 15, marginBottom: 14, gap: 9 },
     heroCard: {
-      borderRadius: 30,
+      borderRadius: 32,
       borderWidth: 1,
-      borderColor: "rgba(15, 35, 58, 0.08)",
-      paddingHorizontal: 22,
-      paddingVertical: 28,
-      marginBottom: 18,
+      borderColor: "rgba(240, 223, 192, 0.16)",
+      paddingHorizontal: 24,
+      paddingVertical: 30,
+      marginBottom: 20,
       overflow: "hidden",
-      gap: 10,
+      gap: 12,
       alignItems: "center",
-      shadowColor: PERITIO_BRAND_COLORS.ink,
-      shadowOpacity: 0.12,
-      shadowRadius: 18,
-      shadowOffset: { width: 0, height: 10 },
+      shadowColor: APP_SURFACE_COLORS.shadow,
+      shadowOpacity: 0.2,
+      shadowRadius: 22,
+      shadowOffset: { width: 0, height: 12 },
       elevation: 6,
+    },
+    heroGlow: {
+      position: "absolute",
+      inset: 0,
+      backgroundColor: "rgba(255, 255, 255, 0.02)",
     },
     heroGuideFrame: {
       position: "absolute",
@@ -5139,45 +5164,68 @@ function createStyles(theme: ThemeTokens) {
       right: 18,
       bottom: 18,
       left: 18,
-      borderRadius: 24,
+      borderRadius: 26,
       borderWidth: 1,
-      borderColor: "rgba(15, 35, 58, 0.06)",
+      borderColor: "rgba(240, 223, 192, 0.16)",
     },
-    heroGuideVertical: {
+    heroGuideInnerFrame: {
       position: "absolute",
-      top: 0,
-      bottom: 0,
-      left: "50%",
+      top: 32,
+      right: 32,
+      bottom: 32,
+      left: 32,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: "rgba(240, 223, 192, 0.08)",
+    },
+    heroGuideLeftRail: {
+      position: "absolute",
+      left: 24,
+      top: 92,
+      bottom: 92,
       width: 1,
-      backgroundColor: "rgba(15, 35, 58, 0.06)",
+      backgroundColor: "rgba(240, 223, 192, 0.09)",
     },
-    heroGuideHorizontal: {
+    heroGuideRightRail: {
       position: "absolute",
-      left: 0,
-      right: 0,
-      top: "50%",
-      height: 1,
-      backgroundColor: "rgba(15, 35, 58, 0.05)",
+      right: 24,
+      top: 76,
+      bottom: 116,
+      width: 1,
+      backgroundColor: "rgba(240, 223, 192, 0.08)",
     },
     heroMarkFrame: {
-      width: 148,
-      height: 148,
-      borderRadius: 34,
+      width: 142,
+      height: 142,
+      borderRadius: 30,
       borderWidth: 1,
-      borderColor: "rgba(15, 35, 58, 0.08)",
-      backgroundColor: "rgba(255, 255, 255, 0.55)",
+      borderColor: "rgba(240, 223, 192, 0.18)",
+      backgroundColor: "rgba(255, 255, 255, 0.04)",
       alignItems: "center",
       justifyContent: "center",
-      marginBottom: 4,
+      marginBottom: 6,
+      shadowColor: APP_SURFACE_COLORS.shadow,
+      shadowOpacity: 0.18,
+      shadowRadius: 16,
+      shadowOffset: { width: 0, height: 10 },
+      elevation: 3,
     },
-    heroKicker: { color: PERITIO_BRAND_COLORS.ink, fontSize: 12.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.2 },
-    heroTitle: { color: PERITIO_BRAND_COLORS.ink, fontSize: 32, fontWeight: "800", lineHeight: 36, letterSpacing: -0.8, textAlign: "center" },
-    heroBody: { color: "#415264", fontSize: 15, lineHeight: 22, textAlign: "center", maxWidth: 320 },
-    heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 2 },
-    heroMetaText: { color: "#415264", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.2 },
-    heroMetaDot: { width: 4, height: 4, borderRadius: 999, backgroundColor: PERITIO_BRAND_COLORS.brass },
-    segmentCard: { marginTop: 2, borderColor: "rgba(15, 35, 58, 0.08)", backgroundColor: "rgba(255, 255, 255, 0.72)" },
-    segmentLabel: { color: PERITIO_BRAND_COLORS.brass, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.9 },
+    heroMarkImage: { width: 122, height: 122, borderRadius: 24 },
+    heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.4 },
+    heroTitle: { color: APP_SURFACE_COLORS.cream, fontSize: 32, fontWeight: "800", lineHeight: 36, letterSpacing: -0.8, textAlign: "center" },
+    heroBody: { color: "rgba(247, 237, 216, 0.84)", fontSize: 15, lineHeight: 23, textAlign: "center", maxWidth: 320 },
+    heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 8 },
+    heroMetaChip: {
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: "rgba(240, 223, 192, 0.14)",
+      backgroundColor: "rgba(32, 38, 32, 0.14)",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    heroMetaText: { color: "rgba(247, 237, 216, 0.82)", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.2 },
+    segmentCard: { marginTop: 6, borderColor: "rgba(116, 98, 69, 0.16)", backgroundColor: "rgba(255, 251, 244, 0.86)" },
+    segmentLabel: { color: "#9A7A4C", fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.9 },
     segmentTitle: { color: theme.text, fontSize: 24, fontWeight: "800", lineHeight: 28 },
     segmentFootnote: { color: theme.textMuted, fontSize: 12.5, lineHeight: 18 },
     title: { color: theme.text, fontSize: 23, fontWeight: "700" },
@@ -5231,29 +5279,36 @@ function createStyles(theme: ThemeTokens) {
     successCard: { borderRadius: 14, borderWidth: 1, borderColor: "rgba(29, 154, 95, 0.45)", backgroundColor: "rgba(29, 154, 95, 0.12)", padding: 12, marginBottom: 12 },
     errorText: { color: theme.danger, fontSize: 13, marginBottom: 6 },
     successText: { color: theme.success, fontSize: 13, marginBottom: 6 },
-    bootRoot: { flex: 1, justifyContent: "center", alignItems: "center" },
-    bootPanel: {
-      width: "100%",
-      maxWidth: 360,
-      borderRadius: 30,
+    bootBleed: { flex: 1, marginHorizontal: -16, marginBottom: -12, backgroundColor: APP_SURFACE_COLORS.sageDeep },
+    bootRoot: { flex: 1, justifyContent: "flex-end", alignItems: "center", paddingBottom: 42, backgroundColor: APP_SURFACE_COLORS.sageDeep, overflow: "hidden" },
+    bootScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(23, 29, 23, 0.08)" },
+    bootStatusWrap: { alignItems: "center", justifyContent: "center" },
+    bootStatusHalo: {
+      width: 42,
+      height: 42,
+      borderRadius: 999,
       borderWidth: 1,
-      borderColor: "rgba(15, 35, 58, 0.08)",
-      backgroundColor: "rgba(248, 244, 236, 0.94)",
+      borderColor: "rgba(240, 223, 192, 0.14)",
+      backgroundColor: "rgba(33, 37, 33, 0.16)",
       alignItems: "center",
       justifyContent: "center",
-      paddingHorizontal: 24,
-      paddingVertical: 28,
-      gap: 12,
-      shadowColor: PERITIO_BRAND_COLORS.ink,
-      shadowOpacity: 0.1,
-      shadowRadius: 16,
-      shadowOffset: { width: 0, height: 10 },
-      elevation: 6,
     },
-    bootWordmark: { color: PERITIO_BRAND_COLORS.ink, fontSize: 28, fontWeight: "800", letterSpacing: -0.6 },
-    bootSubtitle: { color: "#5A6877", fontSize: 14.5, lineHeight: 21, textAlign: "center" },
-    homePrimaryButton: { minHeight: 54, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: PERITIO_BRAND_COLORS.ink, marginBottom: 14 },
-    homePrimaryButtonText: { color: PERITIO_BRAND_COLORS.paper, fontSize: 16, fontWeight: "800" },
+    homePrimaryButton: {
+      minHeight: 54,
+      borderRadius: 18,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: APP_SURFACE_COLORS.sageDeep,
+      borderWidth: 1,
+      borderColor: "rgba(240, 223, 192, 0.18)",
+      marginBottom: 16,
+      shadowColor: APP_SURFACE_COLORS.shadow,
+      shadowOpacity: 0.12,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 8 },
+      elevation: 3,
+    },
+    homePrimaryButtonText: { color: APP_SURFACE_COLORS.gold, fontSize: 16, fontWeight: "800", letterSpacing: 0.2 },
     primaryButton: { minHeight: 52, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },
     primaryButtonText: { color: theme.primaryButtonText, fontSize: 16, fontWeight: "800" },
     disabled: { opacity: 0.55 },

@@ -963,6 +963,125 @@ function runSimulationPostResponseTask(
   });
 }
 
+const PENDING_UNIFIED_TURN_TTL_MS = 2 * 60 * 1000;
+
+type PendingUnifiedSubmitTurnResult =
+  | {
+      outcome: "assistant_reply";
+      transcriptText: string;
+      assistantText: string;
+      usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+      model: string;
+      promptVersion: string;
+      speechPrefetch: SimulationSpeechPrefetchPayload | null;
+      runtime: {
+        path: "unified_submit";
+        transcriptionMs: number;
+        cacheStatus: "hit" | "miss" | "bypass";
+        cacheReason?: string | null;
+        contextBuildMs?: number | null;
+        trainingPackLookupMs?: number | null;
+        modelLatencyMs?: number | null;
+        speechPrefetchTtsLatencyMs?: number | null;
+        routeElapsedMs?: number | null;
+      };
+    }
+  | {
+      outcome: "no_clear_speech";
+      transcriptText: string;
+      noClearSpeechReason: "empty_transcript" | "assistant_echo" | null;
+      runtime: {
+        path: "unified_submit";
+        transcriptionMs: number;
+        cacheStatus: "hit" | "miss" | "bypass";
+        cacheReason?: string | null;
+        contextBuildMs?: number | null;
+        trainingPackLookupMs?: number | null;
+        modelLatencyMs?: number | null;
+        speechPrefetchTtsLatencyMs?: number | null;
+        routeElapsedMs?: number | null;
+      };
+    }
+  | {
+      outcome: "error";
+      error: string;
+    };
+
+interface PendingUnifiedSubmitTurnEntry {
+  userId: string;
+  createdAtMs: number;
+  resultPromise: Promise<PendingUnifiedSubmitTurnResult>;
+  resolvedResult: PendingUnifiedSubmitTurnResult | null;
+}
+
+const pendingUnifiedSubmitTurns = new Map<string, PendingUnifiedSubmitTurnEntry>();
+
+function sweepExpiredPendingUnifiedSubmitTurns(nowMs = Date.now()): void {
+  for (const [correlationId, entry] of pendingUnifiedSubmitTurns.entries()) {
+    if (nowMs - entry.createdAtMs > PENDING_UNIFIED_TURN_TTL_MS) {
+      pendingUnifiedSubmitTurns.delete(correlationId);
+    }
+  }
+}
+
+function registerPendingUnifiedSubmitTurn(params: {
+  correlationId: string;
+  userId: string;
+  resultPromise: Promise<PendingUnifiedSubmitTurnResult>;
+}): void {
+  sweepExpiredPendingUnifiedSubmitTurns();
+  const safeResultPromise = params.resultPromise.catch((error) => ({
+    outcome: "error" as const,
+    error: error instanceof Error ? error.message : "Unified simulation turn failed.",
+  }));
+  const entry: PendingUnifiedSubmitTurnEntry = {
+    userId: params.userId,
+    createdAtMs: Date.now(),
+    resultPromise: safeResultPromise,
+    resolvedResult: null,
+  };
+  safeResultPromise.then((result) => {
+    entry.resolvedResult = result;
+  });
+  pendingUnifiedSubmitTurns.set(params.correlationId, entry);
+}
+
+async function waitForPendingUnifiedSubmitTurn(params: {
+  correlationId: string;
+  userId: string;
+  timeoutMs: number;
+}): Promise<PendingUnifiedSubmitTurnResult | null> {
+  const startedAtMs = Date.now();
+  const deadlineMs = startedAtMs + Math.max(1_000, params.timeoutMs);
+
+  while (Date.now() < deadlineMs) {
+    sweepExpiredPendingUnifiedSubmitTurns();
+    const entry = pendingUnifiedSubmitTurns.get(params.correlationId);
+    if (entry) {
+      if (entry.userId !== params.userId) {
+        return null;
+      }
+      if (entry.resolvedResult) {
+        return entry.resolvedResult;
+      }
+
+      const remainingMs = Math.max(1, deadlineMs - Date.now());
+      return await Promise.race([
+        entry.resultPromise,
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), remainingMs);
+        }),
+      ]);
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 40);
+    });
+  }
+
+  return null;
+}
+
 function parseTtsPreset(value: unknown): TtsPreset | null {
   if (typeof value !== "string") {
     return null;
@@ -6405,9 +6524,10 @@ async function buildDashboardTrainingPackAssignmentDetail(
 async function buildDashboardUserDetail(
   db: ApiDatabase,
   viewer: DashboardViewer,
-  userId: string
+  userId: string,
+  divisionId: string | null = null
 ): Promise<DashboardUserDetailResponse | null> {
-  const report = await buildDashboardUserReport(db, viewer);
+  const report = await buildDashboardUserReport(db, viewer, divisionId);
   const userRow = report.users.find((entry) => entry.userId === userId);
   if (!userRow || !userRow.orgId) {
     return null;
@@ -6422,8 +6542,11 @@ async function buildDashboardUserDetail(
   const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const trainingPackTitles = buildTrainingPackTitleMap(packs);
-  const userSessions = listUsageSessions(db, { userId: user.id, orgId: org.id });
-  const userScores = listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true });
+  const userSessions = filterRecordsByDivision(listUsageSessions(db, { userId: user.id, orgId: org.id }), divisionId);
+  const userScores = filterRecordsByDivision(
+    listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true }),
+    divisionId
+  );
   const now = Date.now();
   const last30DaysThreshold = now - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now - 60 * 24 * 60 * 60 * 1000;
@@ -6439,7 +6562,7 @@ async function buildDashboardUserDetail(
     .filter((assignment) => assignment.active === true && assignment.userId === user.id && assignment.orgId === org.id)
     .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment));
   const assignmentRows: DashboardUserAssignmentSummaryRow[] = assignments
-    .map((assignment) => {
+    .flatMap((assignment) => {
       const pack = packs.find((entry) => entry.id === assignment.trainingPackId);
       const packSessions = userSessions.filter((session) => session.trainingPackId === assignment.trainingPackId);
       const packScores = userScores.filter((record) => record.trainingPackId === assignment.trainingPackId);
@@ -6453,7 +6576,11 @@ async function buildDashboardUserDetail(
         recentScores: packScores
       });
 
-      return {
+      if (divisionId && progress.status === "not_started") {
+        return [];
+      }
+
+      return [{
         assignmentId: assignment.id,
         trainingPackId: assignment.trainingPackId,
         trainingPackTitle: pack?.title ?? assignment.trainingPackId,
@@ -6463,7 +6590,7 @@ async function buildDashboardUserDetail(
         completedAt: progress.completedAt,
         requiredScenarioCount: progress.requiredScenarioCount,
         completedScenarioCount: progress.completedScenarioCount
-      };
+      }];
     })
     .sort((left, right) => {
       const latestDelta =
@@ -6498,7 +6625,8 @@ async function buildDashboardUserDetail(
       previousScores: previousUserScores
     }),
     assignments: assignmentRows,
-    attempts: attemptRows
+    attempts: attemptRows,
+    divisionScope: report.divisionScope
   };
 }
 
@@ -9024,7 +9152,22 @@ app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthR
 
 app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardUserDetail(db, request.dashboard!.viewer, request.params.userId);
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+
+    const payload = await buildDashboardUserDetail(
+      db,
+      request.dashboard!.viewer,
+      request.params.userId,
+      divisionFilter.appliedDivisionId
+    );
     if (!payload) {
       response.status(404).json({ error: "Dashboard user not found." });
       return;
@@ -13028,6 +13171,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     industryBaseline?: unknown;
     trainingPackId?: unknown;
     speechPrefetch?: unknown;
+    responseMode?: unknown;
     history?: unknown;
     simulationSessionId?: unknown;
     sessionId?: unknown;
@@ -13053,6 +13197,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       ? parsedPayload.trainingPackId.trim()
       : null;
   const requestedSpeechPrefetch = parseSimulationSpeechPrefetchRequest(parsedPayload.speechPrefetch);
+  const responseMode = parsedPayload.responseMode === "transcript_first_v1" ? "transcript_first_v1" : "complete";
   const history = normalizeDialogueHistory(parsedPayload.history, { maxTurns: 24 });
 
   if (!scenarioId) {
@@ -13212,22 +13357,34 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     noClearSpeechReason = "assistant_echo";
   }
 
+  const buildUnifiedRuntimeBase = () => ({
+    path: "unified_submit" as const,
+    transcriptionMs: transcription.durationMs,
+    cacheStatus: runtime.cacheStatus,
+    cacheReason: runtime.cacheReason,
+    contextBuildMs: runtime.contextBuildMs,
+    trainingPackLookupMs: runtime.trainingPackLookupMs,
+  });
+
   if (noClearSpeechReason) {
-    response.setHeader("X-Correlation-Id", correlationId);
-    response.json({
+    const noClearPayload: PendingUnifiedSubmitTurnResult = {
       outcome: "no_clear_speech",
       transcriptText: "",
       noClearSpeechReason,
       runtime: {
-        path: "unified_submit",
-        transcriptionMs: transcription.durationMs,
-        cacheStatus: runtime.cacheStatus,
-        cacheReason: runtime.cacheReason,
-        contextBuildMs: runtime.contextBuildMs,
-        trainingPackLookupMs: runtime.trainingPackLookupMs,
+        ...buildUnifiedRuntimeBase(),
         routeElapsedMs: Date.now() - routeStartedAtMs,
       },
-    });
+    };
+    if (responseMode === "transcript_first_v1") {
+      registerPendingUnifiedSubmitTurn({
+        correlationId,
+        userId: accessContext.userId,
+        resultPromise: Promise.resolve(noClearPayload),
+      });
+    }
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json(noClearPayload);
     // eslint-disable-next-line no-console
     console.log("[simulation-route]", {
       route: "submit-turn",
@@ -13284,7 +13441,8 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
   }
 
   const turnHistory = [...history, { role: "user" as const, content: transcriptText }];
-  try {
+
+  const assistantResultPromise = (async (): Promise<PendingUnifiedSubmitTurnResult> => {
     const turnResult = await generateSimulationTurnReply({
       correlationId,
       history: turnHistory,
@@ -13292,8 +13450,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       requestedSpeechPrefetch,
     });
 
-    response.setHeader("X-Correlation-Id", correlationId);
-    response.json({
+    const assistantPayload: PendingUnifiedSubmitTurnResult = {
       outcome: "assistant_reply",
       transcriptText,
       assistantText: turnResult.assistantText,
@@ -13302,23 +13459,19 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       promptVersion: AI_PROMPT_VERSION,
       speechPrefetch: turnResult.speechPrefetch,
       runtime: {
-        path: "unified_submit",
-        transcriptionMs: transcription.durationMs,
-        cacheStatus: runtime.cacheStatus,
-        cacheReason: runtime.cacheReason,
-        contextBuildMs: runtime.contextBuildMs,
-        trainingPackLookupMs: runtime.trainingPackLookupMs,
+        ...buildUnifiedRuntimeBase(),
         modelLatencyMs: turnResult.modelLatencyMs,
         speechPrefetchTtsLatencyMs: turnResult.speechPrefetch?.ttsLatencyMs ?? null,
         routeElapsedMs: Date.now() - routeStartedAtMs,
       },
-    });
+    };
+
     activateSimulationAiBudgetGrace(accessContext.userId, accessContext.maxSimulationMinutes);
     // eslint-disable-next-line no-console
     console.log("[simulation-route]", {
       route: "submit-turn",
       correlationId,
-      stage: "response_sent",
+      stage: responseMode === "transcript_first_v1" ? "assistant_ready" : "response_sent",
       elapsedMs: Date.now() - routeStartedAtMs,
       cacheStatus: runtime.cacheStatus,
       cacheReason: runtime.cacheReason,
@@ -13426,6 +13579,48 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       logKey: "simulation-session:submit-turn",
       description: "failed to touch recognized session after unified submit turn",
     });
+
+    return assistantPayload;
+  })();
+
+  if (responseMode === "transcript_first_v1") {
+    registerPendingUnifiedSubmitTurn({
+      correlationId,
+      userId: accessContext.userId,
+      resultPromise: assistantResultPromise,
+    });
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json({
+      outcome: "transcript_ready",
+      transcriptText,
+      runtime: {
+        ...buildUnifiedRuntimeBase(),
+        routeElapsedMs: Date.now() - routeStartedAtMs,
+      },
+    });
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "submit-turn",
+      correlationId,
+      stage: "transcript_ready_sent",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      cacheStatus: runtime.cacheStatus,
+      cacheReason: runtime.cacheReason,
+      contextBuildMs: runtime.contextBuildMs,
+      trainingPackLookupMs: runtime.trainingPackLookupMs,
+      transcriptionMs: transcription.durationMs,
+      historyCount: turnHistory.length,
+    });
+    return;
+  }
+
+  try {
+    const assistantPayload = await assistantResultPromise;
+    if (assistantPayload.outcome !== "assistant_reply") {
+      throw new Error(assistantPayload.outcome === "error" ? assistantPayload.error : "Unified simulation turn failed.");
+    }
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.json(assistantPayload);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
     // eslint-disable-next-line no-console
@@ -13440,6 +13635,65 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     });
     response.status(503).json({ error: message });
   }
+});
+
+app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRateLimiter, async (request: Request, response: Response) => {
+  const authToken = request.headers.authorization?.replace("Bearer ", "").trim();
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+  const requestedCorrelationId =
+    typeof request.params.correlationId === "string" ? request.params.correlationId.trim().slice(0, 80) : "";
+  if (!requestedCorrelationId) {
+    response.status(400).json({ error: "correlationId is required." });
+    return;
+  }
+
+  const authenticatedUserId = await withDatabaseRead(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return null;
+    }
+
+    const resolvedAccessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!resolvedAccessContext) {
+      return null;
+    }
+    return user.id;
+  });
+
+  if (!authenticatedUserId) {
+    return;
+  }
+
+  const result = await waitForPendingUnifiedSubmitTurn({
+    correlationId: requestedCorrelationId,
+    userId: authenticatedUserId,
+    timeoutMs: 75_000,
+  });
+
+  if (!result) {
+    response.status(504).json({ error: "Timed out waiting for simulation assistant reply." });
+    return;
+  }
+
+  response.setHeader("X-Correlation-Id", requestedCorrelationId);
+  if (result.outcome === "error") {
+    response.status(503).json({ error: result.error });
+    return;
+  }
+  response.json(result);
 });
 
 app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {

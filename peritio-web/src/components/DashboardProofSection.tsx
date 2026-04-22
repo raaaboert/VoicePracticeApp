@@ -18,17 +18,19 @@ export function DashboardProofSection({
   defaultOpen?: boolean;
 }) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
+  const summaryText = isOpen ? description ?? preview ?? null : preview ?? description ?? null;
 
   return (
     <details
       className="section-card dashboard-proof-section"
+      open={isOpen}
       onToggle={(event) => setIsOpen(event.currentTarget.open)}
     >
       <summary className="dashboard-proof-summary">
         <div className="dashboard-proof-summary-copy">
           <p className="eyebrow">{eyebrow}</p>
           <h2>{title}</h2>
-          <p className="dashboard-proof-preview">{isOpen ? description ?? preview ?? "" : preview ?? description ?? ""}</p>
+          {summaryText ? <p className="dashboard-proof-preview">{summaryText}</p> : null}
         </div>
         <span className="dashboard-proof-toggle">{isOpen ? "Hide proof" : "Show proof"}</span>
       </summary>

@@ -5,6 +5,7 @@ import type { DashboardDivisionScope } from "@voicepractice/shared";
 
 import {
   buildDashboardDivisionSearch,
+  buildDashboardScopedUserDetailHref,
   canRenderDashboardWorkspaceDivisionFilter,
   canRenderSingleScopeDivisionFilter,
   formatDashboardDivisionOptionLabel,
@@ -27,6 +28,11 @@ test("buildDashboardDivisionSearch applies the selected division without droppin
     buildDashboardDivisionSearch("tab=users", "division_a"),
     "?tab=users&divisionId=division_a"
   );
+});
+
+test("buildDashboardScopedUserDetailHref preserves the active division filter when present", () => {
+  assert.equal(buildDashboardScopedUserDetailHref("user_1", "division_a"), "/app/users/user_1?divisionId=division_a");
+  assert.equal(buildDashboardScopedUserDetailHref("user_1", null), "/app/users/user_1");
 });
 
 test("canRenderSingleScopeDivisionFilter only returns true when options exist", () => {

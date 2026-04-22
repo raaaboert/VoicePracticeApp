@@ -1124,6 +1124,7 @@ export interface DashboardUserDetailResponse {
   coachingInsights: DashboardCoachingInsights;
   assignments: DashboardUserAssignmentSummaryRow[];
   attempts: DashboardAttemptHistoryRow[];
+  divisionScope?: DashboardDivisionScope;
 }
 
 export interface DashboardAttemptDetailResponse {

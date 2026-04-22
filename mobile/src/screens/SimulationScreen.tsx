@@ -21,6 +21,7 @@ import {
 } from "../lib/api";
 import type { PrefetchedRemoteSpeechChunk } from "../lib/api";
 import {
+  awaitSubmittedSimulationTurnReply,
   createOpeningLine,
   generateAssistantReply,
   isOpenAiConfigured,
@@ -135,12 +136,6 @@ function isApiError(error: unknown): boolean {
 
 function buildLocalCapturedText(turnDurationSeconds: number): string {
   return `Voice input captured (${turnDurationSeconds}s) in local test mode.`;
-}
-
-function waitForUiPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
 }
 
 function normalizeTranscriptForComparison(value: string): string {
@@ -1059,6 +1054,17 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
 
       let userText = "";
       let replyPayload: { assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null } | null = null;
+      let unifiedAssistantAwaitPromise:
+        | Promise<{
+            outcome: "assistant_reply" | "no_clear_speech";
+            transcriptText: string;
+            noClearSpeechReason?: "empty_transcript" | "assistant_echo" | null;
+            assistantText?: string;
+            speechPrefetch?: PrefetchedRemoteSpeechChunk | null;
+            runtime: { modelLatencyMs?: number | null; speechPrefetchTtsLatencyMs?: number | null } | null;
+          }>
+        | null = null;
+      let unifiedAssistantAwaitAbortController: AbortController | null = null;
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
       let shouldAttemptLegacyRemotePath = useLiveApiThisTurn && shouldAttemptTranscription;
       if (!useLiveApiThisTurn) {
@@ -1071,6 +1077,18 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           unifiedSubmitRequestStartedAtMs = Date.now();
           transcribeRequestStartedAtMs = unifiedSubmitRequestStartedAtMs;
           assistantRequestStartedAtMs = unifiedSubmitRequestStartedAtMs;
+          unifiedAssistantAwaitAbortController = new AbortController();
+          unifiedAssistantAwaitPromise = awaitSubmittedSimulationTurnReply({
+            userId,
+            authToken,
+            correlationId,
+            signal: unifiedAssistantAwaitAbortController.signal,
+          });
+          logSimulationTiming({
+            correlationId,
+            phase: "assistant_await_request_start",
+            startedAtMs: effectiveSubmitStartedAtMs,
+          });
           logSimulationTiming({
             correlationId,
             phase: "unified_submit_request_start",
@@ -1093,6 +1111,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             history: [...messagesRef.current],
             trainingPackId: sessionTrainingPackIdRef.current,
             speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
+            responseMode: "transcript_first_v1",
             correlationId,
           });
           unifiedSubmitResponseAtMs = Date.now();
@@ -1125,6 +1144,8 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
             });
           }
           if (unifiedPayload.outcome === "assistant_reply") {
+            unifiedAssistantAwaitAbortController?.abort();
+            unifiedAssistantAwaitPromise = null;
             replyPayload = {
               assistantText: unifiedPayload.assistantText,
               speechPrefetch: unifiedPayload.speechPrefetch,
@@ -1141,8 +1162,11 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
                 speechPrefetchTtsLatencyMs: unifiedPayload.runtime?.speechPrefetchTtsLatencyMs ?? null,
               },
             });
+          } else if (unifiedPayload.outcome === "no_clear_speech") {
+            unifiedAssistantAwaitAbortController.abort();
           }
         } catch (unifiedError) {
+          unifiedAssistantAwaitAbortController?.abort();
           const shouldFallbackToLegacy = shouldFallbackToLegacyUnifiedSubmit(unifiedError);
           if (shouldFallbackToLegacy) {
             logSimulationTiming({
@@ -1266,19 +1290,74 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
       if (userText && appearsToEchoAssistantReply(userText, messagesRef.current)) {
         userText = "";
         replyPayload = null;
+        unifiedAssistantAwaitAbortController?.abort();
+        unifiedAssistantAwaitPromise = null;
       }
 
       if (userText) {
-        appendMessage({ id: createMessageId(), role: "user", content: userText });
-        setStatus(replyPayload ? "Transcript ready. Preparing AI response..." : "Transcript ready. Crafting AI reply...");
+        const userMessage = { id: createMessageId(), role: "user" as const, content: userText };
+        let userMessageCommitted = false;
+        const commitUserMessageIfNeeded = () => {
+          if (userMessageCommitted || unmountedRef.current || simulationClosedRef.current) {
+            return;
+          }
+          userMessageCommitted = true;
+          appendMessage(userMessage);
+          logSimulationTiming({
+            correlationId,
+            phase: "user_transcript_committed",
+            startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              transcriptChars: userText.length,
+            },
+          });
+        };
+
+        setStatus(replyPayload || unifiedAssistantAwaitPromise ? "Preparing AI response..." : "Crafting AI reply...");
 
         if (sessionActiveRef.current && !unmountedRef.current) {
-          if (replyPayload) {
-            await waitForUiPaint();
+          if (!replyPayload && unifiedAssistantAwaitPromise) {
+            commitUserMessageIfNeeded();
+            try {
+              const awaitedPayload = await unifiedAssistantAwaitPromise;
+              if (awaitedPayload.outcome === "assistant_reply" && awaitedPayload.assistantText) {
+                replyPayload = {
+                  assistantText: awaitedPayload.assistantText,
+                  speechPrefetch: awaitedPayload.speechPrefetch ?? null,
+                };
+                assistantResponseAtMs = Date.now();
+                replyChars = awaitedPayload.assistantText.length;
+                logSimulationTiming({
+                  correlationId,
+                  phase: "assistant_response_received",
+                  startedAtMs: effectiveSubmitStartedAtMs,
+                  details: {
+                    replyChars,
+                    path: "unified_submit_await",
+                    modelLatencyMs: awaitedPayload.runtime?.modelLatencyMs ?? null,
+                    speechPrefetchTtsLatencyMs: awaitedPayload.runtime?.speechPrefetchTtsLatencyMs ?? null,
+                  },
+                });
+              }
+            } catch (awaitError) {
+              const awaitErrorMessage = getErrorMessage(awaitError, "Assistant reply wait failed.");
+              logSimulationTiming({
+                correlationId,
+                phase: "assistant_await_fallback_generate",
+                startedAtMs: effectiveSubmitStartedAtMs,
+                details: {
+                  error: awaitErrorMessage,
+                },
+              });
+            } finally {
+              unifiedAssistantAwaitAbortController?.abort();
+              unifiedAssistantAwaitPromise = null;
+            }
           }
 
           if (!replyPayload) {
-            assistantRequestStartedAtMs = Date.now();
+            commitUserMessageIfNeeded();
+            assistantRequestStartedAtMs = assistantRequestStartedAtMs ?? Date.now();
             logSimulationTiming({
               correlationId,
               phase: "assistant_request_start",
@@ -1331,6 +1410,7 @@ export function SimulationScreen({ config, userId, authToken, onExit, onSessionC
           const prefetchedAssistantSpeech = replyPayload.speechPrefetch;
 
           if (sessionActiveRef.current && !unmountedRef.current) {
+            commitUserMessageIfNeeded();
             const assistantTextReceivedAtMs = Date.now();
             const assistantMessage = { id: createMessageId(), role: "assistant" as const, content: reply };
             let assistantMessageCommitted = false;
