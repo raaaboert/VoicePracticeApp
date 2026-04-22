@@ -9,7 +9,12 @@ interface VoiceOrbProps {
 }
 
 type SignalStageKey = "capture" | "process" | "deliver";
-type SignalStageState = "idle" | "ready" | "active";
+type SignalStageState = "upcoming" | "ready" | "complete" | "active";
+
+type SignalStageMeta = {
+  state: SignalStageState;
+  status: string;
+};
 
 const MODE_LABELS: Record<OrbMode, string> = {
   idle: "Ready",
@@ -19,10 +24,10 @@ const MODE_LABELS: Record<OrbMode, string> = {
 };
 
 const MODE_CAPTIONS: Record<OrbMode, string> = {
-  idle: "Waiting for the next turn.",
-  recording: "Capturing the live response.",
-  thinking: "Building the next reply.",
-  speaking: "Delivering the assistant reply.",
+  idle: "The engine is waiting for the next response.",
+  recording: "Voice input is being captured live.",
+  thinking: "The next reply is being prepared now.",
+  speaking: "The assistant reply is being delivered.",
 };
 
 const SIGNAL_STAGES: Array<{ key: SignalStageKey; label: string }> = [
@@ -35,46 +40,46 @@ const THEME = {
   light: {
     shellBg: "rgba(252, 249, 242, 0.98)",
     shellBorder: "rgba(97, 116, 97, 0.14)",
-    shellInner: "rgba(97, 116, 97, 0.07)",
     headerLabel: "#677362",
-    engineChipBg: "rgba(247, 244, 236, 0.94)",
-    engineChipBorder: "rgba(97, 116, 97, 0.14)",
-    engineChipText: "#4e5f4f",
-    stateBadgeBg: "rgba(255, 252, 246, 0.96)",
-    stateBadgeBorder: "rgba(97, 116, 97, 0.16)",
+    headerCopy: "#778173",
+    stateBadgeBg: "rgba(249, 246, 238, 0.98)",
+    stateBadgeBorder: "rgba(97, 116, 97, 0.14)",
     stateBadgeText: "#4f614f",
-    stageBg: "rgba(246, 248, 242, 0.94)",
+    stageBg: "rgba(247, 249, 243, 0.98)",
     stageBorder: "rgba(97, 116, 97, 0.12)",
-    trackBg: "rgba(96, 114, 96, 0.12)",
-    trackReady: "rgba(96, 114, 96, 0.18)",
+    coreShell: "rgba(255, 252, 246, 0.98)",
+    coreBorder: "rgba(97, 116, 97, 0.12)",
+    coreGrid: "rgba(96, 114, 96, 0.12)",
+    stepDivider: "rgba(97, 116, 97, 0.1)",
+    stepBg: "rgba(247, 249, 243, 0.7)",
     inactiveText: "#7a8476",
+    labelText: "#4c5d4a",
+    statusChipBg: "rgba(244, 246, 240, 0.98)",
+    statusChipBorder: "rgba(97, 116, 97, 0.12)",
     caption: "#667264",
     shadow: "#131914",
-    coreShell: "rgba(255, 252, 247, 0.98)",
-    coreBorder: "rgba(97, 116, 97, 0.12)",
-    coreGrid: "rgba(96, 114, 96, 0.16)",
   },
   dark: {
     shellBg: "rgba(20, 27, 21, 0.96)",
-    shellBorder: "rgba(244, 231, 206, 0.1)",
-    shellInner: "rgba(244, 231, 206, 0.04)",
+    shellBorder: "rgba(244, 231, 206, 0.09)",
     headerLabel: "#cfc3ab",
-    engineChipBg: "rgba(28, 35, 28, 0.92)",
-    engineChipBorder: "rgba(244, 231, 206, 0.09)",
-    engineChipText: "#efe3ca",
-    stateBadgeBg: "rgba(25, 34, 26, 0.96)",
-    stateBadgeBorder: "rgba(244, 231, 206, 0.12)",
+    headerCopy: "#9caa99",
+    stateBadgeBg: "rgba(27, 35, 28, 0.96)",
+    stateBadgeBorder: "rgba(244, 231, 206, 0.1)",
     stateBadgeText: "#f6ebd6",
-    stageBg: "rgba(24, 32, 25, 0.96)",
+    stageBg: "rgba(24, 32, 25, 0.94)",
     stageBorder: "rgba(244, 231, 206, 0.08)",
-    trackBg: "rgba(244, 231, 206, 0.08)",
-    trackReady: "rgba(244, 231, 206, 0.12)",
-    inactiveText: "#9dab9a",
-    caption: "#d5ddcf",
-    shadow: "#0e1510",
     coreShell: "rgba(29, 38, 31, 0.98)",
     coreBorder: "rgba(244, 231, 206, 0.08)",
-    coreGrid: "rgba(244, 231, 206, 0.12)",
+    coreGrid: "rgba(244, 231, 206, 0.1)",
+    stepDivider: "rgba(244, 231, 206, 0.07)",
+    stepBg: "rgba(28, 36, 29, 0.56)",
+    inactiveText: "#9dab9a",
+    labelText: "#eef4ec",
+    statusChipBg: "rgba(27, 35, 28, 0.94)",
+    statusChipBorder: "rgba(244, 231, 206, 0.09)",
+    caption: "#d5ddcf",
+    shadow: "#0e1510",
   },
 } as const;
 
@@ -82,74 +87,100 @@ const MODE_COLORS = {
   light: {
     idle: {
       accent: "#637b64",
-      accentSoft: "rgba(99, 123, 100, 0.2)",
-      glow: "rgba(99, 123, 100, 0.14)",
+      accentSoft: "rgba(99, 123, 100, 0.18)",
+      glow: "rgba(99, 123, 100, 0.12)",
       highlight: "#f3e6ca",
     },
     recording: {
       accent: "#c98566",
-      accentSoft: "rgba(201, 133, 102, 0.22)",
-      glow: "rgba(201, 133, 102, 0.16)",
+      accentSoft: "rgba(201, 133, 102, 0.18)",
+      glow: "rgba(201, 133, 102, 0.14)",
       highlight: "#f6ddd0",
     },
     thinking: {
       accent: "#c9a96d",
-      accentSoft: "rgba(201, 169, 109, 0.22)",
-      glow: "rgba(201, 169, 109, 0.16)",
+      accentSoft: "rgba(201, 169, 109, 0.18)",
+      glow: "rgba(201, 169, 109, 0.14)",
       highlight: "#f6ead1",
     },
     speaking: {
       accent: "#86a187",
-      accentSoft: "rgba(134, 161, 135, 0.22)",
-      glow: "rgba(134, 161, 135, 0.16)",
+      accentSoft: "rgba(134, 161, 135, 0.18)",
+      glow: "rgba(134, 161, 135, 0.14)",
       highlight: "#edf2e8",
     },
   },
   dark: {
     idle: {
       accent: "#8faf93",
-      accentSoft: "rgba(143, 175, 147, 0.24)",
+      accentSoft: "rgba(143, 175, 147, 0.22)",
       glow: "rgba(143, 175, 147, 0.14)",
       highlight: "#f3e5c6",
     },
     recording: {
       accent: "#d9906f",
-      accentSoft: "rgba(217, 144, 111, 0.24)",
+      accentSoft: "rgba(217, 144, 111, 0.22)",
       glow: "rgba(217, 144, 111, 0.14)",
       highlight: "#f7dece",
     },
     thinking: {
       accent: "#debe81",
-      accentSoft: "rgba(222, 190, 129, 0.24)",
-      glow: "rgba(222, 190, 129, 0.16)",
+      accentSoft: "rgba(222, 190, 129, 0.22)",
+      glow: "rgba(222, 190, 129, 0.14)",
       highlight: "#faecd1",
     },
     speaking: {
       accent: "#a9c3aa",
-      accentSoft: "rgba(169, 195, 170, 0.24)",
-      glow: "rgba(169, 195, 170, 0.16)",
+      accentSoft: "rgba(169, 195, 170, 0.22)",
+      glow: "rgba(169, 195, 170, 0.14)",
       highlight: "#eff1e6",
     },
   },
 } as const;
 
-function getSignalStageState(mode: OrbMode, stage: SignalStageKey): SignalStageState {
+function getSignalStageMeta(mode: OrbMode, stage: SignalStageKey): SignalStageMeta {
   if (mode === "recording") {
-    return stage === "capture" ? "active" : "idle";
+    if (stage === "capture") {
+      return { state: "active", status: "Active" };
+    }
+    return { state: "upcoming", status: "Queued" };
   }
+
   if (mode === "thinking") {
     if (stage === "capture") {
-      return "ready";
+      return { state: "complete", status: "Complete" };
     }
-    return stage === "process" ? "active" : "idle";
+    if (stage === "process") {
+      return { state: "active", status: "Active" };
+    }
+    return { state: "upcoming", status: "Queued" };
   }
+
   if (mode === "speaking") {
     if (stage === "deliver") {
-      return "active";
+      return { state: "active", status: "Active" };
     }
-    return "ready";
+    return { state: "complete", status: "Complete" };
   }
-  return "ready";
+
+  if (stage === "capture") {
+    return { state: "ready", status: "Ready" };
+  }
+
+  return { state: "upcoming", status: "Queued" };
+}
+
+function getActivePhaseLabel(mode: OrbMode): string {
+  if (mode === "recording") {
+    return "Capture";
+  }
+  if (mode === "thinking") {
+    return "Process";
+  }
+  if (mode === "speaking") {
+    return "Deliver";
+  }
+  return "Standby";
 }
 
 export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
@@ -165,8 +196,8 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
       return;
     }
 
-    const peakScale = mode === "recording" ? 1.09 : mode === "thinking" ? 1.06 : 1.08;
-    const pulseDuration = mode === "recording" ? 520 : mode === "thinking" ? 900 : 680;
+    const peakScale = mode === "recording" ? 1.1 : mode === "thinking" ? 1.06 : 1.08;
+    const pulseDuration = mode === "recording" ? 520 : mode === "thinking" ? 920 : 680;
 
     const loopAnimation = Animated.loop(
       Animated.sequence([
@@ -197,28 +228,24 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
   });
   const haloOpacity = pulseValue.interpolate({
     inputRange: [1, 1.1],
-    outputRange: [0.24, 0.08],
+    outputRange: [0.22, 0.08],
     extrapolate: "clamp",
   });
-  const coreScale = pulseValue.interpolate({
+  const activeDotScale = pulseValue.interpolate({
     inputRange: [1, 1.1],
-    outputRange: [1, 1.04],
+    outputRange: [1, 1.12],
     extrapolate: "clamp",
   });
-  const activeLineOpacity = pulseValue.interpolate({
-    inputRange: [1, 1.1],
-    outputRange: [0.9, 0.58],
-    extrapolate: "clamp",
-  });
+
+  const phaseLabel = getActivePhaseLabel(mode);
 
   return (
     <View style={styles.wrapper}>
       <View style={[styles.shell, { backgroundColor: theme.shellBg, borderColor: theme.shellBorder }]}>
-        <View style={[styles.shellInset, { borderColor: theme.shellInner }]} />
         <View style={styles.headerRow}>
-          <View>
+          <View style={styles.headerCopy}>
             <Text style={[styles.engineLabel, { color: theme.headerLabel }]}>Peritio Engine</Text>
-            <Text style={[styles.engineSubcopy, { color: theme.inactiveText }]}>Live turn processing</Text>
+            <Text style={[styles.engineSubcopy, { color: theme.headerCopy }]}>Live turn state</Text>
           </View>
           <View style={[styles.stateBadge, { backgroundColor: theme.stateBadgeBg, borderColor: theme.stateBadgeBorder }]}>
             <Text style={[styles.stateBadgeText, { color: theme.stateBadgeText }]}>{MODE_LABELS[mode]}</Text>
@@ -226,7 +253,16 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
         </View>
 
         <View style={[styles.stagePanel, { backgroundColor: theme.stageBg, borderColor: theme.stageBorder }]}>
+          <Text style={[styles.stageEyebrow, { color: theme.headerLabel }]}>Current phase</Text>
+          <View style={styles.stageCurrentRow}>
+            <View style={[styles.activePhaseChip, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
+              <Text style={[styles.activePhaseChipText, { color: colors.accent }]}>{phaseLabel}</Text>
+            </View>
+            <Text style={[styles.stageCaption, { color: theme.caption }]}>{MODE_CAPTIONS[mode]}</Text>
+          </View>
+
           <View style={styles.stageVisual}>
+            <View style={[styles.connector, styles.connectorLeft, { backgroundColor: colors.accentSoft }]} />
             <Animated.View
               style={[
                 styles.halo,
@@ -237,58 +273,56 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
                 },
               ]}
             />
-            <View style={[styles.stageRail, styles.stageRailLeft, { backgroundColor: theme.coreGrid }]} />
-            <View style={[styles.stageRail, styles.stageRailRight, { backgroundColor: theme.coreGrid }]} />
-            <Animated.View
-              style={[
-                styles.coreShell,
-                {
-                  backgroundColor: theme.coreShell,
-                  borderColor: theme.coreBorder,
-                  shadowColor: theme.shadow,
-                  transform: [{ scale: coreScale }],
-                },
-              ]}
-            >
-              <View style={[styles.coreCrossHorizontal, { backgroundColor: theme.coreGrid }]} />
-              <View style={[styles.coreCrossVertical, { backgroundColor: theme.coreGrid }]} />
+            <View style={[styles.coreShell, { backgroundColor: theme.coreShell, borderColor: theme.coreBorder, shadowColor: theme.shadow }]}>
+              <View style={[styles.coreGridHorizontal, { backgroundColor: theme.coreGrid }]} />
+              <View style={[styles.coreGridVertical, { backgroundColor: theme.coreGrid }]} />
               <View style={[styles.coreRing, { borderColor: colors.accentSoft }]} />
               <View style={[styles.coreRingInner, { borderColor: colors.accent }]} />
-              <View style={[styles.coreDot, { backgroundColor: colors.accent }]} />
+              <Animated.View style={[styles.coreDotWrap, { transform: [{ scale: activeDotScale }] }]}>
+                <View style={[styles.coreDot, { backgroundColor: colors.accent }]} />
+              </Animated.View>
               <View style={[styles.coreHighlight, { backgroundColor: colors.highlight }]} />
-            </Animated.View>
+            </View>
+            <View style={[styles.connector, styles.connectorRight, { backgroundColor: mode === "speaking" ? colors.accentSoft : theme.coreGrid }]} />
           </View>
         </View>
 
-        <View style={styles.signalPanel}>
-          {SIGNAL_STAGES.map((stage) => {
-            const stageState = getSignalStageState(mode, stage.key);
-            const fillWidth = stageState === "active" ? "84%" : stageState === "ready" ? "58%" : "28%";
-            const fillOpacityStyle = stageState === "active" ? { opacity: activeLineOpacity } : { opacity: stageState === "ready" ? 0.88 : 0.42 };
-            const dotColor = stageState === "active" ? colors.accent : stageState === "ready" ? colors.accentSoft : theme.trackReady;
-            const labelColor = stageState === "idle" ? theme.inactiveText : theme.stateBadgeText;
+        <View style={styles.stepList}>
+          {SIGNAL_STAGES.map((stage, index) => {
+            const meta = getSignalStageMeta(mode, stage.key);
+            const isActive = meta.state === "active";
+            const indicatorStyle =
+              meta.state === "complete"
+                ? { backgroundColor: colors.accent, borderColor: colors.accent }
+                : meta.state === "ready"
+                  ? { backgroundColor: colors.accentSoft, borderColor: colors.accentSoft }
+                  : meta.state === "active"
+                    ? { backgroundColor: colors.accent, borderColor: colors.accent }
+                    : { backgroundColor: "transparent", borderColor: theme.stepDivider };
+            const rowStyle = meta.state === "active" ? { backgroundColor: theme.stepBg } : null;
+            const labelColor = meta.state === "upcoming" ? theme.inactiveText : theme.labelText;
             return (
-              <View key={stage.key} style={styles.signalRow}>
-                <Text style={[styles.signalLabel, { color: labelColor }]}>{stage.label}</Text>
-                <View style={[styles.signalTrack, { backgroundColor: theme.trackBg }]}>
-                  <Animated.View
-                    style={[
-                      styles.signalFill,
-                      fillOpacityStyle,
-                      {
-                        width: fillWidth,
-                        backgroundColor: stageState === "active" ? colors.accent : stageState === "ready" ? colors.accentSoft : theme.trackReady,
-                      },
-                    ]}
-                  />
+              <View
+                key={stage.key}
+                style={[
+                  styles.stepRow,
+                  rowStyle,
+                  index < SIGNAL_STAGES.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
+                ]}
+              >
+                <Animated.View style={[styles.stepIndicatorWrap, isActive ? { transform: [{ scale: activeDotScale }] } : null]}>
+                  <View style={[styles.stepIndicator, indicatorStyle]} />
+                </Animated.View>
+                <Text style={[styles.stepLabel, { color: labelColor }]}>{stage.label}</Text>
+                <View style={[styles.stepStatusChip, { backgroundColor: theme.statusChipBg, borderColor: theme.statusChipBorder }]}>
+                  <Text style={[styles.stepStatusText, { color: meta.state === "active" ? colors.accent : meta.state === "complete" ? colors.accent : theme.caption }]}>
+                    {meta.status}
+                  </Text>
                 </View>
-                <View style={[styles.signalDot, { backgroundColor: dotColor }]} />
               </View>
             );
           })}
         </View>
-
-        <Text style={[styles.caption, { color: theme.caption }]}>{MODE_CAPTIONS[mode]}</Text>
       </View>
     </View>
   );
@@ -296,31 +330,19 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
 
 const styles = StyleSheet.create({
   wrapper: {
+    width: "100%",
     alignItems: "center",
     justifyContent: "center",
-    width: "100%",
-    alignSelf: "center",
     marginVertical: 2,
   },
   shell: {
     width: "100%",
     maxWidth: 292,
-    minHeight: 286,
-    borderRadius: 28,
+    borderRadius: 26,
     borderWidth: 1,
-    overflow: "hidden",
     paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 16,
-  },
-  shellInset: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    right: 10,
-    bottom: 10,
-    borderRadius: 22,
-    borderWidth: 1,
+    paddingBottom: 12,
   },
   headerRow: {
     flexDirection: "row",
@@ -329,12 +351,15 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 14,
   },
+  headerCopy: {
+    flex: 1,
+    gap: 2,
+  },
   engineLabel: {
     fontSize: 11,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 1.3,
-    marginBottom: 2,
   },
   engineSubcopy: {
     fontSize: 12.5,
@@ -356,124 +381,166 @@ const styles = StyleSheet.create({
     letterSpacing: 0.9,
   },
   stagePanel: {
-    minHeight: 150,
-    borderRadius: 22,
+    borderRadius: 20,
     borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 14,
+    marginBottom: 12,
+  },
+  stageEyebrow: {
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 1.1,
+    marginBottom: 8,
+  },
+  stageCurrentRow: {
+    gap: 8,
+    marginBottom: 14,
+  },
+  activePhaseChip: {
+    alignSelf: "flex-start",
+    minHeight: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 11,
+    paddingVertical: 5,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 16,
-    overflow: "hidden",
+  },
+  activePhaseChipText: {
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  stageCaption: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "600",
   },
   stageVisual: {
-    width: 196,
-    height: 146,
+    minHeight: 104,
     alignItems: "center",
     justifyContent: "center",
+  },
+  connector: {
+    position: "absolute",
+    top: "50%",
+    width: 48,
+    height: 2,
+    marginTop: -1,
+    borderRadius: 999,
+  },
+  connectorLeft: {
+    left: 18,
+  },
+  connectorRight: {
+    right: 18,
   },
   halo: {
     position: "absolute",
-    width: 144,
-    height: 144,
+    width: 116,
+    height: 116,
     borderRadius: 999,
-  },
-  stageRail: {
-    position: "absolute",
-    top: 72,
-    width: 38,
-    height: 2,
-    borderRadius: 999,
-  },
-  stageRailLeft: {
-    left: 18,
-  },
-  stageRailRight: {
-    right: 18,
   },
   coreShell: {
-    width: 102,
-    height: 102,
+    width: 96,
+    height: 96,
     borderRadius: 28,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
-    shadowOpacity: 0.16,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 9 },
-    elevation: 5,
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
   },
-  coreCrossHorizontal: {
+  coreGridHorizontal: {
     position: "absolute",
-    width: 52,
+    width: 44,
     height: 1,
     borderRadius: 999,
   },
-  coreCrossVertical: {
+  coreGridVertical: {
     position: "absolute",
     width: 1,
-    height: 52,
+    height: 44,
     borderRadius: 999,
   },
   coreRing: {
     position: "absolute",
-    width: 64,
-    height: 64,
+    width: 58,
+    height: 58,
     borderRadius: 999,
     borderWidth: 1,
   },
   coreRingInner: {
     position: "absolute",
-    width: 42,
-    height: 42,
+    width: 36,
+    height: 36,
     borderRadius: 999,
     borderWidth: 2,
   },
+  coreDotWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
   coreDot: {
-    width: 18,
-    height: 18,
+    width: 16,
+    height: 16,
     borderRadius: 999,
   },
   coreHighlight: {
     position: "absolute",
-    top: 24,
-    right: 26,
+    top: 23,
+    right: 24,
     width: 10,
     height: 10,
     borderRadius: 999,
-    opacity: 0.7,
+    opacity: 0.72,
   },
-  signalPanel: {
-    gap: 10,
-    marginBottom: 14,
+  stepList: {
+    borderRadius: 18,
+    overflow: "hidden",
   },
-  signalRow: {
+  stepRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
+    paddingHorizontal: 4,
+    paddingVertical: 10,
   },
-  signalLabel: {
-    width: 56,
-    fontSize: 12,
+  stepIndicatorWrap: {
+    width: 14,
+    height: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    borderWidth: 1.5,
+  },
+  stepLabel: {
+    flex: 1,
+    fontSize: 13.5,
     fontWeight: "700",
   },
-  signalTrack: {
-    flex: 1,
-    height: 8,
+  stepStatusChip: {
+    minHeight: 26,
     borderRadius: 999,
-    overflow: "hidden",
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  signalFill: {
-    height: "100%",
-    borderRadius: 999,
-  },
-  signalDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 999,
-  },
-  caption: {
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: "600",
-    textAlign: "center",
+  stepStatusText: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
 });

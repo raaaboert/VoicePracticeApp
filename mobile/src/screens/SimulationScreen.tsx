@@ -3,7 +3,7 @@ import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import { LinearGradient } from "expo-linear-gradient";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
   getAiVoiceOption,
@@ -116,10 +116,15 @@ type SimulationPalette = {
   aiBubble: string;
   aiBubbleBorder: string;
   ghostBg: string;
+  startButton: string;
   primaryButton: string;
   submitButton: string;
+  startButtonBorder: string;
+  submitButtonBorder: string;
   busyButton: string;
+  busyButtonBorder: string;
   primaryButtonText: string;
+  busyButtonText: string;
   secondaryButtonBg: string;
   secondaryButtonBorder: string;
   secondaryButtonText: string;
@@ -134,7 +139,7 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     heroBorder: "rgba(98, 119, 100, 0.18)",
     heroMetaBg: "rgba(249, 250, 243, 0.97)",
     heroMetaBorder: "rgba(98, 119, 100, 0.14)",
-    heroMetaText: "#4b5c48",
+    heroMetaText: "#465845",
     panel: "rgba(255, 252, 246, 0.98)",
     panelStrong: "rgba(249, 246, 238, 0.99)",
     panelMuted: "rgba(241, 244, 235, 0.95)",
@@ -142,8 +147,8 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     border: "rgba(98, 119, 100, 0.18)",
     borderStrong: "rgba(98, 119, 100, 0.26)",
     text: "#1f2921",
-    textMuted: "#5b6659",
-    hint: "#677366",
+    textMuted: "#535f53",
+    hint: "#5f6c5f",
     accent: "#617861",
     accentStrong: "#536753",
     accentText: "#f8f0df",
@@ -157,16 +162,21 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     transcriptHeaderBg: "rgba(244, 246, 239, 0.98)",
     transcriptStatBg: "rgba(242, 246, 239, 0.97)",
     transcriptStatBorder: "rgba(98, 119, 100, 0.14)",
-    transcriptStatText: "#576756",
+    transcriptStatText: "#4f604f",
     userBubble: "#617963",
     userBubbleBorder: "rgba(88, 111, 92, 0.24)",
     aiBubble: "#edf2e9",
     aiBubbleBorder: "rgba(98, 119, 100, 0.16)",
     ghostBg: "rgba(244, 246, 239, 0.98)",
+    startButton: "#50664f",
     primaryButton: "#586e59",
     submitButton: "#5f755f",
+    startButtonBorder: "rgba(244, 231, 206, 0.14)",
+    submitButtonBorder: "rgba(244, 231, 206, 0.16)",
     busyButton: "#b09367",
+    busyButtonBorder: "rgba(140, 111, 60, 0.28)",
     primaryButtonText: "#f8f0df",
+    busyButtonText: "#4d3b25",
     secondaryButtonBg: "rgba(112, 43, 43, 0.08)",
     secondaryButtonBorder: "rgba(158, 77, 77, 0.24)",
     secondaryButtonText: "#8d3c3c",
@@ -187,8 +197,8 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     border: "rgba(154, 174, 156, 0.24)",
     borderStrong: "rgba(244, 231, 206, 0.14)",
     text: "#eef4ec",
-    textMuted: "#bbc6bc",
-    hint: "#afbbad",
+    textMuted: "#c3cdc3",
+    hint: "#b7c2b5",
     accent: "#8caf93",
     accentStrong: "#6f9175",
     accentText: "#102017",
@@ -202,16 +212,21 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     transcriptHeaderBg: "rgba(21, 30, 23, 0.94)",
     transcriptStatBg: "rgba(24, 35, 27, 0.94)",
     transcriptStatBorder: "rgba(154, 174, 156, 0.16)",
-    transcriptStatText: "#dde4d7",
+    transcriptStatText: "#e3e9dd",
     userBubble: "#4d6552",
     userBubbleBorder: "rgba(140, 175, 147, 0.16)",
     aiBubble: "#27342a",
     aiBubbleBorder: "rgba(244, 231, 206, 0.08)",
     ghostBg: "rgba(28, 41, 32, 0.6)",
+    startButton: "#6e9073",
     primaryButton: "#8caf93",
     submitButton: "#6f9175",
+    startButtonBorder: "rgba(244, 231, 206, 0.14)",
+    submitButtonBorder: "rgba(244, 231, 206, 0.16)",
     busyButton: "#9b845d",
+    busyButtonBorder: "rgba(244, 231, 206, 0.16)",
     primaryButtonText: "#102017",
+    busyButtonText: "#f8eed9",
     secondaryButtonBg: "rgba(92, 24, 24, 0.7)",
     secondaryButtonBorder: "rgba(255, 124, 124, 0.45)",
     secondaryButtonText: "#ffe4e4",
@@ -2185,10 +2200,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         ? "Voice-first mode with explicit turn control. The app keeps listening until you tap Submit Response."
         : mode === "thinking"
           ? messages[messages.length - 1]?.role === "user"
-          ? "Transcript captured. The next reply is still processing."
-            : "Your response is being transcribed and the AI reply is being prepared."
-          : "The AI response is readying for playback or currently speaking."
-      : "Press Start Simulation to begin, then tap Submit Response to end each turn.";
+            ? "Transcript captured. Reply generation is still in progress."
+            : "Your response is being transcribed and the reply is being prepared."
+          : "The assistant reply is now playing."
+      : "Press Start Simulation to begin, then tap Submit Response when you are ready to end a turn.";
   const stateTitle = !sessionActive
     ? "Scenario ready"
     : mode === "recording"
@@ -2352,24 +2367,28 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       <Pressable
         style={[
           styles.primaryButton,
+          primaryAction.kind === "start" ? styles.startButton : null,
           primaryAction.kind === "submit" ? styles.submitButton : null,
           primaryAction.kind === "busy" ? styles.busyButton : null,
-          primaryAction.disabled ? styles.disabled : null,
+          primaryAction.disabled && primaryAction.kind !== "busy" ? styles.disabled : null,
         ]}
         onPress={() => {
           void onPrimaryButton();
         }}
         disabled={primaryAction.disabled}
       >
-        <Text style={[styles.primaryButtonText, primaryAction.kind === "busy" ? styles.primaryButtonTextLight : null]}>
-          {primaryAction.label}
-        </Text>
+        <View style={styles.primaryButtonContent}>
+          {primaryAction.kind === "busy" ? <ActivityIndicator size="small" color={palette.busyButtonText} /> : null}
+          <Text style={[styles.primaryButtonText, primaryAction.kind === "busy" ? styles.busyButtonText : null]}>
+            {primaryAction.label}
+          </Text>
+        </View>
       </Pressable>
       {sessionActive ? (
         <Pressable
           style={[
             styles.secondaryActionButton,
-            endButtonDisabled ? styles.disabled : null,
+            endButtonDisabled ? styles.secondaryActionDisabled : null,
           ]}
           onPress={() => {
             void completeSessionAndScore();
@@ -2483,8 +2502,8 @@ function createStyles(palette: SimulationPalette) {
       paddingBottom: 18,
       marginBottom: 16,
       shadowColor: palette.shadow,
-      shadowOpacity: 0.11,
-      shadowRadius: 16,
+      shadowOpacity: 0.1,
+      shadowRadius: 14,
       shadowOffset: { width: 0, height: 8 },
       elevation: 3,
     },
@@ -2543,10 +2562,11 @@ function createStyles(palette: SimulationPalette) {
       color: palette.hint,
       textAlign: "center",
       fontSize: 12.5,
-      lineHeight: 18,
+      lineHeight: 19,
       marginTop: 10,
       marginBottom: 12,
       paddingHorizontal: 14,
+      fontWeight: "600",
     },
     stageDivider: {
       height: 1,
@@ -2608,6 +2628,7 @@ function createStyles(palette: SimulationPalette) {
       color: palette.textMuted,
       fontSize: 12.5,
       lineHeight: 18,
+      fontWeight: "600",
     },
     errorCard: {
       borderRadius: 12,
@@ -2673,7 +2694,7 @@ function createStyles(palette: SimulationPalette) {
       justifyContent: "space-between",
       gap: 12,
       paddingHorizontal: 14,
-      paddingVertical: 12,
+      paddingVertical: 13,
       borderBottomWidth: 1,
       borderBottomColor: palette.border,
       backgroundColor: palette.transcriptHeaderBg,
@@ -2681,7 +2702,7 @@ function createStyles(palette: SimulationPalette) {
     chatEyebrow: {
       color: palette.statusEyebrow,
       fontSize: 11,
-      fontWeight: "700",
+      fontWeight: "800",
       textTransform: "uppercase",
       letterSpacing: 1.1,
       marginBottom: 2,
@@ -2702,7 +2723,7 @@ function createStyles(palette: SimulationPalette) {
     chatStatText: {
       color: palette.transcriptStatText,
       fontSize: 11.5,
-      fontWeight: "700",
+      fontWeight: "800",
     },
     chatScroll: {
       flex: 1,
@@ -2732,6 +2753,7 @@ function createStyles(palette: SimulationPalette) {
       lineHeight: 19,
       textAlign: "center",
       maxWidth: 280,
+      fontWeight: "600",
     },
     messageBubble: {
       borderRadius: 16,
@@ -2780,18 +2802,32 @@ function createStyles(palette: SimulationPalette) {
       justifyContent: "center",
       backgroundColor: palette.primaryButton,
       borderWidth: 1,
-      borderColor: palette.borderStrong,
+      borderColor: palette.startButtonBorder,
       shadowColor: palette.shadow,
       shadowOpacity: 0.18,
       shadowRadius: 16,
       shadowOffset: { width: 0, height: 8 },
       elevation: 4,
     },
+    primaryButtonContent: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+    },
+    startButton: {
+      backgroundColor: palette.startButton,
+      borderColor: palette.startButtonBorder,
+    },
     submitButton: {
       backgroundColor: palette.submitButton,
+      borderColor: palette.submitButtonBorder,
     },
     busyButton: {
       backgroundColor: palette.busyButton,
+      borderColor: palette.busyButtonBorder,
+      shadowOpacity: 0.08,
+      elevation: 1,
     },
     primaryButtonText: {
       color: palette.primaryButtonText,
@@ -2799,8 +2835,8 @@ function createStyles(palette: SimulationPalette) {
       fontSize: 16,
       letterSpacing: 0.2,
     },
-    primaryButtonTextLight: {
-      color: "#f8f0df",
+    busyButtonText: {
+      color: palette.busyButtonText,
     },
     secondaryActionButton: {
       minHeight: 52,
@@ -2811,6 +2847,10 @@ function createStyles(palette: SimulationPalette) {
       borderColor: palette.secondaryButtonBorder,
       backgroundColor: palette.secondaryButtonBg,
       marginTop: 12,
+    },
+    secondaryActionDisabled: {
+      opacity: 0.7,
+      shadowOpacity: 0,
     },
     secondaryActionButtonText: {
       color: palette.secondaryButtonText,
