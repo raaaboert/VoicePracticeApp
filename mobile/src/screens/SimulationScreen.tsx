@@ -130,42 +130,42 @@ type SimulationPalette = {
 const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
   light: {
     heroStart: "rgba(255, 250, 242, 0.98)",
-    heroEnd: "rgba(236, 240, 229, 0.96)",
-    heroBorder: "rgba(98, 119, 100, 0.16)",
-    heroMetaBg: "rgba(250, 251, 245, 0.94)",
-    heroMetaBorder: "rgba(98, 119, 100, 0.12)",
-    heroMetaText: "#50624f",
-    panel: "rgba(255, 252, 246, 0.96)",
-    panelStrong: "rgba(249, 246, 238, 0.98)",
-    panelMuted: "rgba(243, 245, 238, 0.92)",
-    stagePanel: "rgba(251, 249, 242, 0.98)",
-    border: "rgba(98, 119, 100, 0.16)",
-    borderStrong: "rgba(98, 119, 100, 0.24)",
+    heroEnd: "rgba(234, 239, 227, 0.97)",
+    heroBorder: "rgba(98, 119, 100, 0.18)",
+    heroMetaBg: "rgba(249, 250, 243, 0.97)",
+    heroMetaBorder: "rgba(98, 119, 100, 0.14)",
+    heroMetaText: "#4b5c48",
+    panel: "rgba(255, 252, 246, 0.98)",
+    panelStrong: "rgba(249, 246, 238, 0.99)",
+    panelMuted: "rgba(241, 244, 235, 0.95)",
+    stagePanel: "rgba(250, 247, 239, 0.99)",
+    border: "rgba(98, 119, 100, 0.18)",
+    borderStrong: "rgba(98, 119, 100, 0.26)",
     text: "#1f2921",
-    textMuted: "#667166",
-    hint: "#768175",
+    textMuted: "#5b6659",
+    hint: "#677366",
     accent: "#617861",
     accentStrong: "#536753",
     accentText: "#f8f0df",
     statusEyebrow: "#8d7452",
-    modePillBg: "rgba(249, 245, 235, 0.94)",
-    modePillBorder: "rgba(98, 119, 100, 0.14)",
-    modePillText: "#50624f",
-    timerBg: "rgba(244, 246, 240, 0.96)",
-    timerBorder: "rgba(98, 119, 100, 0.14)",
-    transcriptBg: "rgba(255, 253, 249, 0.98)",
-    transcriptHeaderBg: "rgba(246, 247, 241, 0.94)",
-    transcriptStatBg: "rgba(245, 248, 242, 0.94)",
-    transcriptStatBorder: "rgba(98, 119, 100, 0.12)",
-    transcriptStatText: "#5e6d5f",
-    userBubble: "#6a816d",
+    modePillBg: "rgba(249, 245, 235, 0.97)",
+    modePillBorder: "rgba(98, 119, 100, 0.16)",
+    modePillText: "#4c5d4a",
+    timerBg: "rgba(243, 245, 238, 0.98)",
+    timerBorder: "rgba(98, 119, 100, 0.16)",
+    transcriptBg: "rgba(255, 252, 247, 0.99)",
+    transcriptHeaderBg: "rgba(244, 246, 239, 0.98)",
+    transcriptStatBg: "rgba(242, 246, 239, 0.97)",
+    transcriptStatBorder: "rgba(98, 119, 100, 0.14)",
+    transcriptStatText: "#576756",
+    userBubble: "#617963",
     userBubbleBorder: "rgba(88, 111, 92, 0.24)",
-    aiBubble: "#eef2ea",
-    aiBubbleBorder: "rgba(98, 119, 100, 0.14)",
-    ghostBg: "rgba(245, 247, 241, 0.95)",
-    primaryButton: "#596f5c",
-    submitButton: "#617a63",
-    busyButton: "#b79d6f",
+    aiBubble: "#edf2e9",
+    aiBubbleBorder: "rgba(98, 119, 100, 0.16)",
+    ghostBg: "rgba(244, 246, 239, 0.98)",
+    primaryButton: "#586e59",
+    submitButton: "#5f755f",
+    busyButton: "#b09367",
     primaryButtonText: "#f8f0df",
     secondaryButtonBg: "rgba(112, 43, 43, 0.08)",
     secondaryButtonBorder: "rgba(158, 77, 77, 0.24)",
@@ -180,34 +180,34 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     heroMetaBg: "rgba(31, 39, 31, 0.72)",
     heroMetaBorder: "rgba(244, 231, 206, 0.08)",
     heroMetaText: "#e0d1b4",
-    panel: "rgba(22, 30, 24, 0.92)",
-    panelStrong: "rgba(19, 26, 21, 0.97)",
-    panelMuted: "rgba(26, 35, 28, 0.88)",
-    stagePanel: "rgba(20, 27, 21, 0.96)",
-    border: "rgba(154, 174, 156, 0.22)",
-    borderStrong: "rgba(244, 231, 206, 0.12)",
+    panel: "rgba(22, 30, 24, 0.94)",
+    panelStrong: "rgba(18, 25, 20, 0.98)",
+    panelMuted: "rgba(26, 35, 28, 0.9)",
+    stagePanel: "rgba(19, 26, 20, 0.97)",
+    border: "rgba(154, 174, 156, 0.24)",
+    borderStrong: "rgba(244, 231, 206, 0.14)",
     text: "#eef4ec",
-    textMuted: "#aebdaf",
-    hint: "#a0b19f",
+    textMuted: "#bbc6bc",
+    hint: "#afbbad",
     accent: "#8caf93",
     accentStrong: "#6f9175",
     accentText: "#102017",
     statusEyebrow: "#d9c7a7",
-    modePillBg: "rgba(28, 36, 29, 0.9)",
-    modePillBorder: "rgba(244, 231, 206, 0.08)",
+    modePillBg: "rgba(29, 37, 30, 0.94)",
+    modePillBorder: "rgba(244, 231, 206, 0.1)",
     modePillText: "#f4ead4",
-    timerBg: "rgba(24, 34, 26, 0.88)",
-    timerBorder: "rgba(154, 174, 156, 0.16)",
-    transcriptBg: "rgba(15, 23, 17, 0.86)",
-    transcriptHeaderBg: "rgba(22, 31, 24, 0.9)",
-    transcriptStatBg: "rgba(24, 35, 27, 0.92)",
-    transcriptStatBorder: "rgba(154, 174, 156, 0.14)",
-    transcriptStatText: "#d7dece",
+    timerBg: "rgba(23, 33, 25, 0.92)",
+    timerBorder: "rgba(154, 174, 156, 0.18)",
+    transcriptBg: "rgba(14, 22, 16, 0.9)",
+    transcriptHeaderBg: "rgba(21, 30, 23, 0.94)",
+    transcriptStatBg: "rgba(24, 35, 27, 0.94)",
+    transcriptStatBorder: "rgba(154, 174, 156, 0.16)",
+    transcriptStatText: "#dde4d7",
     userBubble: "#4d6552",
     userBubbleBorder: "rgba(140, 175, 147, 0.16)",
-    aiBubble: "#28362b",
+    aiBubble: "#27342a",
     aiBubbleBorder: "rgba(244, 231, 206, 0.08)",
-    ghostBg: "rgba(28, 41, 32, 0.54)",
+    ghostBg: "rgba(28, 41, 32, 0.6)",
     primaryButton: "#8caf93",
     submitButton: "#6f9175",
     busyButton: "#9b845d",
@@ -2185,22 +2185,22 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         ? "Voice-first mode with explicit turn control. The app keeps listening until you tap Submit Response."
         : mode === "thinking"
           ? messages[messages.length - 1]?.role === "user"
-            ? "Your transcript is ready. The AI reply is still being prepared."
+          ? "Transcript captured. The next reply is still processing."
             : "Your response is being transcribed and the AI reply is being prepared."
           : "The AI response is readying for playback or currently speaking."
       : "Press Start Simulation to begin, then tap Submit Response to end each turn.";
   const stateTitle = !sessionActive
-    ? "Scenario prepared"
+    ? "Scenario ready"
     : mode === "recording"
       ? "Listening for your response"
       : mode === "thinking"
         ? messages[messages.length - 1]?.role === "user"
-          ? "Building the next reply"
-          : "Preparing the first exchange"
+          ? "Preparing the next reply"
+          : "Preparing the opening reply"
         : mode === "speaking"
-          ? "Delivering the AI reply"
+          ? "Delivering the reply"
           : "Ready for your response";
-  const statusEyebrow = localTestMode ? "Local practice mode" : "Peritio response engine";
+  const statusEyebrow = localTestMode ? "Local practice mode" : "Peritio simulation engine";
   const sessionModeLabel = sessionActive ? "Live session" : "Scenario ready";
   const responseModeLabel = localTestMode ? "Mocked AI" : "Remote AI";
   const transcriptCountLabel =
@@ -2273,6 +2273,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         <Text style={styles.status}>{status}</Text>
         <VoiceOrb mode={mode} variant={themeVariant} />
         <Text style={styles.hint}>{hintText}</Text>
+        <View style={styles.stageDivider} />
         <View style={styles.statusMetaRow}>
           <View style={[styles.timerCard, styles.statusMiniPanel]}>
             <Text style={styles.timerLabel}>
@@ -2320,22 +2321,31 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           contentContainerStyle={styles.chatContent}
           nestedScrollEnabled
         >
-          {messages.map((message) => (
-            <View
-              key={message.id}
-              style={[
-                styles.messageBubble,
-                message.role === "user" ? styles.userBubble : styles.aiBubble,
-              ]}
-            >
-              <Text style={[styles.messageRole, message.role === "user" ? styles.userMessageRole : styles.aiMessageRole]}>
-                {message.role === "user" ? "You" : "AI"}
-              </Text>
-              <Text style={[styles.messageText, message.role === "user" ? styles.userMessageText : styles.aiMessageText]}>
-                {message.content}
+          {messages.length === 0 ? (
+            <View style={styles.chatEmptyState}>
+              <Text style={styles.chatEmptyTitle}>The live transcript will appear here.</Text>
+              <Text style={styles.chatEmptyBody}>
+                Start the simulation, speak naturally, and submit each turn when you are ready.
               </Text>
             </View>
-          ))}
+          ) : (
+            messages.map((message) => (
+              <View
+                key={message.id}
+                style={[
+                  styles.messageBubble,
+                  message.role === "user" ? styles.userBubble : styles.aiBubble,
+                ]}
+              >
+                <Text style={[styles.messageRole, message.role === "user" ? styles.userMessageRole : styles.aiMessageRole]}>
+                  {message.role === "user" ? "You" : "AI"}
+                </Text>
+                <Text style={[styles.messageText, message.role === "user" ? styles.userMessageText : styles.aiMessageText]}>
+                  {message.content}
+                </Text>
+              </View>
+            ))
+          )}
         </ScrollView>
       </View>
 
@@ -2380,13 +2390,13 @@ function createStyles(palette: SimulationPalette) {
     },
     screenContent: {
       flexGrow: 1,
-      paddingBottom: 22,
+      paddingBottom: 26,
     },
     topRow: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
-      marginBottom: 14,
+      marginBottom: 16,
     },
     spacer: {
       width: 76,
@@ -2417,8 +2427,8 @@ function createStyles(palette: SimulationPalette) {
       borderColor: palette.heroBorder,
       paddingHorizontal: 18,
       paddingVertical: 20,
-      marginBottom: 14,
-      gap: 10,
+      marginBottom: 16,
+      gap: 11,
       overflow: "hidden",
       shadowColor: palette.shadow,
       shadowOpacity: 0.12,
@@ -2442,7 +2452,7 @@ function createStyles(palette: SimulationPalette) {
     cardBody: {
       color: palette.textMuted,
       fontSize: 14.5,
-      lineHeight: 22,
+      lineHeight: 21,
     },
     metaRow: {
       flexDirection: "row",
@@ -2471,10 +2481,10 @@ function createStyles(palette: SimulationPalette) {
       paddingHorizontal: 18,
       paddingTop: 18,
       paddingBottom: 18,
-      marginBottom: 14,
+      marginBottom: 16,
       shadowColor: palette.shadow,
-      shadowOpacity: 0.1,
-      shadowRadius: 14,
+      shadowOpacity: 0.11,
+      shadowRadius: 16,
       shadowOffset: { width: 0, height: 8 },
       elevation: 3,
     },
@@ -2498,8 +2508,8 @@ function createStyles(palette: SimulationPalette) {
     },
     statusTitle: {
       color: palette.text,
-      fontSize: 24,
-      lineHeight: 29,
+      fontSize: 23,
+      lineHeight: 28,
       fontWeight: "800",
     },
     modePill: {
@@ -2521,21 +2531,28 @@ function createStyles(palette: SimulationPalette) {
       letterSpacing: 1,
     },
     status: {
-      color: palette.textMuted,
+      color: palette.text,
       textAlign: "center",
-      fontSize: 14,
+      fontSize: 14.5,
       lineHeight: 21,
       marginBottom: 8,
-      paddingHorizontal: 6,
+      paddingHorizontal: 10,
+      fontWeight: "600",
     },
     hint: {
       color: palette.hint,
       textAlign: "center",
       fontSize: 12.5,
       lineHeight: 18,
-      marginTop: 8,
+      marginTop: 10,
       marginBottom: 12,
-      paddingHorizontal: 8,
+      paddingHorizontal: 14,
+    },
+    stageDivider: {
+      height: 1,
+      backgroundColor: palette.border,
+      marginBottom: 12,
+      opacity: 0.85,
     },
     statusMetaRow: {
       flexDirection: "row",
@@ -2559,7 +2576,7 @@ function createStyles(palette: SimulationPalette) {
     timerLabel: {
       color: palette.textMuted,
       fontSize: 12,
-      fontWeight: "600",
+      fontWeight: "700",
       textAlign: "center",
     },
     timerValue: {
@@ -2642,12 +2659,12 @@ function createStyles(palette: SimulationPalette) {
     },
     chatCard: {
       minHeight: 250,
-      height: 344,
-      borderRadius: 18,
+      height: 340,
+      borderRadius: 20,
       borderWidth: 1,
       borderColor: palette.border,
       backgroundColor: palette.transcriptBg,
-      marginBottom: 16,
+      marginBottom: 18,
       overflow: "hidden",
     },
     chatHeader: {
@@ -2691,14 +2708,36 @@ function createStyles(palette: SimulationPalette) {
       flex: 1,
     },
     chatContent: {
-      padding: 14,
+      padding: 16,
       gap: 12,
     },
+    chatEmptyState: {
+      flex: 1,
+      justifyContent: "center",
+      alignItems: "center",
+      paddingHorizontal: 18,
+      gap: 8,
+      minHeight: 210,
+    },
+    chatEmptyTitle: {
+      color: palette.text,
+      fontSize: 15.5,
+      lineHeight: 22,
+      fontWeight: "700",
+      textAlign: "center",
+    },
+    chatEmptyBody: {
+      color: palette.textMuted,
+      fontSize: 13,
+      lineHeight: 19,
+      textAlign: "center",
+      maxWidth: 280,
+    },
     messageBubble: {
-      borderRadius: 14,
+      borderRadius: 16,
       borderWidth: 1,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
       maxWidth: "92%",
       gap: 4,
     },
@@ -2735,16 +2774,16 @@ function createStyles(palette: SimulationPalette) {
       color: palette.text,
     },
     primaryButton: {
-      minHeight: 56,
+      minHeight: 58,
       borderRadius: 18,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: palette.primaryButton,
       borderWidth: 1,
-      borderColor: "rgba(244, 231, 206, 0.08)",
+      borderColor: palette.borderStrong,
       shadowColor: palette.shadow,
-      shadowOpacity: 0.16,
-      shadowRadius: 14,
+      shadowOpacity: 0.18,
+      shadowRadius: 16,
       shadowOffset: { width: 0, height: 8 },
       elevation: 4,
     },
@@ -2764,14 +2803,14 @@ function createStyles(palette: SimulationPalette) {
       color: "#f8f0df",
     },
     secondaryActionButton: {
-      minHeight: 50,
+      minHeight: 52,
       borderRadius: 16,
       alignItems: "center",
       justifyContent: "center",
       borderWidth: 1,
       borderColor: palette.secondaryButtonBorder,
       backgroundColor: palette.secondaryButtonBg,
-      marginTop: 10,
+      marginTop: 12,
     },
     secondaryActionButtonText: {
       color: palette.secondaryButtonText,
