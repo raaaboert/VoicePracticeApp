@@ -187,6 +187,9 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
   const pulseValue = useRef(new Animated.Value(1)).current;
   const theme = THEME[variant];
   const colors = MODE_COLORS[variant][mode];
+  const haloSize = mode === "speaking" ? 168 : mode === "thinking" ? 152 : 144;
+  const haloPeakScale = mode === "speaking" ? 1.14 : mode === "thinking" ? 1.11 : 1.1;
+  const haloMaxOpacity = mode === "speaking" ? 0.3 : mode === "thinking" ? 0.26 : 0.24;
 
   useEffect(() => {
     pulseValue.stopAnimation();
@@ -223,12 +226,12 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
 
   const haloScale = pulseValue.interpolate({
     inputRange: [1, 1.1],
-    outputRange: [1, 1.08],
+    outputRange: [1, haloPeakScale],
     extrapolate: "clamp",
   });
   const haloOpacity = pulseValue.interpolate({
     inputRange: [1, 1.1],
-    outputRange: [0.22, 0.08],
+    outputRange: [haloMaxOpacity, 0.09],
     extrapolate: "clamp",
   });
   const activeDotScale = pulseValue.interpolate({
@@ -268,6 +271,8 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
                 styles.halo,
                 {
                   backgroundColor: colors.glow,
+                  width: haloSize,
+                  height: haloSize,
                   opacity: haloOpacity,
                   transform: [{ scale: haloScale }],
                 },
@@ -301,21 +306,37 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
                     : { backgroundColor: "transparent", borderColor: theme.stepDivider };
             const rowStyle = meta.state === "active" ? { backgroundColor: theme.stepBg } : null;
             const labelColor = meta.state === "upcoming" ? theme.inactiveText : theme.labelText;
+            const statusTextColor =
+              meta.state === "active"
+                ? variant === "dark"
+                  ? "#102017"
+                  : "#f8f0df"
+                : meta.state === "complete"
+                  ? colors.accent
+                  : theme.caption;
+            const statusChipStyle =
+              meta.state === "active"
+                ? {
+                    backgroundColor: colors.accent,
+                    borderColor: colors.accent,
+                  }
+                : null;
             return (
               <View
                 key={stage.key}
                 style={[
                   styles.stepRow,
                   rowStyle,
+                  meta.state === "active" ? { borderColor: colors.accentSoft, borderWidth: 1 } : null,
                   index < SIGNAL_STAGES.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
                 ]}
               >
                 <Animated.View style={[styles.stepIndicatorWrap, isActive ? { transform: [{ scale: activeDotScale }] } : null]}>
                   <View style={[styles.stepIndicator, indicatorStyle]} />
                 </Animated.View>
-                <Text style={[styles.stepLabel, { color: labelColor }]}>{stage.label}</Text>
-                <View style={[styles.stepStatusChip, { backgroundColor: theme.statusChipBg, borderColor: theme.statusChipBorder }]}>
-                  <Text style={[styles.stepStatusText, { color: meta.state === "active" ? colors.accent : meta.state === "complete" ? colors.accent : theme.caption }]}>
+                <Text style={[styles.stepLabel, { color: labelColor }, meta.state === "active" ? styles.stepLabelActive : null]}>{stage.label}</Text>
+                <View style={[styles.stepStatusChip, { backgroundColor: theme.statusChipBg, borderColor: theme.statusChipBorder }, statusChipStyle]}>
+                  <Text style={[styles.stepStatusText, { color: statusTextColor }]}>
                     {meta.status}
                   </Text>
                 </View>
@@ -337,10 +358,10 @@ const styles = StyleSheet.create({
   },
   shell: {
     width: "100%",
-    maxWidth: 292,
+    maxWidth: 372,
     borderRadius: 26,
     borderWidth: 1,
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingTop: 16,
     paddingBottom: 12,
   },
@@ -383,7 +404,7 @@ const styles = StyleSheet.create({
   stagePanel: {
     borderRadius: 20,
     borderWidth: 1,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingTop: 14,
     paddingBottom: 14,
     marginBottom: 12,
@@ -421,28 +442,27 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   stageVisual: {
-    minHeight: 104,
+    width: "100%",
+    minHeight: 116,
     alignItems: "center",
     justifyContent: "center",
   },
   connector: {
     position: "absolute",
     top: "50%",
-    width: 48,
+    width: 72,
     height: 2,
     marginTop: -1,
     borderRadius: 999,
   },
   connectorLeft: {
-    left: 18,
+    left: 12,
   },
   connectorRight: {
-    right: 18,
+    right: 12,
   },
   halo: {
     position: "absolute",
-    width: 116,
-    height: 116,
     borderRadius: 999,
   },
   coreShell: {
@@ -509,7 +529,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 4,
+    borderRadius: 14,
+    paddingHorizontal: 8,
     paddingVertical: 10,
   },
   stepIndicatorWrap: {
@@ -528,6 +549,9 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 13.5,
     fontWeight: "700",
+  },
+  stepLabelActive: {
+    fontWeight: "800",
   },
   stepStatusChip: {
     minHeight: 26,

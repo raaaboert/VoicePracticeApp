@@ -2228,188 +2228,200 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   ];
 
   return (
-    <ScrollView
-      style={styles.fill}
-      contentContainerStyle={styles.screenContent}
-      keyboardShouldPersistTaps="handled"
-      showsVerticalScrollIndicator={false}
-    >
-      <View style={styles.topRow}>
-        <Pressable style={styles.ghostButton} onPress={() => void onExitPress()}>
-          <Text style={styles.ghostButtonText}>Exit</Text>
-        </Pressable>
-        <Text style={styles.title}>Simulation</Text>
-        <View style={styles.spacer} />
-      </View>
-
-      <LinearGradient
-        colors={[palette.heroStart, palette.heroEnd]}
-        start={{ x: 0.04, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.scenarioCard}
+    <View style={styles.screen}>
+      <ScrollView
+        style={styles.scrollArea}
+        contentContainerStyle={styles.screenContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.label}>{config.segmentLabel}</Text>
-        <Text style={styles.cardTitle}>{config.scenario.title}</Text>
-        <Text style={styles.cardBody}>{config.scenario.description}</Text>
-        <View style={styles.metaRow}>
-          {scenarioMeta.map((item) => (
-            <View key={item} style={styles.metaChip}>
-              <Text style={styles.metaChipText}>{item}</Text>
-            </View>
-          ))}
+        <View style={styles.topRow}>
+          <Pressable style={styles.ghostButton} onPress={() => void onExitPress()}>
+            <Text style={styles.ghostButtonText}>Exit</Text>
+          </Pressable>
+          <Text style={styles.title}>Simulation</Text>
+          <View style={styles.spacer} />
         </View>
-      </LinearGradient>
 
-      {__DEV__ ? (
-        <View style={[styles.debugModeCard, localTestMode ? styles.debugModeLocal : styles.debugModeRemote]}>
-          <Text style={styles.debugModeText}>Mode: {localTestMode ? "LOCAL TEST" : "REMOTE"}</Text>
-        </View>
-      ) : null}
-
-      {!apiConfigured ? (
-        <View style={styles.warningCard}>
-          <Text style={styles.warningText}>
-            Remote AI is disabled for this build. This session runs in LOCAL TEST mode unless rebuilt with
-            EXPO_PUBLIC_REMOTE_AI_ENABLED=true.
-          </Text>
-        </View>
-      ) : null}
-
-      <View style={styles.statusStageCard}>
-        <View style={styles.statusHeaderRow}>
-          <View style={styles.statusTitleBlock}>
-            <Text style={styles.statusEyebrow}>{statusEyebrow}</Text>
-            <Text style={styles.statusTitle}>{stateTitle}</Text>
-          </View>
-          <View style={styles.modePill}>
-            <Text style={styles.modePillText}>{sessionModeLabel}</Text>
-          </View>
-        </View>
-        <Text style={styles.status}>{status}</Text>
-        <VoiceOrb mode={mode} variant={themeVariant} />
-        <Text style={styles.hint}>{hintText}</Text>
-        <View style={styles.stageDivider} />
-        <View style={styles.statusMetaRow}>
-          <View style={[styles.timerCard, styles.statusMiniPanel]}>
-            <Text style={styles.timerLabel}>
-              Session Timer
-              {maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}
-            </Text>
-            <Text style={[styles.timerValue, inFinalMinute ? styles.timerValueDanger : null]}>
-              {formatDurationClock(elapsedSeconds)}
-            </Text>
-            {remainingSeconds !== null ? (
-              <Text style={[styles.timerRemaining, inFinalMinute ? styles.timerValueDanger : null]}>
-                Remaining: {formatDurationClock(remainingSeconds)}
-              </Text>
-            ) : null}
-          </View>
-          <View style={[styles.statusMiniPanel, styles.systemCard]}>
-            <Text style={styles.timerLabel}>Response Mode</Text>
-            <Text style={styles.systemTitle}>{responseModeLabel}</Text>
-            <Text style={styles.systemBody}>
-              {localTestMode ? "Useful for flow checks and UI review." : "Live assistant replies and voice playback."}
-            </Text>
-          </View>
-        </View>
-      </View>
-
-      {error ? (
-        <View style={styles.errorCard}>
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
-      ) : null}
-
-      <View style={styles.chatCard}>
-        <View style={styles.chatHeader}>
-          <View>
-            <Text style={styles.chatEyebrow}>Transcript</Text>
-            <Text style={styles.chatTitle}>Live turn history</Text>
-          </View>
-          <View style={styles.chatStatPill}>
-            <Text style={styles.chatStatText}>{transcriptCountLabel}</Text>
-          </View>
-        </View>
-        <ScrollView
-          ref={scrollRef}
-          style={styles.chatScroll}
-          contentContainerStyle={styles.chatContent}
-          nestedScrollEnabled
+        <LinearGradient
+          colors={[palette.heroStart, palette.heroEnd]}
+          start={{ x: 0.04, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.scenarioCard}
         >
-          {messages.length === 0 ? (
-            <View style={styles.chatEmptyState}>
-              <Text style={styles.chatEmptyTitle}>The live transcript will appear here.</Text>
-              <Text style={styles.chatEmptyBody}>
-                Start the simulation, speak naturally, and submit each turn when you are ready.
+          <Text style={styles.label}>{config.segmentLabel}</Text>
+          <Text style={styles.cardTitle}>{config.scenario.title}</Text>
+          <Text style={styles.cardBody}>{config.scenario.description}</Text>
+          <View style={styles.metaRow}>
+            {scenarioMeta.map((item) => (
+              <View key={item} style={styles.metaChip}>
+                <Text style={styles.metaChipText}>{item}</Text>
+              </View>
+            ))}
+          </View>
+        </LinearGradient>
+
+        {__DEV__ ? (
+          <View style={[styles.debugModeCard, localTestMode ? styles.debugModeLocal : styles.debugModeRemote]}>
+            <Text style={styles.debugModeText}>Mode: {localTestMode ? "LOCAL TEST" : "REMOTE"}</Text>
+          </View>
+        ) : null}
+
+        {!apiConfigured ? (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>
+              Remote AI is disabled for this build. This session runs in LOCAL TEST mode unless rebuilt with
+              EXPO_PUBLIC_REMOTE_AI_ENABLED=true.
+            </Text>
+          </View>
+        ) : null}
+
+        <View style={styles.statusStageCard}>
+          <View style={styles.statusHeaderRow}>
+            <View style={styles.statusTitleBlock}>
+              <Text style={styles.statusEyebrow}>{statusEyebrow}</Text>
+              <Text style={styles.statusTitle}>{stateTitle}</Text>
+            </View>
+            <View style={styles.modePill}>
+              <Text style={styles.modePillText}>{sessionModeLabel}</Text>
+            </View>
+          </View>
+          <Text style={styles.status}>{status}</Text>
+          <VoiceOrb mode={mode} variant={themeVariant} />
+          <Text style={styles.hint}>{hintText}</Text>
+          <View style={styles.stageDivider} />
+          <View style={styles.statusMetaRow}>
+            <View style={[styles.timerCard, styles.statusMiniPanel]}>
+              <Text style={styles.timerLabel}>
+                Session Timer
+                {maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}
+              </Text>
+              <Text style={[styles.timerValue, inFinalMinute ? styles.timerValueDanger : null]}>
+                {formatDurationClock(elapsedSeconds)}
+              </Text>
+              {remainingSeconds !== null ? (
+                <Text style={[styles.timerRemaining, inFinalMinute ? styles.timerValueDanger : null]}>
+                  Remaining: {formatDurationClock(remainingSeconds)}
+                </Text>
+              ) : null}
+            </View>
+            <View style={[styles.statusMiniPanel, styles.systemCard]}>
+              <Text style={styles.timerLabel}>Response Mode</Text>
+              <Text style={styles.systemTitle}>{responseModeLabel}</Text>
+              <Text style={styles.systemBody}>
+                {localTestMode ? "Useful for flow checks and UI review." : "Live assistant replies and voice playback."}
               </Text>
             </View>
-          ) : (
-            messages.map((message) => (
-              <View
-                key={message.id}
-                style={[
-                  styles.messageBubble,
-                  message.role === "user" ? styles.userBubble : styles.aiBubble,
-                ]}
-              >
-                <Text style={[styles.messageRole, message.role === "user" ? styles.userMessageRole : styles.aiMessageRole]}>
-                  {message.role === "user" ? "You" : "AI"}
-                </Text>
-                <Text style={[styles.messageText, message.role === "user" ? styles.userMessageText : styles.aiMessageText]}>
-                  {message.content}
+          </View>
+        </View>
+
+        {error ? (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.chatCard}>
+          <View style={styles.chatHeader}>
+            <View>
+              <Text style={styles.chatEyebrow}>Transcript</Text>
+              <Text style={styles.chatTitle}>Live turn history</Text>
+            </View>
+            <View style={styles.chatStatPill}>
+              <Text style={styles.chatStatText}>{transcriptCountLabel}</Text>
+            </View>
+          </View>
+          <ScrollView
+            ref={scrollRef}
+            style={styles.chatScroll}
+            contentContainerStyle={styles.chatContent}
+            nestedScrollEnabled
+          >
+            {messages.length === 0 ? (
+              <View style={styles.chatEmptyState}>
+                <Text style={styles.chatEmptyTitle}>The live transcript will appear here.</Text>
+                <Text style={styles.chatEmptyBody}>
+                  Start the simulation, speak naturally, and submit each turn when you are ready.
                 </Text>
               </View>
-            ))
-          )}
-        </ScrollView>
-      </View>
-
-      <Pressable
-        style={[
-          styles.primaryButton,
-          primaryAction.kind === "start" ? styles.startButton : null,
-          primaryAction.kind === "submit" ? styles.submitButton : null,
-          primaryAction.kind === "busy" ? styles.busyButton : null,
-          primaryAction.disabled && primaryAction.kind !== "busy" ? styles.disabled : null,
-        ]}
-        onPress={() => {
-          void onPrimaryButton();
-        }}
-        disabled={primaryAction.disabled}
-      >
-        <View style={styles.primaryButtonContent}>
-          {primaryAction.kind === "busy" ? <ActivityIndicator size="small" color={palette.busyButtonText} /> : null}
-          <Text style={[styles.primaryButtonText, primaryAction.kind === "busy" ? styles.busyButtonText : null]}>
-            {primaryAction.label}
-          </Text>
+            ) : (
+              messages.map((message) => (
+                <View
+                  key={message.id}
+                  style={[
+                    styles.messageBubble,
+                    message.role === "user" ? styles.userBubble : styles.aiBubble,
+                  ]}
+                >
+                  <Text style={[styles.messageRole, message.role === "user" ? styles.userMessageRole : styles.aiMessageRole]}>
+                    {message.role === "user" ? "You" : "AI"}
+                  </Text>
+                  <Text style={[styles.messageText, message.role === "user" ? styles.userMessageText : styles.aiMessageText]}>
+                    {message.content}
+                  </Text>
+                </View>
+              ))
+            )}
+          </ScrollView>
         </View>
-      </Pressable>
-      {sessionActive ? (
-        <Pressable
-          style={[
-            styles.secondaryActionButton,
-            endButtonDisabled ? styles.secondaryActionDisabled : null,
-          ]}
-          onPress={() => {
-            void completeSessionAndScore();
-          }}
-          disabled={endButtonDisabled}
-        >
-          <Text style={styles.secondaryActionButtonText}>End Session and Score</Text>
-        </Pressable>
-      ) : null}
-    </ScrollView>
+      </ScrollView>
+
+      <View style={styles.actionDock}>
+        <View style={styles.actionDockInner}>
+          <Pressable
+            style={[
+              styles.primaryButton,
+              primaryAction.kind === "start" ? styles.startButton : null,
+              primaryAction.kind === "submit" ? styles.submitButton : null,
+              primaryAction.kind === "busy" ? styles.busyButton : null,
+              primaryAction.disabled && primaryAction.kind !== "busy" ? styles.disabled : null,
+            ]}
+            onPress={() => {
+              void onPrimaryButton();
+            }}
+            disabled={primaryAction.disabled}
+          >
+            <View style={styles.primaryButtonContent}>
+              {primaryAction.kind === "busy" ? <ActivityIndicator size="small" color={palette.busyButtonText} /> : null}
+              <Text style={[styles.primaryButtonText, primaryAction.kind === "busy" ? styles.busyButtonText : null]}>
+                {primaryAction.label}
+              </Text>
+            </View>
+          </Pressable>
+          {sessionActive ? (
+            <Pressable
+              style={[
+                styles.secondaryActionButton,
+                endButtonDisabled ? styles.secondaryActionDisabled : null,
+              ]}
+              onPress={() => {
+                void completeSessionAndScore();
+              }}
+              disabled={endButtonDisabled}
+            >
+              <Text style={styles.secondaryActionButtonText}>End Session and Score</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+    </View>
   );
 }
 
 function createStyles(palette: SimulationPalette) {
   return StyleSheet.create({
+    screen: {
+      flex: 1,
+    },
     fill: {
+      flex: 1,
+    },
+    scrollArea: {
       flex: 1,
     },
     screenContent: {
       flexGrow: 1,
-      paddingBottom: 26,
+      paddingBottom: 18,
     },
     topRow: {
       flexDirection: "row",
@@ -2837,6 +2849,24 @@ function createStyles(palette: SimulationPalette) {
     },
     busyButtonText: {
       color: palette.busyButtonText,
+    },
+    actionDock: {
+      paddingTop: 12,
+    },
+    actionDockInner: {
+      borderTopWidth: 1,
+      borderTopColor: palette.border,
+      backgroundColor: palette.panelStrong,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      paddingTop: 14,
+      paddingBottom: 6,
+      gap: 10,
+      shadowColor: palette.shadow,
+      shadowOpacity: 0.08,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: -4 },
+      elevation: 3,
     },
     secondaryActionButton: {
       minHeight: 52,
