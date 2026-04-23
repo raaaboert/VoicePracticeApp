@@ -28,11 +28,11 @@ import { formatDateTime, formatScore } from "@/src/lib/formatters";
 type DashboardReportTab = "training" | "users" | "company";
 
 function normalizeDashboardTab(value: string | null): DashboardReportTab {
-  if (value === "users" || value === "company") {
+  if (value === "training" || value === "users") {
     return value;
   }
 
-  return "training";
+  return "company";
 }
 
 function formatTrainingStatus(status: string): string {
@@ -51,6 +51,10 @@ function formatOrgRole(orgRole: string): string {
 
 function getTrainingOptionLabel(training: DashboardTrainingWorkspaceRow, multipleOrgs: boolean): string {
   return multipleOrgs ? `${training.name} - ${training.orgName}` : training.name;
+}
+
+function formatCountLabel(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 export function DashboardReportingWorkspace({
@@ -102,6 +106,7 @@ export function DashboardReportingWorkspace({
 
   const topTrainings = trainings
     .slice()
+    .filter((training) => training.summary.totalAttemptsLast30Days > 0)
     .sort((left, right) => {
       if (right.summary.totalAttemptsLast30Days !== left.summary.totalAttemptsLast30Days) {
         return right.summary.totalAttemptsLast30Days - left.summary.totalAttemptsLast30Days;
@@ -125,11 +130,11 @@ export function DashboardReportingWorkspace({
       <header className="page-header">
         <div>
           <p className="eyebrow">Reporting</p>
-          <h1>Training performance</h1>
+          <h1>Performance overview</h1>
           <p className="page-description">
             {isSuperUser
-              ? "Review aggregate performance across the customer accounts currently in scope. Use Customers for account-specific drilldown."
-              : "Review performance by training, user, and company."}
+              ? "Review company, training, and learner performance across the customer accounts in scope. Use Customers for account-level drilldown."
+              : "Review company, training, and learner performance for the current reporting scope."}
           </p>
         </div>
       </header>
@@ -141,7 +146,7 @@ export function DashboardReportingWorkspace({
         <DashboardDivisionFilter
           divisionScope={overview?.divisionScope ?? trainingWorkspace?.divisionScope ?? userReport?.divisionScope}
           title="Company and division view"
-          description="Company Total keeps the default company-wide dashboard. Division filters narrow this page to historically attributed activity only."
+          description="Company Total shows the full company view. Division filters limit the dashboard to historically attributed activity."
         />
       ) : null}
 
@@ -156,7 +161,7 @@ export function DashboardReportingWorkspace({
           </div>
 
           <div className="pill-row">
-            <span className="pill accent">{aggregateScopeContext.customerCount} customer accounts</span>
+            <span className="pill accent">{formatCountLabel(aggregateScopeContext.customerCount, "customer account")}</span>
             <span className="pill">{aggregateScopeContext.activeCustomerCount} active</span>
             {aggregateScopeContext.inactiveCustomerCount > 0 ? (
               <span className="pill">{aggregateScopeContext.inactiveCustomerCount} inactive</span>
@@ -171,31 +176,29 @@ export function DashboardReportingWorkspace({
         </section>
       ) : null}
 
-      <section className="section-card">
-        <div className="tab-row" role="tablist" aria-label="Dashboard reporting views">
-          <button
-            type="button"
-            className={`tab-button${activeTab === "training" ? " active" : ""}`}
-            onClick={() => setActiveTab("training")}
-          >
-            Training
-          </button>
-          <button
-            type="button"
-            className={`tab-button${activeTab === "users" ? " active" : ""}`}
-            onClick={() => setActiveTab("users")}
-          >
-            Users
-          </button>
-          <button
-            type="button"
-            className={`tab-button${activeTab === "company" ? " active" : ""}`}
-            onClick={() => setActiveTab("company")}
-          >
-            Company
-          </button>
-        </div>
-      </section>
+      <div className="tab-row dashboard-report-tabs" role="tablist" aria-label="Dashboard reporting views">
+        <button
+          type="button"
+          className={`tab-button${activeTab === "company" ? " active" : ""}`}
+          onClick={() => setActiveTab("company")}
+        >
+          Company
+        </button>
+        <button
+          type="button"
+          className={`tab-button${activeTab === "training" ? " active" : ""}`}
+          onClick={() => setActiveTab("training")}
+        >
+          Training
+        </button>
+        <button
+          type="button"
+          className={`tab-button${activeTab === "users" ? " active" : ""}`}
+          onClick={() => setActiveTab("users")}
+        >
+          Users
+        </button>
+      </div>
 
       {activeTab === "training" ? (
         <div className="tab-panel page-stack">
@@ -229,7 +232,8 @@ export function DashboardReportingWorkspace({
                     <span className="pill">Updated {formatDateTime(selectedTraining.updatedAt)}</span>
                   </div>
                   <p className="small-copy">
-                    {selectedTraining.attachedTrainingPackCount} attached packs and {selectedTraining.attachedCustomScenarioCount} attached custom scenarios.
+                    {formatCountLabel(selectedTraining.attachedTrainingPackCount, "attached pack")} and{" "}
+                    {formatCountLabel(selectedTraining.attachedCustomScenarioCount, "attached custom scenario")}.
                   </p>
                 </div>
               ) : (
@@ -253,25 +257,19 @@ export function DashboardReportingWorkspace({
                 narrative={trainingNarrative}
               />
 
-              <DashboardSupportSignals signals={trainingNarrative.signals} />
+              <DashboardSupportSignals title="Training support signals" signals={trainingNarrative.signals} />
 
-              <DashboardWhatMattersSection
-                title="What matters most right now"
-                description="This is the shortest useful read before opening the supporting detail."
-                items={trainingNarrative.priorities}
-              />
+              <DashboardWhatMattersSection items={trainingNarrative.priorities} />
 
               <DashboardProofSection
-                title="Proof behind this training view"
-                description="Open the supporting tables when you need the exact user and scenario evidence."
-                preview="User and scenario proof stays hidden until you open it."
+                title="Training detail"
+                description="Open the user and scenario tables for exact usage, scoring, and latest activity."
+                preview="User and scenario tables"
               >
                 <div className="dashboard-proof-stack">
                   <div className="dashboard-proof-block">
                     <h3>User activity inside this training</h3>
-                    <p>
-                      Attempt counts reflect usage activity. Score averages reflect only completed conclusive scored attempts.
-                    </p>
+                    <p>Attempt totals reflect recent usage. Average score reflects conclusive scored attempts only.</p>
 
                     {selectedTraining.users.length > 0 ? (
                       <div className="table-scroll">
@@ -314,7 +312,7 @@ export function DashboardReportingWorkspace({
 
                   <div className="dashboard-proof-block">
                     <h3>Scenario performance</h3>
-                    <p>Scenario-level detail remains available for exact usage, scoring, and latest-activity review.</p>
+                    <p>Scenario rows show recent usage, average score, and latest activity.</p>
 
                     {selectedTraining.scenarios.length > 0 ? (
                       <div className="table-scroll">
@@ -360,25 +358,21 @@ export function DashboardReportingWorkspace({
 
       {activeTab === "users" ? (
         <div className="tab-panel page-stack">
-          <DashboardNarrativePanel eyebrow="Story" title="What learner effort looks like" narrative={usersNarrative} />
+          <DashboardNarrativePanel eyebrow="Story" title="What learner activity looks like" narrative={usersNarrative} />
 
-          <DashboardSupportSignals signals={usersNarrative.signals} />
+          <DashboardSupportSignals title="User support signals" signals={usersNarrative.signals} />
 
-          <DashboardWhatMattersSection
-            title="What matters most right now"
-            description="These are the only learner-level implications worth carrying forward before inspecting the full table."
-            items={usersNarrative.priorities}
-          />
+          <DashboardWhatMattersSection items={usersNarrative.priorities} />
 
           <DashboardProofSection
-            title="Proof behind this user view"
-            description="Open the table when you need the full user list and the underlying attempt and score detail."
-            preview="The full user table stays hidden until you open it."
+            title="User detail"
+            description="Open the full user table for attempts, scores, and latest activity."
+            preview="Full user table"
           >
             <div className="dashboard-proof-stack">
               <div className="dashboard-proof-block">
                 <h3>User performance table</h3>
-                <p>Users with little or no scored activity still remain visible here. The story layer simply keeps them out of overconfident comparison language.</p>
+                <p>All users in scope stay visible here, including learners without enough scored history for comparison.</p>
 
                 {users.length > 0 ? (
                   <div className="table-scroll">
@@ -388,7 +382,7 @@ export function DashboardReportingWorkspace({
                           <th>User</th>
                           <th>Attempts</th>
                           <th>Average score</th>
-                          <th>Trainings with activity</th>
+                          <th>Trainings practiced</th>
                           <th>Latest activity</th>
                         </tr>
                       </thead>
@@ -432,27 +426,23 @@ export function DashboardReportingWorkspace({
         <div className="tab-panel page-stack">
           <DashboardNarrativePanel
             eyebrow="Story"
-            title="What leadership should conclude right now"
+            title="What leadership should conclude"
             narrative={companyNarrative}
           />
 
-          <DashboardSupportSignals signals={companyNarrative.signals} />
+          <DashboardSupportSignals title="Company support signals" signals={companyNarrative.signals} />
 
-          <DashboardWhatMattersSection
-            title="What matters most right now"
-            description="This view is meant to read like a short leadership briefing before any supporting table comes into play."
-            items={companyNarrative.priorities}
-          />
+          <DashboardWhatMattersSection items={companyNarrative.priorities} />
 
           <DashboardProofSection
-            title="Proof behind this company view"
-            description="Open the training table when you need the supporting evidence for usage breadth, score signals, and latest activity."
-            preview="Training-level proof stays hidden until you open it."
+            title="Company detail"
+            description="Open the training table for usage, breadth, score, and latest-activity detail."
+            preview="Training activity table"
           >
             <div className="dashboard-proof-stack">
               <div className="dashboard-proof-block">
-                <h3>Top trainings by activity</h3>
-                <p>Attempt totals reflect usage activity. Score averages reflect only completed conclusive scored attempts.</p>
+                <h3>Training activity</h3>
+                <p>Attempt totals reflect recent usage. Average score reflects conclusive scored attempts only.</p>
 
                 {topTrainings.length > 0 ? (
                   <div className="table-scroll">

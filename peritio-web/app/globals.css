@@ -590,6 +590,10 @@ main {
   margin-bottom: 1rem;
 }
 
+.dashboard-report-tabs {
+  margin: -0.1rem 0 0.35rem;
+}
+
 .tab-button {
   min-height: 2.8rem;
   padding: 0.72rem 1rem;
@@ -903,17 +907,9 @@ html[data-theme="light"] .dashboard-story-panel {
 
 .dashboard-priority-heading {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 1rem;
   align-items: flex-start;
-}
-
-.dashboard-priority-rank {
-  flex-shrink: 0;
-  font-size: 0.82rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: rgba(159, 177, 195, 0.66);
 }
 
 .dashboard-priority-kicker {
@@ -945,18 +941,15 @@ html[data-theme="light"] .dashboard-story-panel {
   max-width: 64ch;
 }
 
-.dashboard-priority-tone-primary .dashboard-priority-kicker,
-.dashboard-priority-tone-primary .dashboard-priority-rank {
+.dashboard-priority-tone-primary .dashboard-priority-kicker {
   color: rgba(147, 197, 253, 0.9);
 }
 
-.dashboard-priority-tone-caution .dashboard-priority-kicker,
-.dashboard-priority-tone-caution .dashboard-priority-rank {
+.dashboard-priority-tone-caution .dashboard-priority-kicker {
   color: rgba(251, 191, 36, 0.88);
 }
 
-.dashboard-priority-tone-watch .dashboard-priority-kicker,
-.dashboard-priority-tone-watch .dashboard-priority-rank {
+.dashboard-priority-tone-watch .dashboard-priority-kicker {
   color: rgba(94, 234, 212, 0.86);
 }
 

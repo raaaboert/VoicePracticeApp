@@ -60,6 +60,10 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return count === 1 ? singular : plural;
 }
 
+function formatCount(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${pluralize(count, singular, plural)}`;
+}
+
 function joinSentences(parts: Array<string | null | undefined>): string {
   return parts
     .map((part) => part?.trim())
@@ -227,12 +231,12 @@ export function buildUserHighlights(users: DashboardUserReportResponse["users"])
 export function buildAggregateTrainingNarrative(training: DashboardTrainingWorkspaceRow | null): DashboardNarrative {
   if (!training) {
     return {
-      summary: "No training is selected. Choose one to review live activity, confidence, and supporting proof.",
+      summary: "No training is selected yet. Choose one to review recent activity, confidence, and supporting evidence.",
       signals: compactSignals([
         { label: "Activity", value: "No training selected", context: "Choose a training above" },
       ]),
       priorities: compactPriorities([
-        makePriority("primary", "Select a training", "Pick one training first. The dashboard only becomes meaningful once the scope is concrete."),
+        makePriority("primary", "Select a training", "Pick a training first so the dashboard has a clear reporting scope."),
       ]),
       facts: {
         subject: "training",
@@ -259,17 +263,17 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
 
   const summary =
     totalAttempts === 0
-      ? "This training is not getting real practice yet. Until activity shows up, the useful read is adoption rather than performance."
+      ? "This training is not seeing recent practice yet. Until activity appears, the main question is rollout rather than performance."
       : activeLearners <= 1
         ? joinSentences([
             "Practice is active, but still concentrated in one learner.",
             enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
               ? `The score read is usable, but it is still being shaped mostly by activity in ${topScenario?.title ?? "a narrow scenario set"}.`
-              : "It is too early to judge score movement confidently, so the useful read is where practice is showing up and where it is not.",
+              : "It is too early to judge movement confidently. The clearest read is where practice is showing up and where it is not.",
           ])
         : totalAttempts >= 8 && activeLearners >= 2
           ? joinSentences([
-              `This training has real repeat practice across ${activeLearners} learners.`,
+              `This training has repeat practice across ${formatCount(activeLearners, "learner")}.`,
               topScenario
                 ? topScenarioShare >= 0.5
                   ? `${topScenario.title} is carrying most of the current practice.`
@@ -277,12 +281,12 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
                 : null,
               enoughFocusEvidence && strongestArea && weakestArea && strongestArea !== weakestArea
                 ? `${strongestArea} is currently the clearest strength signal, while ${weakestArea} is the main weakness to watch.`
-                : "Score coverage is not deep enough yet to turn this into a trend story.",
+                : "Score coverage is not deep enough yet for a trend call.",
             ])
           : joinSentences([
             "Practice is visible, but still early.",
             topScenario ? `${topScenario.title} is the clearest activity center so far.` : "No single scenario is defining the training yet.",
-            "For now, the safest conclusion is about where practice is showing up, not whether performance is moving.",
+            "The clearest read is coverage, not performance movement.",
           ]);
 
   return {
@@ -290,18 +294,18 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
     signals: compactSignals([
       {
         label: "Activity",
-        value: `${totalAttempts} attempts / ${activeLearners} learners`,
+        value: `${formatCount(totalAttempts, "attempt")} across ${formatCount(activeLearners, "learner")}`,
         context: "Last 30 days",
       },
       {
         label: "Confidence",
-        value: `${scoredScenarioCount}/${training.summary.totalScenarioCount} scenarios scored`,
+        value: `${scoredScenarioCount} of ${training.summary.totalScenarioCount} ${pluralize(training.summary.totalScenarioCount, "scenario")} scored`,
         context: enoughFocusEvidence ? "Enough coverage for a cautious score read" : "Early score coverage only",
       },
       {
         label: "Focus",
         value: topScenario?.title ?? "No dominant scenario yet",
-        context: topScenario ? `${topScenarioAttempts} recent attempts` : "Practice has not concentrated yet",
+        context: topScenario ? formatCount(topScenarioAttempts, "recent attempt") : "Practice has not concentrated yet",
       },
     ]),
     priorities: compactPriorities([
@@ -379,13 +383,13 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
 
   const summary = joinSentences([
     engagedUserAttemptShare >= 0.4 && mostEngaged
-      ? `Practice is being carried by a small slice of users, led by ${mostEngaged.email}.`
+      ? `Practice is concentrated in a small slice of users, led by ${mostEngaged.email}.`
       : "Practice is distributed across the visible users rather than resting on one person.",
     comparisonCount >= 2
       ? highlights.improvingUser
         ? `${highlights.improvingUser.email} shows the clearest upward score signal in the current comparable set.`
         : "A comparable score set is starting to form, but no one is separating clearly on improvement yet."
-      : "The safe read is effort first; score movement can wait until the comparison set is real.",
+      : "The clearest signal is effort. Score movement can wait until the comparison set is real.",
     highlights.needsAttention && comparisonCount >= 2 && (highlights.needsAttention.scoreDeltaLast30Days ?? 0) < 0
       ? `${highlights.needsAttention.email} is the clearest coaching watchpoint.`
       : null,
@@ -396,21 +400,21 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
     signals: compactSignals([
       {
         label: "Activity",
-        value: `${totalAttempts} recent attempts`,
+        value: formatCount(totalAttempts, "recent attempt"),
         context:
           engagedUsers > 0
-            ? `${engagedUsers} ${pluralize(engagedUsers, "user")} with recent practice${userCount > engagedUsers ? ` out of ${userCount} in scope` : ""}`
-            : `${userCount} users in scope`,
+            ? `${formatCount(engagedUsers, "user")} with recent practice${userCount > engagedUsers ? ` out of ${formatCount(userCount, "user")} in scope` : ""}`
+            : `${formatCount(userCount, "user")} in scope`,
       },
       {
         label: "Confidence",
-        value: `${comparisonCount} comparable users`,
+        value: formatCount(comparisonCount, "comparable user"),
         context: "At least 2 conclusive scored attempts each",
       },
       {
         label: "Engagement lead",
         value: mostEngaged?.email ?? "No clear leader",
-        context: mostEngaged ? `${mostEngaged.simulationsLast30Days} recent simulations` : "Recent effort is still forming",
+        context: mostEngaged ? formatCount(mostEngaged.simulationsLast30Days, "recent simulation") : "Recent effort is still forming",
       },
     ]),
     priorities: compactPriorities([
@@ -440,7 +444,7 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
           : "The next useful question is whether more users build enough scored history to make the comparison set real."
       ),
     ]),
-    note: "Users with fewer than 2 conclusive scored attempts are kept out of score-comparison language.",
+    note: "Score comparisons include only users with at least 2 conclusive scored attempts.",
     facts: {
       subject: "users",
       activityLevel: engagedUserAttemptShare >= 0.4 ? "concentrated" : totalAttempts > 0 ? "active" : "none",
@@ -516,7 +520,7 @@ export function buildAggregateCompanyNarrative(params: {
   const summary = hasBroadTraction
     ? joinSentences([
         "There is meaningful traction across the program.",
-        "Usage is broad enough to look real rather than accidental.",
+        "Usage is broad enough to count as real rather than isolated.",
         scoreRead,
       ])
     : joinSentences([
@@ -532,21 +536,21 @@ export function buildAggregateCompanyNarrative(params: {
     signals: compactSignals([
       {
         label: "Traction",
-        value: `${totalAttempts} recent attempts`,
+        value: formatCount(totalAttempts, "recent attempt"),
         context:
           engagedUsers > 0
-            ? `${engagedUsers} ${pluralize(engagedUsers, "user")} with recent practice`
+            ? `${formatCount(engagedUsers, "user")} with recent practice`
             : "Last 30 days",
       },
       {
         label: "Breadth",
-        value: `${activeTrainings.length} active trainings`,
-        context: `${params.trainings.length} trainings in scope`,
+        value: formatCount(activeTrainings.length, "active training"),
+        context: `${formatCount(params.trainings.length, "training")} in scope`,
       },
       {
         label: "Confidence",
-        value: `${comparisonUsers.length} comparable users`,
-        context: scoredAttemptsLast30Days > 0 ? `${scoredAttemptsLast30Days} conclusive scored attempts` : "Scored history is still limited",
+        value: formatCount(comparisonUsers.length, "comparable user"),
+        context: scoredAttemptsLast30Days > 0 ? formatCount(scoredAttemptsLast30Days, "conclusive scored attempt") : "Scored history is still limited",
       },
     ]),
     priorities: compactPriorities([
@@ -568,7 +572,7 @@ export function buildAggregateCompanyNarrative(params: {
             ? "The comparable user set leans positive, but the signal is still early rather than settled."
             : negativeMovementUsers > positiveMovementUsers
               ? "The comparable user set leans negative, which is a real caution signal for leadership."
-              : "The comparable user set is mixed, so the safe move is focused coaching rather than broad conclusions."
+              : "The comparable user set is mixed, so focused coaching is a better response than broad conclusions."
       ),
       makePriority(
         "watch",
@@ -650,7 +654,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         : "This account is active, but usage is still narrow."
       : "This account has real usage across more than one training area.",
     totalScoredAttemptsLast30Days < MIN_CUSTOMER_SCORE_EVIDENCE
-      ? "The score read is still early, so the safe conclusion is about adoption and focus rather than performance movement."
+      ? "The score read is still early, so the clearest conclusion is about adoption and focus rather than performance movement."
       : buildMovementSummary(customer.scoreDeltaLast30Days),
     underusedActiveTrainings > 0
       ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet, which is the clearest rollout gap.`
@@ -662,15 +666,15 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
     signals: compactSignals([
       {
         label: "Activity",
-        value: `${customer.simulationsLast30Days} recent simulations`,
+        value: formatCount(customer.simulationsLast30Days, "recent simulation"),
         context:
           engagedUsers > 0
-            ? `${engagedUsers} ${pluralize(engagedUsers, "user")} with recent practice`
+            ? `${formatCount(engagedUsers, "user")} with recent practice`
             : "Last 30 days",
       },
       {
         label: "Confidence",
-        value: `${totalScoredAttemptsLast30Days} scored attempts`,
+        value: formatCount(totalScoredAttemptsLast30Days, "scored attempt"),
         context:
           totalScoredAttemptsLast30Days >= MIN_CUSTOMER_SCORE_EVIDENCE
             ? "Enough volume for a cautious score read"
@@ -740,7 +744,7 @@ export function buildTrainingPackNarrative(payload: DashboardTrainingPackDetailR
 
   const summary =
     pack.attemptsLast30Days === 0
-      ? "This pack is assigned, but it is not producing real recent practice yet. Until that changes, the only useful read is rollout."
+      ? "This pack is assigned, but it is not producing recent practice yet. Until that changes, the main question is rollout."
       : joinSentences([
           scoredAttempts < MIN_PACK_SCORE_EVIDENCE
             ? "This pack is active, but the score read is still early."
@@ -765,13 +769,13 @@ export function buildTrainingPackNarrative(payload: DashboardTrainingPackDetailR
       },
       {
         label: "Confidence",
-        value: `${scoredAttempts} scored attempts`,
+        value: formatCount(scoredAttempts, "scored attempt"),
         context: scoredAttempts >= MIN_PACK_SCORE_EVIDENCE ? "Enough for a cautious score read" : "Early trend read only",
       },
       {
         label: "Focus",
         value: mostUsedScenario?.title ?? "No dominant scenario",
-        context: mostUsedScenario ? `${mostUsedScenario.attemptsLast30Days} recent attempts` : "Recent practice is still dispersed",
+        context: mostUsedScenario ? formatCount(mostUsedScenario.attemptsLast30Days, "recent attempt") : "Recent practice is still dispersed",
       },
     ]),
     priorities: compactPriorities([
@@ -828,13 +832,13 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
 
   const summary =
     user.simulationsLast30Days === 0
-      ? "There is no recent visible practice for this user in the current scope, so the only safe conclusion is that activity has gone quiet."
+      ? "There is no recent visible practice for this user in the current scope. The clearest conclusion is that activity has gone quiet."
       : user.scoredAttemptsLast30Days < MIN_USER_COMPARISON_SCORED_ATTEMPTS
         ? joinSentences([
             "This user is practicing, but the scored history is still early.",
             dominantTraining || dominantScenario
-              ? `The clearest read is current focus${dominantTraining ? ` in ${dominantTraining}` : ""}${dominantScenario ? `${dominantTraining ? " and" : " in"} ${dominantScenario}` : ""}.`
-              : "The clearest read is effort rather than improvement.",
+              ? `Current focus is${dominantTraining ? ` in ${dominantTraining}` : ""}${dominantScenario ? `${dominantTraining ? " and" : " in"} ${dominantScenario}` : ""}.`
+              : "The clearest signal is effort rather than improvement.",
             topPriority ? `${topPriority} is the clearest coaching theme to keep in view.` : null,
           ])
         : (user.scoreDeltaLast30Days ?? 0) > 0
@@ -870,12 +874,12 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
     signals: compactSignals([
       {
         label: "Effort",
-        value: `${user.simulationsLast30Days} simulations`,
-        context: `${user.uniqueScenariosLast30Days} scenarios in the last 30 days`,
+        value: formatCount(user.simulationsLast30Days, "simulation"),
+        context: `${formatCount(user.uniqueScenariosLast30Days, "scenario")} in the last 30 days`,
       },
       {
         label: "Confidence",
-        value: `${user.scoredAttemptsLast30Days} scored attempts`,
+        value: formatCount(user.scoredAttemptsLast30Days, "scored attempt"),
         context:
           user.scoredAttemptsLast30Days >= MIN_USER_COMPARISON_SCORED_ATTEMPTS
             ? "Enough for a cautious movement read"

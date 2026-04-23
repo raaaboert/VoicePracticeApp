@@ -3,7 +3,7 @@
 import { ReactNode, useState } from "react";
 
 export function DashboardProofSection({
-  eyebrow = "Details and proof",
+  eyebrow = "Supporting evidence",
   title,
   description,
   preview,
@@ -32,7 +32,7 @@ export function DashboardProofSection({
           <h2>{title}</h2>
           {summaryText ? <p className="dashboard-proof-preview">{summaryText}</p> : null}
         </div>
-        <span className="dashboard-proof-toggle">{isOpen ? "Hide proof" : "Show proof"}</span>
+        <span className="dashboard-proof-toggle">{isOpen ? "Hide evidence" : "Show evidence"}</span>
       </summary>
 
       <div className="dashboard-proof-body">{children}</div>

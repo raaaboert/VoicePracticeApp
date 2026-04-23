@@ -76,18 +76,14 @@ export default async function TrainingPackDetailPage({
 
       <DashboardNarrativePanel eyebrow="Story" title="What this training pack is doing now" narrative={narrative} />
 
-      <DashboardSupportSignals signals={narrative.signals} />
+      <DashboardSupportSignals title="Training pack support signals" signals={narrative.signals} />
 
-      <DashboardWhatMattersSection
-        title="What matters most right now"
-        description="This keeps the training-pack read focused before you move into progress tables and notes."
-        items={narrative.priorities}
-      />
+      <DashboardWhatMattersSection items={narrative.priorities} />
 
       <DashboardProofSection
-        title="Proof behind this training-pack view"
-        description="Open the metadata, coaching, trend, and progress detail when you need the exact supporting evidence."
-        preview="Metadata, coaching, trend, and progress detail stay hidden until you open them."
+        title="Training pack detail"
+        description="Open metadata, coaching, trend, and progress detail."
+        preview="Metadata, coaching, trend, and progress detail"
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
@@ -115,7 +111,7 @@ export default async function TrainingPackDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Recent pack activity</h3>
-            <p>Trend remains available below the fold so you can inspect how recent activity and scoring volume are distributed over time.</p>
+            <p>Review recent activity and scoring volume by period.</p>
             <div className="trend-grid">
               {pack.trend.map((point) => (
                 <article key={point.label} className="trend-card">
@@ -136,7 +132,7 @@ export default async function TrainingPackDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Scenario progress</h3>
-            <p>Scenario-level raw detail remains available so you can inspect usage, scoring, and latest activity without losing the high-level story.</p>
+            <p>Scenario rows show assignment coverage, recent usage, scoring, and latest activity.</p>
             {pack.scenarios.length > 0 ? (
               <div className="table-scroll">
                 <table className="data-table">
@@ -183,7 +179,7 @@ export default async function TrainingPackDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Per-user progress</h3>
-            <p>User-level assignment detail remains accessible below the interpretation layer for exact learner follow-up.</p>
+            <p>Use assignment detail here for exact learner follow-up.</p>
             {pack.assignments.length > 0 ? (
               <div className="table-scroll">
                 <table className="data-table">

@@ -79,18 +79,14 @@ export default async function CustomerDetailPage({
 
       <DashboardNarrativePanel eyebrow="Story" title="What this account is doing now" narrative={narrative} />
 
-      <DashboardSupportSignals signals={narrative.signals} />
+      <DashboardSupportSignals title="Account support signals" signals={narrative.signals} />
 
-      <DashboardWhatMattersSection
-        title="What matters most right now"
-        description="This keeps the account read concise before you move into the supporting tabs and notes."
-        items={narrative.priorities}
-      />
+      <DashboardWhatMattersSection items={narrative.priorities} />
 
       <DashboardProofSection
-        title="Proof behind this account view"
-        description="Open the coaching detail, account tabs, and reporting notes when you need to inspect the underlying evidence."
-        preview="Coaching detail, account tabs, and reporting notes stay hidden until you open them."
+        title="Account detail"
+        description="Open coaching, account tabs, and reporting notes."
+        preview="Coaching, account tabs, and reporting notes"
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
@@ -110,7 +106,7 @@ export default async function CustomerDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Reporting notes</h3>
-            <p>These notes keep the underlying data contracts visible without crowding the top of the account page.</p>
+            <p>These notes clarify the reporting contract for this account.</p>
             <ul className="bullet-list">
               <li>Primary contact: {customer.contactName} ({customer.contactEmail}).</li>
               <li>Renewal window ends {formatDate(customer.nextRenewalAt)}. Latest recorded activity was {formatDateTime(customer.latestActivityAt)}.</li>

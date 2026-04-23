@@ -114,7 +114,7 @@ test("aggregate users narrative uses recent-practice user counts rather than act
   const narrative = buildAggregateUsersNarrative(userReport);
 
   assert.equal(narrative.signals[0]?.value, "5 recent attempts");
-  assert.equal(narrative.signals[0]?.context, "1 user with recent practice out of 4 in scope");
+  assert.equal(narrative.signals[0]?.context, "1 user with recent practice out of 4 users in scope");
   assert.match(narrative.facts.volumeLabel, /1 user with recent practice/);
   assert.doesNotMatch(narrative.facts.volumeLabel, /active users/i);
 });

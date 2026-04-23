@@ -12,7 +12,7 @@ import {
 export function DashboardDivisionFilter({
   divisionScope,
   title = "Reporting lens",
-  description = "Company Total keeps the default account-wide view. Division filters narrow the view to historically attributed activity only.",
+  description = "Company Total shows the full account view. Division filters limit the view to historically attributed activity.",
 }: {
   divisionScope?: DashboardDivisionScope | null;
   title?: string;

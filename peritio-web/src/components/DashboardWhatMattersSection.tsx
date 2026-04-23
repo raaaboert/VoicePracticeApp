@@ -1,8 +1,8 @@
 import { DashboardNarrativePriority } from "@/src/lib/dashboardNarratives";
 
 export function DashboardWhatMattersSection({
-  eyebrow = "What matters most",
-  title = "Where attention should go",
+  eyebrow = "Priorities",
+  title = "What matters most",
   description,
   items,
 }: {
@@ -37,7 +37,6 @@ export function DashboardWhatMattersSection({
               <p className="dashboard-priority-kicker">{primary.label}</p>
               <h3>{primary.title}</h3>
             </div>
-            <span className="dashboard-priority-rank">01</span>
           </div>
           <p>{primary.detail}</p>
         </article>
@@ -54,7 +53,6 @@ export function DashboardWhatMattersSection({
                     <p className="dashboard-priority-kicker">{item.label}</p>
                     <h3>{item.title}</h3>
                   </div>
-                  <span className="dashboard-priority-rank">{String(index + 2).padStart(2, "0")}</span>
                 </div>
                 <p>{item.detail}</p>
               </article>

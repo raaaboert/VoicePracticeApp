@@ -72,23 +72,19 @@ export default async function UserDetailPage({
       <DashboardDivisionFilter
         divisionScope={payload.divisionScope}
         title="User detail reporting lens"
-        description="Company Total keeps the full account view. Division filters keep this drilldown aligned with the historically attributed activity behind the aggregate dashboard."
+        description="Company Total shows the full account view. Division filters keep this drilldown aligned with the attributed activity behind the aggregate dashboard."
       />
 
       <DashboardNarrativePanel eyebrow="Story" title="What a manager should conclude" narrative={narrative} />
 
-      <DashboardSupportSignals signals={narrative.signals} />
+      <DashboardSupportSignals title="User detail support signals" signals={narrative.signals} />
 
-      <DashboardWhatMattersSection
-        title="What matters most right now"
-        description="This section keeps the read focused on the few implications most likely to matter in a coaching conversation."
-        items={narrative.priorities}
-      />
+      <DashboardWhatMattersSection items={narrative.priorities} />
 
       <DashboardProofSection
-        title="Proof behind this user view"
-        description="Open the full coaching, assignment, and attempt detail when you need the evidence behind the briefing."
-        preview="Coaching themes, assignments, and scored-attempt history stay hidden until you open them."
+        title="User detail"
+        description="Open coaching, assignments, and scored-attempt history."
+        preview="Coaching, assignments, and scored attempts"
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
@@ -104,7 +100,7 @@ export default async function UserDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Current training progress</h3>
-            <p>Assignment progress is derived from pack-linked persisted activity only. Unattributed historical activity does not count toward completion.</p>
+            <p>Assignment progress comes from pack-linked persisted activity only. Unattributed historical activity does not count toward completion.</p>
 
             {assignments.length > 0 ? (
               <div className="table-scroll">
@@ -147,9 +143,7 @@ export default async function UserDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Recent conclusive scored attempts</h3>
-            <p>
-              These rows come from persisted score records, including saved score summaries and coaching priorities when available. Transcript text is not retained for normal dashboard review.
-            </p>
+            <p>These rows come from persisted score records. Transcript text is not retained for normal dashboard review.</p>
 
             {attempts.length > 0 ? (
               <div className="table-scroll">
