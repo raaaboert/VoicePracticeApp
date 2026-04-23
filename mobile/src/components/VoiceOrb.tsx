@@ -39,23 +39,23 @@ const SIGNAL_STAGES: Array<{ key: SignalStageKey; label: string }> = [
 const THEME = {
   light: {
     shellBg: "rgba(252, 249, 242, 0.98)",
-    shellBorder: "rgba(97, 116, 97, 0.14)",
+    shellBorder: "rgba(97, 116, 97, 0.18)",
     headerLabel: "#677362",
     headerCopy: "#778173",
     stateBadgeBg: "rgba(249, 246, 238, 0.98)",
-    stateBadgeBorder: "rgba(97, 116, 97, 0.14)",
+    stateBadgeBorder: "rgba(97, 116, 97, 0.16)",
     stateBadgeText: "#4f614f",
     stageBg: "rgba(247, 249, 243, 0.98)",
-    stageBorder: "rgba(97, 116, 97, 0.12)",
+    stageBorder: "rgba(97, 116, 97, 0.16)",
     coreShell: "rgba(255, 252, 246, 0.98)",
-    coreBorder: "rgba(97, 116, 97, 0.12)",
-    coreGrid: "rgba(96, 114, 96, 0.12)",
-    stepDivider: "rgba(97, 116, 97, 0.1)",
-    stepBg: "rgba(247, 249, 243, 0.7)",
+    coreBorder: "rgba(97, 116, 97, 0.16)",
+    coreGrid: "rgba(96, 114, 96, 0.15)",
+    stepDivider: "rgba(97, 116, 97, 0.14)",
+    stepBg: "rgba(241, 245, 236, 0.98)",
     inactiveText: "#7a8476",
     labelText: "#4c5d4a",
     statusChipBg: "rgba(244, 246, 240, 0.98)",
-    statusChipBorder: "rgba(97, 116, 97, 0.12)",
+    statusChipBorder: "rgba(97, 116, 97, 0.15)",
     caption: "#667264",
     shadow: "#131914",
   },
@@ -187,9 +187,9 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
   const pulseValue = useRef(new Animated.Value(1)).current;
   const theme = THEME[variant];
   const colors = MODE_COLORS[variant][mode];
-  const haloSize = mode === "speaking" ? 168 : mode === "thinking" ? 152 : 144;
-  const haloPeakScale = mode === "speaking" ? 1.14 : mode === "thinking" ? 1.11 : 1.1;
-  const haloMaxOpacity = mode === "speaking" ? 0.3 : mode === "thinking" ? 0.26 : 0.24;
+  const haloSize = mode === "speaking" ? 184 : mode === "thinking" ? 166 : 152;
+  const haloPeakScale = mode === "speaking" ? 1.18 : mode === "thinking" ? 1.14 : 1.11;
+  const haloMaxOpacity = mode === "speaking" ? 0.34 : mode === "thinking" ? 0.3 : 0.26;
 
   useEffect(() => {
     pulseValue.stopAnimation();
@@ -327,10 +327,11 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
                 style={[
                   styles.stepRow,
                   rowStyle,
-                  meta.state === "active" ? { borderColor: colors.accentSoft, borderWidth: 1 } : null,
+                  meta.state === "active" ? { borderColor: colors.accentSoft, borderWidth: 1.25 } : null,
                   index < SIGNAL_STAGES.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
                 ]}
               >
+                {meta.state === "active" ? <View style={[styles.stepActiveBar, { backgroundColor: colors.accent }]} /> : null}
                 <Animated.View style={[styles.stepIndicatorWrap, isActive ? { transform: [{ scale: activeDotScale }] } : null]}>
                   <View style={[styles.stepIndicator, indicatorStyle]} />
                 </Animated.View>
@@ -358,7 +359,7 @@ const styles = StyleSheet.create({
   },
   shell: {
     width: "100%",
-    maxWidth: 372,
+    maxWidth: 420,
     borderRadius: 26,
     borderWidth: 1,
     paddingHorizontal: 18,
@@ -417,49 +418,56 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   stageCurrentRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
     gap: 8,
     marginBottom: 14,
   },
   activePhaseChip: {
     alignSelf: "flex-start",
-    minHeight: 28,
+    minHeight: 30,
     borderRadius: 999,
     borderWidth: 1,
-    paddingHorizontal: 11,
+    paddingHorizontal: 12,
     paddingVertical: 5,
     alignItems: "center",
     justifyContent: "center",
   },
   activePhaseChipText: {
-    fontSize: 12,
+    fontSize: 12.5,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 0.8,
   },
   stageCaption: {
+    flex: 1,
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "600",
+    minWidth: 180,
+    textAlign: "right",
   },
   stageVisual: {
     width: "100%",
-    minHeight: 116,
+    minHeight: 122,
     alignItems: "center",
     justifyContent: "center",
   },
   connector: {
     position: "absolute",
     top: "50%",
-    width: 72,
+    width: 84,
     height: 2,
     marginTop: -1,
     borderRadius: 999,
   },
   connectorLeft: {
-    left: 12,
+    left: 6,
   },
   connectorRight: {
-    right: 12,
+    right: 6,
   },
   halo: {
     position: "absolute",
@@ -530,8 +538,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     borderRadius: 14,
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
     paddingVertical: 10,
+    overflow: "hidden",
+    position: "relative",
+  },
+  stepActiveBar: {
+    position: "absolute",
+    left: 0,
+    top: 8,
+    bottom: 8,
+    width: 3,
+    borderRadius: 999,
   },
   stepIndicatorWrap: {
     width: 14,
