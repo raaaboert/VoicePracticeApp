@@ -93,9 +93,9 @@ export default async function CustomerDetailPage({
             <CoachingInsightsSection
               eyebrow="Coaching themes"
               title="What this customer most needs coaching on"
-              description="These account-level coaching aggregates come only from persisted coaching artifacts inside this customer scope. They are useful for spotting repeated focus areas without retaining transcripts."
+              description="These themes come from scored attempts in this customer scope that saved coaching detail."
               insights={insights.coachingInsights}
-              emptyMessage="This customer does not yet have enough new artifact-backed score records to produce coaching-theme aggregates."
+              emptyMessage="This customer does not yet have enough recent scored attempts with coaching detail to show coaching themes."
               embedded
             />
           </div>

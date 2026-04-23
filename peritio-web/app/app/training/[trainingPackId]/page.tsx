@@ -102,9 +102,9 @@ export default async function TrainingPackDetailPage({
             <CoachingInsightsSection
               eyebrow="Coaching themes"
               title="Most common coaching signals in this pack"
-              description="These pack-level coaching aggregates use only pack-attributed score records that persisted a coaching artifact. They help explain the repeated coaching needs emerging inside this training program."
+              description="These themes come from pack-attributed scored attempts that saved coaching detail."
               insights={pack.coachingInsights}
-              emptyMessage="This pack does not yet have enough artifact-backed scored attempts to produce coaching-theme aggregates."
+              emptyMessage="This pack does not yet have enough recent scored attempts with coaching detail to show coaching themes."
               embedded
             />
           </div>

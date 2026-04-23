@@ -24,6 +24,19 @@ function formatAssignmentStatus(status: string): string {
   return "Not Started";
 }
 
+function formatAssignmentContextStatus(status: string): string {
+  if (status === "counts_toward_completion") {
+    return "Counts Toward Completion";
+  }
+  if (status === "within_assignment_window") {
+    return "Within Assignment Window";
+  }
+  if (status === "outside_assignment_window") {
+    return "Outside Assignment Window";
+  }
+  return "Not Assignment Scoped";
+}
+
 export async function generateMetadata(): Promise<Metadata> {
   return {
     title: "User Detail",
@@ -66,7 +79,7 @@ export default async function UserDetailPage({
       <PageHeader
         eyebrow="User detail"
         title={user.email}
-        description="This drilldown shows persisted score-backed attempt history and current assignment progress. Raw transcripts are not stored for normal dashboard review."
+        description="Review recent performance signals, coaching themes, and active assignment progress for this user."
       />
 
       <DashboardDivisionFilter
@@ -75,32 +88,32 @@ export default async function UserDetailPage({
         description="Company Total shows the full account view. Division filters keep this drilldown aligned with the attributed activity behind the aggregate dashboard."
       />
 
-      <DashboardNarrativePanel eyebrow="Story" title="What a manager should conclude" narrative={narrative} />
+      <DashboardNarrativePanel eyebrow="Story" title="Manager summary" narrative={narrative} />
 
       <DashboardSupportSignals title="User detail support signals" signals={narrative.signals} />
 
       <DashboardWhatMattersSection items={narrative.priorities} />
 
       <DashboardProofSection
-        title="User detail"
-        description="Open coaching, assignments, and scored-attempt history."
-        preview="Coaching, assignments, and scored attempts"
+        title="Supporting detail"
+        description="Open coaching themes, assignments, and scored-attempt history."
+        preview="Coaching themes, assignments, and scored-attempt history"
       >
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
             <CoachingInsightsSection
               eyebrow="Coaching themes"
-              title="Repeated coaching focus for this user"
-              description="These user-level coaching aggregates come only from persisted coaching artifacts on scored attempts in the last 30 days. They highlight repeated themes without storing transcript history."
+              title="Recurring coaching themes"
+              description="These themes come from scored attempts in the last 30 days that saved coaching detail."
               insights={payload.coachingInsights}
-              emptyMessage="This user does not yet have enough artifact-backed scored attempts in the last 30 days to show aggregate coaching themes."
+              emptyMessage="This user does not yet have enough recent scored attempts with coaching detail to show coaching themes."
               embedded
             />
           </div>
 
           <div className="dashboard-proof-block">
             <h3>Current training progress</h3>
-            <p>Assignment progress comes from pack-linked persisted activity only. Unattributed historical activity does not count toward completion.</p>
+            <p>Progress reflects activity linked to each training pack. Older unattributed activity does not count toward completion.</p>
 
             {assignments.length > 0 ? (
               <div className="table-scroll">
@@ -142,8 +155,8 @@ export default async function UserDetailPage({
           </div>
 
           <div className="dashboard-proof-block">
-            <h3>Recent conclusive scored attempts</h3>
-            <p>These rows come from persisted score records. Transcript text is not retained for normal dashboard review.</p>
+            <h3>Scored attempt history</h3>
+            <p>These rows show scored attempts in this dashboard scope, newest first. Saved score notes appear when available.</p>
 
             {attempts.length > 0 ? (
               <div className="table-scroll">
@@ -153,10 +166,10 @@ export default async function UserDetailPage({
                       <th>When</th>
                       <th>Scenario</th>
                       <th>Training pack</th>
-                      <th>Assignment context</th>
+                      <th>Assignment status</th>
                       <th>Score</th>
                       <th>Duration</th>
-                      <th>Summary</th>
+                      <th>Notes</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -169,14 +182,16 @@ export default async function UserDetailPage({
                           </Link>
                         </td>
                         <td>{attempt.trainingPackTitle ?? "Unattributed"}</td>
-                        <td>{attempt.assignmentContextStatus.replaceAll("_", " ")}</td>
+                        <td>{formatAssignmentContextStatus(attempt.assignmentContextStatus)}</td>
                         <td>{attempt.overallScore !== null ? formatScore(attempt.overallScore) : "-"}</td>
                         <td>{formatRawSeconds(attempt.rawDurationSeconds)}</td>
-                        <td>
-                          <div>{attempt.summary ?? "No persisted score summary."}</div>
-                          <div className="table-subcopy">
-                            {attempt.coachingPriority ? `Coaching priority: ${attempt.coachingPriority}` : "No persisted coaching priority"}
+                        <td className="attempt-history-notes">
+                          <div className={`attempt-history-summary${attempt.summary ? "" : " empty"}`}>
+                            {attempt.summary ?? "No saved summary."}
                           </div>
+                          {attempt.coachingPriority ? (
+                            <div className="attempt-history-priority">Priority: {attempt.coachingPriority}</div>
+                          ) : null}
                         </td>
                       </tr>
                     ))}
@@ -185,8 +200,8 @@ export default async function UserDetailPage({
               </div>
             ) : (
               <div className="empty-state-panel">
-                <h3>No conclusive scored attempts found</h3>
-                <p>No persisted conclusive scored attempts were found for this user in the current dashboard scope.</p>
+                <h3>No scored attempts found</h3>
+                <p>No scored attempts were found for this user in the current dashboard scope.</p>
               </div>
             )}
           </div>

@@ -133,8 +133,8 @@ export function DashboardReportingWorkspace({
           <h1>Performance overview</h1>
           <p className="page-description">
             {isSuperUser
-              ? "Review company, training, and learner performance across the customer accounts in scope. Use Customers for account-level drilldown."
-              : "Review company, training, and learner performance for the current reporting scope."}
+              ? "See the company, training, and learner signals that matter most across the customer accounts in scope."
+              : "See the company, training, and learner signals that matter most in the current reporting scope."}
           </p>
         </div>
       </header>
@@ -253,7 +253,7 @@ export function DashboardReportingWorkspace({
             <>
               <DashboardNarrativePanel
                 eyebrow="Story"
-                title="What this training is doing now"
+                title="Training summary"
                 narrative={trainingNarrative}
               />
 
@@ -268,7 +268,7 @@ export function DashboardReportingWorkspace({
               >
                 <div className="dashboard-proof-stack">
                   <div className="dashboard-proof-block">
-                    <h3>User activity inside this training</h3>
+                    <h3>User activity</h3>
                     <p>Attempt totals reflect recent usage. Average score reflects conclusive scored attempts only.</p>
 
                     {selectedTraining.users.length > 0 ? (
@@ -311,7 +311,7 @@ export function DashboardReportingWorkspace({
                   </div>
 
                   <div className="dashboard-proof-block">
-                    <h3>Scenario performance</h3>
+                    <h3>Scenario activity</h3>
                     <p>Scenario rows show recent usage, average score, and latest activity.</p>
 
                     {selectedTraining.scenarios.length > 0 ? (
@@ -358,7 +358,7 @@ export function DashboardReportingWorkspace({
 
       {activeTab === "users" ? (
         <div className="tab-panel page-stack">
-          <DashboardNarrativePanel eyebrow="Story" title="What learner activity looks like" narrative={usersNarrative} />
+          <DashboardNarrativePanel eyebrow="Story" title="Learner summary" narrative={usersNarrative} />
 
           <DashboardSupportSignals title="User support signals" signals={usersNarrative.signals} />
 
@@ -371,7 +371,7 @@ export function DashboardReportingWorkspace({
           >
             <div className="dashboard-proof-stack">
               <div className="dashboard-proof-block">
-                <h3>User performance table</h3>
+                <h3>User table</h3>
                 <p>All users in scope stay visible here, including learners without enough scored history for comparison.</p>
 
                 {users.length > 0 ? (
@@ -426,7 +426,7 @@ export function DashboardReportingWorkspace({
         <div className="tab-panel page-stack">
           <DashboardNarrativePanel
             eyebrow="Story"
-            title="What leadership should conclude"
+            title="Company summary"
             narrative={companyNarrative}
           />
 

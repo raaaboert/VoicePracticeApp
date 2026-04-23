@@ -305,7 +305,7 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
       {
         label: "Focus",
         value: topScenario?.title ?? "No dominant scenario yet",
-        context: topScenario ? formatCount(topScenarioAttempts, "recent attempt") : "Practice has not concentrated yet",
+        context: topScenario ? formatCount(topScenarioAttempts, "recent attempt") : "Practice is still spread across scenarios",
       },
     ]),
     priorities: compactPriorities([
@@ -325,9 +325,9 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
       ),
       makePriority(
         "watch",
-        "Watch the quiet edge",
+        "Coverage gap",
         underusedScenarioCount > 0
-          ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} remain quiet, which is the clearest rollout gap in this training.`
+          ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} remain quiet, which is the clearest coverage gap in this training.`
           : lowestScenario
             ? `${lowestScenario} is the weakest scored scenario on current evidence and is the best next place to look.`
             : "The next useful question is whether practice broadens beyond the current active scenarios."
@@ -412,7 +412,7 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
         context: "At least 2 conclusive scored attempts each",
       },
       {
-        label: "Engagement lead",
+        label: "Most active learner",
         value: mostEngaged?.email ?? "No clear leader",
         context: mostEngaged ? formatCount(mostEngaged.simulationsLast30Days, "recent simulation") : "Recent effort is still forming",
       },
@@ -444,7 +444,7 @@ export function buildAggregateUsersNarrative(userReport: DashboardUserReportResp
           : "The next useful question is whether more users build enough scored history to make the comparison set real."
       ),
     ]),
-    note: "Score comparisons include only users with at least 2 conclusive scored attempts.",
+    note: "Score comparisons use only users with at least 2 conclusive scored attempts.",
     facts: {
       subject: "users",
       activityLevel: engagedUserAttemptShare >= 0.4 ? "concentrated" : totalAttempts > 0 ? "active" : "none",
@@ -519,7 +519,7 @@ export function buildAggregateCompanyNarrative(params: {
 
   const summary = hasBroadTraction
     ? joinSentences([
-        "There is meaningful traction across the program.",
+        "There is real traction across the program.",
         "Usage is broad enough to count as real rather than isolated.",
         scoreRead,
       ])
@@ -707,7 +707,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         underusedActiveTrainings > 0
           ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet and deserve rollout attention.`
           : insights.coachingInsights.repeatedFocusArea
-            ? `${insights.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in the current artifact-backed record.`
+            ? `${insights.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in the current coaching record.`
             : "The next useful question is whether the current activity pattern broadens or stays narrow."
       ),
     ]),
@@ -800,7 +800,7 @@ export function buildTrainingPackNarrative(payload: DashboardTrainingPackDetailR
       ),
     ]),
     note: pack.coachingInsights.repeatedFocusArea
-      ? `${pack.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in artifact-backed pack scoring.`
+      ? `${pack.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in recent pack scoring.`
       : null,
     facts: {
       subject: pack.title,
@@ -894,16 +894,16 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
     priorities: compactPriorities([
       makePriority(
         "primary",
-        "The clearest positive signal",
+        "Strongest signal",
         topStrength
-          ? `${topStrength} is the strongest repeated positive pattern in the artifact-backed coaching record.`
+          ? `${topStrength} is the strongest repeated positive pattern in recent coaching detail.`
           : user.simulationsLast30Days > 0
             ? "The most reliable positive signal is continued practice rather than a repeated strength theme."
             : "There is not enough recent activity to point to a positive signal yet."
       ),
       makePriority(
         "caution",
-        "The main coaching caution",
+        "Main coaching need",
         topPriority
           ? `${topPriority} is the clearest repeated coaching need in the visible history.`
           : user.scoredAttemptsLast30Days < MIN_USER_COMPARISON_SCORED_ATTEMPTS
@@ -912,7 +912,7 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
       ),
       makePriority(
         "watch",
-        "What to watch next",
+        "Watch next",
         assignments.length > 0
           ? `${startedAssignments} of ${assignments.length} active ${pluralize(assignments.length, "assignment")} have been started, so the next question is whether practice converts into assignment progress.`
           : dominantTraining || dominantScenario

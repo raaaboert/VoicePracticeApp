@@ -1,5 +1,9 @@
 import { DashboardCoachingInsights } from "@voicepractice/shared";
 
+function formatCount(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function formatThemeDelta(delta: number | null): string {
   if (delta === null) {
     return "No prior comparison";
@@ -26,7 +30,7 @@ function ThemeList({
         <ul className="bullet-list">
           {items.map((item) => (
             <li key={`${title}:${item.themeId}`}>
-              <strong>{item.theme}</strong> ({item.countLast30Days})
+              <strong>{item.theme}</strong> ({formatCount(item.countLast30Days, "mention")})
               <div className="table-subcopy">{formatThemeDelta(item.deltaCount)}</div>
             </li>
           ))}
@@ -54,6 +58,16 @@ export function CoachingInsightsSection({
   embedded?: boolean;
 }) {
   const hasArtifactData = insights.artifactBackedScoresLast30Days > 0;
+  const coverageSummary =
+    insights.totalScoredAttemptsLast30Days === 0
+      ? "No scored attempts in the last 30 days."
+      : insights.artifactBackedScoresLast30Days === insights.totalScoredAttemptsLast30Days
+        ? `Coaching detail is available for all ${formatCount(insights.totalScoredAttemptsLast30Days, "scored attempt")} in the last 30 days.`
+        : `Coaching detail is available for ${insights.artifactBackedScoresLast30Days} of ${insights.totalScoredAttemptsLast30Days} scored attempts in the last 30 days.`;
+  const themeCoverageSummary =
+    hasArtifactData && insights.normalizedThemeScoresLast30Days < insights.artifactBackedScoresLast30Days
+      ? `${insights.normalizedThemeScoresLast30Days} of those attempts mapped cleanly to the shared theme set.`
+      : null;
 
   return (
     <section className={embedded ? "dashboard-embedded-section" : "section-card"}>
@@ -64,49 +78,37 @@ export function CoachingInsightsSection({
           <p className="section-copy">{description}</p>
         </div>
         <div className="pill-row">
-          <span className="pill accent">{insights.artifactBackedScoresLast30Days} artifact-backed</span>
+          <span className="pill accent">{insights.artifactBackedScoresLast30Days} with coaching detail</span>
           <span className="pill">{insights.totalScoredAttemptsLast30Days} scored attempts</span>
-          {insights.repeatedFocusArea ? <span className="pill">{insights.repeatedFocusArea}</span> : null}
         </div>
       </div>
 
-      <p className="small-copy" style={{ marginTop: 0 }}>
-        Only persisted coaching artifact data is included here. Artifact coverage in the last 30 days is{" "}
-        {insights.artifactBackedScoresLast30Days}/{insights.totalScoredAttemptsLast30Days} scored attempts
-        {insights.artifactCoveragePercentLast30Days !== null ? ` (${insights.artifactCoveragePercentLast30Days}%)` : ""}.
-        {insights.artifactBackedScoresLast30Days < insights.totalScoredAttemptsLast30Days
-          ? " Older score records without persisted coaching artifacts are excluded."
-          : ""}
-        {" "}Normalized theme coverage is {insights.normalizedThemeScoresLast30Days}/{insights.totalScoredAttemptsLast30Days}
-        {insights.normalizedThemeCoveragePercentLast30Days !== null
-          ? ` (${insights.normalizedThemeCoveragePercentLast30Days}%)`
-          : ""}.
-        {insights.normalizedThemeScoresLast30Days < insights.artifactBackedScoresLast30Days
-          ? " Some artifact-backed records did not map cleanly to the lightweight canonical theme set."
-          : ""}
+      <p className="small-copy dashboard-coaching-meta" style={{ marginTop: 0 }}>
+        {coverageSummary}
+        {themeCoverageSummary ? ` ${themeCoverageSummary}` : ""}
       </p>
 
       {hasArtifactData ? (
         <div className="info-grid">
           <ThemeList
-            title="Top improvement themes"
+            title="Improvement themes"
             items={insights.topImprovementAreas}
-            emptyMessage="No persisted improvement themes were found in this scope."
+            emptyMessage="No recurring improvement themes were found in this scope."
           />
           <ThemeList
-            title="Top strengths"
+            title="Strength themes"
             items={insights.topStrengths}
-            emptyMessage="No persisted strengths were found in this scope."
+            emptyMessage="No recurring strength themes were found in this scope."
           />
           <ThemeList
-            title="Top coaching priorities"
+            title="Coaching priorities"
             items={insights.topCoachingPriorities}
-            emptyMessage="No persisted coaching priorities were found in this scope."
+            emptyMessage="No recurring coaching priorities were found in this scope."
           />
         </div>
       ) : (
         <article className="detail-card">
-          <h3>No coaching aggregate coverage yet</h3>
+          <h3>No coaching detail yet</h3>
           <p>{emptyMessage}</p>
         </article>
       )}
