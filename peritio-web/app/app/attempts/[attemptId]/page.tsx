@@ -4,6 +4,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
+import { buildDashboardScopedTrainingPackHref } from "@/src/components/dashboardDivisionFilterState";
 import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardAttemptDetail } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { formatDateTime, formatRawSeconds, formatScore } from "@/src/lib/formatters";
@@ -42,13 +43,17 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function AttemptDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ attemptId: string }>;
+  searchParams: Promise<{ divisionId?: string }>;
 }) {
   const { attemptId } = await params;
+  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const divisionId = rawDivisionId ? rawDivisionId : null;
   let payload;
   try {
-    payload = await getDashboardAttemptDetail(attemptId);
+    payload = await getDashboardAttemptDetail(attemptId, divisionId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -71,11 +76,11 @@ export default async function AttemptDetailPage({
       <PageHeader
         eyebrow="Attempt detail"
         title={attempt.scenarioTitle ?? attempt.scenarioId}
-        description="This detail view uses persisted scorecard metadata only. Raw simulation transcripts are not stored for normal dashboard review."
+        description="This detail view shows the saved score result for one attempt. Standard dashboard review keeps the scored result, not the full conversation transcript."
         actions={
           <div className="pill-row">
-            <span className="pill">{attempt.trainingPackTitle ?? "Unattributed attempt"}</span>
-            <span className="pill accent">{attempt.packAttributed ? "Pack-attributed" : "Not pack-attributed"}</span>
+            <span className="pill">{attempt.trainingPackTitle ?? "No pack linked"}</span>
+            <span className="pill accent">{attempt.packAttributed ? "Linked to pack" : "Not linked to a pack"}</span>
           </div>
         }
       />
@@ -99,9 +104,9 @@ export default async function AttemptDetailPage({
           tone="accent"
         />
         <MetricCard
-          label="Model metadata"
+          label="Scoring model"
           value={attempt.model ?? "-"}
-          meta={attempt.rubricVersion ?? attempt.promptVersion ?? "No persisted model metadata"}
+          meta={attempt.rubricVersion ?? attempt.promptVersion ?? "No saved scoring metadata"}
         />
       </section>
 
@@ -117,12 +122,16 @@ export default async function AttemptDetailPage({
             Scenario: {attempt.scenarioTitle ?? attempt.scenarioId} ({attempt.segmentLabel ?? attempt.segmentId})
           </li>
           <li>
-            Training pack: {attempt.trainingPackId ? <Link className="inline-link subtle" href={`/app/training/${attempt.trainingPackId}`}>{attempt.trainingPackTitle ?? attempt.trainingPackId}</Link> : "No persisted training pack attribution"}
+            Training pack: {attempt.trainingPackId ? (
+              <Link className="inline-link subtle" href={buildDashboardScopedTrainingPackHref(attempt.trainingPackId, divisionId)}>
+                {attempt.trainingPackTitle ?? attempt.trainingPackId}
+              </Link>
+            ) : "No pack link recorded"}
           </li>
           <li>
             Assignment relation: {formatAssignmentContextStatus(attempt.assignmentContextStatus)}
           </li>
-          <li>Transcript available: No. Normal dashboard review does not retain raw conversation history.</li>
+          <li>Transcript available: No. Standard dashboard review keeps the scored result, not the full conversation history.</li>
         </ul>
       </section>
 
@@ -130,9 +139,9 @@ export default async function AttemptDetailPage({
         <div className="section-header">
           <div>
             <p className="eyebrow">Scorecard</p>
-            <h2>Persisted scoring detail</h2>
+            <h2>Saved scoring detail</h2>
             <p className="section-copy">
-              This view shows only persisted score breakdown and saved coaching fields from the original scoring event. Outcome-aware fields appear when they were stored; older score records may still contain only the legacy rubric categories. Raw simulation transcripts are not retained for normal dashboard review.
+              This view shows the score breakdown and coaching fields that were saved with the original scoring event. Newer attempts may include outcome-aware fields, while older records may still show only the earlier rubric categories. Standard dashboard review does not keep the full conversation transcript.
             </p>
           </div>
         </div>
@@ -192,12 +201,12 @@ export default async function AttemptDetailPage({
               </dl>
             </article>
             <article className="detail-card">
-              <h3>Persisted summary</h3>
-              <p>{attempt.summary ?? "No persisted score summary was saved for this attempt."}</p>
+              <h3>Saved summary</h3>
+              <p>{attempt.summary ?? "No saved score summary was recorded for this attempt."}</p>
             </article>
             <article className="detail-card">
               <h3>Coaching priority</h3>
-              <p>{attempt.coachingArtifact?.coachingPriority ?? "No persisted coaching priority was saved for this attempt."}</p>
+              <p>{attempt.coachingArtifact?.coachingPriority ?? "No saved coaching priority was recorded for this attempt."}</p>
             </article>
             <article className="detail-card">
               <h3>Strengths</h3>
@@ -208,7 +217,7 @@ export default async function AttemptDetailPage({
                   ))}
                 </ul>
               ) : (
-                <p>This historical score record does not include persisted strengths.</p>
+                <p>This older score record does not include saved strengths.</p>
               )}
             </article>
             <article className="detail-card">
@@ -220,7 +229,7 @@ export default async function AttemptDetailPage({
                   ))}
                 </ul>
               ) : (
-                <p>This historical score record does not include persisted improvement areas.</p>
+                <p>This older score record does not include saved improvement areas.</p>
               )}
             </article>
             <article className="detail-card">
@@ -234,7 +243,7 @@ export default async function AttemptDetailPage({
           </div>
         ) : (
           <article className="detail-card">
-            <h3>No persisted score breakdown</h3>
+            <h3>No saved score breakdown</h3>
             <p>This activity does not have a saved score breakdown available for dashboard review.</p>
           </article>
         )}

@@ -4,6 +4,11 @@ import { notFound, redirect } from "next/navigation";
 
 import { MetricCard } from "@/src/components/MetricCard";
 import { PageHeader } from "@/src/components/PageHeader";
+import {
+  buildDashboardScopedAttemptDetailHref,
+  buildDashboardScopedCustomerDetailHref,
+  buildDashboardScopedTrainingPackHref,
+} from "@/src/components/dashboardDivisionFilterState";
 import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardTrainingPackAssignmentDetail } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { formatDateTime, formatRawSeconds, formatScore } from "@/src/lib/formatters";
@@ -39,13 +44,17 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function TrainingPackAssignmentDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ trainingPackId: string; assignmentId: string }>;
+  searchParams: Promise<{ divisionId?: string }>;
 }) {
   const { trainingPackId, assignmentId } = await params;
+  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const divisionId = rawDivisionId ? rawDivisionId : null;
   let payload;
   try {
-    payload = await getDashboardTrainingPackAssignmentDetail(trainingPackId, assignmentId);
+    payload = await getDashboardTrainingPackAssignmentDetail(trainingPackId, assignmentId, divisionId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -68,7 +77,7 @@ export default async function TrainingPackAssignmentDetailPage({
       <PageHeader
         eyebrow="Assignment detail"
         title={assignment.email}
-        description="This drilldown shows the persisted activity behind one assignment. Only pack-attributed activity for this pack is shown, and rows outside the assignment window are labeled explicitly."
+        description="This drilldown shows the recorded activity behind one assignment. Only activity already linked to this pack appears here, and rows outside the assignment window are labeled clearly."
         actions={
           <div className="pill-row">
             <span className="pill">{pack.title}</span>
@@ -81,7 +90,7 @@ export default async function TrainingPackAssignmentDetailPage({
         <MetricCard
           label="Assigned"
           value={formatDateTime(assignment.assignedAt)}
-          meta={`Completion rule: ${assignment.completionRule}`}
+          meta="Completion rule: one scored attempt for each required scenario"
         />
         <MetricCard
           label="Started"
@@ -108,19 +117,19 @@ export default async function TrainingPackAssignmentDetailPage({
             <p className="eyebrow">Context</p>
             <h2>Assignment scope</h2>
             <p className="section-copy">
-              Only activity with this pack&apos;s `trainingPackId` is shown here. Unattributed activity is not included because it cannot be tied honestly to this assignment.
+              Only attempts that were recorded with this pack already attached appear here. Other activity stays out of this assignment view because it cannot be tied back to this assignment with confidence.
             </p>
           </div>
         </div>
         <ul className="bullet-list">
           <li>
-            Pack: <Link className="inline-link subtle" href={`/app/training/${pack.trainingPackId}`}>{pack.title}</Link> for{" "}
-            <Link className="inline-link subtle" href={`/app/customers/${pack.orgId}`}>{pack.orgName}</Link>.
+            Pack: <Link className="inline-link subtle" href={buildDashboardScopedTrainingPackHref(pack.trainingPackId, divisionId)}>{pack.title}</Link> for{" "}
+            <Link className="inline-link subtle" href={buildDashboardScopedCustomerDetailHref(pack.orgId, divisionId)}>{pack.orgName}</Link>.
           </li>
           <li>
             Required scenarios at assignment time: {assignment.requiredScenarios.length > 0 ? assignment.requiredScenarios.map((scenario) => scenario.title ?? scenario.scenarioId).join(", ") : "None mapped"}.
           </li>
-          <li>Raw transcripts are not stored for normal dashboard reporting, so this view uses persisted timing, scoring, summary, and coaching metadata only.</li>
+          <li>Conversation transcripts are not kept in normal dashboard review, so this page uses the saved timing, score, summary, and coaching details instead.</li>
         </ul>
       </section>
 
@@ -152,7 +161,7 @@ export default async function TrainingPackAssignmentDetailPage({
                     <td>{attempt.activityKind === "scored_attempt" ? "Scored Attempt" : "Usage Only"}</td>
                     <td>
                       {attempt.activityKind === "scored_attempt" ? (
-                        <Link className="inline-link subtle" href={`/app/attempts/${attempt.activityId}`}>
+                        <Link className="inline-link subtle" href={buildDashboardScopedAttemptDetailHref(attempt.activityId, divisionId)}>
                           {attempt.scenarioTitle ?? attempt.scenarioId}
                         </Link>
                       ) : (
@@ -163,9 +172,9 @@ export default async function TrainingPackAssignmentDetailPage({
                     <td>{attempt.overallScore !== null ? formatScore(attempt.overallScore) : "-"}</td>
                     <td>{formatRawSeconds(attempt.rawDurationSeconds)}</td>
                     <td>
-                      <div>{attempt.summary ?? "No persisted score summary."}</div>
+                      <div>{attempt.summary ?? "No saved score summary."}</div>
                       <div className="table-subcopy">
-                        {attempt.coachingPriority ? `Coaching priority: ${attempt.coachingPriority}` : "No persisted coaching priority"}
+                        {attempt.coachingPriority ? `Coaching priority: ${attempt.coachingPriority}` : "No saved coaching priority"}
                       </div>
                     </td>
                   </tr>
@@ -175,8 +184,8 @@ export default async function TrainingPackAssignmentDetailPage({
           </div>
         ) : (
           <article className="detail-card">
-            <h3>No pack-attributed activity yet</h3>
-            <p>No persisted pack-attributed usage or scored attempts were found for this assignment yet.</p>
+            <h3>No pack-linked activity yet</h3>
+            <p>No recorded pack-linked usage or scored attempts were found for this assignment yet.</p>
           </article>
         )}
       </section>

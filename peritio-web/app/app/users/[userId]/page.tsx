@@ -9,6 +9,10 @@ import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignals";
 import { DashboardWhatMattersSection } from "@/src/components/DashboardWhatMattersSection";
 import { PageHeader } from "@/src/components/PageHeader";
+import {
+  buildDashboardScopedAttemptDetailHref,
+  buildDashboardScopedTrainingPackAssignmentHref,
+} from "@/src/components/dashboardDivisionFilterState";
 import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardUserDetail } from "@/src/lib/auth";
 import { buildUserDetailNarrative } from "@/src/lib/dashboardNarratives";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
@@ -132,7 +136,14 @@ export default async function UserDetailPage({
                     {assignments.map((assignment) => (
                       <tr key={assignment.assignmentId}>
                         <td>
-                          <Link className="inline-link subtle" href={`/app/training/${assignment.trainingPackId}/assignments/${assignment.assignmentId}`}>
+                          <Link
+                            className="inline-link subtle"
+                            href={buildDashboardScopedTrainingPackAssignmentHref(
+                              assignment.trainingPackId,
+                              assignment.assignmentId,
+                              divisionId
+                            )}
+                          >
                             {assignment.trainingPackTitle}
                           </Link>
                         </td>
@@ -177,7 +188,7 @@ export default async function UserDetailPage({
                       <tr key={attempt.activityId}>
                         <td>{formatDateTime(attempt.endedAt)}</td>
                         <td>
-                          <Link className="inline-link subtle" href={`/app/attempts/${attempt.activityId}`}>
+                          <Link className="inline-link subtle" href={buildDashboardScopedAttemptDetailHref(attempt.activityId, divisionId)}>
                             {attempt.scenarioTitle ?? attempt.scenarioId}
                           </Link>
                         </td>

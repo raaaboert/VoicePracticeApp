@@ -311,7 +311,7 @@ export default function EnterpriseOrgPage() {
     return map;
   }, [divisionPayload]);
 
-  const segmentsActiveLabel =
+  const activeIndustriesLabel =
     activeIndustries.length > 0
       ? activeIndustries.map((id) => industryLabelById.get(id) ?? id).join(", ")
       : "-";
@@ -420,7 +420,7 @@ export default function EnterpriseOrgPage() {
 
       setDashboard((prev) => (prev ? { ...prev, org: updatedOrg } : prev));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update segments.");
+      setError(caught instanceof Error ? caught.message : "Could not update industries.");
     } finally {
       setSavingIndustries(false);
     }
@@ -781,8 +781,8 @@ export default function EnterpriseOrgPage() {
       setSuccessMessage(
         action === "approve"
           ? options?.assignOrgAdmin
-            ? "Request approved as org admin."
-            : "Request approved."
+            ? "Membership approved as org admin. Dashboard access remains off until you enable it on the user record."
+            : "Membership approved. Dashboard access remains off until you enable it on the user record."
           : "Request rejected.",
       );
       await load({ preserveSuccessMessage: true });
@@ -864,7 +864,7 @@ export default function EnterpriseOrgPage() {
                       <EnterpriseSummaryPill label="Active Users" value={String(activeUserRows.length)} />
                       <EnterpriseSummaryPill label="Pending Requests" value={String(joinRequests.length)} />
                       <EnterpriseSummaryPill
-                        label="Active Segments"
+                        label="Active Industries"
                         value={activeIndustries.length > 0 ? String(activeIndustries.length) : "0"}
                       />
                     </div>
@@ -1032,9 +1032,9 @@ export default function EnterpriseOrgPage() {
                 <div className="card enterprise-section-card">
                   <div className="card-header">
                     <div>
-                      <h3 style={{ marginBottom: 6 }}>Identity, Segments & Enrollment</h3>
+                      <h3 style={{ marginBottom: 6 }}>Identity, Industries & Enrollment</h3>
                       <p className="small">
-                        Domain controls, join code management, and segment activation for this enterprise account.
+                        Domain controls, join code management, and industry activation for this enterprise account.
                       </p>
                     </div>
                   </div>
@@ -1049,8 +1049,8 @@ export default function EnterpriseOrgPage() {
                         <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
                       </div>
                       <div className="enterprise-detail-item">
-                        <label>Segments Active</label>
-                        <div className="enterprise-detail-value break-word">{segmentsActiveLabel}</div>
+                        <label>Industries Active</label>
+                        <div className="enterprise-detail-value break-word">{activeIndustriesLabel}</div>
                       </div>
                       <div className="enterprise-detail-item">
                         <label>Billing Period</label>
@@ -1060,7 +1060,7 @@ export default function EnterpriseOrgPage() {
                       </div>
                     </div>
                     <div style={{ marginTop: 16 }}>
-                      <label>Segment Selection</label>
+                      <label>Industry Selection</label>
                       <p className="small" style={{ marginTop: 2, marginBottom: 10 }}>
                         Select an industry and toggle whether it is active for this company.
                       </p>
@@ -1144,7 +1144,7 @@ export default function EnterpriseOrgPage() {
             <div className="card-header">
               <div>
                 <h3 style={{ marginBottom: 6 }}>Users & Access</h3>
-                <p className="small">Pending org access requests and enterprise user controls live here.</p>
+                <p className="small">Pending company membership requests and enterprise user controls live here.</p>
               </div>
             </div>
             <div className="enterprise-summary-grid">
@@ -1172,11 +1172,15 @@ export default function EnterpriseOrgPage() {
           <div className="card">
             <div className="card-header">
               <div>
-                <h3 style={{ marginBottom: 6 }}>Org Access Requests</h3>
+                <h3 style={{ marginBottom: 6 }}>Org Membership Requests</h3>
                 <div className="small">
                   Pending requests for this account: {joinRequests.length}
                   {joinRequestsGeneratedAt ? ` | Refreshed ${formatDateTime(joinRequestsGeneratedAt)}` : ""}
                 </div>
+                <p className="small" style={{ marginTop: 6, marginBottom: 0 }}>
+                  Approving a request adds the user to this company account. Dashboard access is still managed separately
+                  in the Users table.
+                </p>
               </div>
               <div className="card-actions">
                 <button type="button" onClick={() => toggleCard("accessRequests")}>
@@ -1224,14 +1228,14 @@ export default function EnterpriseOrgPage() {
                                 disabled={actingJoinRequestId === row.id}
                                 onClick={() => void decideJoinRequest(row.id, "approve")}
                               >
-                                {actingJoinRequestId === row.id ? "Saving..." : "Approve"}
+                                {actingJoinRequestId === row.id ? "Saving..." : "Approve Membership"}
                               </button>
                               <button
                                 type="button"
                                 disabled={actingJoinRequestId === row.id}
                                 onClick={() => void decideJoinRequest(row.id, "approve", { assignOrgAdmin: true })}
                               >
-                                Approve as Org Admin
+                                Approve Membership as Org Admin
                               </button>
                               <button
                                 type="button"
@@ -1250,7 +1254,7 @@ export default function EnterpriseOrgPage() {
                 </table>
               </div>
             ) : (
-              <p className="small">Org access requests are collapsed.</p>
+              <p className="small">Org membership requests are collapsed.</p>
             )}
           </div>
 

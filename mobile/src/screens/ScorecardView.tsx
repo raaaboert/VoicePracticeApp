@@ -165,8 +165,8 @@ export function ScorecardView({
                 </Text>
               </Pressable>
               <Text style={styles.body}>
-                [Company Name] does not retain transcripts of your session. Only scoring and usage data are stored.
-                Transcripts are not available after leaving this screen unless you choose to download them now.
+                Peritio does not keep the transcript from this session after you leave this screen. Only score and usage
+                data remain in the product unless you choose to share a transcript with support.
               </Text>
               {downloadError ? <Text style={styles.warningText}>{downloadError}</Text> : null}
             </View>

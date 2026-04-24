@@ -5,6 +5,7 @@ import { useState } from "react";
 import { DashboardCustomerInsights } from "@voicepractice/shared";
 
 import { formatDateTime, formatScore, formatSignedPercent, formatUsageMinutes } from "@/src/lib/formatters";
+import { buildDashboardScopedTrainingPackHref } from "@/src/components/dashboardDivisionFilterState";
 
 type CustomerTab = "overview" | "users" | "scenarios";
 
@@ -21,9 +22,11 @@ function formatOrgRole(orgRole: string): string {
 export function CustomerDetailTabs({
   customerName,
   insights,
+  divisionId,
 }: {
   customerName: string;
   insights: DashboardCustomerInsights;
+  divisionId: string | null;
 }) {
   const [activeTab, setActiveTab] = useState<CustomerTab>("overview");
 
@@ -85,9 +88,9 @@ export function CustomerDetailTabs({
           {insights.trainingPackAttribution.unattributedUsageSessionsLast30Days > 0 ||
           insights.trainingPackAttribution.unattributedScoresLast30Days > 0 ? (
             <p className="small-copy" style={{ margin: 0 }}>
-              Training pack attribution is forward-only. Recent linked activity is shown below, while{" "}
+              Recent linked activity is shown below, while{" "}
               {insights.trainingPackAttribution.unattributedUsageSessionsLast30Days} usage sessions and{" "}
-              {insights.trainingPackAttribution.unattributedScoresLast30Days} score records in the 30-day window still predate pack linkage.
+              {insights.trainingPackAttribution.unattributedScoresLast30Days} score records in the 30-day window were recorded before a pack link was available.
             </p>
           ) : null}
 
@@ -100,7 +103,10 @@ export function CustomerDetailTabs({
                     <span className="pill">{trainingPack.scenarioSelectionLabel}</span>
                   </div>
                   <h3>
-                    <Link className="inline-link subtle" href={`/app/training/${trainingPack.trainingPackId}`}>
+                    <Link
+                      className="inline-link subtle"
+                      href={buildDashboardScopedTrainingPackHref(trainingPack.trainingPackId, divisionId)}
+                    >
                       {trainingPack.title}
                     </Link>
                   </h3>
@@ -136,7 +142,7 @@ export function CustomerDetailTabs({
             ) : (
               <article className="detail-card">
                 <h3>No training packs returned</h3>
-                <p>{customerName} does not currently have training-pack rows available through the active backend storage provider.</p>
+                <p>{customerName} does not currently have training-pack rows available in this dashboard view.</p>
               </article>
             )}
           </div>

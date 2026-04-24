@@ -43,7 +43,8 @@ export default async function LoginPage({
           </p>
           {dashboardAccessMissing ? (
             <p className="form-error">
-              You are signed in, but this account does not currently have dashboard access.
+              You are signed in, but this account does not currently have dashboard access. Company membership and
+              dashboard reporting access are managed separately.
             </p>
           ) : sessionExpired ? (
             <p className="form-error">

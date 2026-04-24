@@ -8,6 +8,10 @@ import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignals";
 import { DashboardWhatMattersSection } from "@/src/components/DashboardWhatMattersSection";
 import { PageHeader } from "@/src/components/PageHeader";
+import {
+  buildDashboardScopedCustomerDetailHref,
+  buildDashboardScopedTrainingPackAssignmentHref,
+} from "@/src/components/dashboardDivisionFilterState";
 import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardTrainingPackDetail } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { buildTrainingPackNarrative } from "@/src/lib/dashboardNarratives";
@@ -35,13 +39,17 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function TrainingPackDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ trainingPackId: string }>;
+  searchParams: Promise<{ divisionId?: string }>;
 }) {
   const { trainingPackId } = await params;
+  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const divisionId = rawDivisionId ? rawDivisionId : null;
   let payload;
   try {
-    payload = await getDashboardTrainingPackDetail(trainingPackId);
+    payload = await getDashboardTrainingPackDetail(trainingPackId, divisionId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -59,13 +67,21 @@ export default async function TrainingPackDetailPage({
 
   const { pack } = payload;
   const narrative = buildTrainingPackNarrative(payload);
+  const isDivisionScopedView = Boolean(divisionId);
+  const hasScopedPackEvidence =
+    pack.assignments.length > 0 ||
+    pack.attemptsLast30Days > 0 ||
+    pack.scoredAttemptsLast30Days > 0 ||
+    pack.startedLearnerCount > 0 ||
+    pack.completedLearnerCount > 0 ||
+    pack.inProgressLearnerCount > 0;
 
   return (
     <>
       <PageHeader
         eyebrow="Training pack detail"
         title={pack.title}
-        description="This drilldown shows assignment-based progress, required scenarios, pack-linked attempts, and forward-only completion for this training program."
+        description="This drilldown shows learner progress, required scenarios, and recent attempts that were recorded with this training pack already attached."
         actions={
           <div className="pill-row">
             <span className="pill">{pack.active ? "Active" : "Inactive"}</span>
@@ -88,21 +104,37 @@ export default async function TrainingPackDetailPage({
         <div className="dashboard-proof-stack">
           <div className="dashboard-proof-block">
             <h3>Pack metadata</h3>
-            <p>Completion uses the required scenario snapshot stored at assignment time. If the pack definition changes later, existing assignments keep their original snapshot.</p>
+            <p>Each assignment keeps the required-scenario list that was in place when the learner was assigned. Later pack edits do not rewrite earlier assignment progress.</p>
             <ul className="bullet-list">
-              <li>Customer: <Link className="inline-link subtle" href={`/app/customers/${pack.orgId}`}>{pack.orgName}</Link></li>
+              <li>
+                Customer: <Link className="inline-link subtle" href={buildDashboardScopedCustomerDetailHref(pack.orgId, divisionId)}>{pack.orgName}</Link>
+              </li>
               <li>Topic: {pack.trainingTopic || "No training topic recorded."}</li>
               <li>Scenario mapping: {pack.scenarioSelectionLabel}. Required behaviors: {pack.requiredBehaviorCount}. Objectives: {pack.objectiveCount}.</li>
-              <li>Forward-only attribution: {pack.trainingPackAttribution.attributedScoresLast30Days} scored attempts in the current 30-day window are linked to this pack; {pack.trainingPackAttribution.unattributedScoresLast30Days} are not backfilled.</li>
+              <li>
+                Scope policy: {isDivisionScopedView
+                  ? "This drilldown is pinned to the selected division. Empty tables stay empty instead of widening back to company totals."
+                  : "This page is currently showing company-total evidence for the customer."}
+              </li>
+              <li>Recorded pack activity: {pack.trainingPackAttribution.attributedScoresLast30Days} scored attempts in the current 30-day window were already linked to this pack when they were recorded. {pack.trainingPackAttribution.unattributedScoresLast30Days} other scored attempts stay outside this pack view.</li>
               <li>Score averages here are based on conclusive scored attempts. They summarize completed scoring events, not guaranteed objective achievement.</li>
             </ul>
           </div>
+
+          {isDivisionScopedView && !hasScopedPackEvidence ? (
+            <div className="dashboard-proof-block">
+              <div className="empty-state-panel">
+                <h3>No visible pack evidence in this division</h3>
+                <p>This training pack still belongs to {pack.orgName}, but the selected division does not currently have visible assignments or attributed attempts for it. Peritio keeps the pack metadata in view and does not widen this drilldown back to company totals.</p>
+              </div>
+            </div>
+          ) : null}
 
           <div className="dashboard-proof-block">
             <CoachingInsightsSection
               eyebrow="Coaching themes"
               title="Most common coaching signals in this pack"
-              description="These themes come from pack-attributed scored attempts that saved coaching detail."
+              description="These themes come from recent scored attempts that were linked to this pack and included coaching detail."
               insights={pack.coachingInsights}
               emptyMessage="This pack does not yet have enough recent scored attempts with coaching detail to show coaching themes."
               embedded
@@ -111,7 +143,7 @@ export default async function TrainingPackDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Recent pack activity</h3>
-            <p>Review recent activity and scoring volume by period.</p>
+            <p>Review recent activity and scoring volume by period{isDivisionScopedView ? " for the selected division" : ""}.</p>
             <div className="trend-grid">
               {pack.trend.map((point) => (
                 <article key={point.label} className="trend-card">
@@ -179,7 +211,7 @@ export default async function TrainingPackDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Per-user progress</h3>
-            <p>Use assignment detail here for exact learner follow-up.</p>
+            <p>{isDivisionScopedView ? "Assignment detail remains limited to the selected division. Out-of-scope learners are excluded rather than widened into company totals." : "Use assignment detail here for exact learner follow-up."}</p>
             {pack.assignments.length > 0 ? (
               <div className="table-scroll">
                 <table className="data-table">
@@ -200,7 +232,14 @@ export default async function TrainingPackDetailPage({
                     {pack.assignments.map((assignment) => (
                       <tr key={assignment.assignmentId}>
                         <td>
-                          <Link className="inline-link subtle" href={`/app/training/${pack.trainingPackId}/assignments/${assignment.assignmentId}`}>
+                          <Link
+                            className="inline-link subtle"
+                            href={buildDashboardScopedTrainingPackAssignmentHref(
+                              pack.trainingPackId,
+                              assignment.assignmentId,
+                              divisionId
+                            )}
+                          >
                             <strong>{assignment.email}</strong>
                           </Link>
                           <div className="table-subcopy">{formatUserStatus(assignment.userStatus)}</div>
@@ -226,8 +265,8 @@ export default async function TrainingPackDetailPage({
               </div>
             ) : (
               <div className="empty-state-panel">
-                <h3>No assigned users yet</h3>
-                <p>Assignments are the durable lifecycle record for this training pack. Once users are assigned, their start and completion status will appear here.</p>
+                <h3>{isDivisionScopedView ? "No visible learners in this division" : "No assigned users yet"}</h3>
+                <p>{isDivisionScopedView ? "This pack remains valid, but the current division filter leaves no in-scope assignments or linked learner activity to show here. Peritio intentionally keeps this empty instead of widening the view." : "Assignments are the official roster for this training pack. Once users are assigned, their start and completion status will appear here."}</p>
               </div>
             )}
           </div>
@@ -235,9 +274,9 @@ export default async function TrainingPackDetailPage({
           <div className="dashboard-proof-block">
             <h3>Current limitations</h3>
             <ul className="bullet-list">
-              <li>Completion is only accurate for pack-linked scored activity recorded after `trainingPackId` linkage was added.</li>
-              <li>Older unattributed activity is not backfilled into assignment progress.</li>
-              <li>Assignments use the required scenario snapshot captured when each user was assigned.</li>
+              <li>Completion is only reliable for scored activity that was recorded with this pack already attached.</li>
+              <li>Older activity without that pack link stays outside assignment progress.</li>
+              <li>Each assignment keeps the required-scenario list that was active on the day the learner was assigned.</li>
             </ul>
           </div>
         </div>

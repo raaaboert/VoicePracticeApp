@@ -1158,6 +1158,7 @@ export interface AdminTrainingPackAssignmentsResponse {
   orgId: string;
   trainingPackId: string;
   assignments: TrainingPackAssignmentRecord[];
+  deactivatedInvalidAssignmentCount?: number;
 }
 
 export interface SetTrainingPackAssignmentsRequest {

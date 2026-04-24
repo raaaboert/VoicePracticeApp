@@ -4,6 +4,10 @@ import test from "node:test";
 import type { DashboardDivisionScope } from "@voicepractice/shared";
 
 import {
+  buildDashboardScopedAttemptDetailHref,
+  buildDashboardScopedCustomerDetailHref,
+  buildDashboardScopedTrainingPackAssignmentHref,
+  buildDashboardScopedTrainingPackHref,
   buildDashboardDivisionSearch,
   buildDashboardScopedUserDetailHref,
   canRenderDashboardWorkspaceDivisionFilter,
@@ -33,6 +37,16 @@ test("buildDashboardDivisionSearch applies the selected division without droppin
 test("buildDashboardScopedUserDetailHref preserves the active division filter when present", () => {
   assert.equal(buildDashboardScopedUserDetailHref("user_1", "division_a"), "/app/users/user_1?divisionId=division_a");
   assert.equal(buildDashboardScopedUserDetailHref("user_1", null), "/app/users/user_1");
+});
+
+test("scoped drilldown href helpers preserve division filters across deeper navigation", () => {
+  assert.equal(buildDashboardScopedCustomerDetailHref("org_1", "division_a"), "/app/customers/org_1?divisionId=division_a");
+  assert.equal(buildDashboardScopedTrainingPackHref("pack_1", "division_a"), "/app/training/pack_1?divisionId=division_a");
+  assert.equal(
+    buildDashboardScopedTrainingPackAssignmentHref("pack_1", "assign_1", "division_a"),
+    "/app/training/pack_1/assignments/assign_1?divisionId=division_a"
+  );
+  assert.equal(buildDashboardScopedAttemptDetailHref("attempt_1", "division_a"), "/app/attempts/attempt_1?divisionId=division_a");
 });
 
 test("canRenderSingleScopeDivisionFilter only returns true when options exist", () => {

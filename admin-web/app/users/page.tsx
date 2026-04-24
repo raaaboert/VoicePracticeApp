@@ -161,7 +161,7 @@ export default function UsersPage() {
         "Company Contact",
         "Contact Email",
         "Org Admin",
-        "Active Segments",
+        "Active Industries",
         "Current Usage Minutes",
         "Monthly Allotment Minutes",
         "Renewal Total (USD)"
@@ -323,7 +323,7 @@ export default function UsersPage() {
                   <th>Contact Email</th>
                   <th>Domain</th>
                   <th>Join Code</th>
-                  <th>Segments Active</th>
+                  <th>Industries Active</th>
                 </tr>
               </thead>
               <tbody>

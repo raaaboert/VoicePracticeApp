@@ -1,7 +1,9 @@
-import { useEffect, useRef } from "react";
-import { Animated, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Animated, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 
-export type OrbMode = "idle" | "recording" | "thinking" | "speaking";
+import { computeVoiceOrbLayout, type VoiceOrbLayoutMode } from "../lib/voiceOrbLayout";
+
+export type OrbMode = VoiceOrbLayoutMode;
 
 interface VoiceOrbProps {
   mode: OrbMode;
@@ -184,12 +186,19 @@ function getActivePhaseLabel(mode: OrbMode): string {
 }
 
 export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
-  const pulseValue = useRef(new Animated.Value(1)).current;
+  const { width: windowWidth } = useWindowDimensions();
+  const [pulseValue] = useState(() => new Animated.Value(1));
+  const [stageVisualWidth, setStageVisualWidth] = useState(0);
   const theme = THEME[variant];
   const colors = MODE_COLORS[variant][mode];
-  const haloSize = mode === "speaking" ? 184 : mode === "thinking" ? 166 : 152;
-  const haloPeakScale = mode === "speaking" ? 1.18 : mode === "thinking" ? 1.14 : 1.11;
-  const haloMaxOpacity = mode === "speaking" ? 0.34 : mode === "thinking" ? 0.3 : 0.26;
+  const compactScreen = windowWidth < 380;
+  const fallbackStageVisualWidth = Math.min(Math.max(windowWidth - 132, 208), 332);
+  const visualLayout = computeVoiceOrbLayout({
+    availableWidth: stageVisualWidth > 0 ? stageVisualWidth : fallbackStageVisualWidth,
+    mode,
+  });
+  const shellHorizontalPadding = windowWidth < 360 ? 14 : 18;
+  const stagePanelHorizontalPadding = windowWidth < 360 ? 12 : 16;
 
   useEffect(() => {
     pulseValue.stopAnimation();
@@ -226,12 +235,12 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
 
   const haloScale = pulseValue.interpolate({
     inputRange: [1, 1.1],
-    outputRange: [1, haloPeakScale],
+    outputRange: [1, visualLayout.haloPeakScale],
     extrapolate: "clamp",
   });
   const haloOpacity = pulseValue.interpolate({
     inputRange: [1, 1.1],
-    outputRange: [haloMaxOpacity, 0.09],
+    outputRange: [visualLayout.haloMaxOpacity, 0.09],
     extrapolate: "clamp",
   });
   const activeDotScale = pulseValue.interpolate({
@@ -244,7 +253,16 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
 
   return (
     <View style={styles.wrapper}>
-      <View style={[styles.shell, { backgroundColor: theme.shellBg, borderColor: theme.shellBorder }]}>
+      <View
+        style={[
+          styles.shell,
+          {
+            backgroundColor: theme.shellBg,
+            borderColor: theme.shellBorder,
+            paddingHorizontal: shellHorizontalPadding,
+          },
+        ]}
+      >
         <View style={styles.headerRow}>
           <View style={styles.headerCopy}>
             <Text style={[styles.engineLabel, { color: theme.headerLabel }]}>Peritio Engine</Text>
@@ -255,40 +273,157 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
           </View>
         </View>
 
-        <View style={[styles.stagePanel, { backgroundColor: theme.stageBg, borderColor: theme.stageBorder }]}>
+        <View
+          style={[
+            styles.stagePanel,
+            {
+              backgroundColor: theme.stageBg,
+              borderColor: theme.stageBorder,
+              paddingHorizontal: stagePanelHorizontalPadding,
+            },
+          ]}
+        >
           <Text style={[styles.stageEyebrow, { color: theme.headerLabel }]}>Current phase</Text>
           <View style={styles.stageCurrentRow}>
             <View style={[styles.activePhaseChip, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
               <Text style={[styles.activePhaseChipText, { color: colors.accent }]}>{phaseLabel}</Text>
             </View>
-            <Text style={[styles.stageCaption, { color: theme.caption }]}>{MODE_CAPTIONS[mode]}</Text>
+            <Text
+              style={[
+                styles.stageCaption,
+                { color: theme.caption },
+                compactScreen ? styles.stageCaptionCompact : null,
+              ]}
+            >
+              {MODE_CAPTIONS[mode]}
+            </Text>
           </View>
 
-          <View style={styles.stageVisual}>
-            <View style={[styles.connector, styles.connectorLeft, { backgroundColor: colors.accentSoft }]} />
+          <View
+            style={[
+              styles.stageVisual,
+              {
+                minHeight: visualLayout.stageVisualHeight,
+                height: visualLayout.stageVisualHeight,
+              },
+            ]}
+            onLayout={(event) => {
+              const nextWidth = Math.round(event.nativeEvent.layout.width);
+              setStageVisualWidth((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
+            }}
+          >
+            <View
+              style={[
+                styles.connector,
+                styles.connectorLeft,
+                {
+                  backgroundColor: colors.accentSoft,
+                  width: visualLayout.connectorWidth,
+                  left: visualLayout.connectorInset,
+                },
+              ]}
+            />
             <Animated.View
               style={[
                 styles.halo,
                 {
                   backgroundColor: colors.glow,
-                  width: haloSize,
-                  height: haloSize,
+                  width: visualLayout.haloDiameter,
+                  height: visualLayout.haloDiameter,
                   opacity: haloOpacity,
                   transform: [{ scale: haloScale }],
                 },
               ]}
             />
-            <View style={[styles.coreShell, { backgroundColor: theme.coreShell, borderColor: theme.coreBorder, shadowColor: theme.shadow }]}>
-              <View style={[styles.coreGridHorizontal, { backgroundColor: theme.coreGrid }]} />
-              <View style={[styles.coreGridVertical, { backgroundColor: theme.coreGrid }]} />
-              <View style={[styles.coreRing, { borderColor: colors.accentSoft }]} />
-              <View style={[styles.coreRingInner, { borderColor: colors.accent }]} />
+            <View
+              style={[
+                styles.coreShell,
+                {
+                  backgroundColor: theme.coreShell,
+                  borderColor: theme.coreBorder,
+                  borderRadius: visualLayout.coreBorderRadius,
+                  height: visualLayout.coreSize,
+                  width: visualLayout.coreSize,
+                  shadowColor: theme.shadow,
+                  shadowRadius: visualLayout.shadowRadius,
+                  shadowOffset: { width: 0, height: visualLayout.shadowOffsetY },
+                },
+              ]}
+            >
+              <View
+                style={[
+                  styles.coreGridHorizontal,
+                  {
+                    backgroundColor: theme.coreGrid,
+                    width: visualLayout.coreGridLength,
+                  },
+                ]}
+              />
+              <View
+                style={[
+                  styles.coreGridVertical,
+                  {
+                    backgroundColor: theme.coreGrid,
+                    height: visualLayout.coreGridLength,
+                  },
+                ]}
+              />
+              <View
+                style={[
+                  styles.coreRing,
+                  {
+                    borderColor: colors.accentSoft,
+                    height: visualLayout.outerRingSize,
+                    width: visualLayout.outerRingSize,
+                  },
+                ]}
+              />
+              <View
+                style={[
+                  styles.coreRingInner,
+                  {
+                    borderColor: colors.accent,
+                    height: visualLayout.innerRingSize,
+                    width: visualLayout.innerRingSize,
+                  },
+                ]}
+              />
               <Animated.View style={[styles.coreDotWrap, { transform: [{ scale: activeDotScale }] }]}>
-                <View style={[styles.coreDot, { backgroundColor: colors.accent }]} />
+                <View
+                  style={[
+                    styles.coreDot,
+                    {
+                      backgroundColor: colors.accent,
+                      height: visualLayout.dotSize,
+                      width: visualLayout.dotSize,
+                    },
+                  ]}
+                />
               </Animated.View>
-              <View style={[styles.coreHighlight, { backgroundColor: colors.highlight }]} />
+              <View
+                style={[
+                  styles.coreHighlight,
+                  {
+                    backgroundColor: colors.highlight,
+                    height: visualLayout.highlightSize,
+                    right: visualLayout.highlightRight,
+                    top: visualLayout.highlightTop,
+                    width: visualLayout.highlightSize,
+                  },
+                ]}
+              />
             </View>
-            <View style={[styles.connector, styles.connectorRight, { backgroundColor: mode === "speaking" ? colors.accentSoft : theme.coreGrid }]} />
+            <View
+              style={[
+                styles.connector,
+                styles.connectorRight,
+                {
+                  backgroundColor: mode === "speaking" ? colors.accentSoft : theme.coreGrid,
+                  right: visualLayout.connectorInset,
+                  width: visualLayout.connectorWidth,
+                },
+              ]}
+            />
           </View>
         </View>
 
@@ -449,16 +584,20 @@ const styles = StyleSheet.create({
     minWidth: 180,
     textAlign: "right",
   },
+  stageCaptionCompact: {
+    minWidth: 0,
+    textAlign: "left",
+  },
   stageVisual: {
     width: "100%",
-    minHeight: 122,
     alignItems: "center",
     justifyContent: "center",
+    borderRadius: 999,
+    overflow: "hidden",
   },
   connector: {
     position: "absolute",
     top: "50%",
-    width: 84,
     height: 2,
     marginTop: -1,
     borderRadius: 999,
@@ -474,40 +613,29 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   coreShell: {
-    width: 96,
-    height: 96,
-    borderRadius: 28,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
     shadowOpacity: 0.12,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 },
     elevation: 4,
   },
   coreGridHorizontal: {
     position: "absolute",
-    width: 44,
     height: 1,
     borderRadius: 999,
   },
   coreGridVertical: {
     position: "absolute",
     width: 1,
-    height: 44,
     borderRadius: 999,
   },
   coreRing: {
     position: "absolute",
-    width: 58,
-    height: 58,
     borderRadius: 999,
     borderWidth: 1,
   },
   coreRingInner: {
     position: "absolute",
-    width: 36,
-    height: 36,
     borderRadius: 999,
     borderWidth: 2,
   },
@@ -516,16 +644,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   coreDot: {
-    width: 16,
-    height: 16,
     borderRadius: 999,
   },
   coreHighlight: {
     position: "absolute",
-    top: 23,
-    right: 24,
-    width: 10,
-    height: 10,
     borderRadius: 999,
     opacity: 0.72,
   },

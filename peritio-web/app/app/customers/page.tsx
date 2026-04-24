@@ -49,9 +49,9 @@ export default async function CustomersPage() {
       <section className="metric-grid">
         <MetricCard label="Customer accounts" value={`${customerCount}`} meta="Accounts currently in your reporting scope" />
         <MetricCard
-          label="Active learners"
+          label="Active enterprise users"
           value={`${totalActiveUsers}`}
-          meta="Active enterprise users across visible accounts"
+          meta="User accounts currently marked active across visible customers"
           tone="accent"
         />
         <MetricCard

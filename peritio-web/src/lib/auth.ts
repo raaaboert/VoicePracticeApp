@@ -317,12 +317,15 @@ export async function getDashboardTrainingWorkspace(
   }
 }
 
-export async function getDashboardTrainingPackDetail(trainingPackId: string): Promise<DashboardTrainingPackDetailResponse | null> {
+export async function getDashboardTrainingPackDetail(
+  trainingPackId: string,
+  divisionId?: string | null
+): Promise<DashboardTrainingPackDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingPackDetailResponse>(
-      `/dashboard/training/${encodeURIComponent(trainingPackId)}`,
+      appendDivisionQuery(`/dashboard/training/${encodeURIComponent(trainingPackId)}`, divisionId),
       { token }
     );
   } catch (error) {
@@ -346,13 +349,17 @@ export async function getDashboardTrainingPackDetail(trainingPackId: string): Pr
 
 export async function getDashboardTrainingPackAssignmentDetail(
   trainingPackId: string,
-  assignmentId: string
+  assignmentId: string,
+  divisionId?: string | null
 ): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingPackAssignmentDetailResponse>(
-      `/dashboard/training/${encodeURIComponent(trainingPackId)}/assignments/${encodeURIComponent(assignmentId)}`,
+      appendDivisionQuery(
+        `/dashboard/training/${encodeURIComponent(trainingPackId)}/assignments/${encodeURIComponent(assignmentId)}`,
+        divisionId
+      ),
       { token }
     );
   } catch (error) {
@@ -418,11 +425,17 @@ export async function getDashboardUserDetail(
   }
 }
 
-export async function getDashboardAttemptDetail(attemptId: string): Promise<DashboardAttemptDetailResponse | null> {
+export async function getDashboardAttemptDetail(
+  attemptId: string,
+  divisionId?: string | null
+): Promise<DashboardAttemptDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
-    return await fetchDashboardApi<DashboardAttemptDetailResponse>(`/dashboard/attempts/${encodeURIComponent(attemptId)}`, { token });
+    return await fetchDashboardApi<DashboardAttemptDetailResponse>(
+      appendDivisionQuery(`/dashboard/attempts/${encodeURIComponent(attemptId)}`, divisionId),
+      { token }
+    );
   } catch (error) {
     if (error instanceof DashboardApiError) {
       if (error.status === 404) {

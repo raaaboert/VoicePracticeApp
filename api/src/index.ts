@@ -231,6 +231,13 @@ import {
   pruneStaleRecognizedSimulationSessions,
   repairOrphanedUserScopedHistory
 } from "./services/integrityMaintenance.js";
+import {
+  deactivateInvalidTrainingPackAssignments,
+  deactivateInvalidTrainingPackAssignmentsForUser,
+  deactivateTrainingPackAssignmentsForUser,
+  isTrainingPackAssignmentValidForUser,
+  listTrainingPackAssignmentEligibleUsers,
+} from "./services/trainingPackAssignments.js";
 import { createWebAuthService, WebAuthTokenPayload } from "./services/webAuth.js";
 import { normalizeDesiredOutcomeText } from "./services/scenarioTextNormalization.js";
 import { getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
@@ -3957,15 +3964,17 @@ async function runStartupUsageIntegrityMaintenance(): Promise<void> {
       || orphanRepair.orphanedSimulationSessionsDeleted > 0
       || orphanRepair.orphanedScoreRecordsDeleted > 0
       || orphanRepair.orphanedAiUsageEventsDeleted > 0
-      || orphanRepair.orphanedSupportCasesDeleted > 0;
+      || orphanRepair.orphanedSupportCasesDeleted > 0
+      || orphanRepair.invalidTrainingPackAssignmentsDeactivated > 0;
     if (hasOrphanRepair) {
       logWarn(
-        `[integrity][startup] cleaned orphaned user-scoped history `
+        `[integrity][startup] cleaned invalid user-scoped history `
         + `(usage=${orphanRepair.orphanedUsageSessionsDeleted}, `
         + `recognized_sessions=${orphanRepair.orphanedSimulationSessionsDeleted}, `
         + `scores=${orphanRepair.orphanedScoreRecordsDeleted}, `
         + `ai_usage=${orphanRepair.orphanedAiUsageEventsDeleted}, `
-        + `support=${orphanRepair.orphanedSupportCasesDeleted}).`
+        + `support=${orphanRepair.orphanedSupportCasesDeleted}, `
+        + `assignments=${orphanRepair.invalidTrainingPackAssignmentsDeactivated}).`
       );
     }
 
@@ -4955,6 +4964,16 @@ function listTrainingPackAssignments(
   });
 }
 
+function listVisibleTrainingPackAssignments(
+  db: ApiDatabase,
+  orgId: string,
+  trainingPackId: string
+): TrainingPackAssignmentRecord[] {
+  return listTrainingPackAssignments(db, orgId, trainingPackId).filter((assignment) =>
+    isTrainingPackAssignmentValidForUser(assignment, getUserById(db, assignment.userId))
+  );
+}
+
 function resolveTrainingPackAssignmentCompletionAt(
   assignment: TrainingPackAssignmentRecord,
   scoreRecords: SimulationScoreRecord[]
@@ -5503,19 +5522,24 @@ async function buildDashboardTrainingPackRows(
       const packSessions = currentSessions.filter((session) => session.trainingPackId === pack.id);
       const packScores = currentScores.filter((record) => record.trainingPackId === pack.id);
       const previousPackScores = previousScores.filter((record) => record.trainingPackId === pack.id);
-      const assignments = listTrainingPackAssignments(db, org.id, pack.id);
-      const completionSupported = requiredScenarioIds.length > 0 || assignments.some((assignment) => assignment.requiredScenarioIds.length > 0);
-      const assignmentRows = assignments.map((assignment) =>
-        computeTrainingPackAssignmentProgress({
-          db,
-          assignment,
-          scenarioCatalog,
-          allSessions: packAllSessions,
-          allScores: packAllScores,
-          recentSessions: packSessions,
-          recentScores: packScores
-        })
+      const assignments = listVisibleTrainingPackAssignments(db, org.id, pack.id).map((assignment) =>
+        projectTrainingPackAssignmentLifecycle(db, assignment)
       );
+      const assignmentRows = assignments
+        .map((assignment) =>
+          computeTrainingPackAssignmentProgress({
+            db,
+            assignment,
+            scenarioCatalog,
+            allSessions: packAllSessions,
+            allScores: packAllScores,
+            recentSessions: packSessions,
+            recentScores: packScores
+          })
+        )
+        .filter((row) => !divisionId || row.status !== "not_started");
+      const completionSupported =
+        requiredScenarioIds.length > 0 || assignments.some((assignment) => assignment.requiredScenarioIds.length > 0);
       const learnerCount = new Set<string>([
         ...packSessions.map((session) => session.userId),
         ...packScores.map((record) => record.userId)
@@ -5558,6 +5582,520 @@ async function buildDashboardTrainingPackRows(
         createdAt: pack.createdAt
       };
     });
+}
+
+function isDashboardDivisionScopedAssignmentVisible(
+  row: Pick<DashboardTrainingPackAssignmentProgressRow, "status">,
+  divisionId: string | null
+): boolean {
+  return !divisionId || row.status !== "not_started";
+}
+
+async function buildDashboardTrainingPackDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  trainingPackId: string,
+  divisionId: string | null = null
+): Promise<DashboardTrainingPackDetailResponse | null> {
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  if (!located) {
+    return null;
+  }
+
+  const { org, pack, scenarioCatalog } = located;
+  const now = new Date();
+  const nowMs = now.getTime();
+  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, divisionId);
+  const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
+  if (!packSummary) {
+    return null;
+  }
+
+  const allPackSessions = filterRecordsByDivision(
+    listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id }),
+    divisionId
+  );
+  const allPackScores = filterRecordsByDivision(
+    listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true }),
+    divisionId
+  );
+  const recentPackSessions = allPackSessions.filter((session) => {
+    const startedAtMs = new Date(session.startedAt).getTime();
+    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
+  });
+  const recentPackScores = allPackScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
+  });
+  const previousPackScores = allPackScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+  const assignmentProgressRows = listVisibleTrainingPackAssignments(db, org.id, pack.id)
+    .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment))
+    .map((assignment) => {
+      const progress = computeTrainingPackAssignmentProgress({
+        db,
+        assignment,
+        scenarioCatalog,
+        allSessions: allPackSessions,
+        allScores: allPackScores,
+        recentSessions: recentPackSessions,
+        recentScores: recentPackScores
+      });
+      return { assignment, progress };
+    })
+    .filter((entry) => isDashboardDivisionScopedAssignmentVisible(entry.progress, divisionId));
+  const assignmentRows = assignmentProgressRows
+    .map((entry) => entry.progress)
+    .sort((left, right) => {
+      if (left.status !== right.status) {
+        const order: Record<TrainingPackAssignmentProgressStatus, number> = {
+          in_progress: 0,
+          not_started: 1,
+          completed: 2
+        };
+        return order[left.status] - order[right.status];
+      }
+      const latestDelta =
+        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.email.localeCompare(right.email);
+    });
+  const requiredScenarioIds = resolveTrainingPackRequiredScenarioIds(pack, scenarioCatalog);
+  const scenarioRows = buildTrainingPackScenarioProgressRows({
+    requiredScenarioIds,
+    assignments: assignmentProgressRows.map((entry) => entry.assignment),
+    scenarioCatalog,
+    packSessions: allPackSessions,
+    packScores: allPackScores,
+    recentPackSessions,
+    recentPackScores
+  });
+
+  return {
+    viewer,
+    pack: {
+      ...packSummary,
+      orgId: org.id,
+      orgName: org.name,
+      trainingPackAttribution: buildTrainingPackAttributionSummary({
+        usageSessions: recentPackSessions,
+        scoreRecords: recentPackScores
+      }),
+      coachingInsights: buildDashboardCoachingInsights({
+        currentScores: recentPackScores,
+        previousScores: previousPackScores
+      }),
+      scenarios: scenarioRows,
+      assignments: assignmentRows,
+      trend: buildTrainingPackTrendPoints(allPackSessions, allPackScores, now)
+    }
+  };
+}
+
+function findRelatedUsageSessionForScore(
+  sessions: UsageSessionRecord[],
+  score: SimulationScoreRecord
+): UsageSessionRecord | null {
+  return simulationHistoryAccess.findRelatedUsageSessionForScore(sessions, score);
+}
+
+function buildTrainingPackTitleMap(packs: TrainingPack[]): Map<string, string> {
+  const titles = new Map<string, string>();
+  packs.forEach((pack) => titles.set(pack.id, pack.title));
+  return titles;
+}
+
+function findAssignmentForUserPackActivity(
+  db: ApiDatabase,
+  orgId: string,
+  userId: string,
+  trainingPackId: string | null | undefined,
+  activityAt: string
+): TrainingPackAssignmentRecord | null {
+  if (!trainingPackId) {
+    return null;
+  }
+
+  const activityAtMs = new Date(activityAt).getTime();
+  const assignments = listTrainingPackAssignments(db, orgId, trainingPackId, { activeOnly: false })
+    .filter((assignment) => assignment.userId === userId)
+    .sort((left, right) => new Date(right.assignedAt).getTime() - new Date(left.assignedAt).getTime());
+
+  for (const assignment of assignments) {
+    const assignedAtMs = new Date(assignment.assignedAt).getTime();
+    if (Number.isFinite(assignedAtMs) && Number.isFinite(activityAtMs) && assignedAtMs <= activityAtMs) {
+      return projectTrainingPackAssignmentLifecycle(db, assignment);
+    }
+  }
+
+  return assignments[0] ? projectTrainingPackAssignmentLifecycle(db, assignments[0]) : null;
+}
+
+function buildDashboardAttemptHistoryRowFromScore(params: {
+  db: ApiDatabase;
+  score: SimulationScoreRecord;
+  user: UserProfile;
+  org: EnterpriseOrg | null;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  trainingPackTitles: Map<string, string>;
+  relatedSession: UsageSessionRecord | null;
+  assignment: TrainingPackAssignmentRecord | null;
+}): DashboardAttemptHistoryRow {
+  return buildDashboardAttemptHistoryRowFromScorePayload({
+    score: params.score,
+    user: params.user,
+    org: params.org,
+    scenarioCatalog: params.scenarioCatalog,
+    trainingPackTitles: params.trainingPackTitles,
+    relatedSession: params.relatedSession,
+    assignment: params.assignment
+  });
+}
+
+function buildDashboardAttemptHistoryRowFromSession(params: {
+  session: UsageSessionRecord;
+  user: UserProfile;
+  org: EnterpriseOrg | null;
+  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
+  trainingPackTitles: Map<string, string>;
+  assignment: TrainingPackAssignmentRecord | null;
+}): DashboardAttemptHistoryRow {
+  const { session, user, org, scenarioCatalog, trainingPackTitles, assignment } = params;
+  const scenarioMeta = scenarioCatalog.get(session.scenarioId);
+
+  return {
+    activityId: session.id,
+    activityKind: "usage_only",
+    userId: user.id,
+    userEmail: user.email,
+    userStatus: user.status,
+    orgId: org?.id ?? null,
+    orgName: org?.name ?? null,
+    scenarioId: session.scenarioId,
+    scenarioTitle: scenarioMeta?.title ?? session.scenarioId,
+    segmentId: session.segmentId,
+    segmentLabel: scenarioMeta?.segmentLabel ?? session.segmentId,
+    trainingPackId: session.trainingPackId ?? null,
+    trainingPackTitle: session.trainingPackId ? trainingPackTitles.get(session.trainingPackId) ?? session.trainingPackId : null,
+    packAttributed: Boolean(session.trainingPackId),
+    assignmentId: assignment?.id ?? null,
+    assignmentContextStatus: resolveDashboardAttemptActivityAssignmentStatus({
+      assignment,
+      activityAt: session.endedAt,
+      scenarioId: session.scenarioId,
+      isScored: false
+    }),
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    rawDurationSeconds: session.rawDurationSeconds,
+    overallScore: null,
+    summary: null,
+    coachingPriority: null,
+    model: null,
+    promptVersion: null,
+    rubricVersion: null
+  };
+}
+
+function sortDashboardAttemptHistoryRows(rows: DashboardAttemptHistoryRow[]): DashboardAttemptHistoryRow[] {
+  return rows
+    .slice()
+    .sort((left, right) => {
+      const byTime = new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime();
+      if (byTime !== 0) {
+        return byTime;
+      }
+      if (left.activityKind !== right.activityKind) {
+        return left.activityKind === "scored_attempt" ? -1 : 1;
+      }
+      return left.activityId.localeCompare(right.activityId);
+    });
+}
+
+async function buildDashboardTrainingPackAssignmentDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  trainingPackId: string,
+  assignmentId: string,
+  divisionId: string | null = null
+): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  if (!located) {
+    return null;
+  }
+
+  const { org, pack, scenarioCatalog } = located;
+  const assignment = listVisibleTrainingPackAssignments(db, org.id, pack.id).find((entry) => entry.id === assignmentId);
+  if (!assignment) {
+    return null;
+  }
+
+  const user = getUserById(db, assignment.userId);
+  if (!user || !isTrainingPackAssignmentValidForUser(assignment, user)) {
+    return null;
+  }
+
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date(), divisionId);
+  const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
+  if (!packSummary) {
+    return null;
+  }
+
+  const packSessions = filterRecordsByDivision(
+    listUsageSessions(db, {
+      orgId: org.id,
+      userId: assignment.userId,
+      trainingPackId: pack.id
+    }),
+    divisionId
+  );
+  const packScores = filterRecordsByDivision(
+    listScoreRecords(db, {
+      orgId: org.id,
+      userId: assignment.userId,
+      trainingPackId: pack.id,
+      conclusiveOnly: true
+    }),
+    divisionId
+  );
+  const projectedAssignment = projectTrainingPackAssignmentLifecycle(db, assignment);
+  const assignmentRow = computeTrainingPackAssignmentProgress({
+    db,
+    assignment: projectedAssignment,
+    scenarioCatalog,
+    allSessions: packSessions,
+    allScores: packScores,
+    recentSessions: packSessions,
+    recentScores: packScores
+  });
+  if (!isDashboardDivisionScopedAssignmentVisible(assignmentRow, divisionId)) {
+    return null;
+  }
+  const trainingPackTitles = buildTrainingPackTitleMap([pack]);
+  const usedSessionIds = new Set<string>();
+  const attemptRows: DashboardAttemptHistoryRow[] = [];
+
+  for (const score of packScores) {
+    const relatedSession = findRelatedUsageSessionForScore(packSessions, score);
+    if (relatedSession) {
+      usedSessionIds.add(relatedSession.id);
+    }
+    attemptRows.push(
+      buildDashboardAttemptHistoryRowFromScore({
+        db,
+        score,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        relatedSession,
+        assignment: projectedAssignment
+      })
+    );
+  }
+
+  for (const session of packSessions) {
+    if (usedSessionIds.has(session.id)) {
+      continue;
+    }
+    attemptRows.push(
+      buildDashboardAttemptHistoryRowFromSession({
+        session,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        assignment: projectedAssignment
+      })
+    );
+  }
+
+  const requiredScenarios: DashboardTrainingPackAssignmentRequiredScenarioRow[] = projectedAssignment.requiredScenarioIds.map((scenarioId) => {
+    const scenarioMeta = scenarioCatalog.get(scenarioId);
+    return {
+      scenarioId,
+      title: scenarioMeta?.title ?? scenarioId,
+      segmentId: scenarioMeta?.segmentId ?? "unknown",
+      segmentLabel: scenarioMeta?.segmentLabel ?? null,
+      source: scenarioMeta?.source ?? "unknown"
+    };
+  });
+
+  return {
+    viewer,
+    pack: {
+      ...packSummary,
+      orgId: org.id,
+      orgName: org.name
+    },
+    assignment: {
+      ...assignmentRow,
+      completionRule: projectedAssignment.completionRule,
+      requiredScenarios
+    },
+    attempts: sortDashboardAttemptHistoryRows(attemptRows)
+  };
+}
+
+async function buildDashboardUserDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  userId: string,
+  divisionId: string | null = null
+): Promise<DashboardUserDetailResponse | null> {
+  const report = await buildDashboardUserReport(db, viewer, divisionId);
+  const userRow = report.users.find((entry) => entry.userId === userId);
+  if (!userRow || !userRow.orgId) {
+    return null;
+  }
+
+  const org = getOrgById(db, userRow.orgId);
+  const user = getUserById(db, userId);
+  if (!org || !user || !canDashboardViewerAccessOrg(viewer, org.id)) {
+    return null;
+  }
+
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+  const packs = await listTrainingPacksForDashboardOrg(org.id);
+  const trainingPackTitles = buildTrainingPackTitleMap(packs);
+  const userSessions = filterRecordsByDivision(listUsageSessions(db, { userId: user.id, orgId: org.id }), divisionId);
+  const userScores = filterRecordsByDivision(
+    listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true }),
+    divisionId
+  );
+  const now = Date.now();
+  const last30DaysThreshold = now - 30 * 24 * 60 * 60 * 1000;
+  const previous30DaysThreshold = now - 60 * 24 * 60 * 60 * 1000;
+  const recentUserScores = userScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < now;
+  });
+  const previousUserScores = userScores.filter((record) => {
+    const endedAtMs = new Date(record.endedAt).getTime();
+    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
+  });
+  const assignments = (db.trainingPackAssignments ?? [])
+    .filter((assignment) =>
+      assignment.active === true &&
+      assignment.userId === user.id &&
+      assignment.orgId === org.id &&
+      isTrainingPackAssignmentValidForUser(assignment, user)
+    )
+    .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment));
+  const assignmentRows: DashboardUserAssignmentSummaryRow[] = assignments
+    .flatMap((assignment) => {
+      const pack = packs.find((entry) => entry.id === assignment.trainingPackId);
+      const packSessions = userSessions.filter((session) => session.trainingPackId === assignment.trainingPackId);
+      const packScores = userScores.filter((record) => record.trainingPackId === assignment.trainingPackId);
+      const progress = computeTrainingPackAssignmentProgress({
+        db,
+        assignment,
+        scenarioCatalog,
+        allSessions: packSessions,
+        allScores: packScores,
+        recentSessions: packSessions,
+        recentScores: packScores
+      });
+
+      if (divisionId && progress.status === "not_started") {
+        return [];
+      }
+
+      return [{
+        assignmentId: assignment.id,
+        trainingPackId: assignment.trainingPackId,
+        trainingPackTitle: pack?.title ?? assignment.trainingPackId,
+        status: progress.status,
+        assignedAt: progress.assignedAt,
+        startedAt: progress.startedAt,
+        completedAt: progress.completedAt,
+        requiredScenarioCount: progress.requiredScenarioCount,
+        completedScenarioCount: progress.completedScenarioCount
+      }];
+    })
+    .sort((left, right) => {
+      const latestDelta =
+        (new Date(right.completedAt ?? right.startedAt ?? right.assignedAt).getTime() || 0) -
+        (new Date(left.completedAt ?? left.startedAt ?? left.assignedAt).getTime() || 0);
+      if (latestDelta !== 0) {
+        return latestDelta;
+      }
+      return left.trainingPackTitle.localeCompare(right.trainingPackTitle);
+    });
+
+  const attemptRows = sortDashboardAttemptHistoryRows(
+    userScores.map((score) => {
+      return buildDashboardAttemptHistoryRowFromScore({
+        db,
+        score,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        relatedSession: findRelatedUsageSessionForScore(userSessions, score),
+        assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
+      });
+    })
+  ).slice(0, 40);
+
+  return {
+    viewer,
+    user: userRow,
+    coachingInsights: buildDashboardCoachingInsights({
+      currentScores: recentUserScores,
+      previousScores: previousUserScores
+    }),
+    assignments: assignmentRows,
+    attempts: attemptRows,
+    divisionScope: report.divisionScope
+  };
+}
+
+async function buildDashboardAttemptDetail(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  attemptId: string,
+  divisionId: string | null = null
+): Promise<DashboardAttemptDetailResponse | null> {
+  const score = scoreRecordAccess.getById(db, attemptId);
+  if (!score || !isConclusiveSimulationScoreRecord(score) || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
+    return null;
+  }
+  if (divisionId && (score.divisionId ?? null) !== divisionId) {
+    return null;
+  }
+
+  const org = getOrgById(db, score.orgId);
+  const user = getUserById(db, score.userId);
+  if (!org || !user) {
+    return null;
+  }
+
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+  const packs = await listTrainingPacksForDashboardOrg(org.id);
+  const trainingPackTitles = buildTrainingPackTitleMap(packs);
+  const scopedSessions = filterRecordsByDivision(listUsageSessions(db, { userId: score.userId, orgId: org.id }), divisionId);
+  const attempt = buildDashboardAttemptDetailAttemptPayload({
+    score,
+    user,
+    org,
+    scenarioCatalog,
+    trainingPackTitles,
+    industryLabelById: new Map(Object.entries(INDUSTRY_LABELS)),
+    relatedSession: findRelatedUsageSessionForScore(scopedSessions, score),
+    assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
+  });
+
+  return {
+    viewer,
+    attempt
+  };
 }
 
 function isActivityInDashboardTrainingScope(
@@ -6188,482 +6726,6 @@ async function findDashboardAccessibleTrainingPack(
   }
 
   return null;
-}
-
-async function buildDashboardTrainingPackDetail(
-  db: ApiDatabase,
-  viewer: DashboardViewer,
-  trainingPackId: string
-): Promise<DashboardTrainingPackDetailResponse | null> {
-  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
-  if (!located) {
-    return null;
-  }
-
-  const { org, pack, scenarioCatalog } = located;
-  const now = new Date();
-  const nowMs = now.getTime();
-  const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
-  const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now);
-  const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
-  if (!packSummary) {
-    return null;
-  }
-
-  const allPackSessions = listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id });
-  const allPackScores = listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true });
-  const recentPackSessions = allPackSessions.filter((session) => {
-    const startedAtMs = new Date(session.startedAt).getTime();
-    return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
-  });
-  const recentPackScores = allPackScores.filter((record) => {
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < nowMs;
-  });
-  const previousPackScores = allPackScores.filter((record) => {
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
-  });
-  const assignments = listTrainingPackAssignments(db, org.id, pack.id);
-  const assignmentRows = assignments
-    .map((assignment) =>
-      computeTrainingPackAssignmentProgress({
-        db,
-        assignment,
-        scenarioCatalog,
-        allSessions: allPackSessions,
-        allScores: allPackScores,
-        recentSessions: recentPackSessions,
-        recentScores: recentPackScores
-      })
-    )
-    .sort((left, right) => {
-      if (left.status !== right.status) {
-        const order: Record<TrainingPackAssignmentProgressStatus, number> = {
-          in_progress: 0,
-          not_started: 1,
-          completed: 2
-        };
-        return order[left.status] - order[right.status];
-      }
-      const latestDelta =
-        (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
-      if (latestDelta !== 0) {
-        return latestDelta;
-      }
-      return left.email.localeCompare(right.email);
-    });
-  const requiredScenarioIds = resolveTrainingPackRequiredScenarioIds(pack, scenarioCatalog);
-  const scenarioRows = buildTrainingPackScenarioProgressRows({
-    requiredScenarioIds,
-    assignments,
-    scenarioCatalog,
-    packSessions: allPackSessions,
-    packScores: allPackScores,
-    recentPackSessions,
-    recentPackScores
-  });
-
-  return {
-    viewer,
-    pack: {
-      ...packSummary,
-      orgId: org.id,
-      orgName: org.name,
-      trainingPackAttribution: buildTrainingPackAttributionSummary({
-        usageSessions: recentPackSessions,
-        scoreRecords: recentPackScores
-      }),
-      coachingInsights: buildDashboardCoachingInsights({
-        currentScores: recentPackScores,
-        previousScores: previousPackScores
-      }),
-      scenarios: scenarioRows,
-      assignments: assignmentRows,
-      trend: buildTrainingPackTrendPoints(allPackSessions, allPackScores, now)
-    }
-  };
-}
-
-function findRelatedUsageSessionForScore(
-  sessions: UsageSessionRecord[],
-  score: SimulationScoreRecord
-): UsageSessionRecord | null {
-  return simulationHistoryAccess.findRelatedUsageSessionForScore(sessions, score);
-}
-
-function buildTrainingPackTitleMap(packs: TrainingPack[]): Map<string, string> {
-  const titles = new Map<string, string>();
-  packs.forEach((pack) => titles.set(pack.id, pack.title));
-  return titles;
-}
-
-function findAssignmentForUserPackActivity(
-  db: ApiDatabase,
-  orgId: string,
-  userId: string,
-  trainingPackId: string | null | undefined,
-  activityAt: string
-): TrainingPackAssignmentRecord | null {
-  if (!trainingPackId) {
-    return null;
-  }
-
-  const activityAtMs = new Date(activityAt).getTime();
-  const assignments = listTrainingPackAssignments(db, orgId, trainingPackId, { activeOnly: false })
-    .filter((assignment) => assignment.userId === userId)
-    .sort((left, right) => new Date(right.assignedAt).getTime() - new Date(left.assignedAt).getTime());
-
-  for (const assignment of assignments) {
-    const assignedAtMs = new Date(assignment.assignedAt).getTime();
-    if (Number.isFinite(assignedAtMs) && Number.isFinite(activityAtMs) && assignedAtMs <= activityAtMs) {
-      return projectTrainingPackAssignmentLifecycle(db, assignment);
-    }
-  }
-
-  return assignments[0] ? projectTrainingPackAssignmentLifecycle(db, assignments[0]) : null;
-}
-
-function buildDashboardAttemptHistoryRowFromScore(params: {
-  db: ApiDatabase;
-  score: SimulationScoreRecord;
-  user: UserProfile;
-  org: EnterpriseOrg | null;
-  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
-  trainingPackTitles: Map<string, string>;
-  relatedSession: UsageSessionRecord | null;
-  assignment: TrainingPackAssignmentRecord | null;
-}): DashboardAttemptHistoryRow {
-  return buildDashboardAttemptHistoryRowFromScorePayload({
-    score: params.score,
-    user: params.user,
-    org: params.org,
-    scenarioCatalog: params.scenarioCatalog,
-    trainingPackTitles: params.trainingPackTitles,
-    relatedSession: params.relatedSession,
-    assignment: params.assignment
-  });
-}
-
-function buildDashboardAttemptHistoryRowFromSession(params: {
-  session: UsageSessionRecord;
-  user: UserProfile;
-  org: EnterpriseOrg | null;
-  scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
-  trainingPackTitles: Map<string, string>;
-  assignment: TrainingPackAssignmentRecord | null;
-}): DashboardAttemptHistoryRow {
-  const { session, user, org, scenarioCatalog, trainingPackTitles, assignment } = params;
-  const scenarioMeta = scenarioCatalog.get(session.scenarioId);
-
-  return {
-    activityId: session.id,
-    activityKind: "usage_only",
-    userId: user.id,
-    userEmail: user.email,
-    userStatus: user.status,
-    orgId: org?.id ?? null,
-    orgName: org?.name ?? null,
-    scenarioId: session.scenarioId,
-    scenarioTitle: scenarioMeta?.title ?? session.scenarioId,
-    segmentId: session.segmentId,
-    segmentLabel: scenarioMeta?.segmentLabel ?? session.segmentId,
-    trainingPackId: session.trainingPackId ?? null,
-    trainingPackTitle: session.trainingPackId ? trainingPackTitles.get(session.trainingPackId) ?? session.trainingPackId : null,
-    packAttributed: Boolean(session.trainingPackId),
-    assignmentId: assignment?.id ?? null,
-    assignmentContextStatus: resolveDashboardAttemptActivityAssignmentStatus({
-      assignment,
-      activityAt: session.endedAt,
-      scenarioId: session.scenarioId,
-      isScored: false
-    }),
-    startedAt: session.startedAt,
-    endedAt: session.endedAt,
-    rawDurationSeconds: session.rawDurationSeconds,
-    overallScore: null,
-    summary: null,
-    coachingPriority: null,
-    model: null,
-    promptVersion: null,
-    rubricVersion: null
-  };
-}
-
-function sortDashboardAttemptHistoryRows(rows: DashboardAttemptHistoryRow[]): DashboardAttemptHistoryRow[] {
-  return rows
-    .slice()
-    .sort((left, right) => {
-      const byTime = new Date(right.endedAt).getTime() - new Date(left.endedAt).getTime();
-      if (byTime !== 0) {
-        return byTime;
-      }
-      if (left.activityKind !== right.activityKind) {
-        return left.activityKind === "scored_attempt" ? -1 : 1;
-      }
-      return left.activityId.localeCompare(right.activityId);
-    });
-}
-
-async function buildDashboardTrainingPackAssignmentDetail(
-  db: ApiDatabase,
-  viewer: DashboardViewer,
-  trainingPackId: string,
-  assignmentId: string
-): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
-  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
-  if (!located) {
-    return null;
-  }
-
-  const { org, pack, scenarioCatalog } = located;
-  const assignment = listTrainingPackAssignments(db, org.id, pack.id).find((entry) => entry.id === assignmentId);
-  if (!assignment) {
-    return null;
-  }
-
-  const user = getUserById(db, assignment.userId);
-  if (!user) {
-    return null;
-  }
-
-  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date());
-  const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
-  if (!packSummary) {
-    return null;
-  }
-
-  const packSessions = listUsageSessions(db, {
-    orgId: org.id,
-    userId: assignment.userId,
-    trainingPackId: pack.id
-  });
-  const packScores = listScoreRecords(db, {
-    orgId: org.id,
-    userId: assignment.userId,
-    trainingPackId: pack.id,
-    conclusiveOnly: true
-  });
-  const projectedAssignment = projectTrainingPackAssignmentLifecycle(db, assignment);
-  const assignmentRow = computeTrainingPackAssignmentProgress({
-    db,
-    assignment: projectedAssignment,
-    scenarioCatalog,
-    allSessions: packSessions,
-    allScores: packScores,
-    recentSessions: packSessions,
-    recentScores: packScores
-  });
-  const trainingPackTitles = buildTrainingPackTitleMap([pack]);
-  const usedSessionIds = new Set<string>();
-  const attemptRows: DashboardAttemptHistoryRow[] = [];
-
-  for (const score of packScores) {
-    const relatedSession = findRelatedUsageSessionForScore(packSessions, score);
-    if (relatedSession) {
-      usedSessionIds.add(relatedSession.id);
-    }
-    attemptRows.push(
-      buildDashboardAttemptHistoryRowFromScore({
-        db,
-        score,
-        user,
-        org,
-        scenarioCatalog,
-        trainingPackTitles,
-        relatedSession,
-        assignment: projectedAssignment
-      })
-    );
-  }
-
-  for (const session of packSessions) {
-    if (usedSessionIds.has(session.id)) {
-      continue;
-    }
-    attemptRows.push(
-      buildDashboardAttemptHistoryRowFromSession({
-        session,
-        user,
-        org,
-        scenarioCatalog,
-        trainingPackTitles,
-        assignment: projectedAssignment
-      })
-    );
-  }
-
-  const requiredScenarios: DashboardTrainingPackAssignmentRequiredScenarioRow[] = projectedAssignment.requiredScenarioIds.map((scenarioId) => {
-    const scenarioMeta = scenarioCatalog.get(scenarioId);
-    return {
-      scenarioId,
-      title: scenarioMeta?.title ?? scenarioId,
-      segmentId: scenarioMeta?.segmentId ?? "unknown",
-      segmentLabel: scenarioMeta?.segmentLabel ?? null,
-      source: scenarioMeta?.source ?? "unknown"
-    };
-  });
-
-  return {
-    viewer,
-    pack: {
-      ...packSummary,
-      orgId: org.id,
-      orgName: org.name
-    },
-    assignment: {
-      ...assignmentRow,
-      completionRule: projectedAssignment.completionRule,
-      requiredScenarios
-    },
-    attempts: sortDashboardAttemptHistoryRows(attemptRows)
-  };
-}
-
-async function buildDashboardUserDetail(
-  db: ApiDatabase,
-  viewer: DashboardViewer,
-  userId: string,
-  divisionId: string | null = null
-): Promise<DashboardUserDetailResponse | null> {
-  const report = await buildDashboardUserReport(db, viewer, divisionId);
-  const userRow = report.users.find((entry) => entry.userId === userId);
-  if (!userRow || !userRow.orgId) {
-    return null;
-  }
-
-  const org = getOrgById(db, userRow.orgId);
-  const user = getUserById(db, userId);
-  if (!org || !user || !canDashboardViewerAccessOrg(viewer, org.id)) {
-    return null;
-  }
-
-  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
-  const packs = await listTrainingPacksForDashboardOrg(org.id);
-  const trainingPackTitles = buildTrainingPackTitleMap(packs);
-  const userSessions = filterRecordsByDivision(listUsageSessions(db, { userId: user.id, orgId: org.id }), divisionId);
-  const userScores = filterRecordsByDivision(
-    listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true }),
-    divisionId
-  );
-  const now = Date.now();
-  const last30DaysThreshold = now - 30 * 24 * 60 * 60 * 1000;
-  const previous30DaysThreshold = now - 60 * 24 * 60 * 60 * 1000;
-  const recentUserScores = userScores.filter((record) => {
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= last30DaysThreshold && endedAtMs < now;
-  });
-  const previousUserScores = userScores.filter((record) => {
-    const endedAtMs = new Date(record.endedAt).getTime();
-    return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
-  });
-  const assignments = (db.trainingPackAssignments ?? [])
-    .filter((assignment) => assignment.active === true && assignment.userId === user.id && assignment.orgId === org.id)
-    .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment));
-  const assignmentRows: DashboardUserAssignmentSummaryRow[] = assignments
-    .flatMap((assignment) => {
-      const pack = packs.find((entry) => entry.id === assignment.trainingPackId);
-      const packSessions = userSessions.filter((session) => session.trainingPackId === assignment.trainingPackId);
-      const packScores = userScores.filter((record) => record.trainingPackId === assignment.trainingPackId);
-      const progress = computeTrainingPackAssignmentProgress({
-        db,
-        assignment,
-        scenarioCatalog,
-        allSessions: packSessions,
-        allScores: packScores,
-        recentSessions: packSessions,
-        recentScores: packScores
-      });
-
-      if (divisionId && progress.status === "not_started") {
-        return [];
-      }
-
-      return [{
-        assignmentId: assignment.id,
-        trainingPackId: assignment.trainingPackId,
-        trainingPackTitle: pack?.title ?? assignment.trainingPackId,
-        status: progress.status,
-        assignedAt: progress.assignedAt,
-        startedAt: progress.startedAt,
-        completedAt: progress.completedAt,
-        requiredScenarioCount: progress.requiredScenarioCount,
-        completedScenarioCount: progress.completedScenarioCount
-      }];
-    })
-    .sort((left, right) => {
-      const latestDelta =
-        (new Date(right.completedAt ?? right.startedAt ?? right.assignedAt).getTime() || 0) -
-        (new Date(left.completedAt ?? left.startedAt ?? left.assignedAt).getTime() || 0);
-      if (latestDelta !== 0) {
-        return latestDelta;
-      }
-      return left.trainingPackTitle.localeCompare(right.trainingPackTitle);
-    });
-
-  const attemptRows = sortDashboardAttemptHistoryRows(
-    userScores.map((score) => {
-      return buildDashboardAttemptHistoryRowFromScore({
-        db,
-        score,
-        user,
-        org,
-        scenarioCatalog,
-        trainingPackTitles,
-        relatedSession: findRelatedUsageSessionForScore(userSessions, score),
-        assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
-      });
-    })
-  ).slice(0, 40);
-
-  return {
-    viewer,
-    user: userRow,
-    coachingInsights: buildDashboardCoachingInsights({
-      currentScores: recentUserScores,
-      previousScores: previousUserScores
-    }),
-    assignments: assignmentRows,
-    attempts: attemptRows,
-    divisionScope: report.divisionScope
-  };
-}
-
-async function buildDashboardAttemptDetail(
-  db: ApiDatabase,
-  viewer: DashboardViewer,
-  attemptId: string
-): Promise<DashboardAttemptDetailResponse | null> {
-  const score = scoreRecordAccess.getById(db, attemptId);
-  if (!score || !isConclusiveSimulationScoreRecord(score) || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
-    return null;
-  }
-
-  const org = getOrgById(db, score.orgId);
-  const user = getUserById(db, score.userId);
-  if (!org || !user) {
-    return null;
-  }
-
-  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
-  const packs = await listTrainingPacksForDashboardOrg(org.id);
-  const trainingPackTitles = buildTrainingPackTitleMap(packs);
-  const attempt = buildDashboardAttemptDetailAttemptPayload({
-    score,
-    user,
-    org,
-    scenarioCatalog,
-    trainingPackTitles,
-    industryLabelById: new Map(Object.entries(INDUSTRY_LABELS)),
-    relatedSession: findRelatedUsageSessionForScore(listUsageSessions(db, { userId: score.userId, orgId: org.id }), score),
-    assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
-  });
-
-  return {
-    viewer,
-    attempt
-  };
 }
 
 async function buildDashboardUserReport(
@@ -9103,7 +9165,27 @@ app.get("/dashboard/training", requireDashboardAuth, async (request: DashboardAu
 
 app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardTrainingPackDetail(db, request.dashboard!.viewer, request.params.trainingPackId);
+    const located = await findDashboardAccessibleTrainingPack(db, request.dashboard!.viewer, request.params.trainingPackId);
+    if (!located) {
+      response.status(404).json({ error: "Training pack not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: located.org.id,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const payload = await buildDashboardTrainingPackDetail(
+      db,
+      request.dashboard!.viewer,
+      request.params.trainingPackId,
+      divisionFilter.appliedDivisionId
+    );
     if (!payload) {
       response.status(404).json({ error: "Training pack not found." });
       return;
@@ -9118,11 +9200,27 @@ app.get(
   requireDashboardAuth,
   async (request: DashboardAuthRequest, response: Response) => {
     await withFreshReportingRead(async (db) => {
+      const located = await findDashboardAccessibleTrainingPack(db, request.dashboard!.viewer, request.params.trainingPackId);
+      if (!located) {
+        response.status(404).json({ error: "Training pack assignment not found." });
+        return;
+      }
+      const divisionFilter = resolveDashboardDivisionFilter({
+        db,
+        viewer: request.dashboard!.viewer,
+        explicitOrgId: located.org.id,
+        requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+      });
+      if (divisionFilter.error) {
+        response.status(400).json({ error: divisionFilter.error });
+        return;
+      }
       const payload = await buildDashboardTrainingPackAssignmentDetail(
         db,
         request.dashboard!.viewer,
         request.params.trainingPackId,
-        request.params.assignmentId
+        request.params.assignmentId,
+        divisionFilter.appliedDivisionId
       );
       if (!payload) {
         response.status(404).json({ error: "Training pack assignment not found." });
@@ -9179,7 +9277,27 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
 
 app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardAttemptDetail(db, request.dashboard!.viewer, request.params.attemptId);
+    const attemptScore = scoreRecordAccess.getById(db, request.params.attemptId);
+    if (!attemptScore || !isConclusiveSimulationScoreRecord(attemptScore) || !attemptScore.orgId) {
+      response.status(404).json({ error: "Attempt detail not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: attemptScore.orgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const payload = await buildDashboardAttemptDetail(
+      db,
+      request.dashboard!.viewer,
+      request.params.attemptId,
+      divisionFilter.appliedDivisionId
+    );
     if (!payload) {
       response.status(404).json({ error: "Attempt detail not found." });
       return;
@@ -9855,7 +9973,7 @@ app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
     return;
   }
 
-  await withDatabaseRead(async (db) => {
+  await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -9870,6 +9988,12 @@ app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         return;
       }
 
+      const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignments({
+        db,
+        nowIso: nowIso(),
+        orgId: org.id,
+        trainingPackId,
+      });
       const assignments = listTrainingPackAssignments(db, org.id, trainingPackId)
         .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment))
         .sort((left, right) => left.assignedAt.localeCompare(right.assignedAt));
@@ -9877,7 +10001,8 @@ app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         generatedAt: nowIso(),
         orgId: org.id,
         trainingPackId,
-        assignments
+        assignments,
+        deactivatedInvalidAssignmentCount,
       };
       response.json(payload);
     } catch (error) {
@@ -9915,6 +10040,13 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         return;
       }
 
+      const now = nowIso();
+      const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignments({
+        db,
+        nowIso: now,
+        orgId: org.id,
+        trainingPackId,
+      });
       const normalizedUserIds = Array.from(
         new Set(
           body.userIds
@@ -9923,7 +10055,7 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
             .filter(Boolean)
         )
       );
-      const eligibleUsers = db.users.filter((user) => user.accountType === "enterprise" && user.orgId === org.id);
+      const eligibleUsers = listTrainingPackAssignmentEligibleUsers(db.users, org.id);
       const eligibleUserIds = new Set(eligibleUsers.map((user) => user.id));
       const invalidUserId = normalizedUserIds.find((userId) => !eligibleUserIds.has(userId));
       if (invalidUserId) {
@@ -9931,7 +10063,6 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         return;
       }
 
-      const now = nowIso();
       const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
       const requiredScenarioIds = resolveTrainingPackRequiredScenarioIds(pack, scenarioCatalog);
       const activeAssignments = listTrainingPackAssignments(db, org.id, trainingPackId);
@@ -9978,7 +10109,8 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         message: `Updated training pack assignments for "${pack.title}" in ${org.name}.`,
         metadata: {
           trainingPackId,
-          assignedUserCount: assignments.length
+          assignedUserCount: assignments.length,
+          deactivatedInvalidAssignments: deactivatedInvalidAssignmentCount
         }
       });
 
@@ -9986,7 +10118,8 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         generatedAt: nowIso(),
         orgId: org.id,
         trainingPackId,
-        assignments
+        assignments,
+        deactivatedInvalidAssignmentCount,
       };
       response.json(payload);
     } catch (error) {
@@ -11745,6 +11878,13 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       }
     }
 
+    const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
+      assignments: db.trainingPackAssignments ?? [],
+      userId: user.id,
+      user,
+      nowIso: now.toISOString(),
+    });
+
     const afterDashboardViewer = resolveDashboardViewer(db, user);
     const dashboardScopeChanged =
       (beforeDashboardViewer?.accessType ?? null) !== (afterDashboardViewer?.accessType ?? null)
@@ -11786,7 +11926,8 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
           dailyOverageExpiresAt: user.dailyOverageExpiresAt,
-          timezone: user.timezone
+          timezone: user.timezone,
+          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
         }
       }
     });
@@ -11805,6 +11946,16 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     }
 
     const user = db.users[userIndex];
+    const now = nowIso();
+    const deactivatedAssignmentCount = deactivateTrainingPackAssignmentsForUser(
+      db.trainingPackAssignments ?? [],
+      user.id,
+      now
+    );
+    const deletedUsageSessionCount = await usageSessionAccess.deleteForUser(db, user.id);
+    const deletedScoreRecordCount = await scoreRecordAccess.deleteForUser(db, user.id);
+    const deletedAiUsageEventCount = await aiUsageEventAccess.deleteForUser(user.id);
+    const deletedSupportCaseCount = await supportCaseStore.deleteCasesForUser(user.id);
 
     db.users.splice(userIndex, 1);
     db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
@@ -11822,37 +11973,9 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     });
     queueDatabasePostCommitEffect(db, {
       category: "post_commit_cleanup",
-      description: `Delete usage sessions for removed user ${user.id}.`,
-      run: async () => {
-        await usageSessionAccess.deleteForUser(db, user.id);
-      }
-    });
-    queueDatabasePostCommitEffect(db, {
-      category: "post_commit_cleanup",
       description: `Delete recognized simulation sessions for removed user ${user.id}.`,
       run: async () => {
         await simulationSessionStore.deleteSessionsForUser(user.id);
-      }
-    });
-    queueDatabasePostCommitEffect(db, {
-      category: "post_commit_cleanup",
-      description: `Delete score records for removed user ${user.id}.`,
-      run: async () => {
-        await scoreRecordAccess.deleteForUser(db, user.id);
-      }
-    });
-    queueDatabasePostCommitEffect(db, {
-      category: "post_commit_cleanup",
-      description: `Delete AI usage events for removed user ${user.id}.`,
-      run: async () => {
-        await aiUsageEventAccess.deleteForUser(user.id);
-      }
-    });
-    queueDatabasePostCommitEffect(db, {
-      category: "post_commit_cleanup",
-      description: `Delete support cases for removed user ${user.id}.`,
-      run: async () => {
-        await supportCaseStore.deleteCasesForUser(user.id);
       }
     });
 
@@ -11885,7 +12008,12 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
       metadata: {
         email: user.email,
         orgRole: user.orgRole,
-        accountType: user.accountType
+        accountType: user.accountType,
+        deactivatedTrainingPackAssignments: deactivatedAssignmentCount,
+        deletedUsageSessions: deletedUsageSessionCount,
+        deletedScoreRecords: deletedScoreRecordCount,
+        deletedAiUsageEvents: deletedAiUsageEventCount,
+        deletedSupportCases: deletedSupportCaseCount
       }
     });
 
@@ -12574,6 +12702,12 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       targetUser.orgRole = "user";
       targetUser.status = "active";
       targetUser.updatedAt = nowValue;
+      const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
+        assignments: db.trainingPackAssignments ?? [],
+        userId: targetUser.id,
+        user: targetUser,
+        nowIso: nowValue,
+      });
       requestRecord.status = "approved";
       requestRecord.updatedAt = nowValue;
       requestRecord.decidedAt = nowValue;
@@ -12587,7 +12721,8 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
         userId: targetUser.id,
         message: `Approved org join request for ${targetUser.email}.`,
         metadata: {
-          requestId: requestRecord.id
+          requestId: requestRecord.id,
+          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
         }
       });
     } else {
@@ -16628,6 +16763,12 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       targetUser.orgRole = assignOrgAdmin ? "org_admin" : "user";
       targetUser.status = "active";
       targetUser.updatedAt = nowValue;
+      const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
+        assignments: db.trainingPackAssignments ?? [],
+        userId: targetUser.id,
+        user: targetUser,
+        nowIso: nowValue,
+      });
 
       requestRecord.status = "approved";
       requestRecord.updatedAt = nowValue;
@@ -16644,7 +16785,8 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
         message: `Approved org join request for ${targetUser.email}.`,
         metadata: {
           requestId: requestRecord.id,
-          assignOrgAdmin
+          assignOrgAdmin,
+          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
         }
       });
     } else {

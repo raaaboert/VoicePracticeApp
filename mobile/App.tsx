@@ -69,6 +69,7 @@ import {
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import { resolveSimulationScoreOutcome, shouldUsePracticeOnlyFallbackScore } from "./src/lib/simulationScoreHandling";
 import { createSimulationCorrelationId } from "./src/lib/simulationInteractionModel";
+import { shouldBlockForMissingAuthenticatedScopedConfig } from "./src/lib/scopedConfigGuard";
 import {
   getLongPollFailureReportDecision,
   getMissingUsageRecordFields,
@@ -139,6 +140,7 @@ type Screen =
   | "onboarding"
   | "verify_email"
   | "domain_match"
+  | "scoped_config_error"
   | "superuser_org_select"
   | "setup"
   | "simulation"
@@ -677,9 +679,11 @@ export default function App() {
   const sampleRemoteTtsFileRef = useRef<string | null>(null);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
+  const [scopedConfigError, setScopedConfigError] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
 
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [hasAuthenticatedScopedConfig, setHasAuthenticatedScopedConfig] = useState(false);
   const [timezones, setTimezones] = useState<string[]>(COMMON_TIMEZONES);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
@@ -1370,7 +1374,7 @@ export default function App() {
       const payload = await fetchOrgAdminAccessRequests(user.id, mobileAuthToken);
       setOrgAdminAccessRequests(payload);
     } catch (caught) {
-      const message = getErrorMessage(caught, "Could not load org access requests.");
+      const message = getErrorMessage(caught, "Could not load membership requests.");
       setAdminError(message);
       void submitAutoErrorReport("admin_access_requests.refresh", caught, {
         screen: "admin_org_requests",
@@ -1635,6 +1639,7 @@ export default function App() {
           setActiveSuperUserOrgIdState(null);
           await clearSuperUserActiveOrgId();
           setEntitlements(null);
+          setHasAuthenticatedScopedConfig(false);
         }
         setScreen("superuser_org_select");
       } catch (caught) {
@@ -1682,12 +1687,16 @@ export default function App() {
         setSelectedSuperUserOrgId(trimmedOrgId);
         setEntitlements(nextEntitlements);
         setConfig(scopedConfig);
+        setHasAuthenticatedScopedConfig(true);
         setSuperUserOrgNotice(options?.notice ?? null);
         setSuperUserOrgReturnScreen(null);
         setScreen(options?.nextScreen ?? superUserOrgReturnScreen ?? "home");
         return true;
       } catch (caught) {
         setActiveSuperUserOrgId(previousActiveOrgId);
+        if (!previousActiveOrgId) {
+          setHasAuthenticatedScopedConfig(false);
+        }
         const message = getErrorMessage(caught, "Could not activate the selected enterprise environment.");
         setSuperUserOrgError(message);
         void submitAutoErrorReport("superuser_orgs.activate", caught, {
@@ -1721,6 +1730,7 @@ export default function App() {
     setVerificationNotice(null);
     setVerificationError(null);
     setDomainMatch(null);
+    setHasAuthenticatedScopedConfig(false);
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
     setOrgRequestError(null);
@@ -1729,13 +1739,50 @@ export default function App() {
     setSettingsEmail("");
     setSettingsTimezone(detectedTimezone);
     setAppError(null);
+    setScopedConfigError(null);
     setOnboardingError(notice ?? null);
     setScreen("onboarding");
   }, [detectedTimezone]);
 
+  const loadAuthenticatedScopedConfig = useCallback(
+    async (
+      nextUser: UserProfile,
+      authToken: string,
+      options?: {
+        source: string;
+        fallbackMessage: string;
+      },
+    ): Promise<boolean> => {
+      try {
+        const scopedConfig = await fetchMobileConfig(nextUser.id, authToken);
+        setConfig(scopedConfig);
+        setHasAuthenticatedScopedConfig(true);
+        setScopedConfigError(null);
+        return true;
+      } catch (caught) {
+        const message = getErrorMessage(caught, options?.fallbackMessage ?? "Could not load your company configuration.");
+        setHasAuthenticatedScopedConfig(false);
+        setScopedConfigError(message);
+        setScreen("scoped_config_error");
+        void submitAutoErrorReport(options?.source ?? "mobile.scoped_config", caught, {
+          screen: "scoped_config_error",
+          details: {
+            accountType: nextUser.accountType,
+            isSuperUser: nextUser.isSuperUser,
+            userId: nextUser.id,
+          },
+        });
+        return false;
+      }
+    },
+    [submitAutoErrorReport],
+  );
+
   const initializeApp = useCallback(async () => {
     setIsBootLoading(true);
     setAppError(null);
+    setScopedConfigError(null);
+    setHasAuthenticatedScopedConfig(false);
 
     let hadStoredSession = false;
 
@@ -1848,9 +1895,14 @@ export default function App() {
       }
 
       const entitlementsPayload = await fetchEntitlements(storedUserId, storedMobileToken);
-      const scopedConfig = await fetchMobileConfig(storedUserId, storedMobileToken).catch(() => configPayload);
-      setConfig(scopedConfig);
       setEntitlements(entitlementsPayload);
+      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(userPayload, storedMobileToken, {
+        source: "app.initialize.scoped_config",
+        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
+      });
+      if (!scopedConfigLoaded) {
+        return;
+      }
       setScreen("home");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not initialize app.");
@@ -1885,6 +1937,7 @@ export default function App() {
   }, [
     activateSuperUserOrgContext,
     detectedTimezone,
+    loadAuthenticatedScopedConfig,
     loadSuperUserOrgOptionsForSession,
     resetSessionToOnboarding,
     submitAutoErrorReport,
@@ -2046,7 +2099,7 @@ export default function App() {
 
     if (screen === "domain_match" && user.accountType === "enterprise" && user.orgId) {
       setOrgRequestError(null);
-      setOrgRequestNotice("Access approved. Your enterprise account is active.");
+      setOrgRequestNotice("Company membership approved. Your enterprise account is active. Dashboard access is enabled separately if your admin needs you in reporting.");
       setDomainMatch(null);
       setOrgJoinCodeInput("");
       setScreen("home");
@@ -2202,12 +2255,14 @@ export default function App() {
       }
 
       const nextEntitlements = await fetchEntitlements(onboarded.user.id, onboarded.authToken);
-      const scopedConfig = await fetchMobileConfig(onboarded.user.id, onboarded.authToken).catch(
-        async () => fetchAppConfig(),
-      );
-
-      setConfig(scopedConfig);
       setEntitlements(nextEntitlements);
+      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(onboarded.user, onboarded.authToken, {
+        source: "onboarding.scoped_config",
+        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
+      });
+      if (!scopedConfigLoaded) {
+        return;
+      }
       if (onboarded.domainMatch && onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
         setScreen("domain_match");
       } else {
@@ -2258,11 +2313,14 @@ export default function App() {
       }
 
       const nextEntitlements = await fetchEntitlements(payload.user.id, payload.authToken);
-      const scopedConfig = await fetchMobileConfig(payload.user.id, payload.authToken).catch(
-        async () => fetchAppConfig(),
-      );
-      setConfig(scopedConfig);
       setEntitlements(nextEntitlements);
+      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(payload.user, payload.authToken, {
+        source: "verification.scoped_config",
+        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
+      });
+      if (!scopedConfigLoaded) {
+        return;
+      }
 
       if (payload.domainMatch && payload.user.accountType === "individual" && !payload.user.isSuperUser) {
         setScreen("domain_match");
@@ -2279,6 +2337,28 @@ export default function App() {
       setIsVerificationSaving(false);
     }
   };
+
+  const renderScopedConfigError = () => (
+    <View style={styles.centered}>
+      <View style={styles.card}>
+        <Text style={styles.title}>Company setup unavailable</Text>
+        <Text style={styles.body}>
+          {user?.accountType === "enterprise"
+            ? "Your enterprise session is active, but the scoped company configuration could not be loaded."
+            : "Your signed-in session could not load its scoped configuration."}
+          {"\n\n"}
+          Peritio is intentionally blocking the generic catalog here so the app does not fail open into the wrong content.
+        </Text>
+        <Text style={styles.errorText}>{scopedConfigError ?? "Could not load the scoped configuration."}</Text>
+        <Pressable style={styles.primaryButton} onPress={() => { void initializeApp(); }}>
+          <Text style={styles.primaryButtonText}>Retry Scoped Config</Text>
+        </Pressable>
+        <Pressable style={styles.ghostButton} onPress={() => { void resetSessionToOnboarding(); }}>
+          <Text style={styles.ghostButtonText}>Sign Out</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
 
   const resendVerificationCode = async () => {
     if (!pendingVerificationUserId || !mobileAuthToken) {
@@ -2323,8 +2403,8 @@ export default function App() {
       const payload = await submitOrgAccessRequest(user.id, joinCode, mobileAuthToken);
       setOrgRequestNotice(
         payload.created
-          ? "Request submitted. Your org admin can approve it from the Admin section."
-          : "Request already pending. Your org admin can review it in Admin.",
+          ? "Request submitted. Your org admin can approve company membership from the Admin section."
+          : "Request already pending. Your org admin can review company membership from Admin.",
       );
       setOrgJoinCodeInput("");
       await refreshMyOrgAccessRequests();
@@ -3274,7 +3354,8 @@ export default function App() {
             {"\n"}
             {domainMatch?.orgName ?? "Organization"}
             {"\n\n"}
-            Enter the join code from your org admin to submit an approval request.
+            Enter the join code from your org admin to request company membership. Dashboard access, if you need it later,
+            is enabled separately by your admin.
           </Text>
           <TextInput
             value={orgJoinCodeInput}
@@ -3293,7 +3374,7 @@ export default function App() {
               void submitOrgDomainRequest();
             }}
           >
-            <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Org Access"}</Text>
+            <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Membership"}</Text>
           </Pressable>
           <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
             <Text style={styles.ghostButtonText}>Skip and Continue Individual</Text>
@@ -3623,7 +3704,8 @@ export default function App() {
             <Text style={styles.title}>Enterprise Access</Text>
             <Text style={styles.body}>
               If your company has an enterprise subscription for your email domain, enter the org join code to request
-              access. Requests expire after 7 days and can be resent.
+              company membership. Requests expire after 7 days and can be resent. Dashboard access is enabled separately
+              if your admin needs you in reporting.
             </Text>
             <TextInput
               value={orgJoinCodeInput}
@@ -4114,7 +4196,7 @@ export default function App() {
                     setScreen("admin_org_requests");
                   }}
                 >
-                  <Text style={styles.menuItemText}>Access Requests</Text>
+                  <Text style={styles.menuItemText}>Membership Requests</Text>
                 </Pressable>
               </>
             ) : (
@@ -4545,7 +4627,7 @@ export default function App() {
           <Pressable style={styles.ghostButton} onPress={() => setScreen("admin_home")}>
             <Text style={styles.ghostButtonText}>Back</Text>
           </Pressable>
-          <Text style={styles.topTitle}>Access Requests</Text>
+          <Text style={styles.topTitle}>Membership Requests</Text>
           <Pressable
             style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
             disabled={adminLoading}
@@ -4568,7 +4650,9 @@ export default function App() {
             </Text>
             <Text style={styles.body}>
               Org domain: {orgAdminAccessRequests?.org?.emailDomain ?? "-"}{"\n"}
-              Join code: {orgAdminAccessRequests?.org?.joinCode ?? "-"}
+              Join code: {orgAdminAccessRequests?.org?.joinCode ?? "-"}{"\n\n"}
+              Approving a request adds the user to this company account. Dashboard access is still enabled separately in
+              user controls when needed.
             </Text>
 
             {pendingRows.length === 0 ? (
@@ -4590,7 +4674,7 @@ export default function App() {
                           void decideOrgAccessRequest(row.id, "approve");
                         }}
                       >
-                        <Text style={styles.primaryButtonText}>Approve</Text>
+                        <Text style={styles.primaryButtonText}>Approve Membership</Text>
                       </Pressable>
                       <Pressable
                         style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
@@ -5009,6 +5093,15 @@ export default function App() {
       );
     }
 
+    const shouldRenderScopedConfigFailure = shouldBlockForMissingAuthenticatedScopedConfig({
+      screen,
+      hasUser: Boolean(user),
+      hasMobileAuthToken: Boolean(mobileAuthToken),
+      isSuperUser: user?.isSuperUser === true,
+      hasActiveSuperUserOrg: Boolean(activeSuperUserOrgId),
+      hasScopedConfig: hasAuthenticatedScopedConfig && Boolean(config),
+    });
+
     if (appError) {
       return (
         <View style={styles.centered}>
@@ -5023,6 +5116,10 @@ export default function App() {
       );
     }
 
+    if (shouldRenderScopedConfigFailure) {
+      return renderScopedConfigError();
+    }
+
     if (screen === "onboarding") {
       return renderOnboarding();
     }
@@ -5033,6 +5130,10 @@ export default function App() {
 
     if (screen === "domain_match") {
       return renderDomainMatch();
+    }
+
+    if (screen === "scoped_config_error") {
+      return renderScopedConfigError();
     }
 
     if (screen === "superuser_org_select") {

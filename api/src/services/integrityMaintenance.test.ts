@@ -305,13 +305,15 @@ test("integrity maintenance repairs orphaned user-scoped history and prunes stal
       orphanedSimulationSessionsDeleted: 1,
       orphanedScoreRecordsDeleted: 1,
       orphanedAiUsageEventsDeleted: 1,
-      orphanedSupportCasesDeleted: 1
+      orphanedSupportCasesDeleted: 1,
+      invalidTrainingPackAssignmentsDeactivated: 0
     });
     assert.deepEqual(usageStore.listRecords().map((record) => record.userId), ["user_keep"]);
     assert.deepEqual(scoreStore.listRecords().map((record) => record.userId), ["user_keep"]);
     assert.deepEqual((await simulationSessionStore.listSessions()).map((record) => record.userId).sort(), ["user_keep", "user_keep"]);
     assert.deepEqual((await aiUsageEventAccess.list()).map((event) => event.userId), ["user_keep"]);
     assert.deepEqual((await supportStore.listCases({ now: new Date("2026-04-01T00:00:00.000Z") })).map((record) => record.userId), ["user_keep"]);
+    assert.equal(db.trainingPackAssignments[0]?.active, true);
 
     const pruned = await pruneStaleRecognizedSimulationSessions({
       simulationSessionStore,
@@ -320,6 +322,44 @@ test("integrity maintenance repairs orphaned user-scoped history and prunes stal
     });
     assert.equal(pruned.prunedStartedSessions, 1);
     assert.deepEqual((await simulationSessionStore.listSessions()).map((record) => record.simulationSessionId), ["sim_keep_recent"]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("integrity maintenance deactivates live training-pack assignments whose users are gone or no longer eligible", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-integrity-assignment-repair-"));
+  try {
+    const { usageStore, scoreStore, simulationSessionStore, aiStore, supportStore } = await createStores(tempDir);
+    const usageSessionAccess = createUsageSessionAccess(usageStore);
+    const scoreRecordAccess = createScoreRecordAccess(scoreStore);
+    const aiUsageEventAccess = createAiUsageEventAccess(aiStore);
+    const baselineUser = createDb().users[0]!;
+    const db = createDb({
+      users: [
+        { ...baselineUser, id: "user_keep" },
+        { ...baselineUser, id: "user_disabled", email: "disabled@example.com", status: "disabled" },
+      ],
+      trainingPackAssignments: [
+        createAssignment({ id: "assign_keep", userId: "user_keep" }),
+        createAssignment({ id: "assign_orphan", userId: "user_orphan" }),
+        createAssignment({ id: "assign_disabled", userId: "user_disabled" }),
+      ],
+    });
+
+    const repaired = await repairOrphanedUserScopedHistory({
+      db,
+      usageSessionAccess,
+      simulationSessionStore,
+      scoreRecordAccess,
+      aiUsageEventAccess,
+      supportCaseStore: supportStore
+    });
+
+    assert.equal(repaired.invalidTrainingPackAssignmentsDeactivated, 2);
+    assert.equal(db.trainingPackAssignments[0]?.active, true);
+    assert.equal(db.trainingPackAssignments[1]?.active, false);
+    assert.equal(db.trainingPackAssignments[2]?.active, false);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

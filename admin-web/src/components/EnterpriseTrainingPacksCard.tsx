@@ -189,9 +189,11 @@ export function EnterpriseTrainingPacksCard({
   const [editorError, setEditorError] = useState<string | null>(null);
   const [assignmentEditorPack, setAssignmentEditorPack] = useState<TrainingPack | null>(null);
   const [assignmentUserIds, setAssignmentUserIds] = useState<string[]>([]);
+  const [loadedAssignmentUserIds, setLoadedAssignmentUserIds] = useState<string[]>([]);
   const [assignmentLoading, setAssignmentLoading] = useState(false);
   const [assignmentSaving, setAssignmentSaving] = useState(false);
   const [assignmentError, setAssignmentError] = useState<string | null>(null);
+  const [assignmentNotice, setAssignmentNotice] = useState<string | null>(null);
 
   const scenarioOptions = useMemo<ScenarioOption[]>(() => {
     const rows: ScenarioOption[] = [];
@@ -250,6 +252,14 @@ export function EnterpriseTrainingPacksCard({
       }),
     [orgUsers]
   );
+  const assignableUserIdSet = useMemo(
+    () => new Set(orgUsers.filter((user) => user.status === "active").map((user) => user.userId)),
+    [orgUsers]
+  );
+  const disabledAssignedUserCount = useMemo(
+    () => loadedAssignmentUserIds.filter((userId) => !assignableUserIdSet.has(userId)).length,
+    [assignableUserIdSet, loadedAssignmentUserIds]
+  );
 
   const refresh = async (options?: { preserveNotice?: boolean }) => {
     if (!orgId) {
@@ -306,11 +316,19 @@ export function EnterpriseTrainingPacksCard({
     setAssignmentLoading(true);
     setAssignmentSaving(false);
     setAssignmentError(null);
+    setAssignmentNotice(null);
     try {
       const payload = await adminFetch<AdminTrainingPackAssignmentsResponse>(
         `/orgs/${orgId}/training-packs/${pack.id}/assignments`
       );
-      setAssignmentUserIds((payload.assignments ?? []).map((assignment) => assignment.userId));
+      const nextAssignedUserIds = (payload.assignments ?? []).map((assignment) => assignment.userId);
+      setLoadedAssignmentUserIds(nextAssignedUserIds);
+      setAssignmentUserIds(nextAssignedUserIds.filter((userId) => assignableUserIdSet.has(userId)));
+      setAssignmentNotice(
+        (payload.deactivatedInvalidAssignmentCount ?? 0) > 0
+          ? `${payload.deactivatedInvalidAssignmentCount} stale live assignment${payload.deactivatedInvalidAssignmentCount === 1 ? " was" : "s were"} automatically removed because the user is no longer eligible for this pack.`
+          : null
+      );
     } catch (caught) {
       setAssignmentError(caught instanceof Error ? caught.message : "Could not load training pack assignments.");
     } finally {
@@ -321,17 +339,23 @@ export function EnterpriseTrainingPacksCard({
   const closeAssignments = () => {
     setAssignmentEditorPack(null);
     setAssignmentUserIds([]);
+    setLoadedAssignmentUserIds([]);
     setAssignmentLoading(false);
     setAssignmentSaving(false);
     setAssignmentError(null);
+    setAssignmentNotice(null);
   };
 
-  const toggleAssignedUser = (userId: string) => {
+  const toggleAssignedUser = (user: TrainingPackAssignableUser) => {
+    if (user.status !== "active" && !assignmentUserIds.includes(user.userId)) {
+      return;
+    }
+
     setAssignmentUserIds((prev) => {
-      if (prev.includes(userId)) {
-        return prev.filter((entry) => entry !== userId);
+      if (prev.includes(user.userId)) {
+        return prev.filter((entry) => entry !== user.userId);
       }
-      return [...prev, userId];
+      return [...prev, user.userId];
     });
   };
 
@@ -344,14 +368,19 @@ export function EnterpriseTrainingPacksCard({
     setAssignmentError(null);
     setError(null);
     try {
-      await adminFetch<AdminTrainingPackAssignmentsResponse>(
+      const payload = await adminFetch<AdminTrainingPackAssignmentsResponse>(
         `/orgs/${orgId}/training-packs/${assignmentEditorPack.id}/assignments`,
         {
           method: "PUT",
           body: JSON.stringify({ userIds: assignmentUserIds })
         }
       );
-      setNotice("Training pack assignments updated.");
+      const cleanedCount = payload.deactivatedInvalidAssignmentCount ?? 0;
+      setNotice(
+        cleanedCount > 0
+          ? `Training pack assignments updated. ${cleanedCount} stale live assignment${cleanedCount === 1 ? " was" : "s were"} removed automatically.`
+          : "Training pack assignments updated."
+      );
       closeAssignments();
     } catch (caught) {
       setAssignmentError(caught instanceof Error ? caught.message : "Could not update training pack assignments.");
@@ -798,12 +827,23 @@ export function EnterpriseTrainingPacksCard({
                 </div>
 
                 {assignmentError ? <p className="error">{assignmentError}</p> : null}
+                {assignmentNotice ? <p className="success">{assignmentNotice}</p> : null}
 
                 <div className="card" style={{ marginBottom: 16 }}>
                   <p className="small" style={{ margin: 0 }}>
                     Assignments are durable roster records for this pack. Removing a user deactivates the active assignment but does not delete history.
                   </p>
                 </div>
+
+                {disabledAssignedUserCount > 0 ? (
+                  <div className="card" style={{ marginBottom: 16 }}>
+                    <p className="small" style={{ margin: 0 }}>
+                      {disabledAssignedUserCount} disabled user{disabledAssignedUserCount === 1 ? "" : "s"} already{" "}
+                      {disabledAssignedUserCount === 1 ? "has" : "have"} assignment history for this pack. Disabled users cannot
+                      receive or keep active assignments, so saving this form will remove those live assignments.
+                    </p>
+                  </div>
+                ) : null}
 
                 {assignmentLoading ? (
                   <p className="small">Loading assignments...</p>
@@ -820,25 +860,37 @@ export function EnterpriseTrainingPacksCard({
                         </tr>
                       </thead>
                       <tbody>
-                        {sortedAssignableUsers.map((user) => (
-                          <tr key={user.userId}>
-                            <td>
-                              <input
-                                type="checkbox"
-                                checked={assignmentUserIds.includes(user.userId)}
-                                disabled={assignmentSaving}
-                                onChange={() => toggleAssignedUser(user.userId)}
-                              />
-                            </td>
-                            <td>
-                              <div>{user.email}</div>
-                              <div className="small">{user.userId}</div>
-                            </td>
-                            <td>{user.status === "active" ? "Active" : "Disabled"}</td>
-                            <td>{user.orgRole ?? "-"}</td>
-                            <td>{user.dashboardAccessEnabled ? "Enabled" : "Disabled"}</td>
-                          </tr>
-                        ))}
+                        {sortedAssignableUsers.map((user) => {
+                          const isAssignable = user.status === "active";
+                          const isSelected = assignmentUserIds.includes(user.userId);
+                          const hadLoadedAssignment = loadedAssignmentUserIds.includes(user.userId);
+
+                          return (
+                            <tr key={user.userId}>
+                              <td>
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  disabled={assignmentSaving || (!isAssignable && !isSelected)}
+                                  onChange={() => toggleAssignedUser(user)}
+                                />
+                              </td>
+                              <td>
+                                <div>{user.email}</div>
+                                <div className="small">{user.userId}</div>
+                              </td>
+                              <td>
+                                {user.status === "active"
+                                  ? "Active"
+                                  : hadLoadedAssignment
+                                    ? "Disabled (removed on save)"
+                                    : "Disabled (not assignable)"}
+                              </td>
+                              <td>{user.orgRole ?? "-"}</td>
+                              <td>{user.dashboardAccessEnabled ? "Enabled" : "Disabled"}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

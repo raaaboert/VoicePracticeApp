@@ -5,6 +5,7 @@ import type { ScoreRecordAccess } from "./scoreRecordAccess.js";
 import type { UsageSessionAccess } from "./usageSessionAccess.js";
 import type { SimulationSessionStore } from "../storage/simulationSessionStore.js";
 import type { SupportCaseStore } from "../storage/supportCaseStore.js";
+import { deactivateInvalidTrainingPackAssignments } from "./trainingPackAssignments.js";
 
 export const RECOGNIZED_SIMULATION_SESSION_STALE_RETENTION_MS = 48 * 60 * 60 * 1000;
 
@@ -14,6 +15,7 @@ export interface UserScopedHistoryRepairSummary {
   orphanedScoreRecordsDeleted: number;
   orphanedAiUsageEventsDeleted: number;
   orphanedSupportCasesDeleted: number;
+  invalidTrainingPackAssignmentsDeactivated: number;
 }
 
 export interface RecognizedSimulationSessionPruneSummary {
@@ -133,12 +135,18 @@ export async function repairOrphanedUserScopedHistory(
     orphanedSupportCasesDeleted += await params.supportCaseStore.deleteCasesForUser(userId);
   }
 
+  const invalidTrainingPackAssignmentsDeactivated = deactivateInvalidTrainingPackAssignments({
+    db: params.db,
+    nowIso: new Date().toISOString(),
+  });
+
   return {
     orphanedUsageSessionsDeleted,
     orphanedSimulationSessionsDeleted,
     orphanedScoreRecordsDeleted,
     orphanedAiUsageEventsDeleted,
-    orphanedSupportCasesDeleted
+    orphanedSupportCasesDeleted,
+    invalidTrainingPackAssignmentsDeactivated
   };
 }
 

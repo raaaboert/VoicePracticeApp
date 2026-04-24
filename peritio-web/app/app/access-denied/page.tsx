@@ -30,7 +30,7 @@ export default async function AccessDeniedPage({
       <section className="section-card">
         <p className="section-copy">
           {isDashboardAccessIssue
-            ? "If you expected dashboard access here, enable it on the user record in the existing admin system and try again."
+            ? "If your company membership was approved, that alone does not turn on dashboard reporting. Enable dashboard access on the user record in the admin system, then try again."
             : "If you expected access here, update the user record in the existing admin system before trying again."}
         </p>
         <div className="pill-row">
