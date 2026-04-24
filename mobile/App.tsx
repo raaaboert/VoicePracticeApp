@@ -56,6 +56,7 @@ import {
   resendMobileVerificationEmail,
   createPublicSupportErrorCase,
   createSupportCase,
+  recoverPersistedAiScore,
   recordUsageSession,
   submitOrgAccessRequest,
   decideOrgAdminAccessRequest,
@@ -67,7 +68,11 @@ import {
   setActiveSuperUserOrgId,
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
-import { resolveSimulationScoreOutcome, shouldUsePracticeOnlyFallbackScore } from "./src/lib/simulationScoreHandling";
+import {
+  resolveSimulationScoreOutcome,
+  shouldUsePracticeFallbackAfterRemoteScoreFailure,
+  shouldUsePracticeOnlyFallbackScore,
+} from "./src/lib/simulationScoreHandling";
 import { createSimulationCorrelationId } from "./src/lib/simulationInteractionModel";
 import { shouldBlockForMissingAuthenticatedScopedConfig } from "./src/lib/scopedConfigGuard";
 import {
@@ -2752,6 +2757,40 @@ export default function App() {
         });
       };
 
+      const applyAuthoritativeScoreMetadata = (record: {
+        model: string | null;
+        promptVersion: string | null;
+        rubricVersion: string | null;
+        usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+      }) => {
+        setLastTranscript((prev) => {
+          if (!prev) {
+            return prev;
+          }
+
+          const updatedMeta = {
+            ...prev.meta,
+            model: record.model,
+            promptVersion: record.promptVersion,
+            rubricVersion: record.rubricVersion,
+            inputTokens: record.usage.inputTokens,
+            outputTokens: record.usage.outputTokens,
+            totalTokens: record.usage.totalTokens,
+          };
+
+          const updatedText = prev.text
+            .replace("AI Model: (pending)", `AI Model: ${record.model ?? "-"}`)
+            .replace("Prompt Version: (pending)", `Prompt Version: ${record.promptVersion ?? "-"}`)
+            .replace("Rubric Version: (pending)", `Rubric Version: ${record.rubricVersion ?? "-"}`)
+            .replace(
+              "Tokens (input/output/total): (pending)",
+              `Tokens (input/output/total): ${record.usage.inputTokens}/${record.usage.outputTokens}/${record.usage.totalTokens}`,
+            );
+
+          return { ...prev, meta: updatedMeta, text: updatedText };
+        });
+      };
+
       try {
         const usePracticeOnlyFallback = shouldUsePracticeOnlyFallbackScore({
           scoringEnabled,
@@ -2798,42 +2837,36 @@ export default function App() {
             markTranscriptAsNotScored(resolvedScoreOutcome.message ?? "Not enough evidence to score this session.");
           } else if (result.status === "scored") {
             finalScorecard = resolvedScoreOutcome.scorecard;
-
-            setLastTranscript((prev) => {
-              if (!prev) {
-                return prev;
-              }
-
-              const updatedMeta = {
-                ...prev.meta,
-                model: result.record.model,
-                promptVersion: result.record.promptVersion,
-                rubricVersion: result.record.rubricVersion,
-                inputTokens: result.record.usage.inputTokens,
-                outputTokens: result.record.usage.outputTokens,
-                totalTokens: result.record.usage.totalTokens,
-              };
-
-              const updatedText = prev.text
-                .replace("AI Model: (pending)", `AI Model: ${result.record.model ?? "-"}`)
-                .replace("Prompt Version: (pending)", `Prompt Version: ${result.record.promptVersion ?? "-"}`)
-                .replace("Rubric Version: (pending)", `Rubric Version: ${result.record.rubricVersion ?? "-"}`)
-                .replace(
-                  "Tokens (input/output/total): (pending)",
-                  `Tokens (input/output/total): ${result.record.usage.inputTokens}/${result.record.usage.outputTokens}/${result.record.usage.totalTokens}`,
-                );
-
-              return { ...prev, meta: updatedMeta, text: updatedText };
-            });
+            applyAuthoritativeScoreMetadata(result.record);
           }
         }
       } catch (evaluationError) {
-        finalScorecard = null;
-        scoreError = `${getErrorMessage(
-          evaluationError,
-          "Score generation failed, so no reliable scorecard was created for this session."
-        )} No local fallback score was shown.`;
-        markTranscriptAsNotScored(scoreError);
+        const recoveredScore =
+          user && mobileAuthToken
+            ? await recoverPersistedAiScore({
+                userId: user.id,
+                authToken: mobileAuthToken,
+                simulationSessionId: timing.simulationSessionId,
+              })
+            : null;
+
+        if (recoveredScore?.status === "scored") {
+          finalScorecard = recoveredScore.scorecard;
+          scoreError = "A temporary scoring service problem interrupted the live response, but the saved scorecard for this session was recovered successfully.";
+          applyAuthoritativeScoreMetadata(recoveredScore.record);
+        } else if (shouldUsePracticeFallbackAfterRemoteScoreFailure(evaluationError)) {
+          finalScorecard = fallbackScorecard(history);
+          scoreError =
+            "A temporary scoring service problem interrupted the live scorecard, so a practice-only local fallback score is shown below. It was not tracked.";
+          markTranscriptAsLocalFallback();
+        } else {
+          finalScorecard = null;
+          scoreError = `${getErrorMessage(
+            evaluationError,
+            "Score generation failed, so no reliable scorecard was created for this session."
+          )} No authoritative or local fallback score was available.`;
+          markTranscriptAsNotScored(scoreError);
+        }
         void submitAutoErrorReport("simulation.score_generation", evaluationError, {
           screen: "scorecard",
           details: {

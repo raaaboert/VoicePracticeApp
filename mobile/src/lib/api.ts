@@ -427,6 +427,10 @@ async function requestJsonWithRetry<T>(
   throw new Error("Request failed after multiple attempts.");
 }
 
+function isPersistedSimulationScoreMissingError(error: unknown): boolean {
+  return error instanceof Error && error.message.trim().toLowerCase().includes("score not found for this session");
+}
+
 export async function fetchAppConfig(): Promise<AppConfig> {
   return requestJsonWithRetry<AppConfig>(
     "/config",
@@ -1095,6 +1099,8 @@ export async function fetchAiScore(params: {
   history: DialogueMessage[];
   trainingPackId?: string;
 }): Promise<SimulationEvaluationResult> {
+  // Scoring writes a server-side record keyed by simulationSessionId. If the response is lost,
+  // recover by session id instead of blindly retrying the POST and regenerating the score.
   return requestJson(
     `/mobile/users/${encodeURIComponent(params.userId)}/ai/score`,
     {
@@ -1118,6 +1124,49 @@ export async function fetchAiScore(params: {
     params.authToken,
     { timeoutMs: 45_000 },
   );
+}
+
+export async function fetchPersistedAiScore(params: {
+  userId: string;
+  authToken: string;
+  simulationSessionId: string;
+}): Promise<SimulationEvaluationResult> {
+  const query = new URLSearchParams({
+    simulationSessionId: params.simulationSessionId,
+  });
+
+  return requestJson(
+    `/mobile/users/${encodeURIComponent(params.userId)}/ai/score?${query.toString()}`,
+    undefined,
+    params.authToken,
+    { timeoutMs: 15_000 },
+  );
+}
+
+export async function recoverPersistedAiScore(params: {
+  userId: string;
+  authToken: string;
+  simulationSessionId: string;
+}): Promise<SimulationEvaluationResult | null> {
+  const attempts = 5;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchPersistedAiScore(params);
+    } catch (error) {
+      const shouldRetry =
+        attempt < attempts
+        && (isTransientRequestError(error) || isPersistedSimulationScoreMissingError(error));
+
+      if (!shouldRetry) {
+        return null;
+      }
+
+      await sleep(600 * attempt);
+    }
+  }
+
+  return null;
 }
 
 export async function fetchAiTtsAudio(params: {

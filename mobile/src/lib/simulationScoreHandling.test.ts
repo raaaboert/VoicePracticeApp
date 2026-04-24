@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveSimulationScoreOutcome, shouldUsePracticeOnlyFallbackScore } from "./simulationScoreHandling";
+import {
+  resolveSimulationScoreOutcome,
+  shouldUsePracticeFallbackAfterRemoteScoreFailure,
+  shouldUsePracticeOnlyFallbackScore,
+} from "./simulationScoreHandling";
 
 test("resolveSimulationScoreOutcome keeps not-scored responses on the non-fallback path", () => {
   const outcome = resolveSimulationScoreOutcome({
@@ -90,6 +94,34 @@ test("shouldUsePracticeOnlyFallbackScore stays limited to explicit mock or offli
       usedMockMode: true,
       apiConfigured: true
     }),
+    false
+  );
+});
+
+test("shouldUsePracticeFallbackAfterRemoteScoreFailure allows transient or upstream score failures", () => {
+  assert.equal(
+    shouldUsePracticeFallbackAfterRemoteScoreFailure(new Error("Request failed (502)")),
+    true
+  );
+
+  assert.equal(
+    shouldUsePracticeFallbackAfterRemoteScoreFailure(
+      new Error("Score was generated but could not be saved. Please retry once the service is healthy.")
+    ),
+    true
+  );
+});
+
+test("shouldUsePracticeFallbackAfterRemoteScoreFailure rejects policy or malformed-input failures", () => {
+  assert.equal(
+    shouldUsePracticeFallbackAfterRemoteScoreFailure(new Error("Scoring is currently disabled for this account.")),
+    false
+  );
+
+  assert.equal(
+    shouldUsePracticeFallbackAfterRemoteScoreFailure(
+      new Error("No transcribed user text received. Transcription may have failed or client is sending placeholder.")
+    ),
     false
   );
 });

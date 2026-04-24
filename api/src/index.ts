@@ -207,6 +207,7 @@ import {
 } from "./services/dashboardAttemptDetails.js";
 import { createPostCommitEffectRegistry, runPostCommitEffects } from "./services/postCommitEffects.js";
 import type { PostCommitEffect } from "./services/postCommitEffects.js";
+import { buildRecoveredSimulationEvaluationResult } from "./services/mobileScoreRecovery.js";
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
@@ -15448,6 +15449,56 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     const message = error instanceof Error ? error.message : "Score generation failed.";
     response.status(503).json({ error: message });
   }
+});
+
+app.get("/mobile/users/:userId/ai/score", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+  const simulationSessionId = normalizeSimulationSessionId(request.query.simulationSessionId);
+  if (!simulationSessionId) {
+    response.status(400).json({ error: "simulationSessionId is required." });
+    return;
+  }
+
+  await withDatabaseRead(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response, {
+      requireSuperUserOrgSelection: true,
+    });
+    if (!accessContext) {
+      return;
+    }
+
+    const record =
+      scoreRecordAccess
+        .list(db, {
+          userId: user.id,
+          simulationSessionId,
+        })
+        .at(-1) ?? null;
+
+    if (!record) {
+      response.status(404).json({ error: "Score not found for this session." });
+      return;
+    }
+
+    response.json(buildRecoveredSimulationEvaluationResult(record));
+  });
 });
 
 app.post("/mobile/users/:userId/scores", async (request: Request, response: Response) => {
