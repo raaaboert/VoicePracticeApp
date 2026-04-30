@@ -635,6 +635,7 @@ export async function transcribeAudioViaApi(params: {
   audioUri: string;
   mimeType: string;
   correlationId?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
   const formData = new FormData();
   const resolvedMimeType = params.mimeType || (Platform.OS === "web" ? "audio/webm" : "audio/m4a");
@@ -664,6 +665,7 @@ export async function transcribeAudioViaApi(params: {
     params.authToken,
     {
       timeoutMs: 30_000,
+      signal: params.signal,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
   );
@@ -788,6 +790,7 @@ export async function submitSimulationTurnViaApi(params: {
   speechPrefetch?: { preset: RemoteTtsPreset } | null;
   responseMode?: "complete" | "transcript_first_v1";
   correlationId?: string;
+  signal?: AbortSignal;
 }): Promise<UnifiedSimulationTurnPayload> {
   const formData = new FormData();
   const resolvedMimeType = params.mimeType || (Platform.OS === "web" ? "audio/webm" : "audio/m4a");
@@ -843,6 +846,7 @@ export async function submitSimulationTurnViaApi(params: {
     params.authToken,
     {
       timeoutMs: 75_000,
+      signal: params.signal,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
   );
@@ -1042,6 +1046,7 @@ export async function fetchAiTurn(params: {
   trainingPackId?: string;
   speechPrefetch?: { preset: RemoteTtsPreset } | null;
   correlationId?: string;
+  signal?: AbortSignal;
 }): Promise<{
   assistantText: string;
   model: string;
@@ -1074,6 +1079,7 @@ export async function fetchAiTurn(params: {
     params.authToken,
     {
       timeoutMs: 45_000,
+      signal: params.signal,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
   );

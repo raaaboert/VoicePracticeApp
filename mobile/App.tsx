@@ -5180,8 +5180,9 @@ export default function App() {
           colorScheme={colorScheme}
           userId={user.id}
           authToken={mobileAuthToken}
-          onExit={() => {
+          onExit={(message) => {
             setSimulationConfig(null);
+            setSetupError(message ?? null);
             setScreen("setup");
           }}
           onSessionComplete={handleSessionComplete}

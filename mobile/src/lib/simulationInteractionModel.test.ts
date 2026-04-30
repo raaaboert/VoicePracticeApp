@@ -47,6 +47,7 @@ runTest("recording state makes explicit submit the primary action", () => {
       sessionActive: true,
       isInitializing: false,
       mode: "recording",
+      isStartingTurn: false,
     }),
     {
       kind: "submit",
@@ -57,12 +58,30 @@ runTest("recording state makes explicit submit the primary action", () => {
   );
 });
 
+runTest("an active session can recover from a paused idle state without pretending the session ended", () => {
+  assertDeepEqual(
+    getPrimarySimulationAction({
+      sessionActive: true,
+      isInitializing: false,
+      mode: "idle",
+      isStartingTurn: false,
+    }),
+    {
+      kind: "start",
+      label: "Resume Turn",
+      disabled: false,
+    },
+    "idle active mode should offer a resume action instead of a disabled busy state",
+  );
+});
+
 runTest("busy simulation states disable the primary button instead of ending the session", () => {
   assertDeepEqual(
     getPrimarySimulationAction({
       sessionActive: true,
       isInitializing: false,
       mode: "thinking",
+      isStartingTurn: false,
     }),
     {
       kind: "busy",
@@ -77,6 +96,7 @@ runTest("busy simulation states disable the primary button instead of ending the
       sessionActive: true,
       isInitializing: false,
       mode: "speaking",
+      isStartingTurn: false,
     }),
     {
       kind: "busy",
@@ -84,6 +104,23 @@ runTest("busy simulation states disable the primary button instead of ending the
       disabled: true,
     },
     "speaking mode should disable the primary action",
+  );
+});
+
+runTest("restarting a paused session disables duplicate resume taps while the microphone reconnects", () => {
+  assertDeepEqual(
+    getPrimarySimulationAction({
+      sessionActive: true,
+      isInitializing: false,
+      mode: "idle",
+      isStartingTurn: true,
+    }),
+    {
+      kind: "busy",
+      label: "Reconnecting...",
+      disabled: true,
+    },
+    "reconnecting an active paused turn should prevent duplicate resume actions",
   );
 });
 

@@ -28,12 +28,28 @@ export function getPrimarySimulationAction(params: {
   sessionActive: boolean;
   isInitializing: boolean;
   mode: SimulationTurnMode;
+  isStartingTurn?: boolean;
 }): PrimarySimulationAction {
   if (!params.sessionActive) {
     return {
       kind: "start",
       label: "Start Simulation",
       disabled: params.isInitializing || params.mode === "thinking" || params.mode === "speaking",
+    };
+  }
+
+  if (params.mode === "idle") {
+    if (params.isStartingTurn) {
+      return {
+        kind: "busy",
+        label: "Reconnecting...",
+        disabled: true,
+      };
+    }
+    return {
+      kind: "start",
+      label: "Resume Turn",
+      disabled: params.isInitializing,
     };
   }
 

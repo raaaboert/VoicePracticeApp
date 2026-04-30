@@ -83,6 +83,7 @@ export async function generateAssistantReply(params: {
   trainingPackId?: string | null;
   speechPrefetchPreset?: RemoteTtsPreset | null;
   correlationId?: string;
+  signal?: AbortSignal;
 }): Promise<{ assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null }> {
   const payload = await fetchAiTurn({
     userId: params.userId,
@@ -98,6 +99,7 @@ export async function generateAssistantReply(params: {
     trainingPackId: params.trainingPackId ?? undefined,
     speechPrefetch: params.speechPrefetchPreset ? { preset: params.speechPrefetchPreset } : null,
     correlationId: params.correlationId,
+    signal: params.signal,
   });
 
   return {
@@ -112,6 +114,7 @@ export async function transcribeAudio(params: {
   audioUri: string;
   preferredMimeType?: string;
   correlationId?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
   const defaultMimeType = getSimulationTranscriptionMimeType(Platform.OS);
   const mimeType = params.preferredMimeType ?? defaultMimeType;
@@ -122,6 +125,7 @@ export async function transcribeAudio(params: {
     audioUri: params.audioUri,
     mimeType,
     correlationId: params.correlationId,
+    signal: params.signal,
   });
 }
 
@@ -143,6 +147,7 @@ export async function submitRecordedSimulationTurn(params: {
   speechPrefetchPreset?: RemoteTtsPreset | null;
   responseMode?: "complete" | "transcript_first_v1";
   correlationId?: string;
+  signal?: AbortSignal;
 }): Promise<UnifiedSimulationTurnPayload> {
   const defaultMimeType = getSimulationTranscriptionMimeType(Platform.OS);
   const mimeType = params.preferredMimeType ?? defaultMimeType;
@@ -164,6 +169,7 @@ export async function submitRecordedSimulationTurn(params: {
     speechPrefetch: params.speechPrefetchPreset ? { preset: params.speechPrefetchPreset } : null,
     responseMode: params.responseMode ?? "complete",
     correlationId: params.correlationId,
+    signal: params.signal,
   });
 }
 
