@@ -86,6 +86,8 @@ const VOICE_METER_THRESHOLD_DB = -42;
 const MIN_VOICE_HIT_COUNT = 3;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
+const COMPACT_SINGLE_ACTION_DOCK_PADDING_TRIM = 4;
+const COMPACT_SINGLE_ACTION_DOCK_MIN_BOTTOM_PADDING = 2;
 
 type SimulationThemeVariant = "light" | "dark";
 
@@ -2673,7 +2675,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const endButtonDisabled = isInitializing || !sessionActive || sessionCompletionInProgressRef.current;
   const hintText = localTestMode
     ? "Local test mode: replies are mocked. Tap Submit Response when you finish speaking."
-    : sessionActive
+    : isInitializing
+      ? "The opening turn is still being prepared."
+      : sessionActive
       ? lifecyclePauseActive
         ? `Peritio paused the session because the app left the foreground. Return within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes, then tap Resume Turn when you are ready to restart the microphone.`
         : mode === "idle"
@@ -2686,8 +2690,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             : "Your response is being transcribed and the reply is being prepared."
           : "The assistant reply is now playing."
       : "Press Start Simulation to begin, then tap Submit Response when you are ready to end a turn.";
-  const stateTitle = !sessionActive
-    ? "Scenario ready"
+  const stateTitle = isInitializing
+    ? "Preparing scenario"
+    : !sessionActive
+      ? "Scenario ready"
     : lifecyclePauseActive
       ? "Simulation paused"
       : mode === "idle"
@@ -2701,18 +2707,22 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         : mode === "speaking"
           ? "Delivering the reply"
           : "Ready for your response";
-  const statusEyebrow = lifecyclePauseActive
-    ? "Privacy-safe session pause"
-    : localTestMode
-      ? "Local practice mode"
-      : "Peritio simulation engine";
-  const sessionModeLabel = lifecyclePauseActive ? "Paused session" : sessionActive ? "Live session" : "Scenario ready";
+  const statusEyebrow = "Peritio simulation engine";
+  const sessionModeLabel = isInitializing
+    ? "Preparing Scenario"
+    : lifecyclePauseActive
+      ? "Paused Session"
+      : sessionActive
+        ? "Live Session"
+        : "Scenario Ready";
   const responseModeLabel = localTestMode ? "Mocked AI" : "Remote AI";
   const transcriptCountLabel =
     messages.length === 0 ? "No turns yet" : `${messages.length} ${messages.length === 1 ? "message" : "messages"}`;
   const compactHintText = localTestMode
     ? "Local test mode with mocked replies."
-    : sessionActive
+    : isInitializing
+      ? "Start will unlock once setup finishes."
+      : sessionActive
       ? lifecyclePauseActive
         ? `Resume within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes when you are ready.`
         : mode === "idle"
@@ -2741,6 +2751,14 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const responseModeDescription = localTestMode
     ? "Useful for flow checks and UI review."
     : "Live assistant replies and voice playback.";
+  const showCompactEngineSummary = !compactVerticalLayout;
+  const compactSingleActionDock = compactVerticalLayout && !sessionActive;
+  const effectiveActionDockBottomPadding = compactSingleActionDock
+    ? Math.max(
+        COMPACT_SINGLE_ACTION_DOCK_MIN_BOTTOM_PADDING,
+        actionDockBottomPadding - COMPACT_SINGLE_ACTION_DOCK_PADDING_TRIM,
+      )
+    : actionDockBottomPadding;
   const scrollBottomPadding = Math.max(
     28,
     actionDockHeight > 0 ? actionDockHeight + scrollDockSafetyGap : fallbackScrollDockPadding,
@@ -2797,16 +2815,20 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         ) : null}
 
         <View style={[styles.statusStageCard, compactVerticalLayout ? styles.statusStageCardCompact : null]}>
-          <View style={styles.statusHeaderRow}>
-            <View style={styles.statusTitleBlock}>
+          <View style={[styles.statusHeaderRow, compactVerticalLayout ? styles.statusHeaderRowCompact : null]}>
+            <View style={[styles.statusTitleBlock, compactVerticalLayout ? styles.statusTitleBlockCompact : null]}>
               <Text style={styles.statusEyebrow}>{statusEyebrow}</Text>
-              <Text style={[styles.statusTitle, compactVerticalLayout ? styles.statusTitleCompact : null]}>{stateTitle}</Text>
+              {showCompactEngineSummary ? (
+                <Text style={[styles.statusTitle, compactVerticalLayout ? styles.statusTitleCompact : null]}>{stateTitle}</Text>
+              ) : null}
             </View>
             <View style={[styles.modePill, compactVerticalLayout ? styles.modePillCompact : null]}>
               <Text style={[styles.modePillText, compactVerticalLayout ? styles.modePillTextCompact : null]}>{sessionModeLabel}</Text>
             </View>
           </View>
-          <Text style={[styles.status, compactVerticalLayout ? styles.statusCompact : null]}>{status}</Text>
+          {showCompactEngineSummary ? (
+            <Text style={[styles.status, compactVerticalLayout ? styles.statusCompact : null]}>{status}</Text>
+          ) : null}
           <VoiceOrb
             mode={mode}
             variant={themeVariant}
@@ -2944,7 +2966,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       </ScrollView>
 
       <View
-        style={[styles.actionDock, compactVerticalLayout ? styles.actionDockCompact : null]}
+        style={[
+          styles.actionDock,
+          compactVerticalLayout ? styles.actionDockCompact : null,
+          compactSingleActionDock ? styles.actionDockSingleActionCompact : null,
+        ]}
         onLayout={(event) => {
           const nextHeight = Math.ceil(event.nativeEvent.layout.height);
           setActionDockHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
@@ -2954,8 +2980,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           style={[
             styles.actionDockInner,
             compactVerticalLayout ? styles.actionDockInnerCompact : null,
+            compactSingleActionDock ? styles.actionDockInnerSingleActionCompact : null,
             {
-              paddingBottom: actionDockBottomPadding,
+              paddingBottom: effectiveActionDockBottomPadding,
               paddingHorizontal: actionDockHorizontalPadding,
             },
           ]}
@@ -3153,9 +3180,16 @@ function createStyles(palette: SimulationPalette) {
       gap: 12,
       marginBottom: 8,
     },
+    statusHeaderRowCompact: {
+      marginBottom: 6,
+      alignItems: "center",
+    },
     statusTitleBlock: {
       flex: 1,
       gap: 3,
+    },
+    statusTitleBlockCompact: {
+      gap: 0,
     },
     statusEyebrow: {
       color: palette.statusEyebrow,
@@ -3597,6 +3631,9 @@ function createStyles(palette: SimulationPalette) {
     actionDockCompact: {
       paddingTop: 2,
     },
+    actionDockSingleActionCompact: {
+      paddingTop: 0,
+    },
     actionDockInner: {
       borderTopWidth: 1,
       borderTopColor: palette.borderStrong,
@@ -3616,6 +3653,10 @@ function createStyles(palette: SimulationPalette) {
       paddingTop: 8,
       paddingBottom: 0,
       gap: 6,
+    },
+    actionDockInnerSingleActionCompact: {
+      paddingTop: 6,
+      gap: 0,
     },
     secondaryActionButton: {
       minHeight: 52,

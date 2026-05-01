@@ -190,6 +190,7 @@ export function VoiceOrb({ mode, variant = "dark", presentation = "regular", pau
   });
 
   const stateBadgeLabel = paused ? "Paused" : MODE_LABELS[mode];
+  const showStateBadge = !compactScreen;
 
   return (
     <View style={styles.wrapper}>
@@ -205,7 +206,7 @@ export function VoiceOrb({ mode, variant = "dark", presentation = "regular", pau
           },
         ]}
       >
-        <View style={styles.headerRow}>
+        <View style={[styles.headerRow, compactScreen ? styles.headerRowCompact : null]}>
           <View style={styles.headerCopy}>
             <Text style={[styles.engineLabel, compactScreen ? styles.engineLabelCompact : null, { color: theme.headerLabel }]}>
               Peritio Engine
@@ -214,17 +215,19 @@ export function VoiceOrb({ mode, variant = "dark", presentation = "regular", pau
               Live turn state
             </Text>
           </View>
-          <View
-            style={[
-              styles.stateBadge,
-              compactScreen ? styles.stateBadgeCompact : null,
-              { backgroundColor: theme.stateBadgeBg, borderColor: theme.stateBadgeBorder },
-            ]}
-          >
-            <Text style={[styles.stateBadgeText, compactScreen ? styles.stateBadgeTextCompact : null, { color: theme.stateBadgeText }]}>
-              {stateBadgeLabel}
-            </Text>
-          </View>
+          {showStateBadge ? (
+            <View
+              style={[
+                styles.stateBadge,
+                compactScreen ? styles.stateBadgeCompact : null,
+                { backgroundColor: theme.stateBadgeBg, borderColor: theme.stateBadgeBorder },
+              ]}
+            >
+              <Text style={[styles.stateBadgeText, compactScreen ? styles.stateBadgeTextCompact : null, { color: theme.stateBadgeText }]}>
+                {stateBadgeLabel}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         <View
@@ -511,6 +514,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
     marginBottom: 14,
+  },
+  headerRowCompact: {
+    marginBottom: 10,
   },
   headerCopy: {
     flex: 1,
