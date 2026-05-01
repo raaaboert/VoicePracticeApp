@@ -6,10 +6,9 @@ export interface SimulationScreenLayout {
   useCompactEngineStatus: boolean;
   useCompactTranscript: boolean;
   useCompactTimerSummary: boolean;
-  useCondensedResponseMode: boolean;
+  showResponseModeCard: boolean;
   showScenarioDescription: boolean;
   showExtendedScenarioMeta: boolean;
-  stackStatusPanels: boolean;
   chatCardHeight: number;
   scrollDockSafetyGap: number;
   fallbackScrollDockPadding: number;
@@ -40,20 +39,20 @@ export function getSimulationScreenLayout(params: {
   const useCompactEngineStatus = compactVerticalLayout;
   const useCompactTranscript = compactVerticalLayout;
   const useCompactTimerSummary = compactVerticalLayout;
-  const useCondensedResponseMode = compactVerticalLayout;
+  const showResponseModeCard = !compactVerticalLayout;
   const showScenarioDescription = !useCompactScenarioCard;
   const showExtendedScenarioMeta = !useCompactScenarioCard;
-  const stackStatusPanels = width < 340;
   const boundedChatHeight = clamp(Math.round(height * (tightVerticalLayout ? 0.43 : compactVerticalLayout ? 0.41 : 0.35)), 272, 360);
+  const compactTranscriptBoost = compactVerticalLayout ? (tightVerticalLayout ? 20 : 28) : 0;
   const chatCardHeight = tightVerticalLayout
-    ? Math.min(332, boundedChatHeight)
+    ? Math.min(352, boundedChatHeight + compactTranscriptBoost)
     : compactVerticalLayout
-      ? Math.min(352, boundedChatHeight)
+      ? Math.min(372, boundedChatHeight + compactTranscriptBoost)
       : Math.max(312, boundedChatHeight);
   const scrollDockSafetyGap = compactVerticalLayout ? 24 : 18;
   const actionDockBottomPadding = Math.max(compactVerticalLayout ? 8 : 10, params.bottomInset + 6);
   const actionDockHorizontalPadding = compactVerticalLayout ? 14 : 16;
-  const fallbackMeasuredDockHeight = compactVerticalLayout ? 120 : 132;
+  const fallbackMeasuredDockHeight = compactVerticalLayout ? 112 : 132;
   const fallbackScrollDockPadding = fallbackMeasuredDockHeight + actionDockBottomPadding + scrollDockSafetyGap;
 
   return {
@@ -64,10 +63,9 @@ export function getSimulationScreenLayout(params: {
     useCompactEngineStatus,
     useCompactTranscript,
     useCompactTimerSummary,
-    useCondensedResponseMode,
+    showResponseModeCard,
     showScenarioDescription,
     showExtendedScenarioMeta,
-    stackStatusPanels,
     chatCardHeight,
     scrollDockSafetyGap,
     fallbackScrollDockPadding,

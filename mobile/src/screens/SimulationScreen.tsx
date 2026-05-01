@@ -408,10 +408,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     useCompactEngineStatus,
     useCompactTranscript,
     useCompactTimerSummary,
-    useCondensedResponseMode,
+    showResponseModeCard,
     showScenarioDescription,
     showExtendedScenarioMeta,
-    stackStatusPanels,
     chatCardHeight,
     scrollDockSafetyGap,
     fallbackScrollDockPadding,
@@ -2737,15 +2736,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   ];
   const scenarioMeta = showExtendedScenarioMeta ? [...compactScenarioMeta, ...extendedScenarioMeta] : compactScenarioMeta;
   const timerSummaryText = remainingSeconds !== null
-    ? `${formatDurationClock(elapsedSeconds)} · ${formatDurationClock(remainingSeconds)} remaining`
+    ? `${formatDurationClock(elapsedSeconds)} | ${formatDurationClock(remainingSeconds)} remaining`
     : formatDurationClock(elapsedSeconds);
-  const responseModeDescription = useCondensedResponseMode
-    ? localTestMode
-      ? "Mocked AI flow check."
-      : "Live replies and voice playback."
-    : localTestMode
-      ? "Useful for flow checks and UI review."
-      : "Live assistant replies and voice playback.";
+  const responseModeDescription = localTestMode
+    ? "Useful for flow checks and UI review."
+    : "Live assistant replies and voice playback.";
   const scrollBottomPadding = Math.max(
     28,
     actionDockHeight > 0 ? actionDockHeight + scrollDockSafetyGap : fallbackScrollDockPadding,
@@ -2820,17 +2815,23 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           />
           <Text style={[styles.hint, compactVerticalLayout ? styles.hintCompact : null]}>{displayedHintText}</Text>
           <View style={styles.stageDivider} />
-          <View style={[styles.statusMetaRow, stackStatusPanels ? styles.statusMetaRowStacked : null]}>
+          <View style={styles.statusMetaRow}>
             <View
               style={[
                 styles.timerCard,
                 styles.statusMiniPanel,
                 compactVerticalLayout ? styles.statusMiniPanelCompact : null,
                 compactVerticalLayout ? styles.timerCardCompact : null,
-                stackStatusPanels ? styles.statusMiniPanelStacked : null,
+                useCompactTimerSummary ? styles.timerCardSummary : null,
               ]}
             >
-              <Text style={[styles.timerLabel, useCompactTimerSummary ? styles.timerLabelCompact : null]}>
+              <Text
+                style={[
+                  styles.timerLabel,
+                  useCompactTimerSummary ? styles.timerLabelCompact : null,
+                  useCompactTimerSummary ? styles.timerLabelSummary : null,
+                ]}
+              >
                 {useCompactTimerSummary
                   ? "Session Timer"
                   : `Session Timer${maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}`}
@@ -2850,21 +2851,18 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 </>
               )}
             </View>
-            <View
-              style={[
-                styles.statusMiniPanel,
-                styles.systemCard,
-                compactVerticalLayout ? styles.statusMiniPanelCompact : null,
-                compactVerticalLayout ? styles.systemCardCompact : null,
-                stackStatusPanels ? styles.statusMiniPanelStacked : null,
-              ]}
-            >
-              <Text style={[styles.timerLabel, useCondensedResponseMode ? styles.timerLabelCompact : null]}>Response Mode</Text>
-              <Text style={[styles.systemTitle, useCondensedResponseMode ? styles.systemTitleCompact : null]}>{responseModeLabel}</Text>
-              <Text style={[styles.systemBody, useCondensedResponseMode ? styles.systemBodyCompact : null]}>
-                {responseModeDescription}
-              </Text>
-            </View>
+            {showResponseModeCard ? (
+              <View
+                style={[
+                  styles.statusMiniPanel,
+                  styles.systemCard,
+                ]}
+              >
+                <Text style={styles.timerLabel}>Response Mode</Text>
+                <Text style={styles.systemTitle}>{responseModeLabel}</Text>
+                <Text style={styles.systemBody}>{responseModeDescription}</Text>
+              </View>
+            ) : null}
           </View>
         </View>
 
@@ -3246,11 +3244,6 @@ function createStyles(palette: SimulationPalette) {
       gap: 10,
       flexWrap: "wrap",
     },
-    statusMetaRowStacked: {
-      flexDirection: "column",
-      flexWrap: "nowrap",
-      gap: 8,
-    },
     statusMiniPanel: {
       borderRadius: 16,
       borderWidth: 1,
@@ -3258,10 +3251,6 @@ function createStyles(palette: SimulationPalette) {
       backgroundColor: palette.timerBg,
       paddingVertical: 12,
       paddingHorizontal: 12,
-    },
-    statusMiniPanelStacked: {
-      width: "100%",
-      minWidth: 0,
     },
     statusMiniPanelCompact: {
       borderRadius: 14,
@@ -3277,6 +3266,16 @@ function createStyles(palette: SimulationPalette) {
     timerCardCompact: {
       minWidth: 132,
     },
+    timerCardSummary: {
+      width: "100%",
+      minWidth: 0,
+      flexBasis: "100%",
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      paddingVertical: 8,
+    },
     timerLabel: {
       color: palette.textMuted,
       fontSize: 12,
@@ -3286,6 +3285,10 @@ function createStyles(palette: SimulationPalette) {
     timerLabelCompact: {
       fontSize: 11,
     },
+    timerLabelSummary: {
+      textAlign: "left",
+      flexShrink: 0,
+    },
     timerValue: {
       color: palette.text,
       fontSize: 20,
@@ -3293,10 +3296,11 @@ function createStyles(palette: SimulationPalette) {
     },
     timerSummaryInline: {
       color: palette.text,
-      fontSize: 15,
-      lineHeight: 20,
+      flex: 1,
+      fontSize: 14,
+      lineHeight: 18,
       fontWeight: "800",
-      textAlign: "center",
+      textAlign: "right",
     },
     timerRemaining: {
       color: palette.textMuted,
@@ -3312,28 +3316,17 @@ function createStyles(palette: SimulationPalette) {
       justifyContent: "center",
       gap: 4,
     },
-    systemCardCompact: {
-      minWidth: 120,
-    },
     systemTitle: {
       color: palette.text,
       fontSize: 16,
       fontWeight: "800",
       lineHeight: 20,
     },
-    systemTitleCompact: {
-      fontSize: 14.5,
-      lineHeight: 18,
-    },
     systemBody: {
       color: palette.textMuted,
       fontSize: 12.5,
       lineHeight: 18,
       fontWeight: "600",
-    },
-    systemBodyCompact: {
-      fontSize: 11.5,
-      lineHeight: 16,
     },
     errorCard: {
       borderRadius: 12,
