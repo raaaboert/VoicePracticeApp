@@ -10,24 +10,33 @@ export interface SimulationScreenLayout {
   showScenarioDescription: boolean;
   showExtendedScenarioMeta: boolean;
   chatCardHeight: number;
-  scrollDockSafetyGap: number;
-  fallbackScrollDockPadding: number;
   actionDockBottomPadding: number;
+  compactSingleActionDockBottomPadding: number;
   actionDockHorizontalPadding: number;
+  compactSingleActionScrollBottomPadding: number;
+  compactTwoActionScrollBottomPadding: number;
+  regularScrollBottomPadding: number;
 }
 
 const COMPACT_SCREEN_HEIGHT = 760;
 const TIGHT_SCREEN_HEIGHT = 720;
 const COMPACT_SCREEN_WIDTH = 390;
 const TIGHT_SCREEN_WIDTH = 350;
-const REGULAR_DOCK_SAFETY_GAP = 18;
-const COMPACT_DOCK_SAFETY_GAP = 24;
 const REGULAR_DOCK_BOTTOM_PADDING = 10;
 const COMPACT_DOCK_BOTTOM_PADDING = 4;
 const REGULAR_DOCK_INSET_OFFSET = 6;
 const COMPACT_DOCK_INSET_OFFSET = 4;
-const REGULAR_DOCK_FALLBACK_HEIGHT = 132;
-const COMPACT_DOCK_FALLBACK_HEIGHT = 108;
+const COMPACT_SINGLE_ACTION_DOCK_BOTTOM_PADDING_RATIO = 0.5;
+const COMPACT_SINGLE_ACTION_DOCK_BOTTOM_PADDING_FLOOR = 2;
+const COMPACT_SINGLE_ACTION_FALLBACK_SCROLL_PADDING = 18;
+const COMPACT_TWO_ACTION_FALLBACK_SCROLL_PADDING = 28;
+const REGULAR_FALLBACK_SCROLL_PADDING = 32;
+const COMPACT_SINGLE_ACTION_SCROLL_DOCK_HEIGHT_CAP = 12;
+const COMPACT_TWO_ACTION_SCROLL_DOCK_HEIGHT_CAP = 20;
+const REGULAR_SCROLL_DOCK_HEIGHT_CAP = 24;
+const COMPACT_SINGLE_ACTION_SCROLL_CLEARANCE = 8;
+const COMPACT_TWO_ACTION_SCROLL_CLEARANCE = 12;
+const REGULAR_SCROLL_CLEARANCE = 14;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -57,16 +66,20 @@ export function getSimulationScreenLayout(params: {
     : compactVerticalLayout
       ? Math.min(372, boundedChatHeight + compactTranscriptBoost)
       : Math.max(312, boundedChatHeight);
-  const scrollDockSafetyGap = compactVerticalLayout ? COMPACT_DOCK_SAFETY_GAP : REGULAR_DOCK_SAFETY_GAP;
   const actionDockBottomPadding = Math.max(
     compactVerticalLayout ? COMPACT_DOCK_BOTTOM_PADDING : REGULAR_DOCK_BOTTOM_PADDING,
     params.bottomInset + (compactVerticalLayout ? COMPACT_DOCK_INSET_OFFSET : REGULAR_DOCK_INSET_OFFSET),
   );
+  const compactSingleActionDockBottomPadding = compactVerticalLayout
+    ? Math.max(
+        COMPACT_SINGLE_ACTION_DOCK_BOTTOM_PADDING_FLOOR,
+        Math.ceil(actionDockBottomPadding * COMPACT_SINGLE_ACTION_DOCK_BOTTOM_PADDING_RATIO),
+      )
+    : actionDockBottomPadding;
   const actionDockHorizontalPadding = compactVerticalLayout ? 14 : 16;
-  const fallbackMeasuredDockHeight = compactVerticalLayout
-    ? COMPACT_DOCK_FALLBACK_HEIGHT
-    : REGULAR_DOCK_FALLBACK_HEIGHT;
-  const fallbackScrollDockPadding = fallbackMeasuredDockHeight + actionDockBottomPadding + scrollDockSafetyGap;
+  const compactSingleActionScrollBottomPadding = COMPACT_SINGLE_ACTION_FALLBACK_SCROLL_PADDING;
+  const compactTwoActionScrollBottomPadding = COMPACT_TWO_ACTION_FALLBACK_SCROLL_PADDING;
+  const regularScrollBottomPadding = REGULAR_FALLBACK_SCROLL_PADDING;
 
   return {
     compactVerticalLayout,
@@ -80,9 +93,54 @@ export function getSimulationScreenLayout(params: {
     showScenarioDescription,
     showExtendedScenarioMeta,
     chatCardHeight,
-    scrollDockSafetyGap,
-    fallbackScrollDockPadding,
     actionDockBottomPadding,
+    compactSingleActionDockBottomPadding,
     actionDockHorizontalPadding,
+    compactSingleActionScrollBottomPadding,
+    compactTwoActionScrollBottomPadding,
+    regularScrollBottomPadding,
   };
+}
+
+export function getSimulationActionDockBottomPadding(params: {
+  layout: SimulationScreenLayout;
+  hasSecondaryAction: boolean;
+}): number {
+  if (params.layout.compactVerticalLayout && !params.hasSecondaryAction) {
+    return params.layout.compactSingleActionDockBottomPadding;
+  }
+
+  return params.layout.actionDockBottomPadding;
+}
+
+export function getSimulationScrollBottomPadding(params: {
+  layout: SimulationScreenLayout;
+  measuredDockHeight: number;
+  hasSecondaryAction: boolean;
+}): number {
+  const compactSingleAction = params.layout.compactVerticalLayout && !params.hasSecondaryAction;
+
+  if (compactSingleAction) {
+    const measuredContribution =
+      params.measuredDockHeight > 0
+        ? Math.min(params.measuredDockHeight, COMPACT_SINGLE_ACTION_SCROLL_DOCK_HEIGHT_CAP)
+            + COMPACT_SINGLE_ACTION_SCROLL_CLEARANCE
+        : params.layout.compactSingleActionScrollBottomPadding;
+    return Math.max(params.layout.compactSingleActionScrollBottomPadding, measuredContribution);
+  }
+
+  if (params.layout.compactVerticalLayout) {
+    const measuredContribution =
+      params.measuredDockHeight > 0
+        ? Math.min(params.measuredDockHeight, COMPACT_TWO_ACTION_SCROLL_DOCK_HEIGHT_CAP)
+            + COMPACT_TWO_ACTION_SCROLL_CLEARANCE
+        : params.layout.compactTwoActionScrollBottomPadding;
+    return Math.max(params.layout.compactTwoActionScrollBottomPadding, measuredContribution);
+  }
+
+  const measuredContribution =
+    params.measuredDockHeight > 0
+      ? Math.min(params.measuredDockHeight, REGULAR_SCROLL_DOCK_HEIGHT_CAP) + REGULAR_SCROLL_CLEARANCE
+      : params.layout.regularScrollBottomPadding;
+  return Math.max(params.layout.regularScrollBottomPadding, measuredContribution);
 }

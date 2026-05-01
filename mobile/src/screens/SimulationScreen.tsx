@@ -40,7 +40,11 @@ import {
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
 } from "../lib/simulationInteractionModel";
-import { getSimulationScreenLayout } from "../lib/simulationScreenLayout";
+import {
+  getSimulationActionDockBottomPadding,
+  getSimulationScreenLayout,
+  getSimulationScrollBottomPadding,
+} from "../lib/simulationScreenLayout";
 import {
   ACTIVE_SIMULATION_BACKGROUND_GRACE_MS,
   classifySimulationAppStateTransition,
@@ -86,8 +90,6 @@ const VOICE_METER_THRESHOLD_DB = -42;
 const MIN_VOICE_HIT_COUNT = 3;
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
-const COMPACT_SINGLE_ACTION_DOCK_PADDING_TRIM = 4;
-const COMPACT_SINGLE_ACTION_DOCK_MIN_BOTTOM_PADDING = 2;
 
 type SimulationThemeVariant = "light" | "dark";
 
@@ -414,9 +416,6 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     showScenarioDescription,
     showExtendedScenarioMeta,
     chatCardHeight,
-    scrollDockSafetyGap,
-    fallbackScrollDockPadding,
-    actionDockBottomPadding,
     actionDockHorizontalPadding,
   } = screenLayout;
   const localTestMode = !apiConfigured || useLocalMockMode;
@@ -2753,16 +2752,15 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     : "Live assistant replies and voice playback.";
   const showCompactEngineSummary = !compactVerticalLayout;
   const compactSingleActionDock = compactVerticalLayout && !sessionActive;
-  const effectiveActionDockBottomPadding = compactSingleActionDock
-    ? Math.max(
-        COMPACT_SINGLE_ACTION_DOCK_MIN_BOTTOM_PADDING,
-        actionDockBottomPadding - COMPACT_SINGLE_ACTION_DOCK_PADDING_TRIM,
-      )
-    : actionDockBottomPadding;
-  const scrollBottomPadding = Math.max(
-    28,
-    actionDockHeight > 0 ? actionDockHeight + scrollDockSafetyGap : fallbackScrollDockPadding,
-  );
+  const effectiveActionDockBottomPadding = getSimulationActionDockBottomPadding({
+    layout: screenLayout,
+    hasSecondaryAction: sessionActive,
+  });
+  const scrollBottomPadding = getSimulationScrollBottomPadding({
+    layout: screenLayout,
+    measuredDockHeight: actionDockHeight,
+    hasSecondaryAction: sessionActive,
+  });
 
   return (
     <View style={styles.screen}>
@@ -3422,7 +3420,7 @@ function createStyles(palette: SimulationPalette) {
     },
     chatCardCompact: {
       minHeight: 272,
-      marginBottom: 12,
+      marginBottom: 8,
     },
     chatCardTight: {
       minHeight: 260,
@@ -3655,7 +3653,7 @@ function createStyles(palette: SimulationPalette) {
       gap: 6,
     },
     actionDockInnerSingleActionCompact: {
-      paddingTop: 6,
+      paddingTop: 4,
       gap: 0,
     },
     secondaryActionButton: {
