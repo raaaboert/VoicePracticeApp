@@ -40,7 +40,8 @@ test("narrow tall screens still switch to the compact stack", () => {
   assert.equal(layout.showExtendedScenarioMeta, false);
   assert.equal(layout.useCompactTranscript, true);
   assert.equal(layout.chatCardHeight, 356);
-  assert.equal(layout.fallbackScrollDockPadding, 144);
+  assert.equal(layout.actionDockBottomPadding, 4);
+  assert.equal(layout.fallbackScrollDockPadding, 136);
 });
 
 test("short screens honor bottom insets in the sticky dock padding", () => {
@@ -53,7 +54,7 @@ test("short screens honor bottom insets in the sticky dock padding", () => {
   assert.equal(layout.compactVerticalLayout, true);
   assert.equal(layout.tightVerticalLayout, true);
   assert.equal(layout.showResponseModeCard, false);
-  assert.equal(layout.actionDockBottomPadding, 26);
+  assert.equal(layout.actionDockBottomPadding, 24);
   assert.equal(layout.actionDockHorizontalPadding, 14);
   assert.equal(layout.chatCardHeight, 321);
 });
@@ -90,7 +91,7 @@ test("dock compensation keeps a safety gap above the measured dock height", () =
     bottomInset: 0,
   });
 
-  const measuredDockHeight = 118;
+  const measuredDockHeight = 112;
   assert.equal(layout.scrollDockSafetyGap, 24);
   assert(layout.fallbackScrollDockPadding >= measuredDockHeight + layout.scrollDockSafetyGap);
 });

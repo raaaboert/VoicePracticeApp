@@ -3595,7 +3595,7 @@ function createStyles(palette: SimulationPalette) {
       paddingTop: 10,
     },
     actionDockCompact: {
-      paddingTop: 6,
+      paddingTop: 2,
     },
     actionDockInner: {
       borderTopWidth: 1,
@@ -3613,8 +3613,8 @@ function createStyles(palette: SimulationPalette) {
       elevation: 4,
     },
     actionDockInnerCompact: {
-      paddingTop: 10,
-      paddingBottom: 5,
+      paddingTop: 8,
+      paddingBottom: 0,
       gap: 6,
     },
     secondaryActionButton: {
@@ -3625,11 +3625,11 @@ function createStyles(palette: SimulationPalette) {
       borderWidth: 1,
       borderColor: palette.secondaryButtonBorder,
       backgroundColor: palette.secondaryButtonBg,
-      marginTop: 12,
+      marginTop: 0,
     },
     secondaryActionButtonCompact: {
       minHeight: 44,
-      marginTop: 8,
+      marginTop: 0,
     },
     secondaryActionDisabled: {
       opacity: 0.7,

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Animated, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 
 import { computeVoiceOrbLayout, type VoiceOrbLayoutMode } from "../lib/voiceOrbLayout";
-import { getCompactVoiceOrbStatus, getVoiceOrbStages } from "../lib/voiceOrbPhases";
+import { getVoiceOrbStages } from "../lib/voiceOrbPhases";
 
 export type OrbMode = VoiceOrbLayoutMode;
 
@@ -18,20 +18,6 @@ const MODE_LABELS: Record<OrbMode, string> = {
   recording: "Listening",
   thinking: "Processing",
   speaking: "Responding",
-};
-
-const MODE_CAPTIONS: Record<OrbMode, string> = {
-  idle: "The engine is waiting for the next response.",
-  recording: "Voice input is being captured live.",
-  thinking: "The next reply is being prepared now.",
-  speaking: "The assistant reply is being delivered.",
-};
-
-const MODE_COMPACT_CAPTIONS: Record<OrbMode, string> = {
-  idle: "Ready for the next turn.",
-  recording: "Listening live until you submit.",
-  thinking: "Preparing the next reply.",
-  speaking: "Delivering the reply now.",
 };
 
 const THEME = {
@@ -136,19 +122,6 @@ const MODE_COLORS = {
   },
 } as const;
 
-function getActivePhaseLabel(mode: OrbMode): string {
-  if (mode === "recording") {
-    return "Capture";
-  }
-  if (mode === "thinking") {
-    return "Process";
-  }
-  if (mode === "speaking") {
-    return "Deliver";
-  }
-  return "Standby";
-}
-
 export function VoiceOrb({ mode, variant = "dark", presentation = "regular", paused = false }: VoiceOrbProps) {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const [pulseValue] = useState(() => new Animated.Value(1));
@@ -166,7 +139,6 @@ export function VoiceOrb({ mode, variant = "dark", presentation = "regular", pau
   const shellHorizontalPadding = tightScreen ? 12 : compactScreen ? 14 : 18;
   const stagePanelHorizontalPadding = tightScreen ? 10 : compactScreen ? 12 : 16;
   const stages = getVoiceOrbStages(mode);
-  const compactStatus = getCompactVoiceOrbStatus({ mode, paused });
 
   useEffect(() => {
     pulseValue.stopAnimation();
@@ -217,41 +189,7 @@ export function VoiceOrb({ mode, variant = "dark", presentation = "regular", pau
     extrapolate: "clamp",
   });
 
-  const phaseLabel = paused ? "Paused" : getActivePhaseLabel(mode);
-  const stageCaption = paused
-    ? "The microphone stays off until you intentionally resume."
-    : compactScreen
-      ? MODE_COMPACT_CAPTIONS[mode]
-      : MODE_CAPTIONS[mode];
   const stateBadgeLabel = paused ? "Paused" : MODE_LABELS[mode];
-  const compactStatusBadgeStyle = paused
-    ? {
-        backgroundColor: theme.statusChipBg,
-        borderColor: theme.statusChipBorder,
-      }
-    : compactStatus.status === "Active"
-      ? {
-          backgroundColor: colors.accent,
-          borderColor: colors.accent,
-        }
-      : compactStatus.status === "Ready"
-        ? {
-            backgroundColor: colors.accentSoft,
-            borderColor: colors.accentSoft,
-          }
-        : {
-            backgroundColor: theme.statusChipBg,
-            borderColor: theme.statusChipBorder,
-          };
-  const compactStatusBadgeTextColor = paused
-    ? theme.labelText
-    : compactStatus.status === "Active"
-      ? variant === "dark"
-        ? "#102017"
-        : "#f8f0df"
-      : compactStatus.status === "Ready"
-        ? colors.accent
-        : theme.caption;
 
   return (
     <View style={styles.wrapper}>
@@ -301,32 +239,6 @@ export function VoiceOrb({ mode, variant = "dark", presentation = "regular", pau
             },
           ]}
         >
-          <Text style={[styles.stageEyebrow, compactScreen ? styles.stageEyebrowCompact : null, { color: theme.headerLabel }]}>
-            Current phase
-          </Text>
-          {compactScreen ? (
-            <>
-              <View style={[styles.compactStatusRow, tightScreen ? styles.compactStatusRowTight : null]}>
-                <View style={[styles.activePhaseChip, styles.activePhaseChipCompact, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
-                  <Text style={[styles.activePhaseChipText, styles.activePhaseChipTextCompact, { color: colors.accent }]}>
-                    {compactStatus.label}
-                  </Text>
-                </View>
-                <View style={[styles.compactStatusBadge, compactStatusBadgeStyle]}>
-                  <Text style={[styles.compactStatusBadgeText, { color: compactStatusBadgeTextColor }]}>{compactStatus.status}</Text>
-                </View>
-              </View>
-              <Text style={[styles.compactStageCaption, { color: theme.caption }]}>{stageCaption}</Text>
-            </>
-          ) : (
-            <View style={styles.stageCurrentRow}>
-              <View style={[styles.activePhaseChip, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
-                <Text style={[styles.activePhaseChipText, { color: colors.accent }]}>{phaseLabel}</Text>
-              </View>
-              <Text style={[styles.stageCaption, { color: theme.caption }]}>{stageCaption}</Text>
-            </View>
-          )}
-
           <View
             style={[
               styles.stageVisual,
@@ -649,20 +561,20 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 14,
+    paddingTop: 12,
+    paddingBottom: 12,
     marginBottom: 12,
   },
   stagePanelCompact: {
-    paddingTop: 12,
-    paddingBottom: 12,
-    marginBottom: 10,
+    paddingTop: 10,
+    paddingBottom: 10,
+    marginBottom: 8,
   },
   stagePanelTight: {
     borderRadius: 18,
-    paddingTop: 11,
-    paddingBottom: 10,
-    marginBottom: 9,
+    paddingTop: 9,
+    paddingBottom: 8,
+    marginBottom: 8,
   },
   stageEyebrow: {
     fontSize: 11,
@@ -827,7 +739,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 7,
-    marginTop: 8,
+    marginTop: 6,
   },
   compactTrailChip: {
     minHeight: 24,

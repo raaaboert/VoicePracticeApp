@@ -20,6 +20,14 @@ const COMPACT_SCREEN_HEIGHT = 760;
 const TIGHT_SCREEN_HEIGHT = 720;
 const COMPACT_SCREEN_WIDTH = 390;
 const TIGHT_SCREEN_WIDTH = 350;
+const REGULAR_DOCK_SAFETY_GAP = 18;
+const COMPACT_DOCK_SAFETY_GAP = 24;
+const REGULAR_DOCK_BOTTOM_PADDING = 10;
+const COMPACT_DOCK_BOTTOM_PADDING = 4;
+const REGULAR_DOCK_INSET_OFFSET = 6;
+const COMPACT_DOCK_INSET_OFFSET = 4;
+const REGULAR_DOCK_FALLBACK_HEIGHT = 132;
+const COMPACT_DOCK_FALLBACK_HEIGHT = 108;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -49,10 +57,15 @@ export function getSimulationScreenLayout(params: {
     : compactVerticalLayout
       ? Math.min(372, boundedChatHeight + compactTranscriptBoost)
       : Math.max(312, boundedChatHeight);
-  const scrollDockSafetyGap = compactVerticalLayout ? 24 : 18;
-  const actionDockBottomPadding = Math.max(compactVerticalLayout ? 8 : 10, params.bottomInset + 6);
+  const scrollDockSafetyGap = compactVerticalLayout ? COMPACT_DOCK_SAFETY_GAP : REGULAR_DOCK_SAFETY_GAP;
+  const actionDockBottomPadding = Math.max(
+    compactVerticalLayout ? COMPACT_DOCK_BOTTOM_PADDING : REGULAR_DOCK_BOTTOM_PADDING,
+    params.bottomInset + (compactVerticalLayout ? COMPACT_DOCK_INSET_OFFSET : REGULAR_DOCK_INSET_OFFSET),
+  );
   const actionDockHorizontalPadding = compactVerticalLayout ? 14 : 16;
-  const fallbackMeasuredDockHeight = compactVerticalLayout ? 112 : 132;
+  const fallbackMeasuredDockHeight = compactVerticalLayout
+    ? COMPACT_DOCK_FALLBACK_HEIGHT
+    : REGULAR_DOCK_FALLBACK_HEIGHT;
   const fallbackScrollDockPadding = fallbackMeasuredDockHeight + actionDockBottomPadding + scrollDockSafetyGap;
 
   return {
