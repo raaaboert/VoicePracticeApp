@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Animated, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 
 import { computeVoiceOrbLayout, type VoiceOrbLayoutMode } from "../lib/voiceOrbLayout";
+import { getVoiceOrbStages } from "../lib/voiceOrbPhases";
 
 export type OrbMode = VoiceOrbLayoutMode;
 
@@ -9,14 +10,6 @@ interface VoiceOrbProps {
   mode: OrbMode;
   variant?: "light" | "dark";
 }
-
-type SignalStageKey = "capture" | "process" | "deliver";
-type SignalStageState = "upcoming" | "ready" | "complete" | "active";
-
-type SignalStageMeta = {
-  state: SignalStageState;
-  status: string;
-};
 
 const MODE_LABELS: Record<OrbMode, string> = {
   idle: "Ready",
@@ -31,12 +24,6 @@ const MODE_CAPTIONS: Record<OrbMode, string> = {
   thinking: "The next reply is being prepared now.",
   speaking: "The assistant reply is being delivered.",
 };
-
-const SIGNAL_STAGES: Array<{ key: SignalStageKey; label: string }> = [
-  { key: "capture", label: "Capture" },
-  { key: "process", label: "Process" },
-  { key: "deliver", label: "Deliver" },
-];
 
 const THEME = {
   light: {
@@ -140,38 +127,6 @@ const MODE_COLORS = {
   },
 } as const;
 
-function getSignalStageMeta(mode: OrbMode, stage: SignalStageKey): SignalStageMeta {
-  if (mode === "recording") {
-    if (stage === "capture") {
-      return { state: "active", status: "Active" };
-    }
-    return { state: "upcoming", status: "Queued" };
-  }
-
-  if (mode === "thinking") {
-    if (stage === "capture") {
-      return { state: "complete", status: "Complete" };
-    }
-    if (stage === "process") {
-      return { state: "active", status: "Active" };
-    }
-    return { state: "upcoming", status: "Queued" };
-  }
-
-  if (mode === "speaking") {
-    if (stage === "deliver") {
-      return { state: "active", status: "Active" };
-    }
-    return { state: "complete", status: "Complete" };
-  }
-
-  if (stage === "capture") {
-    return { state: "ready", status: "Ready" };
-  }
-
-  return { state: "upcoming", status: "Queued" };
-}
-
 function getActivePhaseLabel(mode: OrbMode): string {
   if (mode === "recording") {
     return "Capture";
@@ -186,19 +141,21 @@ function getActivePhaseLabel(mode: OrbMode): string {
 }
 
 export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const [pulseValue] = useState(() => new Animated.Value(1));
   const [stageVisualWidth, setStageVisualWidth] = useState(0);
   const theme = THEME[variant];
   const colors = MODE_COLORS[variant][mode];
-  const compactScreen = windowWidth < 380;
+  const compactScreen = windowWidth < 380 || windowHeight < 760;
+  const tightScreen = windowWidth < 360 || windowHeight < 700;
   const fallbackStageVisualWidth = Math.min(Math.max(windowWidth - 132, 208), 332);
   const visualLayout = computeVoiceOrbLayout({
     availableWidth: stageVisualWidth > 0 ? stageVisualWidth : fallbackStageVisualWidth,
     mode,
   });
-  const shellHorizontalPadding = windowWidth < 360 ? 14 : 18;
-  const stagePanelHorizontalPadding = windowWidth < 360 ? 12 : 16;
+  const shellHorizontalPadding = tightScreen ? 12 : compactScreen ? 14 : 18;
+  const stagePanelHorizontalPadding = tightScreen ? 10 : compactScreen ? 12 : 16;
+  const stages = getVoiceOrbStages(mode);
 
   useEffect(() => {
     pulseValue.stopAnimation();
@@ -256,6 +213,8 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
       <View
         style={[
           styles.shell,
+          compactScreen ? styles.shellCompact : null,
+          tightScreen ? styles.shellTight : null,
           {
             backgroundColor: theme.shellBg,
             borderColor: theme.shellBorder,
@@ -276,6 +235,8 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
         <View
           style={[
             styles.stagePanel,
+            compactScreen ? styles.stagePanelCompact : null,
+            tightScreen ? styles.stagePanelTight : null,
             {
               backgroundColor: theme.stageBg,
               borderColor: theme.stageBorder,
@@ -283,14 +244,17 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
             },
           ]}
         >
-          <Text style={[styles.stageEyebrow, { color: theme.headerLabel }]}>Current phase</Text>
-          <View style={styles.stageCurrentRow}>
+          <Text style={[styles.stageEyebrow, compactScreen ? styles.stageEyebrowCompact : null, { color: theme.headerLabel }]}>
+            Current phase
+          </Text>
+          <View style={[styles.stageCurrentRow, compactScreen ? styles.stageCurrentRowCompact : null]}>
             <View style={[styles.activePhaseChip, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
               <Text style={[styles.activePhaseChipText, { color: colors.accent }]}>{phaseLabel}</Text>
             </View>
             <Text
               style={[
                 styles.stageCaption,
+                compactScreen ? styles.stageCaptionResponsive : null,
                 { color: theme.caption },
                 compactScreen ? styles.stageCaptionCompact : null,
               ]}
@@ -428,19 +392,31 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
         </View>
 
         <View style={styles.stepList}>
-          {SIGNAL_STAGES.map((stage, index) => {
-            const meta = getSignalStageMeta(mode, stage.key);
+          {stages.map((stage, index) => {
+            const meta = stage;
             const isActive = meta.state === "active";
             const indicatorStyle =
               meta.state === "complete"
                 ? { backgroundColor: colors.accent, borderColor: colors.accent }
                 : meta.state === "ready"
                   ? { backgroundColor: colors.accentSoft, borderColor: colors.accentSoft }
+                  : meta.state === "standby"
+                    ? { backgroundColor: theme.statusChipBg, borderColor: theme.stepDivider }
                   : meta.state === "active"
                     ? { backgroundColor: colors.accent, borderColor: colors.accent }
                     : { backgroundColor: "transparent", borderColor: theme.stepDivider };
-            const rowStyle = meta.state === "active" ? { backgroundColor: theme.stepBg } : null;
-            const labelColor = meta.state === "upcoming" ? theme.inactiveText : theme.labelText;
+            const rowStyle =
+              meta.state === "active"
+                ? { backgroundColor: theme.stepBg }
+                : meta.state === "standby"
+                  ? { backgroundColor: theme.statusChipBg }
+                  : null;
+            const labelColor =
+              meta.state === "complete"
+                ? colors.accent
+                : meta.state === "standby"
+                  ? theme.labelText
+                  : theme.labelText;
             const statusTextColor =
               meta.state === "active"
                 ? variant === "dark"
@@ -448,29 +424,47 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
                   : "#f8f0df"
                 : meta.state === "complete"
                   ? colors.accent
-                  : theme.caption;
+                  : meta.state === "ready"
+                    ? colors.accent
+                    : theme.caption;
             const statusChipStyle =
               meta.state === "active"
                 ? {
                     backgroundColor: colors.accent,
                     borderColor: colors.accent,
                   }
+                : meta.state === "ready"
+                  ? {
+                      backgroundColor: colors.accentSoft,
+                      borderColor: colors.accentSoft,
+                    }
                 : null;
             return (
               <View
                 key={stage.key}
                 style={[
                   styles.stepRow,
+                  compactScreen ? styles.stepRowCompact : null,
+                  tightScreen ? styles.stepRowTight : null,
                   rowStyle,
                   meta.state === "active" ? { borderColor: colors.accentSoft, borderWidth: 1.25 } : null,
-                  index < SIGNAL_STAGES.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
+                  index < stages.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
                 ]}
               >
                 {meta.state === "active" ? <View style={[styles.stepActiveBar, { backgroundColor: colors.accent }]} /> : null}
                 <Animated.View style={[styles.stepIndicatorWrap, isActive ? { transform: [{ scale: activeDotScale }] } : null]}>
                   <View style={[styles.stepIndicator, indicatorStyle]} />
                 </Animated.View>
-                <Text style={[styles.stepLabel, { color: labelColor }, meta.state === "active" ? styles.stepLabelActive : null]}>{stage.label}</Text>
+                <Text
+                  style={[
+                    styles.stepLabel,
+                    compactScreen ? styles.stepLabelCompact : null,
+                    { color: labelColor },
+                    meta.state === "active" ? styles.stepLabelActive : null,
+                  ]}
+                >
+                  {stage.label}
+                </Text>
                 <View style={[styles.stepStatusChip, { backgroundColor: theme.statusChipBg, borderColor: theme.statusChipBorder }, statusChipStyle]}>
                   <Text style={[styles.stepStatusText, { color: statusTextColor }]}>
                     {meta.status}
@@ -500,6 +494,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingTop: 16,
     paddingBottom: 12,
+  },
+  shellCompact: {
+    paddingTop: 14,
+    paddingBottom: 10,
+  },
+  shellTight: {
+    borderRadius: 24,
+    paddingTop: 12,
+    paddingBottom: 9,
   },
   headerRow: {
     flexDirection: "row",
@@ -545,12 +548,26 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     marginBottom: 12,
   },
+  stagePanelCompact: {
+    paddingTop: 12,
+    paddingBottom: 12,
+    marginBottom: 10,
+  },
+  stagePanelTight: {
+    borderRadius: 18,
+    paddingTop: 11,
+    paddingBottom: 10,
+    marginBottom: 9,
+  },
   stageEyebrow: {
     fontSize: 11,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 1.1,
     marginBottom: 8,
+  },
+  stageEyebrowCompact: {
+    marginBottom: 6,
   },
   stageCurrentRow: {
     flexDirection: "row",
@@ -559,6 +576,9 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 8,
     marginBottom: 14,
+  },
+  stageCurrentRowCompact: {
+    marginBottom: 12,
   },
   activePhaseChip: {
     alignSelf: "flex-start",
@@ -583,6 +603,10 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     minWidth: 180,
     textAlign: "right",
+  },
+  stageCaptionResponsive: {
+    fontSize: 12.5,
+    lineHeight: 17,
   },
   stageCaptionCompact: {
     minWidth: 0,
@@ -665,6 +689,15 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     position: "relative",
   },
+  stepRowCompact: {
+    paddingHorizontal: 9,
+    paddingVertical: 8,
+  },
+  stepRowTight: {
+    gap: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
   stepActiveBar: {
     position: "absolute",
     left: 0,
@@ -689,6 +722,9 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 13.5,
     fontWeight: "700",
+  },
+  stepLabelCompact: {
+    fontSize: 13,
   },
   stepLabelActive: {
     fontWeight: "800",

@@ -40,6 +40,7 @@ import {
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
 } from "../lib/simulationInteractionModel";
+import { getSimulationScreenLayout } from "../lib/simulationScreenLayout";
 import {
   ACTIVE_SIMULATION_BACKGROUND_GRACE_MS,
   classifySimulationAppStateTransition,
@@ -370,7 +371,7 @@ function isSimulationLifecycleInterruptedError(error: unknown): boolean {
 }
 
 export function SimulationScreen({ config, colorScheme, userId, authToken, onExit, onSessionComplete }: SimulationScreenProps) {
-  const { height: windowHeight } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [mode, setMode] = useState<OrbMode>("thinking");
@@ -390,8 +391,24 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const themeVariant: SimulationThemeVariant = colorScheme === "soft_light" ? "light" : "dark";
   const palette = useMemo(() => SIMULATION_PALETTES[themeVariant], [themeVariant]);
   const styles = useMemo(() => createStyles(palette), [palette]);
-  const compactVerticalLayout = windowHeight < 760;
-  const tightVerticalLayout = windowHeight < 700;
+  const screenLayout = useMemo(
+    () =>
+      getSimulationScreenLayout({
+        windowWidth,
+        windowHeight,
+        bottomInset: insets.bottom,
+      }),
+    [insets.bottom, windowHeight, windowWidth],
+  );
+  const {
+    compactVerticalLayout,
+    tightVerticalLayout,
+    stackStatusPanels,
+    chatCardHeight,
+    fallbackScrollDockPadding,
+    actionDockBottomPadding,
+    actionDockHorizontalPadding,
+  } = screenLayout;
   const localTestMode = !apiConfigured || useLocalMockMode;
   const shouldUseFastStartRemoteTts =
     config.remoteTtsEnabled &&
@@ -2691,10 +2708,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     `AI voice: ${config.voiceGender === "male" ? "Male" : "Female"} ${voiceOption.label}`,
     ...(config.maxSimulationMinutes !== null ? [`Org max: ${config.maxSimulationMinutes} minute(s)`] : []),
   ];
-  const fallbackScrollDockPadding = compactVerticalLayout ? 124 : 108;
   const scrollBottomPadding = Math.max(
-    24,
-    actionDockHeight > 0 ? actionDockHeight + Math.max(16, insets.bottom) : fallbackScrollDockPadding,
+    28,
+    actionDockHeight > 0 ? actionDockHeight + (compactVerticalLayout ? 20 : 16) : fallbackScrollDockPadding,
   );
 
   return (
@@ -2760,13 +2776,14 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           <VoiceOrb mode={mode} variant={themeVariant} />
           <Text style={[styles.hint, compactVerticalLayout ? styles.hintCompact : null]}>{hintText}</Text>
           <View style={styles.stageDivider} />
-          <View style={styles.statusMetaRow}>
+          <View style={[styles.statusMetaRow, stackStatusPanels ? styles.statusMetaRowStacked : null]}>
             <View
               style={[
                 styles.timerCard,
                 styles.statusMiniPanel,
                 compactVerticalLayout ? styles.statusMiniPanelCompact : null,
                 compactVerticalLayout ? styles.timerCardCompact : null,
+                stackStatusPanels ? styles.statusMiniPanelStacked : null,
               ]}
             >
               <Text style={styles.timerLabel}>
@@ -2788,6 +2805,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 styles.systemCard,
                 compactVerticalLayout ? styles.statusMiniPanelCompact : null,
                 compactVerticalLayout ? styles.systemCardCompact : null,
+                stackStatusPanels ? styles.statusMiniPanelStacked : null,
               ]}
             >
               <Text style={styles.timerLabel}>Response Mode</Text>
@@ -2808,8 +2826,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         <View
           style={[
             styles.chatCard,
-            compactVerticalLayout ? styles.chatCardCompact : null,
-            tightVerticalLayout ? styles.chatCardTight : null,
+            { height: chatCardHeight },
           ]}
         >
           <View style={styles.chatHeader}>
@@ -2869,7 +2886,16 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           setActionDockHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
         }}
       >
-        <View style={[styles.actionDockInner, compactVerticalLayout ? styles.actionDockInnerCompact : null]}>
+        <View
+          style={[
+            styles.actionDockInner,
+            compactVerticalLayout ? styles.actionDockInnerCompact : null,
+            {
+              paddingBottom: actionDockBottomPadding,
+              paddingHorizontal: actionDockHorizontalPadding,
+            },
+          ]}
+        >
           <Pressable
             style={[
               styles.primaryButton,
@@ -3123,6 +3149,11 @@ function createStyles(palette: SimulationPalette) {
       gap: 10,
       flexWrap: "wrap",
     },
+    statusMetaRowStacked: {
+      flexDirection: "column",
+      flexWrap: "nowrap",
+      gap: 8,
+    },
     statusMiniPanel: {
       borderRadius: 16,
       borderWidth: 1,
@@ -3130,6 +3161,10 @@ function createStyles(palette: SimulationPalette) {
       backgroundColor: palette.timerBg,
       paddingVertical: 12,
       paddingHorizontal: 12,
+    },
+    statusMiniPanelStacked: {
+      width: "100%",
+      minWidth: 0,
     },
     statusMiniPanelCompact: {
       borderRadius: 14,
