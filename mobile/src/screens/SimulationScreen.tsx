@@ -403,8 +403,17 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const {
     compactVerticalLayout,
     tightVerticalLayout,
+    useCompactScenarioCard,
+    useCompactEnginePresentation,
+    useCompactEngineStatus,
+    useCompactTranscript,
+    useCompactTimerSummary,
+    useCondensedResponseMode,
+    showScenarioDescription,
+    showExtendedScenarioMeta,
     stackStatusPanels,
     chatCardHeight,
+    scrollDockSafetyGap,
     fallbackScrollDockPadding,
     actionDockBottomPadding,
     actionDockHorizontalPadding,
@@ -2702,15 +2711,44 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const responseModeLabel = localTestMode ? "Mocked AI" : "Remote AI";
   const transcriptCountLabel =
     messages.length === 0 ? "No turns yet" : `${messages.length} ${messages.length === 1 ? "message" : "messages"}`;
-  const scenarioMeta = [
+  const compactHintText = localTestMode
+    ? "Local test mode with mocked replies."
+    : sessionActive
+      ? lifecyclePauseActive
+        ? `Resume within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes when you are ready.`
+        : mode === "idle"
+          ? "Resume the next turn or end the session."
+          : mode === "recording"
+            ? "Listening until you tap Submit Response."
+            : mode === "thinking"
+              ? messages[messages.length - 1]?.role === "user"
+                ? "Transcript captured. Preparing the next reply."
+                : "Preparing the opening reply."
+              : "The assistant reply is playing."
+      : "Tap Start Simulation to begin.";
+  const displayedHintText = compactVerticalLayout ? compactHintText : hintText;
+  const compactScenarioMeta = [
     `Difficulty: ${DIFFICULTY_LABELS[config.difficulty]}`,
     `Persona: ${PERSONA_LABELS[config.personaStyle]}`,
+  ];
+  const extendedScenarioMeta = [
     `AI voice: ${config.voiceGender === "male" ? "Male" : "Female"} ${voiceOption.label}`,
     ...(config.maxSimulationMinutes !== null ? [`Org max: ${config.maxSimulationMinutes} minute(s)`] : []),
   ];
+  const scenarioMeta = showExtendedScenarioMeta ? [...compactScenarioMeta, ...extendedScenarioMeta] : compactScenarioMeta;
+  const timerSummaryText = remainingSeconds !== null
+    ? `${formatDurationClock(elapsedSeconds)} · ${formatDurationClock(remainingSeconds)} remaining`
+    : formatDurationClock(elapsedSeconds);
+  const responseModeDescription = useCondensedResponseMode
+    ? localTestMode
+      ? "Mocked AI flow check."
+      : "Live replies and voice playback."
+    : localTestMode
+      ? "Useful for flow checks and UI review."
+      : "Live assistant replies and voice playback.";
   const scrollBottomPadding = Math.max(
     28,
-    actionDockHeight > 0 ? actionDockHeight + (compactVerticalLayout ? 20 : 16) : fallbackScrollDockPadding,
+    actionDockHeight > 0 ? actionDockHeight + scrollDockSafetyGap : fallbackScrollDockPadding,
   );
 
   return (
@@ -2733,15 +2771,16 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           colors={[palette.heroStart, palette.heroEnd]}
           start={{ x: 0.04, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={[styles.scenarioCard, compactVerticalLayout ? styles.scenarioCardCompact : null]}
+          style={[styles.scenarioCard, useCompactScenarioCard ? styles.scenarioCardCompact : null]}
         >
           <Text style={styles.label}>{config.segmentLabel}</Text>
-          <Text style={styles.cardTitle}>{config.scenario.title}</Text>
-          <Text style={styles.cardBody}>{config.scenario.description}</Text>
-          <View style={styles.metaRow}>
+          {useCompactScenarioCard ? <Text style={styles.cardContextText}>{config.industryLabel}</Text> : null}
+          <Text style={[styles.cardTitle, useCompactScenarioCard ? styles.cardTitleCompact : null]}>{config.scenario.title}</Text>
+          {showScenarioDescription ? <Text style={styles.cardBody}>{config.scenario.description}</Text> : null}
+          <View style={[styles.metaRow, useCompactScenarioCard ? styles.metaRowCompact : null]}>
             {scenarioMeta.map((item) => (
-              <View key={item} style={styles.metaChip}>
-                <Text style={styles.metaChipText}>{item}</Text>
+              <View key={item} style={[styles.metaChip, useCompactScenarioCard ? styles.metaChipCompact : null]}>
+                <Text style={[styles.metaChipText, useCompactScenarioCard ? styles.metaChipTextCompact : null]}>{item}</Text>
               </View>
             ))}
           </View>
@@ -2768,13 +2807,18 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               <Text style={styles.statusEyebrow}>{statusEyebrow}</Text>
               <Text style={[styles.statusTitle, compactVerticalLayout ? styles.statusTitleCompact : null]}>{stateTitle}</Text>
             </View>
-            <View style={styles.modePill}>
-              <Text style={styles.modePillText}>{sessionModeLabel}</Text>
+            <View style={[styles.modePill, compactVerticalLayout ? styles.modePillCompact : null]}>
+              <Text style={[styles.modePillText, compactVerticalLayout ? styles.modePillTextCompact : null]}>{sessionModeLabel}</Text>
             </View>
           </View>
           <Text style={[styles.status, compactVerticalLayout ? styles.statusCompact : null]}>{status}</Text>
-          <VoiceOrb mode={mode} variant={themeVariant} />
-          <Text style={[styles.hint, compactVerticalLayout ? styles.hintCompact : null]}>{hintText}</Text>
+          <VoiceOrb
+            mode={mode}
+            variant={themeVariant}
+            presentation={useCompactEngineStatus || useCompactEnginePresentation ? "compact" : "regular"}
+            paused={lifecyclePauseActive}
+          />
+          <Text style={[styles.hint, compactVerticalLayout ? styles.hintCompact : null]}>{displayedHintText}</Text>
           <View style={styles.stageDivider} />
           <View style={[styles.statusMetaRow, stackStatusPanels ? styles.statusMetaRowStacked : null]}>
             <View
@@ -2786,18 +2830,25 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 stackStatusPanels ? styles.statusMiniPanelStacked : null,
               ]}
             >
-              <Text style={styles.timerLabel}>
-                Session Timer
-                {maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}
+              <Text style={[styles.timerLabel, useCompactTimerSummary ? styles.timerLabelCompact : null]}>
+                {useCompactTimerSummary
+                  ? "Session Timer"
+                  : `Session Timer${maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}`}
               </Text>
-              <Text style={[styles.timerValue, inFinalMinute ? styles.timerValueDanger : null]}>
-                {formatDurationClock(elapsedSeconds)}
-              </Text>
-              {remainingSeconds !== null ? (
-                <Text style={[styles.timerRemaining, inFinalMinute ? styles.timerValueDanger : null]}>
-                  Remaining: {formatDurationClock(remainingSeconds)}
-                </Text>
-              ) : null}
+              {useCompactTimerSummary ? (
+                <Text style={[styles.timerSummaryInline, inFinalMinute ? styles.timerValueDanger : null]}>{timerSummaryText}</Text>
+              ) : (
+                <>
+                  <Text style={[styles.timerValue, inFinalMinute ? styles.timerValueDanger : null]}>
+                    {formatDurationClock(elapsedSeconds)}
+                  </Text>
+                  {remainingSeconds !== null ? (
+                    <Text style={[styles.timerRemaining, inFinalMinute ? styles.timerValueDanger : null]}>
+                      Remaining: {formatDurationClock(remainingSeconds)}
+                    </Text>
+                  ) : null}
+                </>
+              )}
             </View>
             <View
               style={[
@@ -2808,10 +2859,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 stackStatusPanels ? styles.statusMiniPanelStacked : null,
               ]}
             >
-              <Text style={styles.timerLabel}>Response Mode</Text>
-              <Text style={styles.systemTitle}>{responseModeLabel}</Text>
-              <Text style={styles.systemBody}>
-                {localTestMode ? "Useful for flow checks and UI review." : "Live assistant replies and voice playback."}
+              <Text style={[styles.timerLabel, useCondensedResponseMode ? styles.timerLabelCompact : null]}>Response Mode</Text>
+              <Text style={[styles.systemTitle, useCondensedResponseMode ? styles.systemTitleCompact : null]}>{responseModeLabel}</Text>
+              <Text style={[styles.systemBody, useCondensedResponseMode ? styles.systemBodyCompact : null]}>
+                {responseModeDescription}
               </Text>
             </View>
           </View>
@@ -2826,22 +2877,24 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         <View
           style={[
             styles.chatCard,
+            useCompactTranscript ? styles.chatCardCompact : null,
+            tightVerticalLayout ? styles.chatCardTight : null,
             { height: chatCardHeight },
           ]}
         >
-          <View style={styles.chatHeader}>
+          <View style={[styles.chatHeader, useCompactTranscript ? styles.chatHeaderCompact : null]}>
             <View>
-              <Text style={styles.chatEyebrow}>Transcript</Text>
-              <Text style={styles.chatTitle}>Live turn history</Text>
+              <Text style={[styles.chatEyebrow, useCompactTranscript ? styles.chatEyebrowCompact : null]}>Transcript</Text>
+              <Text style={[styles.chatTitle, useCompactTranscript ? styles.chatTitleCompact : null]}>Live turn history</Text>
             </View>
-            <View style={styles.chatStatPill}>
-              <Text style={styles.chatStatText}>{transcriptCountLabel}</Text>
+            <View style={[styles.chatStatPill, useCompactTranscript ? styles.chatStatPillCompact : null]}>
+              <Text style={[styles.chatStatText, useCompactTranscript ? styles.chatStatTextCompact : null]}>{transcriptCountLabel}</Text>
             </View>
           </View>
           <ScrollView
             ref={scrollRef}
             style={styles.chatScroll}
-            contentContainerStyle={styles.chatContent}
+            contentContainerStyle={[styles.chatContent, useCompactTranscript ? styles.chatContentCompact : null]}
             nestedScrollEnabled
           >
             {messages.length === 0 ? (
@@ -2863,13 +2916,26 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                   key={message.id}
                   style={[
                     styles.messageBubble,
+                    useCompactTranscript ? styles.messageBubbleCompact : null,
                     message.role === "user" ? styles.userBubble : styles.aiBubble,
                   ]}
                 >
-                  <Text style={[styles.messageRole, message.role === "user" ? styles.userMessageRole : styles.aiMessageRole]}>
+                  <Text
+                    style={[
+                      styles.messageRole,
+                      useCompactTranscript ? styles.messageRoleCompact : null,
+                      message.role === "user" ? styles.userMessageRole : styles.aiMessageRole,
+                    ]}
+                  >
                     {message.role === "user" ? "You" : "AI"}
                   </Text>
-                  <Text style={[styles.messageText, message.role === "user" ? styles.userMessageText : styles.aiMessageText]}>
+                  <Text
+                    style={[
+                      styles.messageText,
+                      useCompactTranscript ? styles.messageTextCompact : null,
+                      message.role === "user" ? styles.userMessageText : styles.aiMessageText,
+                    ]}
+                  >
                     {message.content}
                   </Text>
                 </View>
@@ -2998,9 +3064,10 @@ function createStyles(palette: SimulationPalette) {
       elevation: 3,
     },
     scenarioCardCompact: {
-      paddingVertical: 16,
-      marginBottom: 14,
-      gap: 9,
+      paddingHorizontal: 15,
+      paddingVertical: 14,
+      marginBottom: 12,
+      gap: 7,
     },
     label: {
       color: palette.statusEyebrow,
@@ -3015,6 +3082,16 @@ function createStyles(palette: SimulationPalette) {
       fontSize: 24,
       lineHeight: 30,
     },
+    cardTitleCompact: {
+      fontSize: 20,
+      lineHeight: 25,
+    },
+    cardContextText: {
+      color: palette.textMuted,
+      fontSize: 12.5,
+      lineHeight: 17,
+      fontWeight: "700",
+    },
     cardBody: {
       color: palette.textMuted,
       fontSize: 14.5,
@@ -3026,6 +3103,10 @@ function createStyles(palette: SimulationPalette) {
       gap: 8,
       marginTop: 4,
     },
+    metaRowCompact: {
+      gap: 6,
+      marginTop: 2,
+    },
     metaChip: {
       borderRadius: 999,
       borderWidth: 1,
@@ -3034,10 +3115,17 @@ function createStyles(palette: SimulationPalette) {
       paddingHorizontal: 11,
       paddingVertical: 7,
     },
+    metaChipCompact: {
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+    },
     metaChipText: {
       color: palette.heroMetaText,
       fontSize: 12,
       fontWeight: "700",
+    },
+    metaChipTextCompact: {
+      fontSize: 11,
     },
     statusStageCard: {
       borderRadius: 24,
@@ -3055,10 +3143,10 @@ function createStyles(palette: SimulationPalette) {
       elevation: 3,
     },
     statusStageCardCompact: {
-      paddingHorizontal: 16,
-      paddingTop: 16,
-      paddingBottom: 16,
-      marginBottom: 14,
+      paddingHorizontal: 15,
+      paddingTop: 14,
+      paddingBottom: 14,
+      marginBottom: 12,
     },
     statusHeaderRow: {
       flexDirection: "row",
@@ -3099,12 +3187,21 @@ function createStyles(palette: SimulationPalette) {
       paddingHorizontal: 12,
       paddingVertical: 6,
     },
+    modePillCompact: {
+      minHeight: 28,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+    },
     modePillText: {
       color: palette.modePillText,
       fontSize: 11.5,
       fontWeight: "700",
       textTransform: "uppercase",
       letterSpacing: 1,
+    },
+    modePillTextCompact: {
+      fontSize: 10.5,
+      letterSpacing: 0.7,
     },
     status: {
       color: palette.text,
@@ -3132,11 +3229,11 @@ function createStyles(palette: SimulationPalette) {
       fontWeight: "600",
     },
     hintCompact: {
-      fontSize: 12,
-      lineHeight: 18,
-      marginTop: 8,
-      marginBottom: 10,
-      paddingHorizontal: 10,
+      fontSize: 11.5,
+      lineHeight: 16,
+      marginTop: 6,
+      marginBottom: 8,
+      paddingHorizontal: 4,
     },
     stageDivider: {
       height: 1,
@@ -3168,7 +3265,7 @@ function createStyles(palette: SimulationPalette) {
     },
     statusMiniPanelCompact: {
       borderRadius: 14,
-      paddingVertical: 10,
+      paddingVertical: 9,
       paddingHorizontal: 10,
     },
     timerCard: {
@@ -3178,7 +3275,7 @@ function createStyles(palette: SimulationPalette) {
       gap: 2,
     },
     timerCardCompact: {
-      minWidth: 148,
+      minWidth: 132,
     },
     timerLabel: {
       color: palette.textMuted,
@@ -3186,10 +3283,20 @@ function createStyles(palette: SimulationPalette) {
       fontWeight: "700",
       textAlign: "center",
     },
+    timerLabelCompact: {
+      fontSize: 11,
+    },
     timerValue: {
       color: palette.text,
       fontSize: 20,
       fontWeight: "800",
+    },
+    timerSummaryInline: {
+      color: palette.text,
+      fontSize: 15,
+      lineHeight: 20,
+      fontWeight: "800",
+      textAlign: "center",
     },
     timerRemaining: {
       color: palette.textMuted,
@@ -3206,7 +3313,7 @@ function createStyles(palette: SimulationPalette) {
       gap: 4,
     },
     systemCardCompact: {
-      minWidth: 128,
+      minWidth: 120,
     },
     systemTitle: {
       color: palette.text,
@@ -3214,11 +3321,19 @@ function createStyles(palette: SimulationPalette) {
       fontWeight: "800",
       lineHeight: 20,
     },
+    systemTitleCompact: {
+      fontSize: 14.5,
+      lineHeight: 18,
+    },
     systemBody: {
       color: palette.textMuted,
       fontSize: 12.5,
       lineHeight: 18,
       fontWeight: "600",
+    },
+    systemBodyCompact: {
+      fontSize: 11.5,
+      lineHeight: 16,
     },
     errorCard: {
       borderRadius: 12,
@@ -3279,13 +3394,11 @@ function createStyles(palette: SimulationPalette) {
       overflow: "hidden",
     },
     chatCardCompact: {
-      minHeight: 220,
-      height: 300,
-      marginBottom: 14,
+      minHeight: 272,
+      marginBottom: 12,
     },
     chatCardTight: {
-      minHeight: 196,
-      height: 270,
+      minHeight: 260,
     },
     chatHeader: {
       flexDirection: "row",
@@ -3298,6 +3411,10 @@ function createStyles(palette: SimulationPalette) {
       borderBottomColor: palette.border,
       backgroundColor: palette.transcriptHeaderBg,
     },
+    chatHeaderCompact: {
+      paddingHorizontal: 12,
+      paddingVertical: 11,
+    },
     chatEyebrow: {
       color: palette.statusEyebrow,
       fontSize: 11,
@@ -3306,10 +3423,17 @@ function createStyles(palette: SimulationPalette) {
       letterSpacing: 1.1,
       marginBottom: 2,
     },
+    chatEyebrowCompact: {
+      fontSize: 10.5,
+      letterSpacing: 0.9,
+    },
     chatTitle: {
       color: palette.text,
       fontSize: 16,
       fontWeight: "800",
+    },
+    chatTitleCompact: {
+      fontSize: 15,
     },
     chatStatPill: {
       borderRadius: 999,
@@ -3319,10 +3443,17 @@ function createStyles(palette: SimulationPalette) {
       paddingHorizontal: 10,
       paddingVertical: 6,
     },
+    chatStatPillCompact: {
+      paddingHorizontal: 8,
+      paddingVertical: 5,
+    },
     chatStatText: {
       color: palette.transcriptStatText,
       fontSize: 11.5,
       fontWeight: "800",
+    },
+    chatStatTextCompact: {
+      fontSize: 10.5,
     },
     chatScroll: {
       flex: 1,
@@ -3330,6 +3461,10 @@ function createStyles(palette: SimulationPalette) {
     chatContent: {
       padding: 16,
       gap: 12,
+    },
+    chatContentCompact: {
+      padding: 13,
+      gap: 10,
     },
     chatEmptyState: {
       flex: 1,
@@ -3370,6 +3505,12 @@ function createStyles(palette: SimulationPalette) {
       maxWidth: "92%",
       gap: 4,
     },
+    messageBubbleCompact: {
+      borderRadius: 14,
+      paddingHorizontal: 11,
+      paddingVertical: 9,
+      gap: 3,
+    },
     userBubble: {
       backgroundColor: palette.userBubble,
       borderColor: palette.userBubbleBorder,
@@ -3386,6 +3527,10 @@ function createStyles(palette: SimulationPalette) {
       textTransform: "uppercase",
       letterSpacing: 0.6,
     },
+    messageRoleCompact: {
+      fontSize: 10.5,
+      letterSpacing: 0.45,
+    },
     userMessageRole: {
       color: "#f8eed9",
     },
@@ -3395,6 +3540,10 @@ function createStyles(palette: SimulationPalette) {
     messageText: {
       fontSize: 14.5,
       lineHeight: 21,
+    },
+    messageTextCompact: {
+      fontSize: 13.5,
+      lineHeight: 19,
     },
     userMessageText: {
       color: "#f8f0df",
@@ -3417,7 +3566,7 @@ function createStyles(palette: SimulationPalette) {
       elevation: 4,
     },
     primaryButtonCompact: {
-      minHeight: 54,
+      minHeight: 50,
       borderRadius: 16,
     },
     primaryButtonContent: {
@@ -3453,7 +3602,7 @@ function createStyles(palette: SimulationPalette) {
       paddingTop: 10,
     },
     actionDockCompact: {
-      paddingTop: 8,
+      paddingTop: 6,
     },
     actionDockInner: {
       borderTopWidth: 1,
@@ -3471,9 +3620,9 @@ function createStyles(palette: SimulationPalette) {
       elevation: 4,
     },
     actionDockInnerCompact: {
-      paddingTop: 12,
-      paddingBottom: 6,
-      gap: 8,
+      paddingTop: 10,
+      paddingBottom: 5,
+      gap: 6,
     },
     secondaryActionButton: {
       minHeight: 52,
@@ -3486,8 +3635,8 @@ function createStyles(palette: SimulationPalette) {
       marginTop: 12,
     },
     secondaryActionButtonCompact: {
-      minHeight: 48,
-      marginTop: 10,
+      minHeight: 44,
+      marginTop: 8,
     },
     secondaryActionDisabled: {
       opacity: 0.7,

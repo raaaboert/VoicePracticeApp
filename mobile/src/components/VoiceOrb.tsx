@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { Animated, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 
 import { computeVoiceOrbLayout, type VoiceOrbLayoutMode } from "../lib/voiceOrbLayout";
-import { getVoiceOrbStages } from "../lib/voiceOrbPhases";
+import { getCompactVoiceOrbStatus, getVoiceOrbStages } from "../lib/voiceOrbPhases";
 
 export type OrbMode = VoiceOrbLayoutMode;
 
 interface VoiceOrbProps {
   mode: OrbMode;
   variant?: "light" | "dark";
+  presentation?: "regular" | "compact";
+  paused?: boolean;
 }
 
 const MODE_LABELS: Record<OrbMode, string> = {
@@ -23,6 +25,13 @@ const MODE_CAPTIONS: Record<OrbMode, string> = {
   recording: "Voice input is being captured live.",
   thinking: "The next reply is being prepared now.",
   speaking: "The assistant reply is being delivered.",
+};
+
+const MODE_COMPACT_CAPTIONS: Record<OrbMode, string> = {
+  idle: "Ready for the next turn.",
+  recording: "Listening live until you submit.",
+  thinking: "Preparing the next reply.",
+  speaking: "Delivering the reply now.",
 };
 
 const THEME = {
@@ -140,22 +149,24 @@ function getActivePhaseLabel(mode: OrbMode): string {
   return "Standby";
 }
 
-export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
+export function VoiceOrb({ mode, variant = "dark", presentation = "regular", paused = false }: VoiceOrbProps) {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const [pulseValue] = useState(() => new Animated.Value(1));
   const [stageVisualWidth, setStageVisualWidth] = useState(0);
   const theme = THEME[variant];
   const colors = MODE_COLORS[variant][mode];
-  const compactScreen = windowWidth < 380 || windowHeight < 760;
-  const tightScreen = windowWidth < 360 || windowHeight < 700;
+  const compactScreen = presentation === "compact";
+  const tightScreen = compactScreen && (windowWidth < 360 || windowHeight < 720);
   const fallbackStageVisualWidth = Math.min(Math.max(windowWidth - 132, 208), 332);
   const visualLayout = computeVoiceOrbLayout({
     availableWidth: stageVisualWidth > 0 ? stageVisualWidth : fallbackStageVisualWidth,
     mode,
+    density: compactScreen ? "compact" : "regular",
   });
   const shellHorizontalPadding = tightScreen ? 12 : compactScreen ? 14 : 18;
   const stagePanelHorizontalPadding = tightScreen ? 10 : compactScreen ? 12 : 16;
   const stages = getVoiceOrbStages(mode);
+  const compactStatus = getCompactVoiceOrbStatus({ mode, paused });
 
   useEffect(() => {
     pulseValue.stopAnimation();
@@ -206,7 +217,41 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
     extrapolate: "clamp",
   });
 
-  const phaseLabel = getActivePhaseLabel(mode);
+  const phaseLabel = paused ? "Paused" : getActivePhaseLabel(mode);
+  const stageCaption = paused
+    ? "The microphone stays off until you intentionally resume."
+    : compactScreen
+      ? MODE_COMPACT_CAPTIONS[mode]
+      : MODE_CAPTIONS[mode];
+  const stateBadgeLabel = paused ? "Paused" : MODE_LABELS[mode];
+  const compactStatusBadgeStyle = paused
+    ? {
+        backgroundColor: theme.statusChipBg,
+        borderColor: theme.statusChipBorder,
+      }
+    : compactStatus.status === "Active"
+      ? {
+          backgroundColor: colors.accent,
+          borderColor: colors.accent,
+        }
+      : compactStatus.status === "Ready"
+        ? {
+            backgroundColor: colors.accentSoft,
+            borderColor: colors.accentSoft,
+          }
+        : {
+            backgroundColor: theme.statusChipBg,
+            borderColor: theme.statusChipBorder,
+          };
+  const compactStatusBadgeTextColor = paused
+    ? theme.labelText
+    : compactStatus.status === "Active"
+      ? variant === "dark"
+        ? "#102017"
+        : "#f8f0df"
+      : compactStatus.status === "Ready"
+        ? colors.accent
+        : theme.caption;
 
   return (
     <View style={styles.wrapper}>
@@ -224,11 +269,23 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
       >
         <View style={styles.headerRow}>
           <View style={styles.headerCopy}>
-            <Text style={[styles.engineLabel, { color: theme.headerLabel }]}>Peritio Engine</Text>
-            <Text style={[styles.engineSubcopy, { color: theme.headerCopy }]}>Live turn state</Text>
+            <Text style={[styles.engineLabel, compactScreen ? styles.engineLabelCompact : null, { color: theme.headerLabel }]}>
+              Peritio Engine
+            </Text>
+            <Text style={[styles.engineSubcopy, compactScreen ? styles.engineSubcopyCompact : null, { color: theme.headerCopy }]}>
+              Live turn state
+            </Text>
           </View>
-          <View style={[styles.stateBadge, { backgroundColor: theme.stateBadgeBg, borderColor: theme.stateBadgeBorder }]}>
-            <Text style={[styles.stateBadgeText, { color: theme.stateBadgeText }]}>{MODE_LABELS[mode]}</Text>
+          <View
+            style={[
+              styles.stateBadge,
+              compactScreen ? styles.stateBadgeCompact : null,
+              { backgroundColor: theme.stateBadgeBg, borderColor: theme.stateBadgeBorder },
+            ]}
+          >
+            <Text style={[styles.stateBadgeText, compactScreen ? styles.stateBadgeTextCompact : null, { color: theme.stateBadgeText }]}>
+              {stateBadgeLabel}
+            </Text>
           </View>
         </View>
 
@@ -247,21 +304,28 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
           <Text style={[styles.stageEyebrow, compactScreen ? styles.stageEyebrowCompact : null, { color: theme.headerLabel }]}>
             Current phase
           </Text>
-          <View style={[styles.stageCurrentRow, compactScreen ? styles.stageCurrentRowCompact : null]}>
-            <View style={[styles.activePhaseChip, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
-              <Text style={[styles.activePhaseChipText, { color: colors.accent }]}>{phaseLabel}</Text>
+          {compactScreen ? (
+            <>
+              <View style={[styles.compactStatusRow, tightScreen ? styles.compactStatusRowTight : null]}>
+                <View style={[styles.activePhaseChip, styles.activePhaseChipCompact, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
+                  <Text style={[styles.activePhaseChipText, styles.activePhaseChipTextCompact, { color: colors.accent }]}>
+                    {compactStatus.label}
+                  </Text>
+                </View>
+                <View style={[styles.compactStatusBadge, compactStatusBadgeStyle]}>
+                  <Text style={[styles.compactStatusBadgeText, { color: compactStatusBadgeTextColor }]}>{compactStatus.status}</Text>
+                </View>
+              </View>
+              <Text style={[styles.compactStageCaption, { color: theme.caption }]}>{stageCaption}</Text>
+            </>
+          ) : (
+            <View style={styles.stageCurrentRow}>
+              <View style={[styles.activePhaseChip, { backgroundColor: theme.statusChipBg, borderColor: colors.accentSoft }]}>
+                <Text style={[styles.activePhaseChipText, { color: colors.accent }]}>{phaseLabel}</Text>
+              </View>
+              <Text style={[styles.stageCaption, { color: theme.caption }]}>{stageCaption}</Text>
             </View>
-            <Text
-              style={[
-                styles.stageCaption,
-                compactScreen ? styles.stageCaptionResponsive : null,
-                { color: theme.caption },
-                compactScreen ? styles.stageCaptionCompact : null,
-              ]}
-            >
-              {MODE_CAPTIONS[mode]}
-            </Text>
-          </View>
+          )}
 
           <View
             style={[
@@ -391,8 +455,43 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
           </View>
         </View>
 
-        <View style={styles.stepList}>
-          {stages.map((stage, index) => {
+        {compactScreen ? (
+          <View style={styles.compactTrailRow}>
+            {stages.map((stage) => {
+              const compactTrailStyle =
+                stage.state === "active"
+                  ? {
+                      backgroundColor: colors.accent,
+                      borderColor: colors.accent,
+                    }
+                  : stage.state === "complete"
+                    ? {
+                        backgroundColor: colors.accentSoft,
+                        borderColor: colors.accentSoft,
+                      }
+                    : {
+                        backgroundColor: theme.statusChipBg,
+                        borderColor: theme.statusChipBorder,
+                      };
+              const compactTrailTextColor =
+                stage.state === "active"
+                  ? variant === "dark"
+                    ? "#102017"
+                    : "#f8f0df"
+                  : stage.state === "complete"
+                    ? colors.accent
+                    : theme.caption;
+
+              return (
+                <View key={stage.key} style={[styles.compactTrailChip, compactTrailStyle]}>
+                  <Text style={[styles.compactTrailText, { color: compactTrailTextColor }]}>{stage.label}</Text>
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <View style={styles.stepList}>
+            {stages.map((stage, index) => {
             const meta = stage;
             const isActive = meta.state === "active";
             const indicatorStyle =
@@ -439,41 +538,31 @@ export function VoiceOrb({ mode, variant = "dark" }: VoiceOrbProps) {
                       borderColor: colors.accentSoft,
                     }
                 : null;
-            return (
-              <View
-                key={stage.key}
-                style={[
-                  styles.stepRow,
-                  compactScreen ? styles.stepRowCompact : null,
-                  tightScreen ? styles.stepRowTight : null,
-                  rowStyle,
-                  meta.state === "active" ? { borderColor: colors.accentSoft, borderWidth: 1.25 } : null,
-                  index < stages.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
-                ]}
-              >
-                {meta.state === "active" ? <View style={[styles.stepActiveBar, { backgroundColor: colors.accent }]} /> : null}
-                <Animated.View style={[styles.stepIndicatorWrap, isActive ? { transform: [{ scale: activeDotScale }] } : null]}>
-                  <View style={[styles.stepIndicator, indicatorStyle]} />
-                </Animated.View>
-                <Text
+              return (
+                <View
+                  key={stage.key}
                   style={[
-                    styles.stepLabel,
-                    compactScreen ? styles.stepLabelCompact : null,
-                    { color: labelColor },
-                    meta.state === "active" ? styles.stepLabelActive : null,
+                    styles.stepRow,
+                    rowStyle,
+                    meta.state === "active" ? { borderColor: colors.accentSoft, borderWidth: 1.25 } : null,
+                    index < stages.length - 1 ? { borderBottomColor: theme.stepDivider, borderBottomWidth: StyleSheet.hairlineWidth } : null,
                   ]}
                 >
-                  {stage.label}
-                </Text>
-                <View style={[styles.stepStatusChip, { backgroundColor: theme.statusChipBg, borderColor: theme.statusChipBorder }, statusChipStyle]}>
-                  <Text style={[styles.stepStatusText, { color: statusTextColor }]}>
-                    {meta.status}
+                  {meta.state === "active" ? <View style={[styles.stepActiveBar, { backgroundColor: colors.accent }]} /> : null}
+                  <Animated.View style={[styles.stepIndicatorWrap, isActive ? { transform: [{ scale: activeDotScale }] } : null]}>
+                    <View style={[styles.stepIndicator, indicatorStyle]} />
+                  </Animated.View>
+                  <Text style={[styles.stepLabel, { color: labelColor }, meta.state === "active" ? styles.stepLabelActive : null]}>
+                    {stage.label}
                   </Text>
+                  <View style={[styles.stepStatusChip, { backgroundColor: theme.statusChipBg, borderColor: theme.statusChipBorder }, statusChipStyle]}>
+                    <Text style={[styles.stepStatusText, { color: statusTextColor }]}>{meta.status}</Text>
+                  </View>
                 </View>
-              </View>
-            );
-          })}
-        </View>
+              );
+            })}
+          </View>
+        )}
       </View>
     </View>
   );
@@ -521,9 +610,16 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 1.3,
   },
+  engineLabelCompact: {
+    fontSize: 10.5,
+    letterSpacing: 1.1,
+  },
   engineSubcopy: {
     fontSize: 12.5,
     fontWeight: "600",
+  },
+  engineSubcopyCompact: {
+    fontSize: 11.5,
   },
   stateBadge: {
     minHeight: 30,
@@ -534,11 +630,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  stateBadgeCompact: {
+    minHeight: 28,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
   stateBadgeText: {
     fontSize: 11.5,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 0.9,
+  },
+  stateBadgeTextCompact: {
+    fontSize: 10.5,
+    letterSpacing: 0.7,
   },
   stagePanel: {
     borderRadius: 20,
@@ -590,11 +695,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  activePhaseChipCompact: {
+    minHeight: 28,
+    paddingHorizontal: 11,
+    paddingVertical: 4,
+  },
   activePhaseChipText: {
     fontSize: 12.5,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 0.8,
+  },
+  activePhaseChipTextCompact: {
+    fontSize: 11.5,
+    letterSpacing: 0.7,
   },
   stageCaption: {
     flex: 1,
@@ -611,6 +725,36 @@ const styles = StyleSheet.create({
   stageCaptionCompact: {
     minWidth: 0,
     textAlign: "left",
+  },
+  compactStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 8,
+  },
+  compactStatusRowTight: {
+    gap: 6,
+  },
+  compactStatusBadge: {
+    minHeight: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 11,
+    paddingVertical: 4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  compactStatusBadgeText: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    letterSpacing: 0.2,
+  },
+  compactStageCaption: {
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "600",
+    marginBottom: 10,
   },
   stageVisual: {
     width: "100%",
@@ -678,6 +822,26 @@ const styles = StyleSheet.create({
   stepList: {
     borderRadius: 18,
     overflow: "hidden",
+  },
+  compactTrailRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 7,
+    marginTop: 8,
+  },
+  compactTrailChip: {
+    minHeight: 24,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  compactTrailText: {
+    fontSize: 10.5,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
   stepRow: {
     flexDirection: "row",

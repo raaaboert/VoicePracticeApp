@@ -48,3 +48,13 @@ runTest("scales the halo and core down on tighter widths while preserving a stro
   assert(compact.haloDiameter >= 132, "compact halo should not collapse into a tiny fallback");
   assert(compact.coreSize >= 86, "compact core should stay visually substantial");
 });
+
+runTest("compact density shrinks the engine for small-screen conversation layouts", () => {
+  const regular = computeVoiceOrbLayout({ availableWidth: 280, mode: "thinking" });
+  const compact = computeVoiceOrbLayout({ availableWidth: 280, mode: "thinking", density: "compact" });
+
+  assert(compact.haloDiameter < regular.haloDiameter, "compact density should shrink the halo");
+  assert(compact.coreSize < regular.coreSize, "compact density should shrink the core");
+  assert(compact.stageVisualHeight < regular.stageVisualHeight, "compact density should reduce the visual lane height");
+  assert(compact.displayedHaloDiameter <= 280 - 8, "compact density halo should stay contained");
+});

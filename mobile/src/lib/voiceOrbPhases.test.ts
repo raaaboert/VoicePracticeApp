@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getVoiceOrbStages } from "./voiceOrbPhases";
+import { getCompactVoiceOrbStatus, getVoiceOrbStages } from "./voiceOrbPhases";
 
 test("idle mode keeps all three stable phase rows visible before start", () => {
   const stages = getVoiceOrbStages("idle");
@@ -50,4 +50,25 @@ test("speaking mode preserves completed earlier phases", () => {
     stages.map((stage) => stage.state),
     ["complete", "complete", "active"],
   );
+});
+
+test("compact status maps idle mode to a visible ready capture label", () => {
+  assert.deepEqual(getCompactVoiceOrbStatus({ mode: "idle" }), {
+    label: "Capture",
+    status: "Ready",
+  });
+});
+
+test("compact status maps processing mode to a visible process label", () => {
+  assert.deepEqual(getCompactVoiceOrbStatus({ mode: "thinking" }), {
+    label: "Process",
+    status: "Active",
+  });
+});
+
+test("compact status can show the paused recovery state without blank labels", () => {
+  assert.deepEqual(getCompactVoiceOrbStatus({ mode: "idle", paused: true }), {
+    label: "Paused",
+    status: "Resume when ready",
+  });
 });

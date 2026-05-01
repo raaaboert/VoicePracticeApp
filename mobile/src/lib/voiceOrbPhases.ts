@@ -10,6 +10,11 @@ export interface VoiceOrbStage {
   status: string;
 }
 
+export interface CompactVoiceOrbStatus {
+  label: string;
+  status: string;
+}
+
 const VOICE_ORB_STAGES: Record<VoiceOrbStageKey, { key: VoiceOrbStageKey; label: string }> = {
   capture: { key: "capture", label: "Capture" },
   process: { key: "process", label: "Process" },
@@ -58,4 +63,26 @@ export function getVoiceOrbStages(mode: VoiceOrbLayoutMode): VoiceOrbStage[] {
     buildStage("process", "standby", "Standby"),
     buildStage("deliver", "standby", "Standby"),
   ];
+}
+
+export function getCompactVoiceOrbStatus(params: {
+  mode: VoiceOrbLayoutMode;
+  paused?: boolean;
+}): CompactVoiceOrbStatus {
+  if (params.paused) {
+    return {
+      label: "Paused",
+      status: "Resume when ready",
+    };
+  }
+
+  const stages = getVoiceOrbStages(params.mode);
+  const currentStage = stages.find((stage) => stage.state === "active")
+    ?? stages.find((stage) => stage.state === "ready")
+    ?? stages[0];
+
+  return {
+    label: currentStage.label,
+    status: currentStage.status,
+  };
 }
