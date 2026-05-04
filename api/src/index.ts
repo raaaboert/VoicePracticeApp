@@ -207,7 +207,10 @@ import {
 } from "./services/dashboardAttemptDetails.js";
 import { createPostCommitEffectRegistry, runPostCommitEffects } from "./services/postCommitEffects.js";
 import type { PostCommitEffect } from "./services/postCommitEffects.js";
-import { buildRecoveredSimulationEvaluationResult } from "./services/mobileScoreRecovery.js";
+import {
+  buildRecoveredSimulationEvaluationResult,
+  isRecoverableSimulationScoreRecord,
+} from "./services/mobileScoreRecovery.js";
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
@@ -222,10 +225,12 @@ import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/s
 import { createSimulationRuntimeCache, type SimulationRuntimeCacheStatus } from "./services/simulationRuntimeCache.js";
 import {
   buildAdditiveEvaluationScoringGuidance,
+  assertValidSimulationScorePayload,
   countUserTurnsForScoring,
   isConclusiveSimulationScoreRecord,
   MIN_USER_TURNS_FOR_SCORE,
   normalizeSimulationScorecard,
+  SimulationScorePayloadValidationError,
   type SimulationScorecard
 } from "./services/simulationScoring.js";
 import {
@@ -748,19 +753,6 @@ function buildPersistedSimulationAiDetails(params: {
     },
     latencyMs: toKnownLatency(params.latencyMs)
   };
-}
-
-function redactUserTextPreview(value: string | null | undefined): string {
-  if (typeof value !== "string" || !value.trim()) {
-    return "";
-  }
-
-  return value
-    .replace(/\s+/g, " ")
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
-    .replace(/\b\d{5,}\b/g, "[number]")
-    .trim()
-    .slice(0, 60);
 }
 
 function normalizeTranscriptForComparison(value: string): string {
@@ -1507,9 +1499,7 @@ function logSimulationUserTextDiagnostics(params: {
 
   // eslint-disable-next-line no-console
   console.log(
-    `[ai-simulation-input] route=${params.route} sessionId=${params.sessionId} userTextLength=${params.userText?.length ?? 0} userTextPreview=${JSON.stringify(
-      redactUserTextPreview(params.userText)
-    )} placeholderDetected=${params.placeholderDetected} payloadMode=${params.payloadType.mode} payloadFlags=audio:${params.payloadType.hasAudioPayload},transcription:${params.payloadType.hasTranscriptionPayload},text:${params.payloadType.hasTextPayload}`
+    `[ai-simulation-input] route=${params.route} sessionId=${params.sessionId} userTextLength=${params.userText?.length ?? 0} placeholderDetected=${params.placeholderDetected} payloadMode=${params.payloadType.mode} payloadFlags=audio:${params.payloadType.hasAudioPayload},transcription:${params.payloadType.hasTranscriptionPayload},text:${params.payloadType.hasTextPayload}`
   );
 }
 
@@ -15318,6 +15308,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     });
 
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
+    assertValidSimulationScorePayload(parsed);
     const scoringWeights = evaluationConfig?.scoringWeights ?? getDefaultScoringWeights();
     const scorecard = normalizeSimulationScorecard(parsed, scoringWeights);
     const coachingArtifact = buildSimulationScoreCoachingArtifactFromScorecard(scorecard);
@@ -15413,6 +15404,20 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       } catch (persistError) {
         const message = persistError instanceof Error ? persistError.message : String(persistError);
         logWarnThrottled("ai-usage:score", `[ai-usage] failed to persist score artifacts: ${message}`);
+        // eslint-disable-next-line no-console
+        console.warn("[simulation-score-persist-failed]", {
+          route: "score",
+          correlationId,
+          sessionId,
+          simulationSessionId: recognizedSessionId ?? null,
+          userId: context.user.id,
+          orgId: context.actingOrgId,
+          segmentId: context.segment.id,
+          scenarioId: context.scenario.id,
+          scoringStage: "score_persistence",
+          errorCategory: "score_persistence_failed",
+          reason: message
+        });
         response.status(503).json({
           error: "Score was generated but could not be saved. Please retry once the service is healthy."
         });
@@ -15447,6 +15452,22 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
     clearSimulationOrgMonthlyOverrunGrace(context.user.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Score generation failed.";
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-score-failed]", {
+      route: "score",
+      correlationId,
+      sessionId,
+      simulationSessionId: recognizedSessionId ?? null,
+      userId: context.user.id,
+      orgId: context.actingOrgId,
+      scenarioId: context.scenario.id,
+      scoringStage: error instanceof SimulationScorePayloadValidationError ? "score_payload_validation" : "score_generation",
+      errorCategory:
+        error instanceof SyntaxError || error instanceof SimulationScorePayloadValidationError
+          ? "invalid_score_payload"
+          : "score_generation_failed",
+      reason: message
+    });
     response.status(503).json({ error: message });
   }
 });
@@ -15494,6 +15515,11 @@ app.get("/mobile/users/:userId/ai/score", async (request: Request, response: Res
 
     if (!record) {
       response.status(404).json({ error: "Score not found for this session." });
+      return;
+    }
+
+    if (!isRecoverableSimulationScoreRecord(record)) {
+      response.status(404).json({ error: "Recoverable score not found for this session." });
       return;
     }
 

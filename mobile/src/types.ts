@@ -53,6 +53,12 @@ export interface SimulationScorecard {
   summary: string;
 }
 
+export type SimulationScoringStatus =
+  | "scoring_in_progress"
+  | "scored"
+  | "score_unavailable"
+  | "not_scored";
+
 export interface ScoredSimulationEvaluationResult {
   status: "scored";
   scorecard: SimulationScorecard;

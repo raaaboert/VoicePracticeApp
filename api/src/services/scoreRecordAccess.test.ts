@@ -220,6 +220,33 @@ test("scoreRecordAccess conclusiveOnly filter excludes partial and inconclusive 
   );
 });
 
+test("score summaries ignore failed scoring sessions when no score record exists", () => {
+  const access = createScoreRecordAccess();
+  const db = {
+    scoreRecords: [
+      createScore({
+        id: "verified_score",
+        overallScore: 82,
+        completionLevel: "complete",
+        objectiveAchieved: true,
+      })
+    ]
+  };
+
+  const summary = access.buildUserScoreSummary({
+    db,
+    userId: "user_1",
+    periodStartAt: new Date("2026-03-01T00:00:00.000Z"),
+    periodEndAt: new Date("2026-04-01T00:00:00.000Z"),
+    segmentLabelById: new Map([["segment_1", "Segment One"]]),
+    industryLabelById: new Map()
+  });
+
+  assert.equal(summary.totals.sessions, 1);
+  assert.equal(summary.totals.avgOverallScore, 82);
+  assert.deepEqual(summary.recent.map((record) => record.id), ["verified_score"]);
+});
+
 test("score summaries expose successful and outcome-aware counts without treating legacy records as successful", () => {
   const access = createScoreRecordAccess();
   const db = {

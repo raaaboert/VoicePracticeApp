@@ -7,11 +7,15 @@ import { Pool } from "pg";
 
 import { SimulationScoreRecord } from "@voicepractice/shared";
 
+import { buildRecoveredSimulationEvaluationResult } from "../services/mobileScoreRecovery.js";
 import { createScoreRecordStore } from "./scoreRecordStore.js";
 
 function createScore(overrides: Partial<SimulationScoreRecord> = {}): SimulationScoreRecord {
   return {
     id: overrides.id ?? "score_1",
+    simulationSessionId: Object.prototype.hasOwnProperty.call(overrides, "simulationSessionId")
+      ? overrides.simulationSessionId
+      : "sim_1",
     userId: overrides.userId ?? "user_1",
     orgId: overrides.orgId ?? "org_1",
     divisionId: overrides.divisionId ?? null,
@@ -22,7 +26,19 @@ function createScore(overrides: Partial<SimulationScoreRecord> = {}): Simulation
     industryId: overrides.industryId ?? null,
     startedAt: overrides.startedAt ?? "2026-03-31T10:00:00.000Z",
     endedAt: overrides.endedAt ?? "2026-03-31T10:05:00.000Z",
+    communicationScore: Object.prototype.hasOwnProperty.call(overrides, "communicationScore")
+      ? overrides.communicationScore
+      : 82,
+    outcomeScore: Object.prototype.hasOwnProperty.call(overrides, "outcomeScore")
+      ? overrides.outcomeScore
+      : 76,
     overallScore: overrides.overallScore ?? 82,
+    completionLevel: Object.prototype.hasOwnProperty.call(overrides, "completionLevel")
+      ? overrides.completionLevel
+      : "complete",
+    objectiveAchieved: Object.prototype.hasOwnProperty.call(overrides, "objectiveAchieved")
+      ? overrides.objectiveAchieved
+      : true,
     persuasion: overrides.persuasion ?? 8,
     clarity: overrides.clarity ?? 9,
     empathy: overrides.empathy ?? 7,
@@ -114,6 +130,70 @@ test("file score record store appends, queries, gets by id, and deletes by user"
       store.listRecords().map((record) => record.id),
       ["score_b"]
     );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("file score record store appends a representative full score and recovers it by simulationSessionId", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-score-record-store-recovery-"));
+  try {
+    const store = createScoreRecordStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    await store.initialize();
+
+    await store.appendRecord(
+      createScore({
+        id: "score_recoverable",
+        simulationSessionId: "sim_recoverable",
+        communicationScore: 86,
+        outcomeScore: 84,
+        overallScore: 85,
+        completionLevel: "complete",
+        objectiveAchieved: true
+      })
+    );
+
+    const recoveredRecord = store.listRecords({ simulationSessionId: "sim_recoverable" }).at(-1) ?? null;
+    assert.equal(recoveredRecord?.id, "score_recoverable");
+    const recovered = buildRecoveredSimulationEvaluationResult(recoveredRecord as SimulationScoreRecord);
+    assert.equal(recovered.status, "scored");
+    assert.equal(recovered.scorecard.overallScore, 85);
+    assert.equal(recovered.scorecard.communicationScore, 86);
+    assert.equal(recovered.scorecard.outcomeScore, 84);
+    assert.equal(recovered.scorecard.completionLevel, "complete");
+    assert.equal(recovered.scorecard.objectiveAchieved, true);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("file score record store rejects invalid records before they become recoverable", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-score-record-store-invalid-"));
+  try {
+    const store = createScoreRecordStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    await store.initialize();
+
+    const invalid = {
+      ...createScore({ id: "score_invalid", simulationSessionId: "sim_invalid" }),
+      overallScore: undefined
+    } as unknown as SimulationScoreRecord;
+
+    await assert.rejects(() => store.appendRecord(invalid), /Score record is invalid/);
+    assert.equal(store.listRecords({ simulationSessionId: "sim_invalid" }).length, 0);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -281,8 +361,168 @@ test("postgres score record store appendRecord uses a valid placeholder set for 
     }, 0);
 
     assert.equal(highestPlaceholder, insert.values.length);
+    assert.equal(insert.values.length, 31);
+    assert.equal(insert.values[1], "sim_123");
+    assert.equal(insert.values[12], 81);
+    assert.equal(insert.values[13], 74);
+    assert.equal(insert.values[15], "complete");
+    assert.equal(insert.values[16], true);
+    assert.deepEqual(insert.values[22], {
+      strengths: ["Clear structure"],
+      improvementAreas: ["Stronger close"],
+      coachingPriority: "clarity"
+    });
+    assert.deepEqual(insert.values[23], {
+      strengths: [{ id: "clarity", label: "Clarity" }],
+      improvementAreas: [{ id: "close", label: "Closing" }],
+      coachingPriority: { id: "clarity", label: "Clarity" }
+    });
+    assert.equal(insert.values[30], "2026-03-31T10:05:00.000Z");
     assert.match(insert.text, /\$23::jsonb,\s*\$24::jsonb,\s*\$25,/);
     assert.match(insert.text, /\$31::timestamptz/);
+  } finally {
+    Pool.prototype.query = originalPoolQuery;
+    Pool.prototype.connect = originalPoolConnect;
+  }
+});
+
+test("postgres score record store migration covers all columns used by append and recovery", async () => {
+  const originalPoolQuery = Pool.prototype.query;
+  const originalPoolConnect = Pool.prototype.connect;
+  let capturedMigration = "";
+
+  try {
+    Pool.prototype.query = (async function query(
+      this: Pool,
+      text: string,
+      values?: unknown[]
+    ): Promise<{ rows: unknown[]; rowCount: number }> {
+      void this;
+      void values;
+      if (text.includes("CREATE TABLE IF NOT EXISTS score_records")) {
+        capturedMigration = text;
+      }
+      return { rows: [], rowCount: 0 };
+    }) as typeof Pool.prototype.query;
+
+    Pool.prototype.connect = (async function connect(this: Pool) {
+      void this;
+      return {
+        async query() {
+          return { rows: [], rowCount: 0 };
+        },
+        release() {
+          return undefined;
+        }
+      };
+    }) as unknown as typeof Pool.prototype.connect;
+
+    const store = createScoreRecordStore({
+      provider: "postgres",
+      dbPath: "ignored-for-postgres.json",
+      databaseUrl: "postgres://example.invalid/test",
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+
+    await store.initialize();
+
+    for (const column of [
+      "simulation_session_id",
+      "user_id",
+      "org_id",
+      "division_id",
+      "segment_id",
+      "scenario_id",
+      "training_id",
+      "training_pack_id",
+      "industry_id",
+      "started_at",
+      "ended_at",
+      "communication_score",
+      "outcome_score",
+      "overall_score",
+      "completion_level",
+      "objective_achieved",
+      "persuasion",
+      "clarity",
+      "empathy",
+      "assertiveness",
+      "summary",
+      "coaching_artifact",
+      "normalized_coaching_themes",
+      "rubric_version",
+      "model",
+      "prompt_version",
+      "input_tokens",
+      "output_tokens",
+      "total_tokens",
+      "created_at"
+    ]) {
+      assert.match(
+        capturedMigration,
+        new RegExp(`ALTER TABLE score_records ADD COLUMN IF NOT EXISTS ${column}\\b`),
+        `expected migration to cover ${column}`
+      );
+    }
+  } finally {
+    Pool.prototype.query = originalPoolQuery;
+    Pool.prototype.connect = originalPoolConnect;
+  }
+});
+
+test("postgres score record store does not expose a recoverable score when append fails", async () => {
+  const originalPoolQuery = Pool.prototype.query;
+  const originalPoolConnect = Pool.prototype.connect;
+
+  try {
+    Pool.prototype.query = (async function query(
+      this: Pool,
+      text: string,
+      values?: unknown[]
+    ): Promise<{ rows: unknown[]; rowCount: number }> {
+      void this;
+      void text;
+      void values;
+      return { rows: [], rowCount: 0 };
+    }) as typeof Pool.prototype.query;
+
+    Pool.prototype.connect = (async function connect(this: Pool) {
+      void this;
+      return {
+        async query(text: string) {
+          if (text.includes("INSERT INTO score_records")) {
+            throw new Error("forced score append failure");
+          }
+          return { rows: [], rowCount: 0 };
+        },
+        release() {
+          return undefined;
+        }
+      };
+    }) as typeof Pool.prototype.connect;
+
+    const store = createScoreRecordStore({
+      provider: "postgres",
+      dbPath: "ignored-for-postgres.json",
+      databaseUrl: "postgres://example.invalid/test",
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+
+    await assert.rejects(
+      () =>
+        store.appendRecord(
+          createScore({
+            id: "score_failed_append",
+            simulationSessionId: "sim_failed_append"
+          })
+        ),
+      /forced score append failure/
+    );
+    assert.equal(store.listRecords({ simulationSessionId: "sim_failed_append" }).length, 0);
   } finally {
     Pool.prototype.query = originalPoolQuery;
     Pool.prototype.connect = originalPoolConnect;

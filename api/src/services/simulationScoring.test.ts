@@ -6,6 +6,7 @@ import { buildDefaultScoringGuidance } from "@voicepractice/shared";
 import { buildEvaluationSystemPrompt } from "../aiPrompts.js";
 import { getDefaultScoringWeights } from "./trainingPackRuntime.js";
 import {
+  assertValidSimulationScorePayload,
   buildAdditiveEvaluationScoringGuidance,
   countUserTurnsForScoring,
   hasOutcomeAwareSimulationScoreRecord,
@@ -13,7 +14,8 @@ import {
   isSuccessfulSimulationScoreRecord,
   MIN_USER_TURNS_FOR_SCORE,
   MAX_UNACHIEVED_OUTCOME_SCORE,
-  normalizeSimulationScorecard
+  normalizeSimulationScorecard,
+  SimulationScorePayloadValidationError
 } from "./simulationScoring.js";
 
 test("evaluation prompt layers desired outcome and standard scoring guidance for standard scenarios", () => {
@@ -206,14 +208,58 @@ test("normalizeSimulationScorecard resolves inconsistent completion and outcome 
   assert.equal(lowOutcomeClaimedSuccess.overallScore, 65);
 });
 
-test("normalizeSimulationScorecard keeps fully missing score payloads on a neutral trust-preserving baseline", () => {
-  const normalized = normalizeSimulationScorecard({}, getDefaultScoringWeights());
+test("assertValidSimulationScorePayload rejects fully missing scorer JSON instead of allowing neutral scores", () => {
+  assert.throws(
+    () => assertValidSimulationScorePayload({}),
+    (error) =>
+      error instanceof SimulationScorePayloadValidationError
+      && /communicationScore is missing or invalid/.test(error.message)
+  );
+});
 
-  assert.equal(normalized.communicationScore, 50);
-  assert.equal(normalized.outcomeScore, 50);
-  assert.equal(normalized.completionLevel, "partial");
-  assert.equal(normalized.objectiveAchieved, false);
-  assert.equal(normalized.overallScore, 50);
+test("assertValidSimulationScorePayload rejects sparse or malformed scorer JSON", () => {
+  assert.throws(
+    () =>
+      assertValidSimulationScorePayload({
+        communicationScore: 82,
+        outcomeScore: 76,
+        overallScore: 80,
+        completionLevel: "complete",
+        objectiveAchieved: true,
+        persuasion: 8,
+        clarity: 9,
+        empathy: 7,
+        assertiveness: 8,
+        strengths: [],
+        improvements: ["Tighter close"],
+        summary: "Handled the conversation well."
+      }),
+    (error) =>
+      error instanceof SimulationScorePayloadValidationError
+      && /strengths is missing or invalid/.test(error.message)
+  );
+});
+
+test("assertValidSimulationScorePayload accepts complete scorer JSON before normalization", () => {
+  const payload = {
+    communicationScore: 82,
+    outcomeScore: 76,
+    overallScore: 80,
+    completionLevel: "complete",
+    objectiveAchieved: true,
+    persuasion: 8,
+    clarity: 9,
+    empathy: 7,
+    assertiveness: 8,
+    strengths: ["Clear framing"],
+    improvements: ["Tighter close"],
+    summary: "Handled the conversation well."
+  };
+
+  assert.doesNotThrow(() => assertValidSimulationScorePayload(payload));
+  const normalized = normalizeSimulationScorecard(payload, getDefaultScoringWeights());
+  assert.equal(normalized.communicationScore, 80);
+  assert.equal(normalized.overallScore, 79);
 });
 
 test("countUserTurnsForScoring enforces the minimum turn threshold and conclusive helper treats legacy records as reportable", () => {

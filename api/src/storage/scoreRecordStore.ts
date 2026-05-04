@@ -804,11 +804,35 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
             );
 
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS simulation_session_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS user_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS org_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS segment_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS scenario_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS training_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS training_pack_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS industry_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS communication_score DOUBLE PRECISION NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS outcome_score DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS overall_score DOUBLE PRECISION NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS completion_level TEXT NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS objective_achieved BOOLEAN NULL;
-            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS persuasion DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS clarity DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS empathy DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS assertiveness DOUBLE PRECISION NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS summary TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS coaching_artifact JSONB NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS normalized_coaching_themes JSONB NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS rubric_version TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS model TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS prompt_version TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS input_tokens INTEGER NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS output_tokens INTEGER NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS total_tokens INTEGER NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NULL;
 
             CREATE INDEX IF NOT EXISTS idx_score_records_user_id ON score_records (user_id);
             CREATE INDEX IF NOT EXISTS idx_score_records_org_id ON score_records (org_id);

@@ -1,16 +1,40 @@
-import type { SimulationScoreRecord } from "@voicepractice/shared";
+import {
+  SIMULATION_COMPLETION_LEVELS,
+  type SimulationScoreRecord,
+} from "@voicepractice/shared";
 
 import {
   normalizeSimulationCompletionLevel,
   type SimulationScorecard,
 } from "./simulationScoring.js";
 
-function clampInteger(value: number | null | undefined, min: number, max: number, fallback: number): number {
-  if (!Number.isFinite(value)) {
-    return fallback;
-  }
+function isFiniteNumberInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
 
-  return Math.max(min, Math.min(max, Math.round(value as number)));
+function clampPersistedInteger(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+export function isRecoverableSimulationScoreRecord(record: SimulationScoreRecord): boolean {
+  return (
+    isFiniteNumberInRange(record.communicationScore, 0, 100)
+    && isFiniteNumberInRange(record.outcomeScore, 0, 100)
+    && isFiniteNumberInRange(record.overallScore, 0, 100)
+    && typeof record.completionLevel === "string"
+    && (SIMULATION_COMPLETION_LEVELS as readonly string[]).includes(record.completionLevel)
+    && typeof record.objectiveAchieved === "boolean"
+    && isFiniteNumberInRange(record.persuasion, 1, 10)
+    && isFiniteNumberInRange(record.clarity, 1, 10)
+    && isFiniteNumberInRange(record.empathy, 1, 10)
+    && isFiniteNumberInRange(record.assertiveness, 1, 10)
+  );
+}
+
+function requireRecoverableSimulationScoreRecord(record: SimulationScoreRecord): void {
+  if (!isRecoverableSimulationScoreRecord(record)) {
+    throw new Error("Recovered score record is incomplete.");
+  }
 }
 
 function normalizeCoachingItems(
@@ -28,19 +52,18 @@ function normalizeCoachingItems(
 export function buildRecoveredSimulationScorecard(
   record: SimulationScoreRecord,
 ): SimulationScorecard {
-  const communicationFallback = clampInteger(record.overallScore, 0, 100, 50);
-  const legacyRubricFallback = Math.max(1, Math.min(10, Math.round(communicationFallback / 10)));
+  requireRecoverableSimulationScoreRecord(record);
 
   return {
-    communicationScore: clampInteger(record.communicationScore, 0, 100, communicationFallback),
-    outcomeScore: clampInteger(record.outcomeScore, 0, 100, communicationFallback),
-    overallScore: clampInteger(record.overallScore, 0, 100, communicationFallback),
+    communicationScore: clampPersistedInteger(record.communicationScore as number, 0, 100),
+    outcomeScore: clampPersistedInteger(record.outcomeScore as number, 0, 100),
+    overallScore: clampPersistedInteger(record.overallScore, 0, 100),
     completionLevel: normalizeSimulationCompletionLevel(record.completionLevel, "partial"),
-    objectiveAchieved: record.objectiveAchieved === true,
-    persuasion: clampInteger(record.persuasion, 1, 10, legacyRubricFallback),
-    clarity: clampInteger(record.clarity, 1, 10, legacyRubricFallback),
-    empathy: clampInteger(record.empathy, 1, 10, legacyRubricFallback),
-    assertiveness: clampInteger(record.assertiveness, 1, 10, legacyRubricFallback),
+    objectiveAchieved: record.objectiveAchieved as boolean,
+    persuasion: clampPersistedInteger(record.persuasion, 1, 10),
+    clarity: clampPersistedInteger(record.clarity, 1, 10),
+    empathy: clampPersistedInteger(record.empathy, 1, 10),
+    assertiveness: clampPersistedInteger(record.assertiveness, 1, 10),
     strengths: normalizeCoachingItems(
       record.coachingArtifact?.strengths,
       "Stayed engaged throughout the conversation.",

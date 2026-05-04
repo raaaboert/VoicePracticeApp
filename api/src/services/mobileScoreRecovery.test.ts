@@ -6,6 +6,7 @@ import type { SimulationScoreRecord } from "@voicepractice/shared";
 import {
   buildRecoveredSimulationEvaluationResult,
   buildRecoveredSimulationScorecard,
+  isRecoverableSimulationScoreRecord,
 } from "./mobileScoreRecovery.js";
 
 function createScore(overrides: Partial<SimulationScoreRecord> = {}): SimulationScoreRecord {
@@ -90,42 +91,40 @@ test("buildRecoveredSimulationScorecard preserves persisted score detail and coa
   });
 });
 
-test("buildRecoveredSimulationEvaluationResult supplies safe fallbacks for sparse persisted records", () => {
-  const result = buildRecoveredSimulationEvaluationResult(
-    createScore({
-      communicationScore: undefined,
-      outcomeScore: undefined,
-      completionLevel: undefined,
-      objectiveAchieved: undefined,
-      coachingArtifact: null,
-      summary: "   ",
-      model: undefined,
-      promptVersion: undefined,
-      rubricVersion: undefined,
-      inputTokens: undefined,
-      outputTokens: undefined,
-      totalTokens: undefined,
-    }),
-  );
-
-  assert.equal(result.status, "scored");
-  assert.equal(result.scorecard.communicationScore, 80);
-  assert.equal(result.scorecard.outcomeScore, 80);
-  assert.equal(result.scorecard.overallScore, 80);
-  assert.equal(result.scorecard.completionLevel, "partial");
-  assert.equal(result.scorecard.objectiveAchieved, false);
-  assert.deepEqual(result.scorecard.strengths, ["Stayed engaged throughout the conversation."]);
-  assert.deepEqual(result.scorecard.improvements, ["Use clearer structure and stronger evidence."]);
+test("score recovery accepts only persisted records with real score fields", () => {
+  assert.equal(isRecoverableSimulationScoreRecord(createScore()), true);
   assert.equal(
-    result.scorecard.summary,
-    "Good effort. Keep improving clarity, evidence, and objection handling.",
+    isRecoverableSimulationScoreRecord(
+      createScore({
+        communicationScore: undefined,
+        outcomeScore: undefined,
+        completionLevel: undefined,
+        objectiveAchieved: undefined,
+      }),
+    ),
+    false,
   );
-  assert.deepEqual(result.record.usage, {
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-  });
-  assert.equal(result.record.model, null);
-  assert.equal(result.record.promptVersion, null);
-  assert.equal(result.record.rubricVersion, null);
+});
+
+test("buildRecoveredSimulationEvaluationResult refuses sparse persisted records instead of creating fallback scores", () => {
+  assert.throws(
+    () =>
+      buildRecoveredSimulationEvaluationResult(
+        createScore({
+          communicationScore: undefined,
+          outcomeScore: undefined,
+          completionLevel: undefined,
+          objectiveAchieved: undefined,
+          coachingArtifact: null,
+          summary: "   ",
+          model: undefined,
+          promptVersion: undefined,
+          rubricVersion: undefined,
+          inputTokens: undefined,
+          outputTokens: undefined,
+          totalTokens: undefined,
+        }),
+      ),
+    /Recovered score record is incomplete/,
+  );
 });

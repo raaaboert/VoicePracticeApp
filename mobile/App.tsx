@@ -69,9 +69,10 @@ import {
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
+  buildScoreUnavailableMessage,
+  classifySimulationScoreFailure,
   resolveSimulationScoreOutcome,
-  shouldUsePracticeFallbackAfterRemoteScoreFailure,
-  shouldUsePracticeOnlyFallbackScore,
+  ScoringFailureCategory,
 } from "./src/lib/simulationScoreHandling";
 import { createSimulationCorrelationId } from "./src/lib/simulationInteractionModel";
 import { shouldBlockForMissingAuthenticatedScopedConfig } from "./src/lib/scopedConfigGuard";
@@ -119,6 +120,7 @@ import {
   SessionTiming,
   SimulationConfig,
   SimulationScorecard,
+  SimulationScoringStatus,
   UserEntitlementsResponse,
   UserProfile,
 } from "./src/types";
@@ -159,6 +161,16 @@ type Screen =
   | "settings"
   | "profile"
   | "subscription";
+
+interface ScorecardSupportDiagnostics {
+  simulationSessionId: string | null;
+  segmentId: string | null;
+  scenarioId: string | null;
+  scoringStatus: SimulationScoringStatus;
+  scoringFailureCategory: ScoringFailureCategory | null;
+  timestamp: string;
+  platform: string;
+}
 
 interface ThemeTokens {
   bgTop: string;
@@ -347,57 +359,51 @@ function shouldAutoReportErrorMessage(message: string): boolean {
   return !ignoreFragments.some((fragment) => normalized.includes(fragment));
 }
 
-function isEmailLike(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+function buildScorecardSupportDiagnostics(params: {
+  simulationSessionId: string | null;
+  segmentId: string | null;
+  scenarioId: string | null;
+  scoringStatus: SimulationScoringStatus;
+  scoringFailureCategory?: ScoringFailureCategory | null;
+  timestamp?: string;
+}): ScorecardSupportDiagnostics {
+  return {
+    simulationSessionId: params.simulationSessionId,
+    segmentId: params.segmentId,
+    scenarioId: params.scenarioId,
+    scoringStatus: params.scoringStatus,
+    scoringFailureCategory: params.scoringFailureCategory ?? null,
+    timestamp: params.timestamp ?? new Date().toISOString(),
+    platform: Platform.OS,
+  };
 }
 
-function fallbackScorecard(history: DialogueMessage[]): SimulationScorecard {
-  const userTurns = history.filter((message) => message.role === "user").length;
-
-  if (userTurns === 0) {
-    return {
-      communicationScore: 0,
-      outcomeScore: 0,
-      overallScore: 0,
-      completionLevel: "inconclusive",
-      objectiveAchieved: false,
-      persuasion: 1,
-      clarity: 1,
-      empathy: 1,
-      assertiveness: 1,
-      strengths: ["Session started successfully."],
-      improvements: [
-        "Speak at least once before ending the session.",
-        "Use clearer and more direct points.",
-        "Address objections with examples.",
-      ],
-      summary: "No user voice response was captured, so scoring is limited.",
-    };
+function appendScorecardSupportDiagnostics(
+  message: string,
+  diagnostics: ScorecardSupportDiagnostics | null,
+): string {
+  const trimmedMessage = message.trim();
+  if (!diagnostics) {
+    return trimmedMessage;
   }
 
-  const base = Math.min(100, 45 + userTurns * 8);
-  return {
-    communicationScore: base,
-    outcomeScore: Math.max(0, base - 5),
-    overallScore: base,
-    completionLevel: "partial",
-    objectiveAchieved: false,
-    persuasion: Math.min(10, 3 + userTurns),
-    clarity: Math.min(10, 3 + Math.floor(userTurns / 2)),
-    empathy: Math.min(10, 2 + Math.floor(userTurns / 2)),
-    assertiveness: Math.min(10, 3 + Math.floor(userTurns / 2)),
-    strengths: [
-      "Stayed engaged through the conversation.",
-      "Kept responses focused on the scenario.",
-      "Maintained steady communication tone.",
-    ],
-    improvements: [
-      "Use more evidence to support key points.",
-      "Summarize agreements and next steps.",
-      "Address concerns with tighter framing.",
-    ],
-    summary: "Fallback scoring applied. Keep refining persuasive structure and evidence.",
-  };
+  const lines = [
+    trimmedMessage,
+    "",
+    "Session diagnostics:",
+    `simulationSessionId: ${diagnostics.simulationSessionId ?? "-"}`,
+    `segmentId: ${diagnostics.segmentId ?? "-"}`,
+    `scenarioId: ${diagnostics.scenarioId ?? "-"}`,
+    `scoringStatus: ${diagnostics.scoringStatus}`,
+    `scoringFailureCategory: ${diagnostics.scoringFailureCategory ?? "-"}`,
+    `timestamp: ${diagnostics.timestamp}`,
+    `platform: ${diagnostics.platform}`,
+  ];
+  return lines.join("\n");
+}
+
+function isEmailLike(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 function dedupeTimezones(list: string[]): string[] {
@@ -747,7 +753,8 @@ export default function App() {
   const [lastCompletedConfig, setLastCompletedConfig] = useState<SimulationConfig | null>(null);
   const [scorecard, setScorecard] = useState<SimulationScorecard | null>(null);
   const [scorecardError, setScorecardError] = useState<string | null>(null);
-  const [isScoring, setIsScoring] = useState(false);
+  const [scorecardStatus, setScorecardStatus] = useState<SimulationScoringStatus>("score_unavailable");
+  const [scorecardDiagnostics, setScorecardDiagnostics] = useState<ScorecardSupportDiagnostics | null>(null);
   const [lastTranscript, setLastTranscript] = useState<{
     text: string;
     fileName: string;
@@ -2572,6 +2579,8 @@ export default function App() {
       });
       setScorecard(null);
       setScorecardError(null);
+      setScorecardStatus("score_unavailable");
+      setScorecardDiagnostics(null);
       setScreen("simulation");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not start simulation.");
@@ -2595,7 +2604,13 @@ export default function App() {
     setLastCompletedConfig(completedConfig);
     setScorecard(null);
     setScorecardError(null);
-    setIsScoring(true);
+    setScorecardStatus("scoring_in_progress");
+    setScorecardDiagnostics(buildScorecardSupportDiagnostics({
+      simulationSessionId: timing.simulationSessionId,
+      segmentId: completedConfig.scenario.segmentId,
+      scenarioId: completedConfig.scenario.id,
+      scoringStatus: "scoring_in_progress",
+    }));
     setScreen("scorecard");
     setLastTranscript(() => {
       const safeTitle = completedConfig.scenario.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -2713,24 +2728,10 @@ export default function App() {
     void (async () => {
       let finalScorecard: SimulationScorecard | null = null;
       let scoreError: string | null = null;
+      let finalScoringStatus: SimulationScoringStatus = "score_unavailable";
+      let scoringFailureCategory: ScoringFailureCategory | null = null;
       const scoringEnabled = config?.featureFlags?.scoringEnabled !== false;
       const usedMockMode = timing.usedMockMode === true;
-
-      const markTranscriptAsLocalFallback = () => {
-        setLastTranscript((prev) => {
-          if (!prev) {
-            return prev;
-          }
-
-          const updatedMeta = { ...prev.meta, model: "local-fallback", promptVersion: "local", rubricVersion: "local" };
-          const updatedText = prev.text
-            .replace("AI Model: (pending)", "AI Model: local-fallback")
-            .replace("Prompt Version: (pending)", "Prompt Version: local")
-            .replace("Rubric Version: (pending)", "Rubric Version: local")
-            .replace("Tokens (input/output/total): (pending)", "Tokens (input/output/total): n/a");
-          return { ...prev, meta: updatedMeta, text: updatedText };
-        });
-      };
 
       const markTranscriptAsNotScored = (reason: string) => {
         setLastTranscript((prev) => {
@@ -2792,23 +2793,21 @@ export default function App() {
       };
 
       try {
-        const usePracticeOnlyFallback = shouldUsePracticeOnlyFallbackScore({
-          scoringEnabled,
-          usedMockMode,
-          apiConfigured,
-        });
-
         if (!scoringEnabled) {
-          scoreError = "Scoring is currently disabled for your account. This session was not scored or tracked.";
-        } else if (usedMockMode && usePracticeOnlyFallback) {
-          finalScorecard = fallbackScorecard(history);
-          scoreError =
-            "Local test/mock mode was used during this simulation. This practice-only score was generated locally and was not tracked.";
-          markTranscriptAsLocalFallback();
-        } else if (!apiConfigured && usePracticeOnlyFallback) {
-          finalScorecard = fallbackScorecard(history);
-          scoreError = "Remote AI is disabled, so a practice-only local score was generated. It was not tracked.";
-          markTranscriptAsLocalFallback();
+          finalScoringStatus = "not_scored";
+          scoringFailureCategory = "scoring_disabled";
+          scoreError = buildScoreUnavailableMessage(scoringFailureCategory);
+          markTranscriptAsNotScored(scoreError);
+        } else if (usedMockMode) {
+          finalScoringStatus = "score_unavailable";
+          scoringFailureCategory = "local_mode";
+          scoreError = buildScoreUnavailableMessage(scoringFailureCategory);
+          markTranscriptAsNotScored(scoreError);
+        } else if (!apiConfigured) {
+          finalScoringStatus = "score_unavailable";
+          scoringFailureCategory = "api_unconfigured";
+          scoreError = buildScoreUnavailableMessage(scoringFailureCategory);
+          markTranscriptAsNotScored(scoreError);
         } else {
           if (!user || !mobileAuthToken) {
             throw new Error("Missing mobile auth context for scoring.");
@@ -2833,14 +2832,17 @@ export default function App() {
           const resolvedScoreOutcome = resolveSimulationScoreOutcome(result);
           if (resolvedScoreOutcome.kind === "not_scored") {
             finalScorecard = null;
+            finalScoringStatus = "not_scored";
             scoreError = resolvedScoreOutcome.message;
             markTranscriptAsNotScored(resolvedScoreOutcome.message ?? "Not enough evidence to score this session.");
           } else if (result.status === "scored") {
             finalScorecard = resolvedScoreOutcome.scorecard;
+            finalScoringStatus = "scored";
             applyAuthoritativeScoreMetadata(result.record);
           }
         }
       } catch (evaluationError) {
+        scoringFailureCategory = classifySimulationScoreFailure(evaluationError);
         const recoveredScore =
           user && mobileAuthToken
             ? await recoverPersistedAiScore({
@@ -2852,33 +2854,38 @@ export default function App() {
 
         if (recoveredScore?.status === "scored") {
           finalScorecard = recoveredScore.scorecard;
+          finalScoringStatus = "scored";
           scoreError = "A temporary scoring service problem interrupted the live response, but the saved scorecard for this session was recovered successfully.";
           applyAuthoritativeScoreMetadata(recoveredScore.record);
-        } else if (shouldUsePracticeFallbackAfterRemoteScoreFailure(evaluationError)) {
-          finalScorecard = fallbackScorecard(history);
-          scoreError =
-            "A temporary scoring service problem interrupted the live scorecard, so a practice-only local fallback score is shown below. It was not tracked.";
-          markTranscriptAsLocalFallback();
         } else {
           finalScorecard = null;
-          scoreError = `${getErrorMessage(
-            evaluationError,
-            "Score generation failed, so no reliable scorecard was created for this session."
-          )} No authoritative or local fallback score was available.`;
+          finalScoringStatus = "score_unavailable";
+          scoreError = buildScoreUnavailableMessage(scoringFailureCategory);
           markTranscriptAsNotScored(scoreError);
         }
         void submitAutoErrorReport("simulation.score_generation", evaluationError, {
           screen: "scorecard",
           details: {
+            flowStage: "scorecard.score_generation",
+            triggeredBy: "session_end",
+            simulationSessionId: timing.simulationSessionId,
             segmentId: completedConfig.scenario.segmentId,
             scenarioId: completedConfig.scenario.id,
+            scoringFailureCategory,
+            scoringFailedAt: new Date().toISOString(),
           },
         });
-      } finally {
-        setIsScoring(false);
       }
 
       setScorecard(finalScorecard);
+      setScorecardStatus(finalScoringStatus);
+      setScorecardDiagnostics(buildScorecardSupportDiagnostics({
+        simulationSessionId: timing.simulationSessionId,
+        segmentId: completedConfig.scenario.segmentId,
+        scenarioId: completedConfig.scenario.id,
+        scoringStatus: finalScoringStatus,
+        scoringFailureCategory,
+      }));
       if (scoreError) {
         setScorecardError(scoreError);
       }
@@ -2938,14 +2945,14 @@ export default function App() {
     return createSupportCase({
       userId: user.id,
       authToken: mobileAuthToken,
-      message: params.message,
+      message: appendScorecardSupportDiagnostics(params.message, scorecardDiagnostics),
       includeTranscript: params.includeTranscript,
       transcript:
         params.includeTranscript && lastTranscript
           ? { text: lastTranscript.text, fileName: lastTranscript.fileName, meta: lastTranscript.meta }
           : undefined,
     });
-  }, [lastTranscript, mobileAuthToken, user]);
+  }, [lastTranscript, mobileAuthToken, scorecardDiagnostics, user]);
 
   const currentTier = useMemo(() => {
     if (!config || !user) {
@@ -5198,7 +5205,7 @@ export default function App() {
           difficulty={lastCompletedConfig.difficulty}
           personaStyle={lastCompletedConfig.personaStyle}
           scorecard={scorecard}
-          isLoading={isScoring}
+          scoringStatus={scorecardStatus}
           error={scorecardError}
           transcriptAvailable={Boolean(lastTranscript)}
           onDownloadTranscript={downloadLastTranscript}

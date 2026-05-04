@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildScoreUnavailableMessage,
+  classifySimulationScoreFailure,
   resolveSimulationScoreOutcome,
-  shouldUsePracticeFallbackAfterRemoteScoreFailure,
-  shouldUsePracticeOnlyFallbackScore,
 } from "./simulationScoreHandling";
 
 test("resolveSimulationScoreOutcome keeps not-scored responses on the non-fallback path", () => {
@@ -60,68 +60,32 @@ test("resolveSimulationScoreOutcome preserves scored payloads", () => {
   assert.equal(outcome.message, null);
 });
 
-test("shouldUsePracticeOnlyFallbackScore stays limited to explicit mock or offline flows", () => {
+test("classifySimulationScoreFailure maps transient failures without authorizing fallback scores", () => {
+  assert.equal(classifySimulationScoreFailure(new Error("Request failed (502)")), "upstream_scoring_failure");
   assert.equal(
-    shouldUsePracticeOnlyFallbackScore({
-      scoringEnabled: true,
-      usedMockMode: true,
-      apiConfigured: true
-    }),
-    true
-  );
-
-  assert.equal(
-    shouldUsePracticeOnlyFallbackScore({
-      scoringEnabled: true,
-      usedMockMode: false,
-      apiConfigured: false
-    }),
-    true
-  );
-
-  assert.equal(
-    shouldUsePracticeOnlyFallbackScore({
-      scoringEnabled: true,
-      usedMockMode: false,
-      apiConfigured: true
-    }),
-    false
-  );
-
-  assert.equal(
-    shouldUsePracticeOnlyFallbackScore({
-      scoringEnabled: false,
-      usedMockMode: true,
-      apiConfigured: true
-    }),
-    false
-  );
-});
-
-test("shouldUsePracticeFallbackAfterRemoteScoreFailure allows transient or upstream score failures", () => {
-  assert.equal(
-    shouldUsePracticeFallbackAfterRemoteScoreFailure(new Error("Request failed (502)")),
-    true
-  );
-
-  assert.equal(
-    shouldUsePracticeFallbackAfterRemoteScoreFailure(
+    classifySimulationScoreFailure(
       new Error("Score was generated but could not be saved. Please retry once the service is healthy.")
     ),
-    true
+    "persistence_failure"
+  );
+  assert.equal(
+    classifySimulationScoreFailure(new Error("No transcribed user text received. Transcription may have failed.")),
+    "invalid_input"
+  );
+  assert.equal(
+    classifySimulationScoreFailure(new Error("Scoring is currently disabled for this account.")),
+    "auth_or_config"
   );
 });
 
-test("shouldUsePracticeFallbackAfterRemoteScoreFailure rejects policy or malformed-input failures", () => {
+test("buildScoreUnavailableMessage never returns fallback score copy", () => {
   assert.equal(
-    shouldUsePracticeFallbackAfterRemoteScoreFailure(new Error("Scoring is currently disabled for this account.")),
-    false
+    buildScoreUnavailableMessage("upstream_scoring_failure"),
+    "Your simulation completed, but the scoring service failed before a verified score could be created. No score was saved or reported."
   );
-
   assert.equal(
-    shouldUsePracticeFallbackAfterRemoteScoreFailure(
-      new Error("No transcribed user text received. Transcription may have failed or client is sending placeholder.")
-    ),
-    false
+    buildScoreUnavailableMessage("local_mode"),
+    "This session used local simulation mode, so Peritio could not create a verified score. No score was saved or reported."
   );
+  assert.doesNotMatch(buildScoreUnavailableMessage("network_timeout"), /fallback score|practice-only|77|50/i);
 });

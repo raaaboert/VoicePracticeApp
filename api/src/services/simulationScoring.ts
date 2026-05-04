@@ -31,6 +31,13 @@ export const MAX_UNACHIEVED_OUTCOME_SCORE = OBJECTIVE_ACHIEVED_MIN_OUTCOME_SCORE
 
 const MAX_PERSISTED_COACHING_ITEMS = 3;
 
+export class SimulationScorePayloadValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SimulationScorePayloadValidationError";
+  }
+}
+
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -47,6 +54,86 @@ function parseOptionalNumber(value: unknown, min: number, max: number): number |
 function fallbackLegacySubscore(communicationScore: number | null, overallScore: number | null): number {
   const source = communicationScore ?? overallScore ?? 50;
   return clamp(Math.round(source / 10), 1, 10);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireFiniteNumberField(
+  candidate: Record<string, unknown>,
+  field: string,
+  min: number,
+  max: number
+): void {
+  const value = candidate[field];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new SimulationScorePayloadValidationError(
+      `Evaluator returned incomplete scoring payload: ${field} is missing or invalid.`
+    );
+  }
+}
+
+function requireBooleanField(candidate: Record<string, unknown>, field: string): void {
+  if (typeof candidate[field] !== "boolean") {
+    throw new SimulationScorePayloadValidationError(
+      `Evaluator returned incomplete scoring payload: ${field} is missing or invalid.`
+    );
+  }
+}
+
+function requireCompletionLevelField(candidate: Record<string, unknown>): void {
+  const value = candidate.completionLevel;
+  if (
+    typeof value !== "string"
+    || !(SIMULATION_COMPLETION_LEVELS as readonly string[]).includes(value.trim().toLowerCase())
+  ) {
+    throw new SimulationScorePayloadValidationError(
+      "Evaluator returned incomplete scoring payload: completionLevel is missing or invalid."
+    );
+  }
+}
+
+function requireNonEmptyStringField(candidate: Record<string, unknown>, field: string): void {
+  const value = candidate[field];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new SimulationScorePayloadValidationError(
+      `Evaluator returned incomplete scoring payload: ${field} is missing or invalid.`
+    );
+  }
+}
+
+function requireStringArrayField(candidate: Record<string, unknown>, field: string): void {
+  const value = candidate[field];
+  const hasTextItem =
+    Array.isArray(value)
+    && value.some((entry) => typeof entry === "string" && entry.trim().length > 0);
+  if (!hasTextItem) {
+    throw new SimulationScorePayloadValidationError(
+      `Evaluator returned incomplete scoring payload: ${field} is missing or invalid.`
+    );
+  }
+}
+
+export function assertValidSimulationScorePayload(raw: unknown): asserts raw is Record<string, unknown> {
+  if (!isPlainRecord(raw)) {
+    throw new SimulationScorePayloadValidationError(
+      "Evaluator returned incomplete scoring payload: root object is missing or invalid."
+    );
+  }
+
+  requireFiniteNumberField(raw, "communicationScore", 0, 100);
+  requireFiniteNumberField(raw, "outcomeScore", 0, 100);
+  requireFiniteNumberField(raw, "overallScore", 0, 100);
+  requireCompletionLevelField(raw);
+  requireBooleanField(raw, "objectiveAchieved");
+  requireFiniteNumberField(raw, "persuasion", 1, 10);
+  requireFiniteNumberField(raw, "clarity", 1, 10);
+  requireFiniteNumberField(raw, "empathy", 1, 10);
+  requireFiniteNumberField(raw, "assertiveness", 1, 10);
+  requireStringArrayField(raw, "strengths");
+  requireStringArrayField(raw, "improvements");
+  requireNonEmptyStringField(raw, "summary");
 }
 
 function normalizeStringArray(value: unknown, fallback: string): string[] {

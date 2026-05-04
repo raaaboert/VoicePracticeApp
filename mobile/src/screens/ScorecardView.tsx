@@ -1,6 +1,7 @@
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { DIFFICULTY_LABELS, PERSONA_LABELS } from "../data/prompts";
-import { Difficulty, PersonaStyle, SimulationScorecard } from "../types";
+import { buildScorecardViewModel } from "../lib/scorecardViewModel";
+import { Difficulty, PersonaStyle, SimulationScorecard, SimulationScoringStatus } from "../types";
 import { useMemo, useState } from "react";
 
 interface ScorecardViewProps {
@@ -9,7 +10,7 @@ interface ScorecardViewProps {
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
   scorecard: SimulationScorecard | null;
-  isLoading: boolean;
+  scoringStatus: SimulationScoringStatus;
   error: string | null;
   transcriptAvailable: boolean;
   onDownloadTranscript: () => Promise<void>;
@@ -36,7 +37,7 @@ export function ScorecardView({
   difficulty,
   personaStyle,
   scorecard,
-  isLoading,
+  scoringStatus,
   error,
   transcriptAvailable,
   onDownloadTranscript,
@@ -53,6 +54,7 @@ export function ScorecardView({
   const [supportSuccess, setSupportSuccess] = useState<string | null>(null);
 
   const canSubmitSupport = useMemo(() => supportMessage.trim().length > 0 && !supportBusy, [supportBusy, supportMessage]);
+  const viewModel = buildScorecardViewModel({ scoringStatus, scorecard, error });
 
   return (
     <View style={styles.fill}>
@@ -71,19 +73,26 @@ export function ScorecardView({
           </Text>
         </View>
 
-        {isLoading ? (
+        {viewModel.showLoading ? (
           <View style={styles.card}>
             <Text style={styles.body}>Generating your scorecard...</Text>
           </View>
         ) : null}
 
-        {error ? (
+        {viewModel.showScoreWarning && viewModel.scoreWarning ? (
           <View style={styles.warningCard}>
-            <Text style={styles.warningText}>{error}</Text>
+            <Text style={styles.warningText}>{viewModel.scoreWarning}</Text>
           </View>
         ) : null}
 
-        {scorecard && !isLoading ? (
+        {viewModel.showScoreUnavailable ? (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningTitle}>{viewModel.scoreUnavailableTitle}</Text>
+            <Text style={styles.warningText}>{viewModel.scoreUnavailableBody}</Text>
+          </View>
+        ) : null}
+
+        {scorecard && viewModel.showVerifiedScore ? (
           <>
             <View style={styles.scoreCard}>
               <Text style={styles.scoreLabel}>Overall Score</Text>
@@ -141,64 +150,65 @@ export function ScorecardView({
               <Text style={styles.body}>{scorecard.summary}</Text>
             </View>
 
-            <View style={styles.card}>
-              <Text style={styles.label}>Transcript</Text>
-              <Pressable
-                style={[styles.secondaryButton, !transcriptAvailable ? styles.buttonDisabled : null]}
-                disabled={!transcriptAvailable || downloadBusy}
-                onPress={() => {
-                  setDownloadError(null);
-                  setDownloadBusy(true);
-                  void (async () => {
-                    try {
-                      await onDownloadTranscript();
-                    } catch (caught) {
-                      setDownloadError(caught instanceof Error ? caught.message : "Could not download transcript.");
-                    } finally {
-                      setDownloadBusy(false);
-                    }
-                  })();
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>
-                  {downloadBusy ? "Preparing..." : "Download transcript of this conversation"}
-                </Text>
-              </Pressable>
-              <Text style={styles.body}>
-                Peritio does not keep the transcript from this session after you leave this screen. Only score and usage
-                data remain in the product unless you choose to share a transcript with support.
-              </Text>
-              {downloadError ? <Text style={styles.warningText}>{downloadError}</Text> : null}
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.label}>Support</Text>
-              <Pressable
-                style={styles.secondaryButton}
-                onPress={() => {
-                  setSupportOpen(true);
-                  setSupportError(null);
-                  setSupportSuccess(null);
-                  setSupportBusy(false);
-                  setSupportConsent(false);
-                  setSupportMessage("");
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>Concerns with this session or score?</Text>
-              </Pressable>
-              <Text style={styles.body}>
-                If something felt off, you can send a note to support. You can optionally consent to share a transcript
-                so we can investigate.
-              </Text>
-            </View>
           </>
+        ) : null}
+
+        {viewModel.showTranscriptActions ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>Transcript</Text>
+            <Pressable
+              style={[styles.secondaryButton, !transcriptAvailable ? styles.buttonDisabled : null]}
+              disabled={!transcriptAvailable || downloadBusy}
+              onPress={() => {
+                setDownloadError(null);
+                setDownloadBusy(true);
+                void (async () => {
+                  try {
+                    await onDownloadTranscript();
+                  } catch (caught) {
+                    setDownloadError(caught instanceof Error ? caught.message : "Could not download transcript.");
+                  } finally {
+                    setDownloadBusy(false);
+                  }
+                })();
+              }}
+            >
+              <Text style={styles.secondaryButtonText}>
+                {downloadBusy ? "Preparing..." : "Download transcript of this conversation"}
+              </Text>
+            </Pressable>
+            <Text style={styles.body}>{viewModel.transcriptPrivacyCopy}</Text>
+            {downloadError ? <Text style={styles.warningText}>{downloadError}</Text> : null}
+          </View>
+        ) : null}
+
+        {viewModel.showSupportActions ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>Support</Text>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => {
+                setSupportOpen(true);
+                setSupportError(null);
+                setSupportSuccess(null);
+                setSupportBusy(false);
+                setSupportConsent(false);
+                setSupportMessage("");
+              }}
+            >
+              <Text style={styles.secondaryButtonText}>{viewModel.supportButtonLabel}</Text>
+            </Pressable>
+            <Text style={styles.body}>{viewModel.supportCopy}</Text>
+          </View>
         ) : null}
       </ScrollView>
 
       <View style={styles.footer}>
-        <Pressable style={styles.button} onPress={onBack}>
-          <Text style={styles.buttonText}>Run Another Simulation</Text>
-        </Pressable>
+        {viewModel.showRunAnother ? (
+          <Pressable style={styles.button} onPress={onBack}>
+            <Text style={styles.buttonText}>Run Another Simulation</Text>
+          </Pressable>
+        ) : null}
       </View>
 
       <Modal transparent visible={supportOpen} animationType="fade" onRequestClose={() => setSupportOpen(false)}>
@@ -338,6 +348,13 @@ const styles = StyleSheet.create({
     color: COLORS.warning,
     fontSize: 13.5,
     lineHeight: 20,
+  },
+  warningTitle: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: "700",
+    lineHeight: 21,
+    marginBottom: 5,
   },
   scoreCard: {
     borderRadius: 18,
