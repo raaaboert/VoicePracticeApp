@@ -325,7 +325,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingBottom: 32,
+    paddingBottom: 14,
   },
   card: {
     borderRadius: 16,
@@ -407,8 +407,8 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   footer: {
-    marginTop: 6,
-    paddingTop: 12,
+    marginTop: 0,
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: "rgba(154, 174, 156, 0.2)",
   },

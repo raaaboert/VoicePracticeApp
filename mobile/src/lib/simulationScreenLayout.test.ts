@@ -24,14 +24,15 @@ test("standard layout stays roomy on larger screens", () => {
   assert.equal(layout.showExtendedScenarioMeta, true);
   assert.equal(layout.useCompactTranscript, false);
   assert.equal(layout.chatCardHeight, 320);
-  assert.equal(layout.regularScrollBottomPadding, 32);
+  assert.equal(layout.regularScrollBottomPadding, 12);
+  assert.equal(layout.actionDockHorizontalPadding, 0);
   assert.equal(
     getSimulationScrollBottomPadding({
       layout,
       measuredDockHeight: 0,
       hasSecondaryAction: false,
     }),
-    32,
+    12,
   );
 });
 
@@ -52,21 +53,21 @@ test("narrow tall screens still switch to the compact stack", () => {
   assert.equal(layout.showExtendedScenarioMeta, false);
   assert.equal(layout.useCompactTranscript, true);
   assert.equal(layout.chatCardHeight, 356);
-  assert.equal(layout.actionDockBottomPadding, 4);
-  assert.equal(layout.compactSingleActionDockBottomPadding, 2);
+  assert.equal(layout.actionDockBottomPadding, 8);
+  assert.equal(layout.compactSingleActionDockBottomPadding, 4);
   assert.equal(
     getSimulationActionDockBottomPadding({
       layout,
       hasSecondaryAction: false,
     }),
-    2,
+    4,
   );
   assert.equal(
     getSimulationActionDockBottomPadding({
       layout,
       hasSecondaryAction: true,
     }),
-    4,
+    8,
   );
   assert.equal(
     getSimulationScrollBottomPadding({
@@ -74,7 +75,7 @@ test("narrow tall screens still switch to the compact stack", () => {
       measuredDockHeight: 0,
       hasSecondaryAction: false,
     }),
-    18,
+    10,
   );
   assert.equal(
     getSimulationScrollBottomPadding({
@@ -82,7 +83,7 @@ test("narrow tall screens still switch to the compact stack", () => {
       measuredDockHeight: 108,
       hasSecondaryAction: true,
     }),
-    32,
+    10,
   );
 });
 
@@ -98,8 +99,50 @@ test("short screens honor bottom insets in the sticky dock padding", () => {
   assert.equal(layout.showResponseModeCard, false);
   assert.equal(layout.actionDockBottomPadding, 24);
   assert.equal(layout.compactSingleActionDockBottomPadding, 12);
-  assert.equal(layout.actionDockHorizontalPadding, 14);
+  assert.equal(layout.actionDockHorizontalPadding, 0);
   assert.equal(layout.chatCardHeight, 321);
+});
+
+test("parent safe area handling prevents compact dock bottom inset double counting", () => {
+  const layout = getSimulationScreenLayout({
+    windowWidth: 360,
+    windowHeight: 700,
+    bottomInset: 20,
+    parentAppliesBottomSafeArea: true,
+  });
+
+  assert.equal(layout.compactVerticalLayout, true);
+  assert.equal(layout.tightVerticalLayout, true);
+  assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: false,
+    }),
+    0,
+  );
+  assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: true,
+    }),
+    0,
+  );
+  assert.equal(
+    getSimulationScrollBottomPadding({
+      layout,
+      measuredDockHeight: 64,
+      hasSecondaryAction: false,
+    }),
+    10,
+  );
+  assert.equal(
+    getSimulationScrollBottomPadding({
+      layout,
+      measuredDockHeight: 112,
+      hasSecondaryAction: true,
+    }),
+    10,
+  );
 });
 
 test("larger compact-adjacent screens do not switch too aggressively", () => {
@@ -114,12 +157,26 @@ test("larger compact-adjacent screens do not switch too aggressively", () => {
   assert.equal(layout.useCompactEnginePresentation, false);
   assert.equal(layout.showResponseModeCard, true);
   assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: false,
+    }),
+    15,
+  );
+  assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: true,
+    }),
+    15,
+  );
+  assert.equal(
     getSimulationScrollBottomPadding({
       layout,
       measuredDockHeight: 0,
       hasSecondaryAction: false,
     }),
-    32,
+    12,
   );
 });
 
@@ -135,7 +192,7 @@ test("very narrow screens still stay in compact mode with transcript priority", 
   assert(layout.chatCardHeight >= 340);
 });
 
-test("dock compensation keeps a safety gap above the measured dock height", () => {
+test("scroll padding stays stable because the sticky CTA is in normal layout flow", () => {
   const layout = getSimulationScreenLayout({
     windowWidth: 360,
     windowHeight: 800,
@@ -148,7 +205,7 @@ test("dock compensation keeps a safety gap above the measured dock height", () =
       measuredDockHeight: 64,
       hasSecondaryAction: false,
     }),
-    20,
+    10,
   );
   assert.equal(
     getSimulationScrollBottomPadding({
@@ -156,18 +213,15 @@ test("dock compensation keeps a safety gap above the measured dock height", () =
       measuredDockHeight: 112,
       hasSecondaryAction: true,
     }),
-    32,
+    10,
   );
-  assert(
+  assert.equal(
     getSimulationScrollBottomPadding({
       layout,
-      measuredDockHeight: 64,
-      hasSecondaryAction: false,
-    }) < getSimulationScrollBottomPadding({
-      layout,
-      measuredDockHeight: 112,
+      measuredDockHeight: 0,
       hasSecondaryAction: true,
     }),
+    10,
   );
 });
 
@@ -182,11 +236,66 @@ test("tablet layouts stay roomy instead of inheriting compact phone spacing", ()
   assert.equal(layout.showResponseModeCard, true);
   assert.equal(layout.chatCardHeight, 358);
   assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: false,
+    }),
+    15,
+  );
+  assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: true,
+    }),
+    15,
+  );
+  assert.equal(
     getSimulationScrollBottomPadding({
       layout,
       measuredDockHeight: 0,
       hasSecondaryAction: false,
     }),
-    32,
+    12,
+  );
+});
+
+test("larger phones with app-level safe area keep one-button and two-button dock padding balanced", () => {
+  const layout = getSimulationScreenLayout({
+    windowWidth: 412,
+    windowHeight: 915,
+    bottomInset: 24,
+    parentAppliesBottomSafeArea: true,
+  });
+
+  assert.equal(layout.compactVerticalLayout, false);
+  assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: false,
+    }),
+    0,
+  );
+  assert.equal(
+    getSimulationActionDockBottomPadding({
+      layout,
+      hasSecondaryAction: true,
+    }),
+    0,
+  );
+  assert.equal(
+    getSimulationScrollBottomPadding({
+      layout,
+      measuredDockHeight: 76,
+      hasSecondaryAction: false,
+    }),
+    12,
+  );
+  assert.equal(
+    getSimulationScrollBottomPadding({
+      layout,
+      measuredDockHeight: 138,
+      hasSecondaryAction: true,
+    }),
+    12,
   );
 });

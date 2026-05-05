@@ -49,22 +49,29 @@ test("score unavailable state renders the final review shell without score or le
   assert.equal(model.showSupportActions, true);
   assert.equal(model.showRunAnother, true);
   assert.equal(model.scoreUnavailableTitle, "We couldn't generate a score for this session.");
+  assert.match(model.scoreUnavailableBody ?? "", /scoring service failed/i);
   assert.doesNotMatch(`${model.scoreUnavailableTitle} ${model.scoreUnavailableBody}`, /fallback score|practice-only|77|50/i);
 });
 
-test("not scored state avoids score numbers while preserving report and run-another actions", () => {
+test("not scored state uses no-scorecard-created copy without service failure wording", () => {
   const model = buildScorecardViewModel({
     scoringStatus: "not_scored",
     scorecard: null,
-    error: "We need at least 3 real user responses to generate a reliable scorecard. This session was not scored.",
+    error: null,
   });
 
+  assert.equal(model.showLoading, false);
   assert.equal(model.showVerifiedScore, false);
   assert.equal(model.showLegacyRubric, false);
   assert.equal(model.showScoreUnavailable, true);
+  assert.equal(model.showTranscriptActions, true);
   assert.equal(model.showSupportActions, true);
   assert.equal(model.showRunAnother, true);
-  assert.equal(model.scoreUnavailableTitle, "This session was not scored.");
+  assert.equal(model.scoreUnavailableTitle, "No scorecard created");
+  assert.match(model.scoreUnavailableBody ?? "", /at least 3 user responses/i);
+  assert.doesNotMatch(`${model.scoreUnavailableTitle} ${model.scoreUnavailableBody}`, /scoring service failed|fallback score|practice-only|77|50/i);
+  assert.equal(model.supportButtonLabel, "Share feedback about this session");
+  assert.doesNotMatch(model.supportCopy, /went wrong/i);
 });
 
 test("scoring in progress does not expose score, support, or transcript actions before the final state", () => {

@@ -2,10 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildInsufficientEvidenceMessage,
   buildScoreUnavailableMessage,
   classifySimulationScoreFailure,
+  countUserResponsesForVerifiedScorecard,
   resolveSimulationScoreOutcome,
 } from "./simulationScoreHandling";
+
+test("countUserResponsesForVerifiedScorecard counts only real user turns", () => {
+  assert.equal(
+    countUserResponsesForVerifiedScorecard([
+      { id: "1", role: "assistant", content: "Hello." },
+      { id: "2", role: "user", content: "I can start with the context." },
+      { id: "3", role: "user", content: "   " },
+      { id: "4", role: "assistant", content: "What next?" },
+      { id: "5", role: "user", content: "Then I will clarify the next step." },
+    ]),
+    2,
+  );
+});
 
 test("resolveSimulationScoreOutcome keeps not-scored responses on the non-fallback path", () => {
   const outcome = resolveSimulationScoreOutcome({
@@ -19,7 +34,8 @@ test("resolveSimulationScoreOutcome keeps not-scored responses on the non-fallba
   assert.deepEqual(outcome, {
     kind: "not_scored",
     scorecard: null,
-    message: "We need at least 3 real user responses to generate a reliable scorecard."
+    message:
+      "This session ended before there were enough user responses to generate a verified scorecard. Complete at least 3 user responses before ending the session."
   });
 });
 
@@ -88,4 +104,12 @@ test("buildScoreUnavailableMessage never returns fallback score copy", () => {
     "This session used local simulation mode, so Peritio could not create a verified score. No score was saved or reported."
   );
   assert.doesNotMatch(buildScoreUnavailableMessage("network_timeout"), /fallback score|practice-only|77|50/i);
+});
+
+test("buildInsufficientEvidenceMessage describes a normal no-scorecard state", () => {
+  const message = buildInsufficientEvidenceMessage(3);
+
+  assert.match(message, /before there were enough user responses/i);
+  assert.match(message, /at least 3 user responses/i);
+  assert.doesNotMatch(message, /scoring service failed|fallback score|practice-only|77|50/i);
 });

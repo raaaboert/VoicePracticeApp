@@ -401,6 +401,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         windowWidth,
         windowHeight,
         bottomInset: insets.bottom,
+        parentAppliesBottomSafeArea: true,
       }),
     [insets.bottom, windowHeight, windowWidth],
   );
@@ -3577,8 +3578,8 @@ function createStyles(palette: SimulationPalette) {
       color: palette.text,
     },
     primaryButton: {
-      minHeight: 58,
-      borderRadius: 18,
+      minHeight: 54,
+      borderRadius: 14,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: palette.primaryButton,
@@ -3592,7 +3593,7 @@ function createStyles(palette: SimulationPalette) {
     },
     primaryButtonCompact: {
       minHeight: 50,
-      borderRadius: 16,
+      borderRadius: 14,
     },
     primaryButtonContent: {
       flexDirection: "row",
@@ -3624,36 +3625,26 @@ function createStyles(palette: SimulationPalette) {
       color: palette.busyButtonText,
     },
     actionDock: {
-      paddingTop: 10,
+      paddingTop: 0,
     },
     actionDockCompact: {
-      paddingTop: 2,
+      paddingTop: 0,
     },
     actionDockSingleActionCompact: {
       paddingTop: 0,
     },
     actionDockInner: {
-      borderTopWidth: 1,
-      borderTopColor: palette.borderStrong,
-      backgroundColor: palette.panelStrong,
-      borderTopLeftRadius: 20,
-      borderTopRightRadius: 20,
-      paddingTop: 15,
-      paddingBottom: 8,
+      paddingTop: 10,
+      paddingBottom: 0,
       gap: 10,
-      shadowColor: palette.shadow,
-      shadowOpacity: 0.1,
-      shadowRadius: 14,
-      shadowOffset: { width: 0, height: -5 },
-      elevation: 4,
     },
     actionDockInnerCompact: {
-      paddingTop: 8,
+      paddingTop: 10,
       paddingBottom: 0,
-      gap: 6,
+      gap: 8,
     },
     actionDockInnerSingleActionCompact: {
-      paddingTop: 4,
+      paddingTop: 10,
       gap: 0,
     },
     secondaryActionButton: {

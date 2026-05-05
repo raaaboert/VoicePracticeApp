@@ -69,8 +69,11 @@ import {
 } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
+  buildInsufficientEvidenceMessage,
   buildScoreUnavailableMessage,
   classifySimulationScoreFailure,
+  countUserResponsesForVerifiedScorecard,
+  MIN_USER_RESPONSES_FOR_VERIFIED_SCORECARD,
   resolveSimulationScoreOutcome,
   ScoringFailureCategory,
 } from "./src/lib/simulationScoreHandling";
@@ -2732,6 +2735,7 @@ export default function App() {
       let scoringFailureCategory: ScoringFailureCategory | null = null;
       const scoringEnabled = config?.featureFlags?.scoringEnabled !== false;
       const usedMockMode = timing.usedMockMode === true;
+      const userResponseCount = countUserResponsesForVerifiedScorecard(history);
 
       const markTranscriptAsNotScored = (reason: string) => {
         setLastTranscript((prev) => {
@@ -2797,6 +2801,10 @@ export default function App() {
           finalScoringStatus = "not_scored";
           scoringFailureCategory = "scoring_disabled";
           scoreError = buildScoreUnavailableMessage(scoringFailureCategory);
+          markTranscriptAsNotScored(scoreError);
+        } else if (userResponseCount < MIN_USER_RESPONSES_FOR_VERIFIED_SCORECARD) {
+          finalScoringStatus = "not_scored";
+          scoreError = buildInsufficientEvidenceMessage(MIN_USER_RESPONSES_FOR_VERIFIED_SCORECARD);
           markTranscriptAsNotScored(scoreError);
         } else if (usedMockMode) {
           finalScoringStatus = "score_unavailable";
@@ -3260,7 +3268,7 @@ export default function App() {
         <Text style={styles.topTitle}>First-Time Setup</Text>
         <View style={styles.spacer} />
       </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
         <View style={styles.card}>
           <Text style={styles.title}>Create Your Local Profile</Text>
           <Text style={styles.body}>
@@ -3666,11 +3674,12 @@ export default function App() {
         </View>
       </ScrollView>
 
-      {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
-
-      <Pressable style={styles.primaryButton} onPress={() => void startSimulation()}>
-        <Text style={styles.primaryButtonText}>Start Simulation</Text>
-      </Pressable>
+      <View style={styles.bottomActionRegion}>
+        {setupError ? <Text style={styles.bottomActionErrorText}>{setupError}</Text> : null}
+        <Pressable style={[styles.primaryButton, styles.bottomPrimaryButton]} onPress={() => void startSimulation()}>
+          <Text style={styles.primaryButtonText}>Start Simulation</Text>
+        </Pressable>
+      </View>
     </View>
     );
   };
@@ -5362,6 +5371,7 @@ function createStyles(theme: ThemeTokens) {
     sectionTitle: { color: theme.text, fontSize: 19, fontWeight: "700", marginTop: 4, marginBottom: 10 },
     scroll: { flex: 1 },
     scrollContent: { paddingBottom: 24 },
+    setupScrollContent: { paddingBottom: 14 },
     ghostButton: { minWidth: 84, height: 38, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.ghostButtonBg },
     ghostButtonText: { color: theme.text, fontSize: 14, fontWeight: "700" },
     menuButton: { width: 84, height: 38, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.ghostButtonBg },
@@ -5405,6 +5415,8 @@ function createStyles(theme: ThemeTokens) {
     errorCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.errorCardBorder, backgroundColor: theme.errorCardBg, padding: 12, marginBottom: 12 },
     successCard: { borderRadius: 14, borderWidth: 1, borderColor: "rgba(29, 154, 95, 0.45)", backgroundColor: "rgba(29, 154, 95, 0.12)", padding: 12, marginBottom: 12 },
     errorText: { color: theme.danger, fontSize: 13, marginBottom: 6 },
+    bottomActionRegion: { paddingTop: 10 },
+    bottomActionErrorText: { color: theme.danger, fontSize: 13, marginBottom: 8 },
     successText: { color: theme.success, fontSize: 13, marginBottom: 6 },
     bootBleed: { flex: 1, marginHorizontal: -16, marginBottom: -12, backgroundColor: APP_SURFACE_COLORS.sage },
     bootRoot: {
@@ -5450,6 +5462,7 @@ function createStyles(theme: ThemeTokens) {
     },
     homePrimaryButtonText: { color: APP_SURFACE_COLORS.gold, fontSize: 16, fontWeight: "800", letterSpacing: 0.2 },
     primaryButton: { minHeight: 52, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },
+    bottomPrimaryButton: { minHeight: 54 },
     primaryButtonText: { color: theme.primaryButtonText, fontSize: 16, fontWeight: "800" },
     disabled: { opacity: 0.55 },
     chipRow: { gap: 8, paddingVertical: 8 },

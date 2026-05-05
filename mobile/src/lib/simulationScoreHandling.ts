@@ -1,4 +1,6 @@
-import { SimulationEvaluationResult, SimulationScorecard } from "../types";
+import { DialogueMessage, SimulationEvaluationResult, SimulationScorecard } from "../types";
+
+export const MIN_USER_RESPONSES_FOR_VERIFIED_SCORECARD = 3;
 
 export type ScoringFailureCategory =
   | "auth_or_config"
@@ -19,12 +21,22 @@ export interface ResolvedSimulationScoreOutcome {
   message: string | null;
 }
 
+export function countUserResponsesForVerifiedScorecard(history: readonly DialogueMessage[]): number {
+  return history.filter((message) => message.role === "user" && message.content.trim().length > 0).length;
+}
+
+export function buildInsufficientEvidenceMessage(
+  minimumUserTurns = MIN_USER_RESPONSES_FOR_VERIFIED_SCORECARD,
+): string {
+  return `This session ended before there were enough user responses to generate a verified scorecard. Complete at least ${minimumUserTurns} user responses before ending the session.`;
+}
+
 export function resolveSimulationScoreOutcome(result: SimulationEvaluationResult): ResolvedSimulationScoreOutcome {
   if (result.status === "not_scored") {
     return {
       kind: "not_scored",
       scorecard: null,
-      message: result.message
+      message: buildInsufficientEvidenceMessage(result.minimumUserTurns)
     };
   }
 
