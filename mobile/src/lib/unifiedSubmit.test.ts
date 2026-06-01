@@ -1,4 +1,5 @@
 import {
+  isUsableAwaitedAssistantReply,
   isUsableSimulationTranscript,
   shouldFallbackToLegacyAssistantReply,
   shouldFallbackToLegacyUnifiedSubmit,
@@ -52,11 +53,42 @@ runTest("assistant-await recovery retries only when the await route is unavailab
     "missing await routes should retain the mixed-version compatibility fallback",
   );
   assert(
+    shouldFallbackToLegacyAssistantReply(new Error("Request failed (405): Method Not Allowed")),
+    "method-unavailable await routes should retain the mixed-version compatibility fallback",
+  );
+  assert(
+    shouldFallbackToLegacyAssistantReply(new Error("Request failed (501): Not Implemented")),
+    "unimplemented await routes should retain the mixed-version compatibility fallback",
+  );
+  assert(
     shouldFallbackToLegacyAssistantReply(new Error("Request timed out after 75 seconds.")) === false,
     "await timeouts should exit processing instead of starting a second generation request",
   );
   assert(
     shouldFallbackToLegacyAssistantReply(new Error("Request failed (503): OpenAI unavailable")) === false,
     "provider failures should exit processing instead of starting a second generation request",
+  );
+  assert(
+    shouldFallbackToLegacyAssistantReply(new Error("OpenAI model not found")) === false,
+    "provider not-found failures should not be mistaken for a missing compatibility route",
+  );
+  assert(
+    shouldFallbackToLegacyAssistantReply(new Error("Unified submit endpoint not found")),
+    "explicit endpoint-not-found compatibility responses should retain the legacy fallback",
+  );
+});
+
+runTest("rejects malformed awaited assistant replies before legacy generation", () => {
+  assert(
+    isUsableAwaitedAssistantReply({ outcome: "assistant_reply", assistantText: "A valid reply." }),
+    "non-empty assistant replies should remain usable",
+  );
+  assert(
+    isUsableAwaitedAssistantReply({ outcome: "assistant_reply", assistantText: "   " }) === false,
+    "empty assistant replies should surface recovery instead of triggering legacy generation",
+  );
+  assert(
+    isUsableAwaitedAssistantReply({ outcome: "unexpected", assistantText: "A reply." }) === false,
+    "malformed await outcomes should surface recovery instead of triggering legacy generation",
   );
 });

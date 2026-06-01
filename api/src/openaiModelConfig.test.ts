@@ -73,6 +73,18 @@ test("supports the recommended GPT-5.4 Responses profile with low reasoning", ()
   assert.equal(config.speech.model, "tts-1");
 });
 
+test("supports the deployed GPT-5.4 mini chat Responses profile with low reasoning", () => {
+  const config = loadOpenAiModelConfig({
+    OPENAI_CHAT_MODEL: "gpt-5.4-mini",
+    OPENAI_CHAT_API_FAMILY: "responses",
+    OPENAI_CHAT_REASONING_EFFORT: "low",
+  });
+
+  assert.equal(config.chat.model, "gpt-5.4-mini");
+  assert.equal(config.chat.apiFamily, "responses");
+  assert.equal(config.chat.reasoningEffort, "low");
+});
+
 test("applies explicit API families, reasoning efforts, and route-specific simulation caps", () => {
   const config = loadOpenAiModelConfig({
     OPENAI_CHAT_MODEL: "chat-model",

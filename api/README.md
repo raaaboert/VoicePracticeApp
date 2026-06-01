@@ -71,9 +71,9 @@ AUTH_CODE_REPLY_TO=
 MOBILE_TOKEN_SECRET=replace_me_for_mobile_tokens
 MOBILE_REVERIFY_ON_ONBOARD=false
 OPENAI_API_KEY=
-OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_CHAT_API_FAMILY=chat_completions
-OPENAI_CHAT_REASONING_EFFORT=
+OPENAI_CHAT_MODEL=gpt-5.4-mini
+OPENAI_CHAT_API_FAMILY=responses
+OPENAI_CHAT_REASONING_EFFORT=low
 OPENAI_SIMULATION_MODEL=gpt-5.4
 OPENAI_SIMULATION_API_FAMILY=responses
 OPENAI_SIMULATION_OPENING_REASONING_EFFORT=low
@@ -122,7 +122,7 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
 - AI budget caps default in production when `OPENAI_API_KEY` is set (`120` per-user calls/day, `1500` global calls/day, `250000` per-user tokens/day, `2000000` global tokens/day).
-- `OPENAI_CHAT_MODEL` applies to admin custom-scenario generation. `OPENAI_CHAT_API_FAMILY` defaults to `chat_completions`; set it to `responses` only when the selected model and request shape have been validated.
+- `OPENAI_CHAT_MODEL` applies to admin custom-scenario generation. The recommended deployed profile uses `gpt-5.4-mini`, `OPENAI_CHAT_API_FAMILY=responses`, and `OPENAI_CHAT_REASONING_EFFORT=low`. When these variables are omitted, the compatibility defaults remain `gpt-4o-mini`, `chat_completions`, and no reasoning effort.
 - `OPENAI_SIMULATION_MODEL` applies only to simulation routes (`/ai/opening`, `/ai/turn`, `/ai/score`) and defaults to `gpt-5.4`.
 - `OPENAI_SIMULATION_API_FAMILY` accepts `chat_completions` or `responses`. The recommended `gpt-5.4` default uses `responses`; a compatibility fallback also keeps `gpt-5.2-chat-latest` on `responses`.
 - `OPENAI_CHAT_REASONING_EFFORT` and the route-specific `OPENAI_SIMULATION_*_REASONING_EFFORT` variables are optional Responses API settings. Accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; confirm support for the selected model before setting them.

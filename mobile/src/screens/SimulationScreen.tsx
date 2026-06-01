@@ -26,6 +26,7 @@ import {
   awaitSubmittedSimulationTurnReply,
   createOpeningLine,
   generateAssistantReply,
+  isUsableAwaitedAssistantReply,
   isUsableSimulationTranscript,
   isOpenAiConfigured,
   isUnifiedSimulationSubmitEnabled,
@@ -1776,25 +1777,26 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             try {
               const awaitedPayload = await unifiedAssistantAwaitPromise;
               throwIfSessionLifecycleInterrupted();
-              if (awaitedPayload.outcome === "assistant_reply" && awaitedPayload.assistantText) {
-                replyPayload = {
-                  assistantText: awaitedPayload.assistantText,
-                  speechPrefetch: awaitedPayload.speechPrefetch ?? null,
-                };
-                assistantResponseAtMs = Date.now();
-                replyChars = awaitedPayload.assistantText.length;
-                logSimulationTiming({
-                  correlationId,
-                  phase: "assistant_response_received",
-                  startedAtMs: effectiveSubmitStartedAtMs,
-                  details: {
-                    replyChars,
-                    path: "unified_submit_await",
-                    modelLatencyMs: awaitedPayload.runtime?.modelLatencyMs ?? null,
-                    speechPrefetchTtsLatencyMs: awaitedPayload.runtime?.speechPrefetchTtsLatencyMs ?? null,
-                  },
-                });
+              if (!isUsableAwaitedAssistantReply(awaitedPayload)) {
+                throw new Error("Assistant reply wait returned an incomplete response.");
               }
+              replyPayload = {
+                assistantText: awaitedPayload.assistantText,
+                speechPrefetch: awaitedPayload.speechPrefetch ?? null,
+              };
+              assistantResponseAtMs = Date.now();
+              replyChars = awaitedPayload.assistantText.length;
+              logSimulationTiming({
+                correlationId,
+                phase: "assistant_response_received",
+                startedAtMs: effectiveSubmitStartedAtMs,
+                details: {
+                  replyChars,
+                  path: "unified_submit_await",
+                  modelLatencyMs: awaitedPayload.runtime?.modelLatencyMs ?? null,
+                  speechPrefetchTtsLatencyMs: awaitedPayload.runtime?.speechPrefetchTtsLatencyMs ?? null,
+                },
+              });
             } catch (awaitError) {
               if (!isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
                 throw new SimulationLifecycleInterruptedError();
