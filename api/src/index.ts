@@ -159,11 +159,11 @@ import {
 import {
   OpenAiSpeechRequestError,
   OpenAiResponsesRequestError,
-  requestChatCompletion,
-  requestResponsesCompletion,
+  requestCompletion,
   requestSpeechSynthesis,
   requestTranscription
 } from "./openaiClient.js";
+import type { OpenAiCompletionApiFamily, SimulationRoute } from "./openaiModelConfig.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
@@ -311,11 +311,11 @@ const WEB_AUTH_TOKEN_SECRET = runtimeConfig.webAuthTokenSecret;
 const DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES = DASHBOARD_TRUSTED_SESSION_MINUTES;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
 const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
-const OPENAI_CHAT_MODEL = runtimeConfig.openAiChatModel;
-const OPENAI_SIMULATION_MODEL = runtimeConfig.openAiSimulationModel;
-const OPENAI_TRANSCRIPTION_MODEL = runtimeConfig.openAiTranscriptionModel;
+const OPENAI_MODEL_CONFIG = runtimeConfig.openAi;
+const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
+const OPENAI_SIMULATION_MODEL = OPENAI_MODEL_CONFIG.simulation.model;
+const OPENAI_TRANSCRIPTION_MODEL = OPENAI_MODEL_CONFIG.transcription.model;
 const ENABLE_REMOTE_TTS = runtimeConfig.enableRemoteTts;
-const OPENAI_SIMULATION_MAX_OUTPUT_TOKENS = runtimeConfig.openAiSimulationMaxOutputTokens;
 const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
 const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;
 const OPENAI_MAX_DAILY_TOKENS_PER_USER = runtimeConfig.openAiMaxDailyTokensPerUser;
@@ -339,10 +339,7 @@ const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
 const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS = 4_000;
-const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING = 160;
-const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_TURN = 220;
-const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE = 1200;
-const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL?.trim() || "tts-1";
+const OPENAI_TTS_MODEL = OPENAI_MODEL_CONFIG.speech.model;
 const TTS_TEXT_MAX_CHARS = 4_000;
 const PROCESS_STARTED_AT = new Date().toISOString();
 const BUILD_TIMESTAMP =
@@ -542,7 +539,6 @@ function logWarnThrottled(key: string, message: string, throttleMs = WARNING_LOG
   logWarn(message);
 }
 
-type SimulationRoute = "opening" | "turn" | "score";
 type SimulationApiPath = "responses" | "chat";
 
 interface SimulationCompletionResult {
@@ -555,8 +551,8 @@ interface SimulationCompletionResult {
   model: string;
 }
 
-function shouldUseResponsesApiForSimulation(model: string): boolean {
-  return model.trim().toLowerCase().startsWith("gpt-5");
+function toSimulationApiPath(apiFamily: OpenAiCompletionApiFamily): SimulationApiPath {
+  return apiFamily === "responses" ? "responses" : "chat";
 }
 
 function logSimulationAiMetrics(params: {
@@ -568,6 +564,7 @@ function logSimulationAiMetrics(params: {
   messageCount: number;
   promptChars: number;
   maxOutputTokens: number;
+  reasoningEffort: string | null;
   completion?: SimulationCompletionResult;
   error?: unknown;
 }): number {
@@ -582,6 +579,7 @@ function logSimulationAiMetrics(params: {
     messageCount: params.messageCount,
     promptChars: params.promptChars,
     maxOutputTokens: params.maxOutputTokens,
+    reasoningEffort: params.reasoningEffort ?? "default",
     responseModel: params.completion?.model ?? "unknown",
     tokenUsage: params.completion
       ? {
@@ -608,31 +606,26 @@ function logSimulationAiMetrics(params: {
 async function requestSimulationCompletion(params: {
   route: SimulationRoute;
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
-  maxOutputTokens: number;
   temperature?: number;
   correlationId: string;
 }): Promise<{ completion: SimulationCompletionResult; latencyMs: number; apiPathUsed: SimulationApiPath }> {
   const requestStartedAt = Date.now();
-  const requestedModel = OPENAI_SIMULATION_MODEL;
-  const apiPathUsed: SimulationApiPath = shouldUseResponsesApiForSimulation(requestedModel) ? "responses" : "chat";
+  const simulationConfig = OPENAI_MODEL_CONFIG.simulation;
+  const routeConfig = simulationConfig.routes[params.route];
+  const requestedModel = simulationConfig.model;
+  const apiPathUsed = toSimulationApiPath(simulationConfig.apiFamily);
   const promptChars = params.messages.reduce((total, message) => total + message.content.length, 0);
   const messageCount = params.messages.length;
 
   try {
-    const completion =
-      apiPathUsed === "responses"
-        ? await requestResponsesCompletion({
-            model: requestedModel,
-            messages: params.messages,
-            maxOutputTokens: params.maxOutputTokens,
-            temperature: params.temperature
-          })
-        : await requestChatCompletion({
-            model: requestedModel,
-            messages: params.messages,
-            maxTokens: params.maxOutputTokens,
-            temperature: params.temperature
-          });
+    const completion = await requestCompletion({
+      apiFamily: simulationConfig.apiFamily,
+      model: requestedModel,
+      messages: params.messages,
+      maxOutputTokens: routeConfig.maxOutputTokens,
+      reasoningEffort: routeConfig.reasoningEffort,
+      temperature: params.temperature
+    });
 
     const latencyMs = logSimulationAiMetrics({
       route: params.route,
@@ -642,7 +635,8 @@ async function requestSimulationCompletion(params: {
       correlationId: params.correlationId,
       messageCount,
       promptChars,
-      maxOutputTokens: params.maxOutputTokens,
+      maxOutputTokens: routeConfig.maxOutputTokens,
+      reasoningEffort: routeConfig.reasoningEffort,
       completion
     });
 
@@ -689,7 +683,8 @@ async function requestSimulationCompletion(params: {
       correlationId: params.correlationId,
       messageCount,
       promptChars,
-      maxOutputTokens: params.maxOutputTokens,
+      maxOutputTokens: routeConfig.maxOutputTokens,
+      reasoningEffort: routeConfig.reasoningEffort,
       error
     });
     throw error;
@@ -1449,7 +1444,6 @@ async function generateSimulationTurnReply(params: {
   speechPrefetch: SimulationSpeechPrefetchPayload | null;
 }> {
   const temperature = params.runtime.difficulty === "hard" ? 0.55 : 0.75;
-  const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_TURN);
   const promptMessages = [
     { role: "system" as const, content: params.runtime.systemPrompt },
     ...params.history.map((message) => ({ role: message.role, content: message.content })),
@@ -1459,7 +1453,6 @@ async function generateSimulationTurnReply(params: {
   const { completion, latencyMs } = await requestSimulationCompletion({
     route: "turn",
     messages: promptMessages,
-    maxOutputTokens,
     temperature,
     correlationId: params.correlationId,
   });
@@ -1501,17 +1494,6 @@ function logSimulationUserTextDiagnostics(params: {
   console.log(
     `[ai-simulation-input] route=${params.route} sessionId=${params.sessionId} userTextLength=${params.userText?.length ?? 0} placeholderDetected=${params.placeholderDetected} payloadMode=${params.payloadType.mode} payloadFlags=audio:${params.payloadType.hasAudioPayload},transcription:${params.payloadType.hasTranscriptionPayload},text:${params.payloadType.hasTextPayload}`
   );
-}
-
-function resolveSimulationMaxOutputTokens(defaultValue: number): number {
-  if (
-    typeof OPENAI_SIMULATION_MAX_OUTPUT_TOKENS === "number" &&
-    Number.isFinite(OPENAI_SIMULATION_MAX_OUTPUT_TOKENS) &&
-    OPENAI_SIMULATION_MAX_OUTPUT_TOKENS > 0
-  ) {
-    return Math.floor(OPENAI_SIMULATION_MAX_OUTPUT_TOKENS);
-  }
-  return defaultValue;
 }
 
 async function getActiveTrainingPackForOrg(
@@ -10461,13 +10443,15 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
   ].join(" ");
 
   try {
-    const completion = await requestChatCompletion({
+    const completion = await requestCompletion({
+      apiFamily: OPENAI_MODEL_CONFIG.chat.apiFamily,
       model: OPENAI_CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: promptPreview },
       ],
       temperature: 0.4,
+      reasoningEffort: OPENAI_MODEL_CONFIG.chat.reasoningEffort,
     });
 
     const parsed = extractFirstJsonObject(completion.text);
@@ -14550,7 +14534,6 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
   });
 
   try {
-    const maxOutputTokens = resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_OPENING);
     const promptMessages = [
       { role: "system" as const, content: context.runtime.systemPrompt },
       { role: "user" as const, content: context.runtime.openingPrompt }
@@ -14559,7 +14542,6 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
     const { completion, latencyMs } = await requestSimulationCompletion({
       route: "opening",
       messages: promptMessages,
-      maxOutputTokens,
       temperature: 0.8,
       correlationId
     });
@@ -14601,7 +14583,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       systemPromptChars: context.runtime.systemPrompt.length,
       openingPromptChars: context.runtime.openingPrompt.length,
       trainingPackLookupMs: context.runtime.trainingPackLookupMs,
-      maxOutputTokens,
+      maxOutputTokens: OPENAI_MODEL_CONFIG.simulation.routes.opening.maxOutputTokens,
       cacheStatus: context.runtime.cacheStatus,
       cacheReason: context.runtime.cacheReason,
       contextBuildMs: context.runtime.contextBuildMs,
@@ -15296,7 +15278,6 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
         { role: "system", content: evaluationPrompt },
         { role: "user", content: `Conversation transcript:\n${transcript}` }
       ],
-      maxOutputTokens: resolveSimulationMaxOutputTokens(DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS_SCORE),
       temperature: 0.2,
       correlationId
     });

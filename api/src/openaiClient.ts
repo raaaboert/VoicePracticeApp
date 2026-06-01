@@ -1,3 +1,5 @@
+import type { OpenAiCompletionApiFamily, OpenAiReasoningEffort } from "./openaiModelConfig.js";
+
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 export interface OpenAiTokenUsage {
@@ -140,7 +142,6 @@ export async function requestChatCompletion(params: {
   frequencyPenalty?: number;
   presencePenalty?: number;
   maxTokens?: number;
-  maxOutputTokens?: number;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
   const body: Record<string, unknown> = {
@@ -162,10 +163,6 @@ export async function requestChatCompletion(params: {
   if (typeof params.maxTokens === "number") {
     body.max_tokens = params.maxTokens;
   }
-  if (typeof params.maxOutputTokens === "number") {
-    body.max_output_tokens = params.maxOutputTokens;
-  }
-
   const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
@@ -226,10 +223,9 @@ export async function requestResponsesCompletion(params: {
   messages: ChatMessage[];
   temperature?: number;
   maxOutputTokens?: number;
+  reasoningEffort?: OpenAiReasoningEffort | null;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
-  const modelKey = params.model.trim().toLowerCase();
-  const isGpt5Model = modelKey.startsWith("gpt-5");
   const body: Record<string, unknown> = {
     model: params.model,
     input: params.messages.map((message) => ({
@@ -238,11 +234,16 @@ export async function requestResponsesCompletion(params: {
     }))
   };
 
-  if (!isGpt5Model && typeof params.temperature === "number") {
+  if (typeof params.temperature === "number") {
     body.temperature = params.temperature;
   }
   if (typeof params.maxOutputTokens === "number") {
     body.max_output_tokens = params.maxOutputTokens;
+  }
+  if (params.reasoningEffort) {
+    body.reasoning = {
+      effort: params.reasoningEffort,
+    };
   }
 
   const response = await fetch(`${OPENAI_BASE_URL}/responses`, {
@@ -304,6 +305,31 @@ export async function requestResponsesCompletion(params: {
     },
     model: typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : params.model
   };
+}
+
+export async function requestCompletion(params: {
+  apiFamily: OpenAiCompletionApiFamily;
+  model: string;
+  messages: ChatMessage[];
+  temperature?: number;
+  maxOutputTokens?: number;
+  reasoningEffort?: OpenAiReasoningEffort | null;
+}): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
+  if (params.apiFamily === "responses") {
+    return requestResponsesCompletion({
+      model: params.model,
+      messages: params.messages,
+      maxOutputTokens: params.maxOutputTokens,
+      reasoningEffort: params.reasoningEffort,
+    });
+  }
+
+  return requestChatCompletion({
+    model: params.model,
+    messages: params.messages,
+    temperature: params.temperature,
+    maxTokens: params.maxOutputTokens,
+  });
 }
 
 export async function requestTranscription(params: {

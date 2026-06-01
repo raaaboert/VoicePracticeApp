@@ -1,4 +1,5 @@
 import path from "node:path";
+import { loadOpenAiModelConfig, OpenAiModelConfig } from "./openaiModelConfig.js";
 
 export type StorageProvider = "file" | "postgres";
 export type AuthCodeDeliveryProvider = "log_only" | "resend";
@@ -27,11 +28,8 @@ export interface RuntimeConfig {
   authCodeFromName: string;
   authCodeReplyTo: string | null;
   requireReverifyOnOnboard: boolean;
-  openAiChatModel: string;
-  openAiSimulationModel: string;
-  openAiTranscriptionModel: string;
+  openAi: OpenAiModelConfig;
   enableRemoteTts: boolean;
-  openAiSimulationMaxOutputTokens: number | null;
   openAiMaxDailyCallsPerUser: number | null;
   openAiMaxDailyCallsGlobal: number | null;
   openAiMaxDailyTokensPerUser: number | null;
@@ -304,15 +302,8 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     authCodeFromName,
     authCodeReplyTo,
     requireReverifyOnOnboard: toBoolean(env.MOBILE_REVERIFY_ON_ONBOARD, isProduction),
-    openAiChatModel: env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
-    openAiSimulationModel: env.OPENAI_SIMULATION_MODEL?.trim() || env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
-    openAiTranscriptionModel: env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1",
+    openAi: loadOpenAiModelConfig(env),
     enableRemoteTts: toBoolean(env.ENABLE_REMOTE_TTS, false),
-    openAiSimulationMaxOutputTokens: parseOptionalNonNegativeInt(
-      "OPENAI_SIMULATION_MAX_OUTPUT_TOKENS",
-      env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS,
-      null
-    ),
     openAiMaxDailyCallsPerUser: parseOptionalNonNegativeInt(
       "OPENAI_MAX_DAILY_CALLS_PER_USER",
       env.OPENAI_MAX_DAILY_CALLS_PER_USER,
