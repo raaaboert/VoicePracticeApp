@@ -13761,6 +13761,9 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRate
     response.status(400).json({ error: "correlationId is required." });
     return;
   }
+  const routeStartedAtMs = Date.now();
+  // eslint-disable-next-line no-console
+  console.log(`[request-hit] route=submit-turn-await userId=${userId} correlationId=${requestedCorrelationId}`);
 
   const authenticatedUserId = await withDatabaseRead(async (db) => {
     const user = getUserById(db, userId);
@@ -13794,16 +13797,38 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRate
   });
 
   if (!result) {
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-route]", {
+      route: "submit-turn-await",
+      correlationId: requestedCorrelationId,
+      stage: "timeout",
+      elapsedMs: Date.now() - routeStartedAtMs,
+    });
     response.status(504).json({ error: "Timed out waiting for simulation assistant reply." });
     return;
   }
 
   response.setHeader("X-Correlation-Id", requestedCorrelationId);
   if (result.outcome === "error") {
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-route]", {
+      route: "submit-turn-await",
+      correlationId: requestedCorrelationId,
+      stage: "error",
+      elapsedMs: Date.now() - routeStartedAtMs,
+    });
     response.status(503).json({ error: result.error });
     return;
   }
   response.json(result);
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "submit-turn-await",
+    correlationId: requestedCorrelationId,
+    stage: "response_sent",
+    elapsedMs: Date.now() - routeStartedAtMs,
+    outcome: result.outcome,
+  });
 });
 
 app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {

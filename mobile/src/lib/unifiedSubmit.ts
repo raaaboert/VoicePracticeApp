@@ -11,3 +11,11 @@ export function shouldFallbackToLegacyUnifiedSubmit(error: unknown): boolean {
     message.includes("not found")
   );
 }
+
+export function shouldFallbackToLegacyAssistantReply(error: unknown): boolean {
+  return shouldFallbackToLegacyUnifiedSubmit(error);
+}
+
+export function isUsableSimulationTranscript(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}

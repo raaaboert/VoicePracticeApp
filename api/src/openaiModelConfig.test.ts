@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { loadOpenAiModelConfig } from "./openaiModelConfig.js";
 
-test("uses behavior-preserving OpenAI defaults", () => {
+test("uses the recommended OpenAI defaults", () => {
   const config = loadOpenAiModelConfig({});
 
   assert.deepEqual(config, {
@@ -13,20 +13,20 @@ test("uses behavior-preserving OpenAI defaults", () => {
       reasoningEffort: null,
     },
     simulation: {
-      model: "gpt-4o-mini",
-      apiFamily: "chat_completions",
+      model: "gpt-5.4",
+      apiFamily: "responses",
       routes: {
         opening: {
           maxOutputTokens: 160,
-          reasoningEffort: null,
+          reasoningEffort: "low",
         },
         turn: {
           maxOutputTokens: 220,
-          reasoningEffort: null,
+          reasoningEffort: "low",
         },
         score: {
           maxOutputTokens: 1200,
-          reasoningEffort: null,
+          reasoningEffort: "low",
         },
       },
     },
@@ -46,6 +46,31 @@ test("preserves Responses API routing for the currently deployed simulation mode
 
   assert.equal(config.chat.apiFamily, "chat_completions");
   assert.equal(config.simulation.apiFamily, "responses");
+  assert.equal(config.simulation.routes.opening.reasoningEffort, null);
+  assert.equal(config.simulation.routes.turn.reasoningEffort, null);
+  assert.equal(config.simulation.routes.score.reasoningEffort, null);
+});
+
+test("supports the recommended GPT-5.4 Responses profile with low reasoning", () => {
+  const config = loadOpenAiModelConfig({
+    OPENAI_CHAT_MODEL: "gpt-4o-mini",
+    OPENAI_CHAT_API_FAMILY: "chat_completions",
+    OPENAI_SIMULATION_MODEL: "gpt-5.4",
+    OPENAI_SIMULATION_API_FAMILY: "responses",
+    OPENAI_SIMULATION_OPENING_REASONING_EFFORT: "low",
+    OPENAI_SIMULATION_TURN_REASONING_EFFORT: "low",
+    OPENAI_SIMULATION_SCORE_REASONING_EFFORT: "low",
+  });
+
+  assert.equal(config.chat.model, "gpt-4o-mini");
+  assert.equal(config.chat.apiFamily, "chat_completions");
+  assert.equal(config.simulation.model, "gpt-5.4");
+  assert.equal(config.simulation.apiFamily, "responses");
+  assert.equal(config.simulation.routes.opening.reasoningEffort, "low");
+  assert.equal(config.simulation.routes.turn.reasoningEffort, "low");
+  assert.equal(config.simulation.routes.score.reasoningEffort, "low");
+  assert.equal(config.transcription.model, "whisper-1");
+  assert.equal(config.speech.model, "tts-1");
 });
 
 test("applies explicit API families, reasoning efforts, and route-specific simulation caps", () => {

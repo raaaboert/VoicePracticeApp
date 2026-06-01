@@ -96,7 +96,7 @@ test("configured Responses requests send output caps and optional reasoning with
         ],
         temperature: 0.75,
         maxOutputTokens: 220,
-        reasoningEffort: "none",
+        reasoningEffort: "low",
       }),
     {
       output_text: "reply",
@@ -113,7 +113,7 @@ test("configured Responses requests send output caps and optional reasoning with
     ],
     max_output_tokens: 220,
     reasoning: {
-      effort: "none",
+      effort: "low",
     },
   });
 });

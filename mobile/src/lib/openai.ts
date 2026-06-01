@@ -10,9 +10,11 @@ import {
 } from "./api";
 import type { PrefetchedRemoteSpeechChunk, RemoteTtsPreset, UnifiedSimulationTurnPayload } from "./api";
 import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
-import { shouldFallbackToLegacyUnifiedSubmit } from "./unifiedSubmit";
-
-export { shouldFallbackToLegacyUnifiedSubmit } from "./unifiedSubmit";
+export {
+  isUsableSimulationTranscript,
+  shouldFallbackToLegacyAssistantReply,
+  shouldFallbackToLegacyUnifiedSubmit,
+} from "./unifiedSubmit";
 
 // Remote AI calls now go through the Node API. This flag simply controls whether the app
 // should attempt calling the backend or stay in local test mode.

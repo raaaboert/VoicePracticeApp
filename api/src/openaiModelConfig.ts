@@ -30,8 +30,10 @@ export interface OpenAiModelConfig {
 }
 
 const DEFAULT_CHAT_MODEL = "gpt-4o-mini";
+const DEFAULT_SIMULATION_MODEL = "gpt-5.4";
 const DEFAULT_TRANSCRIPTION_MODEL = "whisper-1";
 const DEFAULT_SPEECH_MODEL = "tts-1";
+const DEFAULT_SIMULATION_REASONING_EFFORT: OpenAiReasoningEffort = "low";
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS: Record<SimulationRoute, number> = {
   opening: 160,
   turn: 220,
@@ -47,8 +49,8 @@ const OPENAI_REASONING_EFFORTS = new Set<OpenAiReasoningEffort>([
   "xhigh",
 ]);
 
-// Preserve the currently deployed simulation path until Render opts into an explicit API family.
-const LEGACY_RESPONSES_SIMULATION_MODELS = new Set(["gpt-5.2-chat-latest"]);
+// Preserve the currently deployed path while keeping the recommended simulation default explicit.
+const RESPONSES_SIMULATION_MODELS = new Set([DEFAULT_SIMULATION_MODEL, "gpt-5.2-chat-latest"]);
 
 function parseApiFamily(
   envName: string,
@@ -66,10 +68,14 @@ function parseApiFamily(
   throw new Error(`${envName} must be either "chat_completions" or "responses".`);
 }
 
-function parseReasoningEffort(envName: string, rawValue: string | undefined): OpenAiReasoningEffort | null {
+function parseReasoningEffort(
+  envName: string,
+  rawValue: string | undefined,
+  fallback: OpenAiReasoningEffort | null = null
+): OpenAiReasoningEffort | null {
   const candidate = rawValue?.trim().toLowerCase();
   if (!candidate) {
-    return null;
+    return fallback;
   }
   if (OPENAI_REASONING_EFFORTS.has(candidate as OpenAiReasoningEffort)) {
     return candidate as OpenAiReasoningEffort;
@@ -107,10 +113,21 @@ function parseRouteMaxOutputTokens(envName: string, rawValue: string | undefined
 }
 
 function resolveSimulationApiFamily(env: NodeJS.ProcessEnv, model: string): OpenAiCompletionApiFamily {
-  const legacyFallback = LEGACY_RESPONSES_SIMULATION_MODELS.has(model.trim().toLowerCase())
+  const fallback = RESPONSES_SIMULATION_MODELS.has(model.trim().toLowerCase())
     ? "responses"
     : "chat_completions";
-  return parseApiFamily("OPENAI_SIMULATION_API_FAMILY", env.OPENAI_SIMULATION_API_FAMILY, legacyFallback);
+  return parseApiFamily("OPENAI_SIMULATION_API_FAMILY", env.OPENAI_SIMULATION_API_FAMILY, fallback);
+}
+
+function resolveSimulationReasoningEffort(
+  envName: string,
+  rawValue: string | undefined,
+  model: string
+): OpenAiReasoningEffort | null {
+  const fallback = model.trim().toLowerCase() === DEFAULT_SIMULATION_MODEL
+    ? DEFAULT_SIMULATION_REASONING_EFFORT
+    : null;
+  return parseReasoningEffort(envName, rawValue, fallback);
 }
 
 function resolveSimulationMaxOutputTokens(params: {
@@ -131,7 +148,7 @@ function resolveSimulationMaxOutputTokens(params: {
 
 export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): OpenAiModelConfig {
   const chatModel = env.OPENAI_CHAT_MODEL?.trim() || DEFAULT_CHAT_MODEL;
-  const simulationModel = env.OPENAI_SIMULATION_MODEL?.trim() || chatModel;
+  const simulationModel = env.OPENAI_SIMULATION_MODEL?.trim() || DEFAULT_SIMULATION_MODEL;
   const legacySimulationMaxOutputTokens = parseLegacySimulationMaxOutputTokens(
     env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS
   );
@@ -153,9 +170,10 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
             legacyValue: legacySimulationMaxOutputTokens,
             defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.opening,
           }),
-          reasoningEffort: parseReasoningEffort(
+          reasoningEffort: resolveSimulationReasoningEffort(
             "OPENAI_SIMULATION_OPENING_REASONING_EFFORT",
-            env.OPENAI_SIMULATION_OPENING_REASONING_EFFORT
+            env.OPENAI_SIMULATION_OPENING_REASONING_EFFORT,
+            simulationModel
           ),
         },
         turn: {
@@ -165,9 +183,10 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
             legacyValue: legacySimulationMaxOutputTokens,
             defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.turn,
           }),
-          reasoningEffort: parseReasoningEffort(
+          reasoningEffort: resolveSimulationReasoningEffort(
             "OPENAI_SIMULATION_TURN_REASONING_EFFORT",
-            env.OPENAI_SIMULATION_TURN_REASONING_EFFORT
+            env.OPENAI_SIMULATION_TURN_REASONING_EFFORT,
+            simulationModel
           ),
         },
         score: {
@@ -177,9 +196,10 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
             legacyValue: legacySimulationMaxOutputTokens,
             defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.score,
           }),
-          reasoningEffort: parseReasoningEffort(
+          reasoningEffort: resolveSimulationReasoningEffort(
             "OPENAI_SIMULATION_SCORE_REASONING_EFFORT",
-            env.OPENAI_SIMULATION_SCORE_REASONING_EFFORT
+            env.OPENAI_SIMULATION_SCORE_REASONING_EFFORT,
+            simulationModel
           ),
         },
       },

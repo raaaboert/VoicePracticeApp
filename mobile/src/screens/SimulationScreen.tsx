@@ -26,8 +26,10 @@ import {
   awaitSubmittedSimulationTurnReply,
   createOpeningLine,
   generateAssistantReply,
+  isUsableSimulationTranscript,
   isOpenAiConfigured,
   isUnifiedSimulationSubmitEnabled,
+  shouldFallbackToLegacyAssistantReply,
   shouldFallbackToLegacyUnifiedSubmit,
   submitRecordedSimulationTurn,
   transcribeAudio,
@@ -1574,7 +1576,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               modelLatencyMs: unifiedPayload.runtime?.modelLatencyMs ?? null,
             },
           });
-          if (userText) {
+          if (isUsableSimulationTranscript(userText)) {
             logSimulationTiming({
               correlationId,
               phase: "transcribe_response",
@@ -1714,7 +1716,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         transcriptChars = userText.length;
       }
 
-      if (!userText && transcriptionAttempted) {
+      if (!isUsableSimulationTranscript(userText) && transcriptionAttempted) {
         await measureRecordingPayload();
         // eslint-disable-next-line no-console
         console.warn("[simulation-no-transcript]", {
@@ -1735,7 +1737,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         });
       }
 
-      if (userText && appearsToEchoAssistantReply(userText, messagesRef.current)) {
+      if (isUsableSimulationTranscript(userText) && appearsToEchoAssistantReply(userText, messagesRef.current)) {
         userText = "";
         replyPayload = null;
         unifiedAssistantAwaitAbortController?.abort();
@@ -1744,7 +1746,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
 
       throwIfSessionLifecycleInterrupted();
 
-      if (userText) {
+      if (isUsableSimulationTranscript(userText)) {
         const userMessage = { id: createMessageId(), role: "user" as const, content: userText };
         let userMessageCommitted = false;
         const commitUserMessageIfNeeded = () => {
@@ -1798,14 +1800,19 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 throw new SimulationLifecycleInterruptedError();
               }
               const awaitErrorMessage = getErrorMessage(awaitError, "Assistant reply wait failed.");
+              const shouldFallbackToLegacyReply = shouldFallbackToLegacyAssistantReply(awaitError);
               logSimulationTiming({
                 correlationId,
-                phase: "assistant_await_fallback_generate",
+                phase: "assistant_await_failed",
                 startedAtMs: effectiveSubmitStartedAtMs,
                 details: {
                   error: awaitErrorMessage,
+                  shouldFallbackToLegacyReply,
                 },
               });
+              if (!shouldFallbackToLegacyReply) {
+                throw awaitError;
+              }
             } finally {
               unifiedAssistantAwaitAbortController?.abort();
               if (assistantAwaitAbortControllerRef.current === unifiedAssistantAwaitAbortController) {
