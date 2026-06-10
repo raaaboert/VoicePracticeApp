@@ -45,6 +45,11 @@ runTest("accepts short but meaningful simulation transcripts", () => {
   }
 
   assert(isUsableSimulationTranscript("   ") === false, "whitespace-only transcripts should remain unusable");
+  assert(isUsableSimulationTranscript("I") === false, "near-empty transcripts should remain unusable");
+  assert(
+    isUsableSimulationTranscript("\u713c\u304d\u305d\u3070\u3092\u4f5c\u308a\u307e\u3059\u3002") === false,
+    "non-English auto-detected transcripts should remain unusable",
+  );
 });
 
 runTest("assistant-await recovery retries only when the await route is unavailable", () => {

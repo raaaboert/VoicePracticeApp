@@ -60,6 +60,7 @@ interface TranscriptionResponse {
 }
 
 type SpeechFormat = "mp3" | "wav" | "opus" | "flac" | "aac" | "pcm";
+const DEFAULT_SPEECH_REQUEST_TIMEOUT_MS = 12_000;
 
 function getOpenAiApiKey(): string {
   const key = process.env.OPENAI_API_KEY?.trim();
@@ -337,11 +338,15 @@ export async function requestTranscription(params: {
   audioBuffer: Buffer;
   fileName: string;
   mimeType: string;
+  language?: string;
 }): Promise<string> {
   const apiKey = getOpenAiApiKey();
 
   const formData = new FormData();
   formData.append("model", params.model);
+  if (typeof params.language === "string" && params.language.trim()) {
+    formData.append("language", params.language.trim());
+  }
 
   const bytes = new Uint8Array(params.audioBuffer);
   const file = new File([bytes], params.fileName, { type: params.mimeType });
@@ -368,9 +373,14 @@ export async function requestSpeechSynthesis(params: {
   voice: string;
   text: string;
   format?: SpeechFormat;
+  timeoutMs?: number;
 }): Promise<{ audioBuffer: Buffer; contentType: string }> {
   const apiKey = getOpenAiApiKey();
   const responseFormat: SpeechFormat = params.format ?? "mp3";
+  const timeoutMs =
+    typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
+      ? Math.floor(params.timeoutMs)
+      : DEFAULT_SPEECH_REQUEST_TIMEOUT_MS;
   const body: Record<string, unknown> = {
     model: params.model,
     voice: params.voice,
@@ -378,52 +388,75 @@ export async function requestSpeechSynthesis(params: {
     response_format: responseFormat
   };
 
-  const response = await fetch(`${OPENAI_BASE_URL}/audio/speech`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
-  if (!response.ok) {
-    let errorMessage = response.statusText || "";
-    let errorType: string | undefined;
-    let errorCode: string | undefined;
+  try {
+    const response = await fetch(`${OPENAI_BASE_URL}/audio/speech`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
 
-    try {
-      const payload = (await response.json()) as OpenAiErrorPayload;
-      const maybeMessage = payload.error?.message?.trim();
-      if (maybeMessage) {
-        errorMessage = maybeMessage;
+    if (!response.ok) {
+      let errorMessage = response.statusText || "";
+      let errorType: string | undefined;
+      let errorCode: string | undefined;
+
+      try {
+        const payload = (await response.json()) as OpenAiErrorPayload;
+        const maybeMessage = payload.error?.message?.trim();
+        if (maybeMessage) {
+          errorMessage = maybeMessage;
+        }
+        const maybeType = payload.error?.type?.trim();
+        if (maybeType) {
+          errorType = maybeType;
+        }
+        const maybeCode = typeof payload.error?.code === "string" ? payload.error.code.trim() : "";
+        if (maybeCode) {
+          errorCode = maybeCode;
+        }
+      } catch {
+        // Ignore parsing errors and use status text fallback.
       }
-      const maybeType = payload.error?.type?.trim();
-      if (maybeType) {
-        errorType = maybeType;
-      }
-      const maybeCode = typeof payload.error?.code === "string" ? payload.error.code.trim() : "";
-      if (maybeCode) {
-        errorCode = maybeCode;
-      }
-    } catch {
-      // Ignore parsing errors and use status text fallback.
+
+      throw new OpenAiSpeechRequestError({
+        statusCode: response.status,
+        errorType,
+        errorCode,
+        errorMessage: errorMessage || `OpenAI request failed (${response.status})`
+      });
     }
 
-    throw new OpenAiSpeechRequestError({
-      statusCode: response.status,
-      errorType,
-      errorCode,
-      errorMessage: errorMessage || `OpenAI request failed (${response.status})`
-    });
+    const audioBuffer = Buffer.from(await response.arrayBuffer());
+    const contentTypeHeader = response.headers.get("content-type")?.split(";")[0]?.trim();
+    const contentType = contentTypeHeader || (responseFormat === "mp3" ? "audio/mpeg" : "application/octet-stream");
+
+    return {
+      audioBuffer,
+      contentType
+    };
+  } catch (error) {
+    if (timedOut || (error instanceof Error && error.name === "AbortError")) {
+      if (timedOut) {
+        throw new OpenAiSpeechRequestError({
+          errorType: "timeout",
+          errorCode: "timeout",
+          errorMessage: `OpenAI TTS request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`
+        });
+      }
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
   }
-
-  const audioBuffer = Buffer.from(await response.arrayBuffer());
-  const contentTypeHeader = response.headers.get("content-type")?.split(";")[0]?.trim();
-  const contentType = contentTypeHeader || (responseFormat === "mp3" ? "audio/mpeg" : "application/octet-stream");
-
-  return {
-    audioBuffer,
-    contentType
-  };
 }

@@ -18,7 +18,12 @@ export function shouldFallbackToLegacyAssistantReply(error: unknown): boolean {
 }
 
 export function isUsableSimulationTranscript(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length >= 2 && /[A-Za-z0-9]/.test(trimmed);
 }
 
 export function isUsableAwaitedAssistantReply(value: {

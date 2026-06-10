@@ -67,7 +67,7 @@ import {
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
   toRemoteTtsPreset,
 } from "../lib/ttsPlayback";
-import type { PreparedRemoteAudioSource } from "../lib/ttsPlayback";
+import type { PreparedRemoteAudioSource, TtsPlaybackResult } from "../lib/ttsPlayback";
 import { splitTextForRemoteTtsFastStart } from "../lib/ttsFastStart";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
@@ -746,7 +746,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     correlationId?: string,
     chunkIndex?: number,
     chunkCount?: number,
-  ): Promise<void> => {
+  ): Promise<TtsPlaybackResult> => {
     const requestGeneration = ttsRequestGenerationRef.current;
     const abortController = new AbortController();
     const priorController = remoteTtsAbortControllerRef.current;
@@ -756,7 +756,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
 
     try {
-      await speakWithRemoteTtsFallback({
+      return await speakWithRemoteTtsFallback({
         source: "simulation",
         text,
         preset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
@@ -855,7 +855,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     onPlaybackStart?: () => void,
     correlationId?: string,
     prefetchedFirstChunk?: PrefetchedRemoteSpeechChunk | null,
-  ): Promise<void> => {
+  ): Promise<TtsPlaybackResult> => {
     const chunks = shouldUseFastStartRemoteTts ? splitTextForRemoteTtsFastStart(text) : [text];
     const requestGeneration = ttsRequestGenerationRef.current;
     const preset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
@@ -863,6 +863,16 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     const resolvedPreparedChunkByIndex = new Map<number, PreparedRemoteAudioSource>();
     let playbackStartHandled = false;
     let previousChunkCompletedAtMs: number | null = null;
+    let aggregateSpeechResult: TtsPlaybackResult | null = null;
+    const recordSpeechResult = (result: TtsPlaybackResult) => {
+      if (
+        !aggregateSpeechResult
+        || (result.degraded && !aggregateSpeechResult.degraded)
+        || (result.timedOut && !aggregateSpeechResult.timedOut)
+      ) {
+        aggregateSpeechResult = result;
+      }
+    };
     const handlePlaybackStart = () => {
       if (playbackStartHandled) {
         return;
@@ -928,7 +938,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             });
           }
         }
-        await speakSingleUtterance(
+        const utteranceResult = await speakSingleUtterance(
           chunk,
           index === 0 ? assistantTextReceivedAtMs : Date.now(),
           (startedAtMs) => {
@@ -955,6 +965,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           index,
           chunks.length,
         );
+        recordSpeechResult(utteranceResult);
         if (preparedRemoteAudio) {
           resolvedPreparedChunkByIndex.delete(index);
         }
@@ -964,14 +975,31 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         previousChunkCompletedAtMs = Date.now();
         logSimulationTiming({
           correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-          phase: "tts_chunk_completed",
+          phase: utteranceResult.degraded
+            ? utteranceResult.timedOut
+              ? "tts_chunk_timeout_unblocked"
+              : "tts_chunk_degraded_complete"
+            : "tts_chunk_completed",
           details: {
             chunkIndex: index,
             chunkCount: chunks.length,
+            outcome: utteranceResult.outcome,
+            mode: utteranceResult.mode,
+            degraded: utteranceResult.degraded,
+            timedOut: utteranceResult.timedOut,
+            reason: utteranceResult.reason,
+            sourceKind: utteranceResult.sourceKind ?? null,
           },
         });
         startPrefetchForChunk(index + 1);
       }
+      return aggregateSpeechResult ?? {
+        outcome: "remote_tts_completed",
+        mode: "remote",
+        degraded: false,
+        timedOut: false,
+        reason: "no_tts_chunks",
+      };
     } finally {
       for (const [index, preparedChunk] of resolvedPreparedChunkByIndex) {
         await releasePreparedRemoteAudioSource(preparedChunk);
@@ -1962,13 +1990,41 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               correlationId,
               prefetchedAssistantSpeech,
             );
-            await speakPromise;
+            let speechResult: TtsPlaybackResult;
+            try {
+              speechResult = await speakPromise;
+            } catch (speechError) {
+              if (isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
+                commitAssistantMessageIfNeeded();
+                logSimulationTiming({
+                  correlationId,
+                  phase: "assistant_speech_failed",
+                  startedAtMs: effectiveSubmitStartedAtMs,
+                  details: {
+                    error: getErrorMessage(speechError, "Assistant speech failed."),
+                  },
+                });
+              }
+              throw speechError;
+            }
             throwIfSessionLifecycleInterrupted();
             speakingCompletedAtMs = Date.now();
             logSimulationTiming({
               correlationId,
-              phase: "assistant_speaking_complete",
+              phase: speechResult.degraded
+                ? speechResult.timedOut
+                  ? "assistant_speaking_timeout_unblocked"
+                  : "assistant_speaking_degraded_complete"
+                : "assistant_speaking_complete",
               startedAtMs: effectiveSubmitStartedAtMs,
+              details: {
+                outcome: speechResult.outcome,
+                mode: speechResult.mode,
+                degraded: speechResult.degraded,
+                timedOut: speechResult.timedOut,
+                reason: speechResult.reason,
+                sourceKind: speechResult.sourceKind ?? null,
+              },
             });
             commitAssistantMessageIfNeeded();
             if (!turnSummaryLogged) {

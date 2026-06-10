@@ -341,6 +341,9 @@ const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS = 4_000;
 const OPENAI_TTS_MODEL = OPENAI_MODEL_CONFIG.speech.model;
 const TTS_TEXT_MAX_CHARS = 4_000;
+const SIMULATION_SPEECH_PREFETCH_PAYLOAD_WINDOW_MS = 1_500;
+const SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS = 12_000;
+const MIN_SIMULATION_TRANSCRIPT_CHARS = 2;
 const PROCESS_STARTED_AT = new Date().toISOString();
 const BUILD_TIMESTAMP =
   process.env.BUILD_TIMESTAMP?.trim() ||
@@ -1025,13 +1028,38 @@ function registerPendingUnifiedSubmitTurn(params: {
   resultPromise: Promise<PendingUnifiedSubmitTurnResult>;
 }): void {
   sweepExpiredPendingUnifiedSubmitTurns();
-  const safeResultPromise = params.resultPromise.catch((error) => ({
-    outcome: "error" as const,
-    error: error instanceof Error ? error.message : "Unified simulation turn failed.",
-  }));
+  const createdAtMs = Date.now();
+  const safeResultPromise = params.resultPromise.then(
+    (result) => {
+      // eslint-disable-next-line no-console
+      console.log("[simulation-route]", {
+        route: "submit-turn",
+        correlationId: params.correlationId,
+        stage: "pending_turn_resolved",
+        elapsedMs: Date.now() - createdAtMs,
+        outcome: result.outcome,
+      });
+      return result;
+    },
+    (error) => {
+      const message = error instanceof Error ? error.message : "Unified simulation turn failed.";
+      // eslint-disable-next-line no-console
+      console.warn("[simulation-route]", {
+        route: "submit-turn",
+        correlationId: params.correlationId,
+        stage: "pending_turn_rejected",
+        elapsedMs: Date.now() - createdAtMs,
+        error: message,
+      });
+      return {
+        outcome: "error" as const,
+        error: message,
+      };
+    },
+  );
   const entry: PendingUnifiedSubmitTurnEntry = {
     userId: params.userId,
-    createdAtMs: Date.now(),
+    createdAtMs,
     resultPromise: safeResultPromise,
     resolvedResult: null,
   };
@@ -1119,6 +1147,11 @@ function estimateTtsDurationSeconds(text: string): number {
   return Math.max(1, Number((tokens / 2.6).toFixed(1)));
 }
 
+function isUsableSimulationTranscriptText(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.length >= MIN_SIMULATION_TRANSCRIPT_CHARS && /[A-Za-z0-9]/.test(trimmed);
+}
+
 async function maybeBuildSimulationSpeechPrefetch(params: {
   route: "opening" | "turn";
   correlationId: string;
@@ -1145,7 +1178,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
     console.log("[simulation-speech-prefetch]", {
       route: params.route,
       correlationId: params.correlationId,
-      stage: "skipped",
+      stage: "speech_prefetch_skipped",
       reason: "first_chunk_too_large",
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
@@ -1159,7 +1192,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
   console.log("[simulation-speech-prefetch]", {
     route: params.route,
     correlationId: params.correlationId,
-    stage: "start",
+    stage: "speech_prefetch_start",
     preset: params.request.preset,
     firstChunkChars: firstChunk.length,
     chunkCount: chunks.length,
@@ -1172,6 +1205,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       voice,
       text: firstChunk,
       format: "mp3",
+      timeoutMs: SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS,
     });
     const completedAtMs = Date.now();
     const ttsLatencyMs = completedAtMs - startedAtMs;
@@ -1179,7 +1213,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
     console.log("[simulation-speech-prefetch]", {
       route: params.route,
       correlationId: params.correlationId,
-      stage: "ready",
+      stage: "speech_prefetch_ready",
       preset: params.request.preset,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
@@ -1198,11 +1232,12 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Speech prefetch failed.";
+    const timedOut = message.toLowerCase().includes("timed out");
     // eslint-disable-next-line no-console
     console.log("[simulation-speech-prefetch]", {
       route: params.route,
       correlationId: params.correlationId,
-      stage: "error",
+      stage: timedOut ? "speech_prefetch_timeout" : "speech_prefetch_error",
       preset: params.request.preset,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
@@ -1210,6 +1245,55 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       model: OPENAI_TTS_MODEL,
     });
     return null;
+  }
+}
+
+async function resolveSpeechPrefetchForAssistantPayload(params: {
+  route: "opening" | "turn";
+  correlationId: string;
+  promise: Promise<SimulationSpeechPrefetchPayload | null>;
+  payloadWindowMs?: number;
+}): Promise<SimulationSpeechPrefetchPayload | null> {
+  const payloadWindowMs = params.payloadWindowMs ?? SIMULATION_SPEECH_PREFETCH_PAYLOAD_WINDOW_MS;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const guardedPrefetchPromise = params.promise
+      .then((speechPrefetch) => ({ kind: "prefetch" as const, speechPrefetch }))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Speech prefetch failed.";
+        // eslint-disable-next-line no-console
+        console.warn("[simulation-speech-prefetch]", {
+          route: params.route,
+          correlationId: params.correlationId,
+          stage: "speech_prefetch_error",
+          source: "payload_window_guard",
+          error: message,
+        });
+        return { kind: "prefetch" as const, speechPrefetch: null };
+      });
+    const result = await Promise.race([
+      guardedPrefetchPromise,
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), payloadWindowMs);
+      }),
+    ]);
+
+    if (result.kind === "timeout") {
+      // eslint-disable-next-line no-console
+      console.log("[simulation-speech-prefetch]", {
+        route: params.route,
+        correlationId: params.correlationId,
+        stage: "speech_prefetch_skipped_payload_window",
+        payloadWindowMs,
+      });
+      return null;
+    }
+
+    return result.speechPrefetch;
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
   }
 }
 
@@ -1420,6 +1504,7 @@ async function transcribeSimulationAudioFile(params: {
     audioBuffer: params.file.buffer,
     fileName: params.file.originalname || "voice-input.m4a",
     mimeType,
+    language: "en",
   });
 
   return {
@@ -1457,11 +1542,16 @@ async function generateSimulationTurnReply(params: {
     correlationId: params.correlationId,
   });
   const assistantText = completion.text.trim();
-  const speechPrefetch = await maybeBuildSimulationSpeechPrefetch({
+  const speechPrefetchPromise = maybeBuildSimulationSpeechPrefetch({
     route: "turn",
     correlationId: params.correlationId,
     text: assistantText,
     request: params.requestedSpeechPrefetch,
+  });
+  const speechPrefetch = await resolveSpeechPrefetchForAssistantPayload({
+    route: "turn",
+    correlationId: params.correlationId,
+    promise: speechPrefetchPromise,
   });
 
   return {
@@ -13460,7 +13550,18 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
 
   let transcriptText = transcription.text.trim();
   let noClearSpeechReason: "empty_transcript" | "assistant_echo" | null = null;
-  if (!transcriptText) {
+  if (!isUsableSimulationTranscriptText(transcriptText)) {
+    if (transcriptText) {
+      // eslint-disable-next-line no-console
+      console.warn("[simulation-transcript-guard]", {
+        route: "submit-turn",
+        correlationId,
+        stage: "unusable_transcript",
+        transcriptChars: transcriptText.length,
+        reason: "too_short_or_non_english_like",
+      });
+    }
+    transcriptText = "";
     noClearSpeechReason = "empty_transcript";
   } else if (appearsToEchoAssistantHistory(transcriptText, history)) {
     transcriptText = "";
@@ -13575,6 +13676,17 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
         routeElapsedMs: Date.now() - routeStartedAtMs,
       },
     };
+
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "submit-turn",
+      correlationId,
+      stage: "assistant_payload_resolved",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      speechPrefetchRequested: Boolean(requestedSpeechPrefetch),
+      speechPrefetchAvailable: Boolean(turnResult.speechPrefetch),
+      speechPrefetchTtsLatencyMs: turnResult.speechPrefetch?.ttsLatencyMs ?? null,
+    });
 
     activateSimulationAiBudgetGrace(accessContext.userId, accessContext.maxSimulationMinutes);
     // eslint-disable-next-line no-console
@@ -14571,11 +14683,16 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       correlationId
     });
     const assistantText = completion.text.trim();
-    const speechPrefetch = await maybeBuildSimulationSpeechPrefetch({
+    const speechPrefetchPromise = maybeBuildSimulationSpeechPrefetch({
       route: "opening",
       correlationId,
       text: assistantText,
       request: requestedSpeechPrefetch,
+    });
+    const speechPrefetch = await resolveSpeechPrefetchForAssistantPayload({
+      route: "opening",
+      correlationId,
+      promise: speechPrefetchPromise,
     });
 
     response.setHeader("X-Correlation-Id", correlationId);
