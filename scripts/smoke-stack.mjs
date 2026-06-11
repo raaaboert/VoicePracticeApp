@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -165,8 +168,20 @@ async function main() {
   const run = createRunner(cwd);
 
   log("Smoke: API");
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "voicepractice-smoke-stack-"));
   const apiLogs = [];
-  const api = run(NPM_CMD, ["run", "dev", "--workspace", "api"]);
+  const api = run(NPM_CMD, ["run", "dev", "--workspace", "api"], {
+    PORT: "4100",
+    NODE_ENV: "development",
+    STORAGE_PROVIDER: "file",
+    DB_PATH: path.join(tempDir, "db.json"),
+    ADMIN_BOOTSTRAP_PASSWORD: "admin",
+    ADMIN_TOKEN_SECRET: "local-smoke-admin-token-secret-123456",
+    WEB_AUTH_TOKEN_SECRET: "local-smoke-web-auth-token-secret-123456",
+    MOBILE_TOKEN_SECRET: "local-smoke-mobile-token-secret-123456",
+    SUPPORT_TRANSCRIPT_SECRET: "local-smoke-support-token-secret-123456",
+    ENABLE_INTERNAL_DEBUG_ENDPOINTS: "true"
+  });
   attachLogs(api, "[api] ", apiLogs);
 
   try {
@@ -185,6 +200,7 @@ async function main() {
     log(`Smoke: API ok (activeSegmentId=${configJson.activeSegmentId})`);
   } finally {
     await stopProcess(api, "api");
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 
   log("Smoke: Admin Web");

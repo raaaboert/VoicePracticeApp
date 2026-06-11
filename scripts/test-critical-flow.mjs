@@ -194,6 +194,7 @@ async function main() {
     NODE_ENV: "development",
     ADMIN_BOOTSTRAP_PASSWORD: "admin",
     ADMIN_TOKEN_SECRET: "local-critical-flow-admin-token-secret",
+    WEB_AUTH_TOKEN_SECRET: "local-critical-flow-web-auth-token-secret",
     MOBILE_TOKEN_SECRET: "local-critical-flow-mobile-token-secret",
     SUPPORT_TRANSCRIPT_SECRET: "local-critical-flow-support-secret",
   };
