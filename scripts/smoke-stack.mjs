@@ -167,6 +167,7 @@ async function main() {
   const cwd = process.cwd();
   const run = createRunner(cwd);
   const isGitHubActions = process.env.GITHUB_ACTIONS === "true" || process.env.CI === "true";
+  const apiScript = isGitHubActions ? "start" : "dev";
   const apiPort = await findAvailablePort(4100);
   const adminPort = await findAvailablePort(3000);
   const apiBaseUrl = `http://127.0.0.1:${apiPort}`;
@@ -182,7 +183,7 @@ async function main() {
   log("Smoke: API");
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "voicepractice-smoke-stack-"));
   const apiLogs = [];
-  const api = run(NPM_CMD, ["run", "dev", "--workspace", "api"], {
+  const api = run(NPM_CMD, ["run", apiScript, "--workspace", "api"], {
     PORT: String(apiPort),
     NODE_ENV: "development",
     STORAGE_PROVIDER: "file",

@@ -186,6 +186,8 @@ async function main() {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "voicepractice-critical-flow-"));
   const dbPath = path.join(tempDir, "db.json");
   const logs = [];
+  const useBuiltApi = process.env.GITHUB_ACTIONS === "true" || process.env.CI === "true";
+  const apiScript = useBuiltApi ? "start" : "dev";
   const apiEnv = {
     ...process.env,
     PORT: String(port),
@@ -201,13 +203,13 @@ async function main() {
 
   log("Starting API for critical-flow test...");
   const api = IS_WINDOWS
-    ? spawn("cmd.exe", ["/d", "/s", "/c", `${NPM_CMD} run dev --workspace api`], {
+    ? spawn("cmd.exe", ["/d", "/s", "/c", `${NPM_CMD} run ${apiScript} --workspace api`], {
         cwd,
         shell: false,
         env: apiEnv,
         stdio: ["ignore", "pipe", "pipe"],
       })
-    : spawn(NPM_CMD, ["run", "dev", "--workspace", "api"], {
+    : spawn(NPM_CMD, ["run", apiScript, "--workspace", "api"], {
         cwd,
         shell: false,
         env: apiEnv,
