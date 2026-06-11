@@ -106,21 +106,35 @@ async function waitForLogMatch(child, logs, matcher, timeoutMs, name) {
   throw new Error(`${name} did not reach ready state within ${Math.floor(timeoutMs / 1000)}s.`);
 }
 
-async function fetchWithRetry(url, timeoutMs) {
+async function fetchWithRetry(url, timeoutMs, options = {}) {
+  const {
+    child = null,
+    name = url,
+    attemptTimeoutMs = 5000
+  } = options;
   const startedAt = Date.now();
   let lastError = null;
 
   while (Date.now() - startedAt < timeoutMs) {
+    if (child?.exitCode !== null) {
+      throw new Error(`${name} exited before ${url} became reachable (exit ${child.exitCode}).`);
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
       return response;
     } catch (error) {
       lastError = error;
       await delay(300);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  throw lastError ?? new Error(`Failed to fetch ${url}`);
+  const detail = lastError instanceof Error ? ` Last error: ${lastError.message}` : "";
+  throw new Error(`${name} did not become reachable at ${url} within ${Math.floor(timeoutMs / 1000)}s.${detail}`);
 }
 
 async function isTcpPortAvailable(port) {
@@ -156,13 +170,13 @@ async function main() {
   attachLogs(api, "[api] ", apiLogs);
 
   try {
-    await waitForLogMatch(api, apiLogs, /VoicePractice API running on http:\/\/localhost:4100/i, 30000, "api");
-    const health = await fetchWithRetry("http://localhost:4100/health", 10000);
+    const apiBaseUrl = "http://127.0.0.1:4100";
+    const health = await fetchWithRetry(`${apiBaseUrl}/health`, 90000, { child: api, name: "api" });
     if (!health.ok) {
       throw new Error(`api /health returned ${health.status}`);
     }
 
-    const config = await fetchWithRetry("http://localhost:4100/config", 10000);
+    const config = await fetchWithRetry(`${apiBaseUrl}/config`, 10000, { child: api, name: "api" });
     if (!config.ok) {
       throw new Error(`api /config returned ${config.status}`);
     }
@@ -179,8 +193,10 @@ async function main() {
   attachLogs(admin, "[admin] ", adminLogs);
 
   try {
-    await waitForLogMatch(admin, adminLogs, /(Ready in|Local:\s+http:\/\/localhost:3000)/i, 45000, "admin-web");
-    const login = await fetchWithRetry("http://localhost:3000/login", 10000);
+    const login = await fetchWithRetry("http://127.0.0.1:3000/login", 90000, {
+      child: admin,
+      name: "admin-web"
+    });
     if (!login.ok) {
       throw new Error(`admin /login returned ${login.status}`);
     }
@@ -217,18 +233,10 @@ async function main() {
   attachLogs(mobile, "[mobile] ", mobileLogs);
 
   try {
-    await waitForLogMatch(
-      mobile,
-      mobileLogs,
-      new RegExp(
-        `(Starting Metro Bundler|Waiting on http:\\/\\/localhost:${metroPort}|Logs for your project will appear below)`,
-        "i"
-      ),
-      60000,
-      "mobile"
-    );
-
-    const metro = await fetchWithRetry(`http://localhost:${metroPort}`, 10000);
+    const metro = await fetchWithRetry(`http://127.0.0.1:${metroPort}`, 90000, {
+      child: mobile,
+      name: "mobile"
+    });
     log(`Smoke: Mobile Metro reachable (status=${metro.status})`);
   } finally {
     await stopProcess(mobile, "mobile");
