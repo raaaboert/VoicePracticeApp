@@ -19,6 +19,19 @@ function log(message) {
   console.log(`[${nowLabel()}] ${message}`);
 }
 
+function signalProcessTree(child, signal) {
+  if (!IS_WINDOWS) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to signaling the direct child.
+    }
+  }
+
+  child.kill(signal);
+}
+
 function createRunner(cwd) {
   return function run(command, args, envOverrides = {}) {
     if (IS_WINDOWS) {
@@ -41,6 +54,7 @@ function createRunner(cwd) {
 
     return spawn(command, args, {
       cwd,
+      detached: true,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, ...envOverrides }
@@ -66,13 +80,13 @@ async function stopProcess(child, name) {
     return;
   }
 
-  child.kill("SIGTERM");
+  signalProcessTree(child, "SIGTERM");
   await Promise.race([
     new Promise((resolve) => child.once("exit", resolve)),
     delay(5000)
   ]);
   if (child.exitCode === null) {
-    child.kill("SIGKILL");
+    signalProcessTree(child, "SIGKILL");
   }
   log(`${name}: stopped`);
 }

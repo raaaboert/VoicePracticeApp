@@ -19,6 +19,19 @@ function log(message) {
   console.log(`[${nowLabel()}] ${message}`);
 }
 
+function signalProcessTree(child, signal) {
+  if (!IS_WINDOWS) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to signaling the direct child.
+    }
+  }
+
+  child.kill(signal);
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -41,13 +54,13 @@ async function stopProcess(child, name) {
     return;
   }
 
-  child.kill("SIGTERM");
+  signalProcessTree(child, "SIGTERM");
   await Promise.race([
     new Promise((resolve) => child.once("exit", resolve)),
     delay(5000),
   ]);
   if (child.exitCode === null) {
-    child.kill("SIGKILL");
+    signalProcessTree(child, "SIGKILL");
   }
   log(`${name}: stopped`);
 }
@@ -211,6 +224,7 @@ async function main() {
       })
     : spawn(NPM_CMD, ["run", apiScript, "--workspace", "api"], {
         cwd,
+        detached: true,
         shell: false,
         env: apiEnv,
         stdio: ["ignore", "pipe", "pipe"],
