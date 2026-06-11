@@ -166,15 +166,27 @@ async function findAvailablePort(startPort, maxAttempts = 20) {
 async function main() {
   const cwd = process.cwd();
   const run = createRunner(cwd);
+  const apiPort = await findAvailablePort(4100);
+  const adminPort = await findAvailablePort(3000);
+  const apiBaseUrl = `http://127.0.0.1:${apiPort}`;
+  const adminBaseUrl = `http://127.0.0.1:${adminPort}`;
+
+  if (apiPort !== 4100) {
+    log(`Smoke: default API port 4100 is occupied, using ${apiPort}.`);
+  }
+  if (adminPort !== 3000) {
+    log(`Smoke: default Admin Web port 3000 is occupied, using ${adminPort}.`);
+  }
 
   log("Smoke: API");
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "voicepractice-smoke-stack-"));
   const apiLogs = [];
   const api = run(NPM_CMD, ["run", "dev", "--workspace", "api"], {
-    PORT: "4100",
+    PORT: String(apiPort),
     NODE_ENV: "development",
     STORAGE_PROVIDER: "file",
     DB_PATH: path.join(tempDir, "db.json"),
+    CORS_ALLOWED_ORIGINS: `${adminBaseUrl},http://localhost:${adminPort}`,
     ADMIN_BOOTSTRAP_PASSWORD: "admin",
     ADMIN_TOKEN_SECRET: "local-smoke-admin-token-secret-123456",
     WEB_AUTH_TOKEN_SECRET: "local-smoke-web-auth-token-secret-123456",
@@ -185,7 +197,6 @@ async function main() {
   attachLogs(api, "[api] ", apiLogs);
 
   try {
-    const apiBaseUrl = "http://127.0.0.1:4100";
     const health = await fetchWithRetry(`${apiBaseUrl}/health`, 90000, { child: api, name: "api" });
     if (!health.ok) {
       throw new Error(`api /health returned ${health.status}`);
@@ -205,11 +216,13 @@ async function main() {
 
   log("Smoke: Admin Web");
   const adminLogs = [];
-  const admin = run(NPM_CMD, ["run", "dev", "--workspace", "admin-web"]);
+  const admin = run(NPM_CMD, ["run", "dev", "--workspace", "admin-web", "--", "--port", String(adminPort)], {
+    API_BASE_URL: apiBaseUrl
+  });
   attachLogs(admin, "[admin] ", adminLogs);
 
   try {
-    const login = await fetchWithRetry("http://127.0.0.1:3000/login", 90000, {
+    const login = await fetchWithRetry(`${adminBaseUrl}/login`, 90000, {
       child: admin,
       name: "admin-web"
     });
