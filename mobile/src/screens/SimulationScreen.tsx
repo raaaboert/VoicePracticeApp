@@ -84,6 +84,8 @@ interface SimulationScreenProps {
   ) => void;
 }
 
+type OpeningLinePayload = Awaited<ReturnType<typeof createOpeningLine>>;
+
 const SOFT_TURN_NOTICE_MS = 35000;
 const ABSOLUTE_TURN_NOTICE_MS = 60000;
 const MIN_TURN_DURATION_FOR_LONG_PAUSE_NOTICE_MS = 1600;
@@ -456,6 +458,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const sessionTrainingPackIdRef = useRef<string | null>(null);
   const pendingOpeningLineRef = useRef<string | null>(null);
   const pendingOpeningSpeechPrefetchRef = useRef<PrefetchedRemoteSpeechChunk | null>(null);
+  const openingPrefetchPromiseRef = useRef<Promise<OpeningLinePayload> | null>(null);
+  const openingPrefetchGenerationRef = useRef<number | null>(null);
   const lastVoiceAtRef = useRef(0);
   const heardVoiceRef = useRef(false);
   const detectedVoiceRef = useRef(false);
@@ -648,6 +652,134 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       logSimulationApiCall,
     ],
   );
+
+  const createLocalOpeningPayload = useCallback((): OpeningLinePayload => ({
+    assistantText: createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle),
+    trainingPackId: null,
+    speechPrefetch: null,
+  }), [config.difficulty, config.personaStyle, config.scenario]);
+
+  const storePendingOpeningPayload = useCallback((payload: OpeningLinePayload) => {
+    pendingOpeningLineRef.current = payload.assistantText;
+    sessionTrainingPackIdRef.current = payload.trainingPackId;
+    pendingOpeningSpeechPrefetchRef.current = payload.speechPrefetch;
+  }, []);
+
+  const startOpeningPrefetch = useCallback((params: {
+    correlationId: string;
+    generation: number;
+    remoteTtsPreset: ReturnType<typeof toRemoteTtsPreset>;
+    apiCallLabel: string;
+    background: boolean;
+  }): Promise<OpeningLinePayload> => {
+    const existingPrefetch = openingPrefetchPromiseRef.current;
+    if (existingPrefetch && openingPrefetchGenerationRef.current === params.generation) {
+      logSimulationTiming({
+        correlationId: params.correlationId,
+        phase: "opening_prefetch_reused",
+        details: {
+          background: params.background,
+        },
+      });
+      return existingPrefetch;
+    }
+
+    logSimulationTiming({
+      correlationId: params.correlationId,
+      phase: params.background ? "opening_prefetch_request_start" : "opening_request_start",
+    });
+    logSimulationApiCall(params.apiCallLabel);
+
+    let openingPromise: Promise<OpeningLinePayload>;
+    openingPromise = createOpeningLine({
+      userId,
+      authToken,
+      simulationSessionId: config.simulationSessionId,
+      scenario: config.scenario,
+      trainingId: config.trainingId ?? null,
+      industryId: config.industryId,
+      industryBaseline: config.industryBaseline,
+      difficulty: config.difficulty,
+      segmentLabel: config.segmentLabel,
+      personaStyle: config.personaStyle,
+      speechPrefetchPreset: shouldUseFastStartRemoteTts ? params.remoteTtsPreset : null,
+      correlationId: params.correlationId,
+    }).then((openingPayload) => {
+      if (isStartupGenerationCurrent(params.generation)) {
+        storePendingOpeningPayload(openingPayload);
+        logSimulationTiming({
+          correlationId: params.correlationId,
+          phase: params.background ? "opening_prefetch_ready" : "opening_response_ready",
+          details: {
+            assistantChars: openingPayload.assistantText.length,
+            hasSpeechPrefetch: Boolean(openingPayload.speechPrefetch),
+          },
+        });
+      }
+      return openingPayload;
+    }).catch((openingError: unknown) => {
+      if (!isStartupGenerationCurrent(params.generation)) {
+        throw openingError;
+      }
+
+      logSimulationTiming({
+        correlationId: params.correlationId,
+        phase: params.background ? "opening_prefetch_failed" : "opening_request_failed",
+        details: {
+          message: getErrorMessage(openingError, "Could not prepare opening response."),
+        },
+      });
+
+      if (isApiError(openingError)) {
+        setUseLocalMockMode(true);
+        usedMockModeDuringSessionRef.current = true;
+        const localPayload = createLocalOpeningPayload();
+        storePendingOpeningPayload(localPayload);
+        if (params.background && !startSimulationInProgressRef.current && !sessionActiveRef.current) {
+          setMode("idle");
+          setStatus("Local test mode ready. Press Start Simulation.");
+          setError(null);
+        }
+        return localPayload;
+      }
+
+      if (params.background) {
+        void submitAutoErrorReport("simulation.opening_prefetch", openingError, {
+          simulationSessionId: config.simulationSessionId,
+          scenarioId: config.scenario.id,
+        });
+      }
+      throw openingError;
+    }).finally(() => {
+      if (openingPrefetchPromiseRef.current === openingPromise) {
+        openingPrefetchPromiseRef.current = null;
+        openingPrefetchGenerationRef.current = null;
+      }
+    });
+
+    openingPrefetchPromiseRef.current = openingPromise;
+    openingPrefetchGenerationRef.current = params.generation;
+    return openingPromise;
+  }, [
+    authToken,
+    config.difficulty,
+    config.industryBaseline,
+    config.industryId,
+    config.personaStyle,
+    config.scenario,
+    config.scenario.id,
+    config.segmentLabel,
+    config.simulationSessionId,
+    config.trainingId,
+    createLocalOpeningPayload,
+    isStartupGenerationCurrent,
+    logSimulationApiCall,
+    logSimulationTiming,
+    shouldUseFastStartRemoteTts,
+    storePendingOpeningPayload,
+    submitAutoErrorReport,
+    userId,
+  ]);
 
   const appendMessage = (message: DialogueMessage) => {
     messagesRef.current = [...messagesRef.current, message];
@@ -2356,42 +2488,41 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           });
 
           let openingLine = pendingOpeningLineRef.current;
-          const openingLineFromPendingPrefetch = Boolean(openingLine);
+          let openingLineFromPendingPrefetch = Boolean(openingLine);
           if (!openingLine) {
             setStatus("Preparing opening response...");
             if (localTestMode) {
-              openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
-              sessionTrainingPackIdRef.current = null;
-              pendingOpeningSpeechPrefetchRef.current = null;
+              const localPayload = createLocalOpeningPayload();
+              storePendingOpeningPayload(localPayload);
+              openingLine = localPayload.assistantText;
             } else {
               try {
-                logSimulationTiming({
-                  correlationId: openingCorrelationId,
-                  phase: "opening_request_start",
-                });
-                logSimulationApiCall("createOpeningLine:startSession");
-                const openingPayload = await createOpeningLine({
-                  userId,
-                  authToken,
-                  simulationSessionId: config.simulationSessionId,
-                  scenario: config.scenario,
-                  trainingId: config.trainingId ?? null,
-                  industryId: config.industryId,
-                  industryBaseline: config.industryBaseline,
-                  difficulty: config.difficulty,
-                  segmentLabel: config.segmentLabel,
-                  personaStyle: config.personaStyle,
-                  speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
-                  correlationId: openingCorrelationId,
-                });
+                const pendingOpeningPrefetch = openingPrefetchPromiseRef.current;
+                if (pendingOpeningPrefetch) {
+                  openingLineFromPendingPrefetch = true;
+                  logSimulationTiming({
+                    correlationId: openingCorrelationId,
+                    phase: "opening_prefetch_await_start",
+                  });
+                }
+                const openingPayload = await (
+                  pendingOpeningPrefetch
+                  ?? startOpeningPrefetch({
+                    correlationId: openingCorrelationId,
+                    generation: startupGeneration,
+                    remoteTtsPreset,
+                    apiCallLabel: "createOpeningLine:startSession",
+                    background: false,
+                  })
+                );
                 if (!isCurrentStartupAttempt()) {
                   logStaleStartupResult("opening_response");
                   return;
                 }
-                openingLine = openingPayload.assistantText;
-                pendingOpeningLineRef.current = openingLine;
-                sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
-                pendingOpeningSpeechPrefetchRef.current = openingPayload.speechPrefetch;
+                if (!pendingOpeningLineRef.current) {
+                  storePendingOpeningPayload(openingPayload);
+                }
+                openingLine = pendingOpeningLineRef.current;
               } catch (openingError) {
                 if (!isCurrentStartupAttempt()) {
                   logStaleStartupResult("opening_error");
@@ -2400,10 +2531,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 if (isApiError(openingError)) {
                   setUseLocalMockMode(true);
                   usedMockModeDuringSessionRef.current = true;
-                  openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
-                  pendingOpeningLineRef.current = openingLine;
-                  sessionTrainingPackIdRef.current = null;
-                  pendingOpeningSpeechPrefetchRef.current = null;
+                  const localPayload = createLocalOpeningPayload();
+                  storePendingOpeningPayload(localPayload);
+                  openingLine = localPayload.assistantText;
                 } else {
                   throw openingError;
                 }
@@ -2856,6 +2986,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       localModeConfirmedRef.current = false;
       pendingOpeningLineRef.current = null;
       pendingOpeningSpeechPrefetchRef.current = null;
+      openingPrefetchPromiseRef.current = null;
+      openingPrefetchGenerationRef.current = null;
       setElapsedSeconds(0);
       sessionCompletionInProgressRef.current = false;
       simulationClosedRef.current = false;
@@ -2879,66 +3011,35 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       openingTtsInProgressRef.current = false;
       openingTtsCompletedRef.current = false;
       abortActiveTurnRequests();
+      const initializationGeneration = sessionLifecycleGenerationRef.current;
 
       if (localTestMode) {
-        pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
-        sessionTrainingPackIdRef.current = null;
-        pendingOpeningSpeechPrefetchRef.current = null;
+        storePendingOpeningPayload(createLocalOpeningPayload());
         setMode("idle");
         setStatus("Scenario ready. Press Start Simulation.");
         setIsInitializing(false);
         return;
       }
 
-      try {
-        logSimulationApiCall("createOpeningLine:initialize");
-        const openingPayload = await createOpeningLine({
-          userId,
-          authToken,
-          simulationSessionId: config.simulationSessionId,
-          scenario: config.scenario,
-          trainingId: config.trainingId ?? null,
-          industryId: config.industryId,
-          industryBaseline: config.industryBaseline,
-          difficulty: config.difficulty,
-          segmentLabel: config.segmentLabel,
-          personaStyle: config.personaStyle,
-          speechPrefetchPreset: shouldUseFastStartRemoteTts
-            ? toRemoteTtsPreset(config.voiceGender, config.voiceProfile)
-            : null,
-          correlationId: createSimulationCorrelationId(config.simulationSessionId, "opening-prefetch"),
-        });
+      setMode("idle");
+      setStatus("Scenario ready. Press Start Simulation.");
+      setIsInitializing(false);
 
-        if (cancelled || unmountedRef.current) {
+      const openingPrefetchCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "opening-prefetch");
+      void startOpeningPrefetch({
+        correlationId: openingPrefetchCorrelationId,
+        generation: initializationGeneration,
+        remoteTtsPreset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
+        apiCallLabel: "createOpeningLine:initialize",
+        background: true,
+      }).catch((initError: unknown) => {
+        if (cancelled || unmountedRef.current || !isStartupGenerationCurrent(initializationGeneration)) {
           return;
         }
-
-        pendingOpeningLineRef.current = openingPayload.assistantText;
-        sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
-        pendingOpeningSpeechPrefetchRef.current = openingPayload.speechPrefetch;
         setMode("idle");
         setStatus("Scenario ready. Press Start Simulation.");
-      } catch (initError) {
-        if (isApiError(initError)) {
-          setUseLocalMockMode(true);
-          usedMockModeDuringSessionRef.current = true;
-          pendingOpeningLineRef.current = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
-          sessionTrainingPackIdRef.current = null;
-          pendingOpeningSpeechPrefetchRef.current = null;
-          setMode("idle");
-          setStatus("Local test mode ready. Press Start Simulation.");
-          setError(null);
-        } else {
-          setMode("idle");
-          setStatus("Ready.");
-          setError(getErrorMessage(initError, "Could not initialize simulation."));
-          void submitAutoErrorReport("simulation.initialize", initError);
-        }
-      } finally {
-        if (!cancelled && !unmountedRef.current) {
-          setIsInitializing(false);
-        }
-      }
+        setError(getErrorMessage(initError, "Opening prefetch failed. Start Simulation will retry."));
+      });
     };
 
     void initialize();
@@ -2949,6 +3050,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       simulationClosedRef.current = true;
       sessionActiveRef.current = false;
       sessionLifecycleGenerationRef.current += 1;
+      openingPrefetchPromiseRef.current = null;
+      openingPrefetchGenerationRef.current = null;
       startSimulationInProgressRef.current = false;
       recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
@@ -2964,18 +3067,20 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     };
   }, [
     apiConfigured,
-    authToken,
+    abortActiveTurnRequests,
+    cancelPendingTts,
     config.difficulty,
     config.personaStyle,
     config.scenario,
+    config.segmentLabel,
     config.simulationSessionId,
     config.trainingId,
-    config.segmentLabel,
-    submitAutoErrorReport,
-    userId,
-    logSimulationApiCall,
-    abortActiveTurnRequests,
-    cancelPendingTts,
+    config.voiceGender,
+    config.voiceProfile,
+    createLocalOpeningPayload,
+    isStartupGenerationCurrent,
+    startOpeningPrefetch,
+    storePendingOpeningPayload,
   ]);
 
   useEffect(() => {

@@ -344,6 +344,12 @@ const TTS_TEXT_MAX_CHARS = 4_000;
 const SIMULATION_SPEECH_PREFETCH_PAYLOAD_WINDOW_MS = 1_500;
 const SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS = 12_000;
 const MIN_SIMULATION_TRANSCRIPT_CHARS = 2;
+const SIMULATION_MODEL_TIMEOUT_MS_BY_ROUTE: Record<SimulationRoute, number> = {
+  opening: 30_000,
+  turn: 30_000,
+  score: 45_000,
+};
+const SIMULATION_TRANSCRIPTION_TIMEOUT_MS = 20_000;
 const PROCESS_STARTED_AT = new Date().toISOString();
 const BUILD_TIMESTAMP =
   process.env.BUILD_TIMESTAMP?.trim() ||
@@ -627,7 +633,10 @@ async function requestSimulationCompletion(params: {
       messages: params.messages,
       maxOutputTokens: routeConfig.maxOutputTokens,
       reasoningEffort: routeConfig.reasoningEffort,
-      temperature: params.temperature
+      temperature: params.temperature,
+      timeoutMs: SIMULATION_MODEL_TIMEOUT_MS_BY_ROUTE[params.route],
+      route: params.route,
+      correlationId: params.correlationId,
     });
 
     const latencyMs = logSimulationAiMetrics({
@@ -1496,6 +1505,8 @@ async function resolveSimulationRuntimeBundle(params: {
 
 async function transcribeSimulationAudioFile(params: {
   file: { buffer: Buffer; originalname: string; mimetype: string };
+  route: "transcribe" | "submit-turn";
+  correlationId: string;
 }): Promise<{ text: string; durationMs: number; mimeType: string; bytes: number }> {
   const startedAtMs = Date.now();
   const mimeType = params.file.mimetype || "audio/m4a";
@@ -1505,6 +1516,9 @@ async function transcribeSimulationAudioFile(params: {
     fileName: params.file.originalname || "voice-input.m4a",
     mimeType,
     language: "en",
+    timeoutMs: SIMULATION_TRANSCRIPTION_TIMEOUT_MS,
+    route: params.route,
+    correlationId: params.correlationId,
   });
 
   return {
@@ -13248,6 +13262,8 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
   try {
     const transcription = await transcribeSimulationAudioFile({
       file,
+      route: "transcribe",
+      correlationId,
     });
     const text = transcription.text;
     // eslint-disable-next-line no-console
@@ -13498,7 +13514,14 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     });
   };
 
-  const transcriptionPromise = transcribeSimulationAudioFile({ file });
+  const transcriptionPromise = transcribeSimulationAudioFile({
+    file,
+    route: "submit-turn",
+    correlationId,
+  }).then(
+    (transcription) => ({ ok: true as const, transcription }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
   let runtimePromise = loadUnifiedRuntime(false);
   let runtime = await runtimePromise;
   const bootstrapRuntime =
@@ -13516,10 +13539,39 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     runtime = await runtimePromise;
   }
 
-  const transcription = await transcriptionPromise;
+  const transcriptionResult = await transcriptionPromise;
   if (!runtime || "bootstrapOrgId" in runtime) {
     return;
   }
+
+  if (!transcriptionResult.ok) {
+    const message = transcriptionResult.error instanceof Error ? transcriptionResult.error.message : "Transcription failed.";
+    const pendingError = transcriptionResult.error instanceof Error ? transcriptionResult.error : new Error(message);
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-route]", {
+      route: "submit-turn",
+      correlationId,
+      stage: "transcription_error",
+      elapsedMs: Date.now() - routeStartedAtMs,
+      bytes: file.buffer.byteLength,
+      mimeType: file.mimetype || "audio/m4a",
+      error: message,
+    });
+
+    if (responseMode === "transcript_first_v1") {
+      registerPendingUnifiedSubmitTurn({
+        correlationId,
+        userId: accessContext.userId,
+        resultPromise: Promise.reject(pendingError),
+      });
+    }
+
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.status(503).json({ error: message });
+    return;
+  }
+
+  const transcription = transcriptionResult.transcription;
 
   // eslint-disable-next-line no-console
   console.log("[simulation-route]", {

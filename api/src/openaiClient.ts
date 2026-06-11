@@ -60,7 +60,16 @@ interface TranscriptionResponse {
 }
 
 type SpeechFormat = "mp3" | "wav" | "opus" | "flac" | "aac" | "pcm";
+const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_TRANSCRIPTION_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_SPEECH_REQUEST_TIMEOUT_MS = 12_000;
+
+interface OpenAiRequestLogContext {
+  apiPath: string;
+  model: string;
+  route?: string;
+  correlationId?: string;
+}
 
 function getOpenAiApiKey(): string {
   const key = process.env.OPENAI_API_KEY?.trim();
@@ -83,6 +92,93 @@ async function parseOpenAiError(response: Response): Promise<string> {
   }
 
   return response.statusText || `OpenAI request failed (${response.status})`;
+}
+
+function resolveOpenAiRequestTimeoutMs(value: number | undefined, fallbackMs: number): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+
+  return fallbackMs;
+}
+
+function formatTimeoutSeconds(timeoutMs: number): number {
+  return Math.ceil(timeoutMs / 1000);
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function logOpenAiRequest(
+  stage: "openai_request_start" | "openai_request_end" | "openai_request_timeout" | "openai_request_error",
+  context: OpenAiRequestLogContext,
+  startedAtMs: number,
+  timeoutMs: number,
+  extra: Record<string, unknown> = {},
+): void {
+  const payload = {
+    stage,
+    correlationId: context.correlationId ?? null,
+    route: context.route ?? null,
+    model: context.model,
+    apiPath: context.apiPath,
+    timeoutMs,
+    durationMs: Math.max(0, Date.now() - startedAtMs),
+    ...extra,
+  };
+
+  if (stage === "openai_request_error" || stage === "openai_request_timeout") {
+    // eslint-disable-next-line no-console
+    console.warn("[openai-request]", payload);
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log("[openai-request]", payload);
+}
+
+async function runOpenAiRequestWithTimeout<T>(params: OpenAiRequestLogContext & {
+  fallbackTimeoutMs: number;
+  timeoutMs?: number;
+  createTimeoutError: (timeoutMs: number) => Error;
+  operation: (signal: AbortSignal) => Promise<T>;
+}): Promise<T> {
+  const timeoutMs = resolveOpenAiRequestTimeoutMs(params.timeoutMs, params.fallbackTimeoutMs);
+  const startedAtMs = Date.now();
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  logOpenAiRequest("openai_request_start", params, startedAtMs, timeoutMs);
+
+  try {
+    const result = await params.operation(controller.signal);
+    logOpenAiRequest("openai_request_end", params, startedAtMs, timeoutMs);
+    return result;
+  } catch (error) {
+    if (timedOut || isAbortError(error)) {
+      const timeoutError = params.createTimeoutError(timeoutMs);
+      logOpenAiRequest("openai_request_timeout", params, startedAtMs, timeoutMs, {
+        error: timeoutError.message,
+      });
+      throw timeoutError;
+    }
+
+    logOpenAiRequest("openai_request_error", params, startedAtMs, timeoutMs, {
+      error: getErrorMessage(error),
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 export class OpenAiResponsesRequestError extends Error {
@@ -135,6 +231,18 @@ export class OpenAiSpeechRequestError extends Error {
   }
 }
 
+function createOpenAiChatTimeoutError(timeoutMs: number): Error {
+  const error = new Error(`OpenAI chat request timed out after ${formatTimeoutSeconds(timeoutMs)} seconds.`);
+  error.name = "OpenAiChatRequestTimeoutError";
+  return error;
+}
+
+function createOpenAiTranscriptionTimeoutError(timeoutMs: number): Error {
+  const error = new Error(`OpenAI transcription request timed out after ${formatTimeoutSeconds(timeoutMs)} seconds.`);
+  error.name = "OpenAiTranscriptionRequestTimeoutError";
+  return error;
+}
+
 export async function requestChatCompletion(params: {
   model: string;
   messages: ChatMessage[];
@@ -143,6 +251,9 @@ export async function requestChatCompletion(params: {
   frequencyPenalty?: number;
   presencePenalty?: number;
   maxTokens?: number;
+  timeoutMs?: number;
+  route?: string;
+  correlationId?: string;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
   const body: Record<string, unknown> = {
@@ -164,38 +275,51 @@ export async function requestChatCompletion(params: {
   if (typeof params.maxTokens === "number") {
     body.max_tokens = params.maxTokens;
   }
-  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
+
+  return runOpenAiRequestWithTimeout({
+    apiPath: "chat_completions",
+    model: params.model,
+    route: params.route,
+    correlationId: params.correlationId,
+    timeoutMs: params.timeoutMs,
+    fallbackTimeoutMs: DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
+    createTimeoutError: createOpenAiChatTimeoutError,
+    operation: async (signal) => {
+      const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+        method: "POST",
+        signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI chat request failed: ${await parseOpenAiError(response)}`);
+      }
+
+      const payload = (await response.json()) as ChatCompletionResponse;
+      const message = payload.choices?.[0]?.message?.content?.trim();
+      if (!message) {
+        throw new Error("OpenAI returned an empty chat response.");
+      }
+
+      const promptTokens = Number(payload.usage?.prompt_tokens ?? 0);
+      const completionTokens = Number(payload.usage?.completion_tokens ?? 0);
+      const totalTokens = Number(payload.usage?.total_tokens ?? promptTokens + completionTokens);
+
+      return {
+        text: message,
+        usage: {
+          inputTokens: Number.isFinite(promptTokens) ? Math.max(0, promptTokens) : 0,
+          outputTokens: Number.isFinite(completionTokens) ? Math.max(0, completionTokens) : 0,
+          totalTokens: Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0
+        },
+        model: typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : params.model
+      };
+    }
   });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI chat request failed: ${await parseOpenAiError(response)}`);
-  }
-
-  const payload = (await response.json()) as ChatCompletionResponse;
-  const message = payload.choices?.[0]?.message?.content?.trim();
-  if (!message) {
-    throw new Error("OpenAI returned an empty chat response.");
-  }
-
-  const promptTokens = Number(payload.usage?.prompt_tokens ?? 0);
-  const completionTokens = Number(payload.usage?.completion_tokens ?? 0);
-  const totalTokens = Number(payload.usage?.total_tokens ?? promptTokens + completionTokens);
-
-  return {
-    text: message,
-    usage: {
-      inputTokens: Number.isFinite(promptTokens) ? Math.max(0, promptTokens) : 0,
-      outputTokens: Number.isFinite(completionTokens) ? Math.max(0, completionTokens) : 0,
-      totalTokens: Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0
-    },
-    model: typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : params.model
-  };
 }
 
 function extractResponseText(payload: ResponsesCompletionResponse): string | null {
@@ -225,6 +349,9 @@ export async function requestResponsesCompletion(params: {
   temperature?: number;
   maxOutputTokens?: number;
   reasoningEffort?: OpenAiReasoningEffort | null;
+  timeoutMs?: number;
+  route?: string;
+  correlationId?: string;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
   const body: Record<string, unknown> = {
@@ -247,65 +374,82 @@ export async function requestResponsesCompletion(params: {
     };
   }
 
-  const response = await fetch(`${OPENAI_BASE_URL}/responses`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+  return runOpenAiRequestWithTimeout({
+    apiPath: "responses",
+    model: params.model,
+    route: params.route,
+    correlationId: params.correlationId,
+    timeoutMs: params.timeoutMs,
+    fallbackTimeoutMs: DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
+    createTimeoutError: (timeoutMs) =>
+      new OpenAiResponsesRequestError({
+        errorType: "timeout",
+        errorCode: "timeout",
+        errorMessage: `OpenAI responses request timed out after ${formatTimeoutSeconds(timeoutMs)} seconds.`
+      }),
+    operation: async (signal) => {
+      const response = await fetch(`${OPENAI_BASE_URL}/responses`, {
+        method: "POST",
+        signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      });
 
-  if (!response.ok) {
-    let errorMessage = response.statusText || "";
-    let errorType: string | undefined;
-    let errorCode: string | undefined;
+      if (!response.ok) {
+        let errorMessage = response.statusText || "";
+        let errorType: string | undefined;
+        let errorCode: string | undefined;
 
-    try {
-      const payload = (await response.json()) as OpenAiErrorPayload;
-      const maybeMessage = payload.error?.message?.trim();
-      if (maybeMessage) {
-        errorMessage = maybeMessage;
+        try {
+          const payload = (await response.json()) as OpenAiErrorPayload;
+          const maybeMessage = payload.error?.message?.trim();
+          if (maybeMessage) {
+            errorMessage = maybeMessage;
+          }
+          const maybeType = payload.error?.type?.trim();
+          if (maybeType) {
+            errorType = maybeType;
+          }
+          const maybeCode = typeof payload.error?.code === "string" ? payload.error.code.trim() : "";
+          if (maybeCode) {
+            errorCode = maybeCode;
+          }
+        } catch {
+          // Ignore parsing errors and use status text fallback.
+        }
+
+        throw new OpenAiResponsesRequestError({
+          statusCode: response.status,
+          errorType,
+          errorCode,
+          errorMessage: errorMessage || `OpenAI request failed (${response.status})`
+        });
       }
-      const maybeType = payload.error?.type?.trim();
-      if (maybeType) {
-        errorType = maybeType;
+
+      const payload = (await response.json()) as ResponsesCompletionResponse;
+      const message = extractResponseText(payload);
+      if (!message) {
+        throw new Error("OpenAI returned an empty responses output.");
       }
-      const maybeCode = typeof payload.error?.code === "string" ? payload.error.code.trim() : "";
-      if (maybeCode) {
-        errorCode = maybeCode;
-      }
-    } catch {
-      // Ignore parsing errors and use status text fallback.
+
+      const promptTokens = Number(payload.usage?.input_tokens ?? payload.usage?.prompt_tokens ?? 0);
+      const completionTokens = Number(payload.usage?.output_tokens ?? payload.usage?.completion_tokens ?? 0);
+      const totalTokens = Number(payload.usage?.total_tokens ?? promptTokens + completionTokens);
+
+      return {
+        text: message,
+        usage: {
+          inputTokens: Number.isFinite(promptTokens) ? Math.max(0, promptTokens) : 0,
+          outputTokens: Number.isFinite(completionTokens) ? Math.max(0, completionTokens) : 0,
+          totalTokens: Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0
+        },
+        model: typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : params.model
+      };
     }
-
-    throw new OpenAiResponsesRequestError({
-      statusCode: response.status,
-      errorType,
-      errorCode,
-      errorMessage: errorMessage || `OpenAI request failed (${response.status})`
-    });
-  }
-
-  const payload = (await response.json()) as ResponsesCompletionResponse;
-  const message = extractResponseText(payload);
-  if (!message) {
-    throw new Error("OpenAI returned an empty responses output.");
-  }
-
-  const promptTokens = Number(payload.usage?.input_tokens ?? payload.usage?.prompt_tokens ?? 0);
-  const completionTokens = Number(payload.usage?.output_tokens ?? payload.usage?.completion_tokens ?? 0);
-  const totalTokens = Number(payload.usage?.total_tokens ?? promptTokens + completionTokens);
-
-  return {
-    text: message,
-    usage: {
-      inputTokens: Number.isFinite(promptTokens) ? Math.max(0, promptTokens) : 0,
-      outputTokens: Number.isFinite(completionTokens) ? Math.max(0, completionTokens) : 0,
-      totalTokens: Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0
-    },
-    model: typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : params.model
-  };
+  });
 }
 
 export async function requestCompletion(params: {
@@ -315,6 +459,9 @@ export async function requestCompletion(params: {
   temperature?: number;
   maxOutputTokens?: number;
   reasoningEffort?: OpenAiReasoningEffort | null;
+  timeoutMs?: number;
+  route?: string;
+  correlationId?: string;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   if (params.apiFamily === "responses") {
     return requestResponsesCompletion({
@@ -322,6 +469,9 @@ export async function requestCompletion(params: {
       messages: params.messages,
       maxOutputTokens: params.maxOutputTokens,
       reasoningEffort: params.reasoningEffort,
+      timeoutMs: params.timeoutMs,
+      route: params.route,
+      correlationId: params.correlationId,
     });
   }
 
@@ -330,6 +480,9 @@ export async function requestCompletion(params: {
     messages: params.messages,
     temperature: params.temperature,
     maxTokens: params.maxOutputTokens,
+    timeoutMs: params.timeoutMs,
+    route: params.route,
+    correlationId: params.correlationId,
   });
 }
 
@@ -339,6 +492,9 @@ export async function requestTranscription(params: {
   fileName: string;
   mimeType: string;
   language?: string;
+  timeoutMs?: number;
+  route?: string;
+  correlationId?: string;
 }): Promise<string> {
   const apiKey = getOpenAiApiKey();
 
@@ -352,20 +508,32 @@ export async function requestTranscription(params: {
   const file = new File([bytes], params.fileName, { type: params.mimeType });
   formData.append("file", file);
 
-  const response = await fetch(`${OPENAI_BASE_URL}/audio/transcriptions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: formData
+  return runOpenAiRequestWithTimeout({
+    apiPath: "audio_transcriptions",
+    model: params.model,
+    route: params.route,
+    correlationId: params.correlationId,
+    timeoutMs: params.timeoutMs,
+    fallbackTimeoutMs: DEFAULT_TRANSCRIPTION_REQUEST_TIMEOUT_MS,
+    createTimeoutError: createOpenAiTranscriptionTimeoutError,
+    operation: async (signal) => {
+      const response = await fetch(`${OPENAI_BASE_URL}/audio/transcriptions`, {
+        method: "POST",
+        signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: formData
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI transcription failed: ${await parseOpenAiError(response)}`);
+      }
+
+      const payload = (await response.json()) as TranscriptionResponse;
+      return payload.text?.trim() ?? "";
+    }
   });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI transcription failed: ${await parseOpenAiError(response)}`);
-  }
-
-  const payload = (await response.json()) as TranscriptionResponse;
-  return payload.text?.trim() ?? "";
 }
 
 export async function requestSpeechSynthesis(params: {
