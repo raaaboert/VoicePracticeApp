@@ -28,9 +28,18 @@ export function getPrimarySimulationAction(params: {
   sessionActive: boolean;
   isInitializing: boolean;
   mode: SimulationTurnMode;
+  isStartingSession?: boolean;
   isStartingTurn?: boolean;
 }): PrimarySimulationAction {
   if (!params.sessionActive) {
+    if (params.isStartingSession) {
+      return {
+        kind: "busy",
+        label: "Starting...",
+        disabled: true,
+      };
+    }
+
     return {
       kind: "start",
       label: "Start Simulation",

@@ -75,6 +75,23 @@ runTest("an active session can recover from a paused idle state without pretendi
   );
 });
 
+runTest("starting a session disables duplicate start taps immediately", () => {
+  assertDeepEqual(
+    getPrimarySimulationAction({
+      sessionActive: false,
+      isInitializing: false,
+      mode: "idle",
+      isStartingSession: true,
+    }),
+    {
+      kind: "busy",
+      label: "Starting...",
+      disabled: true,
+    },
+    "startup should switch the primary action into a disabled busy state",
+  );
+});
+
 runTest("busy simulation states disable the primary button instead of ending the session", () => {
   assertDeepEqual(
     getPrimarySimulationAction({

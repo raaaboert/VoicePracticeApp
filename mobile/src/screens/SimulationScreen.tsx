@@ -389,6 +389,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const [useLocalMockMode, setUseLocalMockMode] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [actionDockHeight, setActionDockHeight] = useState(0);
+  const [isStartingSession, setIsStartingSession] = useState(false);
   const [isStartingTurn, setIsStartingTurn] = useState(false);
   const [lifecyclePauseActive, setLifecyclePauseActive] = useState(false);
 
@@ -442,9 +443,12 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const appStateRef = useRef<SimulationAppStateStatus>(normalizeSimulationAppStateStatus(AppState.currentState));
   const sessionActiveRef = useRef(false);
+  const startSimulationInProgressRef = useRef(false);
+  const startSimulationAttemptRef = useRef(0);
   const processingRef = useRef(false);
   const finalizeRequestedRef = useRef(false);
   const recordingStartInProgressRef = useRef(false);
+  const recordingPrepareInProgressRef = useRef(false);
   const micGrantedRef = useRef(false);
   const unmountedRef = useRef(false);
   const turnStartedAtRef = useRef(0);
@@ -458,6 +462,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const meteringSeenRef = useRef(false);
   const voiceHitCountRef = useRef(0);
   const noiseFloorDbRef = useRef<number | null>(null);
+  const openingStartedRef = useRef(false);
+  const openingCompletedRef = useRef(false);
+  const openingMessageCommittedRef = useRef(false);
+  const openingTtsInProgressRef = useRef(false);
+  const openingTtsCompletedRef = useRef(false);
   const openingDeliveredRef = useRef(false);
   const recognizedStartRegisteredRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
@@ -565,6 +574,12 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     && !simulationClosedRef.current
     && !unmountedRef.current
     && lifecyclePauseReasonRef.current === null
+  ), []);
+
+  const isStartupGenerationCurrent = useCallback((generation: number) => (
+    sessionLifecycleGenerationRef.current === generation
+    && !simulationClosedRef.current
+    && !unmountedRef.current
   ), []);
 
   const assertForegroundSessionGenerationCurrent = useCallback((generation: number) => {
@@ -1094,6 +1109,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         sessionPreserved: true,
       },
     });
+    startSimulationInProgressRef.current = false;
+    recordingPrepareInProgressRef.current = false;
     await cancelPendingTts();
     await stopRecordingSafely();
 
@@ -1253,12 +1270,40 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   };
 
   const startListeningTurn = async () => {
-    if (
-      !sessionActiveRef.current
-      || processingRef.current
-      || unmountedRef.current
-      || recordingStartInProgressRef.current
-    ) {
+    const requestCorrelationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
+    logSimulationTiming({
+      correlationId: requestCorrelationId,
+      phase: "start_listening_requested",
+      details: {
+        sessionActive: sessionActiveRef.current,
+        processing: processingRef.current,
+        recordingExists: Boolean(recordingRef.current),
+        recordingStartInProgress: recordingStartInProgressRef.current,
+        recordingPrepareInProgress: recordingPrepareInProgressRef.current,
+      },
+    });
+
+    if (!sessionActiveRef.current || processingRef.current || unmountedRef.current) {
+      return;
+    }
+
+    if (recordingRef.current) {
+      logSimulationTiming({
+        correlationId: requestCorrelationId,
+        phase: "start_listening_ignored_recording_exists",
+      });
+      return;
+    }
+
+    if (recordingStartInProgressRef.current || recordingPrepareInProgressRef.current) {
+      logSimulationTiming({
+        correlationId: requestCorrelationId,
+        phase: "start_listening_ignored_prepare_in_progress",
+        details: {
+          recordingStartInProgress: recordingStartInProgressRef.current,
+          recordingPrepareInProgress: recordingPrepareInProgressRef.current,
+        },
+      });
       return;
     }
 
@@ -1275,11 +1320,64 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
       await cancelPendingTts();
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+      if (recordingRef.current) {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "start_listening_ignored_recording_exists",
+          details: { checkedAfterTtsCancel: true },
+        });
+        return;
+      }
+
       await setAudioMode(true);
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+      if (recordingRef.current) {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "start_listening_ignored_recording_exists",
+          details: { checkedBeforePrepare: true },
+        });
+        return;
+      }
+
+      if (recordingPrepareInProgressRef.current) {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "start_listening_ignored_prepare_in_progress",
+          details: { checkedBeforePrepare: true },
+        });
+        return;
+      }
+
+      recordingPrepareInProgressRef.current = true;
+      logSimulationTiming({
+        correlationId: requestCorrelationId,
+        phase: "recording_prepare_start",
+      });
+
       const recording = new Audio.Recording();
       pendingRecording = recording;
-      await recording.prepareToRecordAsync(SIMULATION_RECORDING_OPTIONS);
+      try {
+        await recording.prepareToRecordAsync(SIMULATION_RECORDING_OPTIONS);
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "recording_prepare_success",
+        });
+      } catch (prepareError) {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "recording_prepare_error",
+          details: {
+            message: getErrorMessage(prepareError, "Could not prepare recording."),
+          },
+        });
+        throw prepareError;
+      } finally {
+        recordingPrepareInProgressRef.current = false;
+      }
+
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
       await recording.startAsync();
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
@@ -1310,6 +1408,13 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       }, STATUS_POLL_INTERVAL_MS);
     } catch (recordingError) {
       if (pendingRecording) {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "recording_prepare_cleanup",
+          details: {
+            generationCurrent: isForegroundSessionGenerationCurrent(sessionLifecycleGeneration),
+          },
+        });
         try {
           await pendingRecording.stopAndUnloadAsync();
         } catch {
@@ -1329,7 +1434,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         return;
       }
 
-      const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
+      const correlationId = currentTurnCorrelationIdRef.current ?? requestCorrelationId;
       currentTurnCorrelationIdRef.current = null;
       finalizeRequestedRef.current = false;
       turnSubmitStartedAtRef.current = null;
@@ -1360,6 +1465,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         sessionPreserved: true,
       });
     } finally {
+      recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
       setIsStartingTurn(false);
     }
@@ -2132,193 +2238,396 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   };
 
   const startSession = async () => {
+    const startupCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "simulation-start");
+    logSimulationTiming({
+      correlationId: startupCorrelationId,
+      phase: "simulation_start_pressed",
+      details: {
+        sessionActive: sessionActiveRef.current,
+        isInitializing,
+        startInProgress: startSimulationInProgressRef.current,
+      },
+    });
+
+    if (startSimulationInProgressRef.current) {
+      logSimulationTiming({
+        correlationId: startupCorrelationId,
+        phase: "simulation_start_ignored_already_in_progress",
+      });
+      return;
+    }
+
     if (sessionActiveRef.current || isInitializing) {
       return;
     }
 
-    const granted = await ensureMicPermission();
-    if (!granted) {
-      setError("Microphone permission is required to start the simulation.");
-      return;
-    }
-
-    setError(null);
-    simulationClosedRef.current = false;
-    if (localTestMode) {
-      usedMockModeDuringSessionRef.current = true;
-    }
-    const startPlan = getSimulationStartPlan({
-      openingDelivered: openingDeliveredRef.current,
-      recognizedStartRegistered: recognizedStartRegisteredRef.current,
-    });
-    const remoteTtsPreset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
-    const openingCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "opening");
-    const startRegistrationCorrelationId = createSimulationCorrelationId(
-      config.simulationSessionId,
-      "session-start",
+    startSimulationInProgressRef.current = true;
+    const startupAttempt = startSimulationAttemptRef.current + 1;
+    startSimulationAttemptRef.current = startupAttempt;
+    const startupGeneration = sessionLifecycleGenerationRef.current;
+    const isCurrentStartupAttempt = () => (
+      startSimulationAttemptRef.current === startupAttempt
+      && isStartupGenerationCurrent(startupGeneration)
     );
+    const logStaleStartupResult = (stage: string) => {
+      logSimulationTiming({
+        correlationId: startupCorrelationId,
+        phase: "stale_start_result_ignored",
+        details: {
+          stage,
+          startupAttempt,
+          startupGeneration,
+          currentStartupAttempt: startSimulationAttemptRef.current,
+          currentLifecycleGeneration: sessionLifecycleGenerationRef.current,
+        },
+      });
+    };
 
-    if (startPlan.shouldDeliverOpening) {
-      let openingLine = pendingOpeningLineRef.current;
-      if (!openingLine) {
-        if (localTestMode) {
-          openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
-          sessionTrainingPackIdRef.current = null;
-          pendingOpeningSpeechPrefetchRef.current = null;
+    let startupCompleted = false;
+    simulationClosedRef.current = false;
+    setIsStartingSession(true);
+    setError(null);
+    setMode("thinking");
+    setStatus("Starting simulation...");
+    logSimulationTiming({
+      correlationId: startupCorrelationId,
+      phase: "simulation_start_started",
+      details: {
+        startupAttempt,
+        startupGeneration,
+      },
+    });
+
+    try {
+      const granted = await ensureMicPermission();
+      if (!isCurrentStartupAttempt()) {
+        logStaleStartupResult("mic_permission");
+        return;
+      }
+      if (!granted) {
+        setMode("idle");
+        setStatus("Scenario ready. Press Start Simulation.");
+        setError("Microphone permission is required to start the simulation.");
+        logSimulationTiming({
+          correlationId: startupCorrelationId,
+          phase: "simulation_start_failed",
+          details: { reason: "microphone_permission_denied" },
+        });
+        return;
+      }
+
+      if (localTestMode) {
+        usedMockModeDuringSessionRef.current = true;
+      }
+      const startPlan = getSimulationStartPlan({
+        openingDelivered: openingDeliveredRef.current,
+        recognizedStartRegistered: recognizedStartRegisteredRef.current,
+      });
+      const remoteTtsPreset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
+      const openingCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "opening");
+      const startRegistrationCorrelationId = createSimulationCorrelationId(
+        config.simulationSessionId,
+        "session-start",
+      );
+
+      if (startPlan.shouldDeliverOpening) {
+        if (openingStartedRef.current && !openingCompletedRef.current) {
+          logSimulationTiming({
+            correlationId: openingCorrelationId,
+            phase: "opening_start_ignored_duplicate",
+          });
+          return;
+        }
+
+        if (openingCompletedRef.current || openingDeliveredRef.current) {
+          logSimulationTiming({
+            correlationId: openingCorrelationId,
+            phase: "opening_response_ignored_duplicate",
+            details: {
+              openingCompleted: openingCompletedRef.current,
+              openingDelivered: openingDeliveredRef.current,
+            },
+          });
         } else {
-          try {
-            logSimulationTiming({
-              correlationId: openingCorrelationId,
-              phase: "opening_request_start",
-            });
-            logSimulationApiCall("createOpeningLine:startSession");
-            const openingPayload = await createOpeningLine({
-              userId,
-              authToken,
-              simulationSessionId: config.simulationSessionId,
-              scenario: config.scenario,
-              trainingId: config.trainingId ?? null,
-              industryId: config.industryId,
-              industryBaseline: config.industryBaseline,
-              difficulty: config.difficulty,
-              segmentLabel: config.segmentLabel,
-              personaStyle: config.personaStyle,
-              speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
-              correlationId: openingCorrelationId,
-            });
-            openingLine = openingPayload.assistantText;
-            sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
-            pendingOpeningSpeechPrefetchRef.current = openingPayload.speechPrefetch;
-            logSimulationTiming({
-              correlationId: openingCorrelationId,
-              phase: "opening_response_received",
-            });
-          } catch (openingError) {
-            if (isApiError(openingError)) {
-              setUseLocalMockMode(true);
-              usedMockModeDuringSessionRef.current = true;
+          openingStartedRef.current = true;
+          logSimulationTiming({
+            correlationId: openingCorrelationId,
+            phase: "opening_start_requested",
+          });
+
+          let openingLine = pendingOpeningLineRef.current;
+          const openingLineFromPendingPrefetch = Boolean(openingLine);
+          if (!openingLine) {
+            setStatus("Preparing opening response...");
+            if (localTestMode) {
               openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
               sessionTrainingPackIdRef.current = null;
               pendingOpeningSpeechPrefetchRef.current = null;
             } else {
-              setError(getErrorMessage(openingError, "Could not initialize simulation."));
-              void submitAutoErrorReport("simulation.opening_line", openingError);
+              try {
+                logSimulationTiming({
+                  correlationId: openingCorrelationId,
+                  phase: "opening_request_start",
+                });
+                logSimulationApiCall("createOpeningLine:startSession");
+                const openingPayload = await createOpeningLine({
+                  userId,
+                  authToken,
+                  simulationSessionId: config.simulationSessionId,
+                  scenario: config.scenario,
+                  trainingId: config.trainingId ?? null,
+                  industryId: config.industryId,
+                  industryBaseline: config.industryBaseline,
+                  difficulty: config.difficulty,
+                  segmentLabel: config.segmentLabel,
+                  personaStyle: config.personaStyle,
+                  speechPrefetchPreset: shouldUseFastStartRemoteTts ? remoteTtsPreset : null,
+                  correlationId: openingCorrelationId,
+                });
+                if (!isCurrentStartupAttempt()) {
+                  logStaleStartupResult("opening_response");
+                  return;
+                }
+                openingLine = openingPayload.assistantText;
+                pendingOpeningLineRef.current = openingLine;
+                sessionTrainingPackIdRef.current = openingPayload.trainingPackId;
+                pendingOpeningSpeechPrefetchRef.current = openingPayload.speechPrefetch;
+              } catch (openingError) {
+                if (!isCurrentStartupAttempt()) {
+                  logStaleStartupResult("opening_error");
+                  return;
+                }
+                if (isApiError(openingError)) {
+                  setUseLocalMockMode(true);
+                  usedMockModeDuringSessionRef.current = true;
+                  openingLine = createLocalOpeningLine(config.scenario, config.difficulty, config.personaStyle);
+                  pendingOpeningLineRef.current = openingLine;
+                  sessionTrainingPackIdRef.current = null;
+                  pendingOpeningSpeechPrefetchRef.current = null;
+                } else {
+                  throw openingError;
+                }
+              }
+            }
+          }
+
+          if (!isCurrentStartupAttempt()) {
+            logStaleStartupResult("opening_ready");
+            return;
+          }
+
+          if (openingLine) {
+            logSimulationTiming({
+              correlationId: openingCorrelationId,
+              phase: "opening_response_received",
+              details: {
+                fromPendingPrefetch: openingLineFromPendingPrefetch,
+              },
+            });
+
+            const assistantTextReceivedAtMs = Date.now();
+            const openingSpeechPrefetch = pendingOpeningSpeechPrefetchRef.current;
+            const openingAssistantMessage = { id: createMessageId(), role: "assistant" as const, content: openingLine };
+            const commitOpeningAssistantMessageIfNeeded = () => {
+              if (!isCurrentStartupAttempt()) {
+                logStaleStartupResult("opening_message_commit");
+                return;
+              }
+              if (openingMessageCommittedRef.current) {
+                logSimulationTiming({
+                  correlationId: openingCorrelationId,
+                  phase: "opening_response_ignored_duplicate",
+                });
+                return;
+              }
+              if (unmountedRef.current || simulationClosedRef.current) {
+                return;
+              }
+              openingMessageCommittedRef.current = true;
+              commitAssistantMessage({
+                message: openingAssistantMessage,
+                correlationId: openingCorrelationId,
+                phase: "opening_response_committed",
+              });
+            };
+            // eslint-disable-next-line no-console
+            console.log("[TTS-TIMING]", {
+              source: "simulation",
+              preset: remoteTtsPreset,
+              correlationId: openingCorrelationId,
+              phase: "assistant_text_received",
+              tsMs: assistantTextReceivedAtMs,
+              elapsedMs: 0,
+            });
+            setStatus("Preparing AI voice...");
+            // eslint-disable-next-line no-console
+            console.log("[TTS-TIMING]", {
+              source: "simulation",
+              preset: remoteTtsPreset,
+              correlationId: openingCorrelationId,
+              phase: "speak_invoked",
+              tsMs: Date.now(),
+              elapsedMs: Date.now() - assistantTextReceivedAtMs,
+            });
+            logSimulationTiming({
+              correlationId: openingCorrelationId,
+              phase: "opening_tts_pipeline_start",
+            });
+
+            if (openingTtsInProgressRef.current || openingTtsCompletedRef.current) {
+              logSimulationTiming({
+                correlationId: openingCorrelationId,
+                phase: "opening_tts_ignored_duplicate",
+                details: {
+                  openingTtsInProgress: openingTtsInProgressRef.current,
+                  openingTtsCompleted: openingTtsCompletedRef.current,
+                },
+              });
+            } else {
+              openingTtsInProgressRef.current = true;
+              logSimulationTiming({
+                correlationId: openingCorrelationId,
+                phase: "opening_tts_started",
+              });
+              try {
+                await speakAssistantResponse(
+                  openingLine,
+                  assistantTextReceivedAtMs,
+                  () => {
+                    if (!isCurrentStartupAttempt()) {
+                      logStaleStartupResult("opening_playback_start");
+                      return;
+                    }
+                    commitOpeningAssistantMessageIfNeeded();
+                    setMode("speaking");
+                    setStatus("AI is speaking...");
+                    logSimulationTiming({
+                      correlationId: openingCorrelationId,
+                      phase: "opening_playback_started",
+                    });
+                  },
+                  openingCorrelationId,
+                  openingSpeechPrefetch,
+                );
+                if (!isCurrentStartupAttempt()) {
+                  logStaleStartupResult("opening_tts_complete");
+                  return;
+                }
+                openingTtsCompletedRef.current = true;
+              } finally {
+                openingTtsInProgressRef.current = false;
+              }
+            }
+
+            if (!isCurrentStartupAttempt()) {
+              logStaleStartupResult("opening_complete");
               return;
             }
+
+            commitOpeningAssistantMessageIfNeeded();
+            openingCompletedRef.current = true;
+            openingDeliveredRef.current = true;
+            pendingOpeningLineRef.current = null;
+            pendingOpeningSpeechPrefetchRef.current = null;
           }
         }
       }
 
-      if (openingLine) {
-        const assistantTextReceivedAtMs = Date.now();
-        const openingSpeechPrefetch = pendingOpeningSpeechPrefetchRef.current;
-        const openingAssistantMessage = { id: createMessageId(), role: "assistant" as const, content: openingLine };
-        let openingMessageCommitted = false;
-        const commitOpeningAssistantMessageIfNeeded = () => {
-          if (openingMessageCommitted || unmountedRef.current || simulationClosedRef.current) {
+      if (startPlan.shouldRegisterRecognizedStart) {
+        setStatus("Starting simulation...");
+        logSimulationTiming({
+          correlationId: startRegistrationCorrelationId,
+          phase: "recognized_start_request_start",
+        });
+
+        try {
+          await startSimulationSession(
+            userId,
+            {
+              simulationSessionId: config.simulationSessionId,
+              segmentId: config.scenario.segmentId,
+              scenarioId: config.scenario.id,
+              trainingId: config.trainingId ?? null,
+              trainingPackId: sessionTrainingPackIdRef.current,
+              clientStartedAt: new Date().toISOString(),
+            },
+            authToken,
+            { correlationId: startRegistrationCorrelationId },
+          );
+          if (!isCurrentStartupAttempt()) {
+            logStaleStartupResult("recognized_start");
             return;
           }
-          openingMessageCommitted = true;
-          commitAssistantMessage({
-            message: openingAssistantMessage,
-            correlationId: openingCorrelationId,
-            phase: "opening_message_committed",
+          recognizedStartRegisteredRef.current = true;
+          logSimulationTiming({
+            correlationId: startRegistrationCorrelationId,
+            phase: "recognized_start_request_complete",
           });
-        };
-        // eslint-disable-next-line no-console
-        console.log("[TTS-TIMING]", {
-          source: "simulation",
-          preset: remoteTtsPreset,
-          correlationId: openingCorrelationId,
-          phase: "assistant_text_received",
-          tsMs: assistantTextReceivedAtMs,
-          elapsedMs: 0,
-        });
-        setStatus("Preparing AI voice...");
-        // eslint-disable-next-line no-console
-        console.log("[TTS-TIMING]", {
-          source: "simulation",
-          preset: remoteTtsPreset,
-          correlationId: openingCorrelationId,
-          phase: "speak_invoked",
-          tsMs: Date.now(),
-          elapsedMs: Date.now() - assistantTextReceivedAtMs,
-        });
-        logSimulationTiming({
-          correlationId: openingCorrelationId,
-          phase: "opening_tts_pipeline_start",
-        });
-        const speakPromise = speakAssistantResponse(
-          openingLine,
-          assistantTextReceivedAtMs,
-          () => {
-            commitOpeningAssistantMessageIfNeeded();
-            setMode("speaking");
-            setStatus("AI is speaking...");
-            logSimulationTiming({
-              correlationId: openingCorrelationId,
-              phase: "opening_playback_started",
-            });
-          },
-          openingCorrelationId,
-          openingSpeechPrefetch,
-        );
-        pendingOpeningLineRef.current = null;
-        pendingOpeningSpeechPrefetchRef.current = null;
-        await speakPromise;
-        commitOpeningAssistantMessageIfNeeded();
-        openingDeliveredRef.current = true;
+        } catch (startError) {
+          if (!isCurrentStartupAttempt()) {
+            logStaleStartupResult("recognized_start_error");
+            return;
+          }
+          logSimulationTiming({
+            correlationId: startRegistrationCorrelationId,
+            phase: "recognized_start_request_failed",
+          });
+          throw startError;
+        }
       }
-    }
 
-    if (!recognizedStartRegisteredRef.current) {
-      logSimulationTiming({
-        correlationId: startRegistrationCorrelationId,
-        phase: "recognized_start_request_start",
-      });
-
-      try {
-        await startSimulationSession(
-          userId,
-          {
-            simulationSessionId: config.simulationSessionId,
-            segmentId: config.scenario.segmentId,
-            scenarioId: config.scenario.id,
-            trainingId: config.trainingId ?? null,
-            trainingPackId: sessionTrainingPackIdRef.current,
-            clientStartedAt: new Date().toISOString(),
-          },
-          authToken,
-          { correlationId: startRegistrationCorrelationId },
-        );
-        recognizedStartRegisteredRef.current = true;
-        logSimulationTiming({
-          correlationId: startRegistrationCorrelationId,
-          phase: "recognized_start_request_complete",
-        });
-      } catch (startError) {
-        setMode("idle");
-        setStatus("Simulation start failed. Tap Start Simulation to retry.");
-        setError(getErrorMessage(startError, "Could not register simulation start."));
-        logSimulationTiming({
-          correlationId: startRegistrationCorrelationId,
-          phase: "recognized_start_request_failed",
-        });
-        void submitAutoErrorReport("simulation.session_start", startError, {
-          simulationSessionId: config.simulationSessionId,
-          scenarioId: config.scenario.id,
-        });
+      if (!isCurrentStartupAttempt()) {
+        logStaleStartupResult("activate_session");
         return;
       }
-    }
 
-    sessionActiveRef.current = true;
-    sessionStartedAtRef.current = new Date();
-    sessionCompletionInProgressRef.current = false;
-    setElapsedSeconds(0);
-    setSessionActive(true);
-    setStatus("Simulation active. Speak, then tap Submit Response.");
-    void startListeningTurn();
+      sessionActiveRef.current = true;
+      sessionStartedAtRef.current = new Date();
+      sessionCompletionInProgressRef.current = false;
+      setElapsedSeconds(0);
+      setSessionActive(true);
+      setStatus("Getting ready to listen...");
+      startupCompleted = true;
+      logSimulationTiming({
+        correlationId: startupCorrelationId,
+        phase: "simulation_start_completed",
+      });
+      void startListeningTurn();
+    } catch (startError) {
+      if (!isCurrentStartupAttempt()) {
+        logStaleStartupResult("start_error");
+        return;
+      }
+
+      if (!openingCompletedRef.current) {
+        openingStartedRef.current = false;
+      }
+      openingTtsInProgressRef.current = false;
+      logSimulationTiming({
+        correlationId: startupCorrelationId,
+        phase: "simulation_start_failed",
+        details: {
+          message: getErrorMessage(startError, "Could not start simulation."),
+        },
+      });
+      setMode("idle");
+      setStatus("Simulation start failed. Tap Start Simulation to retry.");
+      setError(getErrorMessage(startError, "Could not start simulation."));
+      void submitAutoErrorReport("simulation.session_start", startError, {
+        simulationSessionId: config.simulationSessionId,
+        scenarioId: config.scenario.id,
+      });
+    } finally {
+      if (startSimulationAttemptRef.current === startupAttempt) {
+        startSimulationInProgressRef.current = false;
+        if (!unmountedRef.current) {
+          setIsStartingSession(false);
+        }
+      }
+      if (!startupCompleted && !openingCompletedRef.current) {
+        openingTtsInProgressRef.current = false;
+      }
+    }
   };
 
   const endSession = async (showEndedText: boolean) => {
@@ -2331,8 +2640,12 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     turnSubmitStartedAtRef.current = null;
     currentTurnCorrelationIdRef.current = null;
     recordingSafetySignalRef.current = null;
+    startSimulationInProgressRef.current = false;
+    setIsStartingSession(false);
     recordingStartInProgressRef.current = false;
+    recordingPrepareInProgressRef.current = false;
     setIsStartingTurn(false);
+    openingTtsInProgressRef.current = false;
     abortActiveTurnRequests();
     await cancelPendingTts(true);
     await stopRecordingSafely();
@@ -2550,13 +2863,21 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       turnSubmitStartedAtRef.current = null;
       currentTurnCorrelationIdRef.current = null;
       recordingSafetySignalRef.current = null;
+      startSimulationInProgressRef.current = false;
+      setIsStartingSession(false);
       recordingStartInProgressRef.current = false;
+      recordingPrepareInProgressRef.current = false;
       setIsStartingTurn(false);
       sessionLifecycleGenerationRef.current += 1;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
       currentBackgroundedAtRef.current = null;
       setLifecyclePauseActive(false);
+      openingStartedRef.current = false;
+      openingCompletedRef.current = false;
+      openingMessageCommittedRef.current = false;
+      openingTtsInProgressRef.current = false;
+      openingTtsCompletedRef.current = false;
       abortActiveTurnRequests();
 
       if (localTestMode) {
@@ -2628,7 +2949,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       simulationClosedRef.current = true;
       sessionActiveRef.current = false;
       sessionLifecycleGenerationRef.current += 1;
+      startSimulationInProgressRef.current = false;
+      recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
+      openingTtsInProgressRef.current = false;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
       currentBackgroundedAtRef.current = null;
@@ -2735,6 +3059,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     sessionActive,
     isInitializing,
     mode,
+    isStartingSession,
     isStartingTurn,
   });
   const endButtonDisabled = isInitializing || !sessionActive || sessionCompletionInProgressRef.current;
@@ -2742,6 +3067,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     ? "Local test mode: replies are mocked. Tap Submit Response when you finish speaking."
     : isInitializing
       ? "The opening turn is still being prepared."
+      : isStartingSession
+        ? "Starting simulation..."
       : sessionActive
       ? lifecyclePauseActive
         ? `Peritio paused the session because the app left the foreground. Return within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes, then tap Resume Turn when you are ready to restart the microphone.`
@@ -2757,6 +3084,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       : "Press Start Simulation to begin, then tap Submit Response when you are ready to end a turn.";
   const stateTitle = isInitializing
     ? "Preparing scenario"
+    : isStartingSession
+      ? "Starting simulation"
     : !sessionActive
       ? "Scenario ready"
     : lifecyclePauseActive
@@ -2775,6 +3104,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const statusEyebrow = "Peritio simulation engine";
   const sessionModeLabel = isInitializing
     ? "Preparing Scenario"
+    : isStartingSession
+      ? "Starting Session"
     : lifecyclePauseActive
       ? "Paused Session"
       : sessionActive
@@ -2787,6 +3118,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     ? "Local test mode with mocked replies."
     : isInitializing
       ? "Start will unlock once setup finishes."
+      : isStartingSession
+        ? "Starting simulation..."
       : sessionActive
       ? lifecyclePauseActive
         ? `Resume within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes when you are ready.`
