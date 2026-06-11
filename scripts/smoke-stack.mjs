@@ -186,8 +186,11 @@ async function main() {
     }
 
     const html = await login.text();
-    if (!html.toLowerCase().includes("admin login")) {
-      throw new Error("admin /login content check failed");
+    const normalizedHtml = html.toLowerCase();
+    const requiredMarkers = ["peritio", "web admin", "sign in"];
+    const missingMarkers = requiredMarkers.filter((marker) => !normalizedHtml.includes(marker));
+    if (missingMarkers.length > 0) {
+      throw new Error(`admin /login content check failed (missing: ${missingMarkers.join(", ")})`);
     }
 
     log("Smoke: Admin web ok");

@@ -54,3 +54,4 @@ scripts/generate_state_summary_doc.py
 
 # api data
 api/db.local.json
+api/db.local.*.json
