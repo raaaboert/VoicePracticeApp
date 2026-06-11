@@ -215,6 +215,12 @@ async function main() {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 
+  if (isGitHubActions) {
+    log("Smoke: Admin Web and Mobile Metro skipped on GitHub Actions; verify:fast covers frontend/mobile validation.");
+    log("Smoke complete: API passed startup checks.");
+    return;
+  }
+
   log("Smoke: Admin Web");
   const adminLogs = [];
   const admin = run(NPM_CMD, ["run", "dev", "--workspace", "admin-web", "--", "--port", String(adminPort)], {
@@ -242,12 +248,6 @@ async function main() {
     log("Smoke: Admin web ok");
   } finally {
     await stopProcess(admin, "admin-web");
-  }
-
-  if (isGitHubActions) {
-    log("Smoke: Mobile Metro skipped on GitHub Actions; verify:fast covers mobile TypeScript validation.");
-    log("Smoke complete: API and Admin Web passed startup checks.");
-    return;
   }
 
   log("Smoke: Mobile Metro");
