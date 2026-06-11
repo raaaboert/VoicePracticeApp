@@ -166,7 +166,7 @@ async function findAvailablePort(startPort, maxAttempts = 20) {
 async function main() {
   const cwd = process.cwd();
   const run = createRunner(cwd);
-  const isGitHubActions = process.env.GITHUB_ACTIONS === "true";
+  const isGitHubActions = process.env.GITHUB_ACTIONS === "true" || process.env.CI === "true";
   const apiPort = await findAvailablePort(4100);
   const adminPort = await findAvailablePort(3000);
   const apiBaseUrl = `http://127.0.0.1:${apiPort}`;
