@@ -3,6 +3,7 @@ import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
+import appManifest from "./app.json";
 import {
   ActivityIndicator,
   Animated,
@@ -64,6 +65,7 @@ import {
   updateOrgAdminOrgSettings,
   updateMobileSettings,
   verifyMobileEmail,
+  fetchBackendVersion,
   getApiBaseUrl,
   setActiveSuperUserOrgId,
 } from "./src/lib/api";
@@ -688,6 +690,7 @@ export default function App() {
   const longPollFirstFailureAtRef = useRef<number | null>(null);
   const longPollLastErrorRef = useRef<string | null>(null);
   const hasInitializedRef = useRef(false);
+  const startupVersionDiagnosticsLoggedRef = useRef(false);
   const sampleVoiceIdentifierRef = useRef<string | undefined>(undefined);
   const sampleRemoteTtsSoundRef = useRef<Audio.Sound | null>(null);
   const sampleRemoteTtsFileRef = useRef<string | null>(null);
@@ -806,18 +809,73 @@ export default function App() {
   }, [config]);
 
   useEffect(() => {
+    if (!config || startupVersionDiagnosticsLoggedRef.current) {
+      return;
+    }
+    startupVersionDiagnosticsLoggedRef.current = true;
     const resolvedApiBaseUrl = getApiBaseUrl();
     const remoteEnabledRaw = process.env.EXPO_PUBLIC_REMOTE_AI_ENABLED;
     const remoteTtsEnabledRaw = process.env.EXPO_PUBLIC_REMOTE_TTS_ENABLED;
+    const expoConfig = appManifest.expo as typeof appManifest.expo & {
+      android?: typeof appManifest.expo.android & { versionCode?: number | string | null };
+      ios?: typeof appManifest.expo.ios & { buildNumber?: string | null };
+      extra?: typeof appManifest.expo.extra & {
+        eas?: {
+          projectId?: string | null;
+          buildId?: string | null;
+          updateId?: string | null;
+        };
+      };
+    };
+    const mobileBuildInfo = {
+      stage: "mobile_build_info",
+      appName: expoConfig.name ?? null,
+      appSlug: expoConfig.slug ?? null,
+      appVersion: expoConfig.version ?? null,
+      iosBuildNumber: expoConfig.ios?.buildNumber ?? null,
+      androidVersionCode: expoConfig.android?.versionCode ?? null,
+      androidPackage: expoConfig.android?.package ?? null,
+      easProjectId: expoConfig.extra?.eas?.projectId ?? null,
+      easBuildId: process.env.EXPO_PUBLIC_EAS_BUILD_ID ?? expoConfig.extra?.eas?.buildId ?? null,
+      easUpdateId: process.env.EXPO_PUBLIC_EAS_UPDATE_ID ?? expoConfig.extra?.eas?.updateId ?? null,
+      mobileGitSha: process.env.EXPO_PUBLIC_GIT_SHA ?? process.env.EXPO_PUBLIC_MOBILE_GIT_SHA ?? null,
+      apiBaseUrl: resolvedApiBaseUrl || "(empty)",
+      remoteEnabledRaw: String(remoteEnabledRaw),
+      remoteEnabled: apiConfigured,
+      remoteTtsEnabledRaw: String(remoteTtsEnabledRaw),
+      remoteTtsEnabled,
+      dev: __DEV__,
+    };
     // eslint-disable-next-line no-console
-    console.log(
-      `[runtime-startup] apiBaseUrl=${resolvedApiBaseUrl || "(empty)"} remoteEnabledRaw=${String(
-        remoteEnabledRaw,
-      )} remoteEnabled=${apiConfigured} remoteTtsEnabledRaw=${String(
-        remoteTtsEnabledRaw,
-      )} remoteTtsEnabled=${remoteTtsEnabled} __DEV__=${__DEV__}`,
+    console.log("[runtime-startup]", mobileBuildInfo);
+    // eslint-disable-next-line no-console
+    console.log("[backend-version-check]", {
+      stage: "backend_version_check_start",
+      apiBaseUrl: resolvedApiBaseUrl || "(empty)",
+      timeoutMs: 5_000,
+    });
+    void fetchBackendVersion({ timeoutMs: 5_000 }).then(
+      (backendVersion) => {
+        // eslint-disable-next-line no-console
+        console.log("[backend-version-check]", {
+          stage: "backend_version_check_success",
+          apiBaseUrl: resolvedApiBaseUrl || "(empty)",
+          gitSha: backendVersion.gitSha ?? null,
+          buildTimestamp: backendVersion.buildTimestamp ?? null,
+          processStartedAt: backendVersion.processStartedAt ?? null,
+          models: backendVersion.models ?? null,
+        });
+      },
+      (versionError) => {
+        // eslint-disable-next-line no-console
+        console.warn("[backend-version-check]", {
+          stage: "backend_version_check_error",
+          apiBaseUrl: resolvedApiBaseUrl || "(empty)",
+          error: versionError instanceof Error ? versionError.message : "Backend version check failed.",
+        });
+      },
     );
-  }, [apiConfigured, remoteTtsEnabled]);
+  }, [apiConfigured, config, remoteTtsEnabled]);
 
   useEffect(() => {
     return () => {

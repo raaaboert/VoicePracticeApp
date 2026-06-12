@@ -27,6 +27,7 @@ import {
   createOpeningLine,
   generateAssistantReply,
   isUsableAwaitedAssistantReply,
+  isExpiredSubmittedTurnAwait,
   isUsableSimulationTranscript,
   isOpenAiConfigured,
   isUnifiedSimulationSubmitEnabled,
@@ -37,6 +38,7 @@ import {
 } from "../lib/openai";
 import {
   createSimulationCorrelationId,
+  createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
@@ -54,6 +56,11 @@ import {
   normalizeSimulationAppStateStatus,
   SimulationAppStateStatus,
 } from "../lib/simulationAppStateLifecycle";
+import {
+  SIMULATION_AUDIO_GUARD_MIN_BYTES,
+  SIMULATION_AUDIO_GUARD_MIN_DURATION_MS,
+  validateSimulationAudioForUpload,
+} from "../lib/simulationAudioGuard";
 import { buildNoTranscriptDiagnostics } from "../lib/simulationDiagnostics";
 import {
   getSimulationTranscriptionMimeType,
@@ -529,8 +536,17 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
 
   const createTurnCorrelationId = useCallback(() => {
     const turnIndex = messagesRef.current.filter((message) => message.role === "user").length + 1;
-    return createSimulationCorrelationId(config.simulationSessionId, `turn-${turnIndex}`);
-  }, [config.simulationSessionId]);
+    const correlationId = createSimulationTurnCorrelationId(config.simulationSessionId, turnIndex);
+    logSimulationTiming({
+      correlationId,
+      phase: "turn_correlation_id_created",
+      details: {
+        sessionId: config.simulationSessionId,
+        turnNumber: turnIndex,
+      },
+    });
+    return correlationId;
+  }, [config.simulationSessionId, logSimulationTiming]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -1575,7 +1591,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       pendingRecording = null;
       finalizeRequestedRef.current = false;
       turnSubmitStartedAtRef.current = null;
-      const turnCorrelationId = createTurnCorrelationId();
+      const turnCorrelationId = requestCorrelationId;
       currentTurnCorrelationIdRef.current = turnCorrelationId;
       turnStartedAtRef.current = Date.now();
       lastVoiceAtRef.current = turnStartedAtRef.current;
@@ -1695,7 +1711,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     let audioModeResetPromise: Promise<void> | null = null;
     let recordingFinalizeCompletedAtMs: number | null = null;
     let audioBytes: number | undefined;
+    let audioFileExists: boolean | null = null;
     let audioFileExtension: string | null = null;
+    let turnDurationMs = 0;
     let turnDurationSeconds = 0;
     let transcriptionAttempted = false;
     let transcriptionFailed = false;
@@ -1773,13 +1791,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       recordingFinalizeCompletedAtMs = Date.now();
       throwIfSessionLifecycleInterrupted();
 
-      const audioUri = recording.getURI();
-      if (!audioUri) {
-        throw new Error("Recorded audio file could not be read.");
-      }
+      const audioUri = recording.getURI() ?? "";
+      turnDurationMs = Math.max(0, Date.now() - turnStartedAtRef.current);
       turnDurationSeconds = Math.max(
         1,
-        Math.round((Date.now() - turnStartedAtRef.current) / 1000),
+        Math.round(turnDurationMs / 1000),
       );
       audioFileExtension = getFileExtensionFromUri(audioUri);
       const audioFileInfoPromise = FileSystem.getInfoAsync(audioUri).catch(() => null);
@@ -1788,6 +1804,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           return;
         }
         const audioFileInfo = await audioFileInfoPromise;
+        audioFileExists = audioFileInfo?.exists ?? null;
         audioBytes =
           audioFileInfo?.exists && typeof audioFileInfo.size === "number" && Number.isFinite(audioFileInfo.size)
             ? audioFileInfo.size
@@ -1817,6 +1834,82 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         detectedVoiceRef.current ||
         heardVoiceRef.current ||
         inferredVoiceWithoutMeter;
+      let shouldUploadAudioForTranscription = shouldAttemptTranscription;
+      if (shouldAttemptTranscription) {
+        await measureRecordingPayload();
+        const voiceEvidence = detectedVoiceRef.current || heardVoiceRef.current;
+        const audioGuardResult = validateSimulationAudioForUpload({
+          audioUri,
+          fileExists: audioFileExists,
+          audioBytes: audioBytes ?? null,
+          durationMs: turnDurationMs,
+          voiceEvidence,
+        });
+        logSimulationTiming({
+          correlationId,
+          phase: "audio_guard_check",
+          startedAtMs: effectiveSubmitStartedAtMs,
+          details: {
+            audioBytes: audioBytes ?? null,
+            fileExists: audioFileExists,
+            turnDurationMs,
+            turnDurationSeconds,
+            voiceEvidence,
+            meteringSeen: meteringSeenRef.current,
+            detectedVoice: detectedVoiceRef.current,
+            heardVoice: heardVoiceRef.current,
+            inferredVoiceWithoutMeter,
+            minBytes: SIMULATION_AUDIO_GUARD_MIN_BYTES,
+            minDurationMs: SIMULATION_AUDIO_GUARD_MIN_DURATION_MS,
+          },
+        });
+        if (audioGuardResult.metadataUnavailable) {
+          logSimulationTiming({
+            correlationId,
+            phase: "audio_guard_metadata_unavailable",
+            startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              audioBytes: audioBytes ?? null,
+              fileExists: audioFileExists,
+              turnDurationMs,
+            },
+          });
+        }
+        if (audioGuardResult.ok) {
+          logSimulationTiming({
+            correlationId,
+            phase: "audio_guard_passed",
+            startedAtMs: effectiveSubmitStartedAtMs,
+          });
+        } else {
+          shouldUploadAudioForTranscription = false;
+          const rejectionPhase =
+            audioGuardResult.reason === "missing_file"
+              ? "audio_guard_rejected_missing_file"
+              : audioGuardResult.reason === "too_small"
+                ? "audio_guard_rejected_too_small"
+                : "audio_guard_rejected_too_short";
+          logSimulationTiming({
+            correlationId,
+            phase: rejectionPhase,
+            startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              audioBytes: audioBytes ?? null,
+              fileExists: audioFileExists,
+              turnDurationMs,
+              reason: audioGuardResult.reason,
+            },
+          });
+          logSimulationTiming({
+            correlationId,
+            phase: "audio_guard_no_clear_speech",
+            startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              reason: audioGuardResult.reason,
+            },
+          });
+        }
+      }
 
       let userText = "";
       let replyPayload: { assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null } | null = null;
@@ -1831,11 +1924,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           }>
         | null = null;
       let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
-      let shouldAttemptLegacyRemotePath = useLiveApiThisTurn && shouldAttemptTranscription;
+      let shouldAttemptLegacyRemotePath = useLiveApiThisTurn && shouldUploadAudioForTranscription;
       if (!useLiveApiThisTurn) {
         usedMockModeDuringSessionRef.current = true;
       }
-      if (useLiveApiThisTurn && shouldAttemptTranscription && unifiedSubmitEnabled) {
+      if (useLiveApiThisTurn && shouldUploadAudioForTranscription && unifiedSubmitEnabled) {
         try {
           transcriptionAttempted = true;
           setStatus("Processing your response...");
@@ -2034,7 +2127,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             throw transcriptionError;
           }
         }
-      } else if (!useLiveApiThisTurn && shouldAttemptTranscription) {
+      } else if (!useLiveApiThisTurn && shouldUploadAudioForTranscription) {
         usedLocalTranscriptionFallback = true;
         localTranscriptionFallbackReason = "local_test_mode";
         userText = buildLocalCapturedText(turnDurationSeconds);
@@ -2127,16 +2220,20 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               }
               const awaitErrorMessage = getErrorMessage(awaitError, "Assistant reply wait failed.");
               const shouldFallbackToLegacyReply = shouldFallbackToLegacyAssistantReply(awaitError);
+              const expiredSubmittedTurnAwait = isExpiredSubmittedTurnAwait(awaitError);
               logSimulationTiming({
                 correlationId,
-                phase: "assistant_await_failed",
+                phase: expiredSubmittedTurnAwait ? "assistant_await_expired" : "assistant_await_failed",
                 startedAtMs: effectiveSubmitStartedAtMs,
                 details: {
                   error: awaitErrorMessage,
                   shouldFallbackToLegacyReply,
+                  expiredSubmittedTurnAwait,
                 },
               });
-              if (!shouldFallbackToLegacyReply) {
+              if (expiredSubmittedTurnAwait) {
+                setStatus("Assistant reply expired. Preparing a fresh reply...");
+              } else if (!shouldFallbackToLegacyReply) {
                 throw awaitError;
               }
             } finally {
@@ -3229,7 +3326,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const hintText = localTestMode
     ? "Local test mode: replies are mocked. Tap Submit Response when you finish speaking."
     : isInitializing
-      ? "The opening turn is still being prepared."
+      ? "Scenario setup is finishing."
       : isStartingSession
         ? "Starting simulation..."
       : sessionActive

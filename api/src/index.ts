@@ -1021,12 +1021,31 @@ interface PendingUnifiedSubmitTurnEntry {
   resolvedResult: PendingUnifiedSubmitTurnResult | null;
 }
 
+interface CleanedPendingUnifiedSubmitTurnEntry {
+  userId: string;
+  cleanedAtMs: number;
+  reason: "after_resolve" | "after_reject";
+}
+
 const pendingUnifiedSubmitTurns = new Map<string, PendingUnifiedSubmitTurnEntry>();
+const cleanedPendingUnifiedSubmitTurns = new Map<string, CleanedPendingUnifiedSubmitTurnEntry>();
+
+type PendingUnifiedSubmitTurnWaitTimeoutKind = "expired" | "no_entry" | "unsettled";
+
+interface PendingUnifiedSubmitTurnWaitOutcome {
+  result: PendingUnifiedSubmitTurnResult | null;
+  timeoutKind?: PendingUnifiedSubmitTurnWaitTimeoutKind;
+}
 
 function sweepExpiredPendingUnifiedSubmitTurns(nowMs = Date.now()): void {
   for (const [correlationId, entry] of pendingUnifiedSubmitTurns.entries()) {
     if (nowMs - entry.createdAtMs > PENDING_UNIFIED_TURN_TTL_MS) {
       pendingUnifiedSubmitTurns.delete(correlationId);
+    }
+  }
+  for (const [correlationId, entry] of cleanedPendingUnifiedSubmitTurns.entries()) {
+    if (nowMs - entry.cleanedAtMs > PENDING_UNIFIED_TURN_TTL_MS) {
+      cleanedPendingUnifiedSubmitTurns.delete(correlationId);
     }
   }
 }
@@ -1078,32 +1097,121 @@ function registerPendingUnifiedSubmitTurn(params: {
   pendingUnifiedSubmitTurns.set(params.correlationId, entry);
 }
 
+function cleanupPendingUnifiedSubmitTurn(params: {
+  correlationId: string;
+  userId: string;
+  reason: "after_resolve" | "after_reject";
+}): boolean {
+  const entry = pendingUnifiedSubmitTurns.get(params.correlationId);
+  if (!entry) {
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "submit-turn-await",
+      correlationId: params.correlationId,
+      stage: "pending_turn_cleanup_skipped",
+      cleanup: "pending_turn_cleanup",
+      reason: "missing_entry",
+      cleanupReason: params.reason,
+    });
+    return false;
+  }
+
+  if (entry.userId !== params.userId) {
+    // eslint-disable-next-line no-console
+    console.warn("[simulation-route]", {
+      route: "submit-turn-await",
+      correlationId: params.correlationId,
+      stage: "pending_turn_cleanup_skipped",
+      cleanup: "pending_turn_cleanup",
+      reason: "user_mismatch",
+      cleanupReason: params.reason,
+    });
+    return false;
+  }
+
+  pendingUnifiedSubmitTurns.delete(params.correlationId);
+  cleanedPendingUnifiedSubmitTurns.set(params.correlationId, {
+    userId: params.userId,
+    cleanedAtMs: Date.now(),
+    reason: params.reason,
+  });
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "submit-turn-await",
+    correlationId: params.correlationId,
+    stage: params.reason === "after_reject" ? "pending_turn_cleanup_after_reject" : "pending_turn_cleanup_after_resolve",
+    cleanup: "pending_turn_cleanup",
+    ageMs: Date.now() - entry.createdAtMs,
+  });
+  return true;
+}
+
+function logPendingUnifiedSubmitTurnCleanupSkipped(params: {
+  correlationId: string;
+  reason: string;
+}): void {
+  // eslint-disable-next-line no-console
+  console.log("[simulation-route]", {
+    route: "submit-turn-await",
+    correlationId: params.correlationId,
+    stage: "pending_turn_cleanup_skipped",
+    cleanup: "pending_turn_cleanup",
+    reason: params.reason,
+  });
+}
+
 async function waitForPendingUnifiedSubmitTurn(params: {
   correlationId: string;
   userId: string;
   timeoutMs: number;
-}): Promise<PendingUnifiedSubmitTurnResult | null> {
+}): Promise<PendingUnifiedSubmitTurnWaitOutcome> {
   const startedAtMs = Date.now();
   const deadlineMs = startedAtMs + Math.max(1_000, params.timeoutMs);
 
   while (Date.now() < deadlineMs) {
     sweepExpiredPendingUnifiedSubmitTurns();
+    const cleanedEntry = cleanedPendingUnifiedSubmitTurns.get(params.correlationId);
+    if (cleanedEntry) {
+      if (cleanedEntry.userId !== params.userId) {
+        return { result: null, timeoutKind: "no_entry" };
+      }
+      // eslint-disable-next-line no-console
+      console.warn("[simulation-route]", {
+        route: "submit-turn-await",
+        correlationId: params.correlationId,
+        stage: "pending_turn_await_expired",
+        elapsedMs: Date.now() - startedAtMs,
+        cleanupReason: cleanedEntry.reason,
+      });
+      return { result: null, timeoutKind: "expired" };
+    }
     const entry = pendingUnifiedSubmitTurns.get(params.correlationId);
     if (entry) {
       if (entry.userId !== params.userId) {
-        return null;
+        return { result: null, timeoutKind: "no_entry" };
       }
       if (entry.resolvedResult) {
-        return entry.resolvedResult;
+        return { result: entry.resolvedResult };
       }
 
       const remainingMs = Math.max(1, deadlineMs - Date.now());
-      return await Promise.race([
+      const result = await Promise.race([
         entry.resultPromise,
         new Promise<null>((resolve) => {
           setTimeout(() => resolve(null), remainingMs);
         }),
       ]);
+      if (result) {
+        return { result };
+      }
+      // eslint-disable-next-line no-console
+      console.warn("[simulation-route]", {
+        route: "submit-turn-await",
+        correlationId: params.correlationId,
+        stage: "pending_turn_await_timeout_unsettled",
+        elapsedMs: Date.now() - startedAtMs,
+      });
+      return { result: null, timeoutKind: "unsettled" };
     }
 
     await new Promise((resolve) => {
@@ -1111,7 +1219,14 @@ async function waitForPendingUnifiedSubmitTurn(params: {
     });
   }
 
-  return null;
+  // eslint-disable-next-line no-console
+  console.warn("[simulation-route]", {
+    route: "submit-turn-await",
+    correlationId: params.correlationId,
+    stage: "pending_turn_await_timeout_no_entry",
+    elapsedMs: Date.now() - startedAtMs,
+  });
+  return { result: null, timeoutKind: "no_entry" };
 }
 
 function parseTtsPreset(value: unknown): TtsPreset | null {
@@ -13954,19 +14069,41 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRate
     return;
   }
 
-  const result = await waitForPendingUnifiedSubmitTurn({
+  const waitOutcome = await waitForPendingUnifiedSubmitTurn({
     correlationId: requestedCorrelationId,
     userId: authenticatedUserId,
     timeoutMs: 75_000,
   });
+  const result = waitOutcome.result;
 
   if (!result) {
+    logPendingUnifiedSubmitTurnCleanupSkipped({
+      correlationId: requestedCorrelationId,
+      reason:
+        waitOutcome.timeoutKind === "unsettled"
+          ? "await_timeout_unsettled"
+          : waitOutcome.timeoutKind === "expired"
+            ? "already_cleaned"
+            : "await_timeout_no_entry",
+    });
+    if (waitOutcome.timeoutKind === "expired") {
+      // eslint-disable-next-line no-console
+      console.warn("[simulation-route]", {
+        route: "submit-turn-await",
+        correlationId: requestedCorrelationId,
+        stage: "expired",
+        elapsedMs: Date.now() - routeStartedAtMs,
+      });
+      response.status(410).json({ error: "Simulation assistant reply is no longer pending for this correlationId." });
+      return;
+    }
     // eslint-disable-next-line no-console
     console.warn("[simulation-route]", {
       route: "submit-turn-await",
       correlationId: requestedCorrelationId,
       stage: "timeout",
       elapsedMs: Date.now() - routeStartedAtMs,
+      timeoutKind: waitOutcome.timeoutKind ?? "unknown",
     });
     response.status(504).json({ error: "Timed out waiting for simulation assistant reply." });
     return;
@@ -13982,6 +14119,11 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRate
       elapsedMs: Date.now() - routeStartedAtMs,
     });
     response.status(503).json({ error: result.error });
+    cleanupPendingUnifiedSubmitTurn({
+      correlationId: requestedCorrelationId,
+      userId: authenticatedUserId,
+      reason: "after_reject",
+    });
     return;
   }
   response.json(result);
@@ -13992,6 +14134,11 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRate
     stage: "response_sent",
     elapsedMs: Date.now() - routeStartedAtMs,
     outcome: result.outcome,
+  });
+  cleanupPendingUnifiedSubmitTurn({
+    correlationId: requestedCorrelationId,
+    userId: authenticatedUserId,
+    reason: "after_resolve",
   });
 });
 

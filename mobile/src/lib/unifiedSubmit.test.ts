@@ -1,4 +1,5 @@
 import {
+  isExpiredSubmittedTurnAwait,
   isUsableAwaitedAssistantReply,
   isUsableSimulationTranscript,
   shouldFallbackToLegacyAssistantReply,
@@ -80,6 +81,15 @@ runTest("assistant-await recovery retries only when the await route is unavailab
   assert(
     shouldFallbackToLegacyAssistantReply(new Error("Unified submit endpoint not found")),
     "explicit endpoint-not-found compatibility responses should retain the legacy fallback",
+  );
+});
+
+runTest("expired duplicate awaits are classified separately from compatibility fallback", () => {
+  const expiredAwait = new Error("Simulation assistant reply is no longer pending for this correlationId.");
+  assert(isExpiredSubmittedTurnAwait(expiredAwait), "expired await responses should be recognized as stale/duplicate");
+  assert(
+    shouldFallbackToLegacyAssistantReply(expiredAwait) === false,
+    "expired awaits should not be mistaken for a missing compatibility route",
   );
 });
 

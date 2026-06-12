@@ -11,6 +11,7 @@ import {
 import type { PrefetchedRemoteSpeechChunk, RemoteTtsPreset, UnifiedSimulationTurnPayload } from "./api";
 import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
 export {
+  isExpiredSubmittedTurnAwait,
   isUsableAwaitedAssistantReply,
   isUsableSimulationTranscript,
   shouldFallbackToLegacyAssistantReply,

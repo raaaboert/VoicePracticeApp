@@ -122,3 +122,30 @@ export function createSimulationCorrelationId(simulationSessionId: string, phase
     .slice(0, 28);
   return `sim-${normalizedSession || "session"}-${normalizedPhase || "trace"}`.slice(0, 80);
 }
+
+export function createSimulationCorrelationNonce(): string {
+  const randomPart = Math.floor(Math.random() * 0xffffffff)
+    .toString(36)
+    .padStart(7, "0");
+  const timePart = Date.now().toString(36).slice(-4);
+  return `${randomPart}${timePart}`.replace(/[^a-z0-9]/g, "").slice(0, 12) || "nonce";
+}
+
+export function createSimulationTurnCorrelationId(
+  simulationSessionId: string,
+  turnNumber: number,
+  nonce = createSimulationCorrelationNonce(),
+): string {
+  const safeTurnNumber = Number.isFinite(turnNumber) ? Math.max(1, Math.floor(turnNumber)) : 1;
+  const safeNonce = nonce
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 16);
+  return createSimulationCorrelationId(
+    simulationSessionId,
+    `turn-${safeTurnNumber}-${safeNonce || createSimulationCorrelationNonce()}`,
+  );
+}

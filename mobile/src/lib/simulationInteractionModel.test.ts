@@ -1,5 +1,6 @@
 import {
   createSimulationCorrelationId,
+  createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
@@ -206,4 +207,15 @@ runTest("correlation ids stay short and readable", () => {
   assert(/^sim-/.test(correlationId), "correlation id should keep the simulation prefix");
   assert(correlationId.includes("turn-12-tts-start"), "correlation id should preserve the phase");
   assert(correlationId.length <= 80, "correlation id should stay within the server header limit");
+});
+
+runTest("turn correlation ids preserve turn number and add a collision-safe suffix", () => {
+  const firstCorrelationId = createSimulationTurnCorrelationId("session_abc_123", 12, "nonce-one");
+  const secondCorrelationId = createSimulationTurnCorrelationId("session_abc_123", 12, "nonce-two");
+
+  assert(/^sim-/.test(firstCorrelationId), "turn correlation id should keep the simulation prefix");
+  assert(firstCorrelationId.includes("turn-12-nonce-one"), "turn correlation id should include turn number and nonce");
+  assert(secondCorrelationId.includes("turn-12-nonce-two"), "turn correlation id should include the supplied nonce");
+  assert(firstCorrelationId !== secondCorrelationId, "different nonces should produce different turn correlation ids");
+  assert(firstCorrelationId.length <= 80, "turn correlation id should stay within the server header limit");
 });

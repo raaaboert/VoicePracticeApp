@@ -17,6 +17,20 @@ export function shouldFallbackToLegacyAssistantReply(error: unknown): boolean {
   return shouldFallbackToLegacyUnifiedSubmit(error);
 }
 
+export function isExpiredSubmittedTurnAwait(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("request failed (410)") ||
+    message.includes("no longer pending") ||
+    message.includes("already cleaned") ||
+    message.includes("expired")
+  );
+}
+
 export function isUsableSimulationTranscript(value: unknown): value is string {
   if (typeof value !== "string") {
     return false;

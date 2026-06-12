@@ -130,6 +130,17 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
+export interface BackendVersionInfo {
+  gitSha?: string;
+  buildTimestamp?: string;
+  processStartedAt?: string;
+  models?: {
+    chatModel?: string;
+    simulationModel?: string;
+    transcriptionModel?: string;
+  };
+}
+
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const BASE64_INDEX_BY_CHAR = Object.fromEntries(
   [...BASE64_ALPHABET].map((character, index) => [character, index]),
@@ -388,6 +399,21 @@ async function requestFormData<T>(
 
 export function getApiBaseUrl(): string {
   return API_BASE_URL;
+}
+
+export async function fetchBackendVersion(options?: {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<BackendVersionInfo> {
+  return await requestJson<BackendVersionInfo>(
+    "/version",
+    { method: "GET" },
+    undefined,
+    {
+      timeoutMs: options?.timeoutMs ?? 5_000,
+      signal: options?.signal,
+    },
+  );
 }
 
 function isTransientRequestError(error: unknown): boolean {
