@@ -1025,7 +1025,6 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         return;
       }
       playbackStartHandled = true;
-      startPrefetchForChunk(2);
       onPlaybackStart?.();
     };
     const startPrefetchForChunk = (targetIndex: number) => {
@@ -1035,6 +1034,15 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       if (preparedChunkByIndex.has(targetIndex)) {
         return;
       }
+      logSimulationTiming({
+        correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${targetIndex + 1}`),
+        phase: "tts_chunk_prepare_start",
+        details: {
+          chunkIndex: targetIndex,
+          chunkCount: chunks.length,
+          textChars: chunks[targetIndex]?.length ?? 0,
+        },
+      });
       preparedChunkByIndex.set(
         targetIndex,
         prefetchRemoteTtsChunk(
@@ -1048,6 +1056,18 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         ),
       );
     };
+
+    logSimulationTiming({
+      correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, "tts-plan"),
+      phase: "tts_chunk_plan",
+      details: {
+        textChars: text.trim().length,
+        chunkCount: chunks.length,
+        chunkChars: chunks.map((chunk) => chunk.length),
+        fastStartEnabled: shouldUseFastStartRemoteTts,
+        hasPrefetchedFirstChunk: Boolean(prefetchedFirstChunk),
+      },
+    });
 
     if (prefetchedFirstChunk) {
       preparedChunkByIndex.set(
@@ -1063,7 +1083,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         }),
       );
     }
-    startPrefetchForChunk(1);
+    for (let index = 1; index < chunks.length; index += 1) {
+      startPrefetchForChunk(index);
+    }
 
     try {
       for (let index = 0; index < chunks.length; index += 1) {
@@ -1092,19 +1114,30 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             if (index === 0) {
               handlePlaybackStart();
             }
+            const boundaryGapMs =
+              index > 0 && typeof previousChunkCompletedAtMs === "number"
+                ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
+                : null;
+            if (typeof boundaryGapMs === "number") {
+              logSimulationTiming({
+                correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                phase: "tts_chunk_boundary_gap",
+                details: {
+                  chunkIndex: index,
+                  chunkCount: chunks.length,
+                  boundaryGapMs,
+                },
+              });
+            }
             logSimulationTiming({
               correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
               phase: "tts_chunk_playback_started",
               details: {
                 chunkIndex: index,
                 chunkCount: chunks.length,
-                boundaryGapMs:
-                  index > 0 && typeof previousChunkCompletedAtMs === "number"
-                    ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
-                    : null,
+                boundaryGapMs,
               },
             });
-            startPrefetchForChunk(index + 1);
           },
           preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
           preparedRemoteAudio,
@@ -1138,15 +1171,40 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             sourceKind: utteranceResult.sourceKind ?? null,
           },
         });
-        startPrefetchForChunk(index + 1);
+        logSimulationTiming({
+          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+          phase: "tts_chunk_playback_completed",
+          details: {
+            chunkIndex: index,
+            chunkCount: chunks.length,
+            outcome: utteranceResult.outcome,
+            mode: utteranceResult.mode,
+            degraded: utteranceResult.degraded,
+            timedOut: utteranceResult.timedOut,
+          },
+        });
       }
-      return aggregateSpeechResult ?? {
+      const finalResult: TtsPlaybackResult = aggregateSpeechResult ?? {
         outcome: "remote_tts_completed",
         mode: "remote",
         degraded: false,
         timedOut: false,
         reason: "no_tts_chunks",
       };
+      logSimulationTiming({
+        correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, "tts-complete"),
+        phase: finalResult.degraded ? "tts_pipeline_degraded" : "tts_pipeline_complete",
+        details: {
+          chunkCount: chunks.length,
+          outcome: finalResult.outcome,
+          mode: finalResult.mode,
+          degraded: finalResult.degraded,
+          timedOut: finalResult.timedOut,
+          reason: finalResult.reason,
+          sourceKind: finalResult.sourceKind ?? null,
+        },
+      });
+      return finalResult;
     } finally {
       for (const [index, preparedChunk] of resolvedPreparedChunkByIndex) {
         await releasePreparedRemoteAudioSource(preparedChunk);

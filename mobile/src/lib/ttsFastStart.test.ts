@@ -28,20 +28,30 @@ runTest("keeps short assistant replies in a single TTS request", () => {
   );
 });
 
-runTest("splits a long multi-sentence reply at the first suitable sentence boundary", () => {
+runTest("keeps normal live replies under the fast-start threshold in one request", () => {
   const text =
     "I understand why you are hesitant about changing vendors right now, and your concerns are reasonable. What would make this feel safer for you is a phased rollout with measurable checkpoints, so we can prove value before expanding further.";
+  assertDeepEqual(
+    splitTextForRemoteTtsFastStart(text),
+    [text],
+    "normal live replies under the single-request threshold should not split",
+  );
+});
+
+runTest("splits a long multi-sentence reply at the first suitable sentence boundary", () => {
+  const text =
+    "I understand why you are hesitant about changing vendors right now, and your concerns are reasonable, especially when your team has already invested time and trust in the current process and cannot afford a disruptive rollout during a busy quarter. A safer path is to run a narrow pilot with clear checkpoints, prove the outcome with your own team, and only expand if the evidence supports it, so you have practical proof before asking anyone to change their workflow or adjust priorities.";
   const chunks = splitTextForRemoteTtsFastStart(text);
 
   assert(chunks.length === 2, "expected the helper to split a long two-sentence reply");
   assert(chunks[0].endsWith("."), "first chunk should end cleanly at a sentence boundary");
   assert(chunks[0].length < text.length, "first chunk should be shorter than the full reply");
-  assert(chunks[1].startsWith("What would make"), "second chunk should carry the remainder of the reply");
+  assert(chunks[1].startsWith("A safer path"), "second chunk should carry the remainder of the reply");
 });
 
 runTest("keeps longer replies split into natural sentence-bounded chunks without over-fragmenting", () => {
   const text =
-    "I hear the hesitation, and I do not expect you to change course blindly. We can start with one narrow pilot so your team sees the workflow in action before committing more broadly. If the pilot misses your standards, you keep full control over what happens next.";
+    "I hear the hesitation, and I do not expect you to change course blindly because the change has to make sense for your team, your customers, and the results you are already responsible for delivering. We can start with one narrow pilot so your team sees the workflow in action before committing more broadly. If the pilot misses your standards, you keep full control over what happens next and we stop before it creates operational drag. That gives you evidence from your own environment instead of asking you to trust a generic promise.";
   const chunks = splitTextForRemoteTtsFastStart(text);
 
   assert(chunks.length >= 2, "expected a longer reply to split into multiple chunks");
@@ -70,9 +80,19 @@ runTest("does not split a long single-sentence reply with no natural pause", () 
   );
 });
 
-runTest("splits a long single-sentence reply at a natural clause boundary when that speeds first audio", () => {
+runTest("does not split normal single-sentence replies at clause boundaries", () => {
   const text =
     "I understand the concern, and I do not want to rush you into a decision, but we can start with a narrow pilot that gives your team real evidence before you commit more broadly.";
+  assertDeepEqual(
+    splitTextForRemoteTtsFastStart(text),
+    [text],
+    "normal single-sentence replies should stay intact even with clause punctuation",
+  );
+});
+
+runTest("splits a very long single-sentence reply at a natural clause boundary when needed", () => {
+  const text =
+    "I understand the concern, and I do not want to rush you into a decision, but we can start with a narrow pilot that gives your team real evidence before you commit more broadly, and we can define success in operational terms your leaders already care about, including adoption, cycle time, handoff quality, and customer follow-through, while keeping the scope small enough that your team can evaluate the change without disrupting current commitments, and if the pilot does not meet the standard we agree on up front, we stop there and you keep full control over the next step, because the goal is not to force a switch, but to make the decision easier and safer with real proof from your environment.";
   const chunks = splitTextForRemoteTtsFastStart(text);
 
   assert(chunks.length >= 2, "expected a long clause-heavy sentence to split");
