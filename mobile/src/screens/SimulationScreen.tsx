@@ -480,6 +480,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const openingTtsCompletedRef = useRef(false);
   const openingDeliveredRef = useRef(false);
   const recognizedStartRegisteredRef = useRef(false);
+  const turnLoopReadyRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const localModeConfirmedRef = useRef(false);
@@ -704,6 +705,12 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       correlationId: params.correlationId,
       phase: params.background ? "opening_prefetch_request_start" : "opening_request_start",
     });
+    if (params.background) {
+      logSimulationTiming({
+        correlationId: params.correlationId,
+        phase: "opening_prefetch_started",
+      });
+    }
     logSimulationApiCall(params.apiCallLabel);
 
     let openingPromise: Promise<OpeningLinePayload>;
@@ -1477,11 +1484,14 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
 
   const startListeningTurn = async () => {
     const requestCorrelationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
+    const turnNumber = messagesRef.current.filter((message) => message.role === "user").length + 1;
     logSimulationTiming({
       correlationId: requestCorrelationId,
       phase: "start_listening_requested",
       details: {
+        turnNumber,
         sessionActive: sessionActiveRef.current,
+        turnLoopReady: turnLoopReadyRef.current,
         processing: processingRef.current,
         recordingExists: Boolean(recordingRef.current),
         recordingStartInProgress: recordingStartInProgressRef.current,
@@ -1490,6 +1500,20 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     });
 
     if (!sessionActiveRef.current || processingRef.current || unmountedRef.current) {
+      return;
+    }
+
+    if (!turnLoopReadyRef.current) {
+      logSimulationTiming({
+        correlationId: requestCorrelationId,
+        phase: "start_listening_ignored_turn_loop_not_ready",
+        details: {
+          turnNumber,
+          openingCompleted: openingCompletedRef.current,
+          openingTtsCompleted: openingTtsCompletedRef.current,
+          recognizedStartRegistered: recognizedStartRegisteredRef.current,
+        },
+      });
       return;
     }
 
@@ -1607,7 +1631,24 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       logSimulationTiming({
         correlationId: turnCorrelationId,
         phase: "turn_recording_started",
+        details: {
+          turnNumber,
+          firstTurn: turnNumber === 1,
+          turnLoopReady: turnLoopReadyRef.current,
+        },
       });
+      if (turnNumber === 1) {
+        logSimulationTiming({
+          correlationId: turnCorrelationId,
+          phase: "first_recording_started",
+          details: {
+            openingCompleted: openingCompletedRef.current,
+            openingTtsCompleted: openingTtsCompletedRef.current,
+            recognizedStartRegistered: recognizedStartRegisteredRef.current,
+            turnLoopReady: turnLoopReadyRef.current,
+          },
+        });
+      }
       clearTurnMonitoring();
       monitorIntervalRef.current = setInterval(() => {
         void monitorCurrentTurn();
@@ -1694,6 +1735,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     setError(null);
     let continueLoop = false;
     const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
+    const turnNumber = messagesRef.current.filter((message) => message.role === "user").length + 1;
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
     const turnAbortController = new AbortController();
     const priorTurnAbortController = activeTurnAbortControllerRef.current;
@@ -1781,6 +1823,22 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         startedAtMs: effectiveSubmitStartedAtMs,
         details: {
           trigger: finalizeTrigger,
+          turnNumber,
+          firstTurn: turnNumber === 1,
+          turnLoopReady: turnLoopReadyRef.current,
+        },
+      });
+      logSimulationTiming({
+        correlationId,
+        phase: "turn_finalize_started",
+        startedAtMs: effectiveSubmitStartedAtMs,
+        details: {
+          turnNumber,
+          firstTurn: turnNumber === 1,
+          mode: modeRef.current,
+          sessionActive: sessionActiveRef.current,
+          openingTtsCompleted: openingTtsCompletedRef.current,
+          turnLoopReady: turnLoopReadyRef.current,
         },
       });
       await recording.stopAndUnloadAsync();
@@ -1935,23 +1993,15 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           unifiedSubmitRequestStartedAtMs = Date.now();
           transcribeRequestStartedAtMs = unifiedSubmitRequestStartedAtMs;
           assistantRequestStartedAtMs = unifiedSubmitRequestStartedAtMs;
-          unifiedAssistantAwaitAbortController = new AbortController();
-          assistantAwaitAbortControllerRef.current = unifiedAssistantAwaitAbortController;
-          unifiedAssistantAwaitPromise = awaitSubmittedSimulationTurnReply({
-            userId,
-            authToken,
-            correlationId,
-            signal: unifiedAssistantAwaitAbortController.signal,
-          });
-          logSimulationTiming({
-            correlationId,
-            phase: "assistant_await_request_start",
-            startedAtMs: effectiveSubmitStartedAtMs,
-          });
           logSimulationTiming({
             correlationId,
             phase: "unified_submit_request_start",
             startedAtMs: effectiveSubmitStartedAtMs,
+            details: {
+              turnNumber,
+              firstTurn: turnNumber === 1,
+              awaitStrategy: "after_transcript_ready",
+            },
           });
           logSimulationApiCall("submitRecordedSimulationTurn");
           const unifiedPayload = await submitRecordedSimulationTurn({
@@ -1994,6 +2044,55 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               modelLatencyMs: unifiedPayload.runtime?.modelLatencyMs ?? null,
             },
           });
+          if (unifiedPayload.outcome === "transcript_ready") {
+            const awaitScheduledAtMs = Date.now();
+            const submitRequestStartedAtMs = unifiedSubmitRequestStartedAtMs ?? awaitScheduledAtMs;
+            unifiedAssistantAwaitAbortController = new AbortController();
+            assistantAwaitAbortControllerRef.current = unifiedAssistantAwaitAbortController;
+            logSimulationTiming({
+              correlationId,
+              phase: "turn_await_start_scheduled",
+              startedAtMs: effectiveSubmitStartedAtMs,
+              details: {
+                turnNumber,
+                firstTurn: turnNumber === 1,
+                strategy: "after_transcript_ready",
+                submitToAwaitStartMs: Math.max(0, awaitScheduledAtMs - submitRequestStartedAtMs),
+                transcriptChars: userText.length,
+                mode: modeRef.current,
+                sessionActive: sessionActiveRef.current,
+                openingTtsCompleted: openingTtsCompletedRef.current,
+                turnLoopReady: turnLoopReadyRef.current,
+              },
+            });
+            if (turnNumber === 1 && awaitScheduledAtMs - effectiveSubmitStartedAtMs > 10_000) {
+              logSimulationTiming({
+                correlationId,
+                phase: "first_turn_await_delay_detected",
+                startedAtMs: effectiveSubmitStartedAtMs,
+                details: {
+                  delayMs: Math.max(0, awaitScheduledAtMs - effectiveSubmitStartedAtMs),
+                  submitToAwaitStartMs: Math.max(0, awaitScheduledAtMs - submitRequestStartedAtMs),
+                },
+              });
+            }
+            unifiedAssistantAwaitPromise = awaitSubmittedSimulationTurnReply({
+              userId,
+              authToken,
+              correlationId,
+              signal: unifiedAssistantAwaitAbortController.signal,
+            });
+            logSimulationTiming({
+              correlationId,
+              phase: "assistant_await_request_start",
+              startedAtMs: effectiveSubmitStartedAtMs,
+              details: {
+                turnNumber,
+                firstTurn: turnNumber === 1,
+                strategy: "after_transcript_ready",
+              },
+            });
+          }
           if (isUsableSimulationTranscript(userText)) {
             logSimulationTiming({
               correlationId,
@@ -2025,7 +2124,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               },
             });
           } else if (unifiedPayload.outcome === "no_clear_speech") {
-            unifiedAssistantAwaitAbortController.abort();
+            unifiedAssistantAwaitAbortController?.abort();
             assistantAwaitAbortControllerRef.current = null;
           }
         } catch (unifiedError) {
@@ -2549,6 +2648,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
 
     startSimulationInProgressRef.current = true;
+    turnLoopReadyRef.current = false;
     const startupAttempt = startSimulationAttemptRef.current + 1;
     startSimulationAttemptRef.current = startupAttempt;
     const startupGeneration = sessionLifecycleGenerationRef.current;
@@ -2799,6 +2899,13 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                   return;
                 }
                 openingTtsCompletedRef.current = true;
+                logSimulationTiming({
+                  correlationId: openingCorrelationId,
+                  phase: "opening_tts_complete",
+                  details: {
+                    openingTtsCompleted: openingTtsCompletedRef.current,
+                  },
+                });
               } finally {
                 openingTtsInProgressRef.current = false;
               }
@@ -2872,10 +2979,21 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       setElapsedSeconds(0);
       setSessionActive(true);
       setStatus("Getting ready to listen...");
+      turnLoopReadyRef.current = true;
       startupCompleted = true;
       logSimulationTiming({
         correlationId: startupCorrelationId,
         phase: "simulation_start_completed",
+      });
+      logSimulationTiming({
+        correlationId: startupCorrelationId,
+        phase: "turn_loop_ready",
+        details: {
+          openingCompleted: openingCompletedRef.current,
+          openingTtsCompleted: openingTtsCompletedRef.current,
+          recognizedStartRegistered: recognizedStartRegisteredRef.current,
+          sessionActive: sessionActiveRef.current,
+        },
       });
       void startListeningTurn();
     } catch (startError) {
@@ -2926,6 +3044,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     currentTurnCorrelationIdRef.current = null;
     recordingSafetySignalRef.current = null;
     startSimulationInProgressRef.current = false;
+    turnLoopReadyRef.current = false;
     setIsStartingSession(false);
     recordingStartInProgressRef.current = false;
     recordingPrepareInProgressRef.current = false;
@@ -3151,6 +3270,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       currentTurnCorrelationIdRef.current = null;
       recordingSafetySignalRef.current = null;
       startSimulationInProgressRef.current = false;
+      turnLoopReadyRef.current = false;
       setIsStartingSession(false);
       recordingStartInProgressRef.current = false;
       recordingPrepareInProgressRef.current = false;
@@ -3173,12 +3293,28 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         setMode("idle");
         setStatus("Scenario ready. Press Start Simulation.");
         setIsInitializing(false);
+        logSimulationTiming({
+          correlationId: createSimulationCorrelationId(config.simulationSessionId, "scenario-config"),
+          phase: "scenario_config_ready",
+          details: {
+            localTestMode: true,
+            openingPrefetchBackground: false,
+          },
+        });
         return;
       }
 
       setMode("idle");
       setStatus("Scenario ready. Press Start Simulation.");
       setIsInitializing(false);
+      logSimulationTiming({
+        correlationId: createSimulationCorrelationId(config.simulationSessionId, "scenario-config"),
+        phase: "scenario_config_ready",
+        details: {
+          localTestMode: false,
+          openingPrefetchBackground: true,
+        },
+      });
 
       const openingPrefetchCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "opening-prefetch");
       void startOpeningPrefetch({
@@ -3208,6 +3344,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       openingPrefetchPromiseRef.current = null;
       openingPrefetchGenerationRef.current = null;
       startSimulationInProgressRef.current = false;
+      turnLoopReadyRef.current = false;
       recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
       openingTtsInProgressRef.current = false;
