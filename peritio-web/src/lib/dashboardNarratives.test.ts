@@ -5,6 +5,7 @@ import type {
   DashboardCustomerDetailResponse,
   DashboardOverviewResponse,
   DashboardTrainingWorkspaceRow,
+  DashboardViewer,
   DashboardUserReportResponse,
 } from "@voicepractice/shared";
 
@@ -28,6 +29,17 @@ function createEmptyCoachingInsights(): DashboardCoachingInsights {
     topCoachingPriorities: [],
     repeatedFocusArea: null,
     normalizationDiagnostics: null,
+  };
+}
+
+function createDashboardViewer(): DashboardViewer {
+  return {
+    accessType: "super_user",
+    userId: "super-1",
+    email: "super@peritio.test",
+    isSuperUser: true,
+    orgId: null,
+    orgName: null,
   };
 }
 
@@ -64,11 +76,13 @@ function createTrainingRow(
     orgName: overrides.orgName ?? "Acme Co",
     name: overrides.name ?? "Negotiation Foundations",
     status: overrides.status ?? "active",
+    description: overrides.description ?? "Practice core negotiation conversations.",
     updatedAt: overrides.updatedAt ?? "2026-04-20T00:00:00.000Z",
     createdAt: overrides.createdAt ?? "2026-01-01T00:00:00.000Z",
+    attachedTrainingPackIds: overrides.attachedTrainingPackIds ?? ["pack-1"],
+    attachedCustomScenarioIds: overrides.attachedCustomScenarioIds ?? [],
     attachedTrainingPackCount: overrides.attachedTrainingPackCount ?? 1,
     attachedCustomScenarioCount: overrides.attachedCustomScenarioCount ?? 0,
-    attachedStandardScenarioCount: overrides.attachedStandardScenarioCount ?? 0,
     summary: overrides.summary ?? {
       totalAttemptsLast30Days: 6,
       averageScoreLast30Days: 78,
@@ -89,7 +103,7 @@ function createTrainingRow(
 
 test("aggregate users narrative uses recent-practice user counts rather than active-account counts", () => {
   const userReport: DashboardUserReportResponse = {
-    viewer: { accessType: "super_user" },
+    viewer: createDashboardViewer(),
     summary: {
       userCount: 4,
       activeUserCount: 4,
@@ -121,7 +135,7 @@ test("aggregate users narrative uses recent-practice user counts rather than act
 
 test("aggregate company narrative derives traction context from recent-practice users", () => {
   const userReport: DashboardUserReportResponse = {
-    viewer: { accessType: "super_user" },
+    viewer: createDashboardViewer(),
     summary: {
       userCount: 6,
       activeUserCount: 6,
@@ -143,7 +157,7 @@ test("aggregate company narrative derives traction context from recent-practice 
   } as DashboardUserReportResponse;
 
   const overview: DashboardOverviewResponse = {
-    viewer: { accessType: "super_user" },
+    viewer: createDashboardViewer(),
     summary: {
       activeCustomers: 1,
       activeUsers: 25,
@@ -180,7 +194,7 @@ test("aggregate company narrative derives traction context from recent-practice 
 
 test("customer narrative uses visible recent-practice users rather than account-status counts", () => {
   const payload: DashboardCustomerDetailResponse = {
-    viewer: { accessType: "super_user" },
+    viewer: createDashboardViewer(),
     customer: {
       orgId: "org-1",
       orgName: "Acme Co",

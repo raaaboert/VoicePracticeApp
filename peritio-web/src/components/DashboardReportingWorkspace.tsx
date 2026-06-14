@@ -61,10 +61,12 @@ export function DashboardReportingWorkspace({
   trainingWorkspace,
   userReport,
   overview,
+  isDemoData = false,
 }: {
   trainingWorkspace: DashboardTrainingWorkspaceResponse | null;
   userReport: DashboardUserReportResponse | null;
   overview: DashboardOverviewResponse | null;
+  isDemoData?: boolean;
 }) {
   const searchParams = useSearchParams();
   const trainings = trainingWorkspace?.trainings ?? [];
@@ -137,6 +139,11 @@ export function DashboardReportingWorkspace({
               : "See the company, training, and learner signals that matter most in the current reporting scope."}
           </p>
         </div>
+        {isDemoData ? (
+          <div className="page-actions">
+            <span className="pill muted">Demo data</span>
+          </div>
+        ) : null}
       </header>
 
       {canRenderDashboardWorkspaceDivisionFilter({
@@ -286,9 +293,13 @@ export function DashboardReportingWorkspace({
                             {selectedTraining.users.map((user) => (
                               <tr key={user.userId}>
                                 <td>
-                                  <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
+                                  {isDemoData ? (
                                     <strong>{user.email}</strong>
-                                  </Link>
+                                  ) : (
+                                    <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
+                                      <strong>{user.email}</strong>
+                                    </Link>
+                                  )}
                                   <div className="table-subcopy">
                                     {formatOrgRole(user.orgRole)}
                                     {user.latestScenarioTitle ? ` - Latest scenario: ${user.latestScenarioTitle}` : ""}
@@ -390,9 +401,13 @@ export function DashboardReportingWorkspace({
                         {users.map((user) => (
                           <tr key={user.userId}>
                             <td>
-                              <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
+                              {isDemoData ? (
                                 <strong>{user.email}</strong>
-                              </Link>
+                              ) : (
+                                <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
+                                  <strong>{user.email}</strong>
+                                </Link>
+                              )}
                               <div className="table-subcopy">
                                 {user.orgName ?? "Unknown company"} - {formatOrgRole(user.orgRole)}
                               </div>

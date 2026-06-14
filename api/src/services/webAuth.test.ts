@@ -40,7 +40,7 @@ const service = createWebAuthService({
 
 test("trusted web auth session stores dashboard scope and device metadata", () => {
   const user = createUser();
-  const now = new Date("2026-03-30T12:00:00.000Z");
+  const now = new Date("2099-03-30T12:00:00.000Z");
 
   const issued = service.issueSession(user, 14 * 24 * 60, now, {
     accessType: "customer_dashboard_user",
@@ -79,7 +79,7 @@ test("dashboard trusted session policy is fixed at exactly 14 days", () => {
 
 test("trusted web auth session touch updates activity metadata only when needed", () => {
   const user = createUser();
-  const issuedAt = new Date("2026-03-30T12:00:00.000Z");
+  const issuedAt = new Date("2099-03-30T12:00:00.000Z");
 
   const issued = service.issueSession(user, 14 * 24 * 60, issuedAt, {
     accessType: "customer_dashboard_user",
@@ -93,19 +93,19 @@ test("trusted web auth session touch updates activity metadata only when needed"
   const record = issued.record;
   assert.ok(record);
 
-  const unchanged = service.touchSession(record, new Date("2026-03-30T12:05:00.000Z"), {
+  const unchanged = service.touchSession(record, new Date("2099-03-30T12:05:00.000Z"), {
     userAgent: "Mozilla/5.0",
     ipAddress: "203.0.113.15",
   });
   assert.equal(unchanged, false);
   assert.equal(record.lastSeenAt, issuedAt.toISOString());
 
-  const touched = service.touchSession(record, new Date("2026-03-30T12:20:00.000Z"), {
+  const touched = service.touchSession(record, new Date("2099-03-30T12:20:00.000Z"), {
     userAgent: "Mozilla/5.0",
     ipAddress: "198.51.100.20",
   });
   assert.equal(touched, true);
-  assert.equal(record.lastSeenAt, "2026-03-30T12:20:00.000Z");
+  assert.equal(record.lastSeenAt, "2099-03-30T12:20:00.000Z");
   assert.equal(record.lastSeenIp, "198.51.100.20");
   assert.equal(record.lastSeenUserAgent, "Mozilla/5.0");
 });
