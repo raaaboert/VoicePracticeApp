@@ -47,6 +47,7 @@ interface SpeakWithTtsFallbackParams {
   remoteTtsEnabled: boolean;
   remoteAiConfigured: boolean;
   allowRemoteTts?: boolean;
+  allowFallbackSpeech?: boolean;
   voiceGender: AiVoiceGender;
   voiceProfile: AiVoiceProfile;
   selectedVoiceIdentifierRef?: MutableRefObject<string | undefined>;
@@ -228,9 +229,10 @@ function logIosTtsSelection(params: {
   preset: RemoteTtsPreset;
   voiceGender: AiVoiceGender;
   voiceProfile: AiVoiceProfile;
-  stage: "remote_attempt" | "remote_success" | "remote_failure" | "fallback_speech";
+  stage: "remote_attempt" | "remote_success" | "remote_failure" | "fallback_blocked" | "fallback_speech";
   sourceKind?: RemoteAudioSourceKind | "fallback" | null;
   fallbackReason?: string | null;
+  playbackRate?: number;
   remoteTtsEnabled?: boolean;
   remoteAiConfigured?: boolean;
   allowRemoteTts?: boolean;
@@ -250,6 +252,7 @@ function logIosTtsSelection(params: {
     stage: params.stage,
     sourceKind: params.sourceKind ?? null,
     fallbackReason: params.fallbackReason ?? null,
+    playbackRate: params.playbackRate ?? null,
     remoteTtsEnabled: params.remoteTtsEnabled ?? null,
     remoteAiConfigured: params.remoteAiConfigured ?? null,
     allowRemoteTts: params.allowRemoteTts ?? null,
@@ -264,6 +267,22 @@ function clampPlaybackRate(value: number): number {
 function resolveRemotePlaybackRate(profile: AiVoiceProfile): number {
   const baseRate = REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE[profile] ?? REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE.balanced;
   return clampPlaybackRate(baseRate * REMOTE_PLAYBACK_GLOBAL_MULTIPLIER);
+}
+
+function resolvePlatformRemotePlaybackRate(gender: AiVoiceGender, profile: AiVoiceProfile): number {
+  if (Platform.OS !== "ios") {
+    return resolveRemotePlaybackRate(profile);
+  }
+
+  if (profile === "warm") {
+    return gender === "male" ? 1.0 : 1.03;
+  }
+
+  if (profile === "balanced") {
+    return 1.04;
+  }
+
+  return 1.0;
 }
 
 function logTtsTiming(payload: {
@@ -556,11 +575,13 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
   const assistantTextReceivedAtMs = params.assistantTextReceivedAtMs ?? Date.now();
   const textChars = params.text.trim().length;
   const remoteAllowed = params.allowRemoteTts ?? true;
+  const fallbackSpeechAllowed = params.allowFallbackSpeech ?? true;
   const shouldAttemptRemote =
     params.remoteTtsEnabled &&
     params.remoteAiConfigured &&
     remoteAllowed &&
     Platform.OS !== "web";
+  const remotePlaybackRate = resolvePlatformRemotePlaybackRate(params.voiceGender, params.voiceProfile);
   const isCancelled = (): boolean => Boolean(params.abortSignal?.aborted) || Boolean(params.isCancelled?.());
   const throwIfCancelled = () => {
     if (isCancelled()) {
@@ -613,6 +634,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       voiceGender: params.voiceGender,
       voiceProfile: params.voiceProfile,
       stage: "remote_attempt",
+      playbackRate: remotePlaybackRate,
       remoteTtsEnabled: params.remoteTtsEnabled,
       remoteAiConfigured: params.remoteAiConfigured,
       allowRemoteTts: remoteAllowed,
@@ -700,6 +722,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         voiceProfile: params.voiceProfile,
         stage: "remote_success",
         sourceKind,
+        playbackRate: remotePlaybackRate,
         remoteTtsEnabled: params.remoteTtsEnabled,
         remoteAiConfigured: params.remoteAiConfigured,
         allowRemoteTts: remoteAllowed,
@@ -895,8 +918,6 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         playbackFinished,
       };
     };
-
-    const remotePlaybackRate = Platform.OS === "ios" ? 1.0 : resolveRemotePlaybackRate(params.voiceProfile);
 
     const loadAndPlayPreparedSource = async (paramsForSource: {
       sourceKind: RemoteAudioSourceKind;
@@ -1259,6 +1280,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         stage: "remote_failure",
         sourceKind,
         fallbackReason: remoteStage,
+        playbackRate: remotePlaybackRate,
         remoteTtsEnabled: params.remoteTtsEnabled,
         remoteAiConfigured: params.remoteAiConfigured,
         allowRemoteTts: remoteAllowed,
@@ -1298,19 +1320,42 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
 
       deviceFallbackAttempted = true;
       fallbackReason = remoteStage;
-      logTtsMode(params.source, params.preset, "fallback", "backendError");
+      if (fallbackSpeechAllowed) {
+        logTtsMode(params.source, params.preset, "fallback", "backendError");
+      }
     }
   } else {
     fallbackReason =
       !params.remoteTtsEnabled || !remoteAllowed || Platform.OS === "web"
         ? "remoteTtsDisabled"
         : "remoteAiNotConfigured";
-    logTtsMode(
-      params.source,
-      params.preset,
-      "fallback",
-      fallbackReason === "remoteAiNotConfigured" ? "remoteAiNotConfigured" : "remoteTtsDisabled",
-    );
+    if (fallbackSpeechAllowed) {
+      logTtsMode(
+        params.source,
+        params.preset,
+        "fallback",
+        fallbackReason === "remoteAiNotConfigured" ? "remoteAiNotConfigured" : "remoteTtsDisabled",
+      );
+    }
+  }
+
+  if (!fallbackSpeechAllowed) {
+    const reason = fallbackReason ?? "remote_unavailable";
+    logIosTtsSelection({
+      source: params.source,
+      preset: params.preset,
+      voiceGender: params.voiceGender,
+      voiceProfile: params.voiceProfile,
+      stage: "fallback_blocked",
+      sourceKind: "fallback",
+      fallbackReason: reason,
+      playbackRate: remotePlaybackRate,
+      remoteTtsEnabled: params.remoteTtsEnabled,
+      remoteAiConfigured: params.remoteAiConfigured,
+      allowRemoteTts: remoteAllowed,
+      correlationId: params.correlationId,
+    });
+    throw new Error(`Remote voice sample unavailable (${reason}).`);
   }
 
   if (!selectedVoiceIdentifierRef.current) {
@@ -1353,6 +1398,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     stage: "fallback_speech",
     sourceKind: "fallback",
     fallbackReason: fallbackReason ?? "remote_unavailable",
+    playbackRate: remotePlaybackRate,
     remoteTtsEnabled: params.remoteTtsEnabled,
     remoteAiConfigured: params.remoteAiConfigured,
     allowRemoteTts: remoteAllowed,

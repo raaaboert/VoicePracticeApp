@@ -3,6 +3,7 @@ import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
+import * as Speech from "expo-speech";
 import appManifest from "./app.json";
 import {
   ActivityIndicator,
@@ -311,6 +312,7 @@ type ScenarioTrainingOption = {
 
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
+const IOS_VOICE_SAMPLE_TIMEOUT_MS = 30_000;
 const APP_ICON_ART = require("./assets/PeritioLogo_061526.png");
 const APP_STARTUP_ART = require("./peritio-source-splash.png");
 const APP_SURFACE_COLORS = {
@@ -696,6 +698,9 @@ export default function App() {
   const sampleVoiceIdentifierRef = useRef<string | undefined>(undefined);
   const sampleRemoteTtsSoundRef = useRef<Audio.Sound | null>(null);
   const sampleRemoteTtsFileRef = useRef<string | null>(null);
+  const samplePlaybackRequestIdRef = useRef(0);
+  const sampleAbortControllerRef = useRef<AbortController | null>(null);
+  const sampleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [scopedConfigError, setScopedConfigError] = useState<string | null>(null);
@@ -879,8 +884,81 @@ export default function App() {
     );
   }, [apiConfigured, config, remoteTtsEnabled]);
 
+  const clearVoiceSampleTimeout = () => {
+    if (sampleTimeoutRef.current) {
+      clearTimeout(sampleTimeoutRef.current);
+      sampleTimeoutRef.current = null;
+    }
+  };
+
+  const logVoiceSampleEvent = (
+    stage: string,
+    details?: {
+      sampleRequestId?: number;
+      preset?: string;
+      mode?: string | null;
+      sourceKind?: string | null;
+      playbackRate?: number | null;
+      reason?: string | null;
+      error?: string | null;
+    },
+  ) => {
+    // eslint-disable-next-line no-console
+    console.log("[VOICE-SAMPLE]", {
+      stage,
+      platform: Platform.OS,
+      sampleRequestId: details?.sampleRequestId ?? samplePlaybackRequestIdRef.current,
+      voiceGender,
+      voiceProfile,
+      preset: details?.preset ?? toRemoteTtsPreset(voiceGender, voiceProfile),
+      remoteTtsEnabled,
+      remoteAiConfigured: apiConfigured,
+      mode: details?.mode ?? null,
+      sourceKind: details?.sourceKind ?? null,
+      playbackRate: details?.playbackRate ?? null,
+      reason: details?.reason ?? null,
+      error: details?.error ?? null,
+    });
+  };
+
+  const stopActiveVoiceSamplePlayback = async (reason: string) => {
+    clearVoiceSampleTimeout();
+    const activeController = sampleAbortControllerRef.current;
+    const hadActivePlayback = Boolean(
+      activeController || sampleRemoteTtsSoundRef.current || sampleRemoteTtsFileRef.current,
+    );
+    sampleAbortControllerRef.current = null;
+    if (activeController && !activeController.signal.aborted) {
+      activeController.abort();
+    }
+    try {
+      Speech.stop();
+    } catch {
+      // Ignore stale sample speech cleanup failures.
+    }
+    await stopRemoteTtsPlaybackHelper({
+      remoteTtsSoundRef: sampleRemoteTtsSoundRef,
+      remoteTtsFileRef: sampleRemoteTtsFileRef,
+    });
+    if (hadActivePlayback) {
+      logVoiceSampleEvent("cancel", { reason });
+    }
+  };
+
   useEffect(() => {
     return () => {
+      samplePlaybackRequestIdRef.current += 1;
+      clearVoiceSampleTimeout();
+      const activeController = sampleAbortControllerRef.current;
+      sampleAbortControllerRef.current = null;
+      if (activeController && !activeController.signal.aborted) {
+        activeController.abort();
+      }
+      try {
+        Speech.stop();
+      } catch {
+        // Ignore stale sample speech cleanup failures.
+      }
       void stopRemoteTtsPlaybackHelper({
         remoteTtsSoundRef: sampleRemoteTtsSoundRef,
         remoteTtsFileRef: sampleRemoteTtsFileRef,
@@ -2548,47 +2626,149 @@ export default function App() {
   };
 
   const playVoiceSample = async () => {
-    if (isVoiceSamplePlaying) {
-      return;
-    }
-
     if (!user || !mobileAuthToken) {
       setSettingsError("Sign in again to play a voice sample.");
       return;
     }
 
+    await stopActiveVoiceSamplePlayback(isVoiceSamplePlaying ? "restart" : "prestart_cleanup");
+    const sampleRequestId = samplePlaybackRequestIdRef.current + 1;
+    samplePlaybackRequestIdRef.current = sampleRequestId;
+    const abortController = new AbortController();
+    sampleAbortControllerRef.current = abortController;
+    const preset = toRemoteTtsPreset(voiceGender, voiceProfile);
+    const sampleCorrelationId = `voice-sample-${String(sampleRequestId).padStart(6, "0")}`;
+
     setIsVoiceSamplePlaying(true);
     setSettingsNotice(null);
     setSettingsError(null);
+    logVoiceSampleEvent("start", { sampleRequestId, preset });
+
+    if (Platform.OS === "ios") {
+      sampleTimeoutRef.current = setTimeout(() => {
+        if (samplePlaybackRequestIdRef.current !== sampleRequestId) {
+          return;
+        }
+        logVoiceSampleEvent("timeout", {
+          sampleRequestId,
+          preset,
+          reason: `timeout_${IOS_VOICE_SAMPLE_TIMEOUT_MS}ms`,
+        });
+        abortController.abort();
+        void stopRemoteTtsPlaybackHelper({
+          remoteTtsSoundRef: sampleRemoteTtsSoundRef,
+          remoteTtsFileRef: sampleRemoteTtsFileRef,
+        });
+        try {
+          Speech.stop();
+        } catch {
+          // Ignore stale sample speech cleanup failures.
+        }
+      }, IOS_VOICE_SAMPLE_TIMEOUT_MS);
+    }
 
     try {
       const sample = getAiVoiceOption(voiceProfile);
-      await speakWithRemoteTtsFallback({
+      const playbackResult = await speakWithRemoteTtsFallback({
         source: "sample",
         text: "This is a sample of your selected simulator voice.",
-        preset: toRemoteTtsPreset(voiceGender, voiceProfile),
+        preset,
+        correlationId: sampleCorrelationId,
         userId: user.id,
         authToken: mobileAuthToken,
         remoteTtsEnabled,
         remoteAiConfigured: apiConfigured,
+        allowFallbackSpeech: Platform.OS !== "ios",
         voiceGender,
         voiceProfile,
         selectedVoiceIdentifierRef: sampleVoiceIdentifierRef,
         remoteTtsSoundRef: sampleRemoteTtsSoundRef,
         remoteTtsFileRef: sampleRemoteTtsFileRef,
+        abortSignal: abortController.signal,
+        isCancelled: () => samplePlaybackRequestIdRef.current !== sampleRequestId || abortController.signal.aborted,
+        describeCancellation: () => ({
+          superseded: samplePlaybackRequestIdRef.current !== sampleRequestId,
+          screenChanging: false,
+          sessionEnding: false,
+        }),
+        onPlaybackStart: (details) => {
+          logVoiceSampleEvent("playback_start", {
+            sampleRequestId,
+            preset,
+            mode: details.mode,
+            sourceKind: details.mode === "fallback" ? "fallback" : null,
+          });
+        },
       });
+
+      if (samplePlaybackRequestIdRef.current !== sampleRequestId) {
+        logVoiceSampleEvent("stale_success_ignored", {
+          sampleRequestId,
+          preset,
+          mode: playbackResult.mode,
+          sourceKind: playbackResult.sourceKind ?? null,
+          reason: playbackResult.reason,
+        });
+        return;
+      }
+
+      if (Platform.OS === "ios" && playbackResult.outcome !== "remote_tts_completed") {
+        throw new Error(`Selected AI voice sample did not complete with remote audio (${playbackResult.reason}).`);
+      }
 
       const selectedGenderLabel =
         AI_VOICE_GENDER_OPTIONS.find((option) => option.id === voiceGender)?.label ?? "Female";
       setSettingsNotice(`Played sample using ${selectedGenderLabel} ${sample.label} voice style.`);
+      logVoiceSampleEvent("success", {
+        sampleRequestId,
+        preset,
+        mode: playbackResult.mode,
+        sourceKind: playbackResult.sourceKind ?? (playbackResult.mode === "fallback" ? "fallback" : null),
+        reason: playbackResult.reason,
+      });
     } catch (caught) {
+      if (samplePlaybackRequestIdRef.current !== sampleRequestId) {
+        logVoiceSampleEvent("stale_failure_ignored", {
+          sampleRequestId,
+          preset,
+          error: getErrorMessage(caught, "Stale voice sample failed."),
+        });
+        return;
+      }
+
       const message = getErrorMessage(caught, "Could not play voice sample on this device.");
-      setSettingsError(message);
+      setSettingsError(
+        Platform.OS === "ios"
+          ? `${message} Please try again; the sample will not fall back to a device voice on iOS.`
+          : message,
+      );
+      logVoiceSampleEvent("failure", {
+        sampleRequestId,
+        preset,
+        error: message,
+        reason: abortController.signal.aborted ? "aborted_or_timeout" : null,
+      });
       void submitAutoErrorReport("settings.voice_sample", caught, {
         screen: "settings",
+        details: {
+          platform: Platform.OS,
+          sampleRequestId,
+          preset,
+          voiceGender,
+          voiceProfile,
+          remoteTtsEnabled,
+          remoteAiConfigured: apiConfigured,
+        },
       });
     } finally {
-      setIsVoiceSamplePlaying(false);
+      if (samplePlaybackRequestIdRef.current === sampleRequestId) {
+        clearVoiceSampleTimeout();
+        if (sampleAbortControllerRef.current === abortController) {
+          sampleAbortControllerRef.current = null;
+        }
+        setIsVoiceSamplePlaying(false);
+        logVoiceSampleEvent("complete", { sampleRequestId, preset });
+      }
     }
   };
 
