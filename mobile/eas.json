@@ -23,6 +23,7 @@
       "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_REMOTE_AI_ENABLED": "true",
+        "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
         "EXPO_PUBLIC_API_BASE_URL": "https://voicepractice-api-dev.onrender.com"
       }
     }

@@ -193,6 +193,36 @@ function logTtsMode(source: TtsSource, preset: RemoteTtsPreset, mode: "remote" |
   console.log(`[TTS-MODE] source=${source} preset=${preset} mode=${mode} reason=${reason}`);
 }
 
+function shouldAttemptInlineRemoteAudio(contentType: string): boolean {
+  return Platform.OS !== "ios" && contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
+}
+
+function logIosRemoteTtsFilePlaybackPreference(params: {
+  source: TtsSource;
+  preset: RemoteTtsPreset;
+  correlationId?: string;
+  contentType: string;
+  chunkIndex?: number;
+  chunkCount?: number;
+}) {
+  if (Platform.OS !== "ios" || !params.contentType.startsWith("audio/")) {
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log("[TTS-MODE]", {
+    source: params.source,
+    preset: params.preset,
+    mode: "remote",
+    reason: "iosFilePlaybackPreferred",
+    sourceKind: "file",
+    correlationId: params.correlationId ?? null,
+    contentType: params.contentType,
+    ...(typeof params.chunkIndex === "number" ? { chunkIndex: params.chunkIndex } : {}),
+    ...(typeof params.chunkCount === "number" ? { chunkCount: params.chunkCount } : {}),
+  });
+}
+
 function clampPlaybackRate(value: number): number {
   return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, value));
 }
@@ -365,8 +395,7 @@ export async function preparePrefetchedRemoteAudioSource(params: {
 }): Promise<PreparedRemoteAudioSource> {
   const assistantTextReceivedAtMs = params.assistantTextReceivedAtMs ?? Date.now();
   const preparationStartedAtMs = Date.now();
-  const shouldAttemptInlineAudio =
-    params.prefetchedRemoteAudio.contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
+  const shouldAttemptInlineAudio = shouldAttemptInlineRemoteAudio(params.prefetchedRemoteAudio.contentType);
 
   if (shouldAttemptInlineAudio) {
     const sourcePreparedAtMs = Date.now();
@@ -392,6 +421,14 @@ export async function preparePrefetchedRemoteAudioSource(params: {
     });
     return prepared;
   }
+  logIosRemoteTtsFilePlaybackPreference({
+    source: params.source,
+    preset: params.preset,
+    correlationId: params.correlationId,
+    contentType: params.prefetchedRemoteAudio.contentType,
+    chunkIndex: params.chunkIndex,
+    chunkCount: params.chunkCount,
+  });
 
   const fileWriteStartedAtMs = Date.now();
   const fileUri = await writeRemoteAudioBytesToFile(params.prefetchedRemoteAudio.bytes);
@@ -1042,8 +1079,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         }
       }
 
-      const shouldAttemptInlineAudio =
-        ttsAudio.contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
+      const shouldAttemptInlineAudio = shouldAttemptInlineRemoteAudio(ttsAudio.contentType);
 
       if (shouldAttemptInlineAudio) {
         const inlinePreparationStartedAtMs = Date.now();
@@ -1075,6 +1111,15 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             error: getErrorMessage(inlinePlaybackError, "Inline TTS playback failed."),
           });
         }
+      } else {
+        logIosRemoteTtsFilePlaybackPreference({
+          source: params.source,
+          preset: params.preset,
+          correlationId: params.correlationId,
+          contentType: ttsAudio.contentType,
+          chunkIndex: params.chunkIndex,
+          chunkCount: params.chunkCount,
+        });
       }
 
       remoteStage = "source_prepare";

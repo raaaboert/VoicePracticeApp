@@ -432,6 +432,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     chatCardHeight,
     actionDockHorizontalPadding,
   } = screenLayout;
+  const useIosCondensedStatusTimerPresentation = Platform.OS === "ios" && !Platform.isPad && windowWidth < 768;
   const localTestMode = !apiConfigured || useLocalMockMode;
   const shouldUseFastStartRemoteTts =
     config.remoteTtsEnabled &&
@@ -1248,6 +1249,36 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     });
   };
 
+  const prepareIosPlaybackAudioMode = async (correlationId: string, sourcePhase: string) => {
+    if (Platform.OS !== "ios") {
+      return;
+    }
+
+    logSimulationTiming({
+      correlationId,
+      phase: "ios_playback_audio_mode_prepare_start",
+      details: { sourcePhase },
+    });
+    try {
+      await setAudioMode(false);
+      logSimulationTiming({
+        correlationId,
+        phase: "ios_playback_audio_mode_prepare_success",
+        details: { sourcePhase },
+      });
+    } catch (audioModeError) {
+      logSimulationTiming({
+        correlationId,
+        phase: "ios_playback_audio_mode_prepare_failed",
+        details: {
+          sourcePhase,
+          message: getErrorMessage(audioModeError, "Could not prepare iOS playback audio mode."),
+        },
+      });
+      throw audioModeError;
+    }
+  };
+
   const ensureMicPermission = async () => {
     if (micGrantedRef.current) {
       return true;
@@ -1539,6 +1570,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
 
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
     let pendingRecording: Audio.Recording | null = null;
+    let recordingStartAttempted = false;
     recordingStartInProgressRef.current = true;
     setIsStartingTurn(true);
 
@@ -1560,7 +1592,32 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         return;
       }
 
-      await setAudioMode(true);
+      if (Platform.OS === "ios") {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "ios_recording_audio_mode_prepare_start",
+        });
+      }
+      try {
+        await setAudioMode(true);
+        if (Platform.OS === "ios") {
+          logSimulationTiming({
+            correlationId: requestCorrelationId,
+            phase: "ios_recording_audio_mode_prepare_success",
+          });
+        }
+      } catch (audioModeError) {
+        if (Platform.OS === "ios") {
+          logSimulationTiming({
+            correlationId: requestCorrelationId,
+            phase: "ios_recording_audio_mode_prepare_failed",
+            details: {
+              message: getErrorMessage(audioModeError, "Could not prepare iOS recording audio mode."),
+            },
+          });
+        }
+        throw audioModeError;
+      }
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
 
       if (recordingRef.current) {
@@ -1609,8 +1666,15 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       }
 
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+      recordingStartAttempted = true;
       await recording.startAsync();
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+      if (Platform.OS === "ios") {
+        logSimulationTiming({
+          correlationId: requestCorrelationId,
+          phase: "ios_recording_start_success",
+        });
+      }
       recordingRef.current = recording;
       pendingRecording = null;
       finalizeRequestedRef.current = false;
@@ -1690,12 +1754,22 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         correlationId,
         phase: "turn_recording_start_failed",
         details: {
+          message: getErrorMessage(recordingError, "Could not start recording."),
           sessionPreserved:
             sessionActiveRef.current
             && !simulationClosedRef.current
             && !unmountedRef.current,
         },
       });
+      if (Platform.OS === "ios" && recordingStartAttempted) {
+        logSimulationTiming({
+          correlationId,
+          phase: "ios_recording_start_failed",
+          details: {
+            message: getErrorMessage(recordingError, "Could not start recording."),
+          },
+        });
+      }
       await stopRecordingSafely();
 
       if (!sessionActiveRef.current || simulationClosedRef.current || unmountedRef.current) {
@@ -2462,6 +2536,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               audioModeResetAwaitStartedAtMs = Date.now();
               audioModeResetCompletedAtMs = audioModeResetAwaitStartedAtMs;
             }
+            await prepareIosPlaybackAudioMode(correlationId, "assistant_reply");
+            throwIfSessionLifecycleInterrupted();
             const speakPromise = speakAssistantResponse(
               reply,
               assistantTextReceivedAtMs,
@@ -2875,6 +2951,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 phase: "opening_tts_started",
               });
               try {
+                await prepareIosPlaybackAudioMode(openingCorrelationId, "opening_reply");
                 await speakAssistantResponse(
                   openingLine,
                   assistantTextReceivedAtMs,
@@ -3530,7 +3607,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 : "Preparing the opening reply."
               : "The assistant reply is playing."
       : "Tap Start Simulation to begin.";
-  const displayedHintText = compactVerticalLayout ? compactHintText : hintText;
+  const useCondensedStatusTimerPresentation = compactVerticalLayout || useIosCondensedStatusTimerPresentation;
+  const useCondensedTimerSummary = useCompactTimerSummary || useCondensedStatusTimerPresentation;
+  const showCondensedResponseModeCard = showResponseModeCard && !useCondensedStatusTimerPresentation;
+  const displayedHintText = useCondensedStatusTimerPresentation ? compactHintText : hintText;
   const compactScenarioMeta = [
     `Difficulty: ${DIFFICULTY_LABELS[config.difficulty]}`,
     `Persona: ${PERSONA_LABELS[config.personaStyle]}`,
@@ -3546,7 +3626,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const responseModeDescription = localTestMode
     ? "Useful for flow checks and UI review."
     : "Live assistant replies and voice playback.";
-  const showCompactEngineSummary = !compactVerticalLayout;
+  const showCompactEngineSummary = !useCondensedStatusTimerPresentation;
   const compactSingleActionDock = compactVerticalLayout && !sessionActive;
   const effectiveActionDockBottomPadding = getSimulationActionDockBottomPadding({
     layout: screenLayout,
@@ -3638,21 +3718,21 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 styles.statusMiniPanel,
                 compactVerticalLayout ? styles.statusMiniPanelCompact : null,
                 compactVerticalLayout ? styles.timerCardCompact : null,
-                useCompactTimerSummary ? styles.timerCardSummary : null,
+                useCondensedTimerSummary ? styles.timerCardSummary : null,
               ]}
             >
               <Text
                 style={[
                   styles.timerLabel,
-                  useCompactTimerSummary ? styles.timerLabelCompact : null,
-                  useCompactTimerSummary ? styles.timerLabelSummary : null,
+                  useCondensedTimerSummary ? styles.timerLabelCompact : null,
+                  useCondensedTimerSummary ? styles.timerLabelSummary : null,
                 ]}
               >
-                {useCompactTimerSummary
+                {useCondensedTimerSummary
                   ? "Session Timer"
                   : `Session Timer${maxSessionSeconds !== null ? ` (max ${formatDurationClock(maxSessionSeconds)})` : ""}`}
               </Text>
-              {useCompactTimerSummary ? (
+              {useCondensedTimerSummary ? (
                 <Text style={[styles.timerSummaryInline, inFinalMinute ? styles.timerValueDanger : null]}>{timerSummaryText}</Text>
               ) : (
                 <>
@@ -3667,7 +3747,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
                 </>
               )}
             </View>
-            {showResponseModeCard ? (
+            {showCondensedResponseModeCard ? (
               <View
                 style={[
                   styles.statusMiniPanel,
