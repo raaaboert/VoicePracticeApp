@@ -3608,6 +3608,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               : "The assistant reply is playing."
       : "Tap Start Simulation to begin.";
   const useCondensedStatusTimerPresentation = compactVerticalLayout || useIosCondensedStatusTimerPresentation;
+  const useCompactStatusTimerLayout = compactVerticalLayout || useIosCondensedStatusTimerPresentation;
   const useCondensedTimerSummary = useCompactTimerSummary || useCondensedStatusTimerPresentation;
   const showCondensedResponseModeCard = showResponseModeCard && !useCondensedStatusTimerPresentation;
   const displayedHintText = useCondensedStatusTimerPresentation ? compactHintText : hintText;
@@ -3688,36 +3689,36 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           </View>
         ) : null}
 
-        <View style={[styles.statusStageCard, compactVerticalLayout ? styles.statusStageCardCompact : null]}>
-          <View style={[styles.statusHeaderRow, compactVerticalLayout ? styles.statusHeaderRowCompact : null]}>
-            <View style={[styles.statusTitleBlock, compactVerticalLayout ? styles.statusTitleBlockCompact : null]}>
+        <View style={[styles.statusStageCard, useCompactStatusTimerLayout ? styles.statusStageCardCompact : null]}>
+          <View style={[styles.statusHeaderRow, useCompactStatusTimerLayout ? styles.statusHeaderRowCompact : null]}>
+            <View style={[styles.statusTitleBlock, useCompactStatusTimerLayout ? styles.statusTitleBlockCompact : null]}>
               <Text style={styles.statusEyebrow}>{statusEyebrow}</Text>
               {showCompactEngineSummary ? (
-                <Text style={[styles.statusTitle, compactVerticalLayout ? styles.statusTitleCompact : null]}>{stateTitle}</Text>
+                <Text style={[styles.statusTitle, useCompactStatusTimerLayout ? styles.statusTitleCompact : null]}>{stateTitle}</Text>
               ) : null}
             </View>
-            <View style={[styles.modePill, compactVerticalLayout ? styles.modePillCompact : null]}>
-              <Text style={[styles.modePillText, compactVerticalLayout ? styles.modePillTextCompact : null]}>{sessionModeLabel}</Text>
+            <View style={[styles.modePill, useCompactStatusTimerLayout ? styles.modePillCompact : null]}>
+              <Text style={[styles.modePillText, useCompactStatusTimerLayout ? styles.modePillTextCompact : null]}>{sessionModeLabel}</Text>
             </View>
           </View>
           {showCompactEngineSummary ? (
-            <Text style={[styles.status, compactVerticalLayout ? styles.statusCompact : null]}>{status}</Text>
+            <Text style={[styles.status, useCompactStatusTimerLayout ? styles.statusCompact : null]}>{status}</Text>
           ) : null}
           <VoiceOrb
             mode={mode}
             variant={themeVariant}
-            presentation={useCompactEngineStatus || useCompactEnginePresentation ? "compact" : "regular"}
+            presentation={useCompactStatusTimerLayout || useCompactEngineStatus || useCompactEnginePresentation ? "compact" : "regular"}
             paused={lifecyclePauseActive}
           />
-          <Text style={[styles.hint, compactVerticalLayout ? styles.hintCompact : null]}>{displayedHintText}</Text>
+          <Text style={[styles.hint, useCompactStatusTimerLayout ? styles.hintCompact : null]}>{displayedHintText}</Text>
           <View style={styles.stageDivider} />
           <View style={styles.statusMetaRow}>
             <View
               style={[
                 styles.timerCard,
                 styles.statusMiniPanel,
-                compactVerticalLayout ? styles.statusMiniPanelCompact : null,
-                compactVerticalLayout ? styles.timerCardCompact : null,
+                useCompactStatusTimerLayout ? styles.statusMiniPanelCompact : null,
+                useCompactStatusTimerLayout ? styles.timerCardCompact : null,
                 useCondensedTimerSummary ? styles.timerCardSummary : null,
               ]}
             >

@@ -223,6 +223,40 @@ function logIosRemoteTtsFilePlaybackPreference(params: {
   });
 }
 
+function logIosTtsSelection(params: {
+  source: TtsSource;
+  preset: RemoteTtsPreset;
+  voiceGender: AiVoiceGender;
+  voiceProfile: AiVoiceProfile;
+  stage: "remote_attempt" | "remote_success" | "remote_failure" | "fallback_speech";
+  sourceKind?: RemoteAudioSourceKind | "fallback" | null;
+  fallbackReason?: string | null;
+  remoteTtsEnabled?: boolean;
+  remoteAiConfigured?: boolean;
+  allowRemoteTts?: boolean;
+  correlationId?: string;
+}) {
+  if (Platform.OS !== "ios") {
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log("[TTS-SELECTION]", {
+    platform: Platform.OS,
+    source: params.source,
+    preset: params.preset,
+    voiceGender: params.voiceGender,
+    voiceProfile: params.voiceProfile,
+    stage: params.stage,
+    sourceKind: params.sourceKind ?? null,
+    fallbackReason: params.fallbackReason ?? null,
+    remoteTtsEnabled: params.remoteTtsEnabled ?? null,
+    remoteAiConfigured: params.remoteAiConfigured ?? null,
+    allowRemoteTts: params.allowRemoteTts ?? null,
+    correlationId: params.correlationId ?? null,
+  });
+}
+
 function clampPlaybackRate(value: number): number {
   return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, value));
 }
@@ -573,6 +607,17 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
   if (shouldAttemptRemote) {
     throwIfCancelled();
     logTtsMode(params.source, params.preset, "remote", "remoteCallStarted");
+    logIosTtsSelection({
+      source: params.source,
+      preset: params.preset,
+      voiceGender: params.voiceGender,
+      voiceProfile: params.voiceProfile,
+      stage: "remote_attempt",
+      remoteTtsEnabled: params.remoteTtsEnabled,
+      remoteAiConfigured: params.remoteAiConfigured,
+      allowRemoteTts: remoteAllowed,
+      correlationId: params.correlationId,
+    });
     const requestStartedAtMs = Date.now();
     let playbackStarted = false;
     let sourceKind: RemoteAudioSourceKind | null = null;
@@ -647,6 +692,18 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         sourceKind,
         playbackStarted,
         fallbackAttempted: deviceFallbackAttempted,
+      });
+      logIosTtsSelection({
+        source: params.source,
+        preset: params.preset,
+        voiceGender: params.voiceGender,
+        voiceProfile: params.voiceProfile,
+        stage: "remote_success",
+        sourceKind,
+        remoteTtsEnabled: params.remoteTtsEnabled,
+        remoteAiConfigured: params.remoteAiConfigured,
+        allowRemoteTts: remoteAllowed,
+        correlationId: params.correlationId,
       });
       await stopRemoteTtsPlayback({ remoteTtsSoundRef, remoteTtsFileRef });
       return buildResult({
@@ -839,6 +896,8 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       };
     };
 
+    const remotePlaybackRate = Platform.OS === "ios" ? 1.0 : resolveRemotePlaybackRate(params.voiceProfile);
+
     const loadAndPlayPreparedSource = async (paramsForSource: {
       sourceKind: RemoteAudioSourceKind;
       sourceUri: string;
@@ -888,7 +947,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             },
             {
               shouldPlay: true,
-              rate: resolveRemotePlaybackRate(params.voiceProfile),
+              rate: remotePlaybackRate,
               shouldCorrectPitch: true,
             },
             false,
@@ -1038,7 +1097,6 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         });
       }
 
-      const remotePlaybackRate = resolveRemotePlaybackRate(params.voiceProfile);
       // eslint-disable-next-line no-console
       console.log(`[TTS-PLAY] profile=${params.voiceProfile} rate=${remotePlaybackRate}`);
 
@@ -1193,6 +1251,19 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       const errorMessage = getErrorMessage(error, "Remote TTS failed.");
       const remoteTimedOut = error instanceof TtsPlaybackTimeoutError;
       logRemoteFailureCounter(error);
+      logIosTtsSelection({
+        source: params.source,
+        preset: params.preset,
+        voiceGender: params.voiceGender,
+        voiceProfile: params.voiceProfile,
+        stage: "remote_failure",
+        sourceKind,
+        fallbackReason: remoteStage,
+        remoteTtsEnabled: params.remoteTtsEnabled,
+        remoteAiConfigured: params.remoteAiConfigured,
+        allowRemoteTts: remoteAllowed,
+        correlationId: params.correlationId,
+      });
       logLifecycle({
         phase: "remote_path_failed",
         sourceKind,
@@ -1273,6 +1344,19 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     timeoutMs: fallbackTimeoutMs,
     chunkIndex: params.chunkIndex ?? null,
     chunkCount: params.chunkCount ?? null,
+  });
+  logIosTtsSelection({
+    source: params.source,
+    preset: params.preset,
+    voiceGender: params.voiceGender,
+    voiceProfile: params.voiceProfile,
+    stage: "fallback_speech",
+    sourceKind: "fallback",
+    fallbackReason: fallbackReason ?? "remote_unavailable",
+    remoteTtsEnabled: params.remoteTtsEnabled,
+    remoteAiConfigured: params.remoteAiConfigured,
+    allowRemoteTts: remoteAllowed,
+    correlationId: params.correlationId,
   });
 
   try {

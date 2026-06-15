@@ -4,7 +4,7 @@
     "slug": "VoicePracticeApp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./peritio-source-icon.png",
+    "icon": "./assets/peritio-app-icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {

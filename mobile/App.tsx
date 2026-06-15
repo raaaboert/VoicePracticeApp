@@ -16,6 +16,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
@@ -310,7 +311,7 @@ type ScenarioTrainingOption = {
 
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
-const APP_ICON_ART = require("./peritio-source-icon.png");
+const APP_ICON_ART = require("./assets/PeritioLogo_061526.png");
 const APP_STARTUP_ART = require("./peritio-source-splash.png");
 const APP_SURFACE_COLORS = {
   sage: "#697364",
@@ -675,6 +676,7 @@ function SearchableSelectionDropdown({
 
 export default function App() {
   const detectedTimezone = useMemo(() => resolveDeviceTimezone(), []);
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
   const [screen, setScreen] = useState<Screen>("home");
   const [colorScheme, setColorScheme] = useState<AppColorScheme>("soft_light");
@@ -1122,6 +1124,7 @@ export default function App() {
   );
   const theme = useMemo(() => APP_THEME_TOKENS[colorScheme], [colorScheme]);
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const useIosCompactHomeLayout = Platform.OS === "ios" && !Platform.isPad && (windowHeight < 860 || windowWidth < 390);
   const statusBarStyle = isBootLoading || colorScheme === "classic_blue" ? "light" : "dark";
   const selectedVoiceOption = useMemo(() => getAiVoiceOption(voiceProfile), [voiceProfile]);
   const trainingSelectOptions = useMemo<SelectOption[]>(
@@ -3117,10 +3120,10 @@ export default function App() {
   }, [lastTranscript, screen]);
 
   const renderHome = () => (
-    <View style={styles.fill}>
-      <View style={styles.topRow}>
+    <View style={[styles.fill, useIosCompactHomeLayout ? styles.homeFillCompact : null]}>
+      <View style={[styles.topRow, useIosCompactHomeLayout ? styles.homeTopRowCompact : null]}>
         <View style={styles.spacer} />
-        <Text style={styles.topTitle}>Peritio</Text>
+        <Text style={styles.topTitle} maxFontSizeMultiplier={1.15}>Peritio</Text>
         <Pressable
           style={styles.menuButton}
           onPress={() => {
@@ -3246,25 +3249,37 @@ export default function App() {
         colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
         start={{ x: 0.04, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={styles.heroCard}
+        style={[styles.heroCard, useIosCompactHomeLayout ? styles.heroCardCompactHome : null]}
       >
-        <View style={styles.heroMarkFrame}>
-          <Image source={APP_ICON_ART} style={styles.heroMarkImage} resizeMode="contain" />
+        <View style={[styles.heroMarkFrame, useIosCompactHomeLayout ? styles.heroMarkFrameCompactHome : null]}>
+          <Image
+            source={APP_ICON_ART}
+            style={[styles.heroMarkImage, useIosCompactHomeLayout ? styles.heroMarkImageCompactHome : null]}
+            resizeMode="contain"
+          />
         </View>
-        <Text style={styles.heroKicker}>Peritio</Text>
-        <Text style={styles.heroTitle}>Improve with precision.</Text>
-        <Text style={styles.heroBody}>
+        <Text style={styles.heroKicker} maxFontSizeMultiplier={1.1}>Peritio</Text>
+        <Text
+          style={[styles.heroTitle, useIosCompactHomeLayout ? styles.heroTitleCompactHome : null]}
+          maxFontSizeMultiplier={1.05}
+        >
+          Improve with precision.
+        </Text>
+        <Text
+          style={[styles.heroBody, useIosCompactHomeLayout ? styles.heroBodyCompactHome : null]}
+          maxFontSizeMultiplier={1.1}
+        >
           Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
         </Text>
-        <View style={styles.heroMetaRow}>
-          <View style={styles.heroMetaChip}>
-            <Text style={styles.heroMetaText}>Voice practice</Text>
+        <View style={[styles.heroMetaRow, useIosCompactHomeLayout ? styles.heroMetaRowCompactHome : null]}>
+          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Voice practice</Text>
           </View>
-          <View style={styles.heroMetaChip}>
-            <Text style={styles.heroMetaText}>Scenario drills</Text>
+          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scenario drills</Text>
           </View>
-          <View style={styles.heroMetaChip}>
-            <Text style={styles.heroMetaText}>Scored feedback</Text>
+          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scored feedback</Text>
           </View>
         </View>
       </LinearGradient>
@@ -3293,8 +3308,11 @@ export default function App() {
         </View>
       ) : null}
 
-      <Pressable style={styles.homePrimaryButton} onPress={() => setScreen("setup")}>
-        <Text style={styles.homePrimaryButtonText}>Continue to setup</Text>
+      <Pressable
+        style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
+        onPress={() => setScreen("setup")}
+      >
+        <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
       </Pressable>
 
       {activeSegment ? (
@@ -5343,8 +5361,10 @@ function createStyles(theme: ThemeTokens) {
     gradient: { flex: 1 },
     safeArea: { flex: 1, paddingHorizontal: 16, paddingBottom: 12 },
     fill: { flex: 1 },
+    homeFillCompact: { justifyContent: "flex-start" },
     centered: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
     topRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+    homeTopRowCompact: { marginBottom: 8 },
     spacer: { width: 84 },
     topTitle: { color: theme.text, fontSize: 19, fontWeight: "700" },
     card: { borderRadius: 16, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.panel, padding: 15, marginBottom: 14, gap: 9 },
@@ -5364,6 +5384,13 @@ function createStyles(theme: ThemeTokens) {
       shadowOffset: { width: 0, height: 9 },
       elevation: 4,
     },
+    heroCardCompactHome: {
+      borderRadius: 22,
+      paddingHorizontal: 16,
+      paddingVertical: 15,
+      marginBottom: 12,
+      gap: 5,
+    },
     heroMarkFrame: {
       width: 144,
       height: 144,
@@ -5380,11 +5407,21 @@ function createStyles(theme: ThemeTokens) {
       shadowOffset: { width: 0, height: 8 },
       elevation: 3,
     },
+    heroMarkFrameCompactHome: {
+      width: 104,
+      height: 104,
+      borderRadius: 22,
+      marginBottom: 0,
+    },
     heroMarkImage: { width: 128, height: 128, borderRadius: 22 },
+    heroMarkImageCompactHome: { width: 92, height: 92, borderRadius: 18 },
     heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.4 },
     heroTitle: { color: APP_SURFACE_COLORS.cream, fontSize: 28, fontWeight: "800", lineHeight: 32, letterSpacing: -0.7, textAlign: "center" },
+    heroTitleCompactHome: { fontSize: 24, lineHeight: 28 },
     heroBody: { color: "rgba(248, 238, 217, 0.9)", fontSize: 14.5, lineHeight: 22, textAlign: "center", maxWidth: 296 },
+    heroBodyCompactHome: { fontSize: 13, lineHeight: 19, maxWidth: 286 },
     heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 2 },
+    heroMetaRowCompactHome: { gap: 6, marginTop: 0 },
     heroMetaChip: {
       borderRadius: 999,
       borderWidth: 1,
@@ -5392,6 +5429,10 @@ function createStyles(theme: ThemeTokens) {
       backgroundColor: "rgba(28, 33, 28, 0.18)",
       paddingHorizontal: 10,
       paddingVertical: 6,
+    },
+    heroMetaChipCompactHome: {
+      paddingHorizontal: 8,
+      paddingVertical: 4,
     },
     heroMetaText: { color: "rgba(248, 238, 217, 0.9)", fontSize: 12, fontWeight: "700", letterSpacing: 0.2 },
     segmentCard: {
@@ -5517,6 +5558,11 @@ function createStyles(theme: ThemeTokens) {
       shadowRadius: 12,
       shadowOffset: { width: 0, height: 7 },
       elevation: 3,
+    },
+    homePrimaryButtonCompact: {
+      minHeight: 50,
+      borderRadius: 14,
+      marginBottom: 10,
     },
     homePrimaryButtonText: { color: APP_SURFACE_COLORS.gold, fontSize: 16, fontWeight: "800", letterSpacing: 0.2 },
     primaryButton: { minHeight: 52, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },
