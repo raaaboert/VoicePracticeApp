@@ -88,6 +88,7 @@ import {
   getMissingUsageRecordFields,
 } from "./src/lib/simulationDiagnostics";
 import {
+  resolvePlatformRemotePlaybackRate,
   speakWithRemoteTtsFallback,
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
   toRemoteTtsPreset,
@@ -968,6 +969,48 @@ export default function App() {
     if (hadActivePlayback) {
       logVoiceSampleEvent("cancel", { reason });
     }
+  };
+
+  const cancelActiveVoiceSampleForSettingsChange = (reason: string) => {
+    const hasActiveSample = Boolean(
+      isVoiceSamplePlaying ||
+        sampleAbortControllerRef.current ||
+        sampleRemoteTtsSoundRef.current ||
+        sampleRemoteTtsFileRef.current ||
+        sampleTimeoutRef.current,
+    );
+
+    if (!hasActiveSample) {
+      return;
+    }
+
+    const sampleRequestId = samplePlaybackRequestIdRef.current + 1;
+    samplePlaybackRequestIdRef.current = sampleRequestId;
+    logVoiceSampleEvent("settings_change_cancel_requested", { sampleRequestId, reason });
+    setIsVoiceSamplePlaying(false);
+    void stopActiveVoiceSamplePlayback(reason);
+  };
+
+  const handleVoiceGenderChange = (nextVoiceGender: AiVoiceGender) => {
+    if (nextVoiceGender === voiceGender) {
+      return;
+    }
+
+    if (Platform.OS === "ios") {
+      cancelActiveVoiceSampleForSettingsChange("settings_change_gender");
+    }
+    setVoiceGender(nextVoiceGender);
+  };
+
+  const handleVoiceProfileChange = (nextVoiceProfile: AiVoiceProfile) => {
+    if (nextVoiceProfile === voiceProfile) {
+      return;
+    }
+
+    if (Platform.OS === "ios") {
+      cancelActiveVoiceSampleForSettingsChange("settings_change_profile");
+    }
+    setVoiceProfile(nextVoiceProfile);
   };
 
   useEffect(() => {
@@ -2662,12 +2705,13 @@ export default function App() {
     const abortController = new AbortController();
     sampleAbortControllerRef.current = abortController;
     const preset = toRemoteTtsPreset(voiceGender, voiceProfile);
+    const playbackRate = Platform.OS === "ios" ? resolvePlatformRemotePlaybackRate(voiceGender, voiceProfile) : null;
     const sampleCorrelationId = `voice-sample-${String(sampleRequestId).padStart(6, "0")}`;
 
     setIsVoiceSamplePlaying(true);
     setSettingsNotice(null);
     setSettingsError(null);
-    logVoiceSampleEvent("start", { sampleRequestId, preset });
+    logVoiceSampleEvent("start", { sampleRequestId, preset, playbackRate });
 
     if (Platform.OS === "ios") {
       sampleTimeoutRef.current = setTimeout(() => {
@@ -4172,7 +4216,7 @@ export default function App() {
                   styles.voiceToggleButton,
                   voiceGender === option.id ? styles.selectedCard : null,
                 ]}
-                onPress={() => setVoiceGender(option.id)}
+                onPress={() => handleVoiceGenderChange(option.id)}
               >
                 <Text style={styles.voiceToggleText}>{option.label}</Text>
               </Pressable>
@@ -4182,7 +4226,7 @@ export default function App() {
             <Pressable
               key={option.id}
               style={[styles.optionCard, voiceProfile === option.id ? styles.selectedCard : null]}
-              onPress={() => setVoiceProfile(option.id)}
+              onPress={() => handleVoiceProfileChange(option.id)}
             >
               <Text style={styles.optionTitle}>{option.label}</Text>
               <Text style={styles.body}>{option.description}</Text>

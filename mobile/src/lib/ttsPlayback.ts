@@ -122,6 +122,18 @@ class TtsFallbackTimeoutError extends Error {
 }
 
 export function toRemoteTtsPreset(voiceGender: AiVoiceGender, voiceProfile: AiVoiceProfile): RemoteTtsPreset {
+  if (Platform.OS === "ios") {
+    if (voiceGender === "female" && voiceProfile === "balanced") {
+      return "female-bright";
+    }
+    if (voiceGender === "female" && voiceProfile === "bright") {
+      return "female-balanced";
+    }
+    if (voiceGender === "male" && voiceProfile === "bright") {
+      return "male-balanced";
+    }
+  }
+
   return `${voiceGender}-${voiceProfile}` as RemoteTtsPreset;
 }
 
@@ -271,7 +283,7 @@ function resolveRemotePlaybackRate(profile: AiVoiceProfile): number {
   return clampPlaybackRate(baseRate * REMOTE_PLAYBACK_GLOBAL_MULTIPLIER);
 }
 
-function resolvePlatformRemotePlaybackRate(gender: AiVoiceGender, profile: AiVoiceProfile): number {
+export function resolvePlatformRemotePlaybackRate(gender: AiVoiceGender, profile: AiVoiceProfile): number {
   if (Platform.OS !== "ios") {
     return resolveRemotePlaybackRate(profile);
   }
@@ -281,11 +293,11 @@ function resolvePlatformRemotePlaybackRate(gender: AiVoiceGender, profile: AiVoi
   }
 
   if (profile === "balanced") {
-    return 1.06;
+    return gender === "male" ? 1.06 : 1.08;
   }
 
   if (profile === "bright") {
-    return gender === "male" ? 1.04 : 1.08;
+    return gender === "male" ? 1.1 : 1.14;
   }
 
   return 1.0;
