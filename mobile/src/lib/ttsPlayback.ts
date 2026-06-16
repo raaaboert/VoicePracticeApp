@@ -22,17 +22,10 @@ type TtsDiagnosticEvent =
   | "fallback_tts_failed"
   | "fallback_tts_timeout"
   | "final_user_visible_outcome";
-const MIN_PLAYBACK_RATE = 0.8;
-const MAX_PLAYBACK_RATE = 1.4;
 const TTS_PLAYBACK_TIMEOUT_MIN_MS = 10_000;
 const TTS_PLAYBACK_TIMEOUT_MAX_MS = 60_000;
 const TTS_AUDIO_LOAD_TIMEOUT_MS = 20_000;
-const REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE: Record<AiVoiceProfile, number> = {
-  warm: 1.08,
-  balanced: 1.15,
-  bright: 1.22,
-};
-const REMOTE_PLAYBACK_GLOBAL_MULTIPLIER = 1.03;
+const REMOTE_TTS_PLAYBACK_RATE = 1.0;
 const ttsDiagnosticCounters = new Map<TtsDiagnosticEvent, number>();
 let inlineRemoteAudioPlaybackSupported: boolean | null = Platform.OS === "web" ? false : null;
 
@@ -47,6 +40,7 @@ interface SpeakWithTtsFallbackParams {
   remoteTtsEnabled: boolean;
   remoteAiConfigured: boolean;
   allowRemoteTts?: boolean;
+  allowFallbackSpeech?: boolean;
   voiceGender: AiVoiceGender;
   voiceProfile: AiVoiceProfile;
   selectedVoiceIdentifierRef?: MutableRefObject<string | undefined>;
@@ -193,13 +187,72 @@ function logTtsMode(source: TtsSource, preset: RemoteTtsPreset, mode: "remote" |
   console.log(`[TTS-MODE] source=${source} preset=${preset} mode=${mode} reason=${reason}`);
 }
 
-function clampPlaybackRate(value: number): number {
-  return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, value));
+function shouldAttemptInlineRemoteAudio(contentType: string): boolean {
+  return Platform.OS !== "ios" && contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
 }
 
-function resolveRemotePlaybackRate(profile: AiVoiceProfile): number {
-  const baseRate = REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE[profile] ?? REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE.balanced;
-  return clampPlaybackRate(baseRate * REMOTE_PLAYBACK_GLOBAL_MULTIPLIER);
+function logIosRemoteTtsFilePlaybackPreference(params: {
+  source: TtsSource;
+  preset: RemoteTtsPreset;
+  correlationId?: string;
+  contentType: string;
+  chunkIndex?: number;
+  chunkCount?: number;
+}) {
+  if (Platform.OS !== "ios" || !params.contentType.startsWith("audio/")) {
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log("[TTS-MODE]", {
+    source: params.source,
+    preset: params.preset,
+    mode: "remote",
+    reason: "iosFilePlaybackPreferred",
+    sourceKind: "file",
+    correlationId: params.correlationId ?? null,
+    contentType: params.contentType,
+    ...(typeof params.chunkIndex === "number" ? { chunkIndex: params.chunkIndex } : {}),
+    ...(typeof params.chunkCount === "number" ? { chunkCount: params.chunkCount } : {}),
+  });
+}
+
+function logIosTtsSelection(params: {
+  source: TtsSource;
+  preset: RemoteTtsPreset;
+  voiceGender: AiVoiceGender;
+  voiceProfile: AiVoiceProfile;
+  stage: "remote_attempt" | "remote_success" | "remote_failure" | "fallback_blocked" | "fallback_speech";
+  sourceKind?: RemoteAudioSourceKind | "fallback" | null;
+  fallbackReason?: string | null;
+  error?: string | null;
+  playbackRate?: number;
+  remoteTtsEnabled?: boolean;
+  remoteAiConfigured?: boolean;
+  allowRemoteTts?: boolean;
+  correlationId?: string;
+}) {
+  if (Platform.OS !== "ios") {
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log("[TTS-SELECTION]", {
+    platform: Platform.OS,
+    source: params.source,
+    preset: params.preset,
+    voiceGender: params.voiceGender,
+    voiceProfile: params.voiceProfile,
+    stage: params.stage,
+    sourceKind: params.sourceKind ?? null,
+    fallbackReason: params.fallbackReason ?? null,
+    error: params.error ?? null,
+    playbackRate: params.playbackRate ?? null,
+    remoteTtsEnabled: params.remoteTtsEnabled ?? null,
+    remoteAiConfigured: params.remoteAiConfigured ?? null,
+    allowRemoteTts: params.allowRemoteTts ?? null,
+    correlationId: params.correlationId ?? null,
+  });
 }
 
 function logTtsTiming(payload: {
@@ -365,8 +418,7 @@ export async function preparePrefetchedRemoteAudioSource(params: {
 }): Promise<PreparedRemoteAudioSource> {
   const assistantTextReceivedAtMs = params.assistantTextReceivedAtMs ?? Date.now();
   const preparationStartedAtMs = Date.now();
-  const shouldAttemptInlineAudio =
-    params.prefetchedRemoteAudio.contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
+  const shouldAttemptInlineAudio = shouldAttemptInlineRemoteAudio(params.prefetchedRemoteAudio.contentType);
 
   if (shouldAttemptInlineAudio) {
     const sourcePreparedAtMs = Date.now();
@@ -392,6 +444,14 @@ export async function preparePrefetchedRemoteAudioSource(params: {
     });
     return prepared;
   }
+  logIosRemoteTtsFilePlaybackPreference({
+    source: params.source,
+    preset: params.preset,
+    correlationId: params.correlationId,
+    contentType: params.prefetchedRemoteAudio.contentType,
+    chunkIndex: params.chunkIndex,
+    chunkCount: params.chunkCount,
+  });
 
   const fileWriteStartedAtMs = Date.now();
   const fileUri = await writeRemoteAudioBytesToFile(params.prefetchedRemoteAudio.bytes);
@@ -485,11 +545,13 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
   const assistantTextReceivedAtMs = params.assistantTextReceivedAtMs ?? Date.now();
   const textChars = params.text.trim().length;
   const remoteAllowed = params.allowRemoteTts ?? true;
+  const fallbackSpeechAllowed = params.allowFallbackSpeech ?? true;
   const shouldAttemptRemote =
     params.remoteTtsEnabled &&
     params.remoteAiConfigured &&
     remoteAllowed &&
     Platform.OS !== "web";
+  const remotePlaybackRate = REMOTE_TTS_PLAYBACK_RATE;
   const isCancelled = (): boolean => Boolean(params.abortSignal?.aborted) || Boolean(params.isCancelled?.());
   const throwIfCancelled = () => {
     if (isCancelled()) {
@@ -536,6 +598,18 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
   if (shouldAttemptRemote) {
     throwIfCancelled();
     logTtsMode(params.source, params.preset, "remote", "remoteCallStarted");
+    logIosTtsSelection({
+      source: params.source,
+      preset: params.preset,
+      voiceGender: params.voiceGender,
+      voiceProfile: params.voiceProfile,
+      stage: "remote_attempt",
+      playbackRate: remotePlaybackRate,
+      remoteTtsEnabled: params.remoteTtsEnabled,
+      remoteAiConfigured: params.remoteAiConfigured,
+      allowRemoteTts: remoteAllowed,
+      correlationId: params.correlationId,
+    });
     const requestStartedAtMs = Date.now();
     let playbackStarted = false;
     let sourceKind: RemoteAudioSourceKind | null = null;
@@ -610,6 +684,19 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         sourceKind,
         playbackStarted,
         fallbackAttempted: deviceFallbackAttempted,
+      });
+      logIosTtsSelection({
+        source: params.source,
+        preset: params.preset,
+        voiceGender: params.voiceGender,
+        voiceProfile: params.voiceProfile,
+        stage: "remote_success",
+        sourceKind,
+        playbackRate: remotePlaybackRate,
+        remoteTtsEnabled: params.remoteTtsEnabled,
+        remoteAiConfigured: params.remoteAiConfigured,
+        allowRemoteTts: remoteAllowed,
+        correlationId: params.correlationId,
       });
       await stopRemoteTtsPlayback({ remoteTtsSoundRef, remoteTtsFileRef });
       return buildResult({
@@ -851,7 +938,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             },
             {
               shouldPlay: true,
-              rate: resolveRemotePlaybackRate(params.voiceProfile),
+              rate: remotePlaybackRate,
               shouldCorrectPitch: true,
             },
             false,
@@ -1001,7 +1088,6 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         });
       }
 
-      const remotePlaybackRate = resolveRemotePlaybackRate(params.voiceProfile);
       // eslint-disable-next-line no-console
       console.log(`[TTS-PLAY] profile=${params.voiceProfile} rate=${remotePlaybackRate}`);
 
@@ -1042,8 +1128,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         }
       }
 
-      const shouldAttemptInlineAudio =
-        ttsAudio.contentType.startsWith("audio/") && inlineRemoteAudioPlaybackSupported !== false;
+      const shouldAttemptInlineAudio = shouldAttemptInlineRemoteAudio(ttsAudio.contentType);
 
       if (shouldAttemptInlineAudio) {
         const inlinePreparationStartedAtMs = Date.now();
@@ -1075,6 +1160,15 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             error: getErrorMessage(inlinePlaybackError, "Inline TTS playback failed."),
           });
         }
+      } else {
+        logIosRemoteTtsFilePlaybackPreference({
+          source: params.source,
+          preset: params.preset,
+          correlationId: params.correlationId,
+          contentType: ttsAudio.contentType,
+          chunkIndex: params.chunkIndex,
+          chunkCount: params.chunkCount,
+        });
       }
 
       remoteStage = "source_prepare";
@@ -1148,6 +1242,21 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       const errorMessage = getErrorMessage(error, "Remote TTS failed.");
       const remoteTimedOut = error instanceof TtsPlaybackTimeoutError;
       logRemoteFailureCounter(error);
+      logIosTtsSelection({
+        source: params.source,
+        preset: params.preset,
+        voiceGender: params.voiceGender,
+        voiceProfile: params.voiceProfile,
+        stage: "remote_failure",
+        sourceKind,
+        fallbackReason: remoteStage,
+        error: errorMessage,
+        playbackRate: remotePlaybackRate,
+        remoteTtsEnabled: params.remoteTtsEnabled,
+        remoteAiConfigured: params.remoteAiConfigured,
+        allowRemoteTts: remoteAllowed,
+        correlationId: params.correlationId,
+      });
       logLifecycle({
         phase: "remote_path_failed",
         sourceKind,
@@ -1182,19 +1291,42 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
 
       deviceFallbackAttempted = true;
       fallbackReason = remoteStage;
-      logTtsMode(params.source, params.preset, "fallback", "backendError");
+      if (fallbackSpeechAllowed) {
+        logTtsMode(params.source, params.preset, "fallback", "backendError");
+      }
     }
   } else {
     fallbackReason =
       !params.remoteTtsEnabled || !remoteAllowed || Platform.OS === "web"
         ? "remoteTtsDisabled"
         : "remoteAiNotConfigured";
-    logTtsMode(
-      params.source,
-      params.preset,
-      "fallback",
-      fallbackReason === "remoteAiNotConfigured" ? "remoteAiNotConfigured" : "remoteTtsDisabled",
-    );
+    if (fallbackSpeechAllowed) {
+      logTtsMode(
+        params.source,
+        params.preset,
+        "fallback",
+        fallbackReason === "remoteAiNotConfigured" ? "remoteAiNotConfigured" : "remoteTtsDisabled",
+      );
+    }
+  }
+
+  if (!fallbackSpeechAllowed) {
+    const reason = fallbackReason ?? "remote_unavailable";
+    logIosTtsSelection({
+      source: params.source,
+      preset: params.preset,
+      voiceGender: params.voiceGender,
+      voiceProfile: params.voiceProfile,
+      stage: "fallback_blocked",
+      sourceKind: "fallback",
+      fallbackReason: reason,
+      playbackRate: remotePlaybackRate,
+      remoteTtsEnabled: params.remoteTtsEnabled,
+      remoteAiConfigured: params.remoteAiConfigured,
+      allowRemoteTts: remoteAllowed,
+      correlationId: params.correlationId,
+    });
+    throw new Error(`Remote voice sample unavailable (${reason}).`);
   }
 
   if (!selectedVoiceIdentifierRef.current) {
@@ -1228,6 +1360,20 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     timeoutMs: fallbackTimeoutMs,
     chunkIndex: params.chunkIndex ?? null,
     chunkCount: params.chunkCount ?? null,
+  });
+  logIosTtsSelection({
+    source: params.source,
+    preset: params.preset,
+    voiceGender: params.voiceGender,
+    voiceProfile: params.voiceProfile,
+    stage: "fallback_speech",
+    sourceKind: "fallback",
+    fallbackReason: fallbackReason ?? "remote_unavailable",
+    playbackRate: remotePlaybackRate,
+    remoteTtsEnabled: params.remoteTtsEnabled,
+    remoteAiConfigured: params.remoteAiConfigured,
+    allowRemoteTts: remoteAllowed,
+    correlationId: params.correlationId,
   });
 
   try {

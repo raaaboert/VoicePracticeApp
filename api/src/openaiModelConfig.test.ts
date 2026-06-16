@@ -34,7 +34,7 @@ test("uses the recommended OpenAI defaults", () => {
       model: "whisper-1",
     },
     speech: {
-      model: "tts-1",
+      model: "gpt-4o-mini-tts",
     },
   });
 });
@@ -70,7 +70,7 @@ test("supports the recommended GPT-5.4 Responses profile with low reasoning", ()
   assert.equal(config.simulation.routes.turn.reasoningEffort, "low");
   assert.equal(config.simulation.routes.score.reasoningEffort, "low");
   assert.equal(config.transcription.model, "whisper-1");
-  assert.equal(config.speech.model, "tts-1");
+  assert.equal(config.speech.model, "gpt-4o-mini-tts");
 });
 
 test("supports the deployed GPT-5.4 mini chat Responses profile with low reasoning", () => {
