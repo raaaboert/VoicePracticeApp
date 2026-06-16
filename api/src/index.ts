@@ -396,16 +396,53 @@ type TtsPreset =
   | "female-warm"
   | "female-bright";
 
-const TTS_VOICE_BY_PRESET: Record<TtsPreset, string> = {
-  "male-balanced": "onyx",
-  "male-warm": "echo",
-  "male-bright": "fable",
-  "female-balanced": "nova",
-  "female-warm": "shimmer",
-  "female-bright": "alloy"
+interface TtsPresetConfig {
+  voice: string;
+  speed: number;
+  instructions: string;
+}
+
+const TTS_RESPONSE_FORMAT = "mp3" as const;
+const TTS_PRESET_CONFIG: Record<TtsPreset, TtsPresetConfig> = {
+  "male-balanced": {
+    voice: "echo",
+    speed: 1.0,
+    instructions:
+      "Speak in a natural, professional coaching voice. Clear, calm, adult, and conversational. Do not sound dramatic.",
+  },
+  "male-warm": {
+    voice: "echo",
+    speed: 0.95,
+    instructions:
+      "Speak in a warm, supportive, professional coaching voice. Calm, natural, and reassuring. Do not sound slow or sleepy.",
+  },
+  "male-bright": {
+    voice: "echo",
+    speed: 1.1,
+    instructions:
+      "Speak with bright professional energy. Keep the pitch natural and adult. Do not sound high-pitched, cartoonish, rushed, or theatrical.",
+  },
+  "female-balanced": {
+    voice: "marin",
+    speed: 0.95,
+    instructions:
+      "Speak in a natural, professional coaching voice. Clear, calm, adult, and conversational. Do not sound dramatic.",
+  },
+  "female-warm": {
+    voice: "shimmer",
+    speed: 1.0,
+    instructions:
+      "Speak in a warm, supportive, professional coaching voice. Calm, natural, and reassuring. Do not sound slow or sleepy.",
+  },
+  "female-bright": {
+    voice: "marin",
+    speed: 1.1,
+    instructions:
+      "Speak with bright professional energy. Keep the pitch natural and adult. Do not sound high-pitched, cartoonish, rushed, or theatrical.",
+  },
 };
 
-const TTS_PRESET_SET = new Set<TtsPreset>(Object.keys(TTS_VOICE_BY_PRESET) as TtsPreset[]);
+const TTS_PRESET_SET = new Set<TtsPreset>(Object.keys(TTS_PRESET_CONFIG) as TtsPreset[]);
 const warningLogByKey = new Map<string, number>();
 const simulationAiBudgetGraceByUserId = new Map<string, number>();
 const simulationOrgMonthlyOverrunGraceByUserId = new Map<string, number>();
@@ -1237,6 +1274,27 @@ function parseTtsPreset(value: unknown): TtsPreset | null {
   return TTS_PRESET_SET.has(preset) ? preset : null;
 }
 
+function ttsModelSupportsInstructions(model: string): boolean {
+  return model.trim().toLowerCase() === "gpt-4o-mini-tts";
+}
+
+function resolveTtsRequestConfig(preset: TtsPreset): TtsPresetConfig & {
+  model: string;
+  instructionsIncluded: boolean;
+  responseFormat: typeof TTS_RESPONSE_FORMAT;
+} {
+  const presetConfig = TTS_PRESET_CONFIG[preset];
+  const model = OPENAI_TTS_MODEL;
+  const instructionsIncluded = ttsModelSupportsInstructions(model);
+
+  return {
+    ...presetConfig,
+    model,
+    instructionsIncluded,
+    responseFormat: TTS_RESPONSE_FORMAT,
+  };
+}
+
 interface SimulationSpeechPrefetchRequest {
   preset: TtsPreset;
 }
@@ -1310,7 +1368,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
     return null;
   }
 
-  const voice = TTS_VOICE_BY_PRESET[params.request.preset];
+  const ttsConfig = resolveTtsRequestConfig(params.request.preset);
   const startedAtMs = Date.now();
   // eslint-disable-next-line no-console
   console.log("[simulation-speech-prefetch]", {
@@ -1318,17 +1376,23 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
     correlationId: params.correlationId,
     stage: "speech_prefetch_start",
     preset: params.request.preset,
+    model: ttsConfig.model,
+    voice: ttsConfig.voice,
+    speed: ttsConfig.speed,
+    instructionsIncluded: ttsConfig.instructionsIncluded,
+    responseFormat: ttsConfig.responseFormat,
     firstChunkChars: firstChunk.length,
     chunkCount: chunks.length,
-    model: OPENAI_TTS_MODEL,
   });
 
   try {
     const ttsResult = await requestSpeechSynthesis({
-      model: OPENAI_TTS_MODEL,
-      voice,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
       text: firstChunk,
-      format: "mp3",
+      format: ttsConfig.responseFormat,
+      speed: ttsConfig.speed,
+      instructions: ttsConfig.instructionsIncluded ? ttsConfig.instructions : undefined,
       timeoutMs: SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS,
     });
     const completedAtMs = Date.now();
@@ -1339,11 +1403,15 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       correlationId: params.correlationId,
       stage: "speech_prefetch_ready",
       preset: params.request.preset,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+      instructionsIncluded: ttsConfig.instructionsIncluded,
+      responseFormat: ttsConfig.responseFormat,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
       bytes: ttsResult.audioBuffer.byteLength,
       ttsLatencyMs,
-      model: OPENAI_TTS_MODEL,
     });
 
     return {
@@ -1363,10 +1431,14 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       correlationId: params.correlationId,
       stage: timedOut ? "speech_prefetch_timeout" : "speech_prefetch_error",
       preset: params.request.preset,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+      instructionsIncluded: ttsConfig.instructionsIncluded,
+      responseFormat: ttsConfig.responseFormat,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
       error: message,
-      model: OPENAI_TTS_MODEL,
     });
     return null;
   }
@@ -14305,9 +14377,9 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     preset,
   });
 
+  const ttsConfig = resolveTtsRequestConfig(preset);
   let ttsCallStartedAtMs: number | null = null;
   try {
-    const voice = TTS_VOICE_BY_PRESET[preset];
     ttsCallStartedAtMs = Date.now();
     // eslint-disable-next-line no-console
     console.log("[tts-call]", {
@@ -14316,15 +14388,21 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       userId,
       preset,
       provider: "openai",
-      model: OPENAI_TTS_MODEL,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+      instructionsIncluded: ttsConfig.instructionsIncluded,
+      responseFormat: ttsConfig.responseFormat,
       stage: "start",
       startedAtMs: ttsCallStartedAtMs
     });
     const ttsResult = await requestSpeechSynthesis({
-      model: OPENAI_TTS_MODEL,
-      voice,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
       text,
-      format: "mp3"
+      format: ttsConfig.responseFormat,
+      speed: ttsConfig.speed,
+      instructions: ttsConfig.instructionsIncluded ? ttsConfig.instructions : undefined,
     });
     const ttsCallEndedAtMs = Date.now();
     // eslint-disable-next-line no-console
@@ -14334,7 +14412,11 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       userId,
       preset,
       provider: "openai",
-      model: OPENAI_TTS_MODEL,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+      instructionsIncluded: ttsConfig.instructionsIncluded,
+      responseFormat: ttsConfig.responseFormat,
       stage: "end",
       endedAtMs: ttsCallEndedAtMs,
       durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
@@ -14358,6 +14440,11 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       bytes: ttsResult.audioBuffer.byteLength,
       textChars: text.length,
       preset,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+      instructionsIncluded: ttsConfig.instructionsIncluded,
+      responseFormat: ttsConfig.responseFormat,
     });
   } catch (error) {
     if (typeof ttsCallStartedAtMs === "number") {
@@ -14369,7 +14456,11 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
         userId,
         preset,
         provider: "openai",
-        model: OPENAI_TTS_MODEL,
+        model: ttsConfig.model,
+        voice: ttsConfig.voice,
+        speed: ttsConfig.speed,
+        instructionsIncluded: ttsConfig.instructionsIncluded,
+        responseFormat: ttsConfig.responseFormat,
         stage: "error",
         endedAtMs: ttsCallEndedAtMs,
         durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
@@ -14384,6 +14475,11 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
       textChars: text.length,
       preset,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+      instructionsIncluded: ttsConfig.instructionsIncluded,
+      responseFormat: ttsConfig.responseFormat,
       error: message,
     });
     if (error instanceof OpenAiSpeechRequestError) {

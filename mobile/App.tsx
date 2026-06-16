@@ -88,7 +88,6 @@ import {
   getMissingUsageRecordFields,
 } from "./src/lib/simulationDiagnostics";
 import {
-  resolvePlatformRemotePlaybackRate,
   speakWithRemoteTtsFallback,
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
   toRemoteTtsPreset,
@@ -2705,7 +2704,7 @@ export default function App() {
     const abortController = new AbortController();
     sampleAbortControllerRef.current = abortController;
     const preset = toRemoteTtsPreset(voiceGender, voiceProfile);
-    const playbackRate = Platform.OS === "ios" ? resolvePlatformRemotePlaybackRate(voiceGender, voiceProfile) : null;
+    const playbackRate = 1.0;
     const sampleCorrelationId = `voice-sample-${String(sampleRequestId).padStart(6, "0")}`;
 
     setIsVoiceSamplePlaying(true);

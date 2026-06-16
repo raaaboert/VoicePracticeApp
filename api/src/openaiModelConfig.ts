@@ -32,7 +32,7 @@ export interface OpenAiModelConfig {
 const DEFAULT_CHAT_MODEL = "gpt-4o-mini";
 const DEFAULT_SIMULATION_MODEL = "gpt-5.4";
 const DEFAULT_TRANSCRIPTION_MODEL = "whisper-1";
-const DEFAULT_SPEECH_MODEL = "tts-1";
+const DEFAULT_SPEECH_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_SIMULATION_REASONING_EFFORT: OpenAiReasoningEffort = "low";
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS: Record<SimulationRoute, number> = {
   opening: 160,

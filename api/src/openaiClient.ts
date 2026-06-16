@@ -63,6 +63,8 @@ type SpeechFormat = "mp3" | "wav" | "opus" | "flac" | "aac" | "pcm";
 const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_TRANSCRIPTION_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_SPEECH_REQUEST_TIMEOUT_MS = 12_000;
+const MIN_SPEECH_SPEED = 0.25;
+const MAX_SPEECH_SPEED = 4.0;
 
 interface OpenAiRequestLogContext {
   apiPath: string;
@@ -78,6 +80,14 @@ function getOpenAiApiKey(): string {
   }
 
   return key;
+}
+
+function sanitizeSpeechSpeed(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  return Math.max(MIN_SPEECH_SPEED, Math.min(MAX_SPEECH_SPEED, value));
 }
 
 async function parseOpenAiError(response: Response): Promise<string> {
@@ -541,6 +551,8 @@ export async function requestSpeechSynthesis(params: {
   voice: string;
   text: string;
   format?: SpeechFormat;
+  speed?: number;
+  instructions?: string;
   timeoutMs?: number;
 }): Promise<{ audioBuffer: Buffer; contentType: string }> {
   const apiKey = getOpenAiApiKey();
@@ -555,6 +567,14 @@ export async function requestSpeechSynthesis(params: {
     input: params.text,
     response_format: responseFormat
   };
+  const speed = sanitizeSpeechSpeed(params.speed);
+  if (typeof speed === "number") {
+    body.speed = speed;
+  }
+  const instructions = params.instructions?.trim();
+  if (instructions) {
+    body.instructions = instructions;
+  }
 
   const controller = new AbortController();
   let timedOut = false;

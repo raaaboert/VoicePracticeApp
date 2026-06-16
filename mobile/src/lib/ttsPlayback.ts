@@ -22,17 +22,10 @@ type TtsDiagnosticEvent =
   | "fallback_tts_failed"
   | "fallback_tts_timeout"
   | "final_user_visible_outcome";
-const MIN_PLAYBACK_RATE = 0.8;
-const MAX_PLAYBACK_RATE = 1.4;
 const TTS_PLAYBACK_TIMEOUT_MIN_MS = 10_000;
 const TTS_PLAYBACK_TIMEOUT_MAX_MS = 60_000;
 const TTS_AUDIO_LOAD_TIMEOUT_MS = 20_000;
-const REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE: Record<AiVoiceProfile, number> = {
-  warm: 1.08,
-  balanced: 1.15,
-  bright: 1.22,
-};
-const REMOTE_PLAYBACK_GLOBAL_MULTIPLIER = 1.03;
+const REMOTE_TTS_PLAYBACK_RATE = 1.0;
 const ttsDiagnosticCounters = new Map<TtsDiagnosticEvent, number>();
 let inlineRemoteAudioPlaybackSupported: boolean | null = Platform.OS === "web" ? false : null;
 
@@ -122,18 +115,6 @@ class TtsFallbackTimeoutError extends Error {
 }
 
 export function toRemoteTtsPreset(voiceGender: AiVoiceGender, voiceProfile: AiVoiceProfile): RemoteTtsPreset {
-  if (Platform.OS === "ios") {
-    if (voiceGender === "female" && voiceProfile === "balanced") {
-      return "female-bright";
-    }
-    if (voiceGender === "female" && voiceProfile === "bright") {
-      return "female-balanced";
-    }
-    if (voiceGender === "male" && voiceProfile === "bright") {
-      return "male-balanced";
-    }
-  }
-
   return `${voiceGender}-${voiceProfile}` as RemoteTtsPreset;
 }
 
@@ -272,35 +253,6 @@ function logIosTtsSelection(params: {
     allowRemoteTts: params.allowRemoteTts ?? null,
     correlationId: params.correlationId ?? null,
   });
-}
-
-function clampPlaybackRate(value: number): number {
-  return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, value));
-}
-
-function resolveRemotePlaybackRate(profile: AiVoiceProfile): number {
-  const baseRate = REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE[profile] ?? REMOTE_PLAYBACK_BASE_RATE_BY_PROFILE.balanced;
-  return clampPlaybackRate(baseRate * REMOTE_PLAYBACK_GLOBAL_MULTIPLIER);
-}
-
-export function resolvePlatformRemotePlaybackRate(gender: AiVoiceGender, profile: AiVoiceProfile): number {
-  if (Platform.OS !== "ios") {
-    return resolveRemotePlaybackRate(profile);
-  }
-
-  if (profile === "warm") {
-    return gender === "male" ? 1.0 : 1.04;
-  }
-
-  if (profile === "balanced") {
-    return gender === "male" ? 1.06 : 1.08;
-  }
-
-  if (profile === "bright") {
-    return gender === "male" ? 1.1 : 1.14;
-  }
-
-  return 1.0;
 }
 
 function logTtsTiming(payload: {
@@ -599,7 +551,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     params.remoteAiConfigured &&
     remoteAllowed &&
     Platform.OS !== "web";
-  const remotePlaybackRate = resolvePlatformRemotePlaybackRate(params.voiceGender, params.voiceProfile);
+  const remotePlaybackRate = REMOTE_TTS_PLAYBACK_RATE;
   const isCancelled = (): boolean => Boolean(params.abortSignal?.aborted) || Boolean(params.isCancelled?.());
   const throwIfCancelled = () => {
     if (isCancelled()) {
