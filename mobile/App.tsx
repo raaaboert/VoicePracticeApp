@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
-import { Audio } from "expo-av";
+import { Audio, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import appManifest from "./app.json";
@@ -919,6 +919,31 @@ export default function App() {
       reason: details?.reason ?? null,
       error: details?.error ?? null,
     });
+  };
+
+  const prepareIosVoiceSamplePlaybackAudioMode = async (sampleRequestId: number, preset: string) => {
+    if (Platform.OS !== "ios") {
+      return;
+    }
+
+    logVoiceSampleEvent("ios_playback_audio_mode_prepare_start", { sampleRequestId, preset });
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+      });
+      logVoiceSampleEvent("ios_playback_audio_mode_prepare_success", { sampleRequestId, preset });
+    } catch (audioModeError) {
+      const message = getErrorMessage(audioModeError, "Could not prepare iOS voice sample audio mode.");
+      logVoiceSampleEvent("ios_playback_audio_mode_prepare_failure", {
+        sampleRequestId,
+        preset,
+        error: message,
+      });
+      throw audioModeError;
+    }
   };
 
   const stopActiveVoiceSamplePlayback = async (reason: string) => {
@@ -2669,6 +2694,11 @@ export default function App() {
 
     try {
       const sample = getAiVoiceOption(voiceProfile);
+      await prepareIosVoiceSamplePlaybackAudioMode(sampleRequestId, preset);
+      if (samplePlaybackRequestIdRef.current !== sampleRequestId || abortController.signal.aborted) {
+        logVoiceSampleEvent("stale_after_audio_mode_prepare", { sampleRequestId, preset });
+        return;
+      }
       const playbackResult = await speakWithRemoteTtsFallback({
         source: "sample",
         text: "This is a sample of your selected simulator voice.",

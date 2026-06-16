@@ -232,6 +232,7 @@ function logIosTtsSelection(params: {
   stage: "remote_attempt" | "remote_success" | "remote_failure" | "fallback_blocked" | "fallback_speech";
   sourceKind?: RemoteAudioSourceKind | "fallback" | null;
   fallbackReason?: string | null;
+  error?: string | null;
   playbackRate?: number;
   remoteTtsEnabled?: boolean;
   remoteAiConfigured?: boolean;
@@ -252,6 +253,7 @@ function logIosTtsSelection(params: {
     stage: params.stage,
     sourceKind: params.sourceKind ?? null,
     fallbackReason: params.fallbackReason ?? null,
+    error: params.error ?? null,
     playbackRate: params.playbackRate ?? null,
     remoteTtsEnabled: params.remoteTtsEnabled ?? null,
     remoteAiConfigured: params.remoteAiConfigured ?? null,
@@ -275,11 +277,15 @@ function resolvePlatformRemotePlaybackRate(gender: AiVoiceGender, profile: AiVoi
   }
 
   if (profile === "warm") {
-    return gender === "male" ? 1.0 : 1.03;
+    return gender === "male" ? 1.0 : 1.04;
   }
 
   if (profile === "balanced") {
-    return 1.04;
+    return 1.06;
+  }
+
+  if (profile === "bright") {
+    return gender === "male" ? 1.04 : 1.08;
   }
 
   return 1.0;
@@ -1280,6 +1286,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         stage: "remote_failure",
         sourceKind,
         fallbackReason: remoteStage,
+        error: errorMessage,
         playbackRate: remotePlaybackRate,
         remoteTtsEnabled: params.remoteTtsEnabled,
         remoteAiConfigured: params.remoteAiConfigured,
