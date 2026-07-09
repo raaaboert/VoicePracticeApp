@@ -3,9 +3,11 @@ import { loadOpenAiModelConfig, OpenAiModelConfig } from "./openaiModelConfig.js
 
 export type StorageProvider = "file" | "postgres";
 export type AuthCodeDeliveryProvider = "log_only" | "resend";
+export type DeploymentEnvironment = "development" | "staging" | "production";
 
 export interface RuntimeConfig {
   nodeEnv: string;
+  deploymentEnvironment: DeploymentEnvironment;
   isProduction: boolean;
   port: number;
   storageProvider: StorageProvider;
@@ -45,6 +47,7 @@ const PLACEHOLDER_VALUES = new Set([
   "replace_me_for_mobile_tokens",
   "replace_me_for_mobile_token",
   "replace_me_for_mobile",
+  "replace_me_for_shared_web_auth",
   "admin",
 ]);
 
@@ -142,6 +145,63 @@ function parseStorageProvider(
   return databaseUrl ? "postgres" : "file";
 }
 
+function parseDeploymentEnvironment(value: string | undefined): DeploymentEnvironment {
+  const candidate = value?.trim().toLowerCase();
+  if (!candidate) {
+    return "development";
+  }
+  if (candidate === "development" || candidate === "dev" || candidate === "local") {
+    return "development";
+  }
+  if (candidate === "staging" || candidate === "stage") {
+    return "staging";
+  }
+  if (candidate === "production" || candidate === "prod") {
+    return "production";
+  }
+
+  throw new Error('PERITIO_ENV must be one of "development", "staging", or "production".');
+}
+
+function normalizeDatabaseUrlFingerprint(value: string): string {
+  return value.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+function databaseUrlContainsAny(value: string | null, markers: string[]): boolean {
+  const normalized = value ? normalizeDatabaseUrlFingerprint(value) : "";
+  return markers.some((marker) => normalized.includes(marker));
+}
+
+function assertDeploymentDatabaseSeparation(params: {
+  deploymentEnvironment: DeploymentEnvironment;
+  databaseUrl: string | null;
+  productionDatabaseUrl?: string;
+}): void {
+  const explicitProductionDatabaseUrl = params.productionDatabaseUrl?.trim();
+  if (
+    params.deploymentEnvironment === "staging" &&
+    explicitProductionDatabaseUrl &&
+    params.databaseUrl &&
+    normalizeDatabaseUrlFingerprint(params.databaseUrl) === normalizeDatabaseUrlFingerprint(explicitProductionDatabaseUrl)
+  ) {
+    throw new Error("Staging DATABASE_URL must not match PRODUCTION_DATABASE_URL.");
+  }
+
+  if (
+    params.deploymentEnvironment === "staging" &&
+    databaseUrlContainsAny(params.databaseUrl, ["peritio-db-prod", "peritio_db_prod"])
+  ) {
+    throw new Error("Staging DATABASE_URL appears to point at the production database.");
+  }
+
+  if (
+    params.deploymentEnvironment === "production" &&
+    databaseUrlContainsAny(params.databaseUrl, ["voicepractice_db", "voicepractice-db"])
+  ) {
+    throw new Error("Production DATABASE_URL appears to point at the staging database.");
+  }
+}
+
 function parseAuthCodeDeliveryProvider(rawValue: string | undefined): AuthCodeDeliveryProvider {
   const candidate = rawValue?.trim().toLowerCase();
   if (!candidate || candidate === "log_only") {
@@ -189,9 +249,67 @@ function assertNotPlaceholderSecret(
   }
 }
 
+function assertExplicitProductionSecret(
+  envName: string,
+  rawValue: string | undefined,
+  resolvedValue: string,
+  isProductionDeployment: boolean,
+  options?: { minimumLength?: number }
+): void {
+  if (isProductionDeployment && !rawValue?.trim()) {
+    throw new Error(`${envName} must be explicitly set in production.`);
+  }
+
+  assertNotPlaceholderSecret(envName, resolvedValue, isProductionDeployment, options);
+}
+
+function assertDistinctProductionSecrets(
+  isProductionDeployment: boolean,
+  secrets: Array<{ envName: string; value: string }>
+): void {
+  if (!isProductionDeployment) {
+    return;
+  }
+
+  const seen = new Map<string, string>();
+  for (const secret of secrets) {
+    const normalized = secret.value.trim();
+    const existing = seen.get(normalized);
+    if (existing) {
+      throw new Error(`${secret.envName} must not reuse the same value as ${existing} in production.`);
+    }
+    seen.set(normalized, secret.envName);
+  }
+}
+
+function assertProductionAuthCodeDelivery(params: {
+  isProductionDeployment: boolean;
+  authCodeDeliveryProvider: AuthCodeDeliveryProvider;
+  webAuthCodeDeliveryProvider: AuthCodeDeliveryProvider | null;
+  mobileEmailVerificationDeliveryProvider: AuthCodeDeliveryProvider | null;
+}): void {
+  if (!params.isProductionDeployment) {
+    return;
+  }
+
+  const effectiveWebAuthProvider = params.webAuthCodeDeliveryProvider ?? params.authCodeDeliveryProvider;
+  const effectiveMobileProvider =
+    params.mobileEmailVerificationDeliveryProvider ?? params.authCodeDeliveryProvider;
+
+  if (
+    params.authCodeDeliveryProvider === "log_only" ||
+    effectiveWebAuthProvider === "log_only" ||
+    effectiveMobileProvider === "log_only"
+  ) {
+    throw new Error("Production auth code delivery must use resend for default, web, and mobile flows.");
+  }
+}
+
 export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   const nodeEnv = env.NODE_ENV?.trim() || "development";
+  const deploymentEnvironment = parseDeploymentEnvironment(env.PERITIO_ENV);
   const isProduction = nodeEnv === "production";
+  const isProductionDeployment = deploymentEnvironment === "production";
   const hasOpenAiApiKey = Boolean(env.OPENAI_API_KEY?.trim());
 
   const port = toInt(env.PORT, 4100);
@@ -200,9 +318,18 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   }
 
   const databaseUrl = env.DATABASE_URL?.trim() || null;
-  const storageProvider = parseStorageProvider(env.STORAGE_PROVIDER, databaseUrl, isProduction);
+  assertDeploymentDatabaseSeparation({
+    deploymentEnvironment,
+    databaseUrl,
+    productionDatabaseUrl: env.PRODUCTION_DATABASE_URL
+  });
+
+  const storageProvider = parseStorageProvider(env.STORAGE_PROVIDER, databaseUrl, isProductionDeployment);
   if (storageProvider === "postgres" && !databaseUrl) {
     throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
+  }
+  if (isProductionDeployment && storageProvider !== "postgres") {
+    throw new Error('STORAGE_PROVIDER must be "postgres" when PERITIO_ENV=production.');
   }
   const pgPoolMax = parsePositiveInt("PG_POOL_MAX", env.PG_POOL_MAX, 5);
   const pgConnectTimeoutMs = parsePositiveInt("PG_CONNECT_TIMEOUT_MS", env.PG_CONNECT_TIMEOUT_MS, 8000);
@@ -210,7 +337,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
 
   const dbPath = path.resolve(process.cwd(), env.DB_PATH ?? "./db.local.json");
   const corsAllowedOrigins = parseCorsAllowedOrigins(env.CORS_ALLOWED_ORIGINS);
-  if (isProduction && corsAllowedOrigins.length === 0) {
+  if (isProductionDeployment && corsAllowedOrigins.length === 0) {
     throw new Error(
       "CORS_ALLOWED_ORIGINS is required in production and must contain one or more comma-separated origins."
     );
@@ -236,14 +363,44 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     throw new Error("WEB_AUTH_TOKEN_SECRET is required and must be at least 32 characters.");
   }
 
-  assertNotPlaceholderSecret("ADMIN_BOOTSTRAP_PASSWORD", adminBootstrapPassword, isProduction, {
+  assertNotPlaceholderSecret("ADMIN_BOOTSTRAP_PASSWORD", adminBootstrapPassword, isProductionDeployment, {
     minimumLength: 8
   });
-  assertNotPlaceholderSecret("ADMIN_TOKEN_SECRET", adminTokenSecret, isProduction, { minimumLength: 32 });
-  assertNotPlaceholderSecret("WEB_AUTH_TOKEN_SECRET", webAuthTokenSecret, isProduction, { minimumLength: 32 });
-  assertNotPlaceholderSecret("MOBILE_TOKEN_SECRET", mobileTokenSecret, isProduction, { minimumLength: 32 });
-  assertNotPlaceholderSecret("SUPPORT_TRANSCRIPT_SECRET", supportTranscriptSecret, isProduction, {
+  assertExplicitProductionSecret("ADMIN_TOKEN_SECRET", env.ADMIN_TOKEN_SECRET, adminTokenSecret, isProductionDeployment, {
     minimumLength: 32
+  });
+  assertExplicitProductionSecret(
+    "WEB_AUTH_TOKEN_SECRET",
+    env.WEB_AUTH_TOKEN_SECRET,
+    webAuthTokenSecret,
+    isProductionDeployment,
+    { minimumLength: 32 }
+  );
+  assertExplicitProductionSecret(
+    "MOBILE_TOKEN_SECRET",
+    env.MOBILE_TOKEN_SECRET,
+    mobileTokenSecret,
+    isProductionDeployment,
+    { minimumLength: 32 }
+  );
+  assertExplicitProductionSecret(
+    "SUPPORT_TRANSCRIPT_SECRET",
+    env.SUPPORT_TRANSCRIPT_SECRET,
+    supportTranscriptSecret,
+    isProductionDeployment,
+    { minimumLength: 32 }
+  );
+  assertDistinctProductionSecrets(isProductionDeployment, [
+    { envName: "ADMIN_TOKEN_SECRET", value: adminTokenSecret },
+    { envName: "WEB_AUTH_TOKEN_SECRET", value: webAuthTokenSecret },
+    { envName: "MOBILE_TOKEN_SECRET", value: mobileTokenSecret },
+    { envName: "SUPPORT_TRANSCRIPT_SECRET", value: supportTranscriptSecret }
+  ]);
+  assertProductionAuthCodeDelivery({
+    isProductionDeployment,
+    authCodeDeliveryProvider,
+    webAuthCodeDeliveryProvider,
+    mobileEmailVerificationDeliveryProvider
   });
 
   const usesResend =
@@ -280,6 +437,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
 
   return {
     nodeEnv,
+    deploymentEnvironment,
     isProduction,
     port,
     storageProvider,

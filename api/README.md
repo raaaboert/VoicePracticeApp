@@ -50,6 +50,7 @@ Create `.env` from `.env.example`:
 ```bash
 PORT=4100
 NODE_ENV=development
+PERITIO_ENV=development
 STORAGE_PROVIDER=file
 DB_PATH=./db.local.json
 DATABASE_URL=
@@ -111,6 +112,12 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - URL-encode any special characters in `DATABASE_URL` passwords (`!` -> `%21`, `@` -> `%40`, etc.).
 - Postgres pool env defaults: `PG_POOL_MAX=5`, `PG_CONNECT_TIMEOUT_MS=8000`, `PG_IDLE_TIMEOUT_MS=30000`.
 - In production, set `STORAGE_PROVIDER` explicitly and provide `CORS_ALLOWED_ORIGINS`.
+- Set `PERITIO_ENV` to the deployment identity:
+  - `development` for local/default
+  - `staging` for the Render staging API with `voicepractice_db`
+  - `production` for the Render production API with `peritio-db-prod`
+- `PERITIO_ENV=production` refuses `STORAGE_PROVIDER=file`, `AUTH_CODE_DELIVERY_PROVIDER=log_only`, placeholder/shared secrets, and obvious staging database URLs.
+- `PERITIO_ENV=staging` refuses obvious production database URLs. Staging and production must never share `DATABASE_URL` values.
 - If the API is already serving other browser apps, append new origins to `CORS_ALLOWED_ORIGINS`; do not replace existing working origins blindly.
 - `AUTH_CODE_DELIVERY_PROVIDER` is the default auth-code delivery mode for all flows unless overridden.
 - `WEB_AUTH_CODE_DELIVERY_PROVIDER` applies to the dashboard shared web-auth flow (`/web/auth/*` and dashboard email verification).
@@ -136,3 +143,18 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Default support behavior stores no transcript. If a user explicitly consents in a support case, transcript data is retained for up to 10 days.
 - `/ready` returns `503` while database connectivity is unavailable. All non-health routes are gated behind readiness.
 - Audit events are stored in `auditEvents` and exposed via `GET /audit/events` with org/actor/date filters.
+
+## Database Bootstrap / Refresh
+
+Use the sanitizer runbook before copying data between Render databases:
+
+- [`../docs/Peritio_Database_Bootstrap_Refresh.md`](../docs/Peritio_Database_Bootstrap_Refresh.md)
+
+The sanitizer is dry-run by default:
+
+```bash
+npm run db:sanitize-bootstrap -- --database-url "<database-url>" --profile prod-bootstrap
+npm run db:sanitize-bootstrap -- --database-url "<database-url>" --profile staging-refresh
+```
+
+Add `--apply` only after reviewing the inventory report. Production deploy remains manual; do not rely on production auto-deploy for database bootstrap work.

@@ -37,9 +37,11 @@ interface CreateTrainingPackStoreParams {
   pgConnectTimeoutMs: number;
   pgIdleTimeoutMs: number;
   logWarn?: (message: string) => void;
+  queryPool?: TrainingPackQueryPool;
 }
 
 type TrainingPackRow = Record<string, unknown>;
+type TrainingPackQueryPool = Pick<Pool, "query" | "connect">;
 
 interface TrainingPackColumnMapping {
   id: string;
@@ -89,7 +91,8 @@ class NullTrainingPackStore implements TrainingPackStore {
 }
 
 class PostgresTrainingPackStore implements TrainingPackStore {
-  private readonly pool: Pool;
+  private readonly pool: TrainingPackQueryPool;
+  private ensureSchemaPromise: Promise<void> | null = null;
   private hasWarnedMissingTable = false;
   private readonly cache = new Map<string, { value: TrainingPack | null; expiresAt: number }>();
   private readonly cacheTtlMs = 60_000;
@@ -100,17 +103,21 @@ class PostgresTrainingPackStore implements TrainingPackStore {
   constructor(
     databaseUrl: string,
     options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number },
-    private readonly logWarn: (message: string) => void
+    private readonly logWarn: (message: string) => void,
+    queryPool?: TrainingPackQueryPool
   ) {
-    this.pool = new Pool({
-      connectionString: databaseUrl,
-      max: options.pgPoolMax,
-      connectionTimeoutMillis: options.pgConnectTimeoutMs,
-      idleTimeoutMillis: options.pgIdleTimeoutMs,
-      keepAlive: true
-    });
+    this.pool =
+      queryPool ??
+      new Pool({
+        connectionString: databaseUrl,
+        max: options.pgPoolMax,
+        connectionTimeoutMillis: options.pgConnectTimeoutMs,
+        idleTimeoutMillis: options.pgIdleTimeoutMs,
+        keepAlive: true
+      });
   }
   async initialize(): Promise<void> {
+    await this.ensureSchema();
     const mapping = await this.getColumnMapping();
     if (this.hasLoggedResolvedMapping) {
       return;
@@ -127,6 +134,51 @@ class PostgresTrainingPackStore implements TrainingPackStore {
       })}`
     );
     this.hasLoggedResolvedMapping = true;
+  }
+
+  private async ensureSchema(): Promise<void> {
+    if (!this.ensureSchemaPromise) {
+      this.ensureSchemaPromise = this.loadOrCreateSchema();
+    }
+
+    await this.ensureSchemaPromise;
+  }
+
+  private async loadOrCreateSchema(): Promise<void> {
+    const existing = await this.pool.query<{ exists: boolean }>(
+      "SELECT to_regclass('training_packs') IS NOT NULL AS exists"
+    );
+    if (existing.rows[0]?.exists) {
+      return;
+    }
+
+    await this.pool.query(
+      `
+        CREATE TABLE IF NOT EXISTS training_packs (
+          id UUID PRIMARY KEY,
+          organization_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          training_topic TEXT NOT NULL,
+          learning_objectives JSONB NOT NULL DEFAULT '[]'::jsonb,
+          success_behaviors JSONB NOT NULL DEFAULT '[]'::jsonb,
+          failure_patterns JSONB NOT NULL DEFAULT '[]'::jsonb,
+          required_behavioral_triggers JSONB NOT NULL DEFAULT '[]'::jsonb,
+          scoring_weight_overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
+          compliance_constraints TEXT NOT NULL DEFAULT '',
+          audience_level TEXT NOT NULL DEFAULT '',
+          active BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS training_packs_org_idx
+          ON training_packs (organization_id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS training_packs_one_active_per_org_idx
+          ON training_packs (organization_id)
+          WHERE active IS TRUE;
+      `
+    );
   }
 
   async getActiveTrainingPackForOrg(orgId: string | null | undefined): Promise<TrainingPack | null> {
@@ -438,6 +490,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
   }
 
   private async getColumnMapping(): Promise<TrainingPackColumnMapping> {
+    await this.ensureSchema();
     if (this.cachedColumnMapping) {
       return this.cachedColumnMapping;
     }
@@ -752,7 +805,8 @@ export function createTrainingPackStore(params: CreateTrainingPackStoreParams): 
       pgConnectTimeoutMs: params.pgConnectTimeoutMs,
       pgIdleTimeoutMs: params.pgIdleTimeoutMs
     },
-    params.logWarn ?? (() => {})
+    params.logWarn ?? (() => {}),
+    params.queryPool
   );
 }
 
