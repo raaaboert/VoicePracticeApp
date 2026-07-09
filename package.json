@@ -22,6 +22,7 @@
     "build:api": "npm run build --workspace shared && npm run build --workspace api",
     "build:shared": "npm run build --workspace shared",
     "build:peritio": "npm run build --workspace shared && npm run build --workspace peritio-web",
+    "db:sanitize-bootstrap": "npm run db:sanitize-bootstrap --workspace api --",
     "smoke:stack": "node scripts/smoke-stack.mjs",
     "test:critical-flow": "node scripts/test-critical-flow.mjs",
     "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run build --workspace admin-web && npm run build --workspace peritio-web && npx tsc --noEmit -p mobile/tsconfig.json",
