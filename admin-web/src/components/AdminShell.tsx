@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { logoutAdminSession } from "../lib/api";
+import { AdminEnvironmentStatus } from "./AdminEnvironmentStatus";
 import {
   AdminMode,
   emitAdminModeChanged,
@@ -193,6 +194,7 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
         <div className="topbar">
           <div className="topbar-main">
             <div className="brand">Peritio - Web Admin</div>
+            <AdminEnvironmentStatus compact />
             <div className="mode-toggle" role="tablist" aria-label="Admin mode">
               <button type="button" className={mode === "personal" ? "active" : ""} onClick={() => switchMode("personal")}>
                 Personal

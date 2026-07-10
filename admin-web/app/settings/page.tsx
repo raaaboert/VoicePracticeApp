@@ -8,6 +8,7 @@ import {
 } from "@voicepractice/shared";
 
 import { AdminShell } from "../../src/components/AdminShell";
+import { AdminEnvironmentStatus } from "../../src/components/AdminEnvironmentStatus";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
 
@@ -122,6 +123,16 @@ export default function SettingsPage() {
 
   return (
     <AdminShell title="Settings">
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h3>Environment</h3>
+            <p className="small">Admin deployment target and API identity.</p>
+          </div>
+        </div>
+        <AdminEnvironmentStatus />
+      </div>
+
       <div className="card">
         <div className="card-header">
           <div>

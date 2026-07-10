@@ -6,6 +6,7 @@ Express API for Phase 1 development.
 
 - `GET /health`
 - `GET /ready`
+- `GET /meta/environment`
 - `POST /auth/login`
 - `POST /auth/change-password`
 - `POST /web/auth/request-code`

@@ -9,6 +9,14 @@ const REQUEST_TOTAL_TIMEOUT_MS = 14_000;
 const REQUEST_MAX_ATTEMPTS = 2;
 const ADMIN_CONTENT_SECTION_STATE_STORAGE_KEY = "vp_admin_content_sections_expanded";
 
+export interface ApiEnvironmentMetadata {
+  PERITIO_ENV?: string;
+  NODE_ENV?: string;
+  gitSha?: string;
+  buildTimestamp?: string;
+  processStartedAt?: string;
+}
+
 export function getApiBaseUrl(): string {
   return API_BASE;
 }
@@ -153,6 +161,18 @@ export async function adminFetch<T>(path: string, init?: AdminFetchRequestInit):
   }
 
   throw new Error("Request failed after multiple attempts. Please retry.");
+}
+
+export async function fetchApiEnvironmentMetadata(): Promise<ApiEnvironmentMetadata> {
+  const response = await fetch(`${API_BASE}/meta/environment`, {
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    throw new Error(`API environment metadata request failed (${response.status}).`);
+  }
+
+  return (await response.json()) as ApiEnvironmentMetadata;
 }
 
 async function readErrorPayload(response: Response): Promise<{ error?: string; snippet?: string } | null> {

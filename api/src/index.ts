@@ -8935,6 +8935,16 @@ app.get("/version", (_request, response) => {
   });
 });
 
+app.get("/meta/environment", (_request, response) => {
+  response.json({
+    PERITIO_ENV: runtimeConfig.deploymentEnvironment,
+    NODE_ENV: runtimeConfig.nodeEnv,
+    gitSha: GIT_SHA || "unknown",
+    buildTimestamp: BUILD_TIMESTAMP || "unknown",
+    processStartedAt: PROCESS_STARTED_AT
+  });
+});
+
 app.get("/meta/timezones", (_request, response) => {
   response.json({ items: getSupportedTimezones() });
 });

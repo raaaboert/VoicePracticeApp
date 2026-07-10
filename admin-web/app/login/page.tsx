@@ -2,7 +2,8 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { adminFetch, getApiBaseUrl, setAdminToken } from "../../src/lib/api";
+import { AdminEnvironmentStatus } from "../../src/components/AdminEnvironmentStatus";
+import { adminFetch, setAdminToken } from "../../src/lib/api";
 
 interface LoginResponse {
   token: string;
@@ -14,7 +15,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [apiBase] = useState(() => getApiBaseUrl());
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -36,25 +36,15 @@ export default function LoginPage() {
     }
   };
 
-  const apiBaseLooksMisconfigured =
-    typeof window !== "undefined"
-    && window.location.hostname !== "localhost"
-    && window.location.hostname !== "127.0.0.1"
-    && apiBase.includes("localhost");
-
   return (
     <main>
       <div className="shell" style={{ maxWidth: 500, paddingTop: 60 }}>
         <div className="card">
           <h2>Peritio - Web Admin</h2>
+          <AdminEnvironmentStatus compact />
           <p className="small">
-            Development login is backed by API password auth. Use the bootstrap password from API env until changed.
+            Sign in with the admin password configured on the target API.
           </p>
-          {apiBaseLooksMisconfigured ? (
-            <p className="error">
-              Admin API base URL is set to localhost. Set `API_BASE_URL` in Vercel and redeploy.
-            </p>
-          ) : null}
           <form onSubmit={onSubmit}>
             <label htmlFor="password">Password</label>
             <input
