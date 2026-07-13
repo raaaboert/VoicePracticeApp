@@ -12,6 +12,12 @@ import {
   sanitizeAppState,
   type SanitizerProfile
 } from "../src/dbSanitizer.js";
+import {
+  assertProductionWriteAllowed,
+  inferDatabaseTargetEnvironment,
+  parseScriptTarget,
+  type ScriptTargetEnvironment
+} from "../src/productionSafety.js";
 
 const APP_STATE_ROW_ID = "primary";
 
@@ -19,6 +25,8 @@ interface ParsedArgs {
   databaseUrl: string;
   profile: SanitizerProfile;
   apply: boolean;
+  target: ScriptTargetEnvironment | null;
+  confirmProduction: string | null;
 }
 
 interface TableCountReport {
@@ -48,6 +56,9 @@ Options:
   --database-url <url>   Required. Explicit target database URL.
   --profile <profile>    Required. prod-bootstrap or staging-refresh.
   --apply                Optional. Defaults to dry-run when omitted.
+  --target <env>          Optional. development, staging, or production.
+  --confirm-production "<phrase>"
+                        Required with --target production when applying.
   --help                 Print this help.
 `);
 }
@@ -79,7 +90,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   return {
     databaseUrl,
     profile: parseSanitizerProfile(String(values.get("profile") ?? "")),
-    apply: values.get("apply") === true
+    apply: values.get("apply") === true,
+    target: parseScriptTarget(values.get("target")),
+    confirmProduction: typeof values.get("confirm-production") === "string"
+      ? String(values.get("confirm-production"))
+      : null
   };
 }
 
@@ -93,6 +108,19 @@ function assertProfileTargetSafety(args: ParsedArgs): void {
   if (args.profile === "staging-refresh" && databaseUrlLooksProduction(args.databaseUrl)) {
     throw new Error("Refusing staging-refresh against the known production database.");
   }
+}
+
+function assertApplyTargetSafety(args: ParsedArgs): void {
+  if (!args.apply) {
+    return;
+  }
+
+  assertProductionWriteAllowed({
+    operationName: "db:sanitize-bootstrap",
+    explicitTarget: args.target,
+    inferredTarget: inferDatabaseTargetEnvironment(args.databaseUrl),
+    confirmProduction: args.confirmProduction
+  });
 }
 
 function quoteIdentifier(value: string): string {
@@ -269,6 +297,7 @@ async function main(): Promise<void> {
 
   const args = parseArgs(process.argv.slice(2));
   assertProfileTargetSafety(args);
+  assertApplyTargetSafety(args);
 
   const pool = new Pool({ connectionString: args.databaseUrl });
   try {

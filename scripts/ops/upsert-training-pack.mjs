@@ -2,6 +2,11 @@
 
 import crypto from "node:crypto";
 import { Pool } from "pg";
+import {
+  assertProductionWriteAllowed,
+  inferDatabaseTargetEnvironment,
+  parseTargetEnvironment,
+} from "./production-safety.mjs";
 
 function parseArgs(argv) {
   const parsed = {};
@@ -108,6 +113,8 @@ Required:
 
 Options:
   --databaseUrl <postgres-url>        Defaults to DATABASE_URL env var
+  --target <environment>              Optional. development, staging, or production
+  --confirm-production "<phrase>"     Required with --target production
   --id <uuid>                         Defaults to random UUID
   --title <text>                      Default: "Org Training Pack"
   --trainingTopic <text>              Default: "General communication reinforcement"
@@ -154,6 +161,13 @@ async function main() {
   if (!databaseUrl) {
     throw new Error("databaseUrl is required (pass --databaseUrl or set DATABASE_URL).");
   }
+  const explicitTarget = parseTargetEnvironment(args.target);
+  const targetEnvironment = assertProductionWriteAllowed({
+    operationName: "upsert-training-pack",
+    explicitTarget,
+    inferredTarget: inferDatabaseTargetEnvironment(databaseUrl),
+    confirmProduction: typeof args["confirm-production"] === "string" ? args["confirm-production"] : null,
+  });
 
   const orgId = String(args.orgId || "").trim();
   if (!orgId) {
@@ -173,6 +187,7 @@ async function main() {
   const audienceLevel = String(args.audienceLevel || "").trim();
   const target = describeDatabaseTarget(databaseUrl);
   console.log(`Target DB host=${target.host} port=${target.port} db=${target.db}`);
+  console.log(`Target environment=${targetEnvironment || "unknown"}`);
 
   const pool = new Pool({ connectionString: databaseUrl });
   try {

@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+import {
+  assertProductionWriteAllowed,
+  inferApiTargetEnvironment,
+  parseTargetEnvironment,
+} from "./production-safety.mjs";
+
 const DEFAULT_API_BASE_URL = "http://localhost:4100";
 const DEFAULT_EMAIL = "rbdautel@gmail.com";
 const DEFAULT_ORG_NAME = "Rob's company";
@@ -103,6 +109,9 @@ Usage:
   node scripts/ops/assign-enterprise-user.mjs --apiBaseUrl <url> --adminPassword <password>
 
 Optional:
+  --target <environment>    development | staging | production
+  --confirm-production "<phrase>"
+                            Required with --target production
   --email <email>           Default: ${DEFAULT_EMAIL}
   --orgName <name>          Default: ${DEFAULT_ORG_NAME}
   --orgRole <role>          org_admin | user_admin | user (default: ${DEFAULT_ORG_ROLE})
@@ -125,6 +134,13 @@ async function main() {
   }
 
   const apiBaseUrl = normalizeBaseUrl(args.apiBaseUrl || process.env.API_BASE_URL || DEFAULT_API_BASE_URL);
+  const explicitTarget = parseTargetEnvironment(args.target);
+  const targetEnvironment = assertProductionWriteAllowed({
+    operationName: "assign-enterprise-user",
+    explicitTarget,
+    inferredTarget: inferApiTargetEnvironment(apiBaseUrl),
+    confirmProduction: typeof args["confirm-production"] === "string" ? args["confirm-production"] : null,
+  });
   const adminPassword = (args.adminPassword || process.env.ADMIN_PASSWORD || "").trim();
   const email = (args.email || process.env.USER_EMAIL || DEFAULT_EMAIL).trim().toLowerCase();
   const orgName = (args.orgName || process.env.ORG_NAME || DEFAULT_ORG_NAME).trim();
@@ -151,6 +167,7 @@ async function main() {
   }
 
   console.log(`Using API: ${apiBaseUrl}`);
+  console.log(`Target environment: ${targetEnvironment || "unknown"}`);
   console.log(`Target user: ${email}`);
   console.log(`Enterprise org: ${orgName}`);
 

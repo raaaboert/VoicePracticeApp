@@ -12,6 +12,12 @@ import {
   inspectDisposableSimulationHistory,
   resetDisposablePreTesterHistory
 } from "../src/services/integrityMaintenance.js";
+import {
+  assertProductionWriteAllowed,
+  inferDatabaseTargetEnvironment,
+  parseScriptTarget,
+  type ScriptTargetEnvironment
+} from "../src/productionSafety.js";
 import { createScoreRecordAccess } from "../src/services/scoreRecordAccess.js";
 import { createUsageSessionAccess } from "../src/services/usageSessionAccess.js";
 import type { StorageProvider } from "../src/runtimeConfig.js";
@@ -59,6 +65,12 @@ interface ScriptRuntimeConfig {
   pgPoolMax: number;
   pgConnectTimeoutMs: number;
   pgIdleTimeoutMs: number;
+}
+
+interface ScriptCliOptions {
+  target: ScriptTargetEnvironment | null;
+  confirmProduction: string | null;
+  dryRun: boolean;
 }
 
 function countArray(value: unknown): number {
@@ -109,6 +121,29 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
     return fallback;
   }
   return Math.floor(parsed);
+}
+
+function readArgValue(name: string): string | null {
+  const flag = `--${name}`;
+  const index = process.argv.indexOf(flag);
+  if (index < 0) {
+    return null;
+  }
+
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith("--")) {
+    return null;
+  }
+
+  return value;
+}
+
+function loadScriptCliOptions(): ScriptCliOptions {
+  return {
+    target: parseScriptTarget(readArgValue("target")),
+    confirmProduction: readArgValue("confirm-production"),
+    dryRun: process.argv.includes("--dry-run")
+  };
 }
 
 function loadScriptRuntimeConfig(env: NodeJS.ProcessEnv = process.env): ScriptRuntimeConfig {
@@ -162,6 +197,19 @@ function resolveStorageTarget(runtimeConfig: ScriptRuntimeConfig): ScriptStorage
     pgConnectTimeoutMs: runtimeConfig.pgConnectTimeoutMs,
     pgIdleTimeoutMs: runtimeConfig.pgIdleTimeoutMs
   };
+}
+
+function assertResetTargetSafety(target: ScriptStorageTarget, cliOptions: ScriptCliOptions): void {
+  if (cliOptions.dryRun || target.provider !== "postgres") {
+    return;
+  }
+
+  assertProductionWriteAllowed({
+    operationName: "reset-simulation-baseline",
+    explicitTarget: cliOptions.target,
+    inferredTarget: inferDatabaseTargetEnvironment(target.databaseUrl),
+    confirmProduction: cliOptions.confirmProduction
+  });
 }
 
 async function loadPersistedAppState(target: ScriptStorageTarget): Promise<ApiDatabase> {
@@ -405,8 +453,10 @@ async function collectReadOnlyPurgeInventory(target: ScriptStorageTarget, db: Ap
 
 async function main(): Promise<void> {
   const runtimeConfig = loadScriptRuntimeConfig();
+  const cliOptions = loadScriptCliOptions();
   const target = resolveStorageTarget(runtimeConfig);
-  const dryRun = process.argv.includes("--dry-run");
+  assertResetTargetSafety(target, cliOptions);
+  const dryRun = cliOptions.dryRun;
   const now = new Date();
   const db = await loadPersistedAppState(target);
   const before = await collectReadOnlyPurgeInventory(target, db);
