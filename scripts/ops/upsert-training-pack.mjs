@@ -114,7 +114,7 @@ Required:
 Options:
   --databaseUrl <postgres-url>        Defaults to DATABASE_URL env var
   --target <environment>              Optional. development, staging, or production
-  --confirm-production "<phrase>"     Required with --target production
+  --confirm-production "<phrase>"     Required for production or unknown targets
   --id <uuid>                         Defaults to random UUID
   --title <text>                      Default: "Org Training Pack"
   --trainingTopic <text>              Default: "General communication reinforcement"

@@ -110,19 +110,32 @@ export function assertProductionWriteAllowed(params: {
   inferredTarget: ScriptTargetEnvironment | null;
   confirmProduction: string | null;
 }): ScriptTargetEnvironment | null {
+  if (!params.inferredTarget) {
+    if (
+      params.explicitTarget === "production" &&
+      params.confirmProduction === PRODUCTION_WRITE_CONFIRMATION
+    ) {
+      return "production";
+    }
+
+    throw new Error(
+      `${params.operationName} refuses to write to an unknown target unless you pass --target production --confirm-production "${PRODUCTION_WRITE_CONFIRMATION}".`
+    );
+  }
+
   const resolvedTarget = resolveGuardedTargetEnvironment(params);
   if (resolvedTarget !== "production") {
     return resolvedTarget;
   }
 
   if (
-    params.explicitTarget !== "production" ||
-    params.confirmProduction !== PRODUCTION_WRITE_CONFIRMATION
+    params.explicitTarget === "production" &&
+    params.confirmProduction === PRODUCTION_WRITE_CONFIRMATION
   ) {
-    throw new Error(
-      `${params.operationName} refuses to write to production unless you pass --target production --confirm-production "${PRODUCTION_WRITE_CONFIRMATION}".`
-    );
+    return resolvedTarget;
   }
 
-  return resolvedTarget;
+  throw new Error(
+    `${params.operationName} refuses to write to production unless you pass --target production --confirm-production "${PRODUCTION_WRITE_CONFIRMATION}".`
+  );
 }

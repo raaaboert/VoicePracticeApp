@@ -111,7 +111,7 @@ Usage:
 Optional:
   --target <environment>    development | staging | production
   --confirm-production "<phrase>"
-                            Required with --target production
+                            Required for production or unknown targets
   --email <email>           Default: ${DEFAULT_EMAIL}
   --orgName <name>          Default: ${DEFAULT_ORG_NAME}
   --orgRole <role>          org_admin | user_admin | user (default: ${DEFAULT_ORG_ROLE})

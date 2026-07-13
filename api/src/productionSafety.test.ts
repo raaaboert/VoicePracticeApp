@@ -32,9 +32,32 @@ test("api target inference uses known API host markers", () => {
   assert.equal(inferApiTargetEnvironment("https://voicepractice-api-dev.onrender.com"), "staging");
   assert.equal(inferApiTargetEnvironment("https://peritio-api-prod.onrender.com"), "production");
   assert.equal(inferApiTargetEnvironment("http://localhost:4100"), "development");
+  assert.equal(inferApiTargetEnvironment("https://api.peritio.ai"), null);
 });
 
-test("production writes require explicit target and exact confirmation", () => {
+test("known staging target allows normal writes", () => {
+  assert.equal(
+    assertProductionWriteAllowed({
+      operationName: "test-script",
+      explicitTarget: null,
+      inferredTarget: "staging",
+      confirmProduction: null
+    }),
+    "staging"
+  );
+
+  assert.equal(
+    assertProductionWriteAllowed({
+      operationName: "test-script",
+      explicitTarget: "staging",
+      inferredTarget: "staging",
+      confirmProduction: null
+    }),
+    "staging"
+  );
+});
+
+test("known production target refuses without confirmation", () => {
   assert.throws(
     () =>
       assertProductionWriteAllowed({
@@ -56,12 +79,97 @@ test("production writes require explicit target and exact confirmation", () => {
       }),
     /refuses to write to production/
   );
+});
 
+test("known production target allows with exact confirmation", () => {
   assert.equal(
     assertProductionWriteAllowed({
       operationName: "test-script",
       explicitTarget: "production",
       inferredTarget: "production",
+      confirmProduction: PRODUCTION_WRITE_CONFIRMATION
+    }),
+    "production"
+  );
+});
+
+test("unknown target refuses by default and with non-production target", () => {
+  assert.throws(
+    () =>
+      assertProductionWriteAllowed({
+        operationName: "test-script",
+        explicitTarget: null,
+        inferredTarget: null,
+        confirmProduction: null
+      }),
+    /refuses to write to an unknown target/
+  );
+
+  assert.throws(
+    () =>
+      assertProductionWriteAllowed({
+        operationName: "test-script",
+        explicitTarget: "staging",
+        inferredTarget: null,
+        confirmProduction: null
+      }),
+    /refuses to write to an unknown target/
+  );
+});
+
+test("unknown target allows only with production confirmation", () => {
+  assert.equal(
+    assertProductionWriteAllowed({
+      operationName: "test-script",
+      explicitTarget: "production",
+      inferredTarget: null,
+      confirmProduction: PRODUCTION_WRITE_CONFIRMATION
+    }),
+    "production"
+  );
+});
+
+test("vanity API domain and unknown DB URL are fail-closed", () => {
+  assert.equal(inferApiTargetEnvironment("https://api.peritio.ai"), null);
+  assert.equal(inferDatabaseTargetEnvironment("postgres://user:pass@pooler.render.com/appdb"), null);
+
+  assert.throws(
+    () =>
+      assertProductionWriteAllowed({
+        operationName: "test-script",
+        explicitTarget: null,
+        inferredTarget: inferApiTargetEnvironment("https://api.peritio.ai"),
+        confirmProduction: null
+      }),
+    /refuses to write to an unknown target/
+  );
+
+  assert.throws(
+    () =>
+      assertProductionWriteAllowed({
+        operationName: "test-script",
+        explicitTarget: null,
+        inferredTarget: inferDatabaseTargetEnvironment("postgres://user:pass@pooler.render.com/appdb"),
+        confirmProduction: null
+      }),
+    /refuses to write to an unknown target/
+  );
+
+  assert.equal(
+    assertProductionWriteAllowed({
+      operationName: "test-script",
+      explicitTarget: "production",
+      inferredTarget: inferApiTargetEnvironment("https://api.peritio.ai"),
+      confirmProduction: PRODUCTION_WRITE_CONFIRMATION
+    }),
+    "production"
+  );
+
+  assert.equal(
+    assertProductionWriteAllowed({
+      operationName: "test-script",
+      explicitTarget: "production",
+      inferredTarget: inferDatabaseTargetEnvironment("postgres://user:pass@pooler.render.com/appdb"),
       confirmProduction: PRODUCTION_WRITE_CONFIRMATION
     }),
     "production"

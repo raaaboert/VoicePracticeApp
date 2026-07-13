@@ -1,5 +1,7 @@
 export const PRODUCTION_WRITE_CONFIRMATION = "I understand this writes to production";
 
+// Keep this standalone helper aligned with api/src/productionSafety.ts.
+// The ops scripts run directly under Node and cannot import the API TypeScript source safely.
 export function parseTargetEnvironment(rawValue) {
   if (rawValue === undefined || rawValue === null || rawValue === "true") {
     return null;
@@ -95,6 +97,19 @@ export function assertProductionWriteAllowed({
   inferredTarget,
   confirmProduction,
 }) {
+  if (!inferredTarget) {
+    if (
+      explicitTarget === "production" &&
+      confirmProduction === PRODUCTION_WRITE_CONFIRMATION
+    ) {
+      return "production";
+    }
+
+    throw new Error(
+      `${operationName} refuses to write to an unknown target unless you pass --target production --confirm-production "${PRODUCTION_WRITE_CONFIRMATION}".`
+    );
+  }
+
   const resolvedTarget = resolveGuardedTargetEnvironment({
     operationName,
     explicitTarget,
@@ -106,13 +121,13 @@ export function assertProductionWriteAllowed({
   }
 
   if (
-    explicitTarget !== "production" ||
-    confirmProduction !== PRODUCTION_WRITE_CONFIRMATION
+    explicitTarget === "production" &&
+    confirmProduction === PRODUCTION_WRITE_CONFIRMATION
   ) {
-    throw new Error(
-      `${operationName} refuses to write to production unless you pass --target production --confirm-production "${PRODUCTION_WRITE_CONFIRMATION}".`
-    );
+    return resolvedTarget;
   }
 
-  return resolvedTarget;
+  throw new Error(
+    `${operationName} refuses to write to production unless you pass --target production --confirm-production "${PRODUCTION_WRITE_CONFIRMATION}".`
+  );
 }

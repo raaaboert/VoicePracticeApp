@@ -58,7 +58,7 @@ Options:
   --apply                Optional. Defaults to dry-run when omitted.
   --target <env>          Optional. development, staging, or production.
   --confirm-production "<phrase>"
-                        Required with --target production when applying.
+                        Required with --target production for production or unknown targets.
   --help                 Print this help.
 `);
 }
@@ -110,11 +110,7 @@ function assertProfileTargetSafety(args: ParsedArgs): void {
   }
 }
 
-function assertApplyTargetSafety(args: ParsedArgs): void {
-  if (!args.apply) {
-    return;
-  }
-
+function assertTargetSafety(args: ParsedArgs): void {
   assertProductionWriteAllowed({
     operationName: "db:sanitize-bootstrap",
     explicitTarget: args.target,
@@ -297,7 +293,7 @@ async function main(): Promise<void> {
 
   const args = parseArgs(process.argv.slice(2));
   assertProfileTargetSafety(args);
-  assertApplyTargetSafety(args);
+  assertTargetSafety(args);
 
   const pool = new Pool({ connectionString: args.databaseUrl });
   try {

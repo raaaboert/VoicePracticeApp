@@ -200,7 +200,7 @@ function resolveStorageTarget(runtimeConfig: ScriptRuntimeConfig): ScriptStorage
 }
 
 function assertResetTargetSafety(target: ScriptStorageTarget, cliOptions: ScriptCliOptions): void {
-  if (cliOptions.dryRun || target.provider !== "postgres") {
+  if (target.provider !== "postgres") {
     return;
   }
 

@@ -340,7 +340,18 @@ Production write confirmation:
 --target production --confirm-production "I understand this writes to production"
 ```
 
-Production-looking database/API targets are refused by default for write operations. The confirmation above is required before an intentionally production-targeted write can proceed.
+Ops scripts are fail-closed:
+
+- recognized local/development targets may proceed normally.
+- recognized staging targets may proceed normally.
+- recognized production targets require the confirmation above.
+- unknown targets are refused by default.
+- unknown targets may proceed only through the same explicit production confirmation path.
+- `--target staging` never overrides an unknown or production-looking target.
+
+This matters for future vanity domains or changed provider URLs. A future target such as `https://api.peritio.ai` must either be classified in the script guard or invoked with the explicit production confirmation until it is classified.
+
+The production-safety logic exists in both `api/src/productionSafety.ts` and `scripts/ops/production-safety.mjs`. Keep them aligned: the ops helper is duplicated because standalone `.mjs` scripts should not depend on importing API TypeScript source at runtime.
 
 Production data is real data. Treat every production write, restore, and cleanup as a manual change window.
 
@@ -348,14 +359,14 @@ Production data is real data. Treat every production write, restore, and cleanup
 
 | Script | Purpose | Current guard | Remaining gap / recommendation |
 | --- | --- | --- | --- |
-| `npm run db:sanitize-bootstrap` / `api/scripts/sanitize-bootstrap.ts` | Sanitized DB bootstrap/refresh cleanup | Requires explicit `--database-url` and `--profile`; dry-run by default; rejects `prod-bootstrap` against known staging DB names; rejects `staging-refresh` against known production DB names; production `--apply` requires the exact production confirmation phrase | Name-marker checks are helpful but brittle if DB names change. Future improvement: support explicit non-secret expected/forbidden DB identifiers. |
-| `npm run reset:simulation-baseline --workspace api` / `api/scripts/reset-simulation-baseline.ts` | Clears simulation-derived disposable history | Defaults to file/local behavior; refuses Postgres unless `--allow-postgres`; supports `--dry-run`; production Postgres writes require the exact production confirmation phrase | Keep hosted use rare. Future improvement: support explicit non-secret expected/forbidden DB identifiers. |
+| `npm run db:sanitize-bootstrap` / `api/scripts/sanitize-bootstrap.ts` | Sanitized DB bootstrap/refresh cleanup | Requires explicit `--database-url` and `--profile`; dry-run by default; rejects `prod-bootstrap` against known staging DB names; rejects `staging-refresh` against known production DB names; production or unknown targets require the exact production confirmation phrase before any DB access | Name-marker checks are helpful but brittle if DB names change. Future improvement: support explicit non-secret expected/forbidden DB identifiers. |
+| `npm run reset:simulation-baseline --workspace api` / `api/scripts/reset-simulation-baseline.ts` | Clears simulation-derived disposable history | Defaults to file/local behavior; refuses Postgres unless `--allow-postgres`; supports `--dry-run`; production or unknown Postgres targets require the exact production confirmation phrase before any DB access | Keep hosted use rare. Future improvement: support explicit non-secret expected/forbidden DB identifiers. |
 | `npm run reset:pretester-history --workspace api` / `api/scripts/reset-pretester-history.ts` | Older pretester reset path | NPM script forces `--local-file`; script refuses non-file storage unless local-file override is present | Acceptable for local file use. Keep it file-only; do not add Postgres support. |
 | `npm run seed:dashboard-local --workspace api` / `api/scripts/seed-dashboard-local.mjs` | Seeds local dashboard identities | Loads local env, requires `STORAGE_PROVIDER=file`, writes only local JSON DB path | Acceptable for local setup. Keep it local-only; do not reuse for staging/prod baseline accounts. |
 | `scripts/launch-local-stack.ps1` | Starts local API/admin/mobile terminals | Uses local dev commands | Local-only helper. No hosted DB risk unless local env files are misconfigured. |
 | `scripts/stop-local-stack.ps1` | Stops local listeners on ports `4100`, `3000`, `8081` | Operates on local processes only | Not a DB risk. Use with care because it kills local processes on those ports. |
-| `scripts/ops/upsert-training-pack.mjs` | Directly upserts Postgres training-pack content | Prints target host/db and detected environment; production-looking DB targets require `--target production` plus the exact confirmation phrase before connecting | No dry-run yet. Use only with a backup and reviewed target. |
-| `scripts/ops/assign-enterprise-user.mjs` | Mutates user/org state through the API | Defaults to localhost; prints detected target environment; production API targets require `--target production` plus the exact confirmation phrase before login/API calls | Use staging/admin UI for routine changes; reserve script use for deliberate operator workflows. |
+| `scripts/ops/upsert-training-pack.mjs` | Directly upserts Postgres training-pack content | Prints target host/db and detected environment; production or unknown DB targets require `--target production` plus the exact confirmation phrase before connecting | No dry-run yet. Use only with a backup and reviewed target. |
+| `scripts/ops/assign-enterprise-user.mjs` | Mutates user/org state through the API | Defaults to localhost; prints detected target environment; production or unknown API targets require `--target production` plus the exact confirmation phrase before login/API calls | Use staging/admin UI for routine changes; reserve script use for deliberate operator workflows. |
 
 Do not run any of the DB-writing or API-writing scripts against production without a fresh backup, target review, and explicit approval.
 
@@ -383,7 +394,14 @@ EXPECTED_DATABASE_NAME=peritio_db_prod
 FORBIDDEN_DATABASE_NAMES=voicepractice_db,voicepractice-db
 ```
 
-That keeps staging from needing production credentials while still making the boot guard explicit and configurable if database names or providers change.
+Recommended next hardening: add an API boot-time DB allowlist guard.
+
+- Prefer `EXPECTED_DATABASE_NAME` per environment.
+- At boot, when using Postgres, the API should query `current_database()` or the provider equivalent and compare it to `EXPECTED_DATABASE_NAME`.
+- Keep forbidden-name checks as a secondary belt-and-suspenders guard.
+- Do not put full `PRODUCTION_DATABASE_URL` credentials into staging just to compare URLs.
+
+That keeps staging from needing production credentials while still making the boot guard explicit and configurable if database names, hosts, poolers, or vanity connection URLs change.
 
 ## Outstanding Before Production Mobile Build
 
