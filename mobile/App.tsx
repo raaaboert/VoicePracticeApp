@@ -113,6 +113,7 @@ import {
 } from "./src/lib/storage";
 import { ScorecardView } from "./src/screens/ScorecardView";
 import { SimulationScreen } from "./src/screens/SimulationScreen";
+import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import {
   AiVoiceGender,
   AiVoiceProfile,
@@ -159,6 +160,7 @@ type Screen =
   | "setup"
   | "simulation"
   | "scorecard"
+  | "performance"
   | "usage_dashboard"
   | "admin_home"
   | "admin_org_dashboard"
@@ -3450,6 +3452,14 @@ export default function App() {
             <Pressable
               style={styles.menuItemButton}
               onPress={() => {
+                closeHomeMenu("performance");
+              }}
+            >
+              <Text style={styles.menuItemText}>Performance</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItemButton}
+              onPress={() => {
                 closeHomeMenu("usage_dashboard");
               }}
             >
@@ -5552,6 +5562,16 @@ export default function App() {
             setLastTranscript(null);
             setScreen("setup");
           }}
+        />
+      );
+    }
+
+    if (screen === "performance" && user && mobileAuthToken) {
+      return (
+        <PerformanceScreen
+          userId={user.id}
+          authToken={mobileAuthToken}
+          onBack={() => setScreen("home")}
         />
       );
     }
