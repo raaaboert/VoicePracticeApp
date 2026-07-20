@@ -693,4 +693,8 @@ test("performance plan postgres store initializes the extracted schema and index
   assert(queries.some((query) => query.includes("performance_plans_one_active_per_user_idx")));
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_scope_items")));
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_audit_events")));
+  assert(queries.some((query) => query.includes("idx_usage_sessions_org_user_ended_at")));
+  assert(queries.some((query) => query.includes("idx_usage_sessions_org_user_scenario_ended_at")));
+  assert(queries.some((query) => query.includes("idx_score_records_org_user_ended_at")));
+  assert(queries.some((query) => query.includes("idx_score_records_org_user_scenario_ended_at")));
 });

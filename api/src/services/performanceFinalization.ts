@@ -1,4 +1,10 @@
-import { PerformanceAuditEvent, PerformancePlan, SimulationScoreRecord, UsageSessionRecord } from "@voicepractice/shared";
+import {
+  AuditActorType,
+  PerformanceAuditEvent,
+  PerformancePlan,
+  SimulationScoreRecord,
+  UsageSessionRecord
+} from "@voicepractice/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -66,6 +72,7 @@ export async function cancelPerformancePlan(params: {
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
   cancelledAt: Date;
+  actorType?: AuditActorType;
   actorId: string | null;
   reason?: string | null;
 }): Promise<PerformancePlanWithRelations | null> {
@@ -89,13 +96,14 @@ export async function cancelPerformancePlan(params: {
   return await params.store.cancelPlan({
     planId: params.plan.id,
     cancelledAt: params.cancelledAt.toISOString(),
-    cancelledByActorType: "mobile_user",
+    cancelledByActorType: params.actorType ?? "mobile_user",
     cancelledByActorId: params.actorId,
     cancellationReason: params.reason ?? null,
     finalResult,
     auditEvent: buildPerformanceFinalizationAuditEvent({
       plan: params.plan,
       action: "cancelled",
+      actorType: params.actorType ?? "mobile_user",
       actorId: params.actorId,
       createdAt: params.cancelledAt.toISOString(),
       finalResult,
@@ -128,6 +136,7 @@ export async function finalizeOpenPerformancePlanForUserIfNeeded(params: {
 function buildPerformanceFinalizationAuditEvent(params: {
   plan: PerformancePlan;
   action: "completed" | "cancelled";
+  actorType?: AuditActorType;
   actorId: string | null;
   createdAt: string;
   finalResult: unknown;
@@ -138,7 +147,7 @@ function buildPerformanceFinalizationAuditEvent(params: {
     planId: params.plan.id,
     orgId: params.plan.orgId,
     userId: params.plan.userId,
-    actorType: params.action === "completed" ? "system" : "mobile_user",
+    actorType: params.action === "completed" ? "system" : params.actorType ?? "mobile_user",
     actorId: params.actorId,
     action: params.action,
     changedFields: ["status", "finalResult"],

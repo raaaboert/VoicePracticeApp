@@ -55,7 +55,11 @@ export function assertValidIanaTimeZone(timeZone: string): void {
 }
 
 export function isDateKey(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const [year, month, day] = value.split("-").map((entry) => Number(entry));
+  return isValidLocalDate(year, month, day);
 }
 
 export function parseDateKey(value: string): { year: number; month: number; day: number } {

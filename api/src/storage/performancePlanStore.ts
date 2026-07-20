@@ -1196,6 +1196,15 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
               ON performance_plan_audit_events (plan_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS performance_plan_audit_events_org_created_idx
               ON performance_plan_audit_events (org_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_user_ended_at
+              ON usage_sessions (org_id, user_id, ended_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_user_scenario_ended_at
+              ON usage_sessions (org_id, user_id, scenario_id, ended_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_score_records_org_user_ended_at
+              ON score_records (org_id, user_id, ended_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_score_records_org_user_scenario_ended_at
+              ON score_records (org_id, user_id, scenario_id, ended_at DESC);
           `
         )
         .then(() => undefined);
