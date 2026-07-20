@@ -168,6 +168,7 @@ import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCry
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
+import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createSimulationSessionStore } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
@@ -194,6 +195,10 @@ import {
   buildNormalizedSimulationScoreThemesFromArtifact,
 } from "./services/coachingThemeNormalization.js";
 import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services/authCodeDelivery.js";
+import {
+  initializeDatabaseStoresForReadiness,
+  initializeDatabaseStoresForStartup
+} from "./services/databaseStoreInitialization.js";
 import {
   handleDashboardWebAuthCodeRequest,
 } from "./services/dashboardWebAuthRequest.js";
@@ -505,6 +510,14 @@ const scoreRecordStore = createScoreRecordStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
 });
 const webAuthSessionStore = createWebAuthSessionStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const performancePlanStore = createPerformancePlanStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
   databaseUrl: DATABASE_URL,
@@ -4276,14 +4289,21 @@ async function revokeWebAuthSessionsForUserIds(userIds: string[]): Promise<void>
 async function refreshDatabaseReadiness(): Promise<void> {
   const wasReady = isDatabaseReady;
   try {
-    await auditEventStore.initialize();
-    await aiUsageEventStore.initialize();
-    await simulationSessionStore.initialize();
-    await usageSessionStore.initialize();
-    await scoreRecordStore.initialize();
-    await supportCaseStore.initialize();
-    await webAuthSessionStore.initialize();
-    await loadDatabase({ forceStorageRead: true });
+    await initializeDatabaseStoresForReadiness({
+      stores: {
+        auditEventStore,
+        aiUsageEventStore,
+        simulationSessionStore,
+        usageSessionStore,
+        scoreRecordStore,
+        supportCaseStore,
+        webAuthSessionStore,
+        performancePlanStore
+      },
+      loadDatabase: async () => {
+        await loadDatabase({ forceStorageRead: true });
+      }
+    });
     isDatabaseReady = true;
     databaseReadyError = null;
     databaseReadyConsecutiveFailures = 0;
@@ -17741,21 +17761,28 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 });
 
 void (async () => {
-  await auditEventStore.initialize();
-  await migrateLegacyAuditEventsFromAppState();
-  await aiUsageEventStore.initialize();
-  await migrateLegacyAiUsageEventsFromAppState();
-  await simulationSessionStore.initialize();
-  await usageSessionStore.initialize();
-  await migrateLegacyUsageSessionsFromAppState();
-  await scoreRecordStore.initialize();
-  await migrateLegacyScoreRecordsFromAppState();
-  await supportCaseStore.initialize();
-  await migrateLegacySupportCasesFromAppState();
-  await webAuthSessionStore.initialize();
-  await migrateLegacyWebAuthSessionsFromAppState();
-  await trainingPackStore.initialize();
-  await runStartupUsageIntegrityMaintenance();
+  await initializeDatabaseStoresForStartup({
+    stores: {
+      auditEventStore,
+      aiUsageEventStore,
+      simulationSessionStore,
+      usageSessionStore,
+      scoreRecordStore,
+      supportCaseStore,
+      webAuthSessionStore,
+      performancePlanStore,
+      trainingPackStore
+    },
+    maintenance: {
+      migrateLegacyAuditEventsFromAppState,
+      migrateLegacyAiUsageEventsFromAppState,
+      migrateLegacyUsageSessionsFromAppState,
+      migrateLegacyScoreRecordsFromAppState,
+      migrateLegacySupportCasesFromAppState,
+      migrateLegacyWebAuthSessionsFromAppState,
+      runStartupUsageIntegrityMaintenance
+    }
+  });
 
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
