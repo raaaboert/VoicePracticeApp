@@ -238,6 +238,7 @@ import {
   SimulationScorePayloadValidationError,
   type SimulationScorecard
 } from "./services/simulationScoring.js";
+import { buildMobilePerformanceCurrentResponse } from "./services/performanceApi.js";
 import {
   pruneStaleRecognizedSimulationSessions,
   repairOrphanedUserScopedHistory
@@ -16184,6 +16185,48 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
   });
 });
 
+app.get("/mobile/users/:userId/performance/current", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+
+    const orgId = accessContext.actingOrgId;
+    const usageSessions = orgId ? listUsageSessions(db, { orgId, userId: user.id }) : [];
+    const scoreRecords = orgId ? listScoreRecords(db, { orgId, userId: user.id, conclusiveOnly: true }) : [];
+    const payload = await buildMobilePerformanceCurrentResponse({
+      store: performancePlanStore,
+      orgId,
+      userId: user.id,
+      usageSessions,
+      scoreRecords,
+      now: new Date()
+    });
+
+    response.json(payload);
+  });
+});
+
 app.get("/mobile/users/:userId/admin/org/dashboard", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
@@ -17760,7 +17803,7 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   response.status(500).json({ error: message });
 });
 
-void (async () => {
+export async function startApiServer(): Promise<void> {
   await initializeDatabaseStoresForStartup({
     stores: {
       auditEventStore,
@@ -17794,9 +17837,15 @@ void (async () => {
     queueDatabaseReadinessRefresh();
   }, READINESS_REFRESH_MS);
   readinessInterval.unref();
-})().catch((error: unknown) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  // eslint-disable-next-line no-console
-  console.error(`[BOOT] startup failed: ${message}`);
-  process.exit(1);
-});
+}
+
+export { app };
+
+if (runtimeConfig.nodeEnv !== "test") {
+  void startApiServer().catch((error: unknown) => {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    // eslint-disable-next-line no-console
+    console.error(`[BOOT] startup failed: ${message}`);
+    process.exit(1);
+  });
+}

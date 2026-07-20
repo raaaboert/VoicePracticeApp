@@ -1,0 +1,291 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  PerformancePlan,
+  PerformancePlanScopeItem,
+  SimulationScoreRecord,
+  UsageSessionRecord
+} from "@voicepractice/shared";
+
+import { createPerformancePlanStore } from "../storage/performancePlanStore.js";
+import {
+  buildMobilePerformanceCurrentResponse
+} from "./performanceApi.js";
+
+const NOW = new Date("2026-07-20T16:00:00.000Z");
+
+function buildPlan(overrides: Partial<PerformancePlan> = {}): PerformancePlan {
+  const planId = overrides.id ?? "perf_plan_1";
+  const userId = overrides.userId ?? "user_1";
+  const orgId = overrides.orgId ?? "org_1";
+  return {
+    id: planId,
+    orgId,
+    userId,
+    createdByActorType: "mobile_user",
+    createdByActorId: userId,
+    createdAt: overrides.createdAt ?? "2026-07-01T06:00:00.000Z",
+    submittedAt: overrides.submittedAt ?? "2026-07-01T06:00:00.000Z",
+    effectiveAt: overrides.effectiveAt ?? "2026-07-01T06:00:00.000Z",
+    startDate: overrides.startDate ?? "2026-07-01",
+    endDate: overrides.endDate ?? "2099-12-31",
+    timeZone: overrides.timeZone ?? "America/Denver",
+    status: overrides.status ?? "active",
+    completedAt: overrides.completedAt ?? null,
+    cancelledAt: overrides.cancelledAt ?? null,
+    cancelledByActorType: overrides.cancelledByActorType ?? null,
+    cancelledByActorId: overrides.cancelledByActorId ?? null,
+    cancellationReason: overrides.cancellationReason ?? null,
+    activityGoal: overrides.activityGoal ?? {
+      enabled: true,
+      metricType: "total_session_count",
+      targetValue: 1
+    },
+    performanceGoal: overrides.performanceGoal ?? {
+      enabled: true,
+      metricType: "target_average_score",
+      targetScore: 80,
+      improvementAmount: null,
+      comparisonMonthCount: null
+    },
+    scope: overrides.scope ?? {
+      allAssignedScenarios: false,
+      selectedFocusTopicIds: [],
+      selectedScenarioIds: ["scenario_1"],
+      scenarios: [
+        {
+          scenarioId: "scenario_1",
+          displayName: "Difficult Performance Review",
+          source: "standard",
+          segmentId: "manager",
+          segmentLabel: "Manager",
+          focusTopics: [],
+          selectionSources: ["direct"]
+        }
+      ]
+    },
+    baseline: overrides.baseline ?? null,
+    finalResult: overrides.finalResult ?? null,
+    updatedAt: overrides.updatedAt ?? "2026-07-01T06:00:00.000Z"
+  };
+}
+
+function buildScopeItem(overrides: Partial<PerformancePlanScopeItem> = {}): PerformancePlanScopeItem {
+  return {
+    id: overrides.id ?? "perf_scope_1",
+    planId: overrides.planId ?? "perf_plan_1",
+    orgId: overrides.orgId ?? "org_1",
+    userId: overrides.userId ?? "user_1",
+    scenarioId: overrides.scenarioId ?? "scenario_1",
+    scenarioDisplayName: overrides.scenarioDisplayName ?? "Difficult Performance Review",
+    scenarioSource: overrides.scenarioSource ?? "standard",
+    segmentId: overrides.segmentId ?? "manager",
+    segmentLabel: overrides.segmentLabel ?? "Manager",
+    focusTopicId: overrides.focusTopicId ?? null,
+    focusTopicName: overrides.focusTopicName ?? null,
+    selectionSources: overrides.selectionSources ?? ["direct"],
+    metadataSnapshot: overrides.metadataSnapshot ?? {},
+    createdAt: overrides.createdAt ?? "2026-07-01T06:00:00.000Z"
+  };
+}
+
+function buildUsage(overrides: Partial<UsageSessionRecord> = {}): UsageSessionRecord {
+  return {
+    id: overrides.id ?? "usage_1",
+    userId: overrides.userId ?? "user_1",
+    orgId: overrides.orgId ?? "org_1",
+    divisionId: overrides.divisionId ?? null,
+    segmentId: overrides.segmentId ?? "manager",
+    scenarioId: overrides.scenarioId ?? "scenario_1",
+    trainingId: overrides.trainingId ?? null,
+    trainingPackId: overrides.trainingPackId ?? null,
+    startedAt: overrides.startedAt ?? "2026-07-10T15:00:00.000Z",
+    endedAt: overrides.endedAt ?? "2026-07-10T15:10:00.000Z",
+    rawDurationSeconds: overrides.rawDurationSeconds ?? 600,
+    billedSecondsAdded: overrides.billedSecondsAdded,
+    createdAt: overrides.createdAt ?? "2026-07-10T15:10:00.000Z"
+  };
+}
+
+function buildScore(id: string, overallScore: number, overrides: Partial<SimulationScoreRecord> = {}): SimulationScoreRecord {
+  const endedAt = overrides.endedAt ?? `2026-07-10T1${id.slice(-1)}:00:00.000Z`;
+  return {
+    id,
+    simulationSessionId: overrides.simulationSessionId ?? `sim_${id}`,
+    userId: overrides.userId ?? "user_1",
+    orgId: overrides.orgId ?? "org_1",
+    divisionId: overrides.divisionId ?? null,
+    segmentId: overrides.segmentId ?? "manager",
+    scenarioId: overrides.scenarioId ?? "scenario_1",
+    trainingId: overrides.trainingId ?? null,
+    trainingPackId: overrides.trainingPackId ?? null,
+    industryId: overrides.industryId ?? null,
+    startedAt: overrides.startedAt ?? endedAt,
+    endedAt,
+    communicationScore: overrides.communicationScore ?? overallScore,
+    outcomeScore: overrides.outcomeScore ?? overallScore,
+    overallScore,
+    completionLevel: overrides.completionLevel ?? "complete",
+    objectiveAchieved: overrides.objectiveAchieved ?? true,
+    persuasion: overrides.persuasion ?? 8,
+    clarity: overrides.clarity ?? 8,
+    empathy: overrides.empathy ?? 8,
+    assertiveness: overrides.assertiveness ?? 8,
+    summary: overrides.summary ?? "Good attempt",
+    coachingArtifact: overrides.coachingArtifact ?? null,
+    normalizedCoachingThemes: overrides.normalizedCoachingThemes ?? null,
+    rubricVersion: overrides.rubricVersion ?? "rubric",
+    model: overrides.model ?? "model",
+    promptVersion: overrides.promptVersion ?? "prompt",
+    inputTokens: overrides.inputTokens ?? 1,
+    outputTokens: overrides.outputTokens ?? 1,
+    totalTokens: overrides.totalTokens ?? 2,
+    createdAt: overrides.createdAt ?? endedAt
+  };
+}
+
+async function withTempStore<T>(runner: (store: ReturnType<typeof createPerformancePlanStore>) => Promise<T>): Promise<T> {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "performance-api-"));
+  try {
+    const store = createPerformancePlanStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1,
+      pgIdleTimeoutMs: 1
+    });
+    await store.initialize();
+    return await runner(store);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+test("mobile performance current response is successful and empty when no active plan exists", async () => {
+  await withTempStore(async (store) => {
+    const response = await buildMobilePerformanceCurrentResponse({
+      store,
+      orgId: "org_1",
+      userId: "user_1",
+      usageSessions: [],
+      scoreRecords: [],
+      now: NOW
+    });
+
+    assert.equal(response.generatedAt, NOW.toISOString());
+    assert.equal(response.plan, null);
+    assert.equal(response.progress, null);
+    assert.deepEqual(response.insights, []);
+    assert.equal(response.displayState.state, "no_active_plan");
+  });
+});
+
+test("mobile performance current response returns active progress and deterministic insights", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan(),
+      scopeItems: [buildScopeItem()],
+      auditEvents: []
+    });
+
+    const response = await buildMobilePerformanceCurrentResponse({
+      store,
+      orgId: "org_1",
+      userId: "user_1",
+      usageSessions: [buildUsage()],
+      scoreRecords: [
+        buildScore("score_1", 80),
+        buildScore("score_2", 90),
+        buildScore("score_3", 85)
+      ],
+      now: NOW
+    });
+
+    assert.equal(response.plan?.id, "perf_plan_1");
+    assert.equal(response.progress?.activity.actualValue, 1);
+    assert.equal(response.progress?.performance.eligibleScoreCount, 3);
+    assert.equal(response.progress?.performance.currentAverage, 85);
+    assert.equal(response.insights.some((insight) => insight.status === "goal_met"), true);
+    assert.equal(response.displayState.state, "active_on_track");
+  });
+});
+
+test("mobile performance current response lazily finalizes expired plans once", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan({
+        id: "perf_plan_expired",
+        startDate: "2026-07-01",
+        endDate: "2026-07-02"
+      }),
+      scopeItems: [buildScopeItem({ id: "perf_scope_expired", planId: "perf_plan_expired" })],
+      auditEvents: []
+    });
+
+    const params = {
+      store,
+      orgId: "org_1",
+      userId: "user_1",
+      usageSessions: [buildUsage({ endedAt: "2026-07-01T15:10:00.000Z" })],
+      scoreRecords: [
+        buildScore("score_1", 80, { endedAt: "2026-07-01T15:00:00.000Z" }),
+        buildScore("score_2", 90, { endedAt: "2026-07-01T16:00:00.000Z" }),
+        buildScore("score_3", 85, { endedAt: "2026-07-01T17:00:00.000Z" })
+      ],
+      now: new Date("2026-07-03T06:00:00.000Z")
+    };
+
+    const [first, second] = await Promise.all([
+      buildMobilePerformanceCurrentResponse(params),
+      buildMobilePerformanceCurrentResponse(params)
+    ]);
+
+    assert.equal(first.plan, null);
+    assert.equal(second.plan, null);
+    const finalized = await store.getPlanById("perf_plan_expired");
+    assert.equal(finalized?.plan.status, "completed");
+    assert.equal(finalized?.plan.finalResult?.sessionsCompleted, 1);
+    assert.equal(finalized?.auditEvents.filter((event) => event.action === "completed").length, 1);
+  });
+});
+
+test("performance calculation errors do not mutate simulation or usage evidence", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan(),
+      scopeItems: [buildScopeItem()],
+      auditEvents: []
+    });
+    const usageSessions = [buildUsage()];
+    const scoreRecords = [buildScore("score_1", 80), buildScore("score_2", 90), buildScore("score_3", 85)];
+    const originalUsageSessions = structuredClone(usageSessions);
+    const originalScoreRecords = structuredClone(scoreRecords);
+
+    await assert.rejects(
+      () =>
+        buildMobilePerformanceCurrentResponse({
+          store,
+          orgId: "org_1",
+          userId: "user_1",
+          usageSessions,
+          scoreRecords,
+          now: NOW,
+          calculateProgress: () => {
+            throw new Error("Performance calculation failed.");
+          }
+        }),
+      /Performance calculation failed/
+    );
+
+    assert.deepEqual(usageSessions, originalUsageSessions);
+    assert.deepEqual(scoreRecords, originalScoreRecords);
+    const plan = await store.getPlanById("perf_plan_1");
+    assert.equal(plan?.plan.status, "active");
+    assert.equal(plan?.auditEvents.length, 0);
+  });
+});
