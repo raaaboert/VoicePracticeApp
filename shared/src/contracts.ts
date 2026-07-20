@@ -476,6 +476,206 @@ export interface AuditEvent {
   createdAt: string;
 }
 
+export const PERFORMANCE_PLAN_STATUSES = ["active", "completed", "cancelled"] as const;
+export type PerformancePlanStatus = (typeof PERFORMANCE_PLAN_STATUSES)[number];
+
+export const PERFORMANCE_ACTIVITY_METRIC_TYPES = [
+  "weekly_practice_minutes",
+  "total_practice_minutes",
+  "weekly_session_count",
+  "total_session_count"
+] as const;
+export type PerformanceActivityMetricType = (typeof PERFORMANCE_ACTIVITY_METRIC_TYPES)[number];
+
+export const PERFORMANCE_GOAL_METRIC_TYPES = [
+  "target_average_score",
+  "improve_by_points",
+  "improve_by_percent"
+] as const;
+export type PerformanceGoalMetricType = (typeof PERFORMANCE_GOAL_METRIC_TYPES)[number];
+
+export const PERFORMANCE_SCOPE_SELECTION_SOURCES = ["direct", "focus_topic", "all_assigned"] as const;
+export type PerformanceScopeSelectionSource = (typeof PERFORMANCE_SCOPE_SELECTION_SOURCES)[number];
+
+export const PERFORMANCE_SCENARIO_SOURCES = ["standard", "custom", "unknown"] as const;
+export type PerformanceScenarioSource = (typeof PERFORMANCE_SCENARIO_SOURCES)[number];
+
+export const PERFORMANCE_INSIGHT_STATUSES = [
+  "ahead_of_goal",
+  "on_track",
+  "needs_attention",
+  "not_enough_data",
+  "goal_met",
+  "goal_ended"
+] as const;
+export type PerformanceInsightStatus = (typeof PERFORMANCE_INSIGHT_STATUSES)[number];
+
+export interface PerformanceActivityGoal {
+  enabled: boolean;
+  metricType: PerformanceActivityMetricType | null;
+  targetValue: number | null;
+}
+
+export interface PerformanceGoal {
+  enabled: boolean;
+  metricType: PerformanceGoalMetricType | null;
+  targetScore: number | null;
+  improvementAmount: number | null;
+  comparisonMonthCount: 1 | 2 | 3 | 6 | null;
+}
+
+export interface PerformanceFocusTopicSnapshot {
+  id: string;
+  name: string;
+}
+
+export interface PerformanceScenarioScopeSnapshot {
+  scenarioId: string;
+  displayName: string;
+  source: PerformanceScenarioSource;
+  segmentId: string | null;
+  segmentLabel: string | null;
+  focusTopics: PerformanceFocusTopicSnapshot[];
+  selectionSources: PerformanceScopeSelectionSource[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface PerformancePlanScope {
+  allAssignedScenarios: boolean;
+  selectedFocusTopicIds: string[];
+  selectedScenarioIds: string[];
+  scenarios: PerformanceScenarioScopeSnapshot[];
+}
+
+export interface PerformanceBaseline {
+  baselineStartAt: string;
+  baselineEndAt: string;
+  baselineAverage: number;
+  baselineSessionCount: number;
+  derivedTargetScore: number;
+}
+
+export interface PerformanceActivityProgress {
+  enabled: boolean;
+  metricType: PerformanceActivityMetricType | null;
+  targetValue: number | null;
+  actualValue: number;
+  cumulativeTargetValue: number;
+  succeeded: boolean;
+  weeklyConsistency: {
+    completedWeeks: number;
+    totalWeeks: number;
+  } | null;
+}
+
+export interface PerformanceScoreProgress {
+  enabled: boolean;
+  metricType: PerformanceGoalMetricType | null;
+  targetScore: number | null;
+  currentAverage: number | null;
+  eligibleScoreCount: number;
+  baselineAverage: number | null;
+  scoreImprovement: number | null;
+  currentlyMeetingTarget: boolean;
+  notEnoughData: boolean;
+  succeeded: boolean;
+}
+
+export interface PerformanceProgress {
+  generatedAt: string;
+  planId: string;
+  windowStartAt: string;
+  windowEndAt: string;
+  activity: PerformanceActivityProgress;
+  performance: PerformanceScoreProgress;
+  overallCurrentlyMeetingTarget: boolean;
+  overallSucceeded: boolean;
+}
+
+export interface PerformanceInsight {
+  status: PerformanceInsightStatus;
+  message: string;
+  recommendedNextStep: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PerformanceFinalResult {
+  finalizedAt: string;
+  windowStartAt: string;
+  windowEndAt: string;
+  activitySucceeded: boolean;
+  performanceSucceeded: boolean;
+  overallSucceeded: boolean;
+  performanceInsufficientEvidence: boolean;
+  finalAverageScore: number | null;
+  scoreImprovement: number | null;
+  totalPracticeSeconds: number;
+  sessionsCompleted: number;
+  weeklyConsistency: {
+    completedWeeks: number;
+    totalWeeks: number;
+  } | null;
+  scope: PerformancePlanScope;
+}
+
+export interface PerformancePlan {
+  id: string;
+  orgId: string;
+  userId: string;
+  createdByActorType: AuditActorType;
+  createdByActorId: string | null;
+  createdAt: string;
+  submittedAt: string;
+  effectiveAt: string;
+  startDate: string;
+  endDate: string;
+  timeZone: string;
+  status: PerformancePlanStatus;
+  completedAt: string | null;
+  cancelledAt: string | null;
+  cancelledByActorType: AuditActorType | null;
+  cancelledByActorId: string | null;
+  cancellationReason: string | null;
+  activityGoal: PerformanceActivityGoal;
+  performanceGoal: PerformanceGoal;
+  scope: PerformancePlanScope;
+  baseline: PerformanceBaseline | null;
+  finalResult: PerformanceFinalResult | null;
+  updatedAt: string;
+}
+
+export interface PerformancePlanScopeItem {
+  id: string;
+  planId: string;
+  orgId: string;
+  userId: string;
+  scenarioId: string;
+  scenarioDisplayName: string;
+  scenarioSource: PerformanceScenarioSource;
+  segmentId: string | null;
+  segmentLabel: string | null;
+  focusTopicId: string | null;
+  focusTopicName: string | null;
+  selectionSources: PerformanceScopeSelectionSource[];
+  metadataSnapshot: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface PerformanceAuditEvent {
+  id: string;
+  planId: string;
+  orgId: string;
+  userId: string;
+  actorType: AuditActorType;
+  actorId: string | null;
+  action: string;
+  changedFields: string[];
+  oldValues: Record<string, unknown> | null;
+  newValues: Record<string, unknown> | null;
+  reason: string | null;
+  createdAt: string;
+}
+
 export type SupportCaseStatus = "open" | "closed";
 
 export interface SupportCaseRecord {
