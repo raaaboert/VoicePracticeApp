@@ -8,7 +8,7 @@ import {
   UserProfile
 } from "@voicepractice/shared";
 
-import { sanitizeAppState } from "./dbSanitizer.js";
+import { OPERATIONAL_TABLES, sanitizeAppState } from "./dbSanitizer.js";
 
 const NOW = "2026-07-09T12:00:00.000Z";
 
@@ -290,6 +290,12 @@ test("sanitizer clears session, token, OTP, support, and operational app_state r
   assert.equal(sanitized.webAuthSessions, undefined);
   assert.equal(report.deleted.mobileAuthTokens, 1);
   assert.equal(report.deleted.legacySupportCases, 1);
+});
+
+test("sanitizer operational table inventory clears performance foundation tables", () => {
+  assert(OPERATIONAL_TABLES.includes("performance_plans"));
+  assert(OPERATIONAL_TABLES.includes("performance_plan_scope_items"));
+  assert(OPERATIONAL_TABLES.includes("performance_plan_audit_events"));
 });
 
 test("sanitizer preserves real content/config while removing safely identifiable demo/local records", () => {
