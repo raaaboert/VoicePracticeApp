@@ -10,6 +10,7 @@ import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
 
 const BASE_NAV_ITEMS = [
   { href: "/app/dashboard", label: "Dashboard" },
+  { href: "/app/performance", label: "Performance" },
   { href: "/app/settings", label: "Settings" },
 ] as const;
 
@@ -36,8 +37,9 @@ export function DashboardShell({
   const navItems = hasCrossAccountAccess
     ? [
         BASE_NAV_ITEMS[0],
-        { href: "/app/customers", label: "Customers" },
         BASE_NAV_ITEMS[1],
+        { href: "/app/customers", label: "Customers" },
+        BASE_NAV_ITEMS[2],
         ...(hasDemoDashAccess ? [{ href: "/app/demo-dash", label: "Demo Dash" }] : []),
       ]
     : BASE_NAV_ITEMS;
