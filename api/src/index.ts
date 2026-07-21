@@ -5688,20 +5688,39 @@ async function getDashboardPerformanceUserContext(
   if (!user || user.accountType !== "enterprise" || !user.orgId) {
     return null;
   }
-  if (explicitOrgId && user.orgId !== explicitOrgId) {
-    return null;
-  }
-  if (!canDashboardViewerAccessOrg(viewer, user.orgId)) {
+  if (!canDashboardViewerAccessPerformanceTarget(db, viewer, user, explicitOrgId, divisionId)) {
     return null;
   }
   const context = await buildPerformanceUserContext(db, user);
   if (!context) {
     return null;
   }
-  if (divisionId && context.divisionId !== divisionId) {
-    return null;
-  }
   return context;
+}
+
+function canDashboardViewerAccessPerformanceTarget(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  target: UserProfile,
+  explicitOrgId: string | null,
+  divisionId: string | null
+): boolean {
+  if (target.accountType !== "enterprise" || !target.orgId) {
+    return false;
+  }
+  if (explicitOrgId && target.orgId !== explicitOrgId) {
+    return false;
+  }
+  if (!canDashboardViewerAccessOrg(viewer, target.orgId)) {
+    return false;
+  }
+  if (divisionId) {
+    const targetDivisionId = resolveUserActiveDivisionId(db, target.orgId, target);
+    if (targetDivisionId !== divisionId) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function getPerformancePlanRowContext(
@@ -9921,11 +9940,11 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
       response.status(404).json({ error: "Dashboard user not found." });
       return;
     }
-    if (target.status !== "active") {
-      response.status(400).json({ error: "Performance plans can only be assigned to active users." });
+    const requestedOrgId = typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : target.orgId;
+    if (requestedOrgId !== target.orgId || !canDashboardViewerAccessOrg(request.dashboard!.viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Dashboard user not found." });
       return;
     }
-    const requestedOrgId = typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : target.orgId;
     const divisionFilter = resolveDashboardDivisionFilter({
       db,
       viewer: request.dashboard!.viewer,
@@ -9934,6 +9953,30 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     });
     if (divisionFilter.error) {
       response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    if (!canDashboardViewerAccessPerformanceTarget(
+      db,
+      request.dashboard!.viewer,
+      target,
+      requestedOrgId,
+      divisionFilter.appliedDivisionId
+    )) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+      response.status(403).json({
+        error: "Performance plan management requires org admin or user admin access.",
+        code: "dashboard_scope_denied"
+      });
+      return;
+    }
+    if (target.status !== "active") {
+      response.status(400).json({
+        error: "Performance plans can only be assigned to active users.",
+        errors: ["Performance plans can only be assigned to active users."]
+      });
       return;
     }
     const userContext = await getDashboardPerformanceUserContext(
@@ -9945,13 +9988,6 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     );
     if (!userContext) {
       response.status(404).json({ error: "Dashboard user not found." });
-      return;
-    }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
-      response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
-        code: "dashboard_scope_denied"
-      });
       return;
     }
     try {
@@ -9996,11 +10032,11 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
       response.status(404).json({ error: "Dashboard user not found." });
       return;
     }
-    if (target.status !== "active") {
-      response.status(400).json({ error: "Performance plans can only be assigned to active users." });
+    const requestedOrgId = typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : target.orgId;
+    if (requestedOrgId !== target.orgId || !canDashboardViewerAccessOrg(request.dashboard!.viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Dashboard user not found." });
       return;
     }
-    const requestedOrgId = typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : target.orgId;
     const divisionFilter = resolveDashboardDivisionFilter({
       db,
       viewer: request.dashboard!.viewer,
@@ -10009,6 +10045,30 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     });
     if (divisionFilter.error) {
       response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    if (!canDashboardViewerAccessPerformanceTarget(
+      db,
+      request.dashboard!.viewer,
+      target,
+      requestedOrgId,
+      divisionFilter.appliedDivisionId
+    )) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+      response.status(403).json({
+        error: "Performance plan management requires org admin or user admin access.",
+        code: "dashboard_scope_denied"
+      });
+      return;
+    }
+    if (target.status !== "active") {
+      response.status(400).json({
+        error: "Performance plans can only be assigned to active users.",
+        errors: ["Performance plans can only be assigned to active users."]
+      });
       return;
     }
     const userContext = await getDashboardPerformanceUserContext(
@@ -10020,13 +10080,6 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     );
     if (!userContext) {
       response.status(404).json({ error: "Dashboard user not found." });
-      return;
-    }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
-      response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
-        code: "dashboard_scope_denied"
-      });
       return;
     }
     try {

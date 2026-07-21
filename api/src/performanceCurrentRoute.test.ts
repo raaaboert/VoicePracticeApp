@@ -168,8 +168,13 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_expired_late", "expired-late@example.com"),
       buildUser("user_expired_create", "expired-create@example.com"),
       buildUser("user_manage", "manage@example.com"),
+      buildUser("user_authorized_active", "authorized-active@example.com"),
       buildUser("user_inactive", "inactive@example.com", {
         status: "disabled"
+      }),
+      buildUser("user_inactive_division_b", "inactive-south@example.com", {
+        status: "disabled",
+        divisionId: "division_b"
       }),
       buildUser("dashboard_admin", "admin@example.com", {
         dashboardAccessEnabled: true,
@@ -182,6 +187,11 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_other_org", "other-org@example.com", {
         orgId: "org_2",
         divisionId: null
+      }),
+      buildUser("user_other_org_inactive", "other-org-inactive@example.com", {
+        orgId: "org_2",
+        divisionId: null,
+        status: "disabled"
       })
     ],
     orgs: [
@@ -544,8 +554,8 @@ function buildCreatePlanRequest(overrides: Record<string, unknown> = {}): Record
   return {
     userId: "user_manage",
     orgId: "org_1",
-    startDate: "2026-07-20",
-    endDate: "2026-08-20",
+    startDate: "2099-07-20",
+    endDate: "2099-08-20",
     timeZone: "America/Denver",
     activityGoal: {
       enabled: true,
@@ -822,6 +832,7 @@ test("dashboard Performance preview and create reject inactive users", async () 
   });
   assert.equal(preview.status, 400);
   assert.match(String(preview.body.error), /active users/);
+  assert.deepEqual(preview.body.errors, ["Performance plans can only be assigned to active users."]);
 
   const created = await dashboardRequest("/dashboard/performance/plans", {
     method: "POST",
@@ -829,6 +840,56 @@ test("dashboard Performance preview and create reject inactive users", async () 
   });
   assert.equal(created.status, 400);
   assert.match(String(created.body.error), /active users/);
+  assert.deepEqual(created.body.errors, ["Performance plans can only be assigned to active users."]);
+});
+
+test("dashboard Performance write routes do not leak cross-org inactive target status", async () => {
+  for (const pathname of ["/dashboard/performance/preview", "/dashboard/performance/plans"]) {
+    const inaccessible = await dashboardRequest(pathname, {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_other_org_inactive", orgId: "org_2" }))
+    });
+    const missing = await dashboardRequest(pathname, {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "missing_user", orgId: "org_2" }))
+    });
+
+    assert.equal(inaccessible.status, 404, `${pathname} cross-org inactive status`);
+    assert.deepEqual(inaccessible.body, missing.body, `${pathname} cross-org inactive response shape`);
+    assert.equal(inaccessible.body.error, "Dashboard user not found.");
+  }
+});
+
+test("dashboard Performance write routes do not leak cross-division inactive target status", async () => {
+  for (const pathname of ["/dashboard/performance/preview", "/dashboard/performance/plans"]) {
+    const result = await dashboardRequest(`${pathname}?divisionId=division_a`, {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_inactive_division_b" }))
+    });
+
+    assert.equal(result.status, 404, `${pathname} cross-division inactive status`);
+    assert.equal(result.body.error, "Dashboard user not found.");
+  }
+});
+
+test("dashboard Performance preview and create still work for authorized active targets", async () => {
+  const input = buildCreatePlanRequest({ userId: "user_authorized_active" });
+  const preview = await dashboardRequest("/dashboard/performance/preview", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.valid, true);
+
+  const created = await dashboardRequest("/dashboard/performance/plans", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+
+  assert.equal(created.status, 201);
+  assert.equal((created.body.plan as { userId?: string; status?: string }).userId, "user_authorized_active");
+  assert.equal((created.body.plan as { status?: string }).status, "active");
 });
 
 test("dashboard Performance write routes require plan-management access", async () => {
