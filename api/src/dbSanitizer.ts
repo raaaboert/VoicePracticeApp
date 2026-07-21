@@ -15,7 +15,10 @@ export const OPERATIONAL_TABLES = [
   "score_records",
   "ai_usage_events",
   "support_cases",
-  "audit_events"
+  "audit_events",
+  "performance_plan_scope_items",
+  "performance_plan_audit_events",
+  "performance_plans"
 ] as const;
 
 export type OperationalTableName = (typeof OPERATIONAL_TABLES)[number];

@@ -4,7 +4,12 @@ import {
   EnterpriseDomainMatch,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  CancelPerformancePlanRequest,
+  CancelPerformancePlanResponse,
   MobileResendVerificationRequest,
+  MobilePerformanceCurrentResponse,
+  MobilePerformancePlanDetailResponse,
+  MobilePerformancePlanHistoryResponse,
   MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
   MobileVerifyEmailRequest,
@@ -547,6 +552,56 @@ export async function fetchEntitlements(userId: string, authToken: string): Prom
   return requestJson<UserEntitlementsResponse>(
     `/mobile/users/${encodeURIComponent(userId)}/entitlements`,
     undefined,
+    authToken,
+  );
+}
+
+export async function fetchCurrentPerformancePlan(
+  userId: string,
+  authToken: string,
+): Promise<MobilePerformanceCurrentResponse> {
+  return requestJson<MobilePerformanceCurrentResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/current`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function fetchPerformancePlanHistory(
+  userId: string,
+  authToken: string,
+): Promise<MobilePerformancePlanHistoryResponse> {
+  return requestJson<MobilePerformancePlanHistoryResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/plans`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function fetchPerformancePlanDetail(
+  userId: string,
+  planId: string,
+  authToken: string,
+): Promise<MobilePerformancePlanDetailResponse> {
+  return requestJson<MobilePerformancePlanDetailResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function cancelPerformancePlan(
+  userId: string,
+  planId: string,
+  input: CancelPerformancePlanRequest,
+  authToken: string,
+): Promise<CancelPerformancePlanResponse> {
+  return requestJson<CancelPerformancePlanResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
     authToken,
   );
 }

@@ -25,6 +25,8 @@ import {
   DashboardCustomerTrendPoint,
   DashboardCustomerUserPerformanceSummary,
   DashboardOverviewResponse,
+  DashboardPerformancePlanDetailResponse,
+  DashboardPerformanceWorkspaceResponse,
   DashboardPortfolioScenarioSummary,
   DashboardTrainingPackAssignmentProgressRow,
   DashboardTrainingPackAssignmentDetailResponse,
@@ -73,9 +75,13 @@ import {
   PersonaStyle,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  MobilePerformancePlanDetailResponse,
+  MobilePerformancePlanHistoryResponse,
   AdminTrainingPackAssignmentsResponse,
+  CancelPerformancePlanRequest,
   CreateOrgDivisionRequest,
   CreateOrgTrainingRequest,
+  CreatePerformancePlanRequest,
   OrgAccountsExportResponse,
   OrgAccountsExportRow,
   OrgDivisionListResponse,
@@ -91,6 +97,8 @@ import {
   MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
   MobileVerifyEmailRequest,
+  PerformancePlan,
+  PerformancePlanPreviewRequest,
   RecordUsageSessionRequest,
   StartSimulationSessionRequest,
   RecordSimulationScoreRequest,
@@ -168,6 +176,7 @@ import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCry
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
+import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createSimulationSessionStore } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
@@ -194,6 +203,10 @@ import {
   buildNormalizedSimulationScoreThemesFromArtifact,
 } from "./services/coachingThemeNormalization.js";
 import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services/authCodeDelivery.js";
+import {
+  initializeDatabaseStoresForReadiness,
+  initializeDatabaseStoresForStartup
+} from "./services/databaseStoreInitialization.js";
 import {
   handleDashboardWebAuthCodeRequest,
 } from "./services/dashboardWebAuthRequest.js";
@@ -233,6 +246,20 @@ import {
   SimulationScorePayloadValidationError,
   type SimulationScorecard
 } from "./services/simulationScoring.js";
+import {
+  buildDashboardPerformancePlanDetailResponse,
+  buildDashboardPerformanceWorkspaceResponse,
+  buildMobilePerformanceCurrentResponse,
+  buildMobilePerformancePlanHistoryResponse,
+  buildPerformancePlanDetailResponse,
+  cancelPerformancePlanWithBoundaryRule,
+  createPerformancePlanFromInput,
+  PerformancePlanInputError,
+  previewPerformancePlan,
+  type PerformancePlanUserContext
+} from "./services/performanceApi.js";
+import { finalizeOpenPerformancePlanForUserIfNeeded } from "./services/performanceFinalization.js";
+import type { PerformanceScopeCandidate } from "./services/performanceScope.js";
 import {
   pruneStaleRecognizedSimulationSessions,
   repairOrphanedUserScopedHistory
@@ -505,6 +532,14 @@ const scoreRecordStore = createScoreRecordStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
 });
 const webAuthSessionStore = createWebAuthSessionStore({
+  provider: STORAGE_PROVIDER,
+  dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const performancePlanStore = createPerformancePlanStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
   databaseUrl: DATABASE_URL,
@@ -4276,14 +4311,21 @@ async function revokeWebAuthSessionsForUserIds(userIds: string[]): Promise<void>
 async function refreshDatabaseReadiness(): Promise<void> {
   const wasReady = isDatabaseReady;
   try {
-    await auditEventStore.initialize();
-    await aiUsageEventStore.initialize();
-    await simulationSessionStore.initialize();
-    await usageSessionStore.initialize();
-    await scoreRecordStore.initialize();
-    await supportCaseStore.initialize();
-    await webAuthSessionStore.initialize();
-    await loadDatabase({ forceStorageRead: true });
+    await initializeDatabaseStoresForReadiness({
+      stores: {
+        auditEventStore,
+        aiUsageEventStore,
+        simulationSessionStore,
+        usageSessionStore,
+        scoreRecordStore,
+        supportCaseStore,
+        webAuthSessionStore,
+        performancePlanStore
+      },
+      loadDatabase: async () => {
+        await loadDatabase({ forceStorageRead: true });
+      }
+    });
     isDatabaseReady = true;
     databaseReadyError = null;
     databaseReadyConsecutiveFailures = 0;
@@ -5469,6 +5511,262 @@ async function listTrainingPacksForDashboardOrg(orgId: string): Promise<Training
     logWarnThrottled("dashboard:training-packs", `[dashboard] failed to load training packs for ${orgId}: ${message}`);
     return [];
   }
+}
+
+async function buildPerformanceScopeCandidatesForUser(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  user: UserProfile
+): Promise<PerformanceScopeCandidate[]> {
+  await ensureOrgTrainingWorkspace(db, org);
+  const catalog = buildDashboardScenarioCatalog(db, org);
+  const visibleStandardScenarioIds = new Set(
+    listOrgVisibleStandardScenarios({ config: db.config, org })
+      .filter((row) => row.enabled)
+      .map((row) => row.scenarioId)
+  );
+  const userDivisionId = resolveUserActiveDivisionId(db, org.id, user);
+  const activeAssignments = db.trainingPackAssignments.filter(
+    (assignment) => assignment.orgId === org.id && assignment.userId === user.id && assignment.active === true
+  );
+  const assignedScenarioIds = new Set<string>();
+  const focusTopicsByScenarioId = new Map<string, Map<string, string>>();
+  const trainingPacks = await listTrainingPacksForDashboardOrg(org.id);
+  const validTrainingPackIds = new Set(trainingPacks.filter((pack) => pack.active === true).map((pack) => pack.id));
+  const trainingSummaries = buildOrgTrainingSummaries({
+    db,
+    orgId: org.id,
+    validTrainingPackIds,
+    validScenarioIds: ensureOrgCustomScenarioCollection(org).map((scenario) => scenario.id)
+  }).filter((training) => training.status === "active");
+
+  const addFocusTopic = (scenarioId: string, topic: { id: string; name: string }): void => {
+    const topics = focusTopicsByScenarioId.get(scenarioId) ?? new Map<string, string>();
+    topics.set(topic.id, topic.name);
+    focusTopicsByScenarioId.set(scenarioId, topics);
+  };
+
+  for (const assignment of activeAssignments) {
+    if (!validTrainingPackIds.has(assignment.trainingPackId)) {
+      continue;
+    }
+    for (const scenarioId of assignment.requiredScenarioIds ?? []) {
+      assignedScenarioIds.add(scenarioId);
+    }
+  }
+
+  for (const training of trainingSummaries) {
+    const trainingDivisionId = resolveTrainingActiveDivisionId(db, org.id, training.id);
+    if (!isDivisionVisibleToUser({
+      divisionsEnabled: org.divisionsEnabled === true,
+      userDivisionId,
+      contentDivisionId: trainingDivisionId
+    })) {
+      continue;
+    }
+
+    const topic = { id: training.id, name: training.name };
+    const attachedAssignmentPackIds = new Set(training.attachedTrainingPackIds);
+    for (const assignment of activeAssignments) {
+      if (!attachedAssignmentPackIds.has(assignment.trainingPackId)) {
+        continue;
+      }
+      for (const scenarioId of assignment.requiredScenarioIds ?? []) {
+        assignedScenarioIds.add(scenarioId);
+        addFocusTopic(scenarioId, topic);
+      }
+    }
+    for (const scenarioId of training.attachedCustomScenarioIds) {
+      assignedScenarioIds.add(scenarioId);
+      addFocusTopic(scenarioId, topic);
+    }
+  }
+
+  return Array.from(assignedScenarioIds)
+    .map((scenarioId): PerformanceScopeCandidate | null => {
+      const entry = catalog.get(scenarioId);
+      if (!entry) {
+        return null;
+      }
+      if (entry.source === "standard") {
+        if (!visibleStandardScenarioIds.has(entry.scenarioId)) {
+          return null;
+        }
+        const scenarioDivisionId = resolveStandardScenarioActiveDivisionId(db, org.id, entry.scenarioId);
+        if (!isDivisionVisibleToUser({
+          divisionsEnabled: org.divisionsEnabled === true,
+          userDivisionId,
+          contentDivisionId: scenarioDivisionId
+        })) {
+          return null;
+        }
+      }
+      const fallbackTopic = { id: `role:${entry.segmentId}`, name: entry.segmentLabel || "Assigned role" };
+      const focusTopics = Array.from(focusTopicsByScenarioId.get(entry.scenarioId)?.entries() ?? [[fallbackTopic.id, fallbackTopic.name]])
+        .map(([id, name]) => ({ id, name }))
+        .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+      return {
+        scenarioId: entry.scenarioId,
+        displayName: entry.title,
+        source: entry.source,
+        segmentId: entry.segmentId,
+        segmentLabel: entry.segmentLabel,
+        focusTopics,
+        metadata: { summary: entry.summary }
+      };
+    })
+    .filter((candidate): candidate is PerformanceScopeCandidate => candidate !== null)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.scenarioId.localeCompare(right.scenarioId));
+}
+
+async function buildPerformanceUserContext(
+  db: ApiDatabase,
+  user: UserProfile
+): Promise<PerformancePlanUserContext | null> {
+  if (user.accountType !== "enterprise" || !user.orgId || user.status !== "active") {
+    return null;
+  }
+  const org = getOrgById(db, user.orgId);
+  if (!org || org.status !== "active") {
+    return null;
+  }
+  const divisionId = resolveUserActiveDivisionId(db, org.id, user);
+  const divisionName = divisionId ? findOrgDivisionRecord(db, org.id, divisionId)?.name ?? null : null;
+  return {
+    userId: user.id,
+    email: user.email,
+    orgId: org.id,
+    orgName: org.name,
+    timeZone: resolveTimeZone(user.timezone),
+    divisionId,
+    divisionName,
+    status: user.status,
+    orgRole: user.orgRole,
+    candidates: await buildPerformanceScopeCandidatesForUser(db, org, user)
+  };
+}
+
+async function listDashboardPerformanceUserContexts(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  divisionId: string | null,
+  explicitOrgId: string | null = null
+): Promise<PerformancePlanUserContext[]> {
+  const accessibleOrgIds = new Set(listDashboardAccessibleOrgs(db, viewer).map((org) => org.id));
+  if (explicitOrgId) {
+    if (!accessibleOrgIds.has(explicitOrgId)) {
+      return [];
+    }
+    accessibleOrgIds.clear();
+    accessibleOrgIds.add(explicitOrgId);
+  }
+  const contexts: PerformancePlanUserContext[] = [];
+  for (const user of db.users) {
+    if (user.accountType !== "enterprise" || !user.orgId || !accessibleOrgIds.has(user.orgId)) {
+      continue;
+    }
+    const context = await buildPerformanceUserContext(db, user);
+    if (!context) {
+      continue;
+    }
+    if (divisionId && context.divisionId !== divisionId) {
+      continue;
+    }
+    contexts.push(context);
+  }
+  return contexts.sort((left, right) => left.email.localeCompare(right.email));
+}
+
+async function getDashboardPerformanceUserContext(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  userId: string,
+  explicitOrgId: string | null,
+  divisionId: string | null
+): Promise<PerformancePlanUserContext | null> {
+  const user = getUserById(db, userId);
+  if (!user || user.accountType !== "enterprise" || !user.orgId) {
+    return null;
+  }
+  if (!canDashboardViewerAccessPerformanceTarget(db, viewer, user, explicitOrgId, divisionId)) {
+    return null;
+  }
+  const context = await buildPerformanceUserContext(db, user);
+  if (!context) {
+    return null;
+  }
+  return context;
+}
+
+function canDashboardViewerAccessPerformanceTarget(
+  db: ApiDatabase,
+  viewer: DashboardViewer,
+  target: UserProfile,
+  explicitOrgId: string | null,
+  divisionId: string | null
+): boolean {
+  if (target.accountType !== "enterprise" || !target.orgId) {
+    return false;
+  }
+  if (explicitOrgId && target.orgId !== explicitOrgId) {
+    return false;
+  }
+  if (!canDashboardViewerAccessOrg(viewer, target.orgId)) {
+    return false;
+  }
+  if (divisionId) {
+    const targetDivisionId = resolveUserActiveDivisionId(db, target.orgId, target);
+    if (targetDivisionId !== divisionId) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getPerformancePlanRowContext(
+  db: ApiDatabase,
+  plan: PerformancePlan
+): { userEmail: string; orgName: string; divisionId: string | null; divisionName: string | null } | null {
+  const user = getUserById(db, plan.userId);
+  const org = getOrgById(db, plan.orgId);
+  if (!user || !org) {
+    return null;
+  }
+  const divisionId = resolveUserActiveDivisionId(db, org.id, user);
+  const divisionName = divisionId ? findOrgDivisionRecord(db, org.id, divisionId)?.name ?? null : null;
+  return {
+    userEmail: user.email,
+    orgName: org.name,
+    divisionId,
+    divisionName
+  };
+}
+
+function canManagePerformancePlanForUser(actor: UserProfile, viewer: DashboardViewer, target: UserProfile): boolean {
+  if (viewer.accessType === "super_user" && actor.isSuperUser === true) {
+    return true;
+  }
+  if (actor.accountType !== "enterprise" || target.accountType !== "enterprise") {
+    return false;
+  }
+  if (!actor.orgId || actor.orgId !== target.orgId) {
+    return false;
+  }
+  if (actor.orgRole === "org_admin") {
+    return true;
+  }
+  if (actor.orgRole === "user_admin") {
+    return target.orgRole !== "org_admin";
+  }
+  return false;
+}
+
+function normalizeCancelReason(body: CancelPerformancePlanRequest): string | null {
+  if (typeof body.reason !== "string") {
+    return null;
+  }
+  const trimmed = body.reason.trim();
+  return trimmed ? trimmed.slice(0, 500) : null;
 }
 
 async function buildDashboardCustomerSummary(
@@ -9577,6 +9875,364 @@ app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: 
       return;
     }
 
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/performance", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshReportingWrite(async (db) => {
+    const requestedOrgId = getSingleQueryParam(request.query.orgId);
+    if (requestedOrgId && !canDashboardViewerAccessOrg(request.dashboard!.viewer, requestedOrgId)) {
+      response.status(403).json({
+        error: "You do not have access to this customer account.",
+        code: "dashboard_scope_denied",
+      });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: requestedOrgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const orgIds = new Set(
+      listDashboardAccessibleOrgs(db, request.dashboard!.viewer)
+        .filter((org) => !requestedOrgId || org.id === requestedOrgId)
+        .map((org) => org.id)
+    );
+    const users = await listDashboardPerformanceUserContexts(
+      db,
+      request.dashboard!.viewer,
+      divisionFilter.appliedDivisionId,
+      requestedOrgId
+    );
+    const payload: DashboardPerformanceWorkspaceResponse = await buildDashboardPerformanceWorkspaceResponse({
+      store: performancePlanStore,
+      viewer: request.dashboard!.viewer,
+      users,
+      usageSessions: listUsageSessions(db).filter((session) => session.orgId && orgIds.has(session.orgId)),
+      scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId && orgIds.has(record.orgId)),
+      now: new Date(),
+      divisionScope: divisionFilter.divisionScope,
+      canManageUser: (userContext) => {
+        const target = getUserById(db, userContext.userId);
+        return Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
+      }
+    });
+    response.json(payload);
+  });
+});
+
+app.post("/dashboard/performance/preview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const body = request.body as PerformancePlanPreviewRequest;
+  if (!body || typeof body.userId !== "string" || !body.userId.trim()) {
+    response.status(400).json({ error: "userId is required." });
+    return;
+  }
+
+  await withFreshReportingWrite(async (db) => {
+    const target = getUserById(db, body.userId);
+    if (!target || !target.orgId || target.accountType !== "enterprise") {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    const requestedOrgId = typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : target.orgId;
+    if (requestedOrgId !== target.orgId || !canDashboardViewerAccessOrg(request.dashboard!.viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: requestedOrgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    if (!canDashboardViewerAccessPerformanceTarget(
+      db,
+      request.dashboard!.viewer,
+      target,
+      requestedOrgId,
+      divisionFilter.appliedDivisionId
+    )) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+      response.status(403).json({
+        error: "Performance plan management requires org admin or user admin access.",
+        code: "dashboard_scope_denied"
+      });
+      return;
+    }
+    if (target.status !== "active") {
+      response.status(400).json({
+        error: "Performance plans can only be assigned to active users.",
+        errors: ["Performance plans can only be assigned to active users."]
+      });
+      return;
+    }
+    const userContext = await getDashboardPerformanceUserContext(
+      db,
+      request.dashboard!.viewer,
+      body.userId,
+      requestedOrgId,
+      divisionFilter.appliedDivisionId
+    );
+    if (!userContext) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    try {
+      const payload = previewPerformancePlan({
+        orgId: userContext.orgId,
+        userId: userContext.userId,
+        input: { ...body, orgId: userContext.orgId, userId: userContext.userId },
+        candidates: userContext.candidates,
+        usageSessions: listUsageSessions(db, { orgId: userContext.orgId, userId: userContext.userId }),
+        scoreRecords: listScoreRecords(db, { orgId: userContext.orgId, userId: userContext.userId, conclusiveOnly: true }),
+        now: new Date()
+      });
+      if (!payload.valid) {
+        response.status(400).json({
+          error: payload.errors[0] ?? "Performance plan input is invalid.",
+          errors: payload.errors,
+          preview: payload
+        });
+        return;
+      }
+      response.json(payload);
+    } catch (error) {
+      if (error instanceof PerformancePlanInputError) {
+        response.status(400).json({ error: error.message, errors: error.errors });
+        return;
+      }
+      throw error;
+    }
+  });
+});
+
+app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const body = request.body as CreatePerformancePlanRequest;
+  if (!body || typeof body.userId !== "string" || !body.userId.trim()) {
+    response.status(400).json({ error: "userId is required." });
+    return;
+  }
+
+  await withFreshReportingWrite(async (db) => {
+    const target = getUserById(db, body.userId);
+    if (!target || !target.orgId || target.accountType !== "enterprise") {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    const requestedOrgId = typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : target.orgId;
+    if (requestedOrgId !== target.orgId || !canDashboardViewerAccessOrg(request.dashboard!.viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: requestedOrgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    if (!canDashboardViewerAccessPerformanceTarget(
+      db,
+      request.dashboard!.viewer,
+      target,
+      requestedOrgId,
+      divisionFilter.appliedDivisionId
+    )) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+      response.status(403).json({
+        error: "Performance plan management requires org admin or user admin access.",
+        code: "dashboard_scope_denied"
+      });
+      return;
+    }
+    if (target.status !== "active") {
+      response.status(400).json({
+        error: "Performance plans can only be assigned to active users.",
+        errors: ["Performance plans can only be assigned to active users."]
+      });
+      return;
+    }
+    const userContext = await getDashboardPerformanceUserContext(
+      db,
+      request.dashboard!.viewer,
+      body.userId,
+      requestedOrgId,
+      divisionFilter.appliedDivisionId
+    );
+    if (!userContext) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
+    try {
+      const now = new Date();
+      const usageSessions = listUsageSessions(db, { orgId: userContext.orgId, userId: userContext.userId });
+      const scoreRecords = listScoreRecords(db, { orgId: userContext.orgId, userId: userContext.userId, conclusiveOnly: true });
+      const input = { ...body, orgId: userContext.orgId, userId: userContext.userId };
+      const validationPreview = previewPerformancePlan({
+        orgId: userContext.orgId,
+        userId: userContext.userId,
+        input,
+        candidates: userContext.candidates,
+        usageSessions,
+        scoreRecords,
+        now
+      });
+      if (!validationPreview.valid) {
+        response.status(400).json({
+          error: validationPreview.errors[0] ?? "Performance plan input is invalid.",
+          errors: validationPreview.errors,
+          preview: validationPreview
+        });
+        return;
+      }
+      await finalizeOpenPerformancePlanForUserIfNeeded({
+        store: performancePlanStore,
+        orgId: userContext.orgId,
+        userId: userContext.userId,
+        usageSessions,
+        scoreRecords,
+        now
+      });
+      const payload = await createPerformancePlanFromInput({
+        store: performancePlanStore,
+        orgId: userContext.orgId,
+        userId: userContext.userId,
+        input,
+        candidates: userContext.candidates,
+        usageSessions,
+        scoreRecords,
+        now,
+        actorType: "web_user",
+        actorId: request.dashboard!.viewer.userId
+      });
+      response.status(201).json(payload);
+    } catch (error) {
+      if (error instanceof PerformancePlanInputError) {
+        response.status(400).json({ error: error.message, errors: error.errors });
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Could not create Performance plan.";
+      if (message.toLowerCase().includes("active performance plan")) {
+        response.status(409).json({ error: message });
+        return;
+      }
+      throw error;
+    }
+  });
+});
+
+app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshReportingWrite(async (db) => {
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: loaded.plan.orgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const rowContext = getPerformancePlanRowContext(db, loaded.plan);
+    if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const detail = await buildPerformancePlanDetailResponse({
+      store: performancePlanStore,
+      planId: loaded.plan.id,
+      usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId }),
+      scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId, conclusiveOnly: true }),
+      now: new Date(),
+      includeAuditActorIds: true
+    });
+    if (!detail) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const target = getUserById(db, detail.plan.userId);
+    const canCancel =
+      detail.plan.status === "active" &&
+      Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
+    const payload: DashboardPerformancePlanDetailResponse = buildDashboardPerformancePlanDetailResponse({
+      viewer: request.dashboard!.viewer,
+      detail,
+      canCancel,
+      rowContext
+    });
+    response.json(payload);
+  });
+});
+
+app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const body = request.body as CancelPerformancePlanRequest;
+  await withFreshReportingWrite(async (db) => {
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: loaded.plan.orgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const rowContext = getPerformancePlanRowContext(db, loaded.plan);
+    if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const target = getUserById(db, loaded.plan.userId);
+    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+      response.status(403).json({
+        error: "Performance plan management requires org admin or user admin access.",
+        code: "dashboard_scope_denied"
+      });
+      return;
+    }
+    const payload = await cancelPerformancePlanWithBoundaryRule({
+      store: performancePlanStore,
+      planId: loaded.plan.id,
+      usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId }),
+      scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId, conclusiveOnly: true }),
+      now: new Date(),
+      actorType: "web_user",
+      actorId: request.dashboard!.viewer.userId,
+      reason: normalizeCancelReason(body)
+    });
+    if (!payload) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
     response.json(payload);
   });
 });
@@ -16164,6 +16820,196 @@ app.get("/mobile/users/:userId/scores/summary", async (request: Request, respons
   });
 });
 
+app.get("/mobile/users/:userId/performance/current", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+
+    const orgId = accessContext.actingOrgId;
+    const usageSessions = orgId ? listUsageSessions(db, { orgId, userId: user.id }) : [];
+    const scoreRecords = orgId ? listScoreRecords(db, { orgId, userId: user.id, conclusiveOnly: true }) : [];
+    const payload = await buildMobilePerformanceCurrentResponse({
+      store: performancePlanStore,
+      orgId,
+      userId: user.id,
+      usageSessions,
+      scoreRecords,
+      now: new Date()
+    });
+
+    response.json(payload);
+  });
+});
+
+app.get("/mobile/users/:userId/performance/plans", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+
+    const orgId = accessContext.actingOrgId;
+    const payload: MobilePerformancePlanHistoryResponse = await buildMobilePerformancePlanHistoryResponse({
+      store: performancePlanStore,
+      orgId,
+      userId: user.id,
+      usageSessions: orgId ? listUsageSessions(db, { orgId, userId: user.id }) : [],
+      scoreRecords: orgId ? listScoreRecords(db, { orgId, userId: user.id, conclusiveOnly: true }) : [],
+      now: new Date()
+    });
+
+    response.json(payload);
+  });
+});
+
+app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+    if (!accessContext.actingOrgId) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const payload: MobilePerformancePlanDetailResponse | null = await buildPerformancePlanDetailResponse({
+      store: performancePlanStore,
+      planId: loaded.plan.id,
+      usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: user.id }),
+      scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: user.id, conclusiveOnly: true }),
+      now: new Date()
+    });
+    if (!payload) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    response.json(payload);
+  });
+});
+
+app.post("/mobile/users/:userId/performance/plans/:planId/cancel", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+  const body = request.body as CancelPerformancePlanRequest;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+    if (!accessContext.actingOrgId) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const payload = await cancelPerformancePlanWithBoundaryRule({
+      store: performancePlanStore,
+      planId: loaded.plan.id,
+      usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: user.id }),
+      scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: user.id, conclusiveOnly: true }),
+      now: new Date(),
+      actorType: "mobile_user",
+      actorId: user.id,
+      reason: normalizeCancelReason(body)
+    });
+    if (!payload) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    response.json(payload);
+  });
+});
+
 app.get("/mobile/users/:userId/admin/org/dashboard", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
@@ -17725,7 +18571,26 @@ function isTransientDatabaseError(error: unknown): boolean {
   return false;
 }
 
+function isJsonBodyParseError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    type?: unknown;
+  };
+  const status = candidate.status ?? candidate.statusCode;
+  return candidate.type === "entity.parse.failed" && status === 400;
+}
+
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  if (isJsonBodyParseError(error)) {
+    response.status(400).json({ error: "Request body must be valid JSON." });
+    return;
+  }
+
   if (error instanceof AuthCodeDeliveryError) {
     response.status(error.statusCode).json({ error: error.message });
     return;
@@ -17740,22 +18605,29 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   response.status(500).json({ error: message });
 });
 
-void (async () => {
-  await auditEventStore.initialize();
-  await migrateLegacyAuditEventsFromAppState();
-  await aiUsageEventStore.initialize();
-  await migrateLegacyAiUsageEventsFromAppState();
-  await simulationSessionStore.initialize();
-  await usageSessionStore.initialize();
-  await migrateLegacyUsageSessionsFromAppState();
-  await scoreRecordStore.initialize();
-  await migrateLegacyScoreRecordsFromAppState();
-  await supportCaseStore.initialize();
-  await migrateLegacySupportCasesFromAppState();
-  await webAuthSessionStore.initialize();
-  await migrateLegacyWebAuthSessionsFromAppState();
-  await trainingPackStore.initialize();
-  await runStartupUsageIntegrityMaintenance();
+export async function startApiServer(): Promise<void> {
+  await initializeDatabaseStoresForStartup({
+    stores: {
+      auditEventStore,
+      aiUsageEventStore,
+      simulationSessionStore,
+      usageSessionStore,
+      scoreRecordStore,
+      supportCaseStore,
+      webAuthSessionStore,
+      performancePlanStore,
+      trainingPackStore
+    },
+    maintenance: {
+      migrateLegacyAuditEventsFromAppState,
+      migrateLegacyAiUsageEventsFromAppState,
+      migrateLegacyUsageSessionsFromAppState,
+      migrateLegacyScoreRecordsFromAppState,
+      migrateLegacySupportCasesFromAppState,
+      migrateLegacyWebAuthSessionsFromAppState,
+      runStartupUsageIntegrityMaintenance
+    }
+  });
 
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
@@ -17767,9 +18639,15 @@ void (async () => {
     queueDatabaseReadinessRefresh();
   }, READINESS_REFRESH_MS);
   readinessInterval.unref();
-})().catch((error: unknown) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  // eslint-disable-next-line no-console
-  console.error(`[BOOT] startup failed: ${message}`);
-  process.exit(1);
-});
+}
+
+export { app };
+
+if (runtimeConfig.nodeEnv !== "test") {
+  void startApiServer().catch((error: unknown) => {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    // eslint-disable-next-line no-console
+    console.error(`[BOOT] startup failed: ${message}`);
+    process.exit(1);
+  });
+}

@@ -1,0 +1,1025 @@
+import {
+  AuditActorType,
+  CancelPerformancePlanResponse,
+  CreatePerformancePlanResponse,
+  DashboardPerformancePlanDetailResponse,
+  DashboardPerformancePlanRow,
+  DashboardPerformanceSummary,
+  DashboardPerformanceUserOption,
+  DashboardPerformanceWorkspaceResponse,
+  DashboardViewer,
+  MobilePerformanceCurrentDisplayState,
+  MobilePerformanceCurrentResponse,
+  MobilePerformancePlanDetailResponse,
+  MobilePerformancePlanHistoryResponse,
+  PERFORMANCE_ACTIVITY_METRIC_TYPES,
+  PERFORMANCE_GOAL_METRIC_TYPES,
+  PerformanceAssignableFocusTopic,
+  PerformanceAssignableScenario,
+  PerformanceActivityGoal,
+  PerformanceAuditEvent,
+  PerformanceBaseline,
+  PerformanceGoal,
+  PerformanceInsight,
+  PerformancePlan,
+  PerformancePlanInput,
+  PerformancePlanPreviewResponse,
+  PerformancePlanScopeItem,
+  PerformancePlanSummary,
+  PerformanceProgress,
+  PerformanceScopeSelectionRequest,
+  SimulationScoreRecord,
+  UsageSessionRecord
+} from "@voicepractice/shared";
+import { randomUUID } from "node:crypto";
+
+import {
+  PerformancePlanStore,
+  PerformancePlanWithRelations
+} from "../storage/performancePlanStore.js";
+import { buildPlanWindow, compareDateKeys, isDateKey, isValidIanaTimeZone } from "./performanceDateWindows.js";
+import { calculatePerformanceBaseline, PerformanceBaselinePreview } from "./performanceBaseline.js";
+import { cancelPerformancePlan, finalizePerformancePlanIfEnded } from "./performanceFinalization.js";
+import {
+  calculatePerformanceProgress,
+  PerformanceProgressCalculation
+} from "./performanceProgress.js";
+import { buildPerformanceInsights } from "./performanceInsights.js";
+import { freezePerformancePlanScope, PerformanceScopeCandidate } from "./performanceScope.js";
+import { validatePerformancePlanInput } from "./performancePlanValidation.js";
+
+export interface BuildMobilePerformanceCurrentResponseParams {
+  store: PerformancePlanStore;
+  orgId: string | null;
+  userId: string;
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+  calculateProgress?: typeof calculatePerformanceProgress;
+  buildInsights?: typeof buildPerformanceInsights;
+  finalizeEndedPlan?: typeof finalizePerformancePlanIfEnded;
+}
+
+export interface PerformancePlanRequestContext {
+  store: PerformancePlanStore;
+  orgId: string;
+  userId: string;
+  input: PerformancePlanInput;
+  candidates: PerformanceScopeCandidate[];
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+  actorType: AuditActorType;
+  actorId: string | null;
+  createPlanId?: () => string;
+  createScopeItemId?: (scenarioId: string) => string;
+  createAuditEventId?: () => string;
+}
+
+export interface PerformancePlanUserContext {
+  userId: string;
+  email: string;
+  orgId: string;
+  orgName: string;
+  timeZone: string;
+  divisionId: string | null;
+  divisionName: string | null;
+  status: DashboardPerformanceUserOption["status"];
+  orgRole: DashboardPerformanceUserOption["orgRole"];
+  candidates: PerformanceScopeCandidate[];
+}
+
+export interface BuildDashboardPerformanceWorkspaceParams {
+  store: PerformancePlanStore;
+  viewer: DashboardViewer;
+  users: PerformancePlanUserContext[];
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+  divisionScope?: DashboardPerformanceWorkspaceResponse["divisionScope"];
+  canManageUser?: (user: PerformancePlanUserContext) => boolean;
+}
+
+export interface BuildPerformancePlanDetailParams {
+  store: PerformancePlanStore;
+  planId: string;
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+  includeAuditActorIds?: boolean;
+}
+
+export interface CancelPerformancePlanWithRuleParams extends BuildPerformancePlanDetailParams {
+  actorType: AuditActorType;
+  actorId: string | null;
+  reason?: string | null;
+}
+
+export async function buildMobilePerformanceCurrentResponse(
+  params: BuildMobilePerformanceCurrentResponseParams
+): Promise<MobilePerformanceCurrentResponse> {
+  const generatedAt = params.now.toISOString();
+  if (!params.orgId) {
+    return buildEmptyMobilePerformanceCurrentResponse(generatedAt);
+  }
+
+  const openPlan = await params.store.getOpenPlanForUser(params.orgId, params.userId);
+  if (!openPlan) {
+    return buildEmptyMobilePerformanceCurrentResponse(generatedAt);
+  }
+
+  const finalizeEndedPlan = params.finalizeEndedPlan ?? finalizePerformancePlanIfEnded;
+  const currentPlan = await finalizeEndedPlan({
+    store: params.store,
+    plan: openPlan.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  });
+
+  if (!currentPlan || currentPlan.plan.status !== "active") {
+    return buildEmptyMobilePerformanceCurrentResponse(generatedAt);
+  }
+
+  const calculateProgress = params.calculateProgress ?? calculatePerformanceProgress;
+  const buildInsights = params.buildInsights ?? buildPerformanceInsights;
+  const progress = calculateProgress({
+    plan: currentPlan.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  });
+
+  return {
+    generatedAt,
+    plan: currentPlan.plan,
+    progress: progress.progress,
+    insights: buildInsights(progress.progress),
+    displayState: deriveMobilePerformanceDisplayState(currentPlan, progress)
+  };
+}
+
+export function buildEmptyMobilePerformanceCurrentResponse(generatedAt: string): MobilePerformanceCurrentResponse {
+  return {
+    generatedAt,
+    plan: null,
+    progress: null,
+    insights: [],
+    displayState: {
+      state: "no_active_plan",
+      planId: null,
+      planStatus: "none",
+      overallCurrentlyMeetingTarget: null
+    }
+  };
+}
+
+export function buildPerformanceAssignableFocusTopics(
+  candidates: PerformanceScopeCandidate[]
+): PerformanceAssignableFocusTopic[] {
+  const counts = new Map<string, { id: string; name: string; scenarioIds: Set<string> }>();
+  for (const candidate of candidates) {
+    for (const topic of candidate.focusTopics) {
+      const current = counts.get(topic.id) ?? { id: topic.id, name: topic.name, scenarioIds: new Set<string>() };
+      current.scenarioIds.add(candidate.scenarioId);
+      counts.set(topic.id, current);
+    }
+  }
+
+  return Array.from(counts.values())
+    .map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      scenarioCount: entry.scenarioIds.size
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+export function buildPerformanceAssignableScenarios(
+  candidates: PerformanceScopeCandidate[]
+): PerformanceAssignableScenario[] {
+  return candidates
+    .map((candidate) => ({
+      scenarioId: candidate.scenarioId,
+      displayName: candidate.displayName,
+      source: candidate.source,
+      segmentId: candidate.segmentId,
+      segmentLabel: candidate.segmentLabel,
+      focusTopics: candidate.focusTopics
+    }))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.scenarioId.localeCompare(right.scenarioId));
+}
+
+export function previewPerformancePlan(
+  params: Omit<PerformancePlanRequestContext, "store" | "actorType" | "actorId">
+): PerformancePlanPreviewResponse {
+  const input = normalizePerformancePlanInputOrThrow(params.input);
+  const generatedAt = params.now.toISOString();
+  const errors: string[] = [];
+  let scope: PerformancePlan["scope"] | null = null;
+  let baseline: PerformanceBaseline | null = null;
+  let baselinePreview: PerformancePlanPreviewResponse["baselinePreview"] = null;
+
+  try {
+    scope = freezePerformancePlanScope({
+      selection: normalizeScopeSelection(input.scopeSelection),
+      candidates: params.candidates,
+      planId: "preview",
+      orgId: params.orgId,
+      userId: params.userId,
+      createdAt: generatedAt,
+      createScopeItemId: (scenarioId) => `preview_${scenarioId}`
+    }).scope;
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : "Performance plan scope is invalid.");
+  }
+
+  if (scope && needsPerformanceBaseline(input.performanceGoal)) {
+    try {
+      const preview = calculatePerformanceBaseline({
+        orgId: params.orgId,
+        userId: params.userId,
+        scope,
+        goal: input.performanceGoal,
+        effectiveAt: generatedAt,
+        timeZone: input.timeZone,
+        scoreRecords: params.scoreRecords
+      });
+      baseline = preview.baseline;
+      baselinePreview = toBaselinePreviewPayload(preview);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "Performance baseline could not be calculated.");
+    }
+  }
+
+  if (scope) {
+    const validation = validatePerformancePlanInput({
+      startDate: input.startDate,
+      endDate: input.endDate,
+      timeZone: input.timeZone,
+      now: params.now,
+      activityGoal: input.activityGoal,
+      performanceGoal: input.performanceGoal,
+      scope,
+      baseline
+    });
+    errors.push(...validation.errors);
+  }
+
+  return {
+    generatedAt,
+    valid: errors.length === 0,
+    errors: uniqueErrors(errors),
+    scope,
+    baseline,
+    baselinePreview,
+    availableFocusTopics: buildPerformanceAssignableFocusTopics(params.candidates),
+    availableScenarios: buildPerformanceAssignableScenarios(params.candidates)
+  };
+}
+
+export async function createPerformancePlanFromInput(
+  params: PerformancePlanRequestContext
+): Promise<CreatePerformancePlanResponse> {
+  const input = normalizePerformancePlanInputOrThrow(params.input);
+  const planId = params.createPlanId?.() ?? `perf_plan_${randomUUID()}`;
+  const createdAt = params.now.toISOString();
+  let frozen: ReturnType<typeof freezePerformancePlanScope>;
+  let baseline: PerformanceBaseline | null = null;
+  try {
+    frozen = freezePerformancePlanScope({
+      selection: normalizeScopeSelection(input.scopeSelection),
+      candidates: params.candidates,
+      planId,
+      orgId: params.orgId,
+      userId: params.userId,
+      createdAt,
+      createScopeItemId: params.createScopeItemId
+    });
+  } catch (error) {
+    throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance plan scope is invalid.")]);
+  }
+  if (needsPerformanceBaseline(input.performanceGoal)) {
+    try {
+      baseline = calculatePerformanceBaseline({
+        orgId: params.orgId,
+        userId: params.userId,
+        scope: frozen.scope,
+        goal: input.performanceGoal,
+        effectiveAt: createdAt,
+        timeZone: input.timeZone,
+        scoreRecords: params.scoreRecords
+      }).baseline;
+    } catch (error) {
+      throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance baseline could not be calculated.")]);
+    }
+  }
+  const validation = validatePerformancePlanInput({
+    startDate: input.startDate,
+    endDate: input.endDate,
+    timeZone: input.timeZone,
+    now: params.now,
+    activityGoal: input.activityGoal,
+    performanceGoal: input.performanceGoal,
+    scope: frozen.scope,
+    baseline
+  });
+  if (!validation.valid) {
+    throw new PerformancePlanInputError(validation.errors);
+  }
+
+  const plan: PerformancePlan = {
+    id: planId,
+    orgId: params.orgId,
+    userId: params.userId,
+    createdByActorType: params.actorType,
+    createdByActorId: params.actorId,
+    createdAt,
+    submittedAt: createdAt,
+    effectiveAt: createdAt,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    timeZone: input.timeZone,
+    status: "active",
+    completedAt: null,
+    cancelledAt: null,
+    cancelledByActorType: null,
+    cancelledByActorId: null,
+    cancellationReason: null,
+    activityGoal: input.activityGoal,
+    performanceGoal: input.performanceGoal,
+    scope: frozen.scope,
+    baseline,
+    finalResult: null,
+    updatedAt: createdAt
+  };
+
+  const created = await params.store.createPlan({
+    plan,
+    scopeItems: frozen.scopeItems,
+    auditEvents: [
+      buildAuditEvent({
+        id: params.createAuditEventId?.() ?? `perf_audit_${randomUUID()}`,
+        plan,
+        actorType: params.actorType,
+        actorId: params.actorId,
+        action: "created",
+        createdAt,
+        newValues: { plan }
+      })
+    ]
+  });
+  const progress = calculatePerformanceProgress({
+    plan: created.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  }).progress;
+
+  return {
+    created: true,
+    plan: created.plan,
+    progress,
+    insights: buildPerformanceInsights(progress)
+  };
+}
+
+export async function buildMobilePerformancePlanHistoryResponse(params: {
+  store: PerformancePlanStore;
+  orgId: string | null;
+  userId: string;
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+}): Promise<MobilePerformancePlanHistoryResponse> {
+  const generatedAt = params.now.toISOString();
+  if (!params.orgId) {
+    return { generatedAt, plans: [] };
+  }
+  const plans = await params.store.listPlansForUser(params.orgId, params.userId);
+  const summaries = await summarizePlans({
+    store: params.store,
+    plans,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  });
+  return { generatedAt, plans: summaries };
+}
+
+export async function buildPerformancePlanDetailResponse(
+  params: BuildPerformancePlanDetailParams
+): Promise<MobilePerformancePlanDetailResponse | null> {
+  const loaded = await materializePlanIfEnded(params);
+  if (!loaded) {
+    return null;
+  }
+  const summary = summarizePlan({
+    plan: loaded.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  });
+  return {
+    generatedAt: params.now.toISOString(),
+    plan: summary.plan,
+    progress: summary.progress,
+    insights: summary.insights,
+    auditEvents: params.includeAuditActorIds === true ? loaded.auditEvents : stripPerformanceAuditActorIds(loaded.auditEvents)
+  };
+}
+
+export async function cancelPerformancePlanWithBoundaryRule(
+  params: CancelPerformancePlanWithRuleParams
+): Promise<CancelPerformancePlanResponse | null> {
+  const loaded = await params.store.getPlanById(params.planId);
+  if (!loaded) {
+    return null;
+  }
+
+  if (loaded.plan.status !== "active") {
+    return {
+      plan: loaded.plan,
+      cancelled: false,
+      finalizedInstead: false,
+      progress: null,
+      insights: []
+    };
+  }
+
+  if (hasPlanEndBoundaryPassed(loaded.plan, params.now)) {
+    const finalized = await finalizePerformancePlanIfEnded({
+      store: params.store,
+      plan: loaded.plan,
+      usageSessions: params.usageSessions,
+      scoreRecords: params.scoreRecords,
+      now: params.now,
+      actorId: params.actorId
+    });
+    return {
+      plan: finalized?.plan ?? null,
+      cancelled: false,
+      finalizedInstead: true,
+      progress: null,
+      insights: []
+    };
+  }
+
+  const cancelled = await cancelPerformancePlan({
+    store: params.store,
+    plan: loaded.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    cancelledAt: params.now,
+    actorType: params.actorType,
+    actorId: params.actorId,
+    reason: params.reason ?? null
+  });
+
+  return {
+    plan: cancelled?.plan ?? null,
+    cancelled: cancelled?.plan.status === "cancelled",
+    finalizedInstead: false,
+    progress: null,
+    insights: []
+  };
+}
+
+export async function buildDashboardPerformanceWorkspaceResponse(
+  params: BuildDashboardPerformanceWorkspaceParams
+): Promise<DashboardPerformanceWorkspaceResponse> {
+  const canManageByUserId = new Map(
+    params.users.map((user) => [user.userId, params.canManageUser ? params.canManageUser(user) : true])
+  );
+  const plans = (
+    await Promise.all(
+      params.users.map(async (user) => {
+        const userPlans = await params.store.listPlansForUser(user.orgId, user.userId);
+        const summaries = await summarizePlans({
+          store: params.store,
+          plans: userPlans,
+          usageSessions: params.usageSessions.filter((session) => session.orgId === user.orgId && session.userId === user.userId),
+          scoreRecords: params.scoreRecords.filter((record) => record.orgId === user.orgId && record.userId === user.userId),
+          now: params.now
+        });
+        return summaries.map(
+          (summary): DashboardPerformancePlanRow => ({
+            ...summary,
+            userEmail: user.email,
+            orgName: user.orgName,
+            divisionId: user.divisionId,
+            divisionName: user.divisionName,
+            canCancel: summary.plan.status === "active" && (canManageByUserId.get(user.userId) ?? false)
+          })
+        );
+      })
+    )
+  ).flat();
+
+  const userOptions = params.users.map(
+    (user): DashboardPerformanceUserOption => ({
+      userId: user.userId,
+      email: user.email,
+      orgId: user.orgId,
+      orgName: user.orgName,
+      timeZone: user.timeZone,
+      divisionId: user.divisionId,
+      divisionName: user.divisionName,
+      status: user.status,
+      orgRole: user.orgRole,
+      activePlanId: plans.find((row) => row.plan.userId === user.userId && row.plan.status === "active")?.plan.id ?? null,
+      canManagePerformancePlans: canManageByUserId.get(user.userId) ?? false,
+      assignableFocusTopics: buildPerformanceAssignableFocusTopics(user.candidates),
+      assignableScenarios: buildPerformanceAssignableScenarios(user.candidates)
+    })
+  );
+
+  const summary = buildDashboardPerformanceSummary(plans);
+  return {
+    viewer: params.viewer,
+    generatedAt: params.now.toISOString(),
+    defaultTimeZone: "UTC",
+    summary: {
+      ...summary,
+      visibleUserCount: userOptions.length
+    },
+    users: userOptions,
+    plans: plans.sort((left, right) => right.plan.createdAt.localeCompare(left.plan.createdAt) || right.plan.id.localeCompare(left.plan.id)),
+    divisionScope: params.divisionScope
+  };
+}
+
+export function buildDashboardPerformancePlanDetailResponse(params: {
+  viewer: DashboardViewer;
+  detail: MobilePerformancePlanDetailResponse;
+  canCancel: boolean;
+  rowContext: {
+    userEmail: string;
+    orgName: string;
+    divisionId: string | null;
+    divisionName: string | null;
+  };
+}): DashboardPerformancePlanDetailResponse {
+  return {
+    viewer: params.viewer,
+    generatedAt: params.detail.generatedAt,
+    plan: {
+      plan: params.detail.plan,
+      progress: params.detail.progress,
+      insights: params.detail.insights,
+      userEmail: params.rowContext.userEmail,
+      orgName: params.rowContext.orgName,
+      divisionId: params.rowContext.divisionId,
+      divisionName: params.rowContext.divisionName,
+      canCancel: params.canCancel
+    },
+    auditEvents: params.detail.auditEvents
+  };
+}
+
+export class PerformancePlanInputError extends Error {
+  errors: string[];
+
+  constructor(errors: string[]) {
+    super(errors.join(" "));
+    this.name = "PerformancePlanInputError";
+    this.errors = errors;
+  }
+}
+
+const ACTIVITY_METRICS = new Set<string>(PERFORMANCE_ACTIVITY_METRIC_TYPES);
+const PERFORMANCE_METRICS = new Set<string>(PERFORMANCE_GOAL_METRIC_TYPES);
+
+function normalizePerformancePlanInputOrThrow(input: PerformancePlanInput): PerformancePlanInput {
+  const errors: string[] = [];
+  if (!isRecord(input)) {
+    throw new PerformancePlanInputError(["Performance plan request body is required."]);
+  }
+
+  const userId = normalizeRequiredText(input.userId, "userId", errors);
+  const orgId = normalizeOptionalText(input.orgId, "orgId", errors);
+  const startDate = normalizeDateKeyInput(input.startDate, "startDate", errors);
+  const endDate = normalizeDateKeyInput(input.endDate, "endDate", errors);
+  const timeZone = normalizeTimeZoneInput(input.timeZone, errors);
+  const activityGoal = normalizeActivityGoalInput(input.activityGoal, errors);
+  const performanceGoal = normalizePerformanceGoalInput(input.performanceGoal, errors);
+  const scopeSelection = normalizeScopeSelectionInput(input.scopeSelection, errors);
+
+  if (isDateKey(startDate) && isDateKey(endDate) && compareDateKeys(startDate, endDate) > 0) {
+    errors.push("startDate must be on or before endDate.");
+  }
+
+  if (errors.length > 0) {
+    throw new PerformancePlanInputError(uniqueErrors(errors));
+  }
+
+  return {
+    userId,
+    orgId,
+    startDate,
+    endDate,
+    timeZone,
+    activityGoal,
+    performanceGoal,
+    scopeSelection
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeRequiredText(value: unknown, fieldName: string, errors: string[]): string {
+  if (typeof value !== "string") {
+    errors.push(`${fieldName} must be a non-empty string.`);
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    errors.push(`${fieldName} must be a non-empty string.`);
+  }
+  return trimmed;
+}
+
+function normalizeOptionalText(value: unknown, fieldName: string, errors: string[]): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    errors.push(`${fieldName} must be a string when provided.`);
+    return null;
+  }
+  return value.trim() || null;
+}
+
+function normalizeDateKeyInput(value: unknown, fieldName: string, errors: string[]): string {
+  if (typeof value !== "string") {
+    errors.push(`${fieldName} must use YYYY-MM-DD format.`);
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!isDateKey(trimmed)) {
+    errors.push(`${fieldName} must be a valid calendar date in YYYY-MM-DD format.`);
+  }
+  return trimmed;
+}
+
+function normalizeTimeZoneInput(value: unknown, errors: string[]): string {
+  if (typeof value !== "string" || !value.trim()) {
+    errors.push("A valid IANA timezone is required.");
+    return "UTC";
+  }
+  const trimmed = value.trim();
+  if (!isValidIanaTimeZone(trimmed)) {
+    errors.push("A valid IANA timezone is required.");
+  }
+  return trimmed;
+}
+
+function normalizeActivityGoalInput(value: unknown, errors: string[]): PerformanceActivityGoal {
+  if (!isRecord(value)) {
+    errors.push("activityGoal is required.");
+    return { enabled: false, metricType: null, targetValue: null };
+  }
+
+  if (typeof value.enabled !== "boolean") {
+    errors.push("activityGoal.enabled must be a boolean.");
+  }
+  const enabled = value.enabled === true;
+  const metricType = normalizeActivityMetricTypeInput(value.metricType, errors);
+  const targetValue = normalizeNullableNumberInput(value.targetValue, "activityGoal.targetValue", errors);
+  return { enabled, metricType, targetValue };
+}
+
+function normalizeActivityMetricTypeInput(value: unknown, errors: string[]): PerformanceActivityGoal["metricType"] {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string") {
+    errors.push("activityGoal.metricType must be a supported string or null.");
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!ACTIVITY_METRICS.has(trimmed)) {
+    errors.push("Activity metric type is required.");
+  }
+  return trimmed as PerformanceActivityGoal["metricType"];
+}
+
+function normalizePerformanceGoalInput(value: unknown, errors: string[]): PerformanceGoal {
+  if (!isRecord(value)) {
+    errors.push("performanceGoal is required.");
+    return { enabled: false, metricType: null, targetScore: null, improvementAmount: null, comparisonMonthCount: null };
+  }
+
+  if (typeof value.enabled !== "boolean") {
+    errors.push("performanceGoal.enabled must be a boolean.");
+  }
+  const enabled = value.enabled === true;
+  const metricType = normalizePerformanceMetricTypeInput(value.metricType, errors);
+  const comparisonMonthCount = normalizeComparisonMonthCountInput(value.comparisonMonthCount, errors);
+  return {
+    enabled,
+    metricType,
+    targetScore: normalizeNullableNumberInput(value.targetScore, "performanceGoal.targetScore", errors),
+    improvementAmount: normalizeNullableNumberInput(value.improvementAmount, "performanceGoal.improvementAmount", errors),
+    comparisonMonthCount
+  };
+}
+
+function normalizePerformanceMetricTypeInput(value: unknown, errors: string[]): PerformanceGoal["metricType"] {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string") {
+    errors.push("performanceGoal.metricType must be a supported string or null.");
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!PERFORMANCE_METRICS.has(trimmed)) {
+    errors.push("Performance metric type is required.");
+  }
+  return trimmed as PerformanceGoal["metricType"];
+}
+
+function normalizeNullableNumberInput(value: unknown, fieldName: string, errors: string[]): number | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    errors.push(`${fieldName} must be a finite number when provided.`);
+    return null;
+  }
+  return value;
+}
+
+function normalizeComparisonMonthCountInput(value: unknown, errors: string[]): 1 | 2 | 3 | 6 | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (value !== 1 && value !== 2 && value !== 3 && value !== 6) {
+    errors.push("Comparison month count must be 1, 2, 3, or 6.");
+    return null;
+  }
+  return value;
+}
+
+function normalizeScopeSelectionInput(value: unknown, errors: string[]): PerformanceScopeSelectionRequest {
+  if (!isRecord(value)) {
+    errors.push("scopeSelection is required.");
+    return { allAssignedScenarios: false, selectedFocusTopicIds: [], selectedScenarioIds: [] };
+  }
+
+  if (typeof value.allAssignedScenarios !== "boolean") {
+    errors.push("scopeSelection.allAssignedScenarios must be a boolean.");
+  }
+  const allAssignedScenarios = value.allAssignedScenarios === true;
+  const selectedFocusTopicIds = normalizeStringListInput(
+    value.selectedFocusTopicIds,
+    "scopeSelection.selectedFocusTopicIds",
+    errors
+  );
+  const selectedScenarioIds = normalizeStringListInput(
+    value.selectedScenarioIds,
+    "scopeSelection.selectedScenarioIds",
+    errors
+  );
+
+  pushDuplicateErrors(selectedFocusTopicIds, "scopeSelection.selectedFocusTopicIds", errors);
+  pushDuplicateErrors(selectedScenarioIds, "scopeSelection.selectedScenarioIds", errors);
+  if (!allAssignedScenarios && selectedFocusTopicIds.length === 0 && selectedScenarioIds.length === 0) {
+    errors.push("Performance plan scope must include at least one selected Focus Topic or scenario.");
+  }
+
+  return { allAssignedScenarios, selectedFocusTopicIds, selectedScenarioIds };
+}
+
+function normalizeStringListInput(value: unknown, fieldName: string, errors: string[]): string[] {
+  if (!Array.isArray(value)) {
+    errors.push(`${fieldName} must be an array of strings.`);
+    return [];
+  }
+  const normalized: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.trim()) {
+      errors.push(`${fieldName} must contain only non-empty strings.`);
+      continue;
+    }
+    normalized.push(entry.trim());
+  }
+  return normalized;
+}
+
+function pushDuplicateErrors(values: string[], fieldName: string, errors: string[]): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      errors.push(`${fieldName} must not contain duplicate ids.`);
+      return;
+    }
+    seen.add(value);
+  }
+}
+
+function toInputErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function deriveMobilePerformanceDisplayState(
+  currentPlan: PerformancePlanWithRelations,
+  progress: PerformanceProgressCalculation
+): MobilePerformanceCurrentDisplayState {
+  if (progress.progress.performance.enabled && progress.progress.performance.notEnoughData) {
+    return {
+      state: "active_collecting_evidence",
+      planId: currentPlan.plan.id,
+      planStatus: "active",
+      overallCurrentlyMeetingTarget: progress.progress.overallCurrentlyMeetingTarget
+    };
+  }
+
+  return {
+    state: progress.progress.overallCurrentlyMeetingTarget ? "active_on_track" : "active_needs_attention",
+    planId: currentPlan.plan.id,
+    planStatus: "active",
+    overallCurrentlyMeetingTarget: progress.progress.overallCurrentlyMeetingTarget
+  };
+}
+
+async function summarizePlans(params: {
+  store: PerformancePlanStore;
+  plans: PerformancePlanWithRelations[];
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+}): Promise<PerformancePlanSummary[]> {
+  const summaries: PerformancePlanSummary[] = [];
+  for (const plan of params.plans) {
+    const materialized = plan.plan.status === "active"
+      ? await finalizePerformancePlanIfEnded({
+          store: params.store,
+          plan: plan.plan,
+          usageSessions: params.usageSessions,
+          scoreRecords: params.scoreRecords,
+          now: params.now
+        })
+      : plan;
+    if (!materialized) {
+      continue;
+    }
+    summaries.push(
+      summarizePlan({
+        plan: materialized.plan,
+        usageSessions: params.usageSessions,
+        scoreRecords: params.scoreRecords,
+        now: params.now
+      })
+    );
+  }
+  return summaries;
+}
+
+function summarizePlan(params: {
+  plan: PerformancePlan;
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+}): PerformancePlanSummary {
+  if (params.plan.status !== "active") {
+    return {
+      plan: params.plan,
+      progress: null,
+      insights: buildTerminalPlanInsights(params.plan)
+    };
+  }
+  const progress = calculatePerformanceProgress({
+    plan: params.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  }).progress;
+  return {
+    plan: params.plan,
+    progress,
+    insights: buildPerformanceInsights(progress)
+  };
+}
+
+async function materializePlanIfEnded(params: BuildPerformancePlanDetailParams): Promise<PerformancePlanWithRelations | null> {
+  const loaded = await params.store.getPlanById(params.planId);
+  if (!loaded) {
+    return null;
+  }
+  if (loaded.plan.status !== "active") {
+    return loaded;
+  }
+  return await finalizePerformancePlanIfEnded({
+    store: params.store,
+    plan: loaded.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  });
+}
+
+function hasPlanEndBoundaryPassed(plan: PerformancePlan, now: Date): boolean {
+  const window = buildPlanWindow({
+    startDate: plan.startDate,
+    endDate: plan.endDate,
+    timeZone: plan.timeZone,
+    effectiveAt: plan.effectiveAt
+  });
+  return now.getTime() >= new Date(window.planEndAt).getTime();
+}
+
+function normalizeScopeSelection(selection: PerformanceScopeSelectionRequest): PerformanceScopeSelectionRequest {
+  return {
+    allAssignedScenarios: selection.allAssignedScenarios === true,
+    selectedFocusTopicIds: Array.isArray(selection.selectedFocusTopicIds) ? selection.selectedFocusTopicIds : [],
+    selectedScenarioIds: Array.isArray(selection.selectedScenarioIds) ? selection.selectedScenarioIds : []
+  };
+}
+
+function needsPerformanceBaseline(goal: PerformanceGoal): boolean {
+  return goal.enabled === true && goal.metricType !== null && goal.metricType !== "target_average_score";
+}
+
+function toBaselinePreviewPayload(
+  preview: PerformanceBaselinePreview
+): PerformancePlanPreviewResponse["baselinePreview"] {
+  return {
+    baselineStartAt: preview.baselineStartAt,
+    baselineEndAt: preview.baselineEndAt,
+    eligibleScoreCount: preview.eligibleScoreCount,
+    baselineAverage: preview.baselineAverage,
+    derivedTargetScore: preview.derivedTargetScore,
+    insufficientData: preview.insufficientData
+  };
+}
+
+function buildAuditEvent(params: {
+  id: string;
+  plan: PerformancePlan;
+  actorType: AuditActorType;
+  actorId: string | null;
+  action: string;
+  createdAt: string;
+  newValues: Record<string, unknown>;
+}): PerformanceAuditEvent {
+  return {
+    id: params.id,
+    planId: params.plan.id,
+    orgId: params.plan.orgId,
+    userId: params.plan.userId,
+    actorType: params.actorType,
+    actorId: params.actorId,
+    action: params.action,
+    changedFields: ["plan"],
+    oldValues: null,
+    newValues: params.newValues,
+    reason: null,
+    createdAt: params.createdAt
+  };
+}
+
+function stripPerformanceAuditActorIds(events: PerformanceAuditEvent[]): PerformanceAuditEvent[] {
+  return events.map((event) => ({ ...event, actorId: null }));
+}
+
+function uniqueErrors(errors: string[]): string[] {
+  return Array.from(new Set(errors.map((error) => error.trim()).filter(Boolean)));
+}
+
+function buildTerminalPlanInsights(plan: PerformancePlan): PerformanceInsight[] {
+  if (!plan.finalResult) {
+    return [];
+  }
+  return [
+    {
+      status: "goal_ended",
+      message:
+        plan.status === "completed"
+          ? "This Performance plan has been finalized."
+          : "This Performance plan has been cancelled.",
+      recommendedNextStep:
+        plan.status === "completed"
+          ? "Review the final result snapshot before assigning the next Focus Topic."
+          : "Use the final snapshot to decide whether a new plan is needed.",
+      metadata: {
+        overallSucceeded: plan.finalResult.overallSucceeded,
+        finalizedAt: plan.finalResult.finalizedAt
+      }
+    }
+  ];
+}
+
+function buildDashboardPerformanceSummary(rows: DashboardPerformancePlanRow[]): DashboardPerformanceSummary {
+  return {
+    visibleUserCount: 0,
+    activePlanCount: rows.filter((row) => row.plan.status === "active").length,
+    completedPlanCount: rows.filter((row) => row.plan.status === "completed").length,
+    cancelledPlanCount: rows.filter((row) => row.plan.status === "cancelled").length,
+    activeOnTrackCount: rows.filter((row) => row.plan.status === "active" && row.progress?.overallCurrentlyMeetingTarget === true).length,
+    activeNeedsAttentionCount: rows.filter((row) => row.plan.status === "active" && row.progress?.overallCurrentlyMeetingTarget === false).length
+  };
+}

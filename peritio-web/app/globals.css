@@ -70,7 +70,8 @@ a {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -215,6 +216,10 @@ main {
   border-radius: 14px;
   background: var(--panel-strong);
   color: var(--text);
+}
+
+select.text-input {
+  appearance: auto;
 }
 
 .primary-button,
@@ -621,6 +626,74 @@ main {
 .tab-panel {
   display: grid;
   gap: 1rem;
+}
+
+.performance-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.performance-form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.performance-wide-field {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.checkbox-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.35rem 0.65rem;
+  align-items: start;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-muted);
+  color: var(--text);
+}
+
+.checkbox-card input {
+  margin-top: 0.15rem;
+}
+
+.checkbox-card span,
+.checkbox-card small {
+  min-width: 0;
+}
+
+.checkbox-card small {
+  grid-column: 2;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.preview-panel {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--panel-muted);
 }
 
 .dashboard-selector-grid {
@@ -1244,6 +1317,10 @@ html[data-theme="light"] .progress-track {
   .customer-directory-actions {
     justify-content: flex-start;
   }
+
+  .performance-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -1276,5 +1353,10 @@ html[data-theme="light"] .progress-track {
   .brand-mark {
     width: 48px;
     height: 48px;
+  }
+
+  .performance-form-grid,
+  .checkbox-grid {
+    grid-template-columns: 1fr;
   }
 }

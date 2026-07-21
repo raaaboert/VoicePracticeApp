@@ -8,6 +8,8 @@ import {
   DashboardCustomerDetailResponse,
   DashboardCustomerListResponse,
   DashboardCustomerSummary,
+  DashboardPerformancePlanDetailResponse,
+  DashboardPerformanceWorkspaceResponse,
   DashboardTrainingPackAssignmentDetailResponse,
   DashboardTrainingPackDetailResponse,
   DashboardTrainingReportResponse,
@@ -15,6 +17,12 @@ import {
   DashboardUserDetailResponse,
   DashboardUserReportResponse,
   DashboardViewer,
+  CancelPerformancePlanRequest,
+  CancelPerformancePlanResponse,
+  CreatePerformancePlanRequest,
+  CreatePerformancePlanResponse,
+  PerformancePlanPreviewRequest,
+  PerformancePlanPreviewResponse,
   WebAuthRequestCodeResponse,
   WebAuthSessionResponse,
   WebAuthVerifyCodeResponse,
@@ -282,6 +290,117 @@ export async function getDashboardOverview(divisionId?: string | null): Promise<
 
     throw error;
   }
+}
+
+function appendPerformanceDashboardQuery(
+  pathname: string,
+  options?: { divisionId?: string | null; orgId?: string | null }
+): string {
+  const params = new URLSearchParams();
+  if (options?.divisionId?.trim()) {
+    params.set("divisionId", options.divisionId.trim());
+  }
+  if (options?.orgId?.trim()) {
+    params.set("orgId", options.orgId.trim());
+  }
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
+export async function getDashboardPerformanceWorkspace(options?: {
+  divisionId?: string | null;
+  orgId?: string | null;
+}): Promise<DashboardPerformanceWorkspaceResponse | null> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+
+  try {
+    return await fetchDashboardApi<DashboardPerformanceWorkspaceResponse>(
+      appendPerformanceDashboardQuery("/dashboard/performance", options),
+      { token }
+    );
+  } catch (error) {
+    if (isProtectedDashboardAuthFailure(error)) {
+      throw new DashboardSessionInvalidError(error instanceof DashboardApiError ? error.message : undefined);
+    }
+
+    throw error;
+  }
+}
+
+export async function previewDashboardPerformancePlan(
+  input: PerformancePlanPreviewRequest,
+  divisionId?: string | null
+): Promise<PerformancePlanPreviewResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<PerformancePlanPreviewResponse>(
+    appendDivisionQuery("/dashboard/performance/preview", divisionId),
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
+}
+
+export async function createDashboardPerformancePlan(
+  input: CreatePerformancePlanRequest,
+  divisionId?: string | null
+): Promise<CreatePerformancePlanResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<CreatePerformancePlanResponse>(
+    appendDivisionQuery("/dashboard/performance/plans", divisionId),
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
+}
+
+export async function getDashboardPerformancePlanDetail(
+  planId: string,
+  divisionId?: string | null
+): Promise<DashboardPerformancePlanDetailResponse | null> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+
+  try {
+    return await fetchDashboardApi<DashboardPerformancePlanDetailResponse>(
+      appendDivisionQuery(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, divisionId),
+      { token }
+    );
+  } catch (error) {
+    if (error instanceof DashboardApiError) {
+      if (error.status === 404) {
+        return null;
+      }
+
+      if (isInvalidDashboardSessionError(error)) {
+        throw new DashboardSessionInvalidError(error.message);
+      }
+
+      if (error.status === 403) {
+        throw new DashboardAccessDeniedError(error.message);
+      }
+    }
+
+    throw error;
+  }
+}
+
+export async function cancelDashboardPerformancePlan(
+  planId: string,
+  input: CancelPerformancePlanRequest,
+  divisionId?: string | null
+): Promise<CancelPerformancePlanResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<CancelPerformancePlanResponse>(
+    appendDivisionQuery(`/dashboard/performance/plans/${encodeURIComponent(planId)}/cancel`, divisionId),
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
 }
 
 export async function getDashboardTrainingReport(): Promise<DashboardTrainingReportResponse | null> {
