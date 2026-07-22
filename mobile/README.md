@@ -21,14 +21,22 @@ Create `.env` from `.env.example`:
 
 ```bash
 EXPO_PUBLIC_REMOTE_AI_ENABLED=true
+EXPO_PUBLIC_REMOTE_TTS_ENABLED=true
 EXPO_PUBLIC_API_BASE_URL=
 ```
 
-`EXPO_PUBLIC_API_BASE_URL` is optional. Leave it blank to auto-detect from Expo host.
+`EXPO_PUBLIC_API_BASE_URL` is optional for local development. Leave it blank to auto-detect from Expo host.
 For Android emulator-only override, use `http://10.0.2.2:4100`.
-For EAS APK/production builds, set `EXPO_PUBLIC_API_BASE_URL` explicitly (do not rely on auto-detect/localhost).
-This repo configures the `preview` EAS profile for `https://voicepractice-api-dev.onrender.com` and the `production` EAS profile for `https://peritio-api-prod.onrender.com`.
-For EAS builds, this repo also sets `EXPO_PUBLIC_REMOTE_AI_ENABLED=true` in `mobile/eas.json`.
+For EAS APK/TestFlight builds, use the checked-in profiles and do not rely on auto-detect/localhost.
+
+EAS profile targets:
+
+- `preview`: Android internal APK, staging API, staging app variant
+- `staging-ios`: iOS store-signed build for the Peritio Staging TestFlight app
+- `production-ios`: iOS store-signed build for the production Peritio TestFlight app
+- `production`: production API and production app variant
+
+The profiles set `PERITIO_MOBILE_ENV`, `PERITIO_MOBILE_APP_VARIANT`, and `EXPO_PUBLIC_API_BASE_URL`.
 
 When `EXPO_PUBLIC_REMOTE_AI_ENABLED=true`, mobile uses API routes for:
 

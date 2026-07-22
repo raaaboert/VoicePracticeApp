@@ -14,14 +14,40 @@
         "buildType": "apk"
       },
       "env": {
+        "PERITIO_MOBILE_ENV": "staging",
+        "PERITIO_MOBILE_APP_VARIANT": "staging",
         "EXPO_PUBLIC_REMOTE_AI_ENABLED": "true",
         "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
         "EXPO_PUBLIC_API_BASE_URL": "https://voicepractice-api-dev.onrender.com"
       }
     },
+    "staging-ios": {
+      "distribution": "store",
+      "autoIncrement": true,
+      "env": {
+        "PERITIO_MOBILE_ENV": "staging",
+        "PERITIO_MOBILE_APP_VARIANT": "staging",
+        "EXPO_PUBLIC_REMOTE_AI_ENABLED": "true",
+        "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
+        "EXPO_PUBLIC_API_BASE_URL": "https://voicepractice-api-dev.onrender.com"
+      }
+    },
+    "production-ios": {
+      "distribution": "store",
+      "autoIncrement": true,
+      "env": {
+        "PERITIO_MOBILE_ENV": "production",
+        "PERITIO_MOBILE_APP_VARIANT": "production",
+        "EXPO_PUBLIC_REMOTE_AI_ENABLED": "true",
+        "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
+        "EXPO_PUBLIC_API_BASE_URL": "https://peritio-api-prod.onrender.com"
+      }
+    },
     "production": {
       "autoIncrement": true,
       "env": {
+        "PERITIO_MOBILE_ENV": "production",
+        "PERITIO_MOBILE_APP_VARIANT": "production",
         "EXPO_PUBLIC_REMOTE_AI_ENABLED": "true",
         "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
         "EXPO_PUBLIC_API_BASE_URL": "https://peritio-api-prod.onrender.com"
@@ -29,6 +55,16 @@
     }
   },
   "submit": {
+    "staging-ios": {
+      "ios": {
+        "ascAppId": "6793392828"
+      }
+    },
+    "production-ios": {
+      "ios": {
+        "ascAppId": "6780612337"
+      }
+    },
     "production": {}
   }
 }
