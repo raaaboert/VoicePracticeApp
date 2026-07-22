@@ -5,10 +5,12 @@
   },
   "build": {
     "development": {
+      "environment": "development",
       "developmentClient": true,
       "distribution": "internal"
     },
     "preview": {
+      "environment": "preview",
       "distribution": "internal",
       "android": {
         "buildType": "apk"
@@ -22,6 +24,7 @@
       }
     },
     "staging-ios": {
+      "environment": "preview",
       "distribution": "store",
       "autoIncrement": true,
       "env": {
@@ -33,6 +36,7 @@
       }
     },
     "production-ios": {
+      "environment": "production",
       "distribution": "store",
       "autoIncrement": true,
       "env": {
@@ -44,6 +48,7 @@
       }
     },
     "production": {
+      "environment": "production",
       "autoIncrement": true,
       "env": {
         "PERITIO_MOBILE_ENV": "production",
