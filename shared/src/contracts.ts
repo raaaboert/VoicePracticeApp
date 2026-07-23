@@ -687,6 +687,27 @@ export interface PerformanceAuditDisplayEvent {
   reason: string | null;
 }
 
+export interface PerformancePlanUpdate {
+  id: string;
+  body: string;
+  authorDisplayName: string;
+  createdAt: string;
+}
+
+export interface CreatePerformancePlanUpdateRequest {
+  body: string;
+}
+
+export interface PerformancePlanUpdatesResponse {
+  generatedAt: string;
+  updates: PerformancePlanUpdate[];
+}
+
+export interface CreatePerformancePlanUpdateResponse {
+  created: true;
+  update: PerformancePlanUpdate;
+}
+
 export interface PerformanceScopeSelectionRequest {
   allAssignedScenarios: boolean;
   selectedFocusTopicIds: string[];
@@ -812,6 +833,7 @@ export interface MobilePerformancePlanDetailResponse {
   plan: PerformancePlan;
   progress: PerformanceProgress | null;
   insights: PerformanceInsight[];
+  updates: PerformancePlanUpdate[];
   auditEvents: PerformanceAuditDisplayEvent[];
 }
 
@@ -875,6 +897,7 @@ export interface DashboardPerformancePlanDetailResponse {
   viewer: DashboardViewer;
   generatedAt: string;
   plan: DashboardPerformancePlanRow;
+  updates: PerformancePlanUpdate[];
   auditEvents: PerformanceAuditDisplayEvent[];
 }
 

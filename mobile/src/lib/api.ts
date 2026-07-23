@@ -13,8 +13,11 @@ import {
   MobileUpdateSettingsRequest,
   MobileVerifyEmailRequest,
   CreatePerformancePlanRequest,
+  CreatePerformancePlanUpdateRequest,
+  CreatePerformancePlanUpdateResponse,
   CreatePerformancePlanResponse,
   PersonaStyle,
+  PerformancePlanUpdatesResponse,
   PerformancePlanPreviewRequest,
   PerformancePlanPreviewResponse,
   RecordUsageSessionRequest,
@@ -631,6 +634,35 @@ export async function fetchPerformancePlanDetail(
   return requestJson<MobilePerformancePlanDetailResponse>(
     `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}`,
     undefined,
+    authToken,
+  );
+}
+
+export async function fetchPerformancePlanUpdates(
+  userId: string,
+  planId: string,
+  authToken: string,
+): Promise<PerformancePlanUpdatesResponse> {
+  return requestJson<PerformancePlanUpdatesResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}/updates`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function postPerformancePlanUpdate(
+  userId: string,
+  planId: string,
+  body: string,
+  authToken: string,
+): Promise<CreatePerformancePlanUpdateResponse> {
+  const payload: CreatePerformancePlanUpdateRequest = { body };
+  return requestJson<CreatePerformancePlanUpdateResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}/updates`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
     authToken,
   );
 }

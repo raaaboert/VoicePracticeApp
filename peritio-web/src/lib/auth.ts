@@ -20,7 +20,10 @@ import {
   CancelPerformancePlanRequest,
   CancelPerformancePlanResponse,
   CreatePerformancePlanRequest,
+  CreatePerformancePlanUpdateRequest,
+  CreatePerformancePlanUpdateResponse,
   CreatePerformancePlanResponse,
+  PerformancePlanUpdatesResponse,
   PerformancePlanPreviewRequest,
   PerformancePlanPreviewResponse,
   UpdatePerformancePlanRequest,
@@ -387,6 +390,33 @@ export async function getDashboardPerformancePlanDetail(
 
     throw error;
   }
+}
+
+export async function getDashboardPerformancePlanUpdates(
+  planId: string,
+  divisionId?: string | null
+): Promise<PerformancePlanUpdatesResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<PerformancePlanUpdatesResponse>(
+    appendDivisionQuery(`/dashboard/performance/plans/${encodeURIComponent(planId)}/updates`, divisionId),
+    { token }
+  );
+}
+
+export async function createDashboardPerformancePlanUpdate(
+  planId: string,
+  input: CreatePerformancePlanUpdateRequest,
+  divisionId?: string | null
+): Promise<CreatePerformancePlanUpdateResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<CreatePerformancePlanUpdateResponse>(
+    appendDivisionQuery(`/dashboard/performance/plans/${encodeURIComponent(planId)}/updates`, divisionId),
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
 }
 
 export async function updateDashboardPerformancePlan(

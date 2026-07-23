@@ -84,6 +84,7 @@ import {
   CreateOrgDivisionRequest,
   CreateOrgTrainingRequest,
   CreatePerformancePlanRequest,
+  CreatePerformancePlanUpdateRequest,
   OrgAccountsExportResponse,
   OrgAccountsExportRow,
   OrgDivisionListResponse,
@@ -256,14 +257,21 @@ import {
   buildMobilePerformancePlanOptionsResponse,
   buildMobilePerformancePlanHistoryResponse,
   buildPerformancePlanDetailResponse,
+  buildPerformancePlanUpdatesResponse,
   cancelPerformancePlanWithBoundaryRule,
   createPerformancePlanFromInput,
+  createPerformancePlanUpdateForPlan,
   PerformancePlanInputError,
+  PerformancePlanUpdateConflictError,
+  PerformancePlanUpdateInputError,
   previewPerformancePlan,
   updatePerformancePlanFromInput,
   type PerformancePlanUserContext
 } from "./services/performanceApi.js";
-import { finalizeOpenPerformancePlansForUserIfNeeded } from "./services/performanceFinalization.js";
+import {
+  finalizeOpenPerformancePlansForUserIfNeeded,
+  finalizePerformancePlanIfEnded
+} from "./services/performanceFinalization.js";
 import type { PerformanceScopeCandidate } from "./services/performanceScope.js";
 import {
   pruneStaleRecognizedSimulationSessions,
@@ -10400,6 +10408,110 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
   });
 });
 
+app.get("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshReportingWrite(async (db) => {
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: loaded.plan.orgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const rowContext = getPerformancePlanRowContext(db, loaded.plan);
+    if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const payload = await buildPerformancePlanUpdatesResponse({
+      store: performancePlanStore,
+      planId: loaded.plan.id,
+      users: db.users,
+      now: new Date()
+    });
+    response.json(payload);
+  });
+});
+
+app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const body = request.body as CreatePerformancePlanUpdateRequest;
+  await withFreshReportingWrite(async (db) => {
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      explicitOrgId: loaded.plan.orgId,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const rowContext = getPerformancePlanRowContext(db, loaded.plan);
+    if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+    const target = getUserById(db, loaded.plan.userId);
+    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+      response.status(403).json({
+        error: "Performance plan management requires org admin or user admin access.",
+        code: "dashboard_scope_denied"
+      });
+      return;
+    }
+    const now = new Date();
+    const materialized = await finalizePerformancePlanIfEnded({
+      store: performancePlanStore,
+      plan: loaded.plan,
+      usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId }),
+      scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId, conclusiveOnly: true }),
+      now,
+      actorId: request.dashboard!.viewer.userId
+    });
+    if (!materialized || materialized.plan.status !== "active") {
+      response.status(409).json({
+        error: "Updates can only be posted to active or scheduled Performance plans.",
+        code: "performance_plan_updates_terminal"
+      });
+      return;
+    }
+    try {
+      const payload = await createPerformancePlanUpdateForPlan({
+        store: performancePlanStore,
+        plan: materialized.plan,
+        body: body?.body,
+        actorType: resolvePerformanceDashboardAuditActorType(request.dashboard!.viewer),
+        actorId: request.dashboard!.viewer.userId,
+        now,
+        users: db.users
+      });
+      response.status(201).json(payload);
+    } catch (error) {
+      if (error instanceof PerformancePlanUpdateInputError) {
+        response.status(400).json({ error: error.message, errors: error.errors });
+        return;
+      }
+      if (error instanceof PerformancePlanUpdateConflictError) {
+        response.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  });
+});
+
 app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const body = request.body as CancelPerformancePlanRequest;
   await withFreshReportingWrite(async (db) => {
@@ -17362,6 +17474,130 @@ app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Reque
     }
 
     response.json(payload);
+  });
+});
+
+app.get("/mobile/users/:userId/performance/plans/:planId/updates", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+    if (!accessContext.actingOrgId) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const payload = await buildPerformancePlanUpdatesResponse({
+      store: performancePlanStore,
+      planId: loaded.plan.id,
+      users: [user],
+      now: new Date()
+    });
+    response.json(payload);
+  });
+});
+
+app.post("/mobile/users/:userId/performance/plans/:planId/updates", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId;
+
+  await withFreshReportingWrite(async (db) => {
+    const user = getUserById(db, userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    const accessContext = resolveMobileAccessContext(db, user, request, response);
+    if (!accessContext) {
+      return;
+    }
+    if (!accessContext.actingOrgId) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const loaded = await performancePlanStore.getPlanById(request.params.planId);
+    if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
+      response.status(404).json({ error: "Performance plan not found." });
+      return;
+    }
+
+    const now = new Date();
+    const materialized = await finalizePerformancePlanIfEnded({
+      store: performancePlanStore,
+      plan: loaded.plan,
+      usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: user.id }),
+      scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: user.id, conclusiveOnly: true }),
+      now,
+      actorId: user.id
+    });
+    if (!materialized || materialized.plan.status !== "active") {
+      response.status(409).json({
+        error: "Updates can only be posted to active or scheduled Performance plans.",
+        code: "performance_plan_updates_terminal"
+      });
+      return;
+    }
+
+    try {
+      const payload = await createPerformancePlanUpdateForPlan({
+        store: performancePlanStore,
+        plan: materialized.plan,
+        body: (request.body as CreatePerformancePlanUpdateRequest | null)?.body,
+        actorType: "mobile_user",
+        actorId: user.id,
+        now,
+        users: [user]
+      });
+      response.status(201).json(payload);
+    } catch (error) {
+      if (error instanceof PerformancePlanUpdateInputError) {
+        response.status(400).json({ error: error.message, errors: error.errors });
+        return;
+      }
+      if (error instanceof PerformancePlanUpdateConflictError) {
+        response.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
   });
 });
 

@@ -1,6 +1,7 @@
 import {
   AuditActorType,
   CancelPerformancePlanResponse,
+  CreatePerformancePlanUpdateResponse,
   CreatePerformancePlanResponse,
   DashboardPerformancePlanDetailResponse,
   DashboardPerformancePlanRow,
@@ -23,6 +24,8 @@ import {
   PerformanceBaseline,
   PerformanceGoal,
   PerformanceInsight,
+  PerformancePlanUpdate,
+  PerformancePlanUpdatesResponse,
   PerformancePlan,
   PerformancePlanInput,
   PerformancePlanPreviewResponse,
@@ -39,6 +42,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   PerformancePlanStore,
+  PerformancePlanUpdateRecord,
   PerformancePlanWithRelations
 } from "../storage/performancePlanStore.js";
 import { buildPlanWindow, compareDateKeys, isDateKey, isValidIanaTimeZone } from "./performanceDateWindows.js";
@@ -127,12 +131,25 @@ export interface BuildPerformancePlanDetailParams {
   auditDisplayContext?: PerformanceAuditDisplayContext;
 }
 
+export interface CreatePerformancePlanUpdateParams {
+  store: PerformancePlanStore;
+  plan: PerformancePlan;
+  body: unknown;
+  actorType: AuditActorType;
+  actorId: string | null;
+  now: Date;
+  users: UserProfile[];
+  createUpdateId?: () => string;
+}
+
 export interface PerformanceAuditDisplayContext {
   viewer: "mobile_user" | "tenant_manager" | "platform_admin";
   currentUserId: string;
   planOrgId: string;
   users: UserProfile[];
 }
+
+export const PERFORMANCE_PLAN_UPDATE_BODY_MAX_LENGTH = 2000;
 
 export function buildMobilePerformancePlanOptionsResponse(params: {
   candidates: PerformanceScopeCandidate[];
@@ -590,6 +607,10 @@ export async function buildPerformancePlanDetailResponse(
     plan: summary.plan,
     progress: summary.progress,
     insights: summary.insights,
+    updates: buildPerformancePlanUpdateDisplayList({
+      updates: await params.store.listPlanUpdates(loaded.plan.id),
+      users: params.auditDisplayContext?.users ?? []
+    }),
     auditEvents: buildPerformanceAuditDisplayEvents({
       events: loaded.auditEvents,
       context: params.auditDisplayContext ?? {
@@ -599,6 +620,46 @@ export async function buildPerformancePlanDetailResponse(
         users: []
       }
     })
+  };
+}
+
+export async function buildPerformancePlanUpdatesResponse(params: {
+  store: PerformancePlanStore;
+  planId: string;
+  users: UserProfile[];
+  now: Date;
+}): Promise<PerformancePlanUpdatesResponse> {
+  return {
+    generatedAt: params.now.toISOString(),
+    updates: buildPerformancePlanUpdateDisplayList({
+      updates: await params.store.listPlanUpdates(params.planId),
+      users: params.users
+    })
+  };
+}
+
+export async function createPerformancePlanUpdateForPlan(
+  params: CreatePerformancePlanUpdateParams
+): Promise<CreatePerformancePlanUpdateResponse> {
+  if (params.plan.status !== "active") {
+    throw new PerformancePlanUpdateConflictError("Updates can only be posted to active or scheduled Performance plans.");
+  }
+  const body = normalizePerformancePlanUpdateBody(params.body);
+  const created = await params.store.appendPlanUpdate({
+    update: {
+      id: params.createUpdateId?.() ?? `perf_update_${randomUUID()}`,
+      planId: params.plan.id,
+      orgId: params.plan.orgId,
+      userId: params.plan.userId,
+      authorActorType: params.actorType,
+      authorActorId: params.actorId,
+      body,
+      createdAt: params.now.toISOString()
+    }
+  });
+  return {
+    created: true,
+    update: buildPerformancePlanUpdateDisplay(created, params.users)
   };
 }
 
@@ -766,8 +827,28 @@ export function buildDashboardPerformancePlanDetailResponse(params: {
       canCancel: params.canCancel,
       canEdit: params.canCancel
     },
+    updates: params.detail.updates,
     auditEvents: params.detail.auditEvents
   };
+}
+
+export class PerformancePlanUpdateInputError extends Error {
+  errors: string[];
+
+  constructor(errors: string[]) {
+    super(errors.join(" "));
+    this.name = "PerformancePlanUpdateInputError";
+    this.errors = errors;
+  }
+}
+
+export class PerformancePlanUpdateConflictError extends Error {
+  code = "performance_plan_updates_terminal";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "PerformancePlanUpdateConflictError";
+  }
 }
 
 export class PerformancePlanInputError extends Error {
@@ -1187,6 +1268,66 @@ function buildAuditEvent(params: {
     reason: null,
     createdAt: params.createdAt
   };
+}
+
+function normalizePerformancePlanUpdateBody(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new PerformancePlanUpdateInputError(["Update text is required."]);
+  }
+  const body = value.trim().replace(/\r\n/g, "\n");
+  if (!body) {
+    throw new PerformancePlanUpdateInputError(["Update text is required."]);
+  }
+  if (body.length > PERFORMANCE_PLAN_UPDATE_BODY_MAX_LENGTH) {
+    throw new PerformancePlanUpdateInputError([
+      `Updates must be ${PERFORMANCE_PLAN_UPDATE_BODY_MAX_LENGTH} characters or fewer.`
+    ]);
+  }
+  return body;
+}
+
+function buildPerformancePlanUpdateDisplayList(params: {
+  updates: PerformancePlanUpdateRecord[];
+  users: UserProfile[];
+}): PerformancePlanUpdate[] {
+  return params.updates.map((update) => buildPerformancePlanUpdateDisplay(update, params.users));
+}
+
+function buildPerformancePlanUpdateDisplay(update: PerformancePlanUpdateRecord, users: UserProfile[]): PerformancePlanUpdate {
+  return {
+    id: update.id,
+    body: update.body,
+    authorDisplayName: resolvePerformanceUpdateAuthorDisplayName(update, users),
+    createdAt: update.createdAt
+  };
+}
+
+function resolvePerformanceUpdateAuthorDisplayName(update: PerformancePlanUpdateRecord, users: UserProfile[]): string {
+  const actor = update.authorActorId ? users.find((user) => user.id === update.authorActorId) ?? null : null;
+  return buildFriendlyAccountName(actor) ?? "Account user";
+}
+
+function buildFriendlyAccountName(user: UserProfile | null): string | null {
+  const localPart = user?.email.split("@")[0]?.trim() ?? "";
+  if (!localPart) {
+    return null;
+  }
+  const parts = localPart
+    .replace(/[^a-zA-Z]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length < 2) {
+    return null;
+  }
+  return `${toTitleCaseName(parts[0])} ${parts[parts.length - 1][0].toUpperCase()}.`;
+}
+
+function toTitleCaseName(value: string): string {
+  if (!value) {
+    return value;
+  }
+  return `${value[0].toUpperCase()}${value.slice(1).toLowerCase()}`;
 }
 
 function buildPerformanceAuditDisplayEvents(params: {

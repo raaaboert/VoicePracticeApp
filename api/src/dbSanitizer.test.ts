@@ -295,13 +295,16 @@ test("sanitizer clears session, token, OTP, support, and operational app_state r
 test("sanitizer operational table inventory clears performance foundation child tables before plans", () => {
   const scopeItemsIndex = OPERATIONAL_TABLES.indexOf("performance_plan_scope_items");
   const auditEventsIndex = OPERATIONAL_TABLES.indexOf("performance_plan_audit_events");
+  const updatesIndex = OPERATIONAL_TABLES.indexOf("performance_plan_updates");
   const plansIndex = OPERATIONAL_TABLES.indexOf("performance_plans");
 
   assert.notEqual(scopeItemsIndex, -1);
   assert.notEqual(auditEventsIndex, -1);
+  assert.notEqual(updatesIndex, -1);
   assert.notEqual(plansIndex, -1);
   assert(scopeItemsIndex < plansIndex);
   assert(auditEventsIndex < plansIndex);
+  assert(updatesIndex < plansIndex);
 });
 
 test("sanitizer preserves real content/config while removing safely identifiable demo/local records", () => {

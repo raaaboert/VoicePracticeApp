@@ -18,6 +18,7 @@ export const OPERATIONAL_TABLES = [
   "audit_events",
   "performance_plan_scope_items",
   "performance_plan_audit_events",
+  "performance_plan_updates",
   "performance_plans"
 ] as const;
 

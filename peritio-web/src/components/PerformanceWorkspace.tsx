@@ -8,13 +8,26 @@ import type {
   DashboardPerformancePlanRow,
   DashboardPerformanceUserOption,
   DashboardPerformanceWorkspaceResponse,
+  CreatePerformancePlanUpdateResponse,
   PerformanceActivityMetricType,
   PerformanceGoalMetricType,
   PerformancePlan,
   PerformancePlanPreviewResponse,
 } from "@voicepractice/shared";
+import {
+  buildPerformanceActivityLine,
+  buildPerformanceDateRangeLabel,
+  buildPerformanceDateStatusLabel,
+  buildPerformanceOverallLine,
+  buildPerformancePerformanceLine,
+  buildPerformancePlanTitle,
+  buildPerformanceScopeLabel,
+  buildPerformanceStatusBadgeLabel,
+  derivePerformancePlanPresentationStatus,
+  groupPerformancePlanSummaries,
+} from "@voicepractice/shared";
 
-import { formatDate } from "@/src/lib/formatters";
+import { formatDate, formatDateTime } from "@/src/lib/formatters";
 
 interface PerformanceWorkspaceProps {
   workspace: DashboardPerformanceWorkspaceResponse;
@@ -136,6 +149,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
+  const [showPlanComposer, setShowPlanComposer] = useState(false);
   const [cancelingPlanId, setCancelingPlanId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DashboardPerformancePlanDetailResponse | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -159,8 +173,10 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
     );
   }, [scenarioSearch, selectedUser]);
 
-  const currentPlans = workspace.plans.filter((row) => row.plan.status === "active");
-  const historicalPlans = workspace.plans.filter((row) => row.plan.status !== "active");
+  const groupedPlanRows = useMemo(
+    () => groupPerformancePlanSummaries(workspace.plans, new Date(workspace.generatedAt)),
+    [workspace.generatedAt, workspace.plans],
+  );
   const canManageSelectedUser = selectedUser?.canManagePerformancePlans === true;
   const isEditing = editingPlanId !== null;
 
@@ -288,6 +304,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
         await postJson(`/api/performance/plans${querySuffix}`, buildRequest());
         setActionNotice("Performance plan created.");
       }
+      setShowPlanComposer(false);
       startTransition(() => router.refresh());
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not save Performance plan.");
@@ -316,6 +333,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
     setPreview(null);
     setActionError(null);
     setActionNotice("Editing active Performance plan.");
+    setShowPlanComposer(true);
   };
 
   const cancelEdit = () => {
@@ -323,9 +341,14 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
     setPreview(null);
     setActionError(null);
     setActionNotice(null);
+    setShowPlanComposer(false);
   };
 
   const cancelPlan = async (planId: string) => {
+    const confirmed = window.confirm("Cancel this Performance plan? It will move to History, and progress, Updates, and plan activity will be retained.");
+    if (!confirmed) {
+      return;
+    }
     setCancelingPlanId(planId);
     setActionError(null);
     setActionNotice(null);
@@ -391,10 +414,32 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
       <section className="section-card">
         <div className="section-header">
           <div>
+            <p className="eyebrow">Performance plans</p>
+            <h2>Create or edit a plan</h2>
+            <p className="section-copy">Use a focused composer when assigning or updating a Performance plan.</p>
+          </div>
+          <button type="button" className="primary-button" onClick={() => {
+            setEditingPlanId(null);
+            setPreview(null);
+            setActionError(null);
+            setActionNotice(null);
+            setShowPlanComposer(true);
+          }}>
+            Create plan
+          </button>
+        </div>
+        {actionNotice ? <p className="small-copy">{actionNotice}</p> : null}
+      </section>
+
+      {showPlanComposer ? (
+        <div className="performance-modal-backdrop" role="presentation">
+          <section className="section-card performance-composer-panel">
+        <div className="section-header">
+          <div>
             <p className="eyebrow">{isEditing ? "Edit" : "Create"}</p>
             <h2>{isEditing ? "Edit active Performance plan" : "Assign a Performance plan"}</h2>
           </div>
-          <span className="pill">{workspace.generatedAt ? `Updated ${formatDate(workspace.generatedAt)}` : "Live"}</span>
+          <button type="button" className="ghost-button" onClick={cancelEdit}>Close</button>
         </div>
 
         {workspace.users.length === 0 ? (
@@ -615,14 +660,16 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
             ) : null}
           </div>
         ) : null}
-      </section>
+          </section>
+        </div>
+      ) : null}
 
       {detailError ? <p className="form-error">{detailError}</p> : null}
-      {detail ? <PlanDetailPanel detail={detail} /> : null}
+      {detail ? <PlanDetailPanel detail={detail} querySuffix={querySuffix} onDetailChange={setDetail} /> : null}
 
       <PlanTable
-        title="Current plans"
-        rows={currentPlans}
+        title="Active plans"
+        rows={groupedPlanRows.active}
         emptyMessage="No active Performance plans in this scope."
         cancelingPlanId={cancelingPlanId}
         isPending={isPending}
@@ -632,8 +679,19 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
         onEdit={editPlan}
       />
       <PlanTable
-        title="Historical plans"
-        rows={historicalPlans}
+        title="Scheduled plans"
+        rows={groupedPlanRows.scheduled}
+        emptyMessage="No scheduled Performance plans in this scope."
+        cancelingPlanId={cancelingPlanId}
+        isPending={isPending}
+        onCancel={cancelPlan}
+        loadingDetailPlanId={loadingDetailPlanId}
+        onOpenDetail={openPlanDetail}
+        onEdit={editPlan}
+      />
+      <PlanTable
+        title="History"
+        rows={groupedPlanRows.history}
         emptyMessage="No finalized or cancelled Performance plans in this scope."
         cancelingPlanId={cancelingPlanId}
         isPending={isPending}
@@ -646,31 +704,65 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   );
 }
 
-function PlanDetailPanel({ detail }: { detail: DashboardPerformancePlanDetailResponse }) {
+function PlanDetailPanel({
+  detail,
+  querySuffix,
+  onDetailChange,
+}: {
+  detail: DashboardPerformancePlanDetailResponse;
+  querySuffix: string;
+  onDetailChange: (detail: DashboardPerformancePlanDetailResponse) => void;
+}) {
   const row = detail.plan;
   const plan = row.plan;
+  const [updateBody, setUpdateBody] = useState("");
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [isPostingUpdate, setIsPostingUpdate] = useState(false);
+  const presentationStatus = derivePerformancePlanPresentationStatus(plan);
+  const canPostUpdate = presentationStatus === "active" || presentationStatus === "scheduled";
+
+  const postUpdate = async () => {
+    setIsPostingUpdate(true);
+    setUpdateError(null);
+    try {
+      const payload = await postJson<CreatePerformancePlanUpdateResponse>(
+        `/api/performance/plans/${encodeURIComponent(plan.id)}/updates${querySuffix}`,
+        { body: updateBody },
+      );
+      onDetailChange({ ...detail, updates: [...detail.updates, payload.update] });
+      setUpdateBody("");
+    } catch (error) {
+      setUpdateError(error instanceof Error ? error.message : "Could not post update.");
+    } finally {
+      setIsPostingUpdate(false);
+    }
+  };
+
   return (
     <section className="section-card">
       <div className="section-header">
         <div>
           <p className="eyebrow">Plan detail</p>
-          <h2>{getFocusTopicLabel(plan)}</h2>
+          <h2>{buildPerformancePlanTitle(plan)}</h2>
           <p className="small-copy">
-            {row.userEmail} | {formatDate(plan.startDate)} to {formatDate(plan.endDate)}
+            {row.userEmail} | {buildPerformanceScopeLabel(plan)} | {buildPerformanceDateRangeLabel(plan)}
           </p>
         </div>
-        <span className="pill">{formatStatus(plan.status)}</span>
+        <span className="pill">{buildPerformanceStatusBadgeLabel(plan)}</span>
       </div>
 
       <div className="preview-panel">
         <p className="small-copy">
+          <strong>Overall:</strong> {buildPerformanceOverallLine(plan, row.progress)}
+        </p>
+        <p className="small-copy">
           Scope: {plan.scope.scenarios.map((scenario) => scenario.displayName).join(", ")}
         </p>
         <p className="small-copy">
-          Activity: {plan.activityGoal.enabled ? `${formatActivityMetricLabel(plan.activityGoal.metricType)} target ${formatNumber(plan.activityGoal.targetValue)}` : "None"}
+          Activity: {buildPerformanceActivityLine(plan, row.progress) ?? "None"}
         </p>
         <p className="small-copy">
-          Performance: {plan.performanceGoal.enabled ? `${formatPerformanceMetricLabel(plan.performanceGoal.metricType)} target ${formatNumber(plan.performanceGoal.targetScore ?? plan.performanceGoal.improvementAmount)}` : "None"}
+          Performance: {buildPerformancePerformanceLine(plan, row.progress) ?? "None"}
         </p>
         {plan.baseline ? (
           <p className="small-copy">
@@ -698,6 +790,51 @@ function PlanDetailPanel({ detail }: { detail: DashboardPerformancePlanDetailRes
           ))}
         </ul>
       ) : null}
+
+      <div className="preview-panel">
+        <div className="section-header compact">
+          <div>
+            <p className="eyebrow">Updates</p>
+            <h3>Plan discussion</h3>
+          </div>
+        </div>
+        {canPostUpdate ? (
+          <div className="performance-update-form">
+            <textarea
+              className="text-input"
+              value={updateBody}
+              onChange={(event) => setUpdateBody(event.target.value)}
+              placeholder="Write an update..."
+              maxLength={2000}
+              rows={4}
+            />
+            {updateError ? <p className="form-error">{updateError}</p> : null}
+            <button
+              type="button"
+              className="primary-button"
+              disabled={isPostingUpdate || !updateBody.trim()}
+              onClick={() => { void postUpdate(); }}
+            >
+              {isPostingUpdate ? "Posting..." : "Post Update"}
+            </button>
+          </div>
+        ) : (
+          <p className="small-copy">Updates are read-only after a plan moves to History.</p>
+        )}
+        {detail.updates.length === 0 ? (
+          <p className="small-copy">No updates yet.</p>
+        ) : (
+          <div className="performance-update-list">
+            {detail.updates.map((update) => (
+              <article key={update.id} className="detail-card">
+                <h3>{update.authorDisplayName}</h3>
+                <p>{update.body}</p>
+                <p className="small-copy">{formatDateTime(update.createdAt)}</p>
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="table-scroll">
         <table className="data-table">
@@ -784,18 +921,21 @@ function PlanTable({
                     <p className="table-subcopy">{row.orgName}{row.divisionName ? ` | ${row.divisionName}` : ""}</p>
                   </td>
                   <td>
-                    {getFocusTopicLabel(row.plan)}
+                    {buildPerformancePlanTitle(row.plan)}
+                    <p className="table-subcopy">{buildPerformanceScopeLabel(row.plan)}</p>
                     <p className="table-subcopy">{row.plan.scope.scenarios.length} scenario{row.plan.scope.scenarios.length === 1 ? "" : "s"}</p>
                   </td>
-                  <td>{formatDate(row.plan.startDate)} to {formatDate(row.plan.endDate)}</td>
-                  <td><span className="pill">{formatStatus(row.plan.status)}</span></td>
+                  <td>
+                    {buildPerformanceDateRangeLabel(row.plan)}
+                    <p className="table-subcopy">{buildPerformanceDateStatusLabel(row.plan)}</p>
+                  </td>
+                  <td><span className="pill">{buildPerformanceStatusBadgeLabel(row.plan)}</span></td>
                   <td>
                     {row.progress ? (
                       <>
-                        <strong>{row.progress.overallCurrentlyMeetingTarget ? "On track" : "Needs attention"}</strong>
-                        <p className="table-subcopy">
-                          Score {formatNumber(row.progress.performance.currentAverage)} / {formatNumber(row.progress.performance.targetScore)}
-                        </p>
+                        <strong>{buildPerformanceOverallLine(row.plan, row.progress)}</strong>
+                        <p className="table-subcopy">{buildPerformanceActivityLine(row.plan, row.progress) ?? "No activity goal"}</p>
+                        <p className="table-subcopy">{buildPerformancePerformanceLine(row.plan, row.progress) ?? "No performance goal"}</p>
                       </>
                     ) : "-"}
                   </td>
@@ -826,7 +966,7 @@ function PlanTable({
                           disabled={isPending || cancelingPlanId === row.plan.id}
                           onClick={() => { void onCancel(row.plan.id); }}
                         >
-                          {cancelingPlanId === row.plan.id ? "Cancelling..." : "Cancel"}
+                          {cancelingPlanId === row.plan.id ? "Cancelling..." : "Cancel plan"}
                         </button>
                       ) : row.plan.status === "active" ? (
                         <span className="pill">Read only</span>

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,6 +23,19 @@ import type {
   PerformancePlanPreviewResponse,
   PerformanceProgress,
 } from "@voicepractice/shared";
+import {
+  buildPerformanceActivityLine,
+  buildPerformanceDateRangeLabel,
+  buildPerformanceDateStatusLabel,
+  buildPerformanceOverallLine,
+  buildPerformancePerformanceLine,
+  buildPerformancePlanTitle,
+  buildPerformanceScopeLabel,
+  buildPerformanceStatusBadgeLabel,
+  derivePerformancePlanPresentationStatus,
+  formatPerformanceDateKey,
+  groupPerformancePlanSummaries,
+} from "@voicepractice/shared";
 
 import {
   createPerformancePlan,
@@ -27,9 +43,10 @@ import {
   fetchPerformancePlanOptions,
   fetchPerformancePlanDetail,
   fetchPerformancePlanHistory,
+  postPerformancePlanUpdate,
   previewPerformancePlan,
 } from "../lib/api";
-import { formatPerformanceDate, getRemainingPerformancePlanDays } from "../lib/performanceDateFormatting";
+import { formatPerformanceDate } from "../lib/performanceDateFormatting";
 
 interface PerformanceScreenProps {
   userId: string;
@@ -65,6 +82,29 @@ function addDaysDateKey(days: number): string {
   const date = new Date();
   date.setDate(date.getDate() + days);
   return dateKeyFromLocalDate(date);
+}
+
+function parseDateKey(value: string): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isInteger(year) || month < 1 || month > 12 || day < 1) {
+    return null;
+  }
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day <= daysInMonth ? { year, month, day } : null;
+}
+
+function dateKeyFromParts(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function compareDateKeys(left: string, right: string): number {
+  return left.localeCompare(right);
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -127,10 +167,6 @@ function getFocusTopicNames(plan: PerformancePlan): string[] {
   return Array.from(names).sort((left, right) => left.localeCompare(right));
 }
 
-function getRemainingDays(plan: PerformancePlan): number | null {
-  return getRemainingPerformancePlanDays(plan.endDate);
-}
-
 function getMobilePlanAttribution(plan: PerformancePlan, userId: string): string {
   return plan.createdByActorType === "mobile_user" && plan.createdByActorId === userId
     ? "Created by you"
@@ -163,55 +199,50 @@ function PlanSummaryCard({
   attribution?: string;
   onOpen?: () => void;
 }) {
-  const focusTopics = getFocusTopicNames(plan);
-  const remainingDays = plan.status === "active" ? getRemainingDays(plan) : null;
   const Wrapper = onOpen ? Pressable : View;
+  const status = derivePerformancePlanPresentationStatus(plan);
+  const activityLine = buildPerformanceActivityLine(plan, progress);
+  const performanceLine = buildPerformancePerformanceLine(plan, progress);
+  const overallLine = buildPerformanceOverallLine(plan, progress);
 
   return (
-    <Wrapper style={styles.card} onPress={onOpen}>
+    <Wrapper style={[styles.card, styles.planCard]} onPress={onOpen}>
       <View style={styles.row}>
         <View style={styles.flex}>
           <Text style={styles.eyebrow}>Performance Plan</Text>
-          <Text style={styles.title}>{focusTopics.join(", ") || "Assigned Focus Topic"}</Text>
+          <Text style={styles.title}>{buildPerformancePlanTitle(plan)}</Text>
         </View>
-        <View style={[styles.statusPill, plan.status === "active" ? styles.statusActive : styles.statusMuted]}>
-          <Text style={styles.statusText}>{formatPlanStatus(plan.status)}</Text>
+        <View style={[styles.statusPill, status === "active" ? styles.statusActive : status === "scheduled" ? styles.statusScheduled : styles.statusMuted]}>
+          <Text style={styles.statusText}>{buildPerformanceStatusBadgeLabel(plan)}</Text>
         </View>
       </View>
 
-      <Text style={styles.body}>
-        {formatPerformanceDate(plan.startDate)} to {formatPerformanceDate(plan.endDate)}
-        {remainingDays !== null ? ` | ${remainingDays} day${remainingDays === 1 ? "" : "s"} left` : ""}
-      </Text>
-
-      <Text style={styles.body}>
-        Scope: {plan.scope.scenarios.map((scenario) => scenario.displayName).join(", ")}
-      </Text>
+      <Text style={styles.body}>{buildPerformanceScopeLabel(plan)}</Text>
+      <Text style={styles.subtle}>{buildPerformanceDateRangeLabel(plan)} | {buildPerformanceDateStatusLabel(plan)}</Text>
       {attribution ? <Text style={styles.subtle}>{attribution}</Text> : null}
 
-      {plan.baseline ? (
-        <Text style={styles.body}>
-          Baseline: {formatNumber(plan.baseline.baselineAverage)} average from {plan.baseline.baselineSessionCount} scored attempts; target {formatNumber(plan.baseline.derivedTargetScore)}.
-        </Text>
-      ) : null}
+      <View style={styles.statusSummary}>
+        <Text style={styles.metricLabel}>Overall</Text>
+        <Text style={styles.body}>{overallLine}</Text>
+      </View>
 
-      {progress?.activity.enabled ? (
+      {activityLine ? (
         <View style={styles.metricBlock}>
-          <Text style={styles.metricLabel}>{formatActivityMetric(progress.activity.metricType)}</Text>
-          <Text style={styles.metricValue}>
-            {formatNumber(progress.activity.actualValue)} / {formatNumber(progress.activity.cumulativeTargetValue)}
-          </Text>
-          <ProgressBar ratio={progressRatio(progress.activity.actualValue, progress.activity.cumulativeTargetValue)} />
+          <Text style={styles.metricLabel}>Activity</Text>
+          <Text style={styles.body}>{activityLine}</Text>
+          {status === "active" && progress?.activity.enabled ? (
+            <ProgressBar ratio={progressRatio(progress.activity.actualValue, plan.activityGoal.targetValue ?? progress.activity.cumulativeTargetValue)} />
+          ) : null}
         </View>
       ) : null}
 
-      {progress?.performance.enabled ? (
+      {performanceLine ? (
         <View style={styles.metricBlock}>
-          <Text style={styles.metricLabel}>{formatPerformanceMetric(progress.performance.metricType)}</Text>
-          <Text style={styles.metricValue}>
-            {formatNumber(progress.performance.currentAverage)} / {formatNumber(progress.performance.targetScore)}
-          </Text>
-          <ProgressBar ratio={progressRatio(progress.performance.currentAverage ?? 0, progress.performance.targetScore ?? 100)} />
+          <Text style={styles.metricLabel}>Performance</Text>
+          <Text style={styles.body}>{performanceLine}</Text>
+          {status === "active" && progress?.performance.enabled && !progress.performance.notEnoughData ? (
+            <ProgressBar ratio={progressRatio(progress.performance.currentAverage ?? 0, progress.performance.targetScore ?? 100)} />
+          ) : null}
         </View>
       ) : null}
     </Wrapper>
@@ -246,6 +277,113 @@ function FinalResultBlock({ plan }: { plan: PerformancePlan }) {
   );
 }
 
+function PlanDetailModal({
+  detail,
+  userId,
+  authToken,
+  onClose,
+  onUpdated,
+}: {
+  detail: MobilePerformancePlanDetailResponse | null;
+  userId: string;
+  authToken: string;
+  onClose: () => void;
+  onUpdated: (detail: MobilePerformancePlanDetailResponse) => void;
+}) {
+  const [body, setBody] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [postError, setPostError] = useState<string | null>(null);
+  if (!detail) {
+    return null;
+  }
+  const canPostUpdate = detail.plan.status === "active" && derivePerformancePlanPresentationStatus(detail.plan) !== "completed" && derivePerformancePlanPresentationStatus(detail.plan) !== "cancelled";
+
+  const submitUpdate = async () => {
+    setPosting(true);
+    setPostError(null);
+    try {
+      const payload = await postPerformancePlanUpdate(userId, detail.plan.id, body, authToken);
+      onUpdated({ ...detail, updates: [...detail.updates, payload.update] });
+      setBody("");
+    } catch (caught) {
+      setPostError(getErrorMessage(caught, "Could not post this update."));
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={styles.modalScreen}>
+          <View style={styles.topRow}>
+            <Pressable style={styles.backButton} onPress={onClose}>
+              <Text style={styles.backButtonText}>Close</Text>
+            </Pressable>
+            <Text style={styles.topTitle}>Plan Detail</Text>
+            <View style={styles.headerSpacer} />
+          </View>
+          <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+            <PlanSummaryCard plan={detail.plan} progress={detail.progress} attribution={getMobilePlanAttribution(detail.plan, userId)} />
+
+            {detail.insights.length > 0 ? (
+              <View style={styles.card}>
+                <Text style={styles.eyebrow}>Insights</Text>
+                {detail.insights.map((insight, index) => (
+                  <View key={`${insight.status}_${index}`} style={styles.insightRow}>
+                    <Text style={styles.body}>{insight.message}</Text>
+                    <Text style={styles.subtle}>{insight.recommendedNextStep}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            <View style={styles.card}>
+              <Text style={styles.eyebrow}>Updates</Text>
+              {canPostUpdate ? (
+                <>
+                  <TextInput
+                    style={[styles.textInput, styles.multilineInput]}
+                    value={body}
+                    onChangeText={setBody}
+                    placeholder="Write an update..."
+                    placeholderTextColor="#7d877a"
+                    multiline
+                    maxLength={2000}
+                  />
+                  {postError ? <Text style={styles.errorText}>{postError}</Text> : null}
+                  <Pressable
+                    style={[styles.primaryButton, posting || !body.trim() ? styles.disabled : null]}
+                    disabled={posting || !body.trim()}
+                    onPress={() => { void submitUpdate(); }}
+                  >
+                    <Text style={styles.primaryButtonText}>{posting ? "Posting..." : "Post Update"}</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <Text style={styles.subtle}>Updates are read-only after a plan moves to History.</Text>
+              )}
+              {detail.updates.length === 0 ? (
+                <Text style={styles.body}>No updates yet.</Text>
+              ) : (
+                detail.updates.map((update) => (
+                  <View key={update.id} style={styles.updateItem}>
+                    <Text style={styles.metricLabel}>{update.authorDisplayName}</Text>
+                    <Text style={styles.body}>{update.body}</Text>
+                    <Text style={styles.subtle}>{new Date(update.createdAt).toLocaleString()}</Text>
+                  </View>
+                ))
+              )}
+            </View>
+
+            <FinalResultBlock plan={detail.plan} />
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 function OptionChip({
   label,
   selected,
@@ -265,6 +403,108 @@ function OptionChip({
     >
       <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>{label}</Text>
     </Pressable>
+  );
+}
+
+function CalendarDateField({
+  label,
+  value,
+  minimumDate,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  minimumDate?: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.formField}>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Pressable style={styles.dateButton} onPress={() => setOpen(true)}>
+        <Text style={styles.dateButtonText}>{formatPerformanceDateKey(value)}</Text>
+      </Pressable>
+      <CalendarDatePicker
+        visible={open}
+        value={value}
+        minimumDate={minimumDate}
+        onClose={() => setOpen(false)}
+        onSelect={(nextValue) => {
+          onChange(nextValue);
+          setOpen(false);
+        }}
+      />
+    </View>
+  );
+}
+
+function CalendarDatePicker({
+  visible,
+  value,
+  minimumDate,
+  onClose,
+  onSelect,
+}: {
+  visible: boolean;
+  value: string;
+  minimumDate?: string;
+  onClose: () => void;
+  onSelect: (value: string) => void;
+}) {
+  const selected = parseDateKey(value) ?? parseDateKey(todayDateKey())!;
+  const [monthCursor, setMonthCursor] = useState(dateKeyFromParts(selected.year, selected.month, 1));
+  const cursor = parseDateKey(monthCursor) ?? selected;
+  const daysInMonth = new Date(Date.UTC(cursor.year, cursor.month, 0)).getUTCDate();
+  const firstDay = new Date(cursor.year, cursor.month - 1, 1).getDay();
+  const cells = Array.from({ length: firstDay + daysInMonth }, (_, index) => index < firstDay ? null : index - firstDay + 1);
+
+  const moveMonth = (delta: number) => {
+    const date = new Date(cursor.year, cursor.month - 1 + delta, 1);
+    setMonthCursor(dateKeyFromParts(date.getFullYear(), date.getMonth() + 1, 1));
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.calendarPanel}>
+          <View style={styles.row}>
+            <Pressable style={styles.smallButton} onPress={() => moveMonth(-1)}>
+              <Text style={styles.smallButtonText}>Prev</Text>
+            </Pressable>
+            <Text style={styles.title}>{formatPerformanceDateKey(monthCursor)}</Text>
+            <Pressable style={styles.smallButton} onPress={() => moveMonth(1)}>
+              <Text style={styles.smallButtonText}>Next</Text>
+            </Pressable>
+          </View>
+          <View style={styles.calendarGrid}>
+            {["S", "M", "T", "W", "T", "F", "S"].map((day, index) => (
+              <Text key={`${day}_${index}`} style={styles.calendarHeader}>{day}</Text>
+            ))}
+            {cells.map((day, index) => {
+              if (day === null) {
+                return <View key={`empty_${index}`} style={styles.calendarCell} />;
+              }
+              const dateKey = dateKeyFromParts(cursor.year, cursor.month, day);
+              const disabled = Boolean(minimumDate && compareDateKeys(dateKey, minimumDate) < 0);
+              const selectedDay = dateKey === value;
+              return (
+                <Pressable
+                  key={dateKey}
+                  style={[styles.calendarCell, selectedDay ? styles.calendarCellSelected : null, disabled ? styles.disabled : null]}
+                  disabled={disabled}
+                  onPress={() => onSelect(dateKey)}
+                >
+                  <Text style={[styles.calendarCellText, selectedDay ? styles.calendarCellTextSelected : null]}>{day}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable style={styles.secondaryButton} onPress={onClose}>
+            <Text style={styles.secondaryButtonText}>Cancel</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -296,6 +536,7 @@ function PerformanceCreateForm({
   const [formError, setFormError] = useState<string | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [step, setStep] = useState<"form" | "review">("form");
 
   const defaultTimeZone = options?.defaultTimeZone ?? "UTC";
   const hasOptions = Boolean((options?.availableFocusTopics.length ?? 0) > 0 || (options?.availableScenarios.length ?? 0) > 0);
@@ -303,6 +544,7 @@ function PerformanceCreateForm({
   const clearPreview = () => {
     setPreview(null);
     setFormError(null);
+    setStep("form");
   };
 
   const toggle = (value: string, values: string[], setValues: (next: string[]) => void) => {
@@ -345,8 +587,16 @@ function PerformanceCreateForm({
     setIsPreviewing(true);
     setFormError(null);
     try {
+      if (compareDateKeys(endDate, startDate) < 0) {
+        setFormError("End date cannot be before start date.");
+        setPreview(null);
+        return;
+      }
       const payload = await previewPerformancePlan(userId, buildRequest(), authToken);
       setPreview(payload);
+      if (payload.valid) {
+        setStep("review");
+      }
     } catch (caught) {
       setFormError(getErrorMessage(caught, "Could not preview this Performance plan."));
       setPreview(null);
@@ -369,50 +619,76 @@ function PerformanceCreateForm({
   };
 
   return (
-    <View style={styles.card}>
+    <View style={styles.modalSheet}>
       <View style={styles.row}>
         <View style={styles.flex}>
-          <Text style={styles.eyebrow}>Create Plan</Text>
-          <Text style={styles.title}>Set your next Focus Topic</Text>
+          <Text style={styles.eyebrow}>Create Performance Plan</Text>
+          <Text style={styles.title}>{step === "review" ? "Review plan" : "Set your next Focus Topic"}</Text>
         </View>
         <Pressable style={styles.smallButton} onPress={onCancel}>
-          <Text style={styles.smallButtonText}>Close</Text>
+          <Text style={styles.smallButtonText}>Cancel</Text>
         </Pressable>
       </View>
 
       {!hasOptions ? (
         <Text style={styles.body}>No eligible Focus Topics are assigned to your account yet.</Text>
+      ) : step === "review" && preview?.valid ? (
+        <>
+          <View style={styles.previewBox}>
+            <Text style={styles.metricLabel}>Dates</Text>
+            <Text style={styles.body}>{formatPerformanceDateKey(startDate)} to {formatPerformanceDateKey(endDate)}</Text>
+            <Text style={styles.metricLabel}>Goal</Text>
+            <Text style={styles.body}>
+              {goalMode !== "performance" ? `${ACTIVITY_METRICS.find((metric) => metric.value === activityMetric)?.label}: ${activityTarget}` : ""}
+              {goalMode === "both" ? " | " : ""}
+              {goalMode !== "activity" ? `${PERFORMANCE_METRICS.find((metric) => metric.value === performanceMetric)?.label}: ${performanceMetric === "target_average_score" ? targetScore : improvementAmount}` : ""}
+            </Text>
+            <Text style={styles.metricLabel}>Focus Topic and scenarios</Text>
+            <Text style={styles.body}>{preview.scope?.scenarios.map((scenario) => scenario.displayName).join(", ") || "-"}</Text>
+            {preview.baselinePreview ? (
+              <Text style={styles.subtle}>
+                Baseline {formatNumber(preview.baselinePreview.baselineAverage)} from {preview.baselinePreview.eligibleScoreCount} attempts.
+              </Text>
+            ) : null}
+          </View>
+          {formError ? <Text style={styles.errorText}>{formError}</Text> : null}
+          <View style={styles.formRow}>
+            <Pressable style={styles.secondaryButton} onPress={() => setStep("form")} disabled={isSaving}>
+              <Text style={styles.secondaryButtonText}>Back</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.primaryButton, isSaving ? styles.disabled : null]}
+              disabled={isSaving}
+              onPress={() => { void runCreate(); }}
+            >
+              <Text style={styles.primaryButtonText}>{isSaving ? "Creating..." : "Create plan"}</Text>
+            </Pressable>
+          </View>
+        </>
       ) : (
         <>
           <View style={styles.formRow}>
-            <View style={styles.formField}>
-              <Text style={styles.metricLabel}>Start date</Text>
-              <TextInput
-                style={styles.textInput}
-                value={startDate}
-                onChangeText={(value) => {
-                  setStartDate(value);
-                  clearPreview();
-                }}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor="#7d877a"
-                autoCapitalize="none"
-              />
-            </View>
-            <View style={styles.formField}>
-              <Text style={styles.metricLabel}>End date</Text>
-              <TextInput
-                style={styles.textInput}
-                value={endDate}
-                onChangeText={(value) => {
+            <CalendarDateField
+              label="Start date"
+              value={startDate}
+              onChange={(value) => {
+                clearPreview();
+                setStartDate(value);
+                if (compareDateKeys(endDate, value) < 0) {
                   setEndDate(value);
-                  clearPreview();
-                }}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor="#7d877a"
-                autoCapitalize="none"
-              />
-            </View>
+                  setFormError("End date was adjusted to match the new start date.");
+                }
+              }}
+            />
+            <CalendarDateField
+              label="End date"
+              value={endDate}
+              minimumDate={startDate}
+              onChange={(value) => {
+                setEndDate(value);
+                clearPreview();
+              }}
+            />
           </View>
 
           <Text style={styles.metricLabel}>Goal type</Text>
@@ -548,18 +824,11 @@ function PerformanceCreateForm({
 
           <View style={styles.formRow}>
             <Pressable
-              style={[styles.secondaryButton, isPreviewing || isSaving ? styles.disabled : null]}
+              style={[styles.primaryButton, isPreviewing || isSaving ? styles.disabled : null]}
               disabled={isPreviewing || isSaving}
               onPress={() => { void runPreview(); }}
             >
-              <Text style={styles.secondaryButtonText}>{isPreviewing ? "Previewing..." : "Preview"}</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.primaryButton, isSaving || isPreviewing ? styles.disabled : null]}
-              disabled={isSaving || isPreviewing}
-              onPress={() => { void runCreate(); }}
-            >
-              <Text style={styles.primaryButtonText}>{isSaving ? "Creating..." : "Create Plan"}</Text>
+              <Text style={styles.primaryButtonText}>{isPreviewing ? "Reviewing..." : "Continue"}</Text>
             </Pressable>
           </View>
         </>
@@ -614,8 +883,20 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
     [authToken, userId],
   );
 
-  const activePlans = current?.activePlans ?? [];
-  const historyPlans = useMemo(() => history?.plans ?? [], [history]);
+  const allPlanRows = useMemo(() => {
+    const byId = new Map<string, MobilePerformancePlanHistoryResponse["plans"][number]>();
+    for (const row of history?.plans ?? []) {
+      byId.set(row.plan.id, row);
+    }
+    for (const row of current?.activePlans ?? []) {
+      byId.set(row.plan.id, row);
+    }
+    return Array.from(byId.values());
+  }, [current, history]);
+  const groupedPlans = useMemo(
+    () => groupPerformancePlanSummaries(allPlanRows, new Date(current?.generatedAt ?? history?.generatedAt ?? Date.now())),
+    [allPlanRows, current?.generatedAt, history?.generatedAt],
+  );
   const handleCreated = useCallback(async () => {
     setShowCreateForm(false);
     await loadPerformance();
@@ -648,14 +929,14 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
 
           <View style={styles.card}>
             <Text style={styles.eyebrow}>Active Plans</Text>
-            <Text style={styles.title}>{activePlans.length === 0 ? "No active Performance plans" : `${activePlans.length} active plan${activePlans.length === 1 ? "" : "s"}`}</Text>
+            <Text style={styles.title}>{groupedPlans.active.length === 0 ? "No active Performance plans" : `${groupedPlans.active.length} active plan${groupedPlans.active.length === 1 ? "" : "s"}`}</Text>
             <Text style={styles.body}>Create a plan for your next Focus Topic when you are ready.</Text>
             <Pressable style={styles.primaryButton} onPress={() => setShowCreateForm(true)}>
               <Text style={styles.primaryButtonText}>Create Performance Plan</Text>
             </Pressable>
           </View>
 
-          {activePlans.map((summary) => (
+          {groupedPlans.active.map((summary) => (
             <PlanSummaryCard
               key={summary.plan.id}
               plan={summary.plan}
@@ -665,43 +946,31 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
             />
           ))}
 
-          {showCreateForm ? (
-            <PerformanceCreateForm
-              userId={userId}
-              options={options}
-              authToken={authToken}
-              onCreated={handleCreated}
-              onCancel={() => setShowCreateForm(false)}
-            />
-          ) : null}
+          <View style={styles.card}>
+            <Text style={styles.eyebrow}>Scheduled Plans</Text>
+            {groupedPlans.scheduled.length === 0 ? (
+              <Text style={styles.body}>No scheduled Performance plans.</Text>
+            ) : (
+              <Text style={styles.title}>{groupedPlans.scheduled.length} scheduled plan{groupedPlans.scheduled.length === 1 ? "" : "s"}</Text>
+            )}
+          </View>
 
-          {detail ? (
-            <>
-              <PlanSummaryCard
-                plan={detail.plan}
-                progress={detail.progress}
-                attribution={getMobilePlanAttribution(detail.plan, userId)}
-              />
-              {detail.auditEvents.length > 0 ? (
-                <View style={styles.card}>
-                  <Text style={styles.eyebrow}>Activity</Text>
-                  {detail.auditEvents.slice(-3).map((event) => (
-                    <Text key={event.id} style={styles.body}>
-                      {event.actionLabel} by {event.actorLabel}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-              <FinalResultBlock plan={detail.plan} />
-            </>
-          ) : null}
+          {groupedPlans.scheduled.map((summary) => (
+            <PlanSummaryCard
+              key={summary.plan.id}
+              plan={summary.plan}
+              progress={summary.progress}
+              attribution={getMobilePlanAttribution(summary.plan, userId)}
+              onOpen={() => { void openPlan(summary.plan.id); }}
+            />
+          ))}
 
           <View style={styles.card}>
             <Text style={styles.eyebrow}>History</Text>
-            {historyPlans.length === 0 ? (
+            {groupedPlans.history.length === 0 ? (
               <Text style={styles.body}>No Performance plan history yet.</Text>
             ) : (
-              historyPlans.map((row) => (
+              groupedPlans.history.map((row) => (
                 <PlanSummaryCard
                   key={row.plan.id}
                   plan={row.plan}
@@ -714,6 +983,28 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
           </View>
         </ScrollView>
       )}
+      <Modal visible={showCreateForm} animationType="slide" onRequestClose={() => setShowCreateForm(false)}>
+        <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.modalScreen}>
+            <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+              <PerformanceCreateForm
+                userId={userId}
+                options={options}
+                authToken={authToken}
+                onCreated={handleCreated}
+                onCancel={() => setShowCreateForm(false)}
+              />
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+      <PlanDetailModal
+        detail={detail}
+        userId={userId}
+        authToken={authToken}
+        onClose={() => setDetail(null)}
+        onUpdated={setDetail}
+      />
     </View>
   );
 }
@@ -722,6 +1013,7 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   scroll: { flex: 1 },
   content: { paddingBottom: 24 },
+  modalScreen: { flex: 1, backgroundColor: "#101711", padding: 14 },
   centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10 },
   topRow: {
     flexDirection: "row",
@@ -730,6 +1022,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   topTitle: { color: "#f6f0df", fontSize: 19, fontWeight: "700" },
+  headerSpacer: { minWidth: 78 },
   backButton: {
     minWidth: 78,
     minHeight: 40,
@@ -750,6 +1043,19 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     gap: 8,
   },
+  planCard: {
+    borderColor: "rgba(143,184,141,0.34)",
+    backgroundColor: "rgba(15,24,18,0.92)",
+    marginBottom: 14,
+  },
+  modalSheet: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.18)",
+    backgroundColor: "rgba(19,27,22,0.96)",
+    padding: 14,
+    gap: 12,
+  },
   row: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   flex: { flex: 1 },
   eyebrow: {
@@ -764,6 +1070,7 @@ const styles = StyleSheet.create({
   subtle: { color: "#aeb8a8", fontSize: 13, lineHeight: 18 },
   statusPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
   statusActive: { backgroundColor: "rgba(114,157,116,0.28)" },
+  statusScheduled: { backgroundColor: "rgba(201,184,143,0.24)" },
   statusMuted: { backgroundColor: "rgba(255,255,255,0.1)" },
   statusText: { color: "#f6f0df", fontSize: 12, fontWeight: "800" },
   smallButton: {
@@ -789,6 +1096,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     fontSize: 15,
   },
+  multilineInput: { minHeight: 96, paddingTop: 12, textAlignVertical: "top" },
+  dateButton: {
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.18)",
+    backgroundColor: "rgba(8,13,10,0.42)",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  dateButtonText: { color: "#f6f0df", fontSize: 15, fontWeight: "700" },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chipColumn: { gap: 8 },
   chip: {
@@ -809,6 +1127,7 @@ const styles = StyleSheet.create({
   chipText: { color: "#d8ddcf", fontSize: 13, fontWeight: "700" },
   chipTextSelected: { color: "#f6f0df" },
   metricBlock: { gap: 6, marginTop: 4 },
+  statusSummary: { gap: 3, marginTop: 4 },
   metricLabel: { color: "#aeb8a8", fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
   metricValue: { color: "#f6f0df", fontSize: 20, fontWeight: "800" },
   progressTrack: { height: 9, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
@@ -822,6 +1141,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.07)",
   },
   insightRow: { gap: 4, paddingVertical: 6, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)" },
+  updateItem: { gap: 4, paddingVertical: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)" },
   errorCard: {
     borderRadius: 16,
     borderWidth: 1,
@@ -839,6 +1159,41 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 6,
   },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  },
+  calendarPanel: {
+    width: "100%",
+    maxWidth: 360,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.18)",
+    backgroundColor: "#152017",
+    padding: 14,
+    gap: 12,
+  },
+  calendarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 4 },
+  calendarHeader: {
+    width: "13.5%",
+    color: "#aeb8a8",
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  calendarCell: {
+    width: "13.5%",
+    aspectRatio: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 10,
+  },
+  calendarCellSelected: { backgroundColor: "#8fb88d" },
+  calendarCellText: { color: "#d8ddcf", fontWeight: "800" },
+  calendarCellTextSelected: { color: "#102017" },
   primaryButton: {
     minHeight: 46,
     flex: 1,

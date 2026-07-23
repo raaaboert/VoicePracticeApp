@@ -63,6 +63,21 @@ export interface PerformancePlanCancelInput {
   auditEvent: PerformanceAuditEvent;
 }
 
+export interface PerformancePlanUpdateRecord {
+  id: string;
+  planId: string;
+  orgId: string;
+  userId: string;
+  authorActorType: AuditActorType;
+  authorActorId: string | null;
+  body: string;
+  createdAt: string;
+}
+
+export interface PerformancePlanAppendUpdateInput {
+  update: PerformancePlanUpdateRecord;
+}
+
 export interface PerformancePlanStore {
   initialize(): Promise<void>;
   createPlan(input: PerformancePlanCreateInput): Promise<PerformancePlanWithRelations>;
@@ -74,6 +89,8 @@ export interface PerformancePlanStore {
   cancelPlan(input: PerformancePlanCancelInput): Promise<PerformancePlanWithRelations | null>;
   appendAuditEvent(event: PerformanceAuditEvent): Promise<void>;
   listAuditEvents(planId: string): Promise<PerformanceAuditEvent[]>;
+  appendPlanUpdate(input: PerformancePlanAppendUpdateInput): Promise<PerformancePlanUpdateRecord>;
+  listPlanUpdates(planId: string, limit?: number): Promise<PerformancePlanUpdateRecord[]>;
 }
 
 interface CreatePerformancePlanStoreParams {
@@ -92,6 +109,7 @@ interface PerformancePlanFilePayload {
   plans: PerformancePlan[];
   scopeItems: PerformancePlanScopeItem[];
   auditEvents: PerformanceAuditEvent[];
+  updates: PerformancePlanUpdateRecord[];
 }
 
 interface PerformancePlanRow {
@@ -164,6 +182,17 @@ interface PerformancePlanAuditEventRow {
   old_values: unknown;
   new_values: unknown;
   reason: string | null;
+  created_at: string | Date;
+}
+
+interface PerformancePlanUpdateRow {
+  id: string;
+  plan_id: string;
+  org_id: string;
+  user_id: string;
+  author_actor_type: string;
+  author_actor_id: string | null;
+  body: string;
   created_at: string | Date;
 }
 
@@ -601,6 +630,32 @@ function normalizeAuditEvent(candidate: unknown): PerformanceAuditEvent | null {
   };
 }
 
+function normalizePlanUpdateRecord(candidate: unknown): PerformancePlanUpdateRecord | null {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return null;
+  }
+  const id = normalizeString((candidate as { id?: unknown }).id);
+  const planId = normalizeString((candidate as { planId?: unknown }).planId);
+  const orgId = normalizeString((candidate as { orgId?: unknown }).orgId);
+  const userId = normalizeString((candidate as { userId?: unknown }).userId);
+  const authorActorType = normalizeActorType((candidate as { authorActorType?: unknown }).authorActorType);
+  const body = normalizeString((candidate as { body?: unknown }).body);
+  const createdAt = normalizeIsoString((candidate as { createdAt?: unknown }).createdAt);
+  if (!id || !planId || !orgId || !userId || !authorActorType || !body || !createdAt) {
+    return null;
+  }
+  return {
+    id,
+    planId,
+    orgId,
+    userId,
+    authorActorType,
+    authorActorId: normalizeNullableString((candidate as { authorActorId?: unknown }).authorActorId),
+    body,
+    createdAt
+  };
+}
+
 function normalizePayload(candidate: unknown): PerformancePlanFilePayload {
   const plans = Array.isArray((candidate as { plans?: unknown } | null)?.plans)
     ? ((candidate as { plans: unknown[] }).plans).map(normalizePlan).filter((entry): entry is PerformancePlan => Boolean(entry))
@@ -615,11 +670,17 @@ function normalizePayload(candidate: unknown): PerformancePlanFilePayload {
         .map(normalizeAuditEvent)
         .filter((entry): entry is PerformanceAuditEvent => Boolean(entry))
     : [];
+  const updates = Array.isArray((candidate as { updates?: unknown } | null)?.updates)
+    ? ((candidate as { updates: unknown[] }).updates)
+        .map(normalizePlanUpdateRecord)
+        .filter((entry): entry is PerformancePlanUpdateRecord => Boolean(entry))
+    : [];
 
   return {
     plans: sortPlans(plans),
     scopeItems: sortScopeItems(scopeItems),
-    auditEvents: sortAuditEvents(auditEvents)
+    auditEvents: sortAuditEvents(auditEvents),
+    updates: sortPlanUpdates(updates)
   };
 }
 
@@ -635,6 +696,18 @@ function sortScopeItems(scopeItems: PerformancePlanScopeItem[]): PerformancePlan
 
 function sortAuditEvents(events: PerformanceAuditEvent[]): PerformanceAuditEvent[] {
   return events.slice().sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+}
+
+function sortPlanUpdates(updates: PerformancePlanUpdateRecord[]): PerformancePlanUpdateRecord[] {
+  return updates.slice().sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+}
+
+function assertPlanUpdateInput(input: PerformancePlanAppendUpdateInput): PerformancePlanUpdateRecord {
+  const update = normalizePlanUpdateRecord(input.update);
+  if (!update) {
+    throw new Error("Performance plan update is invalid.");
+  }
+  return update;
 }
 
 function assertCreateInput(input: PerformancePlanCreateInput): PerformancePlanCreateInput {
@@ -718,6 +791,8 @@ abstract class BasePerformancePlanStore implements PerformancePlanStore {
   abstract cancelPlan(input: PerformancePlanCancelInput): Promise<PerformancePlanWithRelations | null>;
   abstract appendAuditEvent(event: PerformanceAuditEvent): Promise<void>;
   abstract listAuditEvents(planId: string): Promise<PerformanceAuditEvent[]>;
+  abstract appendPlanUpdate(input: PerformancePlanAppendUpdateInput): Promise<PerformancePlanUpdateRecord>;
+  abstract listPlanUpdates(planId: string, limit?: number): Promise<PerformancePlanUpdateRecord[]>;
 }
 
 class FilePerformancePlanStore extends BasePerformancePlanStore {
@@ -755,7 +830,8 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
       const next = normalizePayload({
         plans: [...payload.plans, normalized.plan],
         scopeItems: [...payload.scopeItems, ...normalized.scopeItems],
-        auditEvents: [...payload.auditEvents, ...(normalized.auditEvents ?? [])]
+        auditEvents: [...payload.auditEvents, ...(normalized.auditEvents ?? [])],
+        updates: payload.updates
       });
       await this.savePayload(next);
       return relationFor(next, normalized.plan);
@@ -793,7 +869,8 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
           ...payload.scopeItems.filter((scopeItem) => scopeItem.planId !== existing.id),
           ...normalized.scopeItems
         ],
-        auditEvents: [...payload.auditEvents, normalized.auditEvent]
+        auditEvents: [...payload.auditEvents, normalized.auditEvent],
+        updates: payload.updates
       });
       await this.savePayload(next);
       return relationFor(next, normalized.plan);
@@ -870,7 +947,8 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
       const next = normalizePayload({
         plans: payload.plans.map((plan) => (plan.id === existing.id ? updated : plan)),
         scopeItems: payload.scopeItems,
-        auditEvents: [...payload.auditEvents, auditEvent]
+        auditEvents: [...payload.auditEvents, auditEvent],
+        updates: payload.updates
       });
       await this.savePayload(next);
       return relationFor(next, updated);
@@ -909,7 +987,8 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
       const next = normalizePayload({
         plans: payload.plans.map((plan) => (plan.id === existing.id ? updated : plan)),
         scopeItems: payload.scopeItems,
-        auditEvents: [...payload.auditEvents, auditEvent]
+        auditEvents: [...payload.auditEvents, auditEvent],
+        updates: payload.updates
       });
       await this.savePayload(next);
       return relationFor(next, updated);
@@ -943,6 +1022,35 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
     });
   }
 
+  async appendPlanUpdate(input: PerformancePlanAppendUpdateInput): Promise<PerformancePlanUpdateRecord> {
+    const normalized = assertPlanUpdateInput(input);
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      const plan = payload.plans.find((entry) => entry.id === normalized.planId);
+      if (!plan || plan.orgId !== normalized.orgId || plan.userId !== normalized.userId) {
+        throw new Error("Performance plan update does not match an existing plan.");
+      }
+      await this.savePayload(
+        normalizePayload({
+          ...payload,
+          updates: [...payload.updates.filter((entry) => entry.id !== normalized.id), normalized]
+        })
+      );
+      return normalized;
+    });
+  }
+
+  async listPlanUpdates(planId: string, limit = 100): Promise<PerformancePlanUpdateRecord[]> {
+    const normalizedPlanId = normalizeNullableString(planId);
+    if (!normalizedPlanId) {
+      return [];
+    }
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      return sortPlanUpdates(payload.updates.filter((entry) => entry.planId === normalizedPlanId)).slice(0, Math.max(0, limit));
+    });
+  }
+
   private async loadPayload(): Promise<PerformancePlanFilePayload> {
     await ensureParentDirectory(this.filePath);
     try {
@@ -951,7 +1059,7 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
     } catch (error) {
       const code = (error as { code?: string } | null)?.code;
       if (code === "ENOENT") {
-        const payload = { plans: [], scopeItems: [], auditEvents: [] };
+        const payload = { plans: [], scopeItems: [], auditEvents: [], updates: [] };
         await this.savePayload(payload);
         return payload;
       }
@@ -1305,6 +1413,56 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
     return await loadAuditEvents(this.pool, normalizedPlanId);
   }
 
+  async appendPlanUpdate(input: PerformancePlanAppendUpdateInput): Promise<PerformancePlanUpdateRecord> {
+    const normalized = assertPlanUpdateInput(input);
+    await this.ensureTable();
+    const result = await this.pool.query<PerformancePlanUpdateRow>(
+      `
+        INSERT INTO performance_plan_updates (
+          id,
+          plan_id,
+          org_id,
+          user_id,
+          author_actor_type,
+          author_actor_id,
+          body,
+          created_at
+        )
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8::timestamptz
+        WHERE EXISTS (
+          SELECT 1
+          FROM performance_plans
+          WHERE id = $2 AND org_id = $3 AND user_id = $4
+        )
+        RETURNING *
+      `,
+      [
+        normalized.id,
+        normalized.planId,
+        normalized.orgId,
+        normalized.userId,
+        normalized.authorActorType,
+        normalized.authorActorId,
+        normalized.body,
+        normalized.createdAt
+      ]
+    );
+    const update = result.rows[0] ? mapPlanUpdateRow(result.rows[0]) : null;
+    if (!update) {
+      throw new Error("Performance plan update does not match an existing plan.");
+    }
+    return update;
+  }
+
+  async listPlanUpdates(planId: string, limit = 100): Promise<PerformancePlanUpdateRecord[]> {
+    const normalizedPlanId = normalizeNullableString(planId);
+    if (!normalizedPlanId) {
+      return [];
+    }
+    await this.ensureTable();
+    return await loadPlanUpdates(this.pool, normalizedPlanId, limit);
+  }
+
   private async loadRelations(plan: PerformancePlan): Promise<PerformancePlanWithRelations> {
     const [scopeItems, auditEvents] = await Promise.all([
       loadScopeItems(this.pool, plan.id),
@@ -1410,6 +1568,21 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
               ON performance_plan_audit_events (plan_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS performance_plan_audit_events_org_created_idx
               ON performance_plan_audit_events (org_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS performance_plan_updates (
+              id TEXT PRIMARY KEY,
+              plan_id TEXT NOT NULL REFERENCES performance_plans(id) ON DELETE CASCADE,
+              org_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              author_actor_type TEXT NOT NULL,
+              author_actor_id TEXT NULL,
+              body TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS performance_plan_updates_plan_created_idx
+              ON performance_plan_updates (plan_id, created_at ASC, id ASC);
+            CREATE INDEX IF NOT EXISTS performance_plan_updates_org_created_idx
+              ON performance_plan_updates (org_id, created_at DESC);
 
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_user_ended_at
               ON usage_sessions (org_id, user_id, ended_at DESC);
@@ -1529,6 +1702,19 @@ function mapAuditEventRow(row: PerformancePlanAuditEventRow): PerformanceAuditEv
     oldValues: row.old_values,
     newValues: row.new_values,
     reason: row.reason,
+    createdAt: row.created_at
+  });
+}
+
+function mapPlanUpdateRow(row: PerformancePlanUpdateRow): PerformancePlanUpdateRecord | null {
+  return normalizePlanUpdateRecord({
+    id: row.id,
+    planId: row.plan_id,
+    orgId: row.org_id,
+    userId: row.user_id,
+    authorActorType: row.author_actor_type,
+    authorActorId: row.author_actor_id,
+    body: row.body,
     createdAt: row.created_at
   });
 }
@@ -1734,6 +1920,25 @@ async function loadAuditEvents(pool: Pick<Pool, "query">, planId: string): Promi
     [planId]
   );
   return result.rows.map(mapAuditEventRow).filter((entry): entry is PerformanceAuditEvent => Boolean(entry));
+}
+
+async function loadPlanUpdates(
+  pool: Pick<Pool, "query">,
+  planId: string,
+  limit: number
+): Promise<PerformancePlanUpdateRecord[]> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(Number.isFinite(limit) ? limit : 100)));
+  const result = await pool.query<PerformancePlanUpdateRow>(
+    `
+      SELECT *
+      FROM performance_plan_updates
+      WHERE plan_id = $1
+      ORDER BY created_at ASC, id ASC
+      LIMIT $2
+    `,
+    [planId, boundedLimit]
+  );
+  return result.rows.map(mapPlanUpdateRow).filter((entry): entry is PerformancePlanUpdateRecord => Boolean(entry));
 }
 
 export function createPerformancePlanStore(params: CreatePerformancePlanStoreParams): PerformancePlanStore {

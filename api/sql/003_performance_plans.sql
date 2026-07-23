@@ -123,6 +123,23 @@ CREATE INDEX IF NOT EXISTS performance_plan_audit_events_plan_created_idx
 CREATE INDEX IF NOT EXISTS performance_plan_audit_events_org_created_idx
   ON performance_plan_audit_events (org_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS performance_plan_updates (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES performance_plans(id) ON DELETE CASCADE,
+  org_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  author_actor_type TEXT NOT NULL,
+  author_actor_id TEXT NULL,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS performance_plan_updates_plan_created_idx
+  ON performance_plan_updates (plan_id, created_at ASC, id ASC);
+
+CREATE INDEX IF NOT EXISTS performance_plan_updates_org_created_idx
+  ON performance_plan_updates (org_id, created_at DESC);
+
 -- Additive read indexes for Performance calculations. These do not change write semantics.
 CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_user_ended_at
   ON usage_sessions (org_id, user_id, ended_at DESC);

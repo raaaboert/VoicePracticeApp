@@ -633,6 +633,22 @@ select.text-input {
   gap: 1rem;
 }
 
+.performance-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  overflow: auto;
+  padding: 2rem;
+  background: rgba(7, 11, 9, 0.72);
+}
+
+.performance-composer-panel {
+  width: min(1080px, 100%);
+}
+
 .performance-form-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -694,6 +710,17 @@ select.text-input {
   border: 1px solid var(--border);
   border-radius: 16px;
   background: var(--panel-muted);
+}
+
+.performance-update-form,
+.performance-update-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.performance-update-form textarea {
+  min-height: 7rem;
+  resize: vertical;
 }
 
 .dashboard-selector-grid {

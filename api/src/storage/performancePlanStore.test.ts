@@ -232,6 +232,61 @@ test("performance plan store creates and reads a plan with scope and audit rows"
   });
 });
 
+test("performance plan store appends ordered updates and retains them after cancellation", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan(),
+      scopeItems: [buildScopeItem()],
+      auditEvents: [buildAuditEvent()]
+    });
+
+    await store.appendPlanUpdate({
+      update: {
+        id: "perf_update_2",
+        planId: "perf_plan_1",
+        orgId: "org_1",
+        userId: "user_1",
+        authorActorType: "web_user",
+        authorActorId: "manager_1",
+        body: "Second update",
+        createdAt: "2026-07-20T18:00:00.000Z"
+      }
+    });
+    await store.appendPlanUpdate({
+      update: {
+        id: "perf_update_1",
+        planId: "perf_plan_1",
+        orgId: "org_1",
+        userId: "user_1",
+        authorActorType: "mobile_user",
+        authorActorId: "user_1",
+        body: "First update",
+        createdAt: "2026-07-20T17:00:00.000Z"
+      }
+    });
+
+    assert.deepEqual(
+      (await store.listPlanUpdates("perf_plan_1")).map((update) => update.id),
+      ["perf_update_1", "perf_update_2"]
+    );
+
+    await store.cancelPlan({
+      planId: "perf_plan_1",
+      cancelledAt: "2026-07-21T16:00:00.000Z",
+      cancelledByActorType: "web_user",
+      cancelledByActorId: "manager_1",
+      cancellationReason: "cancelled",
+      finalResult: buildFinalResult({ finalizedAt: "2026-07-21T16:00:00.000Z" }),
+      auditEvent: buildAuditEvent({ id: "perf_audit_cancel", action: "cancelled" })
+    });
+
+    assert.deepEqual(
+      (await store.listPlanUpdates("perf_plan_1")).map((update) => update.body),
+      ["First update", "Second update"]
+    );
+  });
+});
+
 test("performance plan store allows distinct active plans and rejects exact active duplicates", async () => {
   await withTempStore(async (store) => {
     await store.createPlan({
@@ -954,6 +1009,8 @@ test("performance plan postgres store initializes the extracted schema and index
   assert(oldUniqueDropIndex > newUniqueIndex);
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_scope_items")));
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_audit_events")));
+  assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_updates")));
+  assert(queries.some((query) => query.includes("performance_plan_updates_plan_created_idx")));
   assert(queries.some((query) => query.includes("idx_usage_sessions_org_user_ended_at")));
   assert(queries.some((query) => query.includes("idx_usage_sessions_org_user_scenario_ended_at")));
   assert(queries.some((query) => query.includes("idx_score_records_org_user_ended_at")));
@@ -1067,4 +1124,18 @@ test("performance multiple-active SQL migration is retry-safe for existing datab
   assert(
     sql.indexOf("definition_signature IS NULL") < sql.indexOf("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx")
   );
+});
+
+test("performance updates SQL migration is retry-safe for existing databases", async () => {
+  const sql = await readFile(
+    path.resolve(TEST_DIR, "../../sql/005_performance_plan_updates.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /BEGIN;/);
+  assert.match(sql, /COMMIT;/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS performance_plan_updates/);
+  assert.match(sql, /REFERENCES performance_plans\(id\) ON DELETE CASCADE/);
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS performance_plan_updates_plan_created_idx/);
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS performance_plan_updates_org_created_idx/);
 });

@@ -906,6 +906,128 @@ test("mobile Performance cancellation is denied for mobile users without leaking
   assert.equal(loaded?.auditEvents.some((event) => event.action === "cancelled"), false);
 });
 
+test("Performance plan Updates are scoped, sanitized, and read-only after terminal state", async () => {
+  await planStore.createPlan({
+    plan: buildPlan({
+      id: "perf_plan_updates",
+      userId: "user_manage",
+      startDate: "2099-09-01",
+      endDate: "2099-09-30",
+      createdAt: "2026-07-20T18:00:00.000Z",
+      updatedAt: "2026-07-20T18:00:00.000Z"
+    }),
+    scopeItems: [
+      buildScopeItem({
+        id: "perf_scope_updates",
+        planId: "perf_plan_updates",
+        userId: "user_manage"
+      })
+    ],
+    auditEvents: [buildAuditEvent({ id: "perf_audit_updates", planId: "perf_plan_updates", userId: "user_manage" })]
+  });
+
+  const mobilePost = await mobileRequest(
+    "/mobile/users/user_manage/performance/plans/perf_plan_updates/updates",
+    "token_manage",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "I practiced the opening today." })
+    }
+  );
+  assert.equal(mobilePost.status, 201);
+  assert.equal((mobilePost.body.update as { body?: unknown }).body, "I practiced the opening today.");
+  assert.equal((mobilePost.body.update as { authorDisplayName?: unknown }).authorDisplayName, "Account user");
+  assert.equal("authorActorId" in (mobilePost.body.update as Record<string, unknown>), false);
+  assert.equal("authorActorType" in (mobilePost.body.update as Record<string, unknown>), false);
+
+  const crossUserPost = await mobileRequest(
+    "/mobile/users/user_other/performance/plans/perf_plan_updates/updates",
+    "token_other",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "Should not post." })
+    }
+  );
+  assert.equal(crossUserPost.status, 404);
+
+  const dashboardViewerPost = await dashboardRequest(
+    "/dashboard/performance/plans/perf_plan_updates/updates",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "Viewer should not post." })
+    },
+    dashboardViewerToken
+  );
+  assert.equal(dashboardViewerPost.status, 403);
+
+  const dashboardPost = await dashboardRequest(
+    "/dashboard/performance/plans/perf_plan_updates/updates",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "Manager coaching note." })
+    }
+  );
+  assert.equal(dashboardPost.status, 201);
+
+  const platformPost = await dashboardRequest(
+    "/dashboard/performance/plans/perf_plan_updates/updates",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "Platform support note." })
+    },
+    platformDashboardToken
+  );
+  assert.equal(platformPost.status, 201);
+  assert.equal((platformPost.body.update as { authorDisplayName?: unknown }).authorDisplayName, "Platform A.");
+
+  const emptyPost = await dashboardRequest(
+    "/dashboard/performance/plans/perf_plan_updates/updates",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "   " })
+    }
+  );
+  assert.equal(emptyPost.status, 400);
+
+  const updates = await mobileRequest(
+    "/mobile/users/user_manage/performance/plans/perf_plan_updates/updates",
+    "token_manage"
+  );
+  assert.equal(updates.status, 200);
+  const updateRows = updates.body.updates as Array<{ body: string; createdAt: string }>;
+  assert.deepEqual(updateRows.map((update) => update.body), [
+    "I practiced the opening today.",
+    "Manager coaching note.",
+    "Platform support note."
+  ]);
+  assert(updateRows.every((update) => update.createdAt.endsWith("Z")));
+
+  const cancel = await dashboardRequest(
+    "/dashboard/performance/plans/perf_plan_updates/cancel",
+    {
+      method: "POST",
+      body: JSON.stringify({ reason: "No longer needed." })
+    }
+  );
+  assert.equal(cancel.status, 200);
+  assert.equal(cancel.body.cancelled, true);
+
+  const terminalPost = await mobileRequest(
+    "/mobile/users/user_manage/performance/plans/perf_plan_updates/updates",
+    "token_manage",
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "Too late." })
+    }
+  );
+  assert.equal(terminalPost.status, 409);
+  assert.equal(terminalPost.body.code, "performance_plan_updates_terminal");
+
+  const retainedUpdates = await dashboardRequest("/dashboard/performance/plans/perf_plan_updates/updates");
+  assert.equal(retainedUpdates.status, 200);
+  assert.equal((retainedUpdates.body.updates as unknown[]).length, 3);
+});
+
 test("dashboard Performance workspace lists scoped users and Focus Topic candidates", async () => {
   const result = await dashboardRequest("/dashboard/performance");
 
