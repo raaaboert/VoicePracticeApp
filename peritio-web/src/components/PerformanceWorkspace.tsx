@@ -82,6 +82,19 @@ async function postJson<T>(pathname: string, body: unknown): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function patchJson<T>(pathname: string, body: unknown): Promise<T> {
+  const response = await fetch(pathname, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string; errors?: string[] } | null;
+    throw new Error(payload?.errors?.join(" ") || payload?.error || `Request failed (${response.status}).`);
+  }
+  return (await response.json()) as T;
+}
+
 async function getJson<T>(pathname: string): Promise<T> {
   const response = await fetch(pathname, { method: "GET" });
   if (!response.ok) {
@@ -113,6 +126,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
   const [cancelingPlanId, setCancelingPlanId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DashboardPerformancePlanDetailResponse | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -139,6 +153,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   const currentPlans = workspace.plans.filter((row) => row.plan.status === "active");
   const historicalPlans = workspace.plans.filter((row) => row.plan.status !== "active");
   const canManageSelectedUser = selectedUser?.canManagePerformancePlans === true;
+  const isEditing = editingPlanId !== null;
 
   const clearPreview = () => {
     setPreview(null);
@@ -193,19 +208,54 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
     }
   };
 
-  const createPlan = async () => {
+  const savePlan = async () => {
     setIsSaving(true);
     setActionError(null);
     setActionNotice(null);
     try {
-      await postJson(`/api/performance/plans${querySuffix}`, buildRequest());
-      setActionNotice("Performance plan created.");
+      if (editingPlanId) {
+        await patchJson(`/api/performance/plans/${encodeURIComponent(editingPlanId)}${querySuffix}`, buildRequest());
+        setActionNotice("Performance plan updated.");
+        setEditingPlanId(null);
+      } else {
+        await postJson(`/api/performance/plans${querySuffix}`, buildRequest());
+        setActionNotice("Performance plan created.");
+      }
       startTransition(() => router.refresh());
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Could not create Performance plan.");
+      setActionError(error instanceof Error ? error.message : "Could not save Performance plan.");
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const editPlan = (row: DashboardPerformancePlanRow) => {
+    const plan = row.plan;
+    setEditingPlanId(plan.id);
+    setSelectedUserId(plan.userId);
+    setStartDate(plan.startDate);
+    setEndDate(plan.endDate);
+    setTimeZone(plan.timeZone);
+    setGoalMode(plan.activityGoal.enabled && plan.performanceGoal.enabled ? "both" : plan.activityGoal.enabled ? "activity" : "performance");
+    setActivityMetric(plan.activityGoal.metricType ?? "weekly_session_count");
+    setActivityTarget(plan.activityGoal.targetValue === null ? "" : String(plan.activityGoal.targetValue));
+    setPerformanceMetric(plan.performanceGoal.metricType ?? "target_average_score");
+    setTargetScore(plan.performanceGoal.targetScore === null ? "" : String(plan.performanceGoal.targetScore));
+    setImprovementAmount(plan.performanceGoal.improvementAmount === null ? "" : String(plan.performanceGoal.improvementAmount));
+    setComparisonMonths(String(plan.performanceGoal.comparisonMonthCount ?? 3) as "1" | "2" | "3" | "6");
+    setSelectedFocusTopicIds(plan.scope.selectedFocusTopicIds);
+    setSelectedScenarioIds(plan.scope.selectedScenarioIds);
+    setScenarioSearch("");
+    setPreview(null);
+    setActionError(null);
+    setActionNotice("Editing active Performance plan.");
+  };
+
+  const cancelEdit = () => {
+    setEditingPlanId(null);
+    setPreview(null);
+    setActionError(null);
+    setActionNotice(null);
   };
 
   const cancelPlan = async (planId: string) => {
@@ -274,8 +324,8 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
       <section className="section-card">
         <div className="section-header">
           <div>
-            <p className="eyebrow">Create</p>
-            <h2>Assign a Performance plan</h2>
+            <p className="eyebrow">{isEditing ? "Edit" : "Create"}</p>
+            <h2>{isEditing ? "Edit active Performance plan" : "Assign a Performance plan"}</h2>
           </div>
           <span className="pill">{workspace.generatedAt ? `Updated ${formatDate(workspace.generatedAt)}` : "Live"}</span>
         </div>
@@ -296,6 +346,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
                 setTimeZone(nextUser?.timeZone ?? workspace.defaultTimeZone);
                 setSelectedFocusTopicIds([]);
                 setSelectedScenarioIds([]);
+                setEditingPlanId(null);
                 clearPreview();
               }}>
                 {workspace.users.map((user) => (
@@ -461,12 +512,17 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
               <button
                 type="button"
                 className="primary-button"
-                onClick={() => { void createPlan(); }}
-                disabled={isSaving || isPreviewing || Boolean(selectedUser?.activePlanId) || !canManageSelectedUser}
+                onClick={() => { void savePlan(); }}
+                disabled={isSaving || isPreviewing || (!isEditing && Boolean(selectedUser?.activePlanId)) || !canManageSelectedUser}
               >
-                {isSaving ? "Creating..." : "Create Plan"}
+                {isSaving ? "Saving..." : isEditing ? "Save Changes" : "Create Plan"}
               </button>
-              {selectedUser?.activePlanId ? <span className="pill">User already has an active plan</span> : null}
+              {isEditing ? (
+                <button type="button" className="ghost-button" onClick={cancelEdit} disabled={isSaving || isPreviewing}>
+                  Cancel Edit
+                </button>
+              ) : null}
+              {!isEditing && selectedUser?.activePlanId ? <span className="pill">User already has an active plan</span> : null}
               {selectedUser && !canManageSelectedUser ? <span className="pill">Management access required</span> : null}
             </div>
           </div>
@@ -507,6 +563,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
         onCancel={cancelPlan}
         loadingDetailPlanId={loadingDetailPlanId}
         onOpenDetail={openPlanDetail}
+        onEdit={editPlan}
       />
       <PlanTable
         title="Historical plans"
@@ -517,6 +574,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
         onCancel={cancelPlan}
         loadingDetailPlanId={loadingDetailPlanId}
         onOpenDetail={openPlanDetail}
+        onEdit={editPlan}
       />
     </div>
   );
@@ -610,6 +668,7 @@ function PlanTable({
   onCancel,
   loadingDetailPlanId,
   onOpenDetail,
+  onEdit,
 }: {
   title: string;
   rows: DashboardPerformancePlanRow[];
@@ -619,6 +678,7 @@ function PlanTable({
   onCancel: (planId: string) => Promise<void>;
   loadingDetailPlanId: string | null;
   onOpenDetail: (planId: string) => Promise<void>;
+  onEdit: (row: DashboardPerformancePlanRow) => void;
 }) {
   return (
     <section className="section-card">
@@ -702,6 +762,16 @@ function PlanTable({
                         </button>
                       ) : row.plan.status === "active" ? (
                         <span className="pill">Read only</span>
+                      ) : null}
+                      {row.canEdit ? (
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={isPending}
+                          onClick={() => onEdit(row)}
+                        >
+                          Edit
+                        </button>
                       ) : null}
                     </div>
                   </td>

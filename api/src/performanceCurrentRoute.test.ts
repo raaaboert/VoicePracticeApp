@@ -168,6 +168,9 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_expired_late", "expired-late@example.com"),
       buildUser("user_expired_create", "expired-create@example.com"),
       buildUser("user_manage", "manage@example.com"),
+      buildUser("user_edit", "edit@example.com"),
+      buildUser("user_self_created_edit", "self-created-edit@example.com"),
+      buildUser("user_started_edit", "started-edit@example.com"),
       buildUser("user_authorized_active", "authorized-active@example.com"),
       buildUser("user_inactive", "inactive@example.com", {
         status: "disabled"
@@ -235,7 +238,9 @@ function buildDatabase(): ApiDatabase {
       buildMobileToken("user_other", "token_other"),
       buildMobileToken("user_expired", "token_expired"),
       buildMobileToken("user_expired_cancel", "token_expired_cancel"),
-      buildMobileToken("user_manage", "token_manage")
+      buildMobileToken("user_manage", "token_manage"),
+      buildMobileToken("user_self_created_edit", "token_self_created_edit"),
+      buildMobileToken("user_inactive", "token_inactive")
     ],
     emailVerifications: [],
     webAuthChallenges: [],
@@ -531,6 +536,21 @@ async function mobileRequest(pathname: string, token: string, init?: RequestInit
   };
 }
 
+async function mobileRawRequest(pathname: string, token: string, init?: RequestInit): Promise<{ status: number; bodyText: string }> {
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    ...init,
+    headers: {
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      Authorization: `Bearer ${token}`,
+      ...(init?.headers ?? {})
+    }
+  });
+  return {
+    status: response.status,
+    bodyText: await response.text()
+  };
+}
+
 async function dashboardRequest(
   pathname: string,
   init?: RequestInit,
@@ -647,6 +667,149 @@ test("GET /mobile/users/:userId/performance/current returns a successful empty r
   assert.equal((result.body.displayState as { state?: string }).state, "no_active_plan");
 });
 
+test("mobile Performance options, preview, and create let a user create only their own plan", async () => {
+  const options = await mobileRequest("/mobile/users/user_empty/performance/options", "token_empty");
+  assert.equal(options.status, 200);
+  assert.equal(
+    (options.body.availableFocusTopics as Array<{ id?: string }>).some((topic) => topic.id === "focus_topic_1"),
+    true
+  );
+  assert.equal(
+    (options.body.availableScenarios as Array<{ scenarioId?: string }>).some((scenario) => scenario.scenarioId === "custom_1"),
+    true
+  );
+
+  const requestBody = buildCreatePlanRequest({
+    userId: "user_empty",
+    orgId: null,
+    startDate: "2099-09-01",
+    endDate: "2099-10-01",
+    scopeSelection: {
+      allAssignedScenarios: false,
+      selectedFocusTopicIds: ["focus_topic_1"],
+      selectedScenarioIds: []
+    }
+  });
+
+  const preview = await mobileRequest("/mobile/users/user_empty/performance/preview", "token_empty", {
+    method: "POST",
+    body: JSON.stringify(requestBody)
+  });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.valid, true);
+
+  const created = await mobileRequest("/mobile/users/user_empty/performance/plans", "token_empty", {
+    method: "POST",
+    body: JSON.stringify(requestBody)
+  });
+  assert.equal(created.status, 201);
+  assert.equal((created.body.plan as { userId?: string; createdByActorType?: string; createdByActorId?: string }).userId, "user_empty");
+  assert.equal((created.body.plan as { createdByActorType?: string }).createdByActorType, "mobile_user");
+  assert.equal((created.body.plan as { createdByActorId?: string }).createdByActorId, "user_empty");
+
+  const current = await getCurrentPerformance("user_empty", "token_empty");
+  assert.equal(current.status, 200);
+  assert.equal((current.body.plan as { userId?: string } | null)?.userId, "user_empty");
+
+  const duplicate = await mobileRequest("/mobile/users/user_empty/performance/plans", "token_empty", {
+    method: "POST",
+    body: JSON.stringify(requestBody)
+  });
+  assert.equal(duplicate.status, 409);
+
+  const spoofed = await mobileRequest("/mobile/users/user_empty/performance/preview", "token_empty", {
+    method: "POST",
+    body: JSON.stringify({ ...requestBody, userId: "user_other" })
+  });
+  assert.equal(spoofed.status, 403);
+
+  const otherToken = await mobileRequest("/mobile/users/user_empty/performance/plans", "token_other", {
+    method: "POST",
+    body: JSON.stringify(requestBody)
+  });
+  assert.equal(otherToken.status, 401);
+});
+
+test("mobile Performance users cannot edit protected fields after plan creation", async () => {
+  const requestBody = buildCreatePlanRequest({
+    userId: "user_other",
+    orgId: null,
+    startDate: "2099-09-05",
+    endDate: "2099-10-05",
+    scopeSelection: {
+      allAssignedScenarios: false,
+      selectedFocusTopicIds: ["focus_topic_1"],
+      selectedScenarioIds: []
+    }
+  });
+  const created = await mobileRequest("/mobile/users/user_other/performance/plans", "token_other", {
+    method: "POST",
+    body: JSON.stringify(requestBody)
+  });
+  assert.equal(created.status, 201);
+  const planId = (created.body.plan as { id?: string }).id;
+  assert.ok(planId);
+
+  const edited = await mobileRawRequest(`/mobile/users/user_other/performance/plans/${encodeURIComponent(planId)}`, "token_other", {
+    method: "PATCH",
+    body: JSON.stringify({
+      userId: "user_empty",
+      orgId: "org_2",
+      startDate: "2099-01-01",
+      endDate: "2099-12-31",
+      activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 99 },
+      performanceGoal: {
+        enabled: true,
+        metricType: "target_average_score",
+        targetScore: 100,
+        improvementAmount: null,
+        comparisonMonthCount: null
+      },
+      baseline: { derivedTargetScore: 100 },
+      scopeSelection: {
+        allAssignedScenarios: true,
+        selectedFocusTopicIds: ["tampered_topic"],
+        selectedScenarioIds: ["tampered_scenario"]
+      }
+    })
+  });
+  assert.equal(edited.status, 404);
+
+  const loaded = await planStore.getPlanById(planId);
+  assert.equal(loaded?.plan.userId, "user_other");
+  assert.equal(loaded?.plan.orgId, "org_1");
+  assert.equal(loaded?.plan.startDate, "2099-09-05");
+  assert.equal(loaded?.plan.endDate, "2099-10-05");
+  assert.equal(loaded?.plan.activityGoal.targetValue, 1);
+  assert.deepEqual(loaded?.plan.scope.selectedFocusTopicIds, ["focus_topic_1"]);
+  assert.equal(loaded?.auditEvents.some((event) => event.action === "updated"), false);
+});
+
+test("mobile Performance create rejects inactive users and unavailable scenario ids", async () => {
+  const inactive = await mobileRequest("/mobile/users/user_inactive/performance/plans", "token_inactive", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({ userId: "user_inactive", orgId: null }))
+  });
+  assert.equal(inactive.status, 403);
+  assert.equal(inactive.body.error, "User account is disabled.");
+
+  const unavailable = await mobileRequest("/mobile/users/user_manage/performance/plans", "token_manage", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "user_manage",
+      orgId: null,
+      scopeSelection: {
+        allAssignedScenarios: false,
+        selectedFocusTopicIds: [],
+        selectedScenarioIds: ["tampered_scenario"]
+      }
+    }))
+  });
+  assert.equal(unavailable.status, 400);
+  assert.equal(Array.isArray(unavailable.body.errors), true);
+  assert.match(String(unavailable.body.error), /not available/i);
+});
+
 test("GET /mobile/users/:userId/performance/current finalizes an expired active plan once before responding", async () => {
   const [first, second] = await Promise.all([
     getCurrentPerformance("user_expired", "token_expired"),
@@ -682,17 +845,33 @@ test("mobile Performance history and detail return only the authenticated user's
   assert.equal(crossUser.status, 401);
 });
 
-test("mobile Performance cancellation cancels only an unexpired own active plan", async () => {
+test("mobile Performance cancellation is denied for mobile users without leaking other plans", async () => {
+  const crossUserCancel = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_current/cancel", "token_other", {
+    method: "POST",
+    body: JSON.stringify({ reason: "Trying to cancel someone else's plan." })
+  });
+  assert.equal(crossUserCancel.status, 401);
+
+  const otherPlanCancel = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_expired_cancel/cancel", "token_current", {
+    method: "POST",
+    body: JSON.stringify({ reason: "Trying to cancel another user's plan." })
+  });
+  assert.equal(otherPlanCancel.status, 404);
+  assert.equal(otherPlanCancel.body.error, "Performance plan not found.");
+
   const result = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_current/cancel", "token_current", {
     method: "POST",
     body: JSON.stringify({ reason: "I want to reset my goal." })
   });
 
-  assert.equal(result.status, 200);
-  assert.equal(result.body.cancelled, true);
-  assert.equal(result.body.finalizedInstead, false);
-  assert.equal((result.body.plan as { status?: string; cancellationReason?: string }).status, "cancelled");
-  assert.equal((result.body.plan as { status?: string; cancellationReason?: string }).cancellationReason, "I want to reset my goal.");
+  assert.equal(result.status, 403);
+  assert.equal(result.body.error, "Performance plans can only be cancelled by an authorized dashboard manager.");
+  assert.equal(result.body.code, "performance_plan_cancel_requires_manager");
+
+  const loaded = await planStore.getPlanById("perf_plan_current");
+  assert.equal(loaded?.plan.status, "active");
+  assert.equal(loaded?.plan.cancellationReason, null);
+  assert.equal(loaded?.auditEvents.some((event) => event.action === "cancelled"), false);
 });
 
 test("dashboard Performance workspace lists scoped users and Focus Topic candidates", async () => {
@@ -900,6 +1079,8 @@ test("dashboard Performance write routes require plan-management access", async 
   assert.equal(users.every((user) => user.canManagePerformancePlans === false), true);
   const plans = workspace.body.plans as Array<{ canCancel?: boolean }>;
   assert.equal(plans.every((plan) => plan.canCancel === false), true);
+  const editablePlans = workspace.body.plans as Array<{ canEdit?: boolean }>;
+  assert.equal(editablePlans.every((plan) => plan.canEdit === false), true);
 
   const preview = await dashboardRequest(
     "/dashboard/performance/preview",
@@ -933,6 +1114,17 @@ test("dashboard Performance write routes require plan-management access", async 
   );
   assert.equal(cancelled.status, 403);
   assert.equal(cancelled.body.code, "dashboard_scope_denied");
+
+  const edited = await dashboardRequest(
+    "/dashboard/performance/plans/perf_plan_current",
+    {
+      method: "PATCH",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_current" }))
+    },
+    dashboardViewerToken
+  );
+  assert.equal(edited.status, 403);
+  assert.equal(edited.body.code, "dashboard_scope_denied");
 });
 
 test("dashboard Performance create finalizes an expired active plan before creating the next plan", async () => {
@@ -967,6 +1159,172 @@ test("dashboard Performance create finalizes an expired active plan before creat
   assert.equal(finalized?.auditEvents.filter((event) => event.action === "completed").length, 1);
 });
 
+test("dashboard Performance managers can edit active plans without changing the target user", async () => {
+  const created = await dashboardRequest("/dashboard/performance/plans", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({ userId: "user_edit" }))
+  });
+  assert.equal(created.status, 201);
+  const planId = (created.body.plan as { id?: string }).id;
+  assert.ok(planId);
+
+  const detail = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`);
+  assert.equal(detail.status, 200);
+  assert.equal(((detail.body.plan as { canEdit?: boolean }).canEdit), true);
+
+  const updatedRequest = buildCreatePlanRequest({
+    userId: "user_edit",
+    startDate: "2099-10-01",
+    endDate: "2099-11-01",
+    activityGoal: {
+      enabled: true,
+      metricType: "total_session_count",
+      targetValue: 4
+    },
+    performanceGoal: {
+      enabled: true,
+      metricType: "target_average_score",
+      targetScore: 90,
+      improvementAmount: null,
+      comparisonMonthCount: null
+    },
+    scopeSelection: {
+      allAssignedScenarios: false,
+      selectedFocusTopicIds: [],
+      selectedScenarioIds: ["custom_1"]
+    }
+  });
+
+  const updated = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(updatedRequest)
+  });
+  assert.equal(updated.status, 200);
+  assert.equal((updated.body.plan as { id?: string; userId?: string; startDate?: string }).id, planId);
+  assert.equal((updated.body.plan as { userId?: string }).userId, "user_edit");
+  assert.equal((updated.body.plan as { startDate?: string }).startDate, "2099-10-01");
+  assert.equal((updated.body.plan as { activityGoal?: { targetValue?: number } }).activityGoal?.targetValue, 4);
+  assert.equal((updated.body.plan as { performanceGoal?: { targetScore?: number } }).performanceGoal?.targetScore, 90);
+  assert.deepEqual((updated.body.plan as { scope?: { selectedScenarioIds?: string[] } }).scope?.selectedScenarioIds, ["custom_1"]);
+
+  const loaded = await planStore.getPlanById(planId);
+  assert.equal(loaded?.auditEvents.some((event) => event.action === "updated" && event.actorId === "dashboard_admin"), true);
+  assert.equal(loaded?.scopeItems.length, 1);
+  assert.equal(loaded?.scopeItems[0].scenarioId, "custom_1");
+
+  const spoofed = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ ...updatedRequest, userId: "user_other" })
+  });
+  assert.equal(spoofed.status, 400);
+  assert.match(String(spoofed.body.error), /target user cannot be changed/i);
+
+  const wrongDivision = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}?divisionId=division_b`, {
+    method: "PATCH",
+    body: JSON.stringify(updatedRequest)
+  });
+  assert.equal(wrongDivision.status, 404);
+
+  const cancelled = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ reason: "Testing terminal edit guard." })
+  });
+  assert.equal(cancelled.status, 200);
+
+  const terminalEdit = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(updatedRequest)
+  });
+  assert.equal(terminalEdit.status, 409);
+});
+
+test("dashboard Performance managers can edit mobile self-created plans", async () => {
+  const requestBody = buildCreatePlanRequest({
+    userId: "user_self_created_edit",
+    orgId: null,
+    startDate: "2099-08-01",
+    endDate: "2099-09-01",
+    scopeSelection: {
+      allAssignedScenarios: false,
+      selectedFocusTopicIds: ["focus_topic_1"],
+      selectedScenarioIds: []
+    }
+  });
+  const created = await mobileRequest("/mobile/users/user_self_created_edit/performance/plans", "token_self_created_edit", {
+    method: "POST",
+    body: JSON.stringify(requestBody)
+  });
+  assert.equal(created.status, 201);
+  assert.equal((created.body.plan as { createdByActorType?: string }).createdByActorType, "mobile_user");
+  const planId = (created.body.plan as { id?: string }).id;
+  assert.ok(planId);
+
+  const updated = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "user_self_created_edit",
+      startDate: "2099-08-05",
+      endDate: "2099-09-05",
+      activityGoal: {
+        enabled: true,
+        metricType: "total_session_count",
+        targetValue: 3
+      },
+      scopeSelection: {
+        allAssignedScenarios: false,
+        selectedFocusTopicIds: [],
+        selectedScenarioIds: ["custom_1"]
+      }
+    }))
+  });
+
+  assert.equal(updated.status, 200);
+  assert.equal((updated.body.plan as { userId?: string }).userId, "user_self_created_edit");
+  assert.equal((updated.body.plan as { startDate?: string }).startDate, "2099-08-05");
+  assert.equal((updated.body.plan as { activityGoal?: { targetValue?: number } }).activityGoal?.targetValue, 3);
+  const loaded = await planStore.getPlanById(planId);
+  assert.equal(loaded?.plan.createdByActorType, "mobile_user");
+  assert.equal(loaded?.plan.createdByActorId, "user_self_created_edit");
+  assert.equal(loaded?.auditEvents.some((event) => event.action === "updated" && event.actorId === "dashboard_admin"), true);
+});
+
+test("dashboard Performance edit can preserve an already-started active plan start date", async () => {
+  await planStore.createPlan({
+    plan: buildPlan({
+      id: "perf_plan_started_edit",
+      userId: "user_started_edit",
+      startDate: "2026-07-01",
+      endDate: "2099-12-31"
+    }),
+    scopeItems: [
+      buildScopeItem({
+        id: "perf_scope_started_edit",
+        planId: "perf_plan_started_edit",
+        userId: "user_started_edit"
+      })
+    ],
+    auditEvents: []
+  });
+
+  const updated = await dashboardRequest("/dashboard/performance/plans/perf_plan_started_edit", {
+    method: "PATCH",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "user_started_edit",
+      startDate: "2026-07-01",
+      endDate: "2099-12-31",
+      activityGoal: {
+        enabled: true,
+        metricType: "total_session_count",
+        targetValue: 3
+      }
+    }))
+  });
+
+  assert.equal(updated.status, 200);
+  assert.equal((updated.body.plan as { startDate?: string; activityGoal?: { targetValue?: number } }).startDate, "2026-07-01");
+  assert.equal((updated.body.plan as { activityGoal?: { targetValue?: number } }).activityGoal?.targetValue, 3);
+});
+
 test("dashboard Performance create, detail, duplicate protection, and cancel work through authorized scope", async () => {
   const created = await dashboardRequest("/dashboard/performance/plans", {
     method: "POST",
@@ -988,6 +1346,13 @@ test("dashboard Performance create, detail, duplicate protection, and cancel wor
   const detail = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(createdPlan.id!)}`);
   assert.equal(detail.status, 200);
   assert.equal(((detail.body.plan as { plan?: { id?: string } }).plan?.id), createdPlan.id);
+
+  const wrongDivisionCancel = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(createdPlan.id!)}/cancel?divisionId=division_b`, {
+    method: "POST",
+    body: JSON.stringify({ reason: "Out of scope." })
+  });
+  assert.equal(wrongDivisionCancel.status, 404);
+  assert.equal(wrongDivisionCancel.body.error, "Performance plan not found.");
 
   const cancelled = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(createdPlan.id!)}/cancel`, {
     method: "POST",

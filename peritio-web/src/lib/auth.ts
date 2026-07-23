@@ -23,6 +23,8 @@ import {
   CreatePerformancePlanResponse,
   PerformancePlanPreviewRequest,
   PerformancePlanPreviewResponse,
+  UpdatePerformancePlanRequest,
+  UpdatePerformancePlanResponse,
   WebAuthRequestCodeResponse,
   WebAuthSessionResponse,
   WebAuthVerifyCodeResponse,
@@ -385,6 +387,22 @@ export async function getDashboardPerformancePlanDetail(
 
     throw error;
   }
+}
+
+export async function updateDashboardPerformancePlan(
+  planId: string,
+  input: UpdatePerformancePlanRequest,
+  divisionId?: string | null
+): Promise<UpdatePerformancePlanResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<UpdatePerformancePlanResponse>(
+    appendDivisionQuery(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, divisionId),
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
 }
 
 export async function cancelDashboardPerformancePlan(

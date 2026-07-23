@@ -10,6 +10,7 @@ import {
   DashboardViewer,
   MobilePerformanceCurrentDisplayState,
   MobilePerformanceCurrentResponse,
+  MobilePerformancePlanOptionsResponse,
   MobilePerformancePlanDetailResponse,
   MobilePerformancePlanHistoryResponse,
   PERFORMANCE_ACTIVITY_METRIC_TYPES,
@@ -29,6 +30,7 @@ import {
   PerformanceProgress,
   PerformanceScopeSelectionRequest,
   SimulationScoreRecord,
+  UpdatePerformancePlanResponse,
   UsageSessionRecord
 } from "@voicepractice/shared";
 import { randomUUID } from "node:crypto";
@@ -76,6 +78,10 @@ export interface PerformancePlanRequestContext {
   createAuditEventId?: () => string;
 }
 
+export interface UpdatePerformancePlanRequestContext extends PerformancePlanRequestContext {
+  existingPlan: PerformancePlan;
+}
+
 export interface PerformancePlanUserContext {
   userId: string;
   email: string;
@@ -107,6 +113,19 @@ export interface BuildPerformancePlanDetailParams {
   scoreRecords: SimulationScoreRecord[];
   now: Date;
   includeAuditActorIds?: boolean;
+}
+
+export function buildMobilePerformancePlanOptionsResponse(params: {
+  candidates: PerformanceScopeCandidate[];
+  defaultTimeZone: string;
+  now: Date;
+}): MobilePerformancePlanOptionsResponse {
+  return {
+    generatedAt: params.now.toISOString(),
+    defaultTimeZone: params.defaultTimeZone,
+    availableFocusTopics: buildPerformanceAssignableFocusTopics(params.candidates),
+    availableScenarios: buildPerformanceAssignableScenarios(params.candidates)
+  };
 }
 
 export interface CancelPerformancePlanWithRuleParams extends BuildPerformancePlanDetailParams {
@@ -384,6 +403,129 @@ export async function createPerformancePlanFromInput(
   };
 }
 
+export async function updatePerformancePlanFromInput(
+  params: UpdatePerformancePlanRequestContext
+): Promise<UpdatePerformancePlanResponse> {
+  const input = normalizePerformancePlanInputOrThrow(params.input);
+  if (params.existingPlan.status !== "active") {
+    throw new PerformancePlanInputError(["Only active Performance plans can be edited."]);
+  }
+  if (input.userId !== params.existingPlan.userId || params.userId !== params.existingPlan.userId) {
+    throw new PerformancePlanInputError(["Performance plan target user cannot be changed."]);
+  }
+  if ((input.orgId && input.orgId !== params.existingPlan.orgId) || params.orgId !== params.existingPlan.orgId) {
+    throw new PerformancePlanInputError(["Performance plan organization cannot be changed."]);
+  }
+
+  const updatedAt = params.now.toISOString();
+  let frozen: ReturnType<typeof freezePerformancePlanScope>;
+  let baseline: PerformanceBaseline | null = null;
+  try {
+    frozen = freezePerformancePlanScope({
+      selection: normalizeScopeSelection(input.scopeSelection),
+      candidates: params.candidates,
+      planId: params.existingPlan.id,
+      orgId: params.orgId,
+      userId: params.userId,
+      createdAt: updatedAt,
+      createScopeItemId: params.createScopeItemId
+    });
+  } catch (error) {
+    throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance plan scope is invalid.")]);
+  }
+  if (needsPerformanceBaseline(input.performanceGoal)) {
+    try {
+      baseline = calculatePerformanceBaseline({
+        orgId: params.orgId,
+        userId: params.userId,
+        scope: frozen.scope,
+        goal: input.performanceGoal,
+        effectiveAt: updatedAt,
+        timeZone: input.timeZone,
+        scoreRecords: params.scoreRecords
+      }).baseline;
+    } catch (error) {
+      throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance baseline could not be calculated.")]);
+    }
+  }
+  const validation = validatePerformancePlanInput({
+    startDate: input.startDate,
+    endDate: input.endDate,
+    timeZone: input.timeZone,
+    now: params.now,
+    activityGoal: input.activityGoal,
+    performanceGoal: input.performanceGoal,
+    scope: frozen.scope,
+    baseline
+  });
+  const validationErrors = input.startDate === params.existingPlan.startDate
+    ? validation.errors.filter((error) => error !== BACKDATED_PLAN_ERROR)
+    : validation.errors;
+  if (validationErrors.length > 0) {
+    throw new PerformancePlanInputError(validationErrors);
+  }
+
+  const updatedPlan: PerformancePlan = {
+    ...params.existingPlan,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    timeZone: input.timeZone,
+    activityGoal: input.activityGoal,
+    performanceGoal: input.performanceGoal,
+    scope: frozen.scope,
+    baseline,
+    updatedAt
+  };
+
+  const updated = await params.store.updatePlan({
+    plan: updatedPlan,
+    scopeItems: frozen.scopeItems,
+    auditEvent: buildAuditEvent({
+      id: params.createAuditEventId?.() ?? `perf_audit_${randomUUID()}`,
+      plan: updatedPlan,
+      actorType: params.actorType,
+      actorId: params.actorId,
+      action: "updated",
+      createdAt: updatedAt,
+      oldValues: {
+        startDate: params.existingPlan.startDate,
+        endDate: params.existingPlan.endDate,
+        timeZone: params.existingPlan.timeZone,
+        activityGoal: params.existingPlan.activityGoal,
+        performanceGoal: params.existingPlan.performanceGoal,
+        scope: params.existingPlan.scope,
+        baseline: params.existingPlan.baseline
+      },
+      newValues: {
+        startDate: updatedPlan.startDate,
+        endDate: updatedPlan.endDate,
+        timeZone: updatedPlan.timeZone,
+        activityGoal: updatedPlan.activityGoal,
+        performanceGoal: updatedPlan.performanceGoal,
+        scope: updatedPlan.scope,
+        baseline: updatedPlan.baseline
+      }
+    })
+  });
+  if (!updated || updated.plan.status !== "active") {
+    throw new PerformancePlanInputError(["Only active Performance plans can be edited."]);
+  }
+
+  const progress = calculatePerformanceProgress({
+    plan: updated.plan,
+    usageSessions: params.usageSessions,
+    scoreRecords: params.scoreRecords,
+    now: params.now
+  }).progress;
+
+  return {
+    updated: true,
+    plan: updated.plan,
+    progress,
+    insights: buildPerformanceInsights(progress)
+  };
+}
+
 export async function buildMobilePerformancePlanHistoryResponse(params: {
   store: PerformancePlanStore;
   orgId: string | null;
@@ -509,7 +651,8 @@ export async function buildDashboardPerformanceWorkspaceResponse(
             orgName: user.orgName,
             divisionId: user.divisionId,
             divisionName: user.divisionName,
-            canCancel: summary.plan.status === "active" && (canManageByUserId.get(user.userId) ?? false)
+            canCancel: summary.plan.status === "active" && (canManageByUserId.get(user.userId) ?? false),
+            canEdit: summary.plan.status === "active" && (canManageByUserId.get(user.userId) ?? false)
           })
         );
       })
@@ -571,7 +714,8 @@ export function buildDashboardPerformancePlanDetailResponse(params: {
       orgName: params.rowContext.orgName,
       divisionId: params.rowContext.divisionId,
       divisionName: params.rowContext.divisionName,
-      canCancel: params.canCancel
+      canCancel: params.canCancel,
+      canEdit: params.canCancel
     },
     auditEvents: params.detail.auditEvents
   };
@@ -589,6 +733,7 @@ export class PerformancePlanInputError extends Error {
 
 const ACTIVITY_METRICS = new Set<string>(PERFORMANCE_ACTIVITY_METRIC_TYPES);
 const PERFORMANCE_METRICS = new Set<string>(PERFORMANCE_GOAL_METRIC_TYPES);
+const BACKDATED_PLAN_ERROR = "Users cannot create a backdated Performance plan.";
 
 function normalizePerformancePlanInputOrThrow(input: PerformancePlanInput): PerformancePlanInput {
   const errors: string[] = [];
@@ -964,6 +1109,7 @@ function buildAuditEvent(params: {
   actorId: string | null;
   action: string;
   createdAt: string;
+  oldValues?: Record<string, unknown> | null;
   newValues: Record<string, unknown>;
 }): PerformanceAuditEvent {
   return {
@@ -975,7 +1121,7 @@ function buildAuditEvent(params: {
     actorId: params.actorId,
     action: params.action,
     changedFields: ["plan"],
-    oldValues: null,
+    oldValues: params.oldValues ?? null,
     newValues: params.newValues,
     reason: null,
     createdAt: params.createdAt

@@ -39,6 +39,12 @@ export interface PerformancePlanCreateInput {
   auditEvents?: PerformanceAuditEvent[];
 }
 
+export interface PerformancePlanUpdateInput {
+  plan: PerformancePlan;
+  scopeItems: PerformancePlanScopeItem[];
+  auditEvent: PerformanceAuditEvent;
+}
+
 export interface PerformancePlanCompleteInput {
   planId: string;
   completedAt: string;
@@ -59,6 +65,7 @@ export interface PerformancePlanCancelInput {
 export interface PerformancePlanStore {
   initialize(): Promise<void>;
   createPlan(input: PerformancePlanCreateInput): Promise<PerformancePlanWithRelations>;
+  updatePlan(input: PerformancePlanUpdateInput): Promise<PerformancePlanWithRelations | null>;
   getPlanById(planId: string): Promise<PerformancePlanWithRelations | null>;
   getOpenPlanForUser(orgId: string, userId: string): Promise<PerformancePlanWithRelations | null>;
   listPlansForUser(orgId: string, userId: string): Promise<PerformancePlanWithRelations[]>;
@@ -622,6 +629,33 @@ function assertCreateInput(input: PerformancePlanCreateInput): PerformancePlanCr
   return { plan, scopeItems, auditEvents };
 }
 
+function assertUpdateInput(input: PerformancePlanUpdateInput): PerformancePlanUpdateInput {
+  const plan = normalizePlan(input.plan);
+  if (!plan) {
+    throw new Error("Performance plan is invalid.");
+  }
+  if (plan.status !== "active") {
+    throw new Error("Only active Performance plans can be updated.");
+  }
+  const scopeItems = input.scopeItems.map(normalizeScopeItem).filter((entry): entry is PerformancePlanScopeItem => Boolean(entry));
+  if (scopeItems.length !== input.scopeItems.length) {
+    throw new Error("Performance plan scope items are invalid.");
+  }
+  for (const scopeItem of scopeItems) {
+    if (scopeItem.planId !== plan.id || scopeItem.orgId !== plan.orgId || scopeItem.userId !== plan.userId) {
+      throw new Error("Performance plan scope item does not match the plan identity.");
+    }
+  }
+  const auditEvent = normalizeAuditEvent(input.auditEvent);
+  if (!auditEvent) {
+    throw new Error("Performance plan audit event is invalid.");
+  }
+  if (auditEvent.planId !== plan.id || auditEvent.orgId !== plan.orgId || auditEvent.userId !== plan.userId) {
+    throw new Error("Performance plan audit event does not match the plan identity.");
+  }
+  return { plan, scopeItems, auditEvent };
+}
+
 function relationFor(payload: PerformancePlanFilePayload, plan: PerformancePlan): PerformancePlanWithRelations {
   return {
     plan,
@@ -637,6 +671,7 @@ async function ensureParentDirectory(filePath: string): Promise<void> {
 abstract class BasePerformancePlanStore implements PerformancePlanStore {
   abstract initialize(): Promise<void>;
   abstract createPlan(input: PerformancePlanCreateInput): Promise<PerformancePlanWithRelations>;
+  abstract updatePlan(input: PerformancePlanUpdateInput): Promise<PerformancePlanWithRelations | null>;
   abstract getPlanById(planId: string): Promise<PerformancePlanWithRelations | null>;
   abstract getOpenPlanForUser(orgId: string, userId: string): Promise<PerformancePlanWithRelations | null>;
   abstract listPlansForUser(orgId: string, userId: string): Promise<PerformancePlanWithRelations[]>;
@@ -676,6 +711,34 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
         plans: [...payload.plans, normalized.plan],
         scopeItems: [...payload.scopeItems, ...normalized.scopeItems],
         auditEvents: [...payload.auditEvents, ...(normalized.auditEvents ?? [])]
+      });
+      await this.savePayload(next);
+      return relationFor(next, normalized.plan);
+    });
+  }
+
+  async updatePlan(input: PerformancePlanUpdateInput): Promise<PerformancePlanWithRelations | null> {
+    const normalized = assertUpdateInput(input);
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      const existing = payload.plans.find((entry) => entry.id === normalized.plan.id);
+      if (!existing) {
+        return null;
+      }
+      if (existing.status !== "active") {
+        return null;
+      }
+      if (existing.orgId !== normalized.plan.orgId || existing.userId !== normalized.plan.userId) {
+        throw new Error("Performance plan identity cannot be changed.");
+      }
+
+      const next = normalizePayload({
+        plans: payload.plans.map((plan) => (plan.id === existing.id ? normalized.plan : plan)),
+        scopeItems: [
+          ...payload.scopeItems.filter((scopeItem) => scopeItem.planId !== existing.id),
+          ...normalized.scopeItems
+        ],
+        auditEvents: [...payload.auditEvents, normalized.auditEvent]
       });
       await this.savePayload(next);
       return relationFor(next, normalized.plan);
@@ -910,6 +973,96 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
       if ((error as { code?: string } | null)?.code === "23505") {
         throw new Error("An active Performance plan already exists for this user.");
       }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updatePlan(input: PerformancePlanUpdateInput): Promise<PerformancePlanWithRelations | null> {
+    const normalized = assertUpdateInput(input);
+    await this.ensureTable();
+    const existing = await this.getPlanById(normalized.plan.id);
+    if (!existing) {
+      return null;
+    }
+    if (existing.plan.status !== "active") {
+      return null;
+    }
+    if (existing.plan.orgId !== normalized.plan.orgId || existing.plan.userId !== normalized.plan.userId) {
+      throw new Error("Performance plan identity cannot be changed.");
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<PerformancePlanRow>(
+        `
+          UPDATE performance_plans
+          SET start_date = $2::date,
+              end_date = $3::date,
+              time_zone = $4,
+              activity_goal_enabled = $5,
+              activity_metric_type = $6,
+              activity_target_value = $7,
+              performance_goal_enabled = $8,
+              performance_metric_type = $9,
+              target_score = $10,
+              improvement_amount = $11,
+              comparison_month_count = $12,
+              baseline_start_at = $13::timestamptz,
+              baseline_end_at = $14::timestamptz,
+              baseline_average = $15,
+              baseline_session_count = $16,
+              derived_target_score = $17,
+              all_assigned_scenarios = $18,
+              selected_focus_topic_ids = $19::jsonb,
+              selected_scenario_ids = $20::jsonb,
+              scope_snapshot = $21::jsonb,
+              baseline_snapshot = $22::jsonb,
+              updated_at = $23::timestamptz
+          WHERE id = $1 AND status = 'active'
+          RETURNING *
+        `,
+        [
+          normalized.plan.id,
+          normalized.plan.startDate,
+          normalized.plan.endDate,
+          normalized.plan.timeZone,
+          normalized.plan.activityGoal.enabled,
+          normalized.plan.activityGoal.metricType,
+          normalized.plan.activityGoal.targetValue,
+          normalized.plan.performanceGoal.enabled,
+          normalized.plan.performanceGoal.metricType,
+          normalized.plan.performanceGoal.targetScore,
+          normalized.plan.performanceGoal.improvementAmount,
+          normalized.plan.performanceGoal.comparisonMonthCount,
+          normalized.plan.baseline?.baselineStartAt ?? null,
+          normalized.plan.baseline?.baselineEndAt ?? null,
+          normalized.plan.baseline?.baselineAverage ?? null,
+          normalized.plan.baseline?.baselineSessionCount ?? null,
+          normalized.plan.baseline?.derivedTargetScore ?? null,
+          normalized.plan.scope.allAssignedScenarios,
+          JSON.stringify(normalized.plan.scope.selectedFocusTopicIds),
+          JSON.stringify(normalized.plan.scope.selectedScenarioIds),
+          JSON.stringify(normalized.plan.scope),
+          JSON.stringify(normalized.plan.baseline),
+          normalized.plan.updatedAt
+        ]
+      );
+      if (!result.rows[0]) {
+        await client.query("ROLLBACK");
+        return await this.getPlanById(normalized.plan.id);
+      }
+      await client.query("DELETE FROM performance_plan_scope_items WHERE plan_id = $1", [normalized.plan.id]);
+      for (const scopeItem of normalized.scopeItems) {
+        await insertScopeItemRow(client, scopeItem);
+      }
+      await insertAuditEventRow(client, normalized.auditEvent);
+      await client.query("COMMIT");
+      return await this.getPlanById(normalized.plan.id);
+    } catch (error) {
+      await client.query("ROLLBACK");
       throw error;
     } finally {
       client.release();

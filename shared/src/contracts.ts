@@ -737,6 +737,15 @@ export interface CreatePerformancePlanResponse {
   insights: PerformanceInsight[];
 }
 
+export interface UpdatePerformancePlanRequest extends PerformancePlanInput {}
+
+export interface UpdatePerformancePlanResponse {
+  updated: boolean;
+  plan: PerformancePlan;
+  progress: PerformanceProgress | null;
+  insights: PerformanceInsight[];
+}
+
 export interface CancelPerformancePlanRequest {
   reason?: string | null;
 }
@@ -769,6 +778,13 @@ export interface MobilePerformanceCurrentResponse {
   progress: PerformanceProgress | null;
   insights: PerformanceInsight[];
   displayState: MobilePerformanceCurrentDisplayState;
+}
+
+export interface MobilePerformancePlanOptionsResponse {
+  generatedAt: string;
+  defaultTimeZone: string;
+  availableFocusTopics: PerformanceAssignableFocusTopic[];
+  availableScenarios: PerformanceAssignableScenario[];
 }
 
 export interface PerformancePlanSummary {
@@ -815,6 +831,7 @@ export interface DashboardPerformancePlanRow {
   progress: PerformanceProgress | null;
   insights: PerformanceInsight[];
   canCancel: boolean;
+  canEdit: boolean;
 }
 
 export interface DashboardPerformanceSummary {

@@ -4,16 +4,19 @@ import {
   EnterpriseDomainMatch,
   MobileOnboardRequest,
   MobileOnboardResponse,
-  CancelPerformancePlanRequest,
-  CancelPerformancePlanResponse,
   MobileResendVerificationRequest,
   MobilePerformanceCurrentResponse,
+  MobilePerformancePlanOptionsResponse,
   MobilePerformancePlanDetailResponse,
   MobilePerformancePlanHistoryResponse,
   MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
   MobileVerifyEmailRequest,
+  CreatePerformancePlanRequest,
+  CreatePerformancePlanResponse,
   PersonaStyle,
+  PerformancePlanPreviewRequest,
+  PerformancePlanPreviewResponse,
   RecordUsageSessionRequest,
   RecordSimulationScoreRequest,
   StartSimulationSessionRequest,
@@ -567,6 +570,48 @@ export async function fetchCurrentPerformancePlan(
   );
 }
 
+export async function fetchPerformancePlanOptions(
+  userId: string,
+  authToken: string,
+): Promise<MobilePerformancePlanOptionsResponse> {
+  return requestJson<MobilePerformancePlanOptionsResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/options`,
+    undefined,
+    authToken,
+  );
+}
+
+export async function previewPerformancePlan(
+  userId: string,
+  input: CreatePerformancePlanRequest,
+  authToken: string,
+): Promise<PerformancePlanPreviewResponse> {
+  const body: PerformancePlanPreviewRequest = input;
+  return requestJson<PerformancePlanPreviewResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/preview`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    authToken,
+  );
+}
+
+export async function createPerformancePlan(
+  userId: string,
+  input: CreatePerformancePlanRequest,
+  authToken: string,
+): Promise<CreatePerformancePlanResponse> {
+  return requestJson<CreatePerformancePlanResponse>(
+    `/mobile/users/${encodeURIComponent(userId)}/performance/plans`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    authToken,
+  );
+}
+
 export async function fetchPerformancePlanHistory(
   userId: string,
   authToken: string,
@@ -586,22 +631,6 @@ export async function fetchPerformancePlanDetail(
   return requestJson<MobilePerformancePlanDetailResponse>(
     `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}`,
     undefined,
-    authToken,
-  );
-}
-
-export async function cancelPerformancePlan(
-  userId: string,
-  planId: string,
-  input: CancelPerformancePlanRequest,
-  authToken: string,
-): Promise<CancelPerformancePlanResponse> {
-  return requestJson<CancelPerformancePlanResponse>(
-    `/mobile/users/${encodeURIComponent(userId)}/performance/plans/${encodeURIComponent(planId)}/cancel`,
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    },
     authToken,
   );
 }

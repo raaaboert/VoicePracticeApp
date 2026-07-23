@@ -258,6 +258,90 @@ test("performance plan store enforces one active plan per org and user", async (
   });
 });
 
+test("performance plan store updates only active plans and records edited scope/audit rows", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan(),
+      scopeItems: [buildScopeItem()],
+      auditEvents: []
+    });
+
+    const updatedPlan = buildPlan({
+      startDate: "2026-07-22",
+      endDate: "2026-08-22",
+      activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 5 },
+      performanceGoal: {
+        enabled: true,
+        metricType: "target_average_score",
+        targetScore: 91,
+        improvementAmount: null,
+        comparisonMonthCount: null
+      },
+      baseline: null,
+      scope: {
+        allAssignedScenarios: false,
+        selectedFocusTopicIds: [],
+        selectedScenarioIds: ["scenario_2"],
+        scenarios: [
+          {
+            scenarioId: "scenario_2",
+            displayName: "Updated Scenario",
+            source: "custom",
+            segmentId: "manager",
+            segmentLabel: "Manager",
+            focusTopics: [],
+            selectionSources: ["direct"],
+            metadata: {}
+          }
+        ]
+      },
+      updatedAt: "2026-07-22T16:00:00.000Z"
+    });
+
+    const updated = await store.updatePlan({
+      plan: updatedPlan,
+      scopeItems: [
+        buildScopeItem({
+          id: "scope_updated",
+          scenarioId: "scenario_2",
+          scenarioDisplayName: "Updated Scenario",
+          focusTopicId: null,
+          focusTopicName: null,
+          selectionSources: ["direct"],
+          createdAt: "2026-07-22T16:00:00.000Z"
+        })
+      ],
+      auditEvent: buildAuditEvent({ id: "audit_updated", action: "updated", createdAt: "2026-07-22T16:00:00.000Z" })
+    });
+
+    assert.equal(updated?.plan.startDate, "2026-07-22");
+    assert.equal(updated?.plan.activityGoal.targetValue, 5);
+    assert.deepEqual(updated?.plan.scope.selectedScenarioIds, ["scenario_2"]);
+    assert.equal(updated?.scopeItems.length, 1);
+    assert.equal(updated?.scopeItems[0].scenarioId, "scenario_2");
+    assert.deepEqual(updated?.auditEvents.map((event) => event.id), ["audit_updated"]);
+
+    const cancelled = await store.cancelPlan({
+      planId: "perf_plan_1",
+      cancelledAt: "2026-07-25T18:00:00.000Z",
+      cancelledByActorType: "mobile_user",
+      cancelledByActorId: "user_1",
+      cancellationReason: "done editing",
+      finalResult: buildFinalResult({ finalizedAt: "2026-07-25T18:00:00.000Z" }),
+      auditEvent: buildAuditEvent({ id: "audit_cancel_after_update", action: "cancelled" })
+    });
+    assert(cancelled);
+
+    const terminalEdit = await store.updatePlan({
+      plan: { ...updatedPlan, startDate: "2026-07-23", updatedAt: "2026-07-23T16:00:00.000Z" },
+      scopeItems: [buildScopeItem({ id: "scope_terminal", scenarioId: "scenario_terminal" })],
+      auditEvent: buildAuditEvent({ id: "audit_terminal_update", action: "updated" })
+    });
+    assert.equal(terminalEdit, null);
+    assertTerminalPlanFieldsUnchanged((await store.getPlanById("perf_plan_1"))!.plan, cancelled.plan);
+  });
+});
+
 test("performance plan store finalizes active plans idempotently and releases the active slot", async () => {
   await withTempStore(async (store) => {
     await store.createPlan({
@@ -622,6 +706,12 @@ test("performance plan postgres terminal updates are guarded to active rows", as
           if (text.includes("UPDATE performance_plans")) {
             return { rows: [buildPostgresPlanRow(activePlan)], rowCount: 1 };
           }
+          if (text.includes("DELETE FROM performance_plan_scope_items")) {
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.includes("INSERT INTO performance_plan_scope_items")) {
+            return { rows: [], rowCount: 1 };
+          }
           if (text.includes("INSERT INTO performance_plan_audit_events")) {
             return { rows: [], rowCount: 1 };
           }
@@ -657,9 +747,14 @@ test("performance plan postgres terminal updates are guarded to active rows", as
     finalResult: buildFinalResult({ finalizedAt: "2026-08-22T06:00:00.000Z", overallSucceeded: false }),
     auditEvent: buildAuditEvent({ id: "audit_pg_cancel", planId: activePlan.id, action: "cancelled" })
   });
+  await store.updatePlan({
+    plan: buildPlan({ id: activePlan.id, startDate: "2026-07-21", updatedAt: "2026-07-21T16:00:00.000Z" }),
+    scopeItems: [buildScopeItem({ planId: activePlan.id })],
+    auditEvent: buildAuditEvent({ id: "audit_pg_update", planId: activePlan.id, action: "updated" })
+  });
 
   const updateQueries = clientQueries.filter((query) => query.includes("UPDATE performance_plans"));
-  assert.equal(updateQueries.length, 2);
+  assert.equal(updateQueries.length, 3);
   for (const query of updateQueries) {
     assert.match(query, /WHERE id = \$1 AND status = 'active'/);
   }

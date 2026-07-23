@@ -1,26 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import type {
+  CreatePerformancePlanRequest,
   MobilePerformanceCurrentResponse,
+  MobilePerformancePlanOptionsResponse,
   MobilePerformancePlanDetailResponse,
   MobilePerformancePlanHistoryResponse,
+  PerformanceActivityMetricType,
+  PerformanceGoalMetricType,
   PerformancePlan,
+  PerformancePlanPreviewResponse,
   PerformanceProgress,
 } from "@voicepractice/shared";
 
 import {
-  cancelPerformancePlan,
+  createPerformancePlan,
   fetchCurrentPerformancePlan,
+  fetchPerformancePlanOptions,
   fetchPerformancePlanDetail,
   fetchPerformancePlanHistory,
+  previewPerformancePlan,
 } from "../lib/api";
 import { formatPerformanceDate, getRemainingPerformancePlanDays } from "../lib/performanceDateFormatting";
 
@@ -31,6 +38,34 @@ interface PerformanceScreenProps {
 }
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+type GoalMode = "activity" | "performance" | "both";
+
+const ACTIVITY_METRICS: Array<{ value: PerformanceActivityMetricType; label: string }> = [
+  { value: "weekly_practice_minutes", label: "Weekly minutes" },
+  { value: "total_practice_minutes", label: "Total minutes" },
+  { value: "weekly_session_count", label: "Weekly sessions" },
+  { value: "total_session_count", label: "Total sessions" },
+];
+
+const PERFORMANCE_METRICS: Array<{ value: PerformanceGoalMetricType; label: string }> = [
+  { value: "target_average_score", label: "Target score" },
+  { value: "improve_by_percent", label: "Percent improvement" },
+  { value: "improve_by_points", label: "Point improvement" },
+];
+
+function dateKeyFromLocalDate(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function todayDateKey(): string {
+  return dateKeyFromLocalDate(new Date());
+}
+
+function addDaysDateKey(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return dateKeyFromLocalDate(date);
+}
 
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim() ? error.message : fallback;
@@ -202,24 +237,349 @@ function FinalResultBlock({ plan }: { plan: PerformancePlan }) {
   );
 }
 
+function OptionChip({
+  label,
+  selected,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      style={[styles.chip, selected ? styles.chipSelected : null, disabled ? styles.disabled : null]}
+      disabled={disabled}
+      onPress={onPress}
+    >
+      <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function PerformanceCreateForm({
+  userId,
+  options,
+  authToken,
+  onCreated,
+  onCancel,
+}: {
+  userId: string;
+  options: MobilePerformancePlanOptionsResponse | null;
+  authToken: string;
+  onCreated: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [goalMode, setGoalMode] = useState<GoalMode>("both");
+  const [startDate, setStartDate] = useState(todayDateKey());
+  const [endDate, setEndDate] = useState(addDaysDateKey(30));
+  const [activityMetric, setActivityMetric] = useState<PerformanceActivityMetricType>("weekly_session_count");
+  const [activityTarget, setActivityTarget] = useState("2");
+  const [performanceMetric, setPerformanceMetric] = useState<PerformanceGoalMetricType>("target_average_score");
+  const [targetScore, setTargetScore] = useState("85");
+  const [improvementAmount, setImprovementAmount] = useState("10");
+  const [comparisonMonths, setComparisonMonths] = useState<"1" | "2" | "3" | "6">("3");
+  const [selectedFocusTopicIds, setSelectedFocusTopicIds] = useState<string[]>([]);
+  const [selectedScenarioIds, setSelectedScenarioIds] = useState<string[]>([]);
+  const [preview, setPreview] = useState<PerformancePlanPreviewResponse | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const defaultTimeZone = options?.defaultTimeZone ?? "UTC";
+  const hasOptions = Boolean((options?.availableFocusTopics.length ?? 0) > 0 || (options?.availableScenarios.length ?? 0) > 0);
+
+  const clearPreview = () => {
+    setPreview(null);
+    setFormError(null);
+  };
+
+  const toggle = (value: string, values: string[], setValues: (next: string[]) => void) => {
+    setValues(values.includes(value) ? values.filter((entry) => entry !== value) : [...values, value]);
+    clearPreview();
+  };
+
+  const buildRequest = (): CreatePerformancePlanRequest => {
+    const activityEnabled = goalMode === "activity" || goalMode === "both";
+    const performanceEnabled = goalMode === "performance" || goalMode === "both";
+    return {
+      userId,
+      orgId: null,
+      startDate,
+      endDate,
+      timeZone: defaultTimeZone,
+      activityGoal: {
+        enabled: activityEnabled,
+        metricType: activityEnabled ? activityMetric : null,
+        targetValue: activityEnabled ? Number(activityTarget) : null,
+      },
+      performanceGoal: {
+        enabled: performanceEnabled,
+        metricType: performanceEnabled ? performanceMetric : null,
+        targetScore: performanceEnabled && performanceMetric === "target_average_score" ? Number(targetScore) : null,
+        improvementAmount:
+          performanceEnabled && performanceMetric !== "target_average_score" ? Number(improvementAmount) : null,
+        comparisonMonthCount:
+          performanceEnabled && performanceMetric !== "target_average_score" ? Number(comparisonMonths) as 1 | 2 | 3 | 6 : null,
+      },
+      scopeSelection: {
+        allAssignedScenarios: false,
+        selectedFocusTopicIds,
+        selectedScenarioIds,
+      },
+    };
+  };
+
+  const runPreview = async () => {
+    setIsPreviewing(true);
+    setFormError(null);
+    try {
+      const payload = await previewPerformancePlan(userId, buildRequest(), authToken);
+      setPreview(payload);
+    } catch (caught) {
+      setFormError(getErrorMessage(caught, "Could not preview this Performance plan."));
+      setPreview(null);
+    } finally {
+      setIsPreviewing(false);
+    }
+  };
+
+  const runCreate = async () => {
+    setIsSaving(true);
+    setFormError(null);
+    try {
+      await createPerformancePlan(userId, buildRequest(), authToken);
+      await onCreated();
+    } catch (caught) {
+      setFormError(getErrorMessage(caught, "Could not create this Performance plan."));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.row}>
+        <View style={styles.flex}>
+          <Text style={styles.eyebrow}>Create Plan</Text>
+          <Text style={styles.title}>Set your next Focus Topic</Text>
+        </View>
+        <Pressable style={styles.smallButton} onPress={onCancel}>
+          <Text style={styles.smallButtonText}>Close</Text>
+        </Pressable>
+      </View>
+
+      {!hasOptions ? (
+        <Text style={styles.body}>No eligible Focus Topics are assigned to your account yet.</Text>
+      ) : (
+        <>
+          <View style={styles.formRow}>
+            <View style={styles.formField}>
+              <Text style={styles.metricLabel}>Start date</Text>
+              <TextInput
+                style={styles.textInput}
+                value={startDate}
+                onChangeText={(value) => {
+                  setStartDate(value);
+                  clearPreview();
+                }}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor="#7d877a"
+                autoCapitalize="none"
+              />
+            </View>
+            <View style={styles.formField}>
+              <Text style={styles.metricLabel}>End date</Text>
+              <TextInput
+                style={styles.textInput}
+                value={endDate}
+                onChangeText={(value) => {
+                  setEndDate(value);
+                  clearPreview();
+                }}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor="#7d877a"
+                autoCapitalize="none"
+              />
+            </View>
+          </View>
+
+          <Text style={styles.metricLabel}>Goal type</Text>
+          <View style={styles.chipRow}>
+            <OptionChip label="Both" selected={goalMode === "both"} onPress={() => { setGoalMode("both"); clearPreview(); }} />
+            <OptionChip label="Performance" selected={goalMode === "performance"} onPress={() => { setGoalMode("performance"); clearPreview(); }} />
+            <OptionChip label="Activity" selected={goalMode === "activity"} onPress={() => { setGoalMode("activity"); clearPreview(); }} />
+          </View>
+
+          {goalMode !== "performance" ? (
+            <>
+              <Text style={styles.metricLabel}>Activity goal</Text>
+              <View style={styles.chipRow}>
+                {ACTIVITY_METRICS.map((metric) => (
+                  <OptionChip
+                    key={metric.value}
+                    label={metric.label}
+                    selected={activityMetric === metric.value}
+                    onPress={() => { setActivityMetric(metric.value); clearPreview(); }}
+                  />
+                ))}
+              </View>
+              <TextInput
+                style={styles.textInput}
+                value={activityTarget}
+                onChangeText={(value) => {
+                  setActivityTarget(value);
+                  clearPreview();
+                }}
+                keyboardType="decimal-pad"
+                placeholder="Activity target"
+                placeholderTextColor="#7d877a"
+              />
+            </>
+          ) : null}
+
+          {goalMode !== "activity" ? (
+            <>
+              <Text style={styles.metricLabel}>Performance goal</Text>
+              <View style={styles.chipRow}>
+                {PERFORMANCE_METRICS.map((metric) => (
+                  <OptionChip
+                    key={metric.value}
+                    label={metric.label}
+                    selected={performanceMetric === metric.value}
+                    onPress={() => { setPerformanceMetric(metric.value); clearPreview(); }}
+                  />
+                ))}
+              </View>
+              {performanceMetric === "target_average_score" ? (
+                <TextInput
+                  style={styles.textInput}
+                  value={targetScore}
+                  onChangeText={(value) => {
+                    setTargetScore(value);
+                    clearPreview();
+                  }}
+                  keyboardType="decimal-pad"
+                  placeholder="Target score"
+                  placeholderTextColor="#7d877a"
+                />
+              ) : (
+                <>
+                  <TextInput
+                    style={styles.textInput}
+                    value={improvementAmount}
+                    onChangeText={(value) => {
+                      setImprovementAmount(value);
+                      clearPreview();
+                    }}
+                    keyboardType="decimal-pad"
+                    placeholder="Improvement amount"
+                    placeholderTextColor="#7d877a"
+                  />
+                  <Text style={styles.metricLabel}>Comparison window</Text>
+                  <View style={styles.chipRow}>
+                    {(["1", "2", "3", "6"] as const).map((monthCount) => (
+                      <OptionChip
+                        key={monthCount}
+                        label={`${monthCount} mo`}
+                        selected={comparisonMonths === monthCount}
+                        onPress={() => { setComparisonMonths(monthCount); clearPreview(); }}
+                      />
+                    ))}
+                  </View>
+                </>
+              )}
+            </>
+          ) : null}
+
+          <Text style={styles.metricLabel}>Focus Topics</Text>
+          <View style={styles.chipRow}>
+            {(options?.availableFocusTopics ?? []).map((topic) => (
+              <OptionChip
+                key={topic.id}
+                label={`${topic.name} (${topic.scenarioCount})`}
+                selected={selectedFocusTopicIds.includes(topic.id)}
+                onPress={() => toggle(topic.id, selectedFocusTopicIds, setSelectedFocusTopicIds)}
+              />
+            ))}
+          </View>
+
+          <Text style={styles.metricLabel}>Scenarios</Text>
+          <View style={styles.chipColumn}>
+            {(options?.availableScenarios ?? []).map((scenario) => (
+              <OptionChip
+                key={scenario.scenarioId}
+                label={`${scenario.displayName} - ${scenario.segmentLabel ?? "Role"}`}
+                selected={selectedScenarioIds.includes(scenario.scenarioId)}
+                onPress={() => toggle(scenario.scenarioId, selectedScenarioIds, setSelectedScenarioIds)}
+              />
+            ))}
+          </View>
+
+          {formError ? <Text style={styles.errorText}>{formError}</Text> : null}
+          {preview ? (
+            <View style={styles.previewBox}>
+              <Text style={styles.metricLabel}>{preview.valid ? "Preview valid" : "Needs changes"}</Text>
+              {preview.errors.length > 0 ? (
+                <Text style={styles.body}>{preview.errors.join(" ")}</Text>
+              ) : (
+                <Text style={styles.body}>
+                  Scope: {preview.scope?.scenarios.map((scenario) => scenario.displayName).join(", ") || "-"}
+                </Text>
+              )}
+              {preview.baselinePreview ? (
+                <Text style={styles.subtle}>
+                  Baseline {formatNumber(preview.baselinePreview.baselineAverage)} from {preview.baselinePreview.eligibleScoreCount} attempts.
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          <View style={styles.formRow}>
+            <Pressable
+              style={[styles.secondaryButton, isPreviewing || isSaving ? styles.disabled : null]}
+              disabled={isPreviewing || isSaving}
+              onPress={() => { void runPreview(); }}
+            >
+              <Text style={styles.secondaryButtonText}>{isPreviewing ? "Previewing..." : "Preview"}</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.primaryButton, isSaving || isPreviewing ? styles.disabled : null]}
+              disabled={isSaving || isPreviewing}
+              onPress={() => { void runCreate(); }}
+            >
+              <Text style={styles.primaryButtonText}>{isSaving ? "Creating..." : "Create Plan"}</Text>
+            </Pressable>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
 export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScreenProps) {
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [current, setCurrent] = useState<MobilePerformanceCurrentResponse | null>(null);
+  const [options, setOptions] = useState<MobilePerformancePlanOptionsResponse | null>(null);
   const [history, setHistory] = useState<MobilePerformancePlanHistoryResponse | null>(null);
   const [detail, setDetail] = useState<MobilePerformancePlanDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isCanceling, setIsCanceling] = useState(false);
+  const [showCreateForm, setShowCreateForm] = useState(false);
 
   const loadPerformance = useCallback(async () => {
     setLoadState("loading");
     setError(null);
     try {
-      const [currentPayload, historyPayload] = await Promise.all([
+      const [currentPayload, historyPayload, optionsPayload] = await Promise.all([
         fetchCurrentPerformancePlan(userId, authToken),
         fetchPerformancePlanHistory(userId, authToken),
+        fetchPerformancePlanOptions(userId, authToken),
       ]);
       setCurrent(currentPayload);
       setHistory(historyPayload);
+      setOptions(optionsPayload);
       setDetail(null);
       setLoadState("ready");
     } catch (caught) {
@@ -245,32 +605,12 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
     [authToken, userId],
   );
 
-  const runCancel = useCallback(async () => {
-    const planId = detail?.plan.id ?? current?.plan?.id ?? null;
-    if (!planId) {
-      return;
-    }
-    setIsCanceling(true);
-    setError(null);
-    try {
-      await cancelPerformancePlan(userId, planId, { reason: "Cancelled from mobile app." }, authToken);
-      await loadPerformance();
-    } catch (caught) {
-      setError(getErrorMessage(caught, "Could not cancel this Performance plan."));
-    } finally {
-      setIsCanceling(false);
-    }
-  }, [authToken, current?.plan?.id, detail?.plan.id, loadPerformance, userId]);
-
-  const confirmCancel = useCallback(() => {
-    Alert.alert("Cancel Performance Plan", "Cancel this active plan?", [
-      { text: "Keep Plan", style: "cancel" },
-      { text: "Cancel Plan", style: "destructive", onPress: () => { void runCancel(); } },
-    ]);
-  }, [runCancel]);
-
   const currentPlan = current?.plan ?? null;
   const historyPlans = useMemo(() => history?.plans ?? [], [history]);
+  const handleCreated = useCallback(async () => {
+    setShowCreateForm(false);
+    await loadPerformance();
+  }, [loadPerformance]);
 
   return (
     <View style={styles.fill}>
@@ -303,9 +643,22 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
             <View style={styles.card}>
               <Text style={styles.eyebrow}>Current Plan</Text>
               <Text style={styles.title}>No active Performance plan</Text>
-              <Text style={styles.body}>Assigned plans will appear here after your manager creates one.</Text>
+              <Text style={styles.body}>Create a plan for your next Focus Topic when you are ready.</Text>
+              <Pressable style={styles.primaryButton} onPress={() => setShowCreateForm(true)}>
+                <Text style={styles.primaryButtonText}>Create Plan</Text>
+              </Pressable>
             </View>
           )}
+
+          {showCreateForm && !currentPlan ? (
+            <PerformanceCreateForm
+              userId={userId}
+              options={options}
+              authToken={authToken}
+              onCreated={handleCreated}
+              onCancel={() => setShowCreateForm(false)}
+            />
+          ) : null}
 
           {current?.insights.length ? (
             <View style={styles.card}>
@@ -324,15 +677,6 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
             <>
               <PlanSummaryCard plan={detail.plan} progress={detail.progress} />
               <FinalResultBlock plan={detail.plan} />
-              {detail.plan.status === "active" ? (
-                <Pressable
-                  style={[styles.cancelButton, isCanceling ? styles.disabled : null]}
-                  disabled={isCanceling}
-                  onPress={confirmCancel}
-                >
-                  <Text style={styles.cancelButtonText}>{isCanceling ? "Cancelling..." : "Cancel Plan"}</Text>
-                </Pressable>
-              ) : null}
             </>
           ) : null}
 
@@ -405,6 +749,48 @@ const styles = StyleSheet.create({
   statusActive: { backgroundColor: "rgba(114,157,116,0.28)" },
   statusMuted: { backgroundColor: "rgba(255,255,255,0.1)" },
   statusText: { color: "#f6f0df", fontSize: 12, fontWeight: "800" },
+  smallButton: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.18)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  smallButtonText: { color: "#f6f0df", fontWeight: "800" },
+  formRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  formField: { flex: 1, minWidth: 130, gap: 6 },
+  textInput: {
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.18)",
+    backgroundColor: "rgba(8,13,10,0.42)",
+    color: "#f6f0df",
+    paddingHorizontal: 12,
+    fontSize: 15,
+  },
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chipColumn: { gap: 8 },
+  chip: {
+    minHeight: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.18)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+  },
+  chipSelected: {
+    borderColor: "rgba(143,184,141,0.82)",
+    backgroundColor: "rgba(143,184,141,0.2)",
+  },
+  chipText: { color: "#d8ddcf", fontSize: 13, fontWeight: "700" },
+  chipTextSelected: { color: "#f6f0df" },
   metricBlock: { gap: 6, marginTop: 4 },
   metricLabel: { color: "#aeb8a8", fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
   metricValue: { color: "#f6f0df", fontSize: 20, fontWeight: "800" },
@@ -428,14 +814,35 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   errorText: { color: "#ffd6d6", lineHeight: 20 },
-  cancelButton: {
+  previewBox: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(143,184,141,0.28)",
+    backgroundColor: "rgba(143,184,141,0.08)",
+    padding: 12,
+    gap: 6,
+  },
+  primaryButton: {
     minHeight: 46,
+    flex: 1,
+    minWidth: 120,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 16,
-    backgroundColor: "#9d4f4f",
-    marginBottom: 12,
+    backgroundColor: "#8fb88d",
   },
-  cancelButtonText: { color: "#fff7ee", fontWeight: "800" },
+  primaryButtonText: { color: "#102017", fontWeight: "900" },
+  secondaryButton: {
+    minHeight: 46,
+    flex: 1,
+    minWidth: 120,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.2)",
+    backgroundColor: "rgba(255,255,255,0.07)",
+  },
+  secondaryButtonText: { color: "#f6f0df", fontWeight: "800" },
   disabled: { opacity: 0.6 },
 });

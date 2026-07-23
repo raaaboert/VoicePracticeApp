@@ -7,6 +7,7 @@ import {
   getConfiguredPublicHost,
   isAppExperiencePath,
   isAuthApiPath,
+  isPerformanceApiPath,
   isSystemPath,
 } from "@/src/lib/domain";
 import { WEB_AUTH_SESSION_COOKIE_NAME } from "@/src/lib/authConstants";
@@ -58,7 +59,7 @@ export function middleware(request: NextRequest) {
       return NextResponse.next();
     }
 
-    if (isAppExperiencePath(pathname) || isAuthApiPath(pathname)) {
+    if (isAppExperiencePath(pathname) || isAuthApiPath(pathname) || isPerformanceApiPath(pathname)) {
       return NextResponse.redirect(
         buildAbsoluteUrlForHost({
           host: getConfiguredAppHost(),
@@ -90,7 +91,7 @@ export function middleware(request: NextRequest) {
       );
     }
 
-    if (pathname === "/login" || pathname === "/app" || pathname.startsWith("/app/") || isAuthApiPath(pathname)) {
+    if (pathname === "/login" || pathname === "/app" || pathname.startsWith("/app/") || isAuthApiPath(pathname) || isPerformanceApiPath(pathname)) {
       return NextResponse.next();
     }
 

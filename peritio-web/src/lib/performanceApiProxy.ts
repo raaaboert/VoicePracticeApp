@@ -21,8 +21,8 @@ export function dashboardPerformanceApiErrorResponse(error: unknown): NextRespon
   if (error instanceof DashboardApiError) {
     return noStore(NextResponse.json({ error: error.message, code: error.code }, { status: error.status }));
   }
-  const message = error instanceof Error && error.message.trim() ? error.message : "Performance request failed.";
-  return noStore(NextResponse.json({ error: message }, { status: 500 }));
+  console.error("[performance-api-proxy] request failed", error);
+  return noStore(NextResponse.json({ error: "Performance request failed. Please retry." }, { status: 500 }));
 }
 
 export function noStore(response: NextResponse): NextResponse {
