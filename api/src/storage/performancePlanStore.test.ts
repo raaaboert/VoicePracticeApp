@@ -302,7 +302,7 @@ test("performance plan store allows distinct active plans and rejects exact acti
           scopeItems: [buildScopeItem({ id: "scope_2", planId: "perf_plan_2" })],
           auditEvents: []
         }),
-      /identical active Performance plan already exists/
+      /identical active Performance goal already exists/
     );
 
     await store.createPlan({
@@ -374,7 +374,7 @@ test("performance plan store allows distinct active plans and rejects exact acti
           ],
           auditEvents: []
         }),
-      /identical active Performance plan already exists/
+      /identical active Performance goal already exists/
     );
 
     await store.createPlan({
@@ -404,7 +404,7 @@ test("performance plan store serializes concurrent active creates by normalized 
     ]);
     assert.equal(duplicateResults.filter((result) => result.status === "fulfilled").length, 1);
     const rejected = duplicateResults.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
-    assert.match(String(rejected?.reason?.message ?? rejected?.reason), /identical active Performance plan already exists/);
+    assert.match(String(rejected?.reason?.message ?? rejected?.reason), /identical active Performance goal already exists/);
     assert.equal((await store.listPlansForUser("org_1", "user_1")).filter((entry) => entry.plan.status === "active").length, 1);
   });
 
@@ -515,7 +515,7 @@ test("performance plan store updates only active plans and records edited scope/
           scopeItems: [buildScopeItem({ id: "scope_duplicate_update", planId: "perf_plan_duplicate_target", scenarioId: "scenario_2" })],
           auditEvent: buildAuditEvent({ id: "audit_duplicate_update", planId: "perf_plan_duplicate_target", action: "updated" })
         }),
-      /identical active Performance plan already exists/
+      /identical active Performance goal already exists/
     );
 
     const cancelled = await store.cancelPlan({

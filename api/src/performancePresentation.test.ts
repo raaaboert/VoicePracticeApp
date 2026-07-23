@@ -152,4 +152,21 @@ test("Performance presentation titles are derived from defining goals", () => {
     })),
     "Weekly session goal"
   );
+  assert.equal(
+    buildPerformancePlanTitle(buildPlan({
+      activityGoal: {
+        enabled: false,
+        metricType: null,
+        targetValue: null
+      },
+      performanceGoal: {
+        enabled: false,
+        metricType: null,
+        targetScore: null,
+        improvementAmount: null,
+        comparisonMonthCount: null
+      }
+    })),
+    "Performance goal"
+  );
 });

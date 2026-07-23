@@ -53,7 +53,7 @@ export function validatePerformancePlanInput(input: PerformancePlanValidationInp
   if (isValidIanaTimeZone(input.timeZone) && isDateKey(input.startDate)) {
     const today = getDateKeyInTimeZone(input.now, input.timeZone);
     if (compareDateKeys(input.startDate, today) < 0) {
-      errors.push("Users cannot create a backdated Performance plan.");
+      errors.push("Users cannot create a backdated Performance goal.");
     }
   }
 
@@ -169,7 +169,7 @@ function validatePerformanceGoal(goal: PerformanceGoal, baseline: PerformanceBas
 
 function validateScope(scope: PerformancePlanScope, errors: string[]): void {
   if (!Array.isArray(scope.scenarios) || scope.scenarios.length === 0) {
-    errors.push("Performance plan scope must include at least one frozen scenario.");
+    errors.push("Performance goal scope must include at least one frozen scenario.");
     return;
   }
 
@@ -182,7 +182,7 @@ function validateScope(scope: PerformancePlanScope, errors: string[]): void {
       errors.push("Every scoped scenario must have a display name snapshot.");
     }
     if (scenarioIds.has(scenario.scenarioId)) {
-      errors.push("Performance plan scope must deduplicate scenario ids.");
+      errors.push("Performance goal scope must deduplicate scenario ids.");
     }
     scenarioIds.add(scenario.scenarioId);
   }

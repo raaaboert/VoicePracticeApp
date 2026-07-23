@@ -1,6 +1,5 @@
 import { notFound, redirect } from "next/navigation";
 
-import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
 import { PageHeader } from "@/src/components/PageHeader";
 import { PerformanceWorkspace } from "@/src/components/PerformanceWorkspace";
 import {
@@ -50,8 +49,6 @@ export default async function CustomerPerformancePage({
         description={`Viewing ${workspace.selectedOrg.orgName} as a Peritio administrator.`}
         actions={<span className="pill accent">Peritio administrator company context</span>}
       />
-
-      <DashboardDivisionFilter divisionScope={workspace.divisionScope} />
 
       <PerformanceWorkspace workspace={workspace} divisionId={divisionId} />
     </>

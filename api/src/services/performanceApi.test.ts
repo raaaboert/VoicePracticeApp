@@ -17,7 +17,8 @@ import {
   cancelPerformancePlanWithBoundaryRule,
   createPerformancePlanFromInput,
   PerformancePlanInputError,
-  previewPerformancePlan
+  previewPerformancePlan,
+  resolvePerformanceUserDisplayName
 } from "./performanceApi.js";
 import { PerformanceScopeCandidate } from "./performanceScope.js";
 
@@ -163,6 +164,27 @@ const candidates: PerformanceScopeCandidate[] = [
     focusTopics: [{ id: "focus_1", name: "Coaching" }]
   }
 ];
+
+test("performance dashboard user display names prefer real profile names and fall back safely", () => {
+  assert.equal(
+    resolvePerformanceUserDisplayName({ email: "email@example.com", displayName: "  Ada Lovelace  " }),
+    "Ada Lovelace"
+  );
+  assert.equal(
+    resolvePerformanceUserDisplayName({ email: "email@example.com", firstName: "Grace", lastName: "Hopper" }),
+    "Grace Hopper"
+  );
+  assert.equal(
+    resolvePerformanceUserDisplayName({ email: "email@example.com", givenName: "Katherine", familyName: "Johnson" }),
+    "Katherine Johnson"
+  );
+  assert.equal(
+    resolvePerformanceUserDisplayName({ email: "email@example.com", profile: { fullName: "Mary Jackson" } }),
+    "Mary Jackson"
+  );
+  assert.equal(resolvePerformanceUserDisplayName({ email: "email@example.com" }), "email@example.com");
+  assert.equal(resolvePerformanceUserDisplayName({ email: "" }), "Account user");
+});
 
 function buildPlanInput() {
   return {

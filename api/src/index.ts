@@ -265,6 +265,7 @@ import {
   PerformancePlanUpdateConflictError,
   PerformancePlanUpdateInputError,
   previewPerformancePlan,
+  resolvePerformanceUserDisplayName,
   updatePerformancePlanFromInput,
   type PerformancePlanUserContext
 } from "./services/performanceApi.js";
@@ -5648,6 +5649,7 @@ async function buildPerformanceUserContext(
   return {
     userId: user.id,
     email: user.email,
+    displayName: resolvePerformanceUserDisplayName(user),
     orgId: org.id,
     orgName: org.name,
     timeZone: resolveTimeZone(user.timezone),
@@ -5687,7 +5689,12 @@ async function listDashboardPerformanceUserContexts(
     }
     contexts.push(context);
   }
-  return contexts.sort((left, right) => left.email.localeCompare(right.email));
+  return contexts.sort(
+    (left, right) =>
+      left.displayName.localeCompare(right.displayName, undefined, { sensitivity: "base" }) ||
+      left.email.localeCompare(right.email, undefined, { sensitivity: "base" }) ||
+      left.userId.localeCompare(right.userId)
+  );
 }
 
 async function getDashboardPerformanceUserContext(
@@ -5778,7 +5785,7 @@ function resolvePerformanceDashboardAuditActorType(viewer: DashboardViewer): Aud
   return viewer.accessType === "super_user" ? "platform_admin" : "web_user";
 }
 
-const PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE = "An identical active Performance plan already exists for this user.";
+const PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE = "An identical active Performance goal already exists for this user.";
 const PERFORMANCE_DUPLICATE_ACTIVE_PLAN_CODE = "performance_plan_duplicate_active_definition";
 
 function isDuplicatePerformancePlanError(error: unknown): boolean {
@@ -5808,12 +5815,12 @@ function rejectMobilePerformanceTargetSpoof(
   }
   const requestedUserId = typeof body.userId === "string" ? body.userId.trim() : null;
   if (requestedUserId && requestedUserId !== userId) {
-    response.status(403).json({ error: "Mobile users can only create Performance plans for themselves." });
+    response.status(403).json({ error: "Mobile users can only create Performance goals for themselves." });
     return true;
   }
   const requestedOrgId = typeof body.orgId === "string" ? body.orgId.trim() : null;
   if (requestedOrgId && requestedOrgId !== orgId) {
-    response.status(403).json({ error: "Mobile users can only create Performance plans in their own enterprise account." });
+    response.status(403).json({ error: "Mobile users can only create Performance goals in their own enterprise account." });
     return true;
   }
   return false;
@@ -10076,15 +10083,15 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
+        error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
       });
       return;
     }
     if (target.status !== "active") {
       response.status(400).json({
-        error: "Performance plans can only be assigned to active users.",
-        errors: ["Performance plans can only be assigned to active users."]
+        error: "Performance goals can only be assigned to active users.",
+        errors: ["Performance goals can only be assigned to active users."]
       });
       return;
     }
@@ -10111,7 +10118,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
       });
       if (!payload.valid) {
         response.status(400).json({
-          error: payload.errors[0] ?? "Performance plan input is invalid.",
+          error: payload.errors[0] ?? "Performance goal input is invalid.",
           errors: payload.errors,
           preview: payload
         });
@@ -10168,15 +10175,15 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
+        error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
       });
       return;
     }
     if (target.status !== "active") {
       response.status(400).json({
-        error: "Performance plans can only be assigned to active users.",
-        errors: ["Performance plans can only be assigned to active users."]
+        error: "Performance goals can only be assigned to active users.",
+        errors: ["Performance goals can only be assigned to active users."]
       });
       return;
     }
@@ -10207,7 +10214,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
       });
       if (!validationPreview.valid) {
         response.status(400).json({
-          error: validationPreview.errors[0] ?? "Performance plan input is invalid.",
+          error: validationPreview.errors[0] ?? "Performance goal input is invalid.",
           errors: validationPreview.errors,
           preview: validationPreview
         });
@@ -10253,7 +10260,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
   await withFreshReportingWrite(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
@@ -10268,21 +10275,21 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
     if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
+        error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
       });
       return;
     }
     if (target.status !== "active") {
       response.status(400).json({
-        error: "Performance plans can only be assigned to active users.",
-        errors: ["Performance plans can only be assigned to active users."]
+        error: "Performance goals can only be assigned to active users.",
+        errors: ["Performance goals can only be assigned to active users."]
       });
       return;
     }
@@ -10294,7 +10301,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       divisionFilter.appliedDivisionId
     );
     if (!userContext) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     try {
@@ -10311,7 +10318,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       });
       const refreshed = await performancePlanStore.getPlanById(loaded.plan.id);
       if (!refreshed || refreshed.plan.status !== "active") {
-        response.status(409).json({ error: "Only active Performance plans can be edited." });
+        response.status(409).json({ error: "Only active Performance goals can be edited." });
         return;
       }
       const bodyObject = isPlainRequestBody(body) ? body : {};
@@ -10321,8 +10328,8 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
         const requestedOrgId = typeof body.orgId === "string" ? body.orgId.trim() : null;
         if ((requestedUserId && requestedUserId !== userContext.userId) || (requestedOrgId && requestedOrgId !== userContext.orgId)) {
           response.status(400).json({
-            error: "Performance plan target user cannot be changed.",
-            errors: ["Performance plan target user cannot be changed."]
+            error: "Performance goal target user cannot be changed.",
+            errors: ["Performance goal target user cannot be changed."]
           });
           return;
         }
@@ -10359,7 +10366,7 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
   await withFreshReportingWrite(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
@@ -10374,7 +10381,7 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const detail = await buildPerformancePlanDetailResponse({
@@ -10391,7 +10398,7 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
       }
     });
     if (!detail) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const target = getUserById(db, detail.plan.userId);
@@ -10412,7 +10419,7 @@ app.get("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, as
   await withFreshReportingWrite(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
@@ -10427,7 +10434,7 @@ app.get("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, as
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const payload = await buildPerformancePlanUpdatesResponse({
@@ -10445,7 +10452,7 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
   await withFreshReportingWrite(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
@@ -10460,13 +10467,13 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
     if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
+        error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -10482,7 +10489,7 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
     });
     if (!materialized || materialized.plan.status !== "active") {
       response.status(409).json({
-        error: "Updates can only be posted to active or scheduled Performance plans.",
+        error: "Updates can only be posted to active or scheduled Performance goals.",
         code: "performance_plan_updates_terminal"
       });
       return;
@@ -10517,7 +10524,7 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
   await withFreshReportingWrite(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
@@ -10532,13 +10539,13 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
     if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance plan management requires org admin or user admin access.",
+        error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -10554,7 +10561,7 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
       reason: normalizeCancelReason(body)
     });
     if (!payload) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
     response.json(payload);
@@ -17249,8 +17256,8 @@ app.post("/mobile/users/:userId/performance/preview", async (request: Request, r
     }
     if (!accessContext.actingOrgId) {
       response.status(403).json({
-        error: "Performance plans require an active enterprise account.",
-        errors: ["Performance plans require an active enterprise account."]
+        error: "Performance goals require an active enterprise account.",
+        errors: ["Performance goals require an active enterprise account."]
       });
       return;
     }
@@ -17260,8 +17267,8 @@ app.post("/mobile/users/:userId/performance/preview", async (request: Request, r
     const userContext = await buildPerformanceUserContext(db, user);
     if (!userContext) {
       response.status(403).json({
-        error: "Performance plans require an active enterprise account.",
-        errors: ["Performance plans require an active enterprise account."]
+        error: "Performance goals require an active enterprise account.",
+        errors: ["Performance goals require an active enterprise account."]
       });
       return;
     }
@@ -17279,7 +17286,7 @@ app.post("/mobile/users/:userId/performance/preview", async (request: Request, r
       });
       if (!payload.valid) {
         response.status(400).json({
-          error: payload.errors[0] ?? "Performance plan input is invalid.",
+          error: payload.errors[0] ?? "Performance goal input is invalid.",
           errors: payload.errors,
           preview: payload
         });
@@ -17323,8 +17330,8 @@ app.post("/mobile/users/:userId/performance/plans", async (request: Request, res
     }
     if (!accessContext.actingOrgId) {
       response.status(403).json({
-        error: "Performance plans require an active enterprise account.",
-        errors: ["Performance plans require an active enterprise account."]
+        error: "Performance goals require an active enterprise account.",
+        errors: ["Performance goals require an active enterprise account."]
       });
       return;
     }
@@ -17334,8 +17341,8 @@ app.post("/mobile/users/:userId/performance/plans", async (request: Request, res
     const userContext = await buildPerformanceUserContext(db, user);
     if (!userContext) {
       response.status(403).json({
-        error: "Performance plans require an active enterprise account.",
-        errors: ["Performance plans require an active enterprise account."]
+        error: "Performance goals require an active enterprise account.",
+        errors: ["Performance goals require an active enterprise account."]
       });
       return;
     }
@@ -17445,13 +17452,13 @@ app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Reque
       return;
     }
     if (!accessContext.actingOrgId) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
@@ -17469,7 +17476,7 @@ app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Reque
       }
     });
     if (!payload) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
@@ -17503,13 +17510,13 @@ app.get("/mobile/users/:userId/performance/plans/:planId/updates", async (reques
       return;
     }
     if (!accessContext.actingOrgId) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
@@ -17549,13 +17556,13 @@ app.post("/mobile/users/:userId/performance/plans/:planId/updates", async (reque
       return;
     }
     if (!accessContext.actingOrgId) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
@@ -17570,7 +17577,7 @@ app.post("/mobile/users/:userId/performance/plans/:planId/updates", async (reque
     });
     if (!materialized || materialized.plan.status !== "active") {
       response.status(409).json({
-        error: "Updates can only be posted to active or scheduled Performance plans.",
+        error: "Updates can only be posted to active or scheduled Performance goals.",
         code: "performance_plan_updates_terminal"
       });
       return;
@@ -17627,18 +17634,18 @@ app.post("/mobile/users/:userId/performance/plans/:planId/cancel", async (reques
       return;
     }
     if (!accessContext.actingOrgId) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || loaded.plan.orgId !== accessContext.actingOrgId || loaded.plan.userId !== user.id) {
-      response.status(404).json({ error: "Performance plan not found." });
+      response.status(404).json({ error: "Performance goal not found." });
       return;
     }
 
     response.status(403).json({
-      error: "Performance plans can only be cancelled by an authorized dashboard manager.",
+      error: "Performance goals can only be cancelled by an authorized dashboard manager.",
       code: "performance_plan_cancel_requires_manager"
     });
   });

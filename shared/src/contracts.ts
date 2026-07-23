@@ -840,6 +840,7 @@ export interface MobilePerformancePlanDetailResponse {
 export interface DashboardPerformanceUserOption {
   userId: string;
   email: string;
+  displayName: string;
   orgId: string;
   orgName: string;
   timeZone: string;

@@ -1,6 +1,5 @@
 import { redirect } from "next/navigation";
 
-import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
 import { PageHeader } from "@/src/components/PageHeader";
 import { PerformanceWorkspace } from "@/src/components/PerformanceWorkspace";
 import {
@@ -36,15 +35,13 @@ export default async function PerformancePage({
     <>
       <PageHeader
         eyebrow="Performance"
-        title={workspace.scopeMode === "portfolio" ? "Performance portfolio" : "Performance plans"}
+        title={workspace.scopeMode === "portfolio" ? "Performance portfolio" : "Performance Goals"}
         description={
           workspace.scopeMode === "portfolio"
-            ? "Select a customer account before reviewing or managing detailed Performance plans."
-            : `Assign Focus Topic plans, track current progress, and review finalized results${workspace.selectedOrg ? ` for ${workspace.selectedOrg.orgName}` : " across your dashboard scope"}.`
+            ? "Select a customer account before reviewing or managing detailed Performance Goals."
+            : `Assign Focus Topic goals, track current progress, and review finalized results${workspace.selectedOrg ? ` for ${workspace.selectedOrg.orgName}` : " across your dashboard scope"}.`
         }
       />
-
-      {workspace.scopeMode === "organization" ? <DashboardDivisionFilter divisionScope={workspace.divisionScope} /> : null}
 
       <PerformanceWorkspace workspace={workspace} divisionId={divisionId} />
     </>

@@ -90,6 +90,7 @@ export interface UpdatePerformancePlanRequestContext extends PerformancePlanRequ
 export interface PerformancePlanUserContext {
   userId: string;
   email: string;
+  displayName: string;
   orgId: string;
   orgName: string;
   timeZone: string;
@@ -112,6 +113,57 @@ export interface BuildDashboardPerformanceWorkspaceParams {
   now: Date;
   divisionScope?: DashboardPerformanceWorkspaceResponse["divisionScope"];
   canManageUser?: (user: PerformancePlanUserContext) => boolean;
+}
+
+type UserNameSource = Pick<UserProfile, "email"> & {
+  displayName?: unknown;
+  fullName?: unknown;
+  profileName?: unknown;
+  firstName?: unknown;
+  lastName?: unknown;
+  givenName?: unknown;
+  familyName?: unknown;
+  profile?: unknown;
+};
+
+function normalizeFriendlyName(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return normalized ? normalized : null;
+}
+
+function readProfileNameField(user: UserNameSource, key: string): string | null {
+  const profile = user.profile;
+  if (!profile || typeof profile !== "object") {
+    return null;
+  }
+  return normalizeFriendlyName((profile as Record<string, unknown>)[key]);
+}
+
+function readNameField(user: UserNameSource, key: string): string | null {
+  return normalizeFriendlyName((user as Record<string, unknown>)[key]) ?? readProfileNameField(user, key);
+}
+
+export function resolvePerformanceUserDisplayName(user: UserNameSource): string {
+  const directName =
+    readNameField(user, "displayName") ??
+    readNameField(user, "fullName") ??
+    readNameField(user, "profileName") ??
+    readProfileNameField(user, "name");
+  if (directName) {
+    return directName;
+  }
+
+  const firstName = readNameField(user, "firstName") ?? readNameField(user, "givenName");
+  const lastName = readNameField(user, "lastName") ?? readNameField(user, "familyName");
+  const fullName = normalizeFriendlyName([firstName, lastName].filter(Boolean).join(" "));
+  if (fullName) {
+    return fullName;
+  }
+
+  return normalizeFriendlyName(user.email) ?? "Account user";
 }
 
 export interface BuildDashboardPerformanceWorkspaceOrganizationSummary {
@@ -290,7 +342,7 @@ export function previewPerformancePlan(
       createScopeItemId: (scenarioId) => `preview_${scenarioId}`
     }).scope;
   } catch (error) {
-    errors.push(error instanceof Error ? error.message : "Performance plan scope is invalid.");
+    errors.push(error instanceof Error ? error.message : "Performance goal scope is invalid.");
   }
 
   if (scope && needsPerformanceBaseline(input.performanceGoal)) {
@@ -356,7 +408,7 @@ export async function createPerformancePlanFromInput(
       createScopeItemId: params.createScopeItemId
     });
   } catch (error) {
-    throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance plan scope is invalid.")]);
+    throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance goal scope is invalid.")]);
   }
   if (needsPerformanceBaseline(input.performanceGoal)) {
     try {
@@ -448,13 +500,13 @@ export async function updatePerformancePlanFromInput(
 ): Promise<UpdatePerformancePlanResponse> {
   const input = normalizePerformancePlanInputOrThrow(params.input);
   if (params.existingPlan.status !== "active") {
-    throw new PerformancePlanInputError(["Only active Performance plans can be edited."]);
+    throw new PerformancePlanInputError(["Only active Performance goals can be edited."]);
   }
   if (input.userId !== params.existingPlan.userId || params.userId !== params.existingPlan.userId) {
-    throw new PerformancePlanInputError(["Performance plan target user cannot be changed."]);
+    throw new PerformancePlanInputError(["Performance goal target user cannot be changed."]);
   }
   if ((input.orgId && input.orgId !== params.existingPlan.orgId) || params.orgId !== params.existingPlan.orgId) {
-    throw new PerformancePlanInputError(["Performance plan organization cannot be changed."]);
+    throw new PerformancePlanInputError(["Performance goal organization cannot be changed."]);
   }
 
   const updatedAt = params.now.toISOString();
@@ -471,7 +523,7 @@ export async function updatePerformancePlanFromInput(
       createScopeItemId: params.createScopeItemId
     });
   } catch (error) {
-    throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance plan scope is invalid.")]);
+    throw new PerformancePlanInputError([toInputErrorMessage(error, "Performance goal scope is invalid.")]);
   }
   if (needsPerformanceBaseline(input.performanceGoal)) {
     try {
@@ -548,7 +600,7 @@ export async function updatePerformancePlanFromInput(
     })
   });
   if (!updated || updated.plan.status !== "active") {
-    throw new PerformancePlanInputError(["Only active Performance plans can be edited."]);
+    throw new PerformancePlanInputError(["Only active Performance goals can be edited."]);
   }
 
   const progress = calculatePerformanceProgress({
@@ -642,7 +694,7 @@ export async function createPerformancePlanUpdateForPlan(
   params: CreatePerformancePlanUpdateParams
 ): Promise<CreatePerformancePlanUpdateResponse> {
   if (params.plan.status !== "active") {
-    throw new PerformancePlanUpdateConflictError("Updates can only be posted to active or scheduled Performance plans.");
+    throw new PerformancePlanUpdateConflictError("Updates can only be posted to active or scheduled Performance goals.");
   }
   const body = normalizePerformancePlanUpdateBody(params.body);
   const created = await params.store.appendPlanUpdate({
@@ -755,6 +807,7 @@ export async function buildDashboardPerformanceWorkspaceResponse(
     (user): DashboardPerformanceUserOption => ({
       userId: user.userId,
       email: user.email,
+      displayName: user.displayName,
       orgId: user.orgId,
       orgName: user.orgName,
       timeZone: user.timeZone,
@@ -863,12 +916,12 @@ export class PerformancePlanInputError extends Error {
 
 const ACTIVITY_METRICS = new Set<string>(PERFORMANCE_ACTIVITY_METRIC_TYPES);
 const PERFORMANCE_METRICS = new Set<string>(PERFORMANCE_GOAL_METRIC_TYPES);
-const BACKDATED_PLAN_ERROR = "Users cannot create a backdated Performance plan.";
+const BACKDATED_PLAN_ERROR = "Users cannot create a backdated Performance goal.";
 
 function normalizePerformancePlanInputOrThrow(input: PerformancePlanInput): PerformancePlanInput {
   const errors: string[] = [];
   if (!isRecord(input)) {
-    throw new PerformancePlanInputError(["Performance plan request body is required."]);
+    throw new PerformancePlanInputError(["Performance goal request body is required."]);
   }
 
   const userId = normalizeRequiredText(input.userId, "userId", errors);
@@ -1063,7 +1116,7 @@ function normalizeScopeSelectionInput(value: unknown, errors: string[]): Perform
   pushDuplicateErrors(selectedFocusTopicIds, "scopeSelection.selectedFocusTopicIds", errors);
   pushDuplicateErrors(selectedScenarioIds, "scopeSelection.selectedScenarioIds", errors);
   if (!allAssignedScenarios && selectedFocusTopicIds.length === 0 && selectedScenarioIds.length === 0) {
-    errors.push("Performance plan scope must include at least one selected Focus Topic or scenario.");
+    errors.push("Performance goal scope must include at least one selected Focus Topic or scenario.");
   }
 
   return { allAssignedScenarios, selectedFocusTopicIds, selectedScenarioIds };
@@ -1451,8 +1504,8 @@ function buildTerminalPlanInsights(plan: PerformancePlan): PerformanceInsight[] 
       status: "goal_ended",
       message:
         plan.status === "completed"
-          ? "This Performance plan has been finalized."
-          : "This Performance plan has been cancelled.",
+          ? "This Performance goal has been finalized."
+          : "This Performance goal has been cancelled.",
       recommendedNextStep:
         plan.status === "completed"
           ? "Review the final result snapshot before assigning the next Focus Topic."

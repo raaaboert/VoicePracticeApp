@@ -202,7 +202,7 @@ const ACTIVITY_METRIC_SET = new Set<PerformanceActivityMetricType>(PERFORMANCE_A
 const PERFORMANCE_METRIC_SET = new Set<PerformanceGoalMetricType>(PERFORMANCE_GOAL_METRIC_TYPES);
 const SCENARIO_SOURCE_SET = new Set<PerformanceScenarioSource>(PERFORMANCE_SCENARIO_SOURCES);
 const SCOPE_SELECTION_SOURCE_SET = new Set<PerformanceScopeSelectionSource>(PERFORMANCE_SCOPE_SELECTION_SOURCES);
-const DUPLICATE_ACTIVE_PLAN_MESSAGE = "An identical active Performance plan already exists for this user.";
+const DUPLICATE_ACTIVE_PLAN_MESSAGE = "An identical active Performance goal already exists for this user.";
 
 function buildPerformancePlanFilePath(dbPath: string): string {
   const parsed = path.parse(dbPath);

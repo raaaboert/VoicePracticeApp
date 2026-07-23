@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -47,6 +48,7 @@ import {
   previewPerformancePlan,
 } from "../lib/api";
 import { formatPerformanceDate } from "../lib/performanceDateFormatting";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 interface PerformanceScreenProps {
   userId: string;
@@ -157,6 +159,10 @@ function formatPlanStatus(status: PerformancePlan["status"]): string {
   }
 }
 
+function formatGoalCount(count: number, label: string): string {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
 function getFocusTopicNames(plan: PerformancePlan): string[] {
   const names = new Set<string>();
   for (const scenario of plan.scope.scenarios) {
@@ -206,10 +212,10 @@ function PlanSummaryCard({
   const overallLine = buildPerformanceOverallLine(plan, progress);
 
   return (
-    <Wrapper style={[styles.card, styles.planCard]} onPress={onOpen}>
+    <Wrapper style={styles.planCard} onPress={onOpen}>
       <View style={styles.row}>
         <View style={styles.flex}>
-          <Text style={styles.eyebrow}>Performance Plan</Text>
+          <Text style={styles.eyebrow}>Performance Goal</Text>
           <Text style={styles.title}>{buildPerformancePlanTitle(plan)}</Text>
         </View>
         <View style={[styles.statusPill, status === "active" ? styles.statusActive : status === "scheduled" ? styles.statusScheduled : styles.statusMuted]}>
@@ -320,7 +326,7 @@ function PlanDetailModal({
             <Pressable style={styles.backButton} onPress={onClose}>
               <Text style={styles.backButtonText}>Close</Text>
             </Pressable>
-            <Text style={styles.topTitle}>Plan Detail</Text>
+            <Text style={styles.topTitle}>Goal Detail</Text>
             <View style={styles.headerSpacer} />
           </View>
           <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
@@ -339,7 +345,7 @@ function PlanDetailModal({
             ) : null}
 
             <View style={styles.card}>
-              <Text style={styles.eyebrow}>Updates</Text>
+              <Text style={styles.eyebrow}>Goal Updates</Text>
               {canPostUpdate ? (
                 <>
                   <TextInput
@@ -361,7 +367,7 @@ function PlanDetailModal({
                   </Pressable>
                 </>
               ) : (
-                <Text style={styles.subtle}>Updates are read-only after a plan moves to History.</Text>
+                <Text style={styles.subtle}>Updates are read-only after a goal moves to Goal History.</Text>
               )}
               {detail.updates.length === 0 ? (
                 <Text style={styles.body}>No updates yet.</Text>
@@ -513,13 +519,11 @@ function PerformanceCreateForm({
   options,
   authToken,
   onCreated,
-  onCancel,
 }: {
   userId: string;
   options: MobilePerformancePlanOptionsResponse | null;
   authToken: string;
   onCreated: () => Promise<void>;
-  onCancel: () => void;
 }) {
   const [goalMode, setGoalMode] = useState<GoalMode>("both");
   const [startDate, setStartDate] = useState(todayDateKey());
@@ -598,7 +602,7 @@ function PerformanceCreateForm({
         setStep("review");
       }
     } catch (caught) {
-      setFormError(getErrorMessage(caught, "Could not preview this Performance plan."));
+      setFormError(getErrorMessage(caught, "Could not preview this Performance goal."));
       setPreview(null);
     } finally {
       setIsPreviewing(false);
@@ -612,24 +616,14 @@ function PerformanceCreateForm({
       await createPerformancePlan(userId, buildRequest(), authToken);
       await onCreated();
     } catch (caught) {
-      setFormError(getErrorMessage(caught, "Could not create this Performance plan."));
+      setFormError(getErrorMessage(caught, "Could not create this Performance goal."));
     } finally {
       setIsSaving(false);
     }
   };
 
   return (
-    <View style={styles.modalSheet}>
-      <View style={styles.row}>
-        <View style={styles.flex}>
-          <Text style={styles.eyebrow}>Create Performance Plan</Text>
-          <Text style={styles.title}>{step === "review" ? "Review plan" : "Set your next Focus Topic"}</Text>
-        </View>
-        <Pressable style={styles.smallButton} onPress={onCancel}>
-          <Text style={styles.smallButtonText}>Cancel</Text>
-        </Pressable>
-      </View>
-
+    <View style={styles.createFormBody}>
       {!hasOptions ? (
         <Text style={styles.body}>No eligible Focus Topics are assigned to your account yet.</Text>
       ) : step === "review" && preview?.valid ? (
@@ -661,7 +655,7 @@ function PerformanceCreateForm({
               disabled={isSaving}
               onPress={() => { void runCreate(); }}
             >
-              <Text style={styles.primaryButtonText}>{isSaving ? "Creating..." : "Create plan"}</Text>
+              <Text style={styles.primaryButtonText}>{isSaving ? "Creating..." : "Create Goal"}</Text>
             </Pressable>
           </View>
         </>
@@ -837,6 +831,40 @@ function PerformanceCreateForm({
   );
 }
 
+function GoalSection({
+  title,
+  countLabel,
+  emptyMessage,
+  action,
+  children,
+}: {
+  title: string;
+  countLabel: string;
+  emptyMessage: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  const childArray = Array.isArray(children) ? children.filter(Boolean) : children ? [children] : [];
+  return (
+    <View style={styles.goalSection}>
+      <View style={styles.goalSectionHeader}>
+        <View style={styles.flex}>
+          <Text style={styles.eyebrow}>{title}</Text>
+          <Text style={styles.title}>{countLabel}</Text>
+        </View>
+        {action}
+      </View>
+      <View style={styles.goalSectionBody}>
+        {childArray.length === 0 ? (
+          <Text style={styles.body}>{emptyMessage}</Text>
+        ) : (
+          childArray
+        )}
+      </View>
+    </View>
+  );
+}
+
 export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScreenProps) {
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [current, setCurrent] = useState<MobilePerformanceCurrentResponse | null>(null);
@@ -861,7 +889,7 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
       setDetail(null);
       setLoadState("ready");
     } catch (caught) {
-      setError(getErrorMessage(caught, "Could not load Performance plans."));
+      setError(getErrorMessage(caught, "Could not load Performance goals."));
       setLoadState("error");
     }
   }, [authToken, userId]);
@@ -877,7 +905,7 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
         const payload = await fetchPerformancePlanDetail(userId, planId, authToken);
         setDetail(payload);
       } catch (caught) {
-        setError(getErrorMessage(caught, "Could not load Performance plan detail."));
+        setError(getErrorMessage(caught, "Could not load Performance goal detail."));
       }
     },
     [authToken, userId],
@@ -917,7 +945,7 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
       {loadState === "loading" ? (
         <View style={styles.centered}>
           <ActivityIndicator />
-          <Text style={styles.body}>Loading Performance plans...</Text>
+          <Text style={styles.body}>Loading Performance goals...</Text>
         </View>
       ) : (
         <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
@@ -927,76 +955,86 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
             </View>
           ) : null}
 
-          <View style={styles.card}>
-            <Text style={styles.eyebrow}>Active Plans</Text>
-            <Text style={styles.title}>{groupedPlans.active.length === 0 ? "No active Performance plans" : `${groupedPlans.active.length} active plan${groupedPlans.active.length === 1 ? "" : "s"}`}</Text>
-            <Text style={styles.body}>Create a plan for your next Focus Topic when you are ready.</Text>
-            <Pressable style={styles.primaryButton} onPress={() => setShowCreateForm(true)}>
-              <Text style={styles.primaryButtonText}>Create Performance Plan</Text>
-            </Pressable>
-          </View>
-
-          {groupedPlans.active.map((summary) => (
-            <PlanSummaryCard
-              key={summary.plan.id}
-              plan={summary.plan}
-              progress={summary.progress}
-              attribution={getMobilePlanAttribution(summary.plan, userId)}
-              onOpen={() => { void openPlan(summary.plan.id); }}
-            />
-          ))}
-
-          <View style={styles.card}>
-            <Text style={styles.eyebrow}>Scheduled Plans</Text>
-            {groupedPlans.scheduled.length === 0 ? (
-              <Text style={styles.body}>No scheduled Performance plans.</Text>
-            ) : (
-              <Text style={styles.title}>{groupedPlans.scheduled.length} scheduled plan{groupedPlans.scheduled.length === 1 ? "" : "s"}</Text>
+          <GoalSection
+            title="Active Goals"
+            countLabel={formatGoalCount(groupedPlans.active.length, "active goal")}
+            emptyMessage="No active goals"
+            action={(
+              <Pressable style={styles.sectionActionButton} onPress={() => setShowCreateForm(true)}>
+                <Text style={styles.sectionActionButtonText}>Create Goal</Text>
+              </Pressable>
             )}
-          </View>
+          >
+            {groupedPlans.active.map((summary) => (
+              <PlanSummaryCard
+                key={summary.plan.id}
+                plan={summary.plan}
+                progress={summary.progress}
+                attribution={getMobilePlanAttribution(summary.plan, userId)}
+                onOpen={() => { void openPlan(summary.plan.id); }}
+              />
+            ))}
+          </GoalSection>
 
-          {groupedPlans.scheduled.map((summary) => (
-            <PlanSummaryCard
-              key={summary.plan.id}
-              plan={summary.plan}
-              progress={summary.progress}
-              attribution={getMobilePlanAttribution(summary.plan, userId)}
-              onOpen={() => { void openPlan(summary.plan.id); }}
-            />
-          ))}
+          <GoalSection
+            title="Scheduled Goals"
+            countLabel={formatGoalCount(groupedPlans.scheduled.length, "scheduled goal")}
+            emptyMessage="No scheduled goals"
+          >
+            {groupedPlans.scheduled.map((summary) => (
+              <PlanSummaryCard
+                key={summary.plan.id}
+                plan={summary.plan}
+                progress={summary.progress}
+                attribution={getMobilePlanAttribution(summary.plan, userId)}
+                onOpen={() => { void openPlan(summary.plan.id); }}
+              />
+            ))}
+          </GoalSection>
 
-          <View style={styles.card}>
-            <Text style={styles.eyebrow}>History</Text>
-            {groupedPlans.history.length === 0 ? (
-              <Text style={styles.body}>No Performance plan history yet.</Text>
-            ) : (
-              groupedPlans.history.map((row) => (
-                <PlanSummaryCard
-                  key={row.plan.id}
-                  plan={row.plan}
-                  progress={row.progress}
-                  attribution={getMobilePlanAttribution(row.plan, userId)}
-                  onOpen={() => { void openPlan(row.plan.id); }}
-                />
-              ))
-            )}
-          </View>
+          <GoalSection
+            title="Goal History"
+            countLabel={formatGoalCount(groupedPlans.history.length, "historical goal")}
+            emptyMessage="No completed or cancelled goals yet"
+          >
+            {groupedPlans.history.map((row) => (
+              <PlanSummaryCard
+                key={row.plan.id}
+                plan={row.plan}
+                progress={row.progress}
+                attribution={getMobilePlanAttribution(row.plan, userId)}
+                onOpen={() => { void openPlan(row.plan.id); }}
+              />
+            ))}
+          </GoalSection>
         </ScrollView>
       )}
       <Modal visible={showCreateForm} animationType="slide" onRequestClose={() => setShowCreateForm(false)}>
-        <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <View style={styles.modalScreen}>
-            <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+        <SafeAreaView style={styles.modalSafeArea} edges={["top", "bottom"]}>
+          <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+            <View style={styles.createModalHeader}>
+              <View style={styles.flex}>
+                <Text style={styles.topTitle}>Create Performance Goal</Text>
+                <Text style={styles.subtle}>Set your next Focus Topic</Text>
+              </View>
+              <Pressable style={styles.smallButton} onPress={() => setShowCreateForm(false)}>
+                <Text style={styles.smallButtonText}>Cancel</Text>
+              </Pressable>
+            </View>
+            <ScrollView
+              style={styles.scroll}
+              contentContainerStyle={styles.createFormContent}
+              keyboardShouldPersistTaps="handled"
+            >
               <PerformanceCreateForm
                 userId={userId}
                 options={options}
                 authToken={authToken}
                 onCreated={handleCreated}
-                onCancel={() => setShowCreateForm(false)}
               />
             </ScrollView>
-          </View>
-        </KeyboardAvoidingView>
+          </KeyboardAvoidingView>
+        </SafeAreaView>
       </Modal>
       <PlanDetailModal
         detail={detail}
@@ -1013,7 +1051,21 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   scroll: { flex: 1 },
   content: { paddingBottom: 24 },
+  createFormContent: { padding: 14, paddingBottom: 36 },
+  createFormBody: { gap: 12 },
+  modalSafeArea: { flex: 1, backgroundColor: "#101711" },
   modalScreen: { flex: 1, backgroundColor: "#101711", padding: 14 },
+  createModalHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(246,240,223,0.12)",
+    backgroundColor: "#101711",
+  },
   centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10 },
   topRow: {
     flexDirection: "row",
@@ -1043,10 +1095,33 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     gap: 8,
   },
+  goalSection: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(246,240,223,0.16)",
+    backgroundColor: "rgba(19,27,22,0.72)",
+    marginBottom: 14,
+    overflow: "hidden",
+  },
+  goalSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(246,240,223,0.1)",
+  },
+  goalSectionBody: {
+    padding: 10,
+    gap: 10,
+  },
   planCard: {
+    borderRadius: 14,
+    borderWidth: 1,
     borderColor: "rgba(143,184,141,0.34)",
     backgroundColor: "rgba(15,24,18,0.92)",
-    marginBottom: 14,
+    padding: 14,
+    gap: 8,
   },
   modalSheet: {
     borderRadius: 18,
@@ -1084,6 +1159,15 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.06)",
   },
   smallButtonText: { color: "#f6f0df", fontWeight: "800" },
+  sectionActionButton: {
+    minHeight: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    backgroundColor: "#8fb88d",
+    paddingHorizontal: 12,
+  },
+  sectionActionButtonText: { color: "#102017", fontWeight: "900" },
   formRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   formField: { flex: 1, minWidth: 130, gap: 6 },
   textInput: {

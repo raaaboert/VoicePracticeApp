@@ -55,7 +55,19 @@ function buildMobileToken(userId: string, token: string): MobileAuthRecord {
   };
 }
 
-function buildUser(id: string, email: string, overrides: Partial<UserProfile> = {}): UserProfile {
+function buildUser(
+  id: string,
+  email: string,
+  overrides: Partial<UserProfile> & {
+    displayName?: string;
+    fullName?: string;
+    firstName?: string;
+    lastName?: string;
+    givenName?: string;
+    familyName?: string;
+    profile?: Record<string, unknown>;
+  } = {}
+): UserProfile {
   return {
     id,
     email,
@@ -168,7 +180,7 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_expired_cancel", "expired-cancel@example.com"),
       buildUser("user_expired_late", "expired-late@example.com"),
       buildUser("user_expired_create", "expired-create@example.com"),
-      buildUser("user_manage", "manage@example.com"),
+      buildUser("user_manage", "manage@example.com", { displayName: "Morgan Manager" }),
       buildUser("user_edit", "edit@example.com"),
       buildUser("user_self_created_edit", "self-created-edit@example.com"),
       buildUser("user_started_edit", "started-edit@example.com"),
@@ -889,7 +901,7 @@ test("mobile Performance cancellation is denied for mobile users without leaking
     body: JSON.stringify({ reason: "Trying to cancel another user's plan." })
   });
   assert.equal(otherPlanCancel.status, 404);
-  assert.equal(otherPlanCancel.body.error, "Performance plan not found.");
+  assert.equal(otherPlanCancel.body.error, "Performance goal not found.");
 
   const result = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_current/cancel", "token_current", {
     method: "POST",
@@ -897,7 +909,7 @@ test("mobile Performance cancellation is denied for mobile users without leaking
   });
 
   assert.equal(result.status, 403);
-  assert.equal(result.body.error, "Performance plans can only be cancelled by an authorized dashboard manager.");
+  assert.equal(result.body.error, "Performance goals can only be cancelled by an authorized dashboard manager.");
   assert.equal(result.body.code, "performance_plan_cancel_requires_manager");
 
   const loaded = await planStore.getPlanById("perf_plan_current");
@@ -906,7 +918,7 @@ test("mobile Performance cancellation is denied for mobile users without leaking
   assert.equal(loaded?.auditEvents.some((event) => event.action === "cancelled"), false);
 });
 
-test("Performance plan Updates are scoped, sanitized, and read-only after terminal state", async () => {
+test("Performance goal Updates are scoped, sanitized, and read-only after terminal state", async () => {
   await planStore.createPlan({
     plan: buildPlan({
       id: "perf_plan_updates",
@@ -1036,6 +1048,7 @@ test("dashboard Performance workspace lists scoped users and Focus Topic candida
   assert.equal(result.body.defaultTimeZone, "UTC");
   const users = result.body.users as Array<{
     userId?: string;
+    displayName?: string;
     timeZone?: string;
     canManagePerformancePlans?: boolean;
     assignableFocusTopics?: Array<{ id?: string; name?: string }>;
@@ -1043,6 +1056,7 @@ test("dashboard Performance workspace lists scoped users and Focus Topic candida
   }>;
   const managedUser = users.find((user) => user.userId === "user_manage");
   assert.ok(managedUser);
+  assert.equal(managedUser.displayName, "Morgan Manager");
   assert.equal(managedUser.timeZone, "America/Denver");
   assert.equal(managedUser.canManagePerformancePlans, true);
   assert.equal(managedUser.assignableFocusTopics?.some((topic) => topic.name === "Manager Coaching"), true);
@@ -1219,7 +1233,7 @@ test("dashboard Performance preview and create reject inactive users", async () 
   });
   assert.equal(preview.status, 400);
   assert.match(String(preview.body.error), /active users/);
-  assert.deepEqual(preview.body.errors, ["Performance plans can only be assigned to active users."]);
+  assert.deepEqual(preview.body.errors, ["Performance goals can only be assigned to active users."]);
 
   const created = await dashboardRequest("/dashboard/performance/plans", {
     method: "POST",
@@ -1227,7 +1241,7 @@ test("dashboard Performance preview and create reject inactive users", async () 
   });
   assert.equal(created.status, 400);
   assert.match(String(created.body.error), /active users/);
-  assert.deepEqual(created.body.errors, ["Performance plans can only be assigned to active users."]);
+  assert.deepEqual(created.body.errors, ["Performance goals can only be assigned to active users."]);
 });
 
 test("dashboard Performance write routes do not leak cross-org inactive target status", async () => {
@@ -1299,7 +1313,7 @@ test("dashboard Performance concurrent identical creates return one success and 
 
   assert.deepEqual([first.status, second.status].sort(), [201, 409]);
   const duplicate = [first, second].find((result) => result.status === 409);
-  assert.equal(duplicate?.body.error, "An identical active Performance plan already exists for this user.");
+  assert.equal(duplicate?.body.error, "An identical active Performance goal already exists for this user.");
   assert.equal(duplicate?.body.code, "performance_plan_duplicate_active_definition");
   const userPlans = await planStore.listPlansForUser("org_1", "user_concurrent_duplicate");
   assert.equal(userPlans.filter((entry) => entry.plan.status === "active").length, 1);
@@ -1646,7 +1660,7 @@ test("dashboard Performance create, detail, duplicate protection, and cancel wor
     body: JSON.stringify({ reason: "Out of scope." })
   });
   assert.equal(wrongDivisionCancel.status, 404);
-  assert.equal(wrongDivisionCancel.body.error, "Performance plan not found.");
+  assert.equal(wrongDivisionCancel.body.error, "Performance goal not found.");
 
   const cancelled = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(createdPlan.id!)}/cancel`, {
     method: "POST",

@@ -74,7 +74,7 @@ export function buildPerformancePlanTitle(plan: PerformancePlan): string {
   if (plan.activityGoal.metricType === "total_practice_minutes") {
     return "Total practice minutes";
   }
-  return "Performance plan";
+  return "Performance goal";
 }
 
 export function buildPerformanceScopeLabel(plan: PerformancePlan): string {
