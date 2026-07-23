@@ -221,10 +221,8 @@ test("mobile performance current response is successful and empty when no active
     });
 
     assert.equal(response.generatedAt, NOW.toISOString());
-    assert.equal(response.plan, null);
-    assert.equal(response.progress, null);
-    assert.deepEqual(response.insights, []);
-    assert.equal(response.displayState.state, "no_active_plan");
+    assert.deepEqual(response.activePlans, []);
+    assert.equal(response.displayState.state, "no_active_plans");
   });
 });
 
@@ -249,12 +247,51 @@ test("mobile performance current response returns active progress and determinis
       now: NOW
     });
 
-    assert.equal(response.plan?.id, "perf_plan_1");
-    assert.equal(response.progress?.activity.actualValue, 1);
-    assert.equal(response.progress?.performance.eligibleScoreCount, 3);
-    assert.equal(response.progress?.performance.currentAverage, 85);
-    assert.equal(response.insights.some((insight) => insight.status === "goal_met"), true);
-    assert.equal(response.displayState.state, "active_on_track");
+    assert.equal(response.activePlans.length, 1);
+    assert.equal(response.activePlans[0].plan.id, "perf_plan_1");
+    assert.equal(response.activePlans[0].progress?.activity.actualValue, 1);
+    assert.equal(response.activePlans[0].progress?.performance.eligibleScoreCount, 3);
+    assert.equal(response.activePlans[0].progress?.performance.currentAverage, 85);
+    assert.equal(response.activePlans[0].insights.some((insight) => insight.status === "goal_met"), true);
+    assert.equal(response.displayState.state, "active_plans_on_track");
+    assert.equal(response.displayState.activePlanCount, 1);
+  });
+});
+
+test("mobile performance current response returns multiple active plans independently", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan({ id: "perf_plan_1", endDate: "2026-08-01" }),
+      scopeItems: [buildScopeItem({ planId: "perf_plan_1" })],
+      auditEvents: []
+    });
+    await store.createPlan({
+      plan: buildPlan({
+        id: "perf_plan_2",
+        endDate: "2026-08-15",
+        activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 2 }
+      }),
+      scopeItems: [buildScopeItem({ id: "perf_scope_2", planId: "perf_plan_2" })],
+      auditEvents: []
+    });
+
+    const response = await buildMobilePerformanceCurrentResponse({
+      store,
+      orgId: "org_1",
+      userId: "user_1",
+      usageSessions: [buildUsage({ id: "usage_1" }), buildUsage({ id: "usage_2" })],
+      scoreRecords: [buildScore("score_1", 80), buildScore("score_2", 90), buildScore("score_3", 85)],
+      now: NOW
+    });
+
+    assert.deepEqual(response.activePlans.map((summary) => summary.plan.id), ["perf_plan_1", "perf_plan_2"]);
+    assert.equal(response.activePlans[0].progress?.planId, "perf_plan_1");
+    assert.equal(response.activePlans[1].progress?.planId, "perf_plan_2");
+    assert.equal(response.activePlans[0].progress?.activity.actualValue, 2);
+    assert.equal(response.activePlans[1].progress?.activity.actualValue, 2);
+    assert.equal(response.activePlans[0].progress?.performance.eligibleScoreCount, 3);
+    assert.equal(response.activePlans[1].progress?.performance.eligibleScoreCount, 3);
+    assert.equal(response.displayState.activePlanCount, 2);
   });
 });
 
@@ -288,8 +325,8 @@ test("mobile performance current response lazily finalizes expired plans once", 
       buildMobilePerformanceCurrentResponse(params)
     ]);
 
-    assert.equal(first.plan, null);
-    assert.equal(second.plan, null);
+    assert.deepEqual(first.activePlans, []);
+    assert.deepEqual(second.activePlans, []);
     const finalized = await store.getPlanById("perf_plan_expired");
     assert.equal(finalized?.plan.status, "completed");
     assert.equal(finalized?.plan.finalResult?.sessionsCompleted, 1);

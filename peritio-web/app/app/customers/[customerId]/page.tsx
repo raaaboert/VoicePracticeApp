@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSection";
@@ -71,6 +72,9 @@ export default async function CustomerDetailPage({
           <div className="pill-row">
             <span className="pill">{customer.industryLabels.join(", ") || "General"}</span>
             <span className="pill accent">{customer.orgStatus}</span>
+            <Link className="inline-link" href={`/app/customers/${encodeURIComponent(customer.orgId)}/performance${divisionId ? `?divisionId=${encodeURIComponent(divisionId)}` : ""}`}>
+              Performance
+            </Link>
           </div>
         }
       />

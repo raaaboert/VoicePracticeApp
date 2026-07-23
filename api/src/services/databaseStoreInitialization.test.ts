@@ -44,6 +44,7 @@ function fakeStartupMaintenance(calls: string[]) {
 test("database startup initializes Performance tables through the normal extracted-store setup", async () => {
   const calls: string[] = [];
   const queries: string[] = [];
+  let performanceStoreInitialized = false;
   const performancePlanStore = createPerformancePlanStore({
     provider: "postgres",
     dbPath: "unused.json",
@@ -53,7 +54,10 @@ test("database startup initializes Performance tables through the normal extract
     pgIdleTimeoutMs: 1,
     queryPool: {
       async query(text: string) {
-        calls.push("performancePlanStore.initialize");
+        if (!performanceStoreInitialized) {
+          calls.push("performancePlanStore.initialize");
+          performanceStoreInitialized = true;
+        }
         queries.push(text);
         return { rows: [], rowCount: 0 };
       },

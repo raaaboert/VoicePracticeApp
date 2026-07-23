@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   PerformanceAuditEvent,
@@ -14,6 +15,7 @@ import {
 import { createPerformancePlanStore } from "./performancePlanStore.js";
 
 const NOW = "2026-07-20T16:00:00.000Z";
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function buildPlan(overrides: Partial<PerformancePlan> = {}): PerformancePlan {
   const scope = overrides.scope ?? {
@@ -169,6 +171,7 @@ function buildPostgresPlanRow(plan: PerformancePlan): Record<string, unknown> {
     scope_snapshot: plan.scope,
     baseline_snapshot: plan.baseline,
     final_result_snapshot: plan.finalResult,
+    definition_signature: "signature",
     updated_at: plan.updatedAt
   };
 }
@@ -229,7 +232,7 @@ test("performance plan store creates and reads a plan with scope and audit rows"
   });
 });
 
-test("performance plan store enforces one active plan per org and user", async () => {
+test("performance plan store allows distinct active plans and rejects exact active duplicates", async () => {
   await withTempStore(async (store) => {
     await store.createPlan({
       plan: buildPlan({ id: "perf_plan_1" }),
@@ -244,7 +247,79 @@ test("performance plan store enforces one active plan per org and user", async (
           scopeItems: [buildScopeItem({ id: "scope_2", planId: "perf_plan_2" })],
           auditEvents: []
         }),
-      /active Performance plan already exists/
+      /identical active Performance plan already exists/
+    );
+
+    await store.createPlan({
+      plan: buildPlan({
+        id: "perf_plan_distinct",
+        activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 3 }
+      }),
+      scopeItems: [buildScopeItem({ id: "scope_distinct", planId: "perf_plan_distinct" })],
+      auditEvents: []
+    });
+
+    const userPlans = await store.listPlansForUser("org_1", "user_1");
+    assert.equal(userPlans.filter((entry) => entry.plan.status === "active").length, 2);
+
+    const buildTwoScenarioScope = (reversed: boolean): PerformancePlan["scope"] => {
+      const scenarios: PerformancePlan["scope"]["scenarios"] = [
+        {
+          scenarioId: "scenario_1",
+          displayName: "Difficult Performance Review",
+          source: "custom",
+          segmentId: "manager",
+          segmentLabel: "Manager",
+          focusTopics: [{ id: "focus_1", name: "Coaching and Feedback" }],
+          selectionSources: ["focus_topic", "direct"],
+          metadata: { frozen: true }
+        },
+        {
+          scenarioId: "scenario_2",
+          displayName: "Discovery Call",
+          source: "custom",
+          segmentId: "sales",
+          segmentLabel: "Sales",
+          focusTopics: [{ id: "focus_2", name: "Discovery" }],
+          selectionSources: ["focus_topic", "direct"],
+          metadata: { frozen: true }
+        }
+      ];
+      return {
+        allAssignedScenarios: false,
+        selectedFocusTopicIds: reversed ? ["focus_2", "focus_1"] : ["focus_1", "focus_2"],
+        selectedScenarioIds: reversed ? ["scenario_2", "scenario_1"] : ["scenario_1", "scenario_2"],
+        scenarios: reversed ? scenarios.slice().reverse() : scenarios
+      };
+    };
+
+    await store.createPlan({
+      plan: buildPlan({
+        id: "perf_plan_ordered",
+        activityGoal: { enabled: true, metricType: "weekly_practice_minutes", targetValue: 45 },
+        scope: buildTwoScenarioScope(false)
+      }),
+      scopeItems: [
+        buildScopeItem({ id: "scope_ordered_1", planId: "perf_plan_ordered", scenarioId: "scenario_1" }),
+        buildScopeItem({ id: "scope_ordered_2", planId: "perf_plan_ordered", scenarioId: "scenario_2" })
+      ],
+      auditEvents: []
+    });
+    await assert.rejects(
+      () =>
+        store.createPlan({
+          plan: buildPlan({
+            id: "perf_plan_reordered",
+            activityGoal: { enabled: true, metricType: "weekly_practice_minutes", targetValue: 45 },
+            scope: buildTwoScenarioScope(true)
+          }),
+          scopeItems: [
+            buildScopeItem({ id: "scope_reordered_2", planId: "perf_plan_reordered", scenarioId: "scenario_2" }),
+            buildScopeItem({ id: "scope_reordered_1", planId: "perf_plan_reordered", scenarioId: "scenario_1" })
+          ],
+          auditEvents: []
+        }),
+      /identical active Performance plan already exists/
     );
 
     await store.createPlan({
@@ -254,7 +329,47 @@ test("performance plan store enforces one active plan per org and user", async (
     });
 
     const open = await store.getOpenPlanForUser("org_1", "user_1");
-    assert.equal(open?.plan.id, "perf_plan_1");
+    assert.ok(open?.plan.id);
+  });
+});
+
+test("performance plan store serializes concurrent active creates by normalized definition", async () => {
+  await withTempStore(async (store) => {
+    const duplicateResults = await Promise.allSettled([
+      store.createPlan({
+        plan: buildPlan({ id: "perf_concurrent_duplicate_a" }),
+        scopeItems: [buildScopeItem({ id: "scope_concurrent_duplicate_a", planId: "perf_concurrent_duplicate_a" })],
+        auditEvents: []
+      }),
+      store.createPlan({
+        plan: buildPlan({ id: "perf_concurrent_duplicate_b" }),
+        scopeItems: [buildScopeItem({ id: "scope_concurrent_duplicate_b", planId: "perf_concurrent_duplicate_b" })],
+        auditEvents: []
+      })
+    ]);
+    assert.equal(duplicateResults.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = duplicateResults.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
+    assert.match(String(rejected?.reason?.message ?? rejected?.reason), /identical active Performance plan already exists/);
+    assert.equal((await store.listPlansForUser("org_1", "user_1")).filter((entry) => entry.plan.status === "active").length, 1);
+  });
+
+  await withTempStore(async (store) => {
+    await Promise.all([
+      store.createPlan({
+        plan: buildPlan({ id: "perf_concurrent_distinct_a" }),
+        scopeItems: [buildScopeItem({ id: "scope_concurrent_distinct_a", planId: "perf_concurrent_distinct_a" })],
+        auditEvents: []
+      }),
+      store.createPlan({
+        plan: buildPlan({
+          id: "perf_concurrent_distinct_b",
+          activityGoal: { enabled: true, metricType: "weekly_practice_minutes", targetValue: 45 }
+        }),
+        scopeItems: [buildScopeItem({ id: "scope_concurrent_distinct_b", planId: "perf_concurrent_distinct_b" })],
+        auditEvents: []
+      })
+    ]);
+    assert.equal((await store.listPlansForUser("org_1", "user_1")).filter((entry) => entry.plan.status === "active").length, 2);
   });
 });
 
@@ -321,6 +436,33 @@ test("performance plan store updates only active plans and records edited scope/
     assert.equal(updated?.scopeItems[0].scenarioId, "scenario_2");
     assert.deepEqual(updated?.auditEvents.map((event) => event.id), ["audit_updated"]);
 
+    await store.createPlan({
+      plan: buildPlan({
+        id: "perf_plan_duplicate_target",
+        startDate: "2026-09-01",
+        endDate: "2026-10-01",
+        activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 8 }
+      }),
+      scopeItems: [buildScopeItem({ id: "scope_duplicate_target", planId: "perf_plan_duplicate_target" })],
+      auditEvents: []
+    });
+
+    await assert.rejects(
+      () =>
+        store.updatePlan({
+          plan: {
+            ...updatedPlan,
+            id: "perf_plan_duplicate_target",
+            createdAt: "2026-07-10T16:00:00.000Z",
+            submittedAt: "2026-07-10T16:00:00.000Z",
+            effectiveAt: "2026-07-10T16:00:00.000Z"
+          },
+          scopeItems: [buildScopeItem({ id: "scope_duplicate_update", planId: "perf_plan_duplicate_target", scenarioId: "scenario_2" })],
+          auditEvent: buildAuditEvent({ id: "audit_duplicate_update", planId: "perf_plan_duplicate_target", action: "updated" })
+        }),
+      /identical active Performance plan already exists/
+    );
+
     const cancelled = await store.cancelPlan({
       planId: "perf_plan_1",
       cancelledAt: "2026-07-25T18:00:00.000Z",
@@ -368,7 +510,7 @@ test("performance plan store finalizes active plans idempotently and releases th
     assert.equal(replay?.plan.finalResult?.overallSucceeded, true);
 
     await store.createPlan({
-      plan: buildPlan({ id: "perf_plan_2", startDate: "2026-08-22", endDate: "2026-09-22" }),
+      plan: buildPlan({ id: "perf_plan_2" }),
       scopeItems: [buildScopeItem({ id: "scope_2", planId: "perf_plan_2" })],
       auditEvents: []
     });
@@ -414,6 +556,13 @@ test("performance plan store cancels active plans and keeps completed/cancelled 
       auditEvent: buildAuditEvent({ id: "audit_cancelled_replay", action: "cancelled" })
     });
     assert.equal(replay?.plan.cancellationReason, null);
+
+    await store.createPlan({
+      plan: buildPlan({ id: "perf_plan_after_cancel" }),
+      scopeItems: [buildScopeItem({ id: "scope_after_cancel", planId: "perf_plan_after_cancel" })],
+      auditEvents: []
+    });
+    assert.equal((await store.getPlanById("perf_plan_after_cancel"))?.plan.status, "active");
   });
 });
 
@@ -688,6 +837,15 @@ test("performance plan postgres terminal updates are guarded to active rows", as
       if (text.includes("CREATE TABLE IF NOT EXISTS performance_plans")) {
         return { rows: [], rowCount: 0 };
       }
+      if (text.includes("SELECT * FROM performance_plans WHERE definition_signature IS NULL")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes("CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_definition_idx")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx")) {
+        return { rows: [], rowCount: 0 };
+      }
       if (text.includes("SELECT * FROM performance_plans WHERE id = $1")) {
         return { rows: [buildPostgresPlanRow(activePlan)], rowCount: 1 };
       }
@@ -785,11 +943,128 @@ test("performance plan postgres store initializes the extracted schema and index
   await store.initialize();
 
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plans")));
-  assert(queries.some((query) => query.includes("performance_plans_one_active_per_user_idx")));
+  assert(queries.some((query) => query.includes("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx")));
+  assert(queries.some((query) => query.includes("performance_plans_one_active_definition_idx")));
+  assert(queries.some((query) => query.includes("definition_signature")));
+  const backfillIndex = queries.findIndex((query) => query.includes("SELECT * FROM performance_plans WHERE definition_signature IS NULL"));
+  const newUniqueIndex = queries.findIndex((query) => query.includes("performance_plans_one_active_definition_idx"));
+  const oldUniqueDropIndex = queries.findIndex((query) => query.includes("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx"));
+  assert(backfillIndex >= 0);
+  assert(newUniqueIndex > backfillIndex);
+  assert(oldUniqueDropIndex > newUniqueIndex);
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_scope_items")));
   assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS performance_plan_audit_events")));
   assert(queries.some((query) => query.includes("idx_usage_sessions_org_user_ended_at")));
   assert(queries.some((query) => query.includes("idx_usage_sessions_org_user_scenario_ended_at")));
   assert(queries.some((query) => query.includes("idx_score_records_org_user_ended_at")));
   assert(queries.some((query) => query.includes("idx_score_records_org_user_scenario_ended_at")));
+});
+
+test("performance plan postgres startup backfills signatures before replacing the active-plan index", async () => {
+  const queries: Array<{ text: string; values?: unknown[] }> = [];
+  const queryPool = {
+    async query(text: string, values?: unknown[]) {
+      queries.push({ text, values });
+      if (text.includes("SELECT * FROM performance_plans WHERE definition_signature IS NULL")) {
+        return {
+          rows: [{ ...buildPostgresPlanRow(buildPlan({ id: "perf_existing_active" })), definition_signature: null }],
+          rowCount: 1
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    async connect() {
+      throw new Error("connect should not be used during initialize.");
+    }
+  };
+
+  const store = createPerformancePlanStore({
+    provider: "postgres",
+    dbPath: "unused.json",
+    databaseUrl: "postgres://user:pass@example.com/db",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: queryPool as any
+  });
+
+  await store.initialize();
+
+  const backfillUpdateIndex = queries.findIndex((query) =>
+    query.text.includes("UPDATE performance_plans SET definition_signature = $2")
+  );
+  const newUniqueIndex = queries.findIndex((query) =>
+    query.text.includes("CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_definition_idx")
+  );
+  const oldUniqueDropIndex = queries.findIndex((query) =>
+    query.text.includes("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx")
+  );
+  assert(backfillUpdateIndex >= 0);
+  assert(newUniqueIndex > backfillUpdateIndex);
+  assert(oldUniqueDropIndex > newUniqueIndex);
+  assert.equal(queries[backfillUpdateIndex].values?.[0], "perf_existing_active");
+  assert.match(String(queries[backfillUpdateIndex].values?.[1]), /^[a-f0-9]{64}$/);
+});
+
+test("performance plan postgres startup fails closed when an existing row cannot be signed", async () => {
+  const queries: Array<{ text: string; values?: unknown[] }> = [];
+  const invalidRow = {
+    ...buildPostgresPlanRow(buildPlan({ id: "perf_invalid_existing" })),
+    definition_signature: null,
+    start_date: null
+  };
+  const queryPool = {
+    async query(text: string, values?: unknown[]) {
+      queries.push({ text, values });
+      if (text.includes("SELECT * FROM performance_plans WHERE definition_signature IS NULL")) {
+        return { rows: [invalidRow], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    async connect() {
+      throw new Error("connect should not be used during initialize.");
+    }
+  };
+
+  const store = createPerformancePlanStore({
+    provider: "postgres",
+    dbPath: "unused.json",
+    databaseUrl: "postgres://user:pass@example.com/db",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: queryPool as any
+  });
+
+  await assert.rejects(
+    () => store.initialize(),
+    /Unable to backfill Performance plan definition signature/
+  );
+
+  assert(
+    !queries.some((query) =>
+      query.text.includes("CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_definition_idx")
+    )
+  );
+  assert(
+    !queries.some((query) => query.text.includes("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx"))
+  );
+});
+
+test("performance multiple-active SQL migration is retry-safe for existing databases", async () => {
+  const sql = await readFile(
+    path.resolve(TEST_DIR, "../../sql/004_performance_multiple_active_plans.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /BEGIN;/);
+  assert.match(sql, /COMMIT;/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS definition_signature TEXT NULL/);
+  assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_definition_idx/);
+  assert.match(sql, /WHERE status = ''active'' AND definition_signature IS NOT NULL/);
+  assert.match(sql, /WHERE status = 'active'\s+AND definition_signature IS NULL/);
+  assert.match(sql, /DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx/);
+  assert(
+    sql.indexOf("definition_signature IS NULL") < sql.indexOf("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx")
+  );
 });

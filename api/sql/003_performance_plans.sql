@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS performance_plans (
   scope_snapshot JSONB NOT NULL,
   baseline_snapshot JSONB NULL,
   final_result_snapshot JSONB NULL,
+  definition_signature TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   CONSTRAINT performance_plans_status_chk
     CHECK (status IN ('active', 'completed', 'cancelled')),
@@ -57,9 +58,12 @@ CREATE TABLE IF NOT EXISTS performance_plans (
     CHECK (comparison_month_count IS NULL OR comparison_month_count IN (1, 2, 3, 6))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_per_user_idx
-  ON performance_plans (org_id, user_id)
-  WHERE status = 'active';
+ALTER TABLE performance_plans
+  ADD COLUMN IF NOT EXISTS definition_signature TEXT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_definition_idx
+  ON performance_plans (org_id, user_id, definition_signature)
+  WHERE status = 'active' AND definition_signature IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS performance_plans_org_user_status_idx
   ON performance_plans (org_id, user_id, status);

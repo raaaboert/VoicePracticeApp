@@ -40,6 +40,7 @@ let server: Server;
 let planStore: PerformancePlanStore;
 let dashboardToken: string;
 let dashboardViewerToken: string;
+let platformDashboardToken: string;
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
@@ -172,6 +173,9 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_self_created_edit", "self-created-edit@example.com"),
       buildUser("user_started_edit", "started-edit@example.com"),
       buildUser("user_authorized_active", "authorized-active@example.com"),
+      buildUser("user_concurrent_duplicate", "concurrent-duplicate@example.com"),
+      buildUser("user_concurrent_distinct", "concurrent-distinct@example.com"),
+      buildUser("user_platform_target", "platform-target@example.com"),
       buildUser("user_inactive", "inactive@example.com", {
         status: "disabled"
       }),
@@ -186,6 +190,15 @@ function buildDatabase(): ApiDatabase {
       buildUser("dashboard_viewer", "viewer@example.com", {
         dashboardAccessEnabled: true,
         orgRole: "user"
+      }),
+      buildUser("platform_admin", "platform-admin@peritio.ai", {
+        accountType: "individual",
+        orgId: null,
+        divisionId: null,
+        orgRole: "user",
+        dashboardAccessEnabled: false,
+        isSuperUser: true,
+        isPlatformAdmin: true
       }),
       buildUser("user_other_org", "other-org@example.com", {
         orgId: "org_2",
@@ -496,6 +509,13 @@ async function seedStores(): Promise<void> {
     orgId: "org_1"
   });
   dashboardViewerToken = viewerIssued.token;
+  const platformUser = buildDatabase().users.find((user) => user.id === "platform_admin");
+  assert.ok(platformUser);
+  const platformIssued = webAuthService.issueSession(platformUser, 14 * 24 * 60, new Date(NOW), {
+    accessType: "super_user",
+    orgId: null
+  });
+  platformDashboardToken = platformIssued.token;
   const webAuthStore = createWebAuthSessionStore({
     provider: "file",
     dbPath,
@@ -507,6 +527,7 @@ async function seedStores(): Promise<void> {
   await webAuthStore.initialize();
   await webAuthStore.saveSession(issued.record);
   await webAuthStore.saveSession(viewerIssued.record);
+  await webAuthStore.saveSession(platformIssued.record);
 }
 
 async function getCurrentPerformance(userId: string, token: string): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -644,10 +665,11 @@ test("GET /mobile/users/:userId/performance/current lets a valid mobile token re
   const result = await getCurrentPerformance("user_current", "token_current");
 
   assert.equal(result.status, 200);
-  assert.equal((result.body.plan as { id?: string } | null)?.id, "perf_plan_current");
-  assert.equal((result.body.progress as { performance?: { eligibleScoreCount?: number } } | null)?.performance?.eligibleScoreCount, 3);
-  assert.equal(Array.isArray(result.body.insights), true);
-  assert.equal((result.body.displayState as { state?: string }).state, "active_on_track");
+  const activePlans = result.body.activePlans as Array<{ plan?: { id?: string }; progress?: { performance?: { eligibleScoreCount?: number } }; insights?: unknown[] }>;
+  assert.equal(activePlans[0]?.plan?.id, "perf_plan_current");
+  assert.equal(activePlans[0]?.progress?.performance?.eligibleScoreCount, 3);
+  assert.equal(Array.isArray(activePlans[0]?.insights), true);
+  assert.equal((result.body.displayState as { state?: string }).state, "active_plans_on_track");
 });
 
 test("GET /mobile/users/:userId/performance/current rejects another user's mobile token", async () => {
@@ -661,10 +683,8 @@ test("GET /mobile/users/:userId/performance/current returns a successful empty r
   const result = await getCurrentPerformance("user_empty", "token_empty");
 
   assert.equal(result.status, 200);
-  assert.equal(result.body.plan, null);
-  assert.equal(result.body.progress, null);
-  assert.deepEqual(result.body.insights, []);
-  assert.equal((result.body.displayState as { state?: string }).state, "no_active_plan");
+  assert.deepEqual(result.body.activePlans, []);
+  assert.equal((result.body.displayState as { state?: string }).state, "no_active_plans");
 });
 
 test("mobile Performance options, preview, and create let a user create only their own plan", async () => {
@@ -709,13 +729,26 @@ test("mobile Performance options, preview, and create let a user create only the
 
   const current = await getCurrentPerformance("user_empty", "token_empty");
   assert.equal(current.status, 200);
-  assert.equal((current.body.plan as { userId?: string } | null)?.userId, "user_empty");
+  assert.equal(((current.body.activePlans as Array<{ plan?: { userId?: string } }>)[0]?.plan?.userId), "user_empty");
 
   const duplicate = await mobileRequest("/mobile/users/user_empty/performance/plans", "token_empty", {
     method: "POST",
     body: JSON.stringify(requestBody)
   });
   assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.code, "performance_plan_duplicate_active_definition");
+
+  const distinct = await mobileRequest("/mobile/users/user_empty/performance/plans", "token_empty", {
+    method: "POST",
+    body: JSON.stringify({
+      ...requestBody,
+      startDate: "2099-09-02",
+      endDate: "2099-10-02"
+    })
+  });
+  assert.equal(distinct.status, 201);
+  const multipleCurrent = await getCurrentPerformance("user_empty", "token_empty");
+  assert.equal((multipleCurrent.body.activePlans as unknown[]).length, 2);
 
   const spoofed = await mobileRequest("/mobile/users/user_empty/performance/preview", "token_empty", {
     method: "POST",
@@ -818,8 +851,8 @@ test("GET /mobile/users/:userId/performance/current finalizes an expired active 
 
   assert.equal(first.status, 200);
   assert.equal(second.status, 200);
-  assert.equal(first.body.plan, null);
-  assert.equal(second.body.plan, null);
+  assert.deepEqual(first.body.activePlans, []);
+  assert.deepEqual(second.body.activePlans, []);
 
   const finalized = await planStore.getPlanById("perf_plan_expired");
   assert.equal(finalized?.plan.status, "completed");
@@ -836,10 +869,9 @@ test("mobile Performance history and detail return only the authenticated user's
   const detail = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_current", "token_current");
   assert.equal(detail.status, 200);
   assert.equal((detail.body.plan as { id?: string }).id, "perf_plan_current");
-  assert.deepEqual(
-    (detail.body.auditEvents as Array<{ actorId?: string | null }>).map((event) => event.actorId),
-    [null]
-  );
+  const auditEvents = detail.body.auditEvents as Array<{ actorLabel?: string; actorRoleLabel?: string; actorId?: string }>;
+  assert.deepEqual(auditEvents.map((event) => event.actorLabel), ["your manager"]);
+  assert.equal(auditEvents.some((event) => "actorId" in event), false);
 
   const crossUser = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_current", "token_other");
   assert.equal(crossUser.status, 401);
@@ -878,6 +910,7 @@ test("dashboard Performance workspace lists scoped users and Focus Topic candida
   const result = await dashboardRequest("/dashboard/performance");
 
   assert.equal(result.status, 200);
+  assert.equal(result.body.scopeMode, "organization");
   assert.equal(result.body.defaultTimeZone, "UTC");
   const users = result.body.users as Array<{
     userId?: string;
@@ -893,6 +926,59 @@ test("dashboard Performance workspace lists scoped users and Focus Topic candida
   assert.equal(managedUser.assignableFocusTopics?.some((topic) => topic.name === "Manager Coaching"), true);
   assert.equal(managedUser.assignableScenarios?.some((scenario) => scenario.scenarioId === "custom_1"), true);
   assert.equal(users.some((user) => user.userId === "user_inactive"), false);
+});
+
+test("dashboard Performance super user sees a grouped portfolio instead of mixed plan rows", async () => {
+  const result = await dashboardRequest("/dashboard/performance", undefined, platformDashboardToken);
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.scopeMode, "portfolio");
+  assert.deepEqual(result.body.plans, []);
+  assert.deepEqual(result.body.users, []);
+  const summaries = result.body.organizationSummaries as Array<{ orgId?: string; activePlanCount?: number; visibleUserCount?: number }>;
+  assert.equal(summaries.some((summary) => summary.orgId === "org_1" && (summary.activePlanCount ?? 0) >= 1), true);
+  assert.equal(summaries.some((summary) => summary.orgId === "org_2"), true);
+});
+
+test("dashboard Performance super user manages selected company plans with platform-admin audit", async () => {
+  const workspace = await dashboardRequest("/dashboard/performance?orgId=org_1", undefined, platformDashboardToken);
+  assert.equal(workspace.status, 200);
+  assert.equal(workspace.body.scopeMode, "organization");
+  assert.deepEqual(workspace.body.selectedOrg, { orgId: "org_1", orgName: "Acme Learning" });
+  assert.equal((workspace.body.plans as Array<{ plan?: { orgId?: string } }>).every((row) => row.plan?.orgId === "org_1"), true);
+
+  const created = await dashboardRequest("/dashboard/performance/plans", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({ userId: "user_platform_target" }))
+  }, platformDashboardToken);
+  assert.equal(created.status, 201);
+  const planId = (created.body.plan as { id?: string }).id;
+  assert.ok(planId);
+
+  const updated = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "user_platform_target",
+      activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 4 }
+    }))
+  }, platformDashboardToken);
+  assert.equal(updated.status, 200);
+
+  const detail = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, undefined, platformDashboardToken);
+  assert.equal(detail.status, 200);
+  const auditEvents = detail.body.auditEvents as Array<{ actorLabel?: string; actorRoleLabel?: string; actorId?: string }>;
+  assert.equal(auditEvents.some((event) => event.actorLabel === "platform-admin@peritio.ai" && event.actorRoleLabel === "Peritio administrator"), true);
+  assert.equal(auditEvents.some((event) => "actorId" in event), false);
+
+  const stored = await planStore.getPlanById(planId);
+  assert.equal(stored?.auditEvents.some((event) => event.actorType === "platform_admin" && event.actorId === "platform_admin"), true);
+
+  const cancelled = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ reason: "Platform review complete." })
+  }, platformDashboardToken);
+  assert.equal(cancelled.status, 200);
+  assert.equal(cancelled.body.cancelled, true);
 });
 
 test("dashboard Performance preview validates a plan before creation", async () => {
@@ -1071,6 +1157,63 @@ test("dashboard Performance preview and create still work for authorized active 
   assert.equal((created.body.plan as { status?: string }).status, "active");
 });
 
+test("dashboard Performance concurrent identical creates return one success and one structured duplicate", async () => {
+  const input = buildCreatePlanRequest({
+    userId: "user_concurrent_duplicate",
+    startDate: "2099-11-01",
+    endDate: "2099-12-01"
+  });
+
+  const [first, second] = await Promise.all([
+    dashboardRequest("/dashboard/performance/plans", {
+      method: "POST",
+      body: JSON.stringify(input)
+    }),
+    dashboardRequest("/dashboard/performance/plans", {
+      method: "POST",
+      body: JSON.stringify(input)
+    })
+  ]);
+
+  assert.deepEqual([first.status, second.status].sort(), [201, 409]);
+  const duplicate = [first, second].find((result) => result.status === 409);
+  assert.equal(duplicate?.body.error, "An identical active Performance plan already exists for this user.");
+  assert.equal(duplicate?.body.code, "performance_plan_duplicate_active_definition");
+  const userPlans = await planStore.listPlansForUser("org_1", "user_concurrent_duplicate");
+  assert.equal(userPlans.filter((entry) => entry.plan.status === "active").length, 1);
+});
+
+test("dashboard Performance concurrent different creates both succeed for one user", async () => {
+  const firstInput = buildCreatePlanRequest({
+    userId: "user_concurrent_distinct",
+    startDate: "2099-11-05",
+    endDate: "2099-12-05",
+    activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 2 }
+  });
+  const secondInput = buildCreatePlanRequest({
+    userId: "user_concurrent_distinct",
+    startDate: "2099-11-05",
+    endDate: "2099-12-05",
+    activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 3 }
+  });
+
+  const [first, second] = await Promise.all([
+    dashboardRequest("/dashboard/performance/plans", {
+      method: "POST",
+      body: JSON.stringify(firstInput)
+    }),
+    dashboardRequest("/dashboard/performance/plans", {
+      method: "POST",
+      body: JSON.stringify(secondInput)
+    })
+  ]);
+
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 201);
+  const userPlans = await planStore.listPlansForUser("org_1", "user_concurrent_distinct");
+  assert.equal(userPlans.filter((entry) => entry.plan.status === "active").length, 2);
+});
+
 test("dashboard Performance write routes require plan-management access", async () => {
   const workspace = await dashboardRequest("/dashboard/performance", undefined, dashboardViewerToken);
   assert.equal(workspace.status, 200);
@@ -1212,6 +1355,25 @@ test("dashboard Performance managers can edit active plans without changing the 
   assert.equal(loaded?.scopeItems.length, 1);
   assert.equal(loaded?.scopeItems[0].scenarioId, "custom_1");
 
+  const second = await dashboardRequest("/dashboard/performance/plans", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "user_edit",
+      startDate: "2099-12-01",
+      endDate: "2100-01-01",
+      activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 7 }
+    }))
+  });
+  assert.equal(second.status, 201);
+  const secondPlanId = (second.body.plan as { id?: string }).id;
+  assert.ok(secondPlanId);
+  const duplicateEdit = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(secondPlanId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(updatedRequest)
+  });
+  assert.equal(duplicateEdit.status, 409);
+  assert.equal(duplicateEdit.body.code, "performance_plan_duplicate_active_definition");
+
   const spoofed = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
     method: "PATCH",
     body: JSON.stringify({ ...updatedRequest, userId: "user_other" })
@@ -1342,6 +1504,16 @@ test("dashboard Performance create, detail, duplicate protection, and cancel wor
     body: JSON.stringify(buildCreatePlanRequest())
   });
   assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.code, "performance_plan_duplicate_active_definition");
+
+  const distinct = await dashboardRequest("/dashboard/performance/plans", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({
+      startDate: "2099-07-21",
+      endDate: "2099-08-21"
+    }))
+  });
+  assert.equal(distinct.status, 201);
 
   const detail = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(createdPlan.id!)}`);
   assert.equal(detail.status, 200);

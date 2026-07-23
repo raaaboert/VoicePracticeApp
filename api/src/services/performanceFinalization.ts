@@ -120,17 +120,36 @@ export async function finalizeOpenPerformancePlanForUserIfNeeded(params: {
   scoreRecords: SimulationScoreRecord[];
   now: Date;
 }): Promise<PerformancePlanWithRelations | null> {
-  const open = await params.store.getOpenPlanForUser(params.orgId, params.userId);
-  if (!open) {
-    return null;
+  const finalized = await finalizeOpenPerformancePlansForUserIfNeeded(params);
+  return finalized[0] ?? null;
+}
+
+export async function finalizeOpenPerformancePlansForUserIfNeeded(params: {
+  store: PerformancePlanStore;
+  orgId: string;
+  userId: string;
+  usageSessions: UsageSessionRecord[];
+  scoreRecords: SimulationScoreRecord[];
+  now: Date;
+}): Promise<PerformancePlanWithRelations[]> {
+  const plans = (await params.store.listPlansForUser(params.orgId, params.userId)).filter((entry) => entry.plan.status === "active");
+  if (plans.length === 0) {
+    return [];
   }
-  return await finalizePerformancePlanIfEnded({
-    store: params.store,
-    plan: open.plan,
-    usageSessions: params.usageSessions,
-    scoreRecords: params.scoreRecords,
-    now: params.now
-  });
+  const finalized: PerformancePlanWithRelations[] = [];
+  for (const plan of plans) {
+    const materialized = await finalizePerformancePlanIfEnded({
+      store: params.store,
+      plan: plan.plan,
+      usageSessions: params.usageSessions,
+      scoreRecords: params.scoreRecords,
+      now: params.now
+    });
+    if (materialized) {
+      finalized.push(materialized);
+    }
+  }
+  return finalized;
 }
 
 function buildPerformanceFinalizationAuditEvent(params: {

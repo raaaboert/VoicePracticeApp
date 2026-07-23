@@ -131,6 +131,12 @@ function getRemainingDays(plan: PerformancePlan): number | null {
   return getRemainingPerformancePlanDays(plan.endDate);
 }
 
+function getMobilePlanAttribution(plan: PerformancePlan, userId: string): string {
+  return plan.createdByActorType === "mobile_user" && plan.createdByActorId === userId
+    ? "Created by you"
+    : "Assigned by your manager";
+}
+
 function progressRatio(actual: number, target: number): number {
   if (!Number.isFinite(actual) || !Number.isFinite(target) || target <= 0) {
     return 0;
@@ -149,10 +155,12 @@ function ProgressBar({ ratio }: { ratio: number }) {
 function PlanSummaryCard({
   plan,
   progress,
+  attribution,
   onOpen,
 }: {
   plan: PerformancePlan;
   progress: PerformanceProgress | null;
+  attribution?: string;
   onOpen?: () => void;
 }) {
   const focusTopics = getFocusTopicNames(plan);
@@ -179,6 +187,7 @@ function PlanSummaryCard({
       <Text style={styles.body}>
         Scope: {plan.scope.scenarios.map((scenario) => scenario.displayName).join(", ")}
       </Text>
+      {attribution ? <Text style={styles.subtle}>{attribution}</Text> : null}
 
       {plan.baseline ? (
         <Text style={styles.body}>
@@ -605,7 +614,7 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
     [authToken, userId],
   );
 
-  const currentPlan = current?.plan ?? null;
+  const activePlans = current?.activePlans ?? [];
   const historyPlans = useMemo(() => history?.plans ?? [], [history]);
   const handleCreated = useCallback(async () => {
     setShowCreateForm(false);
@@ -637,20 +646,26 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
             </View>
           ) : null}
 
-          {currentPlan && current?.progress ? (
-            <PlanSummaryCard plan={currentPlan} progress={current.progress} onOpen={() => { void openPlan(currentPlan.id); }} />
-          ) : (
-            <View style={styles.card}>
-              <Text style={styles.eyebrow}>Current Plan</Text>
-              <Text style={styles.title}>No active Performance plan</Text>
-              <Text style={styles.body}>Create a plan for your next Focus Topic when you are ready.</Text>
-              <Pressable style={styles.primaryButton} onPress={() => setShowCreateForm(true)}>
-                <Text style={styles.primaryButtonText}>Create Plan</Text>
-              </Pressable>
-            </View>
-          )}
+          <View style={styles.card}>
+            <Text style={styles.eyebrow}>Active Plans</Text>
+            <Text style={styles.title}>{activePlans.length === 0 ? "No active Performance plans" : `${activePlans.length} active plan${activePlans.length === 1 ? "" : "s"}`}</Text>
+            <Text style={styles.body}>Create a plan for your next Focus Topic when you are ready.</Text>
+            <Pressable style={styles.primaryButton} onPress={() => setShowCreateForm(true)}>
+              <Text style={styles.primaryButtonText}>Create Performance Plan</Text>
+            </Pressable>
+          </View>
 
-          {showCreateForm && !currentPlan ? (
+          {activePlans.map((summary) => (
+            <PlanSummaryCard
+              key={summary.plan.id}
+              plan={summary.plan}
+              progress={summary.progress}
+              attribution={getMobilePlanAttribution(summary.plan, userId)}
+              onOpen={() => { void openPlan(summary.plan.id); }}
+            />
+          ))}
+
+          {showCreateForm ? (
             <PerformanceCreateForm
               userId={userId}
               options={options}
@@ -660,22 +675,23 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
             />
           ) : null}
 
-          {current?.insights.length ? (
-            <View style={styles.card}>
-              <Text style={styles.eyebrow}>Insights</Text>
-              {current.insights.map((insight, index) => (
-                <View key={`${insight.status}_${index}`} style={styles.insightRow}>
-                  <Text style={styles.metricLabel}>{insight.status.replace(/_/g, " ")}</Text>
-                  <Text style={styles.body}>{insight.message}</Text>
-                  <Text style={styles.subtle}>{insight.recommendedNextStep}</Text>
-                </View>
-              ))}
-            </View>
-          ) : null}
-
           {detail ? (
             <>
-              <PlanSummaryCard plan={detail.plan} progress={detail.progress} />
+              <PlanSummaryCard
+                plan={detail.plan}
+                progress={detail.progress}
+                attribution={getMobilePlanAttribution(detail.plan, userId)}
+              />
+              {detail.auditEvents.length > 0 ? (
+                <View style={styles.card}>
+                  <Text style={styles.eyebrow}>Activity</Text>
+                  {detail.auditEvents.slice(-3).map((event) => (
+                    <Text key={event.id} style={styles.body}>
+                      {event.actionLabel} by {event.actorLabel}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
               <FinalResultBlock plan={detail.plan} />
             </>
           ) : null}
@@ -690,6 +706,7 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
                   key={row.plan.id}
                   plan={row.plan}
                   progress={row.progress}
+                  attribution={getMobilePlanAttribution(row.plan, userId)}
                   onOpen={() => { void openPlan(row.plan.id); }}
                 />
               ))

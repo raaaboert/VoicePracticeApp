@@ -676,6 +676,17 @@ export interface PerformanceAuditEvent {
   createdAt: string;
 }
 
+export interface PerformanceAuditDisplayEvent {
+  id: string;
+  action: string;
+  actionLabel: string;
+  actorLabel: string;
+  actorRoleLabel: string;
+  actorEmail: string | null;
+  occurredAt: string;
+  reason: string | null;
+}
+
 export interface PerformanceScopeSelectionRequest {
   allAssignedScenarios: boolean;
   selectedFocusTopicIds: string[];
@@ -760,23 +771,21 @@ export interface CancelPerformancePlanResponse {
 
 export type MobilePerformanceCurrentDisplayState =
   | {
-      state: "no_active_plan";
-      planId: null;
-      planStatus: "none";
-      overallCurrentlyMeetingTarget: null;
+      state: "no_active_plans";
+      activePlanCount: 0;
+      activeNeedsAttentionCount: 0;
+      activeCollectingEvidenceCount: 0;
     }
   | {
-      state: "active_collecting_evidence" | "active_on_track" | "active_needs_attention";
-      planId: string;
-      planStatus: "active";
-      overallCurrentlyMeetingTarget: boolean;
+      state: "active_plans_collecting_evidence" | "active_plans_on_track" | "active_plans_need_attention";
+      activePlanCount: number;
+      activeNeedsAttentionCount: number;
+      activeCollectingEvidenceCount: number;
     };
 
 export interface MobilePerformanceCurrentResponse {
   generatedAt: string;
-  plan: PerformancePlan | null;
-  progress: PerformanceProgress | null;
-  insights: PerformanceInsight[];
+  activePlans: PerformancePlanSummary[];
   displayState: MobilePerformanceCurrentDisplayState;
 }
 
@@ -803,7 +812,7 @@ export interface MobilePerformancePlanDetailResponse {
   plan: PerformancePlan;
   progress: PerformanceProgress | null;
   insights: PerformanceInsight[];
-  auditEvents: PerformanceAuditEvent[];
+  auditEvents: PerformanceAuditDisplayEvent[];
 }
 
 export interface DashboardPerformanceUserOption {
@@ -816,7 +825,7 @@ export interface DashboardPerformanceUserOption {
   divisionName: string | null;
   status: UserStatus;
   orgRole: OrgUserRole;
-  activePlanId: string | null;
+  activePlanCount: number;
   canManagePerformancePlans: boolean;
   assignableFocusTopics: PerformanceAssignableFocusTopic[];
   assignableScenarios: PerformanceAssignableScenario[];
@@ -846,6 +855,15 @@ export interface DashboardPerformanceSummary {
 export interface DashboardPerformanceWorkspaceResponse {
   viewer: DashboardViewer;
   generatedAt: string;
+  scopeMode: "portfolio" | "organization";
+  selectedOrg: { orgId: string; orgName: string } | null;
+  organizationSummaries: Array<{
+    orgId: string;
+    orgName: string;
+    activePlanCount: number;
+    activeNeedsAttentionCount: number;
+    visibleUserCount: number;
+  }>;
   defaultTimeZone: string;
   summary: DashboardPerformanceSummary;
   users: DashboardPerformanceUserOption[];
@@ -857,7 +875,7 @@ export interface DashboardPerformancePlanDetailResponse {
   viewer: DashboardViewer;
   generatedAt: string;
   plan: DashboardPerformancePlanRow;
-  auditEvents: PerformanceAuditEvent[];
+  auditEvents: PerformanceAuditDisplayEvent[];
 }
 
 export type SupportCaseStatus = "open" | "closed";

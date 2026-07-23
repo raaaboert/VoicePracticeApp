@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type {
@@ -67,6 +68,14 @@ function getFocusTopicLabel(plan: PerformancePlan): string {
     }
   }
   return Array.from(names).sort().join(", ") || "Assigned Focus Topic";
+}
+
+function formatActivityMetricLabel(metricType: PerformanceActivityMetricType | null): string {
+  return ACTIVITY_METRICS.find((metric) => metric.value === metricType)?.label ?? "Activity";
+}
+
+function formatPerformanceMetricLabel(metricType: PerformanceGoalMetricType | null): string {
+  return PERFORMANCE_METRICS.find((metric) => metric.value === metricType)?.label ?? "Performance";
 }
 
 async function postJson<T>(pathname: string, body: unknown): Promise<T> {
@@ -154,6 +163,64 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   const historicalPlans = workspace.plans.filter((row) => row.plan.status !== "active");
   const canManageSelectedUser = selectedUser?.canManagePerformancePlans === true;
   const isEditing = editingPlanId !== null;
+
+  if (workspace.scopeMode === "portfolio") {
+    return (
+      <div className="performance-stack">
+        <section className="metric-grid">
+          <div className="metric-card">
+            <p className="metric-label">Visible users</p>
+            <strong className="metric-value">{workspace.summary.visibleUserCount}</strong>
+            <p className="metric-meta">Across customer accounts</p>
+          </div>
+          <div className="metric-card accent">
+            <p className="metric-label">Active plans</p>
+            <strong className="metric-value">{workspace.summary.activePlanCount}</strong>
+            <p className="metric-meta">Across customer accounts</p>
+          </div>
+          <div className="metric-card warm">
+            <p className="metric-label">Needs attention</p>
+            <strong className="metric-value">{workspace.summary.activeNeedsAttentionCount}</strong>
+            <p className="metric-meta">Open the company workspace to review details</p>
+          </div>
+        </section>
+
+        <section className="section-card">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Portfolio</p>
+              <h2>Customer Performance workspaces</h2>
+              <p className="section-copy">Choose a company before creating, editing, or reviewing detailed Performance plans.</p>
+            </div>
+          </div>
+          <div className="info-grid">
+            {workspace.organizationSummaries.map((org) => (
+              <article key={org.orgId} className="detail-card">
+                <h3>{org.orgName}</h3>
+                <dl className="inline-stats">
+                  <div>
+                    <dt>Active plans</dt>
+                    <dd>{org.activePlanCount}</dd>
+                  </div>
+                  <div>
+                    <dt>Needs attention</dt>
+                    <dd>{org.activeNeedsAttentionCount}</dd>
+                  </div>
+                  <div>
+                    <dt>Visible users</dt>
+                    <dd>{org.visibleUserCount}</dd>
+                  </div>
+                </dl>
+                <Link className="inline-link" href={`/app/customers/${encodeURIComponent(org.orgId)}/performance`}>
+                  View company performance
+                </Link>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   const clearPreview = () => {
     setPreview(null);
@@ -351,7 +418,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
               }}>
                 {workspace.users.map((user) => (
                   <option key={user.userId} value={user.userId}>
-                    {user.email} - {user.orgName}
+                    {user.email} - {user.orgName} ({user.activePlanCount} active)
                   </option>
                 ))}
               </select>
@@ -513,7 +580,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
                 type="button"
                 className="primary-button"
                 onClick={() => { void savePlan(); }}
-                disabled={isSaving || isPreviewing || (!isEditing && Boolean(selectedUser?.activePlanId)) || !canManageSelectedUser}
+                disabled={isSaving || isPreviewing || !canManageSelectedUser}
               >
                 {isSaving ? "Saving..." : isEditing ? "Save Changes" : "Create Plan"}
               </button>
@@ -522,7 +589,6 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
                   Cancel Edit
                 </button>
               ) : null}
-              {!isEditing && selectedUser?.activePlanId ? <span className="pill">User already has an active plan</span> : null}
               {selectedUser && !canManageSelectedUser ? <span className="pill">Management access required</span> : null}
             </div>
           </div>
@@ -601,10 +667,10 @@ function PlanDetailPanel({ detail }: { detail: DashboardPerformancePlanDetailRes
           Scope: {plan.scope.scenarios.map((scenario) => scenario.displayName).join(", ")}
         </p>
         <p className="small-copy">
-          Activity: {plan.activityGoal.enabled ? `${plan.activityGoal.metricType} target ${formatNumber(plan.activityGoal.targetValue)}` : "None"}
+          Activity: {plan.activityGoal.enabled ? `${formatActivityMetricLabel(plan.activityGoal.metricType)} target ${formatNumber(plan.activityGoal.targetValue)}` : "None"}
         </p>
         <p className="small-copy">
-          Performance: {plan.performanceGoal.enabled ? `${plan.performanceGoal.metricType} target ${formatNumber(plan.performanceGoal.targetScore ?? plan.performanceGoal.improvementAmount)}` : "None"}
+          Performance: {plan.performanceGoal.enabled ? `${formatPerformanceMetricLabel(plan.performanceGoal.metricType)} target ${formatNumber(plan.performanceGoal.targetScore ?? plan.performanceGoal.improvementAmount)}` : "None"}
         </p>
         {plan.baseline ? (
           <p className="small-copy">
@@ -639,6 +705,7 @@ function PlanDetailPanel({ detail }: { detail: DashboardPerformancePlanDetailRes
             <tr>
               <th>Audit action</th>
               <th>Actor</th>
+              <th>Role</th>
               <th>Reason</th>
               <th>At</th>
             </tr>
@@ -646,10 +713,11 @@ function PlanDetailPanel({ detail }: { detail: DashboardPerformancePlanDetailRes
           <tbody>
             {detail.auditEvents.map((event) => (
               <tr key={event.id}>
-                <td>{event.action}</td>
-                <td>{event.actorType}{event.actorId ? ` | ${event.actorId}` : ""}</td>
+                <td>{event.actionLabel}</td>
+                <td>{event.actorLabel}</td>
+                <td>{event.actorRoleLabel}</td>
                 <td>{event.reason ?? "-"}</td>
-                <td>{formatDate(event.createdAt)}</td>
+                <td>{formatDate(event.occurredAt)}</td>
               </tr>
             ))}
           </tbody>

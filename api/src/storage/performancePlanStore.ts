@@ -1,5 +1,6 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import { Pool, PoolClient } from "pg";
 
 import {
@@ -130,6 +131,7 @@ interface PerformancePlanRow {
   scope_snapshot: unknown;
   baseline_snapshot: unknown;
   final_result_snapshot: unknown;
+  definition_signature: string | null;
   updated_at: string | Date;
 }
 
@@ -171,6 +173,7 @@ const ACTIVITY_METRIC_SET = new Set<PerformanceActivityMetricType>(PERFORMANCE_A
 const PERFORMANCE_METRIC_SET = new Set<PerformanceGoalMetricType>(PERFORMANCE_GOAL_METRIC_TYPES);
 const SCENARIO_SOURCE_SET = new Set<PerformanceScenarioSource>(PERFORMANCE_SCENARIO_SOURCES);
 const SCOPE_SELECTION_SOURCE_SET = new Set<PerformanceScopeSelectionSource>(PERFORMANCE_SCOPE_SELECTION_SOURCES);
+const DUPLICATE_ACTIVE_PLAN_MESSAGE = "An identical active Performance plan already exists for this user.";
 
 function buildPerformancePlanFilePath(dbPath: string): string {
   const parsed = path.parse(dbPath);
@@ -180,6 +183,42 @@ function buildPerformancePlanFilePath(dbPath: string): string {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function buildPerformancePlanDefinitionSignature(plan: PerformancePlan): string {
+  const definition = {
+    orgId: plan.orgId,
+    userId: plan.userId,
+    startDate: plan.startDate,
+    endDate: plan.endDate,
+    timeZone: plan.timeZone,
+    activityGoal: {
+      enabled: plan.activityGoal.enabled === true,
+      metricType: plan.activityGoal.metricType ?? null,
+      targetValue: normalizeSignatureNumber(plan.activityGoal.targetValue)
+    },
+    performanceGoal: {
+      enabled: plan.performanceGoal.enabled === true,
+      metricType: plan.performanceGoal.metricType ?? null,
+      targetScore: normalizeSignatureNumber(plan.performanceGoal.targetScore),
+      improvementAmount: normalizeSignatureNumber(plan.performanceGoal.improvementAmount),
+      comparisonMonthCount: normalizeSignatureNumber(plan.performanceGoal.comparisonMonthCount)
+    },
+    scope: {
+      allAssignedScenarios: plan.scope.allAssignedScenarios === true,
+      selectedFocusTopicIds: [...plan.scope.selectedFocusTopicIds].sort(),
+      selectedScenarioIds: [...plan.scope.selectedScenarioIds].sort(),
+      scenarioIds: plan.scope.scenarios.map((scenario) => scenario.scenarioId).sort()
+    }
+  };
+  return createHash("sha256").update(JSON.stringify(definition)).digest("hex");
+}
+
+function normalizeSignatureNumber(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Number(value.toFixed(6));
 }
 
 function normalizeNullableString(value: unknown): string | null {
@@ -703,8 +742,14 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
       if (payload.plans.some((plan) => plan.id === normalized.plan.id)) {
         throw new Error("Performance plan already exists.");
       }
-      if (payload.plans.some((plan) => plan.orgId === normalized.plan.orgId && plan.userId === normalized.plan.userId && plan.status === "active")) {
-        throw new Error("An active Performance plan already exists for this user.");
+      const signature = buildPerformancePlanDefinitionSignature(normalized.plan);
+      if (payload.plans.some((plan) =>
+        plan.orgId === normalized.plan.orgId &&
+        plan.userId === normalized.plan.userId &&
+        plan.status === "active" &&
+        buildPerformancePlanDefinitionSignature(plan) === signature
+      )) {
+        throw new Error(DUPLICATE_ACTIVE_PLAN_MESSAGE);
       }
 
       const next = normalizePayload({
@@ -730,6 +775,16 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
       }
       if (existing.orgId !== normalized.plan.orgId || existing.userId !== normalized.plan.userId) {
         throw new Error("Performance plan identity cannot be changed.");
+      }
+      const signature = buildPerformancePlanDefinitionSignature(normalized.plan);
+      if (payload.plans.some((plan) =>
+        plan.id !== existing.id &&
+        plan.orgId === normalized.plan.orgId &&
+        plan.userId === normalized.plan.userId &&
+        plan.status === "active" &&
+        buildPerformancePlanDefinitionSignature(plan) === signature
+      )) {
+        throw new Error(DUPLICATE_ACTIVE_PLAN_MESSAGE);
       }
 
       const next = normalizePayload({
@@ -971,7 +1026,7 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
     } catch (error) {
       await client.query("ROLLBACK");
       if ((error as { code?: string } | null)?.code === "23505") {
-        throw new Error("An active Performance plan already exists for this user.");
+        throw new Error(DUPLICATE_ACTIVE_PLAN_MESSAGE);
       }
       throw error;
     } finally {
@@ -1020,7 +1075,8 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
               selected_scenario_ids = $20::jsonb,
               scope_snapshot = $21::jsonb,
               baseline_snapshot = $22::jsonb,
-              updated_at = $23::timestamptz
+              definition_signature = $23,
+              updated_at = $24::timestamptz
           WHERE id = $1 AND status = 'active'
           RETURNING *
         `,
@@ -1047,6 +1103,7 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
           JSON.stringify(normalized.plan.scope.selectedScenarioIds),
           JSON.stringify(normalized.plan.scope),
           JSON.stringify(normalized.plan.baseline),
+          buildPerformancePlanDefinitionSignature(normalized.plan),
           normalized.plan.updatedAt
         ]
       );
@@ -1063,6 +1120,9 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
       return await this.getPlanById(normalized.plan.id);
     } catch (error) {
       await client.query("ROLLBACK");
+      if ((error as { code?: string } | null)?.code === "23505") {
+        throw new Error(DUPLICATE_ACTIVE_PLAN_MESSAGE);
+      }
       throw error;
     } finally {
       client.release();
@@ -1295,12 +1355,13 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
               scope_snapshot JSONB NOT NULL,
               baseline_snapshot JSONB NULL,
               final_result_snapshot JSONB NULL,
+              definition_signature TEXT NULL,
               updated_at TIMESTAMPTZ NOT NULL
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_per_user_idx
-              ON performance_plans (org_id, user_id)
-              WHERE status = 'active';
+            ALTER TABLE performance_plans
+              ADD COLUMN IF NOT EXISTS definition_signature TEXT NULL;
+
             CREATE INDEX IF NOT EXISTS performance_plans_org_user_status_idx
               ON performance_plans (org_id, user_id, status);
             CREATE INDEX IF NOT EXISTS performance_plans_user_dates_idx
@@ -1360,9 +1421,36 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
               ON score_records (org_id, user_id, scenario_id, ended_at DESC);
           `
         )
+        .then(async () => {
+          await this.backfillDefinitionSignatures();
+          await this.pool.query(
+            `
+              CREATE UNIQUE INDEX IF NOT EXISTS performance_plans_one_active_definition_idx
+                ON performance_plans (org_id, user_id, definition_signature)
+                WHERE status = 'active' AND definition_signature IS NOT NULL
+            `
+          );
+          await this.pool.query("DROP INDEX IF EXISTS performance_plans_one_active_per_user_idx");
+        })
         .then(() => undefined);
     }
     await this.ensureTablePromise;
+  }
+
+  private async backfillDefinitionSignatures(): Promise<void> {
+    const result = await this.pool.query<PerformancePlanRow>(
+      "SELECT * FROM performance_plans WHERE definition_signature IS NULL"
+    );
+    for (const row of result.rows) {
+      const plan = mapPlanRow(row);
+      if (!plan) {
+        throw new Error("Unable to backfill Performance plan definition signature.");
+      }
+      await this.pool.query(
+        "UPDATE performance_plans SET definition_signature = $2 WHERE id = $1 AND definition_signature IS NULL",
+        [plan.id, buildPerformancePlanDefinitionSignature(plan)]
+      );
+    }
   }
 }
 
@@ -1485,6 +1573,7 @@ async function insertPlanRow(client: Pick<PoolClient, "query"> | Pick<Pool, "que
         scope_snapshot,
         baseline_snapshot,
         final_result_snapshot,
+        definition_signature,
         updated_at
       )
       VALUES (
@@ -1492,7 +1581,7 @@ async function insertPlanRow(client: Pick<PoolClient, "query"> | Pick<Pool, "que
         $9::date, $10::date, $11, $12, $13::timestamptz, $14::timestamptz, $15, $16, $17,
         $18, $19, $20, $21, $22, $23, $24, $25, $26::timestamptz, $27::timestamptz,
         $28, $29, $30, $31, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb,
-        $37::timestamptz
+        $37, $38::timestamptz
       )
     `,
     [
@@ -1532,6 +1621,7 @@ async function insertPlanRow(client: Pick<PoolClient, "query"> | Pick<Pool, "que
       JSON.stringify(plan.scope),
       JSON.stringify(plan.baseline),
       JSON.stringify(plan.finalResult),
+      buildPerformancePlanDefinitionSignature(plan),
       plan.updatedAt
     ]
   );

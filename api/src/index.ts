@@ -8,6 +8,7 @@ import multer from "multer";
 import {
   ACCOUNT_TYPES,
   AUDIT_ACTOR_TYPES,
+  AuditActorType,
   AuditEvent,
   ApiDatabase,
   AiUsageEvent,
@@ -262,7 +263,7 @@ import {
   updatePerformancePlanFromInput,
   type PerformancePlanUserContext
 } from "./services/performanceApi.js";
-import { finalizeOpenPerformancePlanForUserIfNeeded } from "./services/performanceFinalization.js";
+import { finalizeOpenPerformancePlansForUserIfNeeded } from "./services/performanceFinalization.js";
 import type { PerformanceScopeCandidate } from "./services/performanceScope.js";
 import {
   pruneStaleRecognizedSimulationSessions,
@@ -5765,6 +5766,17 @@ function canManagePerformancePlanForUser(actor: UserProfile, viewer: DashboardVi
   return false;
 }
 
+function resolvePerformanceDashboardAuditActorType(viewer: DashboardViewer): AuditActorType {
+  return viewer.accessType === "super_user" ? "platform_admin" : "web_user";
+}
+
+const PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE = "An identical active Performance plan already exists for this user.";
+const PERFORMANCE_DUPLICATE_ACTIVE_PLAN_CODE = "performance_plan_duplicate_active_definition";
+
+function isDuplicatePerformancePlanError(error: unknown): boolean {
+  return error instanceof Error && error.message === PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE;
+}
+
 function normalizeCancelReason(body: CancelPerformancePlanRequest): string | null {
   if (typeof body.reason !== "string") {
     return null;
@@ -9925,10 +9937,48 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
   await withFreshReportingWrite(async (db) => {
     const requestedOrgId = getSingleQueryParam(request.query.orgId);
     if (requestedOrgId && !canDashboardViewerAccessOrg(request.dashboard!.viewer, requestedOrgId)) {
-      response.status(403).json({
-        error: "You do not have access to this customer account.",
-        code: "dashboard_scope_denied",
+      response.status(404).json({ error: "Performance workspace not found." });
+      return;
+    }
+    if (request.dashboard!.viewer.accessType === "super_user" && !requestedOrgId) {
+      const orgs = listDashboardAccessibleOrgs(db, request.dashboard!.viewer);
+      const organizationSummaries = [];
+      for (const org of orgs) {
+        const users = await listDashboardPerformanceUserContexts(db, request.dashboard!.viewer, null, org.id);
+        const orgPayload = await buildDashboardPerformanceWorkspaceResponse({
+          store: performancePlanStore,
+          viewer: request.dashboard!.viewer,
+          users,
+          usageSessions: listUsageSessions(db).filter((session) => session.orgId === org.id),
+          scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId === org.id),
+          now: new Date(),
+          selectedOrg: { orgId: org.id, orgName: org.name },
+          canManageUser: (userContext) => {
+            const target = getUserById(db, userContext.userId);
+            return Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
+          }
+        });
+        organizationSummaries.push({
+          orgId: org.id,
+          orgName: org.name,
+          activePlanCount: orgPayload.summary.activePlanCount,
+          activeNeedsAttentionCount: orgPayload.summary.activeNeedsAttentionCount,
+          visibleUserCount: orgPayload.summary.visibleUserCount
+        });
+      }
+      const payload: DashboardPerformanceWorkspaceResponse = await buildDashboardPerformanceWorkspaceResponse({
+        store: performancePlanStore,
+        viewer: request.dashboard!.viewer,
+        users: [],
+        organizationSummaries,
+        scopeMode: "portfolio",
+        selectedOrg: null,
+        usageSessions: [],
+        scoreRecords: [],
+        now: new Date(),
+        canManageUser: () => false
       });
+      response.json(payload);
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
@@ -9959,6 +10009,15 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
       usageSessions: listUsageSessions(db).filter((session) => session.orgId && orgIds.has(session.orgId)),
       scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId && orgIds.has(record.orgId)),
       now: new Date(),
+      scopeMode: "organization",
+      selectedOrg: requestedOrgId
+        ? (() => {
+            const org = getOrgById(db, requestedOrgId);
+            return org ? { orgId: org.id, orgName: org.name } : null;
+          })()
+        : request.dashboard!.viewer.orgId && request.dashboard!.viewer.orgName
+          ? { orgId: request.dashboard!.viewer.orgId, orgName: request.dashboard!.viewer.orgName }
+          : null,
       divisionScope: divisionFilter.divisionScope,
       canManageUser: (userContext) => {
         const target = getUserById(db, userContext.userId);
@@ -10146,7 +10205,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
         });
         return;
       }
-      await finalizeOpenPerformancePlanForUserIfNeeded({
+      await finalizeOpenPerformancePlansForUserIfNeeded({
         store: performancePlanStore,
         orgId: userContext.orgId,
         userId: userContext.userId,
@@ -10163,7 +10222,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
         usageSessions,
         scoreRecords,
         now,
-        actorType: "web_user",
+        actorType: resolvePerformanceDashboardAuditActorType(request.dashboard!.viewer),
         actorId: request.dashboard!.viewer.userId
       });
       response.status(201).json(payload);
@@ -10172,9 +10231,8 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
         response.status(400).json({ error: error.message, errors: error.errors });
         return;
       }
-      const message = error instanceof Error ? error.message : "Could not create Performance plan.";
-      if (message.toLowerCase().includes("active performance plan")) {
-        response.status(409).json({ error: message });
+      if (isDuplicatePerformancePlanError(error)) {
+        response.status(409).json({ error: PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE, code: PERFORMANCE_DUPLICATE_ACTIVE_PLAN_CODE });
         return;
       }
       throw error;
@@ -10235,7 +10293,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       const now = new Date();
       const usageSessions = listUsageSessions(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId });
       const scoreRecords = listScoreRecords(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId, conclusiveOnly: true });
-      await finalizeOpenPerformancePlanForUserIfNeeded({
+      await finalizeOpenPerformancePlansForUserIfNeeded({
         store: performancePlanStore,
         orgId: loaded.plan.orgId,
         userId: loaded.plan.userId,
@@ -10271,13 +10329,17 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
         usageSessions,
         scoreRecords,
         now,
-        actorType: "web_user",
+        actorType: resolvePerformanceDashboardAuditActorType(request.dashboard!.viewer),
         actorId: request.dashboard!.viewer.userId
       });
       response.json(payload);
     } catch (error) {
       if (error instanceof PerformancePlanInputError) {
         response.status(400).json({ error: error.message, errors: error.errors });
+        return;
+      }
+      if (isDuplicatePerformancePlanError(error)) {
+        response.status(409).json({ error: PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE, code: PERFORMANCE_DUPLICATE_ACTIVE_PLAN_CODE });
         return;
       }
       throw error;
@@ -10313,7 +10375,12 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
       usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId }),
       scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId, conclusiveOnly: true }),
       now: new Date(),
-      includeAuditActorIds: true
+      auditDisplayContext: {
+        viewer: request.dashboard!.viewer.accessType === "super_user" ? "platform_admin" : "tenant_manager",
+        currentUserId: request.dashboard!.viewer.userId,
+        planOrgId: loaded.plan.orgId,
+        users: db.users
+      }
     });
     if (!detail) {
       response.status(404).json({ error: "Performance plan not found." });
@@ -10370,7 +10437,7 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
       usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId }),
       scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: loaded.plan.userId, conclusiveOnly: true }),
       now: new Date(),
-      actorType: "web_user",
+      actorType: resolvePerformanceDashboardAuditActorType(request.dashboard!.viewer),
       actorId: request.dashboard!.viewer.userId,
       reason: normalizeCancelReason(body)
     });
@@ -17165,7 +17232,7 @@ app.post("/mobile/users/:userId/performance/plans", async (request: Request, res
       const now = new Date();
       const usageSessions = listUsageSessions(db, { orgId: userContext.orgId, userId: userContext.userId });
       const scoreRecords = listScoreRecords(db, { orgId: userContext.orgId, userId: userContext.userId, conclusiveOnly: true });
-      await finalizeOpenPerformancePlanForUserIfNeeded({
+      await finalizeOpenPerformancePlansForUserIfNeeded({
         store: performancePlanStore,
         orgId: userContext.orgId,
         userId: userContext.userId,
@@ -17191,9 +17258,8 @@ app.post("/mobile/users/:userId/performance/plans", async (request: Request, res
         response.status(400).json({ error: error.message, errors: error.errors });
         return;
       }
-      const message = error instanceof Error ? error.message : "Could not create Performance plan.";
-      if (message.toLowerCase().includes("active performance plan")) {
-        response.status(409).json({ error: message });
+      if (isDuplicatePerformancePlanError(error)) {
+        response.status(409).json({ error: PERFORMANCE_DUPLICATE_ACTIVE_PLAN_MESSAGE, code: PERFORMANCE_DUPLICATE_ACTIVE_PLAN_CODE });
         return;
       }
       throw error;
@@ -17282,7 +17348,13 @@ app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Reque
       planId: loaded.plan.id,
       usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: user.id }),
       scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: user.id, conclusiveOnly: true }),
-      now: new Date()
+      now: new Date(),
+      auditDisplayContext: {
+        viewer: "mobile_user",
+        currentUserId: user.id,
+        planOrgId: loaded.plan.orgId,
+        users: db.users.filter((entry) => entry.id === user.id || entry.orgId === loaded.plan.orgId || entry.isSuperUser === true)
+      }
     });
     if (!payload) {
       response.status(404).json({ error: "Performance plan not found." });

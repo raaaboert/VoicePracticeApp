@@ -36,11 +36,15 @@ export default async function PerformancePage({
     <>
       <PageHeader
         eyebrow="Performance"
-        title="Performance plans"
-        description="Assign Focus Topic plans, track current progress, and review finalized results across your dashboard scope."
+        title={workspace.scopeMode === "portfolio" ? "Performance portfolio" : "Performance plans"}
+        description={
+          workspace.scopeMode === "portfolio"
+            ? "Select a customer account before reviewing or managing detailed Performance plans."
+            : `Assign Focus Topic plans, track current progress, and review finalized results${workspace.selectedOrg ? ` for ${workspace.selectedOrg.orgName}` : " across your dashboard scope"}.`
+        }
       />
 
-      <DashboardDivisionFilter divisionScope={workspace.divisionScope} />
+      {workspace.scopeMode === "organization" ? <DashboardDivisionFilter divisionScope={workspace.divisionScope} /> : null}
 
       <PerformanceWorkspace workspace={workspace} divisionId={divisionId} />
     </>

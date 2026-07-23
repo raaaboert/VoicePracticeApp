@@ -18,6 +18,7 @@ import {
   PerformanceAssignableFocusTopic,
   PerformanceAssignableScenario,
   PerformanceActivityGoal,
+  PerformanceAuditDisplayEvent,
   PerformanceAuditEvent,
   PerformanceBaseline,
   PerformanceGoal,
@@ -31,7 +32,8 @@ import {
   PerformanceScopeSelectionRequest,
   SimulationScoreRecord,
   UpdatePerformancePlanResponse,
-  UsageSessionRecord
+  UsageSessionRecord,
+  UserProfile
 } from "@voicepractice/shared";
 import { randomUUID } from "node:crypto";
 
@@ -43,8 +45,7 @@ import { buildPlanWindow, compareDateKeys, isDateKey, isValidIanaTimeZone } from
 import { calculatePerformanceBaseline, PerformanceBaselinePreview } from "./performanceBaseline.js";
 import { cancelPerformancePlan, finalizePerformancePlanIfEnded } from "./performanceFinalization.js";
 import {
-  calculatePerformanceProgress,
-  PerformanceProgressCalculation
+  calculatePerformanceProgress
 } from "./performanceProgress.js";
 import { buildPerformanceInsights } from "./performanceInsights.js";
 import { freezePerformancePlanScope, PerformanceScopeCandidate } from "./performanceScope.js";
@@ -99,11 +100,22 @@ export interface BuildDashboardPerformanceWorkspaceParams {
   store: PerformancePlanStore;
   viewer: DashboardViewer;
   users: PerformancePlanUserContext[];
+  organizationSummaries?: BuildDashboardPerformanceWorkspaceOrganizationSummary[];
+  selectedOrg?: { orgId: string; orgName: string } | null;
+  scopeMode?: DashboardPerformanceWorkspaceResponse["scopeMode"];
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
   now: Date;
   divisionScope?: DashboardPerformanceWorkspaceResponse["divisionScope"];
   canManageUser?: (user: PerformancePlanUserContext) => boolean;
+}
+
+export interface BuildDashboardPerformanceWorkspaceOrganizationSummary {
+  orgId: string;
+  orgName: string;
+  activePlanCount: number;
+  activeNeedsAttentionCount: number;
+  visibleUserCount: number;
 }
 
 export interface BuildPerformancePlanDetailParams {
@@ -112,7 +124,14 @@ export interface BuildPerformancePlanDetailParams {
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
   now: Date;
-  includeAuditActorIds?: boolean;
+  auditDisplayContext?: PerformanceAuditDisplayContext;
+}
+
+export interface PerformanceAuditDisplayContext {
+  viewer: "mobile_user" | "tenant_manager" | "platform_admin";
+  currentUserId: string;
+  planOrgId: string;
+  users: UserProfile[];
 }
 
 export function buildMobilePerformancePlanOptionsResponse(params: {
@@ -142,53 +161,57 @@ export async function buildMobilePerformanceCurrentResponse(
     return buildEmptyMobilePerformanceCurrentResponse(generatedAt);
   }
 
-  const openPlan = await params.store.getOpenPlanForUser(params.orgId, params.userId);
-  if (!openPlan) {
+  const userPlans = await params.store.listPlansForUser(params.orgId, params.userId);
+  const activePlans = userPlans.filter((entry) => entry.plan.status === "active");
+  if (activePlans.length === 0) {
     return buildEmptyMobilePerformanceCurrentResponse(generatedAt);
   }
 
   const finalizeEndedPlan = params.finalizeEndedPlan ?? finalizePerformancePlanIfEnded;
-  const currentPlan = await finalizeEndedPlan({
-    store: params.store,
-    plan: openPlan.plan,
-    usageSessions: params.usageSessions,
-    scoreRecords: params.scoreRecords,
-    now: params.now
-  });
-
-  if (!currentPlan || currentPlan.plan.status !== "active") {
+  const materializedPlans: PerformancePlanWithRelations[] = [];
+  for (const activePlan of activePlans) {
+    const materialized = await finalizeEndedPlan({
+      store: params.store,
+      plan: activePlan.plan,
+      usageSessions: params.usageSessions,
+      scoreRecords: params.scoreRecords,
+      now: params.now
+    });
+    if (materialized?.plan.status === "active") {
+      materializedPlans.push(materialized);
+    }
+  }
+  if (materializedPlans.length === 0) {
     return buildEmptyMobilePerformanceCurrentResponse(generatedAt);
   }
 
-  const calculateProgress = params.calculateProgress ?? calculatePerformanceProgress;
-  const buildInsights = params.buildInsights ?? buildPerformanceInsights;
-  const progress = calculateProgress({
-    plan: currentPlan.plan,
-    usageSessions: params.usageSessions,
-    scoreRecords: params.scoreRecords,
-    now: params.now
-  });
+  const summaries = materializedPlans
+    .map((plan) => summarizePlan({
+      plan: plan.plan,
+      usageSessions: params.usageSessions,
+      scoreRecords: params.scoreRecords,
+      now: params.now,
+      calculateProgress: params.calculateProgress,
+      buildInsights: params.buildInsights
+    }))
+    .sort((left, right) => left.plan.endDate.localeCompare(right.plan.endDate) || left.plan.createdAt.localeCompare(right.plan.createdAt));
 
   return {
     generatedAt,
-    plan: currentPlan.plan,
-    progress: progress.progress,
-    insights: buildInsights(progress.progress),
-    displayState: deriveMobilePerformanceDisplayState(currentPlan, progress)
+    activePlans: summaries,
+    displayState: deriveMobilePerformanceDisplayState(summaries)
   };
 }
 
 export function buildEmptyMobilePerformanceCurrentResponse(generatedAt: string): MobilePerformanceCurrentResponse {
   return {
     generatedAt,
-    plan: null,
-    progress: null,
-    insights: [],
+    activePlans: [],
     displayState: {
-      state: "no_active_plan",
-      planId: null,
-      planStatus: "none",
-      overallCurrentlyMeetingTarget: null
+      state: "no_active_plans",
+      activePlanCount: 0,
+      activeNeedsAttentionCount: 0,
+      activeCollectingEvidenceCount: 0
     }
   };
 }
@@ -567,7 +590,15 @@ export async function buildPerformancePlanDetailResponse(
     plan: summary.plan,
     progress: summary.progress,
     insights: summary.insights,
-    auditEvents: params.includeAuditActorIds === true ? loaded.auditEvents : stripPerformanceAuditActorIds(loaded.auditEvents)
+    auditEvents: buildPerformanceAuditDisplayEvents({
+      events: loaded.auditEvents,
+      context: params.auditDisplayContext ?? {
+        viewer: "mobile_user",
+        currentUserId: loaded.plan.userId,
+        planOrgId: loaded.plan.orgId,
+        users: []
+      }
+    })
   };
 }
 
@@ -670,25 +701,43 @@ export async function buildDashboardPerformanceWorkspaceResponse(
       divisionName: user.divisionName,
       status: user.status,
       orgRole: user.orgRole,
-      activePlanId: plans.find((row) => row.plan.userId === user.userId && row.plan.status === "active")?.plan.id ?? null,
+      activePlanCount: plans.filter((row) => row.plan.userId === user.userId && row.plan.status === "active").length,
       canManagePerformancePlans: canManageByUserId.get(user.userId) ?? false,
       assignableFocusTopics: buildPerformanceAssignableFocusTopics(user.candidates),
       assignableScenarios: buildPerformanceAssignableScenarios(user.candidates)
     })
   );
 
-  const summary = buildDashboardPerformanceSummary(plans);
+  const summary = params.scopeMode === "portfolio"
+    ? buildDashboardPerformancePortfolioSummary(params.organizationSummaries ?? [])
+    : buildDashboardPerformanceSummary(plans);
   return {
     viewer: params.viewer,
     generatedAt: params.now.toISOString(),
+    scopeMode: params.scopeMode ?? "organization",
+    selectedOrg: params.selectedOrg ?? null,
+    organizationSummaries: params.organizationSummaries ?? [],
     defaultTimeZone: "UTC",
     summary: {
       ...summary,
-      visibleUserCount: userOptions.length
+      visibleUserCount: params.scopeMode === "portfolio" ? summary.visibleUserCount : userOptions.length
     },
     users: userOptions,
     plans: plans.sort((left, right) => right.plan.createdAt.localeCompare(left.plan.createdAt) || right.plan.id.localeCompare(left.plan.id)),
     divisionScope: params.divisionScope
+  };
+}
+
+function buildDashboardPerformancePortfolioSummary(
+  rows: BuildDashboardPerformanceWorkspaceOrganizationSummary[]
+): DashboardPerformanceSummary {
+  return {
+    visibleUserCount: rows.reduce((total, row) => total + row.visibleUserCount, 0),
+    activePlanCount: rows.reduce((total, row) => total + row.activePlanCount, 0),
+    completedPlanCount: 0,
+    cancelledPlanCount: 0,
+    activeOnTrackCount: rows.reduce((total, row) => total + Math.max(0, row.activePlanCount - row.activeNeedsAttentionCount), 0),
+    activeNeedsAttentionCount: rows.reduce((total, row) => total + row.activeNeedsAttentionCount, 0)
   };
 }
 
@@ -970,24 +1019,32 @@ function toInputErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim() ? error.message : fallback;
 }
 
-function deriveMobilePerformanceDisplayState(
-  currentPlan: PerformancePlanWithRelations,
-  progress: PerformanceProgressCalculation
-): MobilePerformanceCurrentDisplayState {
-  if (progress.progress.performance.enabled && progress.progress.performance.notEnoughData) {
+function deriveMobilePerformanceDisplayState(summaries: PerformancePlanSummary[]): MobilePerformanceCurrentDisplayState {
+  const activeSummaries = summaries.filter((summary) => summary.plan.status === "active");
+  if (activeSummaries.length === 0) {
     return {
-      state: "active_collecting_evidence",
-      planId: currentPlan.plan.id,
-      planStatus: "active",
-      overallCurrentlyMeetingTarget: progress.progress.overallCurrentlyMeetingTarget
+      state: "no_active_plans",
+      activePlanCount: 0,
+      activeNeedsAttentionCount: 0,
+      activeCollectingEvidenceCount: 0
     };
   }
-
+  const activeCollectingEvidenceCount = activeSummaries.filter(
+    (summary) => summary.progress?.performance.enabled === true && summary.progress.performance.notEnoughData === true
+  ).length;
+  const activeNeedsAttentionCount = activeSummaries.filter(
+    (summary) => summary.progress?.overallCurrentlyMeetingTarget === false
+  ).length;
   return {
-    state: progress.progress.overallCurrentlyMeetingTarget ? "active_on_track" : "active_needs_attention",
-    planId: currentPlan.plan.id,
-    planStatus: "active",
-    overallCurrentlyMeetingTarget: progress.progress.overallCurrentlyMeetingTarget
+    state:
+      activeNeedsAttentionCount > 0
+        ? "active_plans_need_attention"
+        : activeCollectingEvidenceCount > 0
+          ? "active_plans_collecting_evidence"
+          : "active_plans_on_track",
+    activePlanCount: activeSummaries.length,
+    activeNeedsAttentionCount,
+    activeCollectingEvidenceCount
   };
 }
 
@@ -1029,6 +1086,8 @@ function summarizePlan(params: {
   usageSessions: UsageSessionRecord[];
   scoreRecords: SimulationScoreRecord[];
   now: Date;
+  calculateProgress?: typeof calculatePerformanceProgress;
+  buildInsights?: typeof buildPerformanceInsights;
 }): PerformancePlanSummary {
   if (params.plan.status !== "active") {
     return {
@@ -1037,7 +1096,9 @@ function summarizePlan(params: {
       insights: buildTerminalPlanInsights(params.plan)
     };
   }
-  const progress = calculatePerformanceProgress({
+  const calculateProgress = params.calculateProgress ?? calculatePerformanceProgress;
+  const buildInsights = params.buildInsights ?? buildPerformanceInsights;
+  const progress = calculateProgress({
     plan: params.plan,
     usageSessions: params.usageSessions,
     scoreRecords: params.scoreRecords,
@@ -1046,7 +1107,7 @@ function summarizePlan(params: {
   return {
     plan: params.plan,
     progress,
-    insights: buildPerformanceInsights(progress)
+    insights: buildInsights(progress)
   };
 }
 
@@ -1128,8 +1189,112 @@ function buildAuditEvent(params: {
   };
 }
 
-function stripPerformanceAuditActorIds(events: PerformanceAuditEvent[]): PerformanceAuditEvent[] {
-  return events.map((event) => ({ ...event, actorId: null }));
+function buildPerformanceAuditDisplayEvents(params: {
+  events: PerformanceAuditEvent[];
+  context: PerformanceAuditDisplayContext;
+}): PerformanceAuditDisplayEvent[] {
+  const userById = new Map(params.context.users.map((user) => [user.id, user]));
+  return params.events.map((event) => {
+    const actor = event.actorId ? userById.get(event.actorId) ?? null : null;
+    const actorInfo = resolvePerformanceAuditActorLabel({
+      event,
+      actor,
+      context: params.context
+    });
+    return {
+      id: event.id,
+      action: event.action,
+      actionLabel: formatAuditActionLabel(event.action),
+      actorLabel: actorInfo.actorLabel,
+      actorRoleLabel: actorInfo.actorRoleLabel,
+      actorEmail: actorInfo.actorEmail,
+      occurredAt: event.createdAt,
+      reason: event.reason
+    };
+  });
+}
+
+function resolvePerformanceAuditActorLabel(params: {
+  event: PerformanceAuditEvent;
+  actor: UserProfile | null;
+  context: PerformanceAuditDisplayContext;
+}): { actorLabel: string; actorRoleLabel: string; actorEmail: string | null } {
+  const { event, actor, context } = params;
+  if (event.actorType === "system") {
+    return { actorLabel: "Peritio system", actorRoleLabel: "System", actorEmail: null };
+  }
+
+  if (context.viewer === "mobile_user") {
+    if (event.actorType === "mobile_user" && event.actorId === context.currentUserId) {
+      return { actorLabel: "you", actorRoleLabel: "Plan owner", actorEmail: null };
+    }
+    if (event.actorType === "platform_admin") {
+      return { actorLabel: "Peritio administrator", actorRoleLabel: "Peritio administrator", actorEmail: null };
+    }
+    return { actorLabel: "your manager", actorRoleLabel: "Company manager", actorEmail: null };
+  }
+
+  if (!actor) {
+    if (event.actorType === "platform_admin") {
+      return { actorLabel: "Peritio administrator", actorRoleLabel: "Peritio administrator", actorEmail: null };
+    }
+    if (event.actorType === "mobile_user") {
+      return { actorLabel: "Former user", actorRoleLabel: "Plan owner", actorEmail: null };
+    }
+    return { actorLabel: "Former account administrator", actorRoleLabel: "Company manager", actorEmail: null };
+  }
+
+  if (actor.isSuperUser === true || event.actorType === "platform_admin") {
+    return {
+      actorLabel: context.viewer === "platform_admin" ? actor.email : "Peritio administrator",
+      actorRoleLabel: "Peritio administrator",
+      actorEmail: context.viewer === "platform_admin" ? actor.email : null
+    };
+  }
+
+  const sameOrg = actor.orgId === context.planOrgId;
+  if (!sameOrg) {
+    return { actorLabel: "Former account administrator", actorRoleLabel: "Company manager", actorEmail: null };
+  }
+
+  if (event.actorId === context.currentUserId) {
+    return {
+      actorLabel: "you",
+      actorRoleLabel: formatAuditActorRoleLabel(actor),
+      actorEmail: actor.email
+    };
+  }
+
+  return {
+    actorLabel: actor.email,
+    actorRoleLabel: formatAuditActorRoleLabel(actor),
+    actorEmail: actor.email
+  };
+}
+
+function formatAuditActorRoleLabel(user: UserProfile): string {
+  if (user.orgRole === "org_admin") {
+    return "Company administrator";
+  }
+  if (user.orgRole === "user_admin") {
+    return "User administrator";
+  }
+  return "Company user";
+}
+
+function formatAuditActionLabel(action: string): string {
+  switch (action) {
+    case "created":
+      return "Created";
+    case "updated":
+      return "Updated";
+    case "cancelled":
+      return "Cancelled";
+    case "completed":
+      return "Finalized";
+    default:
+      return action.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  }
 }
 
 function uniqueErrors(errors: string[]): string[] {
