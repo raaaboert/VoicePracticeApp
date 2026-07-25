@@ -221,6 +221,7 @@ export interface TrainingPack {
 export interface UserProfile {
   id: string;
   email: string;
+  employeeId: string | null;
   emailVerifiedAt: string | null;
   isPlatformAdmin?: boolean;
   isSuperUser?: boolean;
@@ -1060,6 +1061,16 @@ export interface DashboardViewer {
   isSuperUser: boolean;
   orgId: string | null;
   orgName: string | null;
+  orgRole: OrgUserRole | null;
+  capabilities: DashboardAdminCapabilities;
+}
+
+export interface DashboardAdminCapabilities {
+  viewOrganizationUsers: boolean;
+  manageRegularOrganizationUsers: boolean;
+  approveRejectAccessRequests: boolean;
+  editEmployeeIds: boolean;
+  manageOrganizationContent: boolean;
 }
 
 export interface DashboardDivisionScopeOption {
@@ -1181,6 +1192,7 @@ export interface DashboardCustomerTrainingPackSummary {
 export interface DashboardCustomerUserPerformanceSummary {
   userId: string;
   email: string;
+  employeeId: string | null;
   status: UserStatus;
   orgRole: OrgUserRole;
   dashboardAccessEnabled: boolean;
@@ -1423,6 +1435,7 @@ export interface DashboardTrainingWorkspaceScenarioInsight {
 export interface DashboardTrainingWorkspaceUserRow {
   userId: string;
   email: string;
+  employeeId: string | null;
   orgId: string;
   orgName: string;
   status: UserStatus;
@@ -1502,6 +1515,7 @@ export interface DashboardTrainingPackAssignmentDetailResponse {
 export interface DashboardUserReportRow {
   userId: string;
   email: string;
+  employeeId: string | null;
   orgId: string | null;
   orgName: string | null;
   status: UserStatus;
@@ -1671,6 +1685,7 @@ export interface ChangeAdminPasswordRequest {
 
 export interface CreateUserRequest {
   email: string;
+  employeeId?: string | null;
   tier: TierId;
   accountType: AccountType;
   timezone: string;
@@ -1711,6 +1726,7 @@ export interface SuperUserOrgOptionsResponse {
 
 export interface UpdateUserRequest {
   email?: string;
+  employeeId?: string | null;
   tier?: TierId;
   status?: UserStatus;
   isPlatformAdmin?: boolean;
@@ -1832,6 +1848,94 @@ export interface MobileResendVerificationRequest {
 
 export interface MobileSubmitOrgJoinRequest {
   joinCode: string;
+}
+
+export interface DashboardAdminUserRow {
+  userId: string;
+  email: string;
+  displayName: string;
+  employeeId: string | null;
+  orgRole: OrgUserRole;
+  status: UserStatus;
+  dashboardAccessEnabled: boolean;
+  canEditEmployeeId: boolean;
+  canDeactivate: boolean;
+  canReactivate: boolean;
+  isSelf: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DashboardAdminUsersResponse {
+  viewer: DashboardViewer;
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+  };
+  users: DashboardAdminUserRow[];
+}
+
+export interface DashboardAdminUpdateUserRequest {
+  employeeId?: string | null;
+  status?: UserStatus;
+}
+
+export interface DashboardAdminUpdateUserResponse {
+  ok: true;
+  user: DashboardAdminUserRow;
+}
+
+export interface DashboardAdminUsersExportRow {
+  employeeId: string;
+  name: string;
+  email: string;
+  role: string;
+  status: UserStatus;
+}
+
+export interface DashboardAdminUsersExportResponse {
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+  };
+  rows: DashboardAdminUsersExportRow[];
+}
+
+export interface DashboardAdminAccessRequestRow {
+  id: string;
+  status: OrgJoinRequestStatus;
+  userId: string;
+  displayName: string;
+  email: string;
+  orgId: string;
+  orgName: string;
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+}
+
+export interface DashboardAdminAccessRequestsResponse {
+  viewer: DashboardViewer;
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+  };
+  requests: DashboardAdminAccessRequestRow[];
+}
+
+export interface DashboardAdminDecideAccessRequest {
+  action: "approve" | "reject";
+  reason?: string;
+}
+
+export interface DashboardAdminDecideAccessRequestResponse {
+  ok: true;
+  request: DashboardAdminAccessRequestRow;
 }
 
 export interface RecordUsageSessionRequest {

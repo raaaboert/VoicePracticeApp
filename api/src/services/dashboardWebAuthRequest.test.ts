@@ -27,6 +27,7 @@ function createUser(overrides?: Partial<UserProfile>): UserProfile {
   return {
     id: "user_1",
     email: "eligible@example.com",
+    employeeId: null,
     emailVerifiedAt: "2026-03-30T00:00:00.000Z",
     isPlatformAdmin: false,
     isSuperUser: false,

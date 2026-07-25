@@ -77,6 +77,7 @@ test("database startup initializes Performance tables through the normal extract
       supportCaseStore: fakeStore(calls, "supportCaseStore"),
       webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
       performancePlanStore,
+      userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
       trainingPackStore: fakeStore(calls, "trainingPackStore")
     },
     maintenance: fakeStartupMaintenance(calls)
@@ -97,6 +98,7 @@ test("database startup initializes Performance tables through the normal extract
     "webAuthSessionStore.initialize",
     "migrateLegacyWebAuthSessionsFromAppState",
     "performancePlanStore.initialize",
+    "userEmployeeIdClaimStore.initialize",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
   ]);
@@ -120,7 +122,8 @@ test("database readiness refresh initializes the Performance store before loadin
       scoreRecordStore: fakeStore(calls, "scoreRecordStore"),
       supportCaseStore: fakeStore(calls, "supportCaseStore"),
       webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
-      performancePlanStore: fakeStore(calls, "performancePlanStore")
+      performancePlanStore: fakeStore(calls, "performancePlanStore"),
+      userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore")
     },
     async loadDatabase(): Promise<void> {
       calls.push("loadDatabase");
@@ -136,6 +139,7 @@ test("database readiness refresh initializes the Performance store before loadin
     "supportCaseStore.initialize",
     "webAuthSessionStore.initialize",
     "performancePlanStore.initialize",
+    "userEmployeeIdClaimStore.initialize",
     "loadDatabase"
   ]);
 });

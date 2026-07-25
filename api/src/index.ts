@@ -13,6 +13,16 @@ import {
   ApiDatabase,
   AiUsageEvent,
   AppConfig,
+  DashboardAdminAccessRequestsResponse,
+  DashboardAdminAccessRequestRow,
+  DashboardAdminCapabilities,
+  DashboardAdminDecideAccessRequest,
+  DashboardAdminDecideAccessRequestResponse,
+  DashboardAdminUpdateUserRequest,
+  DashboardAdminUpdateUserResponse,
+  DashboardAdminUserRow,
+  DashboardAdminUsersExportResponse,
+  DashboardAdminUsersResponse,
   DashboardAttemptDetailResponse,
   DashboardAttemptHistoryRow,
   DashboardCoachingInsights,
@@ -95,6 +105,7 @@ import {
   OrgTrainingRecord,
   OrgTrainingSummary,
   OrgTrainingStatus,
+  ORG_USER_ROLE_LABELS,
   OrgUsageBillingResponse,
   MobileResendVerificationRequest,
   MobileSubmitOrgJoinRequest,
@@ -185,6 +196,7 @@ import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createSimulationSessionStore } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
+import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
@@ -193,6 +205,7 @@ import {
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
 import {
+  buildDashboardAdminCapabilities,
   canDashboardViewerAccessCustomerDirectory,
   canDashboardViewerAccessOrg,
   resolveDashboardAccessEligibility,
@@ -231,6 +244,10 @@ import {
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
+import {
+  findEmployeeIdConflict,
+  normalizeEmployeeIdInput,
+} from "./services/employeeIds.js";
 import {
   completeRecognizedSimulationUsage,
   normalizeSimulationSessionId,
@@ -556,6 +573,13 @@ const webAuthSessionStore = createWebAuthSessionStore({
 const performancePlanStore = createPerformancePlanStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const userEmployeeIdClaimStore = createUserEmployeeIdClaimStore({
+  provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
@@ -3149,6 +3173,8 @@ function ensureDemoEnterpriseData(db: {
       existingUser.emailVerifiedAt = existingUser.emailVerifiedAt ?? existingUser.createdAt ?? now;
       existingUser.accountType = "enterprise";
       existingUser.tier = "enterprise";
+      const normalizedEmployeeId = normalizeEmployeeIdInput(existingUser.employeeId);
+      existingUser.employeeId = normalizedEmployeeId.ok ? normalizedEmployeeId.value : null;
       existingUser.orgId = demoUser.orgId;
       existingUser.orgRole = demoUser.orgRole;
       existingUser.status = existingUser.status ?? "active";
@@ -3163,6 +3189,7 @@ function ensureDemoEnterpriseData(db: {
     db.users.push({
       id: demoUser.id,
       email: demoUser.email,
+      employeeId: null,
       emailVerifiedAt: now,
       accountType: "enterprise",
       tier: "enterprise",
@@ -3843,6 +3870,10 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
     return {
       ...user,
+      employeeId: (() => {
+        const normalizedEmployeeId = normalizeEmployeeIdInput(candidateUser.employeeId);
+        return normalizedEmployeeId.ok ? normalizedEmployeeId.value : null;
+      })(),
       isPlatformAdmin: candidateUser.isPlatformAdmin === true,
       isSuperUser: candidateUser.isSuperUser === true,
       dashboardAccessEnabled: candidateUser.accountType === "enterprise" ? candidateUser.dashboardAccessEnabled === true : false,
@@ -4016,6 +4047,7 @@ async function loadDatabase(options?: { forceStorageRead?: boolean }): Promise<A
 
   const storage = getOrCreateDatabaseStorage();
   const loaded = await storage.load();
+  await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
   databaseCache = loaded;
   return loaded;
 }
@@ -4034,6 +4066,7 @@ function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
 async function saveDatabase(db: ApiDatabase): Promise<void> {
   databaseCache = db;
   const storage = getOrCreateDatabaseStorage();
+  await userEmployeeIdClaimStore.syncFromUsers(db.users);
   await storage.save(buildPersistedDatabaseSnapshot(db));
 }
 
@@ -4334,7 +4367,8 @@ async function refreshDatabaseReadiness(): Promise<void> {
         scoreRecordStore,
         supportCaseStore,
         webAuthSessionStore,
-        performancePlanStore
+        performancePlanStore,
+        userEmployeeIdClaimStore
       },
       loadDatabase: async () => {
         await loadDatabase({ forceStorageRead: true });
@@ -5968,6 +6002,7 @@ function buildDashboardCustomerUserRows(
       return {
         userId: user.id,
         email: user.email,
+        employeeId: user.employeeId ?? null,
         status: user.status,
         orgRole: user.orgRole,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
@@ -6825,6 +6860,7 @@ function buildDashboardTrainingWorkspaceUserRows(params: {
       return {
         userId: user.id,
         email: user.email,
+        employeeId: user.employeeId ?? null,
         orgId: params.org.id,
         orgName: params.org.name,
         status: user.status,
@@ -7103,6 +7139,273 @@ function listDashboardAccessibleOrgs(db: ApiDatabase, viewer: DashboardViewer): 
   return viewer.accessType === "super_user"
     ? db.orgs.slice().sort((left, right) => left.name.localeCompare(right.name))
     : db.orgs.filter((org) => org.id === viewer.orgId);
+}
+
+interface DashboardAdminOrgContext {
+  org: EnterpriseOrg;
+  capabilities: DashboardAdminCapabilities;
+}
+
+function resolveDashboardAdminOrgContext(
+  db: ApiDatabase,
+  principal: DashboardRequestPrincipal,
+  requestedOrgId: string | null,
+  response: Response
+): DashboardAdminOrgContext | null {
+  let orgId: string | null = null;
+  let capabilities = principal.viewer.capabilities;
+
+  if (principal.viewer.accessType === "super_user") {
+    if (!requestedOrgId) {
+      response.status(400).json({
+        error: "Select an organization before using Admin.",
+        code: "dashboard_scope_denied",
+      });
+      return null;
+    }
+    if (!canDashboardViewerAccessOrg(principal.viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Organization not found." });
+      return null;
+    }
+    orgId = requestedOrgId;
+    capabilities = buildDashboardAdminCapabilities(null, { superUserOrgContext: true });
+  } else {
+    orgId = principal.viewer.orgId;
+    if (requestedOrgId && requestedOrgId !== orgId) {
+      response.status(404).json({ error: "Organization not found." });
+      return null;
+    }
+  }
+
+  const org = getOrgById(db, orgId);
+  if (!org || org.status !== "active") {
+    response.status(404).json({ error: "Organization not found." });
+    return null;
+  }
+
+  return { org, capabilities };
+}
+
+function rejectMissingDashboardAdminCapability(
+  capabilities: DashboardAdminCapabilities,
+  capability: keyof DashboardAdminCapabilities,
+  response: Response
+): boolean {
+  if (capabilities[capability]) {
+    return false;
+  }
+
+  response.status(403).json({
+    error: "Admin access is not available for this account.",
+    code: "dashboard_scope_denied",
+  });
+  return true;
+}
+
+function canDashboardAdminEditEmployeeId(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.editEmployeeIds) {
+    return false;
+  }
+  if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
+    return true;
+  }
+  return params.actor.orgRole === "user_admin" && params.target.orgRole === "user";
+}
+
+function canDashboardAdminChangeUserStatus(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+  nextStatus: UserStatus;
+  orgUsers: readonly UserProfile[];
+}): boolean {
+  if (!params.capabilities.manageRegularOrganizationUsers || params.target.id === params.actor.id) {
+    return false;
+  }
+  if (params.target.orgRole === "org_admin") {
+    const activeOrgAdminCount = params.orgUsers.filter(
+      (user) => user.orgRole === "org_admin" && user.status === "active"
+    ).length;
+    return params.nextStatus !== "disabled" || activeOrgAdminCount > 1;
+  }
+  if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
+    return params.target.orgRole === "user" || params.target.orgRole === "user_admin";
+  }
+  return params.actor.orgRole === "user_admin" && params.target.orgRole === "user";
+}
+
+function buildDashboardAdminUserRow(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  user: UserProfile;
+  orgUsers: readonly UserProfile[];
+}): DashboardAdminUserRow {
+  const canDeactivate = params.user.status === "active" && canDashboardAdminChangeUserStatus({
+    actor: params.actor,
+    viewer: params.viewer,
+    capabilities: params.capabilities,
+    target: params.user,
+    nextStatus: "disabled",
+    orgUsers: params.orgUsers,
+  });
+  const canReactivate = params.user.status === "disabled" && canDashboardAdminChangeUserStatus({
+    actor: params.actor,
+    viewer: params.viewer,
+    capabilities: params.capabilities,
+    target: params.user,
+    nextStatus: "active",
+    orgUsers: params.orgUsers,
+  });
+
+  return {
+    userId: params.user.id,
+    email: params.user.email,
+    displayName: resolvePerformanceUserDisplayName(params.user),
+    employeeId: params.user.employeeId ?? null,
+    orgRole: params.user.orgRole,
+    status: params.user.status,
+    dashboardAccessEnabled: params.user.dashboardAccessEnabled === true,
+    canEditEmployeeId: canDashboardAdminEditEmployeeId({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canDeactivate,
+    canReactivate,
+    isSelf: params.user.id === params.actor.id,
+    createdAt: params.user.createdAt,
+    updatedAt: params.user.updatedAt,
+  };
+}
+
+function buildDashboardAdminAccessRequestRow(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  requestRecord: EnterpriseJoinRequestRecord
+): DashboardAdminAccessRequestRow {
+  const user = getUserById(db, requestRecord.userId);
+  return {
+    id: requestRecord.id,
+    status: requestRecord.status,
+    userId: requestRecord.userId,
+    displayName: user ? resolvePerformanceUserDisplayName(user) : requestRecord.email,
+    email: requestRecord.email,
+    orgId: org.id,
+    orgName: org.name,
+    createdAt: requestRecord.createdAt,
+    expiresAt: requestRecord.expiresAt,
+    updatedAt: requestRecord.updatedAt,
+    decidedAt: requestRecord.decidedAt,
+    decisionReason: requestRecord.decisionReason,
+  };
+}
+
+type OrgJoinDecisionChannel = "mobile" | "dashboard";
+
+type OrgJoinDecisionResult =
+  | { ok: true; requestRecord: EnterpriseJoinRequestRecord }
+  | { ok: false; status: number; error: string };
+
+function decideEnterpriseJoinRequest(params: {
+  db: ApiDatabase;
+  actor: UserProfile;
+  org: EnterpriseOrg;
+  requestId: string;
+  action: "approve" | "reject";
+  reason?: string | null;
+  channel: OrgJoinDecisionChannel;
+}): OrgJoinDecisionResult {
+  const requestRecord = params.db.enterpriseJoinRequests.find((row) => row.id === params.requestId);
+  if (!requestRecord || requestRecord.orgId !== params.org.id) {
+    return { ok: false, status: 404, error: "Join request not found." };
+  }
+
+  if (requestRecord.status !== "pending") {
+    return { ok: false, status: 409, error: `Join request is already ${requestRecord.status}.` };
+  }
+
+  const targetUser = getUserById(params.db, requestRecord.userId);
+  if (!targetUser) {
+    const nowValue = nowIso();
+    requestRecord.status = "rejected";
+    requestRecord.updatedAt = nowValue;
+    requestRecord.decidedAt = nowValue;
+    requestRecord.decidedByUserId = params.actor.id;
+    requestRecord.decisionReason = "Target user no longer exists.";
+    return { ok: false, status: 404, error: "Target user not found." };
+  }
+
+  const nowValue = nowIso();
+  const appendDecisionAudit = (action: string, message: string, metadata: Record<string, unknown>) => {
+    const input = {
+      action,
+      orgId: params.org.id,
+      userId: targetUser.id,
+      message,
+      metadata,
+    };
+    if (params.channel === "mobile") {
+      appendMobileAuditEvent(params.db, params.actor, input);
+    } else {
+      appendWebAuditEvent(params.db, params.actor, input);
+    }
+  };
+
+  if (params.action === "approve") {
+    targetUser.accountType = "enterprise";
+    targetUser.tier = "enterprise";
+    targetUser.orgId = params.org.id;
+    targetUser.orgRole = "user";
+    targetUser.status = "active";
+    targetUser.updatedAt = nowValue;
+    const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
+      assignments: params.db.trainingPackAssignments ?? [],
+      userId: targetUser.id,
+      user: targetUser,
+      nowIso: nowValue,
+    });
+    requestRecord.status = "approved";
+    requestRecord.updatedAt = nowValue;
+    requestRecord.decidedAt = nowValue;
+    requestRecord.decidedByUserId = params.actor.id;
+    requestRecord.decisionReason = params.reason?.trim() || null;
+    emitMobileUpdateForUser(params.db, targetUser.id, "user");
+    emitMobileUpdateForOrg(params.db, params.org.id, "org");
+    appendDecisionAudit(
+      params.channel === "mobile" ? "org_join.approved_by_org_admin" : "org_join.approved_by_dashboard_admin",
+      `Approved org join request for ${targetUser.email}.`,
+      {
+        requestId: requestRecord.id,
+        deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
+      }
+    );
+  } else {
+    requestRecord.status = "rejected";
+    requestRecord.updatedAt = nowValue;
+    requestRecord.decidedAt = nowValue;
+    requestRecord.decidedByUserId = params.actor.id;
+    requestRecord.decisionReason = params.reason?.trim() || "Rejected by organization admin.";
+    emitMobileUpdateForUser(params.db, targetUser.id, "user");
+    emitMobileUpdateForOrg(params.db, params.org.id, "org");
+    appendDecisionAudit(
+      params.channel === "mobile" ? "org_join.rejected_by_org_admin" : "org_join.rejected_by_dashboard_admin",
+      `Rejected org join request for ${targetUser.email}.`,
+      {
+        requestId: requestRecord.id,
+        reasonProvided: Boolean(requestRecord.decisionReason)
+      }
+    );
+  }
+
+  return { ok: true, requestRecord };
 }
 
 async function listDashboardAccessibleCustomers(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardCustomerSummary[]> {
@@ -7422,6 +7725,7 @@ async function buildDashboardUserReport(
       return {
         userId: user.id,
         email: user.email,
+        employeeId: user.employeeId ?? null,
         orgId,
         orgName: orgId ? orgById.get(orgId)?.name ?? null : null,
         status: user.status,
@@ -9217,6 +9521,13 @@ const mobileVerificationRateLimiter = createRateLimiter({
   }
 });
 
+const mobileOrgJoinRequestRateLimiter = createRateLimiter({
+  name: "mobile-org-join-request",
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
+});
+
 const mobilePublicErrorReportRateLimiter = createRateLimiter({
   name: "mobile-public-error-report",
   windowMs: 60 * 60 * 1000,
@@ -9915,6 +10226,328 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
     response.json(payload);
   });
 });
+
+app.get("/dashboard/admin/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+    if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "viewOrganizationUsers", response)) {
+      return;
+    }
+
+    const users = db.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const rows = users.map((user) => buildDashboardAdminUserRow({
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      capabilities: adminContext.capabilities,
+      user,
+      orgUsers: users,
+    }));
+
+    const payload: DashboardAdminUsersResponse = {
+      viewer: {
+        ...request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+      },
+      generatedAt: nowIso(),
+      org: {
+        id: adminContext.org.id,
+        name: adminContext.org.name,
+      },
+      users: rows,
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/admin/users/export", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+    if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "viewOrganizationUsers", response)) {
+      return;
+    }
+
+    const rows = db.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }))
+      .map((user) => ({
+        employeeId: user.employeeId ?? "",
+        name: resolvePerformanceUserDisplayName(user),
+        email: user.email,
+        role: ORG_USER_ROLE_LABELS[user.orgRole] ?? user.orgRole,
+        status: user.status,
+      }));
+
+    const payload: DashboardAdminUsersExportResponse = {
+      generatedAt: nowIso(),
+      org: {
+        id: adminContext.org.id,
+        name: adminContext.org.name,
+      },
+      rows,
+    };
+    response.json(payload);
+  });
+});
+
+app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const body = request.body as DashboardAdminUpdateUserRequest;
+  const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
+  const hasStatusPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "status");
+  if (!hasEmployeeIdPatch && !hasStatusPatch) {
+    response.status(400).json({ error: "Provide employeeId or status." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+
+    const orgUsers = db.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const target = orgUsers.find((user) => user.id === request.params.userId);
+    if (!target) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    const beforeEmployeeId = target.employeeId ?? null;
+    const beforeStatus = target.status;
+
+    if (hasEmployeeIdPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editEmployeeIds", response)) {
+        return;
+      }
+      if (!canDashboardAdminEditEmployeeId({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+      })) {
+        response.status(403).json({
+          error: "You cannot edit Employee ID for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      const normalizedEmployeeId = normalizeEmployeeIdInput(body.employeeId);
+      if (!normalizedEmployeeId.ok) {
+        response.status(400).json({ error: normalizedEmployeeId.error, code: normalizedEmployeeId.code });
+        return;
+      }
+      const employeeIdConflict = findEmployeeIdConflict({
+        users: db.users,
+        orgId: adminContext.org.id,
+        employeeId: normalizedEmployeeId.value,
+        exceptUserId: target.id,
+      });
+      if (employeeIdConflict) {
+        response.status(409).json({
+          error: "Employee ID is already assigned within this organization.",
+          code: employeeIdConflict.code,
+        });
+        return;
+      }
+      target.employeeId = normalizedEmployeeId.value;
+    }
+
+    if (hasStatusPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "manageRegularOrganizationUsers", response)) {
+        return;
+      }
+      if (!body.status || !isUserStatus(body.status)) {
+        response.status(400).json({ error: "Valid status is required." });
+        return;
+      }
+      if (!canDashboardAdminChangeUserStatus({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+        nextStatus: body.status,
+        orgUsers,
+      })) {
+        response.status(403).json({
+          error: "You cannot change status for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      target.status = body.status;
+      if (target.status !== "active") {
+        revokeMobileAccessForUser(db, target.id, "User access was disabled.");
+        db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
+        queueDatabasePostCommitEffect(db, {
+          category: "security_cleanup",
+          description: `Revoke dashboard sessions for deactivated user ${target.id}.`,
+          run: async () => {
+            await revokeWebAuthSessionsForUserId(target.id);
+          }
+        });
+      } else {
+        emitMobileUpdateForUser(db, target.id, "user");
+      }
+    }
+
+    target.updatedAt = nowIso();
+    if (beforeEmployeeId !== (target.employeeId ?? null)) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.employee_id.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: `Updated Employee ID for ${target.email}.`,
+        metadata: {
+          previousEmployeeIdPresent: Boolean(beforeEmployeeId),
+          nextEmployeeIdPresent: Boolean(target.employeeId)
+        }
+      });
+    }
+    if (beforeStatus !== target.status) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: target.status === "active" ? "org_user.reactivated" : "org_user.deactivated",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: `${target.status === "active" ? "Reactivated" : "Deactivated"} ${target.email}.`,
+        metadata: {
+          previousStatus: beforeStatus,
+          nextStatus: target.status,
+        }
+      });
+    }
+
+    const nextOrgUsers = db.users.filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id);
+    const payload: DashboardAdminUpdateUserResponse = {
+      ok: true,
+      user: buildDashboardAdminUserRow({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        user: target,
+        orgUsers: nextOrgUsers,
+      }),
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/admin/access-requests", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabase(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+    if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "approveRejectAccessRequests", response)) {
+      return;
+    }
+
+    expireOrgJoinRequests(db, new Date());
+    const requests = db.enterpriseJoinRequests
+      .filter((row) => row.orgId === adminContext.org.id)
+      .slice()
+      .sort((a, b) => {
+        if (a.status === "pending" && b.status !== "pending") {
+          return -1;
+        }
+        if (a.status !== "pending" && b.status === "pending") {
+          return 1;
+        }
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      })
+      .map((row) => buildDashboardAdminAccessRequestRow(db, adminContext.org, row));
+
+    const payload: DashboardAdminAccessRequestsResponse = {
+      viewer: {
+        ...request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+      },
+      generatedAt: nowIso(),
+      org: {
+        id: adminContext.org.id,
+        name: adminContext.org.name,
+      },
+      requests,
+    };
+    response.json(payload);
+  });
+});
+
+app.patch(
+  "/dashboard/admin/access-requests/:requestId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const body = request.body as DashboardAdminDecideAccessRequest;
+    if (body.action !== "approve" && body.action !== "reject") {
+      response.status(400).json({ error: "action must be approve or reject." });
+      return;
+    }
+
+    await withDatabase(async (db) => {
+      const adminContext = resolveDashboardAdminOrgContext(
+        db,
+        request.dashboard!,
+        getSingleQueryParam(request.query.orgId),
+        response
+      );
+      if (!adminContext) {
+        return;
+      }
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "approveRejectAccessRequests", response)) {
+        return;
+      }
+
+      expireOrgJoinRequests(db, new Date());
+      const decision = decideEnterpriseJoinRequest({
+        db,
+        actor: request.dashboard!.user,
+        org: adminContext.org,
+        requestId: request.params.requestId,
+        action: body.action,
+        reason: body.reason,
+        channel: "dashboard",
+      });
+      if (!decision.ok) {
+        response.status(decision.status).json({ error: decision.error });
+        return;
+      }
+
+      const payload: DashboardAdminDecideAccessRequestResponse = {
+        ok: true,
+        request: buildDashboardAdminAccessRequestRow(db, adminContext.org, decision.requestRecord),
+      };
+      response.json(payload);
+    });
+  }
+);
 
 app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
@@ -12772,6 +13405,7 @@ app.post("/admin/settings/superusers", requireAdmin, async (request: Request, re
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      employeeId: null,
       emailVerifiedAt: null,
       isPlatformAdmin: false,
       isSuperUser: true,
@@ -12918,10 +13552,30 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       }
     }
 
+    const employeeIdResult =
+      body.accountType === "enterprise" ? normalizeEmployeeIdInput(body.employeeId) : { ok: true as const, value: null };
+    if (!employeeIdResult.ok) {
+      response.status(400).json({ error: employeeIdResult.error, code: employeeIdResult.code });
+      return;
+    }
+    const employeeIdConflict = findEmployeeIdConflict({
+      users: db.users,
+      orgId,
+      employeeId: employeeIdResult.value,
+    });
+    if (employeeIdConflict) {
+      response.status(409).json({
+        error: "Employee ID is already assigned within this organization.",
+        code: employeeIdConflict.code,
+      });
+      return;
+    }
+
     const now = nowIso();
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      employeeId: employeeIdResult.value,
       emailVerifiedAt: now,
       isPlatformAdmin: body.isPlatformAdmin === true,
       dashboardAccessEnabled: body.accountType === "enterprise" && body.dashboardAccessEnabled === true,
@@ -12951,6 +13605,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       message: `Created user ${user.email}.`,
       metadata: {
         email: user.email,
+        employeeId: user.employeeId,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         accountType: user.accountType,
         tier: user.tier,
@@ -12975,6 +13630,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     const beforeDashboardViewer = resolveDashboardViewer(db, user);
     const before = {
       email: user.email,
+      employeeId: user.employeeId ?? null,
       isPlatformAdmin: user.isPlatformAdmin === true,
       dashboardAccessEnabled: user.dashboardAccessEnabled === true,
       tier: user.tier,
@@ -13058,6 +13714,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     }
 
     let nextOrgId = patch.orgId !== undefined ? patch.orgId : user.orgId;
+    if (patch.employeeId !== undefined && patch.orgId !== undefined && patch.orgId !== user.orgId) {
+      response.status(400).json({ error: "Employee ID updates cannot change the user's organization." });
+      return;
+    }
     if (nextAccountType === "enterprise") {
       if (!nextOrgId) {
         response.status(400).json({ error: "Enterprise users require an organization." });
@@ -13073,8 +13733,34 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       nextOrgId = null;
     }
 
+    const employeeIdPatch = patch.employeeId !== undefined
+      ? normalizeEmployeeIdInput(patch.employeeId)
+      : { ok: true as const, value: user.employeeId ?? null };
+    if (!employeeIdPatch.ok) {
+      response.status(400).json({ error: employeeIdPatch.error, code: employeeIdPatch.code });
+      return;
+    }
+    if (nextAccountType !== "enterprise" && employeeIdPatch.value) {
+      response.status(400).json({ error: "Employee ID applies only to enterprise users." });
+      return;
+    }
+    const employeeIdConflict = findEmployeeIdConflict({
+      users: db.users,
+      orgId: nextOrgId,
+      employeeId: employeeIdPatch.value,
+      exceptUserId: user.id,
+    });
+    if (employeeIdConflict) {
+      response.status(409).json({
+        error: "Employee ID is already assigned within this organization.",
+        code: employeeIdConflict.code,
+      });
+      return;
+    }
+
     user.accountType = nextAccountType;
     user.orgId = nextOrgId;
+    user.employeeId = nextAccountType === "enterprise" ? employeeIdPatch.value : null;
 
     if (nextAccountType === "enterprise") {
       if (patch.orgRole !== undefined) {
@@ -13189,11 +13875,24 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
           dailyOverageExpiresAt: user.dailyOverageExpiresAt,
+          employeeId: user.employeeId ?? null,
           timezone: user.timezone,
           deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
         }
       }
     });
+    if (before.employeeId !== (user.employeeId ?? null)) {
+      appendPlatformAuditEvent(db, {
+        action: "user.employee_id.changed",
+        orgId: user.orgId,
+        userId: user.id,
+        message: `Updated Employee ID for ${user.email}.`,
+        metadata: {
+          previousEmployeeIdPresent: Boolean(before.employeeId),
+          nextEmployeeIdPresent: Boolean(user.employeeId)
+        }
+      });
+    }
     response.json(user);
   });
 });
@@ -13367,6 +14066,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      employeeId: null,
       emailVerifiedAt: null,
       accountType: "individual",
       tier: "free",
@@ -13688,7 +14388,7 @@ app.get("/mobile/users/:userId/org-access-requests", async (request: Request, re
   });
 });
 
-app.post("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -13719,25 +14419,13 @@ app.post("/mobile/users/:userId/org-access-requests", async (request: Request, r
       return;
     }
 
-    const emailDomain = extractEmailDomain(user.email);
-    if (!emailDomain) {
-      response.status(400).json({ error: "Email domain could not be determined from your profile." });
-      return;
-    }
+    const emailDomain = extractEmailDomain(user.email) ?? "";
 
     const org = db.orgs.find(
       (entry) => entry.status === "active" && normalizeJoinCode(entry.joinCode) === joinCode
     );
     if (!org) {
       response.status(404).json({ error: "Join code not found." });
-      return;
-    }
-
-    if (normalizeEmailDomain(org.emailDomain) !== normalizeEmailDomain(emailDomain)) {
-      response.status(400).json({
-        error:
-          "Join code does not match your email domain. Ask your org admin for the correct code for your domain."
-      });
       return;
     }
 
@@ -13911,6 +14599,7 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
     response.status(400).json({ error: "action must be approve or reject." });
     return;
   }
+  const action = body.action;
 
   await withDatabase(async (db) => {
     const actor = getUserById(db, request.params.userId);
@@ -13934,93 +14623,40 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       return;
     }
 
+    const org = getOrgById(db, actor.orgId);
+    if (!org || org.status !== "active") {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
     expireOrgJoinRequests(db, new Date());
-    const requestRecord = db.enterpriseJoinRequests.find((row) => row.id === request.params.requestId);
-    if (!requestRecord || requestRecord.orgId !== actor.orgId) {
-      response.status(404).json({ error: "Join request not found." });
+    const decision = decideEnterpriseJoinRequest({
+      db,
+      actor,
+      org,
+      requestId: request.params.requestId,
+      action,
+      reason: body.reason,
+      channel: "mobile",
+    });
+    if (!decision.ok) {
+      response.status(decision.status).json({ error: decision.error });
       return;
-    }
-
-    if (requestRecord.status !== "pending") {
-      response.status(409).json({ error: `Join request is already ${requestRecord.status}.` });
-      return;
-    }
-
-    const targetUser = getUserById(db, requestRecord.userId);
-    if (!targetUser) {
-      requestRecord.status = "rejected";
-      requestRecord.updatedAt = nowIso();
-      requestRecord.decidedAt = requestRecord.updatedAt;
-      requestRecord.decidedByUserId = actor.id;
-      requestRecord.decisionReason = "Target user no longer exists.";
-      response.status(404).json({ error: "Target user not found." });
-      return;
-    }
-
-    const nowValue = nowIso();
-    if (body.action === "approve") {
-      targetUser.accountType = "enterprise";
-      targetUser.tier = "enterprise";
-      targetUser.orgId = actor.orgId;
-      targetUser.orgRole = "user";
-      targetUser.status = "active";
-      targetUser.updatedAt = nowValue;
-      const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
-        assignments: db.trainingPackAssignments ?? [],
-        userId: targetUser.id,
-        user: targetUser,
-        nowIso: nowValue,
-      });
-      requestRecord.status = "approved";
-      requestRecord.updatedAt = nowValue;
-      requestRecord.decidedAt = nowValue;
-      requestRecord.decidedByUserId = actor.id;
-      requestRecord.decisionReason = body.reason?.trim() || null;
-      emitMobileUpdateForUser(db, targetUser.id, "user");
-      emitMobileUpdateForOrg(db, actor.orgId, "org");
-      appendMobileAuditEvent(db, actor, {
-        action: "org_join.approved_by_org_admin",
-        orgId: actor.orgId,
-        userId: targetUser.id,
-        message: `Approved org join request for ${targetUser.email}.`,
-        metadata: {
-          requestId: requestRecord.id,
-          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
-        }
-      });
-    } else {
-      requestRecord.status = "rejected";
-      requestRecord.updatedAt = nowValue;
-      requestRecord.decidedAt = nowValue;
-      requestRecord.decidedByUserId = actor.id;
-      requestRecord.decisionReason = body.reason?.trim() || "Rejected by organization admin.";
-      emitMobileUpdateForUser(db, targetUser.id, "user");
-      emitMobileUpdateForOrg(db, actor.orgId, "org");
-      appendMobileAuditEvent(db, actor, {
-        action: "org_join.rejected_by_org_admin",
-        orgId: actor.orgId,
-        userId: targetUser.id,
-        message: `Rejected org join request for ${targetUser.email}.`,
-        metadata: {
-          requestId: requestRecord.id,
-          reason: requestRecord.decisionReason
-        }
-      });
     }
 
     response.json({
       ok: true,
       request: {
-        id: requestRecord.id,
-        status: requestRecord.status,
-        userId: requestRecord.userId,
-        email: requestRecord.email,
-        orgId: requestRecord.orgId,
-        createdAt: requestRecord.createdAt,
-        expiresAt: requestRecord.expiresAt,
-        updatedAt: requestRecord.updatedAt,
-        decidedAt: requestRecord.decidedAt,
-        decisionReason: requestRecord.decisionReason
+        id: decision.requestRecord.id,
+        status: decision.requestRecord.status,
+        userId: decision.requestRecord.userId,
+        email: decision.requestRecord.email,
+        orgId: decision.requestRecord.orgId,
+        createdAt: decision.requestRecord.createdAt,
+        expiresAt: decision.requestRecord.expiresAt,
+        updatedAt: decision.requestRecord.updatedAt,
+        decidedAt: decision.requestRecord.decidedAt,
+        decisionReason: decision.requestRecord.decisionReason
       }
     });
   });
@@ -17901,6 +18537,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
         return {
           userId: user.id,
           email: user.email,
+          employeeId: user.employeeId ?? null,
           status: user.status,
           orgRole: user.orgRole,
           dailySecondsCapOverride: user.dailySecondsCapOverride,
@@ -17992,6 +18629,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       user: {
         userId: target.id,
         email: target.email,
+        employeeId: target.employeeId ?? null,
         status: target.status,
         orgRole: target.orgRole,
         dailySecondsCapOverride: target.dailySecondsCapOverride,
@@ -19257,6 +19895,7 @@ export async function startApiServer(): Promise<void> {
       supportCaseStore,
       webAuthSessionStore,
       performancePlanStore,
+      userEmployeeIdClaimStore,
       trainingPackStore
     },
     maintenance: {

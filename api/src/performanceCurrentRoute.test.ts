@@ -71,6 +71,7 @@ function buildUser(
   return {
     id,
     email,
+    employeeId: null,
     emailVerifiedAt: NOW,
     isPlatformAdmin: false,
     isSuperUser: false,

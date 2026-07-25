@@ -11,6 +11,7 @@ export interface OperationalStoreSet {
   supportCaseStore: InitializableStore;
   webAuthSessionStore: InitializableStore;
   performancePlanStore: InitializableStore;
+  userEmployeeIdClaimStore: InitializableStore;
 }
 
 export interface StartupStoreSet extends OperationalStoreSet {
@@ -39,6 +40,7 @@ export async function initializeDatabaseStoresForReadiness(params: {
   await params.stores.supportCaseStore.initialize();
   await params.stores.webAuthSessionStore.initialize();
   await params.stores.performancePlanStore.initialize();
+  await params.stores.userEmployeeIdClaimStore.initialize();
   await params.loadDatabase();
 }
 
@@ -60,6 +62,7 @@ export async function initializeDatabaseStoresForStartup(params: {
   await params.stores.webAuthSessionStore.initialize();
   await params.maintenance.migrateLegacyWebAuthSessionsFromAppState();
   await params.stores.performancePlanStore.initialize();
+  await params.stores.userEmployeeIdClaimStore.initialize();
   await params.stores.trainingPackStore.initialize();
   await params.maintenance.runStartupUsageIntegrityMaintenance();
 }
