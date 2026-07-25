@@ -600,7 +600,8 @@ select.text-input {
   font-weight: 600;
 }
 
-.table-scroll {
+.table-scroll,
+.table-wrap {
   overflow-x: auto;
 }
 
@@ -623,6 +624,56 @@ select.text-input {
   font-size: 0.84rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.notice {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-muted);
+  color: var(--text);
+}
+
+.notice.success {
+  border-color: rgba(138, 210, 161, 0.36);
+  color: var(--success);
+}
+
+.notice.danger {
+  border-color: rgba(240, 138, 138, 0.38);
+  color: var(--danger);
+}
+
+.admin-search {
+  margin-bottom: 1rem;
+}
+
+.admin-inline-edit {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) auto;
+  gap: 0.5rem;
+  min-width: 14rem;
+}
+
+.compact-input {
+  min-height: 2.45rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+}
+
+.compact-button {
+  min-height: 2.4rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+}
+
+.danger-button {
+  color: var(--danger);
+  border-color: rgba(240, 138, 138, 0.32);
+}
+
+.admin-table td {
+  vertical-align: middle;
 }
 
 .tab-row {

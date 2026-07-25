@@ -4,6 +4,13 @@ import { cookies } from "next/headers";
 import type { DashboardApiErrorCode } from "@/src/lib/dashboardApiErrors";
 import {
   DashboardAttemptDetailResponse,
+  DashboardAdminAccessRequestsResponse,
+  DashboardAdminDecideAccessRequest,
+  DashboardAdminDecideAccessRequestResponse,
+  DashboardAdminUpdateUserRequest,
+  DashboardAdminUpdateUserResponse,
+  DashboardAdminUsersExportResponse,
+  DashboardAdminUsersResponse,
   DashboardOverviewResponse,
   DashboardCustomerDetailResponse,
   DashboardCustomerListResponse,
@@ -123,6 +130,15 @@ function appendDivisionQuery(pathname: string, divisionId?: string | null): stri
 
   const separator = pathname.includes("?") ? "&" : "?";
   return `${pathname}${separator}divisionId=${encodeURIComponent(divisionId.trim())}`;
+}
+
+function appendOrgQuery(pathname: string, orgId?: string | null): string {
+  if (!orgId || !orgId.trim()) {
+    return pathname;
+  }
+
+  const separator = pathname.includes("?") ? "&" : "?";
+  return `${pathname}${separator}orgId=${encodeURIComponent(orgId.trim())}`;
 }
 
 async function fetchDashboardApi<T>(
@@ -590,6 +606,61 @@ export async function getDashboardUserDetail(
 
     throw error;
   }
+}
+
+export async function getDashboardAdminUsers(orgId?: string | null): Promise<DashboardAdminUsersResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardAdminUsersResponse>(appendOrgQuery("/dashboard/admin/users", orgId), { token });
+}
+
+export async function getDashboardAdminUsersExport(orgId?: string | null): Promise<DashboardAdminUsersExportResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardAdminUsersExportResponse>(
+    appendOrgQuery("/dashboard/admin/users/export", orgId),
+    { token }
+  );
+}
+
+export async function updateDashboardAdminUser(
+  userId: string,
+  input: DashboardAdminUpdateUserRequest,
+  orgId?: string | null
+): Promise<DashboardAdminUpdateUserResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardAdminUpdateUserResponse>(
+    appendOrgQuery(`/dashboard/admin/users/${encodeURIComponent(userId)}`, orgId),
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
+}
+
+export async function getDashboardAdminAccessRequests(
+  orgId?: string | null
+): Promise<DashboardAdminAccessRequestsResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardAdminAccessRequestsResponse>(
+    appendOrgQuery("/dashboard/admin/access-requests", orgId),
+    { token }
+  );
+}
+
+export async function decideDashboardAdminAccessRequest(
+  requestId: string,
+  input: DashboardAdminDecideAccessRequest,
+  orgId?: string | null
+): Promise<DashboardAdminDecideAccessRequestResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardAdminDecideAccessRequestResponse>(
+    appendOrgQuery(`/dashboard/admin/access-requests/${encodeURIComponent(requestId)}`, orgId),
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+      token,
+    }
+  );
 }
 
 export async function getDashboardAttemptDetail(

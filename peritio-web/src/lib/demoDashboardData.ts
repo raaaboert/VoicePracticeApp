@@ -690,6 +690,14 @@ function buildDemoCustomerFacingViewer(viewer: DashboardViewer): DashboardViewer
     isSuperUser: false,
     orgId: DASHBOARD_DEMO_ACCOUNT_ID,
     orgName: "SampleCo Training",
+    orgRole: "org_admin",
+    capabilities: {
+      viewOrganizationUsers: true,
+      manageRegularOrganizationUsers: true,
+      approveRejectAccessRequests: true,
+      editEmployeeIds: true,
+      manageOrganizationContent: true,
+    },
   };
 }
 
@@ -712,6 +720,7 @@ function buildDemoUserReportRows(): DashboardUserReportRow[] {
     return {
       userId: `demo_sampleco_user_${String(index + 1).padStart(2, "0")}`,
       email: seed.email,
+      employeeId: null,
       orgId: DASHBOARD_DEMO_ACCOUNT_ID,
       orgName: "SampleCo Training",
       status: seed.status,
@@ -741,6 +750,7 @@ function buildTrainingUsers(userAttemptCounts: number[], trainingIndex: number):
     return {
       userId: user.userId,
       email: user.email,
+      employeeId: user.employeeId,
       orgId: DASHBOARD_DEMO_ACCOUNT_ID,
       orgName: "SampleCo Training",
       status: user.status,

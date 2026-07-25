@@ -21,6 +21,14 @@ function createViewer(overrides?: Partial<DashboardViewer>): DashboardViewer {
     isSuperUser: true,
     orgId: null,
     orgName: null,
+    orgRole: null,
+    capabilities: {
+      viewOrganizationUsers: false,
+      manageRegularOrganizationUsers: false,
+      approveRejectAccessRequests: false,
+      editEmployeeIds: false,
+      manageOrganizationContent: false,
+    },
     ...overrides,
   };
 }

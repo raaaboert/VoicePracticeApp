@@ -75,6 +75,9 @@ export default async function CustomerDetailPage({
             <Link className="inline-link" href={`/app/customers/${encodeURIComponent(customer.orgId)}/performance${divisionId ? `?divisionId=${encodeURIComponent(divisionId)}` : ""}`}>
               Performance
             </Link>
+            <Link className="inline-link" href={`/app/admin?orgId=${encodeURIComponent(customer.orgId)}`}>
+              Admin
+            </Link>
           </div>
         }
       />
