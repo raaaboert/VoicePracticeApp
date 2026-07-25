@@ -1589,6 +1589,7 @@ export async function fetchOrgAdminUsers(
   users: Array<{
     userId: string;
     email: string;
+    employeeId: string | null;
     status: string;
     orgRole: string;
     dailySecondsCapOverride: number | null;
@@ -1675,6 +1676,7 @@ export async function fetchOrgAdminUserDetail(
   user: {
     userId: string;
     email: string;
+    employeeId: string | null;
     status: string;
     orgRole: string;
     dailySecondsCapOverride: number | null;

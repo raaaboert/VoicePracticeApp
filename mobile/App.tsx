@@ -741,7 +741,6 @@ export default function App() {
   const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
   const [verificationError, setVerificationError] = useState<string | null>(null);
   const [isVerificationSaving, setIsVerificationSaving] = useState(false);
-  const [domainMatch, setDomainMatch] = useState<{ orgId: string; orgName: string; emailDomain: string } | null>(null);
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [orgRequestNotice, setOrgRequestNotice] = useState<string | null>(null);
   const [orgRequestError, setOrgRequestError] = useState<string | null>(null);
@@ -1952,7 +1951,6 @@ export default function App() {
     setVerificationExpiresAt(null);
     setVerificationNotice(null);
     setVerificationError(null);
-    setDomainMatch(null);
     setHasAuthenticatedScopedConfig(false);
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
@@ -2323,7 +2321,6 @@ export default function App() {
     if (screen === "domain_match" && user.accountType === "enterprise" && user.orgId) {
       setOrgRequestError(null);
       setOrgRequestNotice("Company membership approved. Your enterprise account is active. Dashboard access is enabled separately if your admin needs you in reporting.");
-      setDomainMatch(null);
       setOrgJoinCodeInput("");
       setScreen("home");
     }
@@ -2455,7 +2452,6 @@ export default function App() {
       ]);
       setUser(onboarded.user);
       setMobileAuthToken(onboarded.authToken);
-      setDomainMatch(onboarded.domainMatch ?? null);
       setSettingsEmail(onboarded.user.email);
       setSettingsTimezone(onboarded.user.timezone);
 
@@ -2470,7 +2466,6 @@ export default function App() {
       }
 
       if (onboarded.user.isSuperUser) {
-        setDomainMatch(null);
         await openSuperUserOrgSelector(onboarded.user, onboarded.authToken, {
           preserveActiveContext: false,
         });
@@ -2486,7 +2481,7 @@ export default function App() {
       if (!scopedConfigLoaded) {
         return;
       }
-      if (onboarded.domainMatch && onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
+      if (onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -2522,13 +2517,11 @@ export default function App() {
       setUser(payload.user);
       setMobileAuthToken(payload.authToken);
       void saveMobileAuthToken(payload.authToken);
-      setDomainMatch(payload.domainMatch ?? null);
       setVerificationCode("");
       setPendingVerificationUserId(null);
       setVerificationExpiresAt(null);
       setVerificationNotice("Email verified.");
       if (payload.user.isSuperUser) {
-        setDomainMatch(null);
         await openSuperUserOrgSelector(payload.user, payload.authToken, {
           preserveActiveContext: false,
         });
@@ -2545,7 +2538,7 @@ export default function App() {
         return;
       }
 
-      if (payload.domainMatch && payload.user.accountType === "individual" && !payload.user.isSuperUser) {
+      if (payload.user.accountType === "individual" && !payload.user.isSuperUser) {
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -3730,19 +3723,16 @@ export default function App() {
         <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
           <Text style={styles.ghostButtonText}>Skip</Text>
         </Pressable>
-        <Text style={styles.topTitle}>Org Access</Text>
+        <Text style={styles.topTitle}>Company Access</Text>
         <View style={styles.spacer} />
       </View>
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         <View style={styles.card}>
-          <Text style={styles.title}>Organization Found</Text>
+          <Text style={styles.title}>Enter Company Code</Text>
           <Text style={styles.body}>
-            We found an enterprise account for {domainMatch?.emailDomain ?? "your domain"}:
-            {"\n"}
-            {domainMatch?.orgName ?? "Organization"}
-            {"\n\n"}
-            Enter the join code from your org admin to request company membership. Dashboard access, if you need it later,
-            is enabled separately by your admin.
+            Enter the company code from your organization admin to request membership. The code identifies the company,
+            but access is only granted after an administrator approves your request. Dashboard access, if you need it
+            later, is enabled separately by your admin.
           </Text>
           <TextInput
             value={orgJoinCodeInput}
@@ -3764,7 +3754,7 @@ export default function App() {
             <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Membership"}</Text>
           </Pressable>
           <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
-            <Text style={styles.ghostButtonText}>Skip and Continue Individual</Text>
+            <Text style={styles.ghostButtonText}>Continue Without Company</Text>
           </Pressable>
         </View>
       </ScrollView>
@@ -4091,9 +4081,8 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.title}>Enterprise Access</Text>
             <Text style={styles.body}>
-              If your company has an enterprise subscription for your email domain, enter the org join code to request
-              company membership. Requests expire after 7 days and can be resent. Dashboard access is enabled separately
-              if your admin needs you in reporting.
+              Enter the company code from your organization admin to request membership. Requests expire after 7 days and
+              can be resent. Dashboard access is enabled separately if your admin needs you in reporting.
             </Text>
             <TextInput
               value={orgJoinCodeInput}
