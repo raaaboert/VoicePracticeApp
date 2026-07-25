@@ -77,14 +77,6 @@ export function DashboardShell({
           ))}
         </nav>
 
-        <div className="sidebar-note">
-          <p className="eyebrow">Access</p>
-          <p>
-            {hasCrossAccountAccess
-              ? "You can review every customer account currently in your reporting scope."
-              : "You are limited to your own customer account and its reporting views."}
-          </p>
-        </div>
       </aside>
 
       <section className="app-main">

@@ -520,6 +520,32 @@ select.text-input {
   margin-bottom: 1rem;
 }
 
+.history-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.history-toggle-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 999px;
+}
+
+.history-toggle-icon {
+  min-width: 1rem;
+  color: var(--text-muted);
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+}
+
 .route-grid {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }

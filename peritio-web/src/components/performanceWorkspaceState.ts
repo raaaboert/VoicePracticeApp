@@ -56,3 +56,20 @@ export function filterPerformanceRowsForUser(
   }
   return rows.filter((row) => row.plan.userId === userId);
 }
+
+export function getVisiblePerformanceHistoryRows(
+  rows: DashboardPerformancePlanRow[],
+  isExpanded: boolean
+): DashboardPerformancePlanRow[] {
+  return isExpanded ? rows : [];
+}
+
+export function shouldClosePerformanceDetailWhenHistoryCollapses(
+  detailPlanId: string | null,
+  historyRows: DashboardPerformancePlanRow[]
+): boolean {
+  if (!detailPlanId) {
+    return false;
+  }
+  return historyRows.some((row) => row.plan.id === detailPlanId);
+}

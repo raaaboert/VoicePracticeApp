@@ -33,7 +33,9 @@ import {
   buildPerformanceUserDisplayName,
   filterPerformanceRowsForUser,
   filterPerformanceUsers,
+  getVisiblePerformanceHistoryRows,
   resolveSelectedPerformanceUser,
+  shouldClosePerformanceDetailWhenHistoryCollapses,
 } from "@/src/components/performanceWorkspaceState";
 
 interface PerformanceWorkspaceProps {
@@ -162,6 +164,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   const [detail, setDetail] = useState<DashboardPerformancePlanDetailResponse | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [loadingDetailPlanId, setLoadingDetailPlanId] = useState<string | null>(null);
+  const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
 
   const selectedUser = useMemo(
     () => resolveSelectedPerformanceUser(workspace.users, selectedUserId),
@@ -192,6 +195,10 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
   const groupedPlanRows = useMemo(
     () => groupPerformancePlanSummaries(selectedUserPlanRows, new Date(workspace.generatedAt)),
     [selectedUserPlanRows, workspace.generatedAt],
+  );
+  const visibleHistoryRows = useMemo(
+    () => getVisiblePerformanceHistoryRows(groupedPlanRows.history, isHistoryExpanded),
+    [groupedPlanRows.history, isHistoryExpanded],
   );
   const canManageSelectedUser = selectedUser?.canManagePerformancePlans === true;
   const isEditing = editingPlanId !== null;
@@ -272,6 +279,15 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
     setDetailError(null);
     setEditingPlanId(null);
     setShowPlanComposer(false);
+    setIsHistoryExpanded(false);
+  };
+
+  const toggleHistoryExpanded = () => {
+    const nextExpanded = !isHistoryExpanded;
+    if (!nextExpanded && shouldClosePerformanceDetailWhenHistoryCollapses(detail?.plan.plan.id ?? null, groupedPlanRows.history)) {
+      setDetail(null);
+    }
+    setIsHistoryExpanded(nextExpanded);
   };
 
   const buildRequest = () => {
@@ -772,6 +788,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
       <PlanTable
         title="Goal History"
         rows={groupedPlanRows.history}
+        visibleRows={visibleHistoryRows}
         emptyMessage="No completed or cancelled goals yet"
         cancelingPlanId={cancelingPlanId}
         isPending={isPending}
@@ -779,6 +796,9 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
         loadingDetailPlanId={loadingDetailPlanId}
         onOpenDetail={openPlanDetail}
         onEdit={editPlan}
+        collapsible
+        isCollapsed={!isHistoryExpanded}
+        onToggleCollapsed={toggleHistoryExpanded}
       />
         </>
       )}
@@ -949,6 +969,7 @@ function PlanDetailPanel({
 function PlanTable({
   title,
   rows,
+  visibleRows = rows,
   emptyMessage,
   cancelingPlanId,
   isPending,
@@ -956,9 +977,13 @@ function PlanTable({
   loadingDetailPlanId,
   onOpenDetail,
   onEdit,
+  collapsible = false,
+  isCollapsed = false,
+  onToggleCollapsed,
 }: {
   title: string;
   rows: DashboardPerformancePlanRow[];
+  visibleRows?: DashboardPerformancePlanRow[];
   emptyMessage: string;
   cancelingPlanId: string | null;
   isPending: boolean;
@@ -966,6 +991,9 @@ function PlanTable({
   loadingDetailPlanId: string | null;
   onOpenDetail: (planId: string) => Promise<void>;
   onEdit: (row: DashboardPerformancePlanRow) => void;
+  collapsible?: boolean;
+  isCollapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }) {
   return (
     <section className="section-card">
@@ -974,9 +1002,24 @@ function PlanTable({
           <p className="eyebrow">Goals</p>
           <h2>{title}</h2>
         </div>
-        <span className="pill">{rows.length}</span>
+        {collapsible ? (
+          <button
+            type="button"
+            className="history-toggle-button"
+            aria-expanded={!isCollapsed}
+            aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${title}`}
+            onClick={onToggleCollapsed}
+          >
+            <span className="pill">{rows.length}</span>
+            <span className="history-toggle-icon" aria-hidden="true">
+              {isCollapsed ? "v" : "^"}
+            </span>
+          </button>
+        ) : (
+          <span className="pill">{rows.length}</span>
+        )}
       </div>
-      {rows.length === 0 ? (
+      {collapsible && isCollapsed ? null : visibleRows.length === 0 ? (
         <div className="empty-state-panel">
           <h3>{emptyMessage}</h3>
           <p>Performance goal rows appear here when they exist for the selected user.</p>
@@ -995,7 +1038,7 @@ function PlanTable({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {visibleRows.map((row) => (
                 <tr key={row.plan.id}>
                   <td>
                     {buildPerformancePlanTitle(row.plan)}

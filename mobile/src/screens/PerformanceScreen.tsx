@@ -48,7 +48,7 @@ import {
   previewPerformancePlan,
 } from "../lib/api";
 import { formatPerformanceDate } from "../lib/performanceDateFormatting";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 interface PerformanceScreenProps {
   userId: string;
@@ -1009,33 +1009,14 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
           </GoalSection>
         </ScrollView>
       )}
-      <Modal visible={showCreateForm} animationType="slide" onRequestClose={() => setShowCreateForm(false)}>
-        <SafeAreaView style={styles.modalSafeArea} edges={["top", "bottom"]}>
-          <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : "height"}>
-            <View style={styles.createModalHeader}>
-              <View style={styles.flex}>
-                <Text style={styles.topTitle}>Create Performance Goal</Text>
-                <Text style={styles.subtle}>Set your next Focus Topic</Text>
-              </View>
-              <Pressable style={styles.smallButton} onPress={() => setShowCreateForm(false)}>
-                <Text style={styles.smallButtonText}>Cancel</Text>
-              </Pressable>
-            </View>
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.createFormContent}
-              keyboardShouldPersistTaps="handled"
-            >
-              <PerformanceCreateForm
-                userId={userId}
-                options={options}
-                authToken={authToken}
-                onCreated={handleCreated}
-              />
-            </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      </Modal>
+      <PerformanceCreateGoalModal
+        visible={showCreateForm}
+        userId={userId}
+        options={options}
+        authToken={authToken}
+        onCreated={handleCreated}
+        onClose={() => setShowCreateForm(false)}
+      />
       <PlanDetailModal
         detail={detail}
         userId={userId}
@@ -1047,25 +1028,105 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
   );
 }
 
+function PerformanceCreateGoalModal({
+  visible,
+  userId,
+  options,
+  authToken,
+  onCreated,
+  onClose,
+}: {
+  visible: boolean;
+  userId: string;
+  options: MobilePerformancePlanOptionsResponse | null;
+  authToken: string;
+  onCreated: () => Promise<void>;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="fullScreen"
+      onRequestClose={onClose}
+    >
+      <SafeAreaProvider style={styles.fill}>
+        <PerformanceCreateGoalModalContent
+          userId={userId}
+          options={options}
+          authToken={authToken}
+          onCreated={onCreated}
+          onClose={onClose}
+        />
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+
+function PerformanceCreateGoalModalContent({
+  userId,
+  options,
+  authToken,
+  onCreated,
+  onClose,
+}: {
+  userId: string;
+  options: MobilePerformancePlanOptionsResponse | null;
+  authToken: string;
+  onCreated: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const bottomInsetPadding = Math.max(insets.bottom, 12) + 24;
+
+  return (
+    <View style={[styles.modalSafeArea, { paddingTop: insets.top }]}>
+      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <View style={styles.createModalHeader}>
+          <View style={styles.createModalHeaderActions}>
+            <Pressable style={[styles.smallButton, styles.createModalCancelButton]} onPress={onClose}>
+              <Text style={styles.smallButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.topTitle}>Create Performance Goal</Text>
+          <Text style={styles.subtle}>Set your next Focus Topic</Text>
+        </View>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[styles.createFormContent, { paddingBottom: bottomInsetPadding }]}
+          keyboardShouldPersistTaps="handled"
+        >
+          <PerformanceCreateForm
+            userId={userId}
+            options={options}
+            authToken={authToken}
+            onCreated={onCreated}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   scroll: { flex: 1 },
   content: { paddingBottom: 24 },
-  createFormContent: { padding: 14, paddingBottom: 36 },
+  createFormContent: { paddingHorizontal: 14, paddingTop: 14 },
   createFormBody: { gap: 12 },
   modalSafeArea: { flex: 1, backgroundColor: "#101711" },
   modalScreen: { flex: 1, backgroundColor: "#101711", padding: 14 },
   createModalHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
     gap: 12,
     paddingHorizontal: 14,
-    paddingTop: 12,
+    paddingTop: 10,
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(246,240,223,0.12)",
     backgroundColor: "#101711",
   },
+  createModalHeaderActions: { alignItems: "flex-end" },
+  createModalCancelButton: { minHeight: 44 },
   centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10 },
   topRow: {
     flexDirection: "row",

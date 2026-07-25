@@ -7,7 +7,9 @@ import {
   buildPerformanceUserDisplayName,
   filterPerformanceRowsForUser,
   filterPerformanceUsers,
+  getVisiblePerformanceHistoryRows,
   resolveSelectedPerformanceUser,
+  shouldClosePerformanceDetailWhenHistoryCollapses,
 } from "./performanceWorkspaceState";
 
 function createUser(overrides?: Partial<DashboardPerformanceUserOption>): DashboardPerformanceUserOption {
@@ -108,4 +110,26 @@ test("Performance rows are filtered to the explicitly selected user only", () =>
 
   assert.deepEqual(filterPerformanceRowsForUser(rows, null).map((row) => row.plan.id), []);
   assert.deepEqual(filterPerformanceRowsForUser(rows, "selected_user").map((row) => row.plan.id), ["selected_active"]);
+});
+
+test("Performance Goal History rows are hidden until the section is expanded", () => {
+  const rows = [
+    createRow({ plan: createPlan({ id: "completed_goal", status: "completed", completedAt: "2026-08-20T12:00:00.000Z" }) }),
+    createRow({ plan: createPlan({ id: "cancelled_goal", status: "cancelled", cancelledAt: "2026-08-10T12:00:00.000Z" }) }),
+  ];
+
+  assert.deepEqual(getVisiblePerformanceHistoryRows(rows, false).map((row) => row.plan.id), []);
+  assert.deepEqual(getVisiblePerformanceHistoryRows(rows, true).map((row) => row.plan.id), ["completed_goal", "cancelled_goal"]);
+});
+
+test("Collapsing Performance Goal History closes only historical goal detail", () => {
+  const historyRows = [
+    createRow({ plan: createPlan({ id: "completed_goal", status: "completed", completedAt: "2026-08-20T12:00:00.000Z" }) }),
+    createRow({ plan: createPlan({ id: "cancelled_goal", status: "cancelled", cancelledAt: "2026-08-10T12:00:00.000Z" }) }),
+  ];
+
+  assert.equal(shouldClosePerformanceDetailWhenHistoryCollapses("completed_goal", historyRows), true);
+  assert.equal(shouldClosePerformanceDetailWhenHistoryCollapses("cancelled_goal", historyRows), true);
+  assert.equal(shouldClosePerformanceDetailWhenHistoryCollapses("active_goal", historyRows), false);
+  assert.equal(shouldClosePerformanceDetailWhenHistoryCollapses(null, historyRows), false);
 });
