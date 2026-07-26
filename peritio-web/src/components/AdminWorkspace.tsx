@@ -11,6 +11,7 @@ import type {
   UserStatus,
 } from "@voicepractice/shared";
 
+import { buildCsv } from "@/src/lib/csv";
 import { formatDateTime } from "@/src/lib/formatters";
 
 type AdminTab = "users" | "access";
@@ -33,11 +34,6 @@ function roleLabel(role: string): string {
   return "User";
 }
 
-function csvCell(value: string): string {
-  const escaped = value.replace(/"/g, '""');
-  return /[",\n\r]/.test(escaped) ? `"${escaped}"` : escaped;
-}
-
 function buildUsersCsv(payload: DashboardAdminUsersExportResponse): string {
   const header = ["Employee ID", "Name", "Email", "Role", "Status"];
   const rows = payload.rows.map((row) => [
@@ -47,7 +43,7 @@ function buildUsersCsv(payload: DashboardAdminUsersExportResponse): string {
     row.role,
     row.status,
   ]);
-  return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+  return buildCsv([header, ...rows]);
 }
 
 async function readJson<T>(response: Response): Promise<T> {

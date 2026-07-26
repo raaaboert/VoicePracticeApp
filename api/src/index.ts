@@ -7229,6 +7229,9 @@ function canDashboardAdminChangeUserStatus(params: {
     return false;
   }
   if (params.target.orgRole === "org_admin") {
+    if (params.viewer.accessType !== "super_user" && params.actor.orgRole !== "org_admin") {
+      return false;
+    }
     const activeOrgAdminCount = params.orgUsers.filter(
       (user) => user.orgRole === "org_admin" && user.status === "active"
     ).length;
@@ -10338,6 +10341,8 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
 
     const beforeEmployeeId = target.employeeId ?? null;
     const beforeStatus = target.status;
+    let nextEmployeeId = beforeEmployeeId;
+    let nextStatus = beforeStatus;
 
     if (hasEmployeeIdPatch) {
       if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editEmployeeIds", response)) {
@@ -10373,7 +10378,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         });
         return;
       }
-      target.employeeId = normalizedEmployeeId.value;
+      nextEmployeeId = normalizedEmployeeId.value;
     }
 
     if (hasStatusPatch) {
@@ -10384,12 +10389,13 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         response.status(400).json({ error: "Valid status is required." });
         return;
       }
+      nextStatus = body.status;
       if (!canDashboardAdminChangeUserStatus({
         actor: request.dashboard!.user,
         viewer: request.dashboard!.viewer,
         capabilities: adminContext.capabilities,
         target,
-        nextStatus: body.status,
+        nextStatus,
         orgUsers,
       })) {
         response.status(403).json({
@@ -10398,8 +10404,13 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         });
         return;
       }
-      target.status = body.status;
-      if (target.status !== "active") {
+    }
+
+    target.employeeId = nextEmployeeId;
+    target.status = nextStatus;
+
+    if (hasStatusPatch) {
+      if (nextStatus !== "active") {
         revokeMobileAccessForUser(db, target.id, "User access was disabled.");
         db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
         queueDatabasePostCommitEffect(db, {
@@ -10420,10 +10431,11 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         action: "org_user.employee_id.changed",
         orgId: adminContext.org.id,
         userId: target.id,
-        message: `Updated Employee ID for ${target.email}.`,
+        message: "Updated Employee ID for organization user.",
         metadata: {
+          employeeIdChanged: true,
           previousEmployeeIdPresent: Boolean(beforeEmployeeId),
-          nextEmployeeIdPresent: Boolean(target.employeeId)
+          newEmployeeIdPresent: Boolean(target.employeeId)
         }
       });
     }
@@ -13605,7 +13617,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       message: `Created user ${user.email}.`,
       metadata: {
         email: user.email,
-        employeeId: user.employeeId,
+        employeeIdPresent: Boolean(user.employeeId),
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         accountType: user.accountType,
         tier: user.tier,
@@ -13628,9 +13640,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     }
 
     const beforeDashboardViewer = resolveDashboardViewer(db, user);
+    const beforeEmployeeId = user.employeeId ?? null;
     const before = {
       email: user.email,
-      employeeId: user.employeeId ?? null,
+      employeeIdPresent: Boolean(beforeEmployeeId),
       isPlatformAdmin: user.isPlatformAdmin === true,
       dashboardAccessEnabled: user.dashboardAccessEnabled === true,
       tier: user.tier,
@@ -13875,21 +13888,22 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
           dailyOverageExpiresAt: user.dailyOverageExpiresAt,
-          employeeId: user.employeeId ?? null,
+          employeeIdPresent: Boolean(user.employeeId),
           timezone: user.timezone,
           deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
         }
       }
     });
-    if (before.employeeId !== (user.employeeId ?? null)) {
+    if (beforeEmployeeId !== (user.employeeId ?? null)) {
       appendPlatformAuditEvent(db, {
         action: "user.employee_id.changed",
         orgId: user.orgId,
         userId: user.id,
-        message: `Updated Employee ID for ${user.email}.`,
+        message: "Updated Employee ID for user.",
         metadata: {
-          previousEmployeeIdPresent: Boolean(before.employeeId),
-          nextEmployeeIdPresent: Boolean(user.employeeId)
+          employeeIdChanged: true,
+          previousEmployeeIdPresent: Boolean(beforeEmployeeId),
+          newEmployeeIdPresent: Boolean(user.employeeId)
         }
       });
     }
