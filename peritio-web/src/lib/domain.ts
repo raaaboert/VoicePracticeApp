@@ -76,6 +76,10 @@ export function isAuthApiPath(pathname: string): boolean {
   return pathname.startsWith("/api/auth/");
 }
 
+export function isAdminApiPath(pathname: string): boolean {
+  return pathname.startsWith("/api/admin/");
+}
+
 export function isPerformanceApiPath(pathname: string): boolean {
   return pathname.startsWith("/api/performance/");
 }

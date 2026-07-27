@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { DashboardAccessDeniedError, DashboardApiError, DashboardSessionInvalidError } from "@/src/lib/auth";
+import {
+  DashboardAccessDeniedError,
+  DashboardApiError,
+  DashboardSessionInvalidError,
+} from "@/src/lib/dashboardApiErrorTypes";
 import { classifyRequestHost } from "@/src/lib/domain";
 
 export function rejectNonAppDashboardApiHost(request: NextRequest): NextResponse | null {

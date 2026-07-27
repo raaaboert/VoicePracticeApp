@@ -6,12 +6,16 @@ import type {
   DashboardAdminAccessRequestRow,
   DashboardAdminAccessRequestsResponse,
   DashboardAdminUserRow,
-  DashboardAdminUsersExportResponse,
   DashboardAdminUsersResponse,
   UserStatus,
 } from "@voicepractice/shared";
 
-import { buildCsv } from "@/src/lib/csv";
+import {
+  assertAdminApiOk,
+  fetchAdminApiJson,
+  fetchAdminApiResponse,
+  getDownloadFilenameFromContentDisposition,
+} from "@/src/lib/adminApiClient";
 import { formatDateTime } from "@/src/lib/formatters";
 
 type AdminTab = "users" | "access";
@@ -34,37 +38,17 @@ function roleLabel(role: string): string {
   return "User";
 }
 
-function buildUsersCsv(payload: DashboardAdminUsersExportResponse): string {
-  const header = ["Employee ID", "Name", "Email", "Role", "Status"];
-  const rows = payload.rows.map((row) => [
-    row.employeeId,
-    row.name,
-    row.email,
-    row.role,
-    row.status,
-  ]);
-  return buildCsv([header, ...rows]);
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const payload = (await response.json().catch(() => null)) as ({ error?: string } & T) | null;
-  if (!response.ok) {
-    throw new Error(payload?.error || `Request failed (${response.status}).`);
-  }
-  return payload as T;
-}
-
 async function patchAdminUser(
   userId: string,
   body: { employeeId?: string | null; status?: UserStatus },
   orgId: string | null
 ): Promise<DashboardAdminUserRow> {
-  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}${encodeOrgQuery(orgId)}`, {
+  const url = `/api/admin/users/${encodeURIComponent(userId)}${encodeOrgQuery(orgId)}`;
+  const payload = await fetchAdminApiJson<{ user: DashboardAdminUserRow }>(url, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const payload = await readJson<{ user: DashboardAdminUserRow }>(response);
   return payload.user;
 }
 
@@ -73,12 +57,12 @@ async function decideAccessRequest(
   action: "approve" | "reject",
   orgId: string | null
 ): Promise<DashboardAdminAccessRequestRow> {
-  const response = await fetch(`/api/admin/access-requests/${encodeURIComponent(requestId)}${encodeOrgQuery(orgId)}`, {
+  const url = `/api/admin/access-requests/${encodeURIComponent(requestId)}${encodeOrgQuery(orgId)}`;
+  const payload = await fetchAdminApiJson<{ request: DashboardAdminAccessRequestRow }>(url, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action }),
   });
-  const payload = await readJson<{ request: DashboardAdminAccessRequestRow }>(response);
   return payload.request;
 }
 
@@ -160,15 +144,19 @@ export function AdminWorkspace({
     setActionMessage(null);
     setIsExporting(true);
     try {
-      const response = await fetch(`/api/admin/users${encodeOrgQuery(orgId)}${orgId ? "&" : "?"}export=csv`);
-      const payload = await readJson<DashboardAdminUsersExportResponse>(response);
-      const blob = new Blob([buildUsersCsv(payload)], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
+      const endpointUrl = `/api/admin/users${encodeOrgQuery(orgId)}${orgId ? "&" : "?"}export=csv`;
+      const response = await fetchAdminApiResponse(endpointUrl);
+      await assertAdminApiOk(response, endpointUrl);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${payload.org.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "organization"}-users.csv`;
+      anchor.href = blobUrl;
+      anchor.download = getDownloadFilenameFromContentDisposition(
+        response.headers.get("Content-Disposition"),
+        "organization-users.csv"
+      );
       anchor.click();
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(blobUrl);
       setActionMessage("CSV export generated.");
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not export users.");

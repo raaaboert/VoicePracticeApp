@@ -3,6 +3,11 @@ import "server-only";
 import { cookies } from "next/headers";
 import type { DashboardApiErrorCode } from "@/src/lib/dashboardApiErrors";
 import {
+  DashboardAccessDeniedError,
+  DashboardApiError,
+  DashboardSessionInvalidError,
+} from "@/src/lib/dashboardApiErrorTypes";
+import {
   DashboardAttemptDetailResponse,
   DashboardAdminAccessRequestsResponse,
   DashboardAdminDecideAccessRequest,
@@ -45,31 +50,7 @@ import {
   isDashboardSessionInvalidStatus,
 } from "@/src/lib/dashboardApiErrors";
 
-export class DashboardAccessDeniedError extends Error {
-  constructor(message = "Access denied.") {
-    super(message);
-    this.name = "DashboardAccessDeniedError";
-  }
-}
-
-export class DashboardApiError extends Error {
-  status: number;
-  code: DashboardApiErrorCode | null;
-
-  constructor(status: number, message: string, code: DashboardApiErrorCode | null = null) {
-    super(message);
-    this.name = "DashboardApiError";
-    this.status = status;
-    this.code = code;
-  }
-}
-
-export class DashboardSessionInvalidError extends Error {
-  constructor(message = "Dashboard session is no longer valid.") {
-    super(message);
-    this.name = "DashboardSessionInvalidError";
-  }
-}
+export { DashboardAccessDeniedError, DashboardApiError, DashboardSessionInvalidError };
 
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -97,7 +78,11 @@ async function parseErrorPayload(
 
   const code = payload?.code;
   const normalizedCode =
-    code === "dashboard_scope_denied" || code === "dashboard_session_invalid" || code === "web_auth_invalid"
+    code === "dashboard_scope_denied" ||
+    code === "dashboard_session_invalid" ||
+    code === "web_auth_invalid" ||
+    code === "employee_id_conflict" ||
+    code === "employee_id_invalid"
       ? code
       : null;
 

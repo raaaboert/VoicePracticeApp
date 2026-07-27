@@ -194,6 +194,12 @@ function buildDatabase(): ApiDatabase {
         orgId: null,
         orgRole: "user",
       }),
+      buildUser("reject_user", "reject@gmail.com", {
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user",
+      }),
       buildUser("gmail_invalid", "invalid.gmail@gmail.com", {
         accountType: "individual",
         tier: "free",
@@ -251,6 +257,7 @@ function buildDatabase(): ApiDatabase {
     webAuthChallenges: [],
     enterpriseJoinRequests: [
       buildJoinRequest("jr_pending", "pending_user", "pending@gmail.com"),
+      buildJoinRequest("jr_reject", "reject_user", "reject@gmail.com"),
       buildJoinRequest("jr_mobile", "gmail_join_2", "gmail.two@gmail.com"),
       buildJoinRequest("jr_other", "other_pending", "other-pending@gmail.com", "org_2"),
     ],
@@ -696,6 +703,27 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   });
   assert.equal(approved.status, 200);
   assert.equal((approved.body.request as { status?: string }).status, "approved");
+
+  const usersAfterApproval = await dashboardRequest("/dashboard/admin/users", userAdminToken);
+  assert.equal(usersAfterApproval.status, 200);
+  const users = usersAfterApproval.body.users as Array<{ userId: string; email: string; status: string; orgRole: string }>;
+  assert.equal(
+    users.some((user) =>
+      user.userId === "pending_user" &&
+      user.email === "pending@gmail.com" &&
+      user.status === "active" &&
+      user.orgRole === "user"
+    ),
+    true
+  );
+
+  const rejected = await dashboardRequest("/dashboard/admin/access-requests/jr_reject", userAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "reject", reason: "Not a trial user." }),
+  });
+  assert.equal(rejected.status, 200);
+  assert.equal((rejected.body.request as { status?: string }).status, "rejected");
+  assert.equal((await readUser("reject_user"))?.orgId, null);
 
   const mobileApproved = await mobileRequest(
     "/mobile/users/org_admin/admin/org/access-requests/jr_mobile",

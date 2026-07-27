@@ -5,6 +5,7 @@ import {
   classifyRequestHost,
   getConfiguredAppHost,
   getConfiguredPublicHost,
+  isAdminApiPath,
   isAppExperiencePath,
   isAuthApiPath,
   isPerformanceApiPath,
@@ -59,7 +60,12 @@ export function middleware(request: NextRequest) {
       return NextResponse.next();
     }
 
-    if (isAppExperiencePath(pathname) || isAuthApiPath(pathname) || isPerformanceApiPath(pathname)) {
+    if (
+      isAppExperiencePath(pathname) ||
+      isAuthApiPath(pathname) ||
+      isAdminApiPath(pathname) ||
+      isPerformanceApiPath(pathname)
+    ) {
       return NextResponse.redirect(
         buildAbsoluteUrlForHost({
           host: getConfiguredAppHost(),
@@ -91,7 +97,14 @@ export function middleware(request: NextRequest) {
       );
     }
 
-    if (pathname === "/login" || pathname === "/app" || pathname.startsWith("/app/") || isAuthApiPath(pathname) || isPerformanceApiPath(pathname)) {
+    if (
+      pathname === "/login" ||
+      pathname === "/app" ||
+      pathname.startsWith("/app/") ||
+      isAuthApiPath(pathname) ||
+      isAdminApiPath(pathname) ||
+      isPerformanceApiPath(pathname)
+    ) {
       return NextResponse.next();
     }
 
