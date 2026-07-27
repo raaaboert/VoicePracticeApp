@@ -163,7 +163,7 @@ export function resolvePerformanceUserDisplayName(user: UserNameSource): string 
     return fullName;
   }
 
-  return normalizeFriendlyName(user.email) ?? "Account user";
+  return "Not provided";
 }
 
 export interface BuildDashboardPerformanceWorkspaceOrganizationSummary {
@@ -1357,30 +1357,7 @@ function buildPerformancePlanUpdateDisplay(update: PerformancePlanUpdateRecord, 
 
 function resolvePerformanceUpdateAuthorDisplayName(update: PerformancePlanUpdateRecord, users: UserProfile[]): string {
   const actor = update.authorActorId ? users.find((user) => user.id === update.authorActorId) ?? null : null;
-  return buildFriendlyAccountName(actor) ?? "Account user";
-}
-
-function buildFriendlyAccountName(user: UserProfile | null): string | null {
-  const localPart = user?.email.split("@")[0]?.trim() ?? "";
-  if (!localPart) {
-    return null;
-  }
-  const parts = localPart
-    .replace(/[^a-zA-Z]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts.length < 2) {
-    return null;
-  }
-  return `${toTitleCaseName(parts[0])} ${parts[parts.length - 1][0].toUpperCase()}.`;
-}
-
-function toTitleCaseName(value: string): string {
-  if (!value) {
-    return value;
-  }
-  return `${value[0].toUpperCase()}${value.slice(1).toLowerCase()}`;
+  return actor ? resolvePerformanceUserDisplayName(actor) : "Not provided";
 }
 
 function buildPerformanceAuditDisplayEvents(params: {

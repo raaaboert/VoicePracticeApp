@@ -732,6 +732,9 @@ export default function App() {
   const [selectedPersonaStyle, setSelectedPersonaStyle] = useState<PersonaStyle>("skeptical");
 
   const [onboardingEmail, setOnboardingEmail] = useState("");
+  const [onboardingFirstName, setOnboardingFirstName] = useState("");
+  const [onboardingLastName, setOnboardingLastName] = useState("");
+  const [onboardingCompanyCode, setOnboardingCompanyCode] = useState("");
   const [onboardingTimezone, setOnboardingTimezone] = useState(detectedTimezone);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [isOnboardingSaving, setIsOnboardingSaving] = useState(false);
@@ -1956,6 +1959,9 @@ export default function App() {
     setOrgRequestNotice(null);
     setOrgRequestError(null);
     setOnboardingEmail("");
+    setOnboardingFirstName("");
+    setOnboardingLastName("");
+    setOnboardingCompanyCode("");
     setOnboardingTimezone(detectedTimezone);
     setSettingsEmail("");
     setSettingsTimezone(detectedTimezone);
@@ -2072,6 +2078,8 @@ export default function App() {
 
       setUser(userPayload);
       setOnboardingEmail(userPayload.email);
+      setOnboardingFirstName(userPayload.firstName ?? "");
+      setOnboardingLastName(userPayload.lastName ?? "");
       setOnboardingTimezone(userPayload.timezone);
       setSettingsEmail(userPayload.email);
       setSettingsTimezone(userPayload.timezone);
@@ -2131,6 +2139,7 @@ export default function App() {
       const shouldResetSession =
         lower.includes("mobile token") ||
         lower.includes("invalid mobile token") ||
+        lower.includes("mobile profile update required") ||
         lower.includes("user not found") ||
         lower.includes("user doesn't exist");
       const shouldSelfHeal =
@@ -2429,9 +2438,24 @@ export default function App() {
   const runOnboarding = async () => {
     setOnboardingError(null);
     const normalizedEmail = onboardingEmail.trim().toLowerCase();
+    const firstName = onboardingFirstName.trim();
+    const lastName = onboardingLastName.trim();
+    const companyCode = onboardingCompanyCode.trim();
 
     if (!isEmailLike(normalizedEmail)) {
       setOnboardingError("Please enter a valid email.");
+      return;
+    }
+    if (!firstName) {
+      setOnboardingError("Please enter your first name.");
+      return;
+    }
+    if (!lastName) {
+      setOnboardingError("Please enter your last name.");
+      return;
+    }
+    if (!companyCode) {
+      setOnboardingError("Please enter your company code.");
       return;
     }
 
@@ -2444,6 +2468,9 @@ export default function App() {
     try {
       const onboarded = await onboardMobileUser({
         email: normalizedEmail,
+        firstName,
+        lastName,
+        joinCode: companyCode,
         timezone: onboardingTimezone.trim(),
       });
       void Promise.allSettled([
@@ -2482,6 +2509,7 @@ export default function App() {
         return;
       }
       if (onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
+        setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -2508,12 +2536,28 @@ export default function App() {
       setVerificationError("Enter the 6-digit email verification code (numbers only).");
       return;
     }
+    if (!onboardingFirstName.trim()) {
+      setVerificationError("Enter your first name before verifying.");
+      return;
+    }
+    if (!onboardingLastName.trim()) {
+      setVerificationError("Enter your last name before verifying.");
+      return;
+    }
+    if (!onboardingCompanyCode.trim()) {
+      setVerificationError("Enter your company code before verifying.");
+      return;
+    }
 
     setVerificationError(null);
     setVerificationNotice(null);
     setIsVerificationSaving(true);
     try {
-      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken);
+      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken, {
+        firstName: onboardingFirstName.trim(),
+        lastName: onboardingLastName.trim(),
+        joinCode: onboardingCompanyCode.trim(),
+      });
       setUser(payload.user);
       setMobileAuthToken(payload.authToken);
       void saveMobileAuthToken(payload.authToken);
@@ -2539,6 +2583,7 @@ export default function App() {
       }
 
       if (payload.user.accountType === "individual" && !payload.user.isSuperUser) {
+        setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -3619,6 +3664,30 @@ export default function App() {
             autoCapitalize="none"
             style={styles.input}
           />
+          <TextInput
+            value={onboardingFirstName}
+            onChangeText={setOnboardingFirstName}
+            placeholder="First name"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="words"
+            style={styles.input}
+          />
+          <TextInput
+            value={onboardingLastName}
+            onChangeText={setOnboardingLastName}
+            placeholder="Last name"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="words"
+            style={styles.input}
+          />
+          <TextInput
+            value={onboardingCompanyCode}
+            onChangeText={setOnboardingCompanyCode}
+            placeholder="Company code"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="characters"
+            style={styles.input}
+          />
           <Text style={styles.hintText}>Timezone</Text>
           <TimezoneDropdown
             value={onboardingTimezone}
@@ -3670,6 +3739,30 @@ export default function App() {
               ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
               : "Use resend if the code has expired."}
           </Text>
+          <TextInput
+            value={onboardingFirstName}
+            onChangeText={setOnboardingFirstName}
+            placeholder="First name"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="words"
+            style={styles.input}
+          />
+          <TextInput
+            value={onboardingLastName}
+            onChangeText={setOnboardingLastName}
+            placeholder="Last name"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="words"
+            style={styles.input}
+          />
+          <TextInput
+            value={onboardingCompanyCode}
+            onChangeText={setOnboardingCompanyCode}
+            placeholder="Company code"
+            placeholderTextColor={theme.hint}
+            autoCapitalize="characters"
+            style={styles.input}
+          />
           <TextInput
             value={verificationCode}
             onChangeText={setVerificationCode}

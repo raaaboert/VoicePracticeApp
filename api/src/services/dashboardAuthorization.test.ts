@@ -74,6 +74,9 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
     manageRegularOrganizationUsers: true,
     approveRejectAccessRequests: true,
     editEmployeeIds: true,
+    editUserNames: true,
+    manageUserRoles: true,
+    assignUserManagers: true,
     manageOrganizationContent: true,
   });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
@@ -139,6 +142,9 @@ test("super users retain cross-account dashboard access", () => {
     manageRegularOrganizationUsers: false,
     approveRejectAccessRequests: false,
     editEmployeeIds: false,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
     manageOrganizationContent: false,
   });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), true);
@@ -231,8 +237,11 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
   assert.deepEqual(buildDashboardAdminCapabilities("user_admin"), {
     viewOrganizationUsers: true,
     manageRegularOrganizationUsers: true,
-    approveRejectAccessRequests: true,
+    approveRejectAccessRequests: false,
     editEmployeeIds: true,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
     manageOrganizationContent: false,
   });
 
@@ -241,6 +250,9 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     manageRegularOrganizationUsers: false,
     approveRejectAccessRequests: false,
     editEmployeeIds: false,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
     manageOrganizationContent: false,
   });
 
@@ -249,6 +261,9 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     manageRegularOrganizationUsers: true,
     approveRejectAccessRequests: true,
     editEmployeeIds: true,
+    editUserNames: true,
+    manageUserRoles: true,
+    assignUserManagers: true,
     manageOrganizationContent: true,
   });
 });

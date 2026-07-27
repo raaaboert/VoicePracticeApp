@@ -80,11 +80,15 @@ function buildUser(id: string, email: string, overrides: Partial<UserProfile> = 
   return {
     id,
     email,
+    firstName: overrides.firstName ?? null,
+    lastName: overrides.lastName ?? null,
     employeeId: overrides.employeeId ?? null,
+    managerUserId: overrides.managerUserId ?? null,
     emailVerifiedAt: overrides.emailVerifiedAt === undefined ? NOW : overrides.emailVerifiedAt,
     isPlatformAdmin: overrides.isPlatformAdmin ?? false,
     isSuperUser: overrides.isSuperUser ?? false,
     dashboardAccessEnabled: overrides.dashboardAccessEnabled ?? false,
+    mobileProfileReonboardingRequired: overrides.mobileProfileReonboardingRequired ?? false,
     accountType: overrides.accountType ?? "enterprise",
     tier: overrides.tier ?? "enterprise",
     status: overrides.status ?? "active",
@@ -139,32 +143,79 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_admin", "manager@acme.example", {
         orgRole: "user_admin",
         dashboardAccessEnabled: true,
+        firstName: "Maya",
+        lastName: "Manager",
         employeeId: "MGR-1",
       }),
       buildUser("eligible_user_admin", "eligible-manager@acme.example", {
         orgRole: "user_admin",
+        firstName: "Zoe",
+        lastName: "Eligible",
         employeeId: "MGR-2",
       }),
       buildUser("disabled_user_admin", "disabled-manager@acme.example", {
         orgRole: "user_admin",
         status: "disabled",
+        firstName: "Disabled",
+        lastName: "Manager",
         employeeId: "MGR-D",
       }),
       buildUser("learner", "learner@acme.example", {
         orgRole: "user",
         employeeId: "EMP-1",
+        managerUserId: "user_admin",
       }),
       buildUser("learner_status", "learner-status@acme.example", {
         orgRole: "user",
         employeeId: "EMP-S",
+        managerUserId: "user_admin",
       }),
       buildUser("learner_atomic", "learner-atomic@acme.example", {
         orgRole: "user",
         employeeId: null,
+        managerUserId: "user_admin",
       }),
       buildUser("regular_dashboard", "viewer@acme.example", {
         orgRole: "user",
         dashboardAccessEnabled: true,
+      }),
+      buildUser("unassigned_learner", "unassigned@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-U",
+      }),
+      buildUser("other_manager_report", "other-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-O",
+        managerUserId: "eligible_user_admin",
+      }),
+      buildUser("role_target", "role-target@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-R",
+        managerUserId: "user_admin",
+      }),
+      buildUser("manager_to_demote", "aaron.lead@acme.example", {
+        orgRole: "user_admin",
+        dashboardAccessEnabled: true,
+        firstName: "Aaron",
+        lastName: "Lead",
+        employeeId: "MGR-3",
+      }),
+      buildUser("manager_to_demote_report", "demote-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-DM",
+        managerUserId: "manager_to_demote",
+      }),
+      buildUser("manager_to_disable", "brie.lead@acme.example", {
+        orgRole: "user_admin",
+        dashboardAccessEnabled: true,
+        firstName: "Brie",
+        lastName: "Lead",
+        employeeId: "MGR-4",
+      }),
+      buildUser("manager_to_disable_report", "disable-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-DD",
+        managerUserId: "manager_to_disable",
       }),
       buildUser("other_org_admin", "admin@other.example", {
         orgId: "org_2",
@@ -218,6 +269,16 @@ function buildDatabase(): ApiDatabase {
         orgId: null,
         orgRole: "user",
       }),
+      buildUser("reset_member", "reset.member@gmail.com", {
+        mobileProfileReonboardingRequired: true,
+      }),
+      buildUser("reset_mismatch", "reset.mismatch@gmail.com", {
+        mobileProfileReonboardingRequired: true,
+      }),
+      buildUser("disabled_member", "disabled.member@gmail.com", {
+        status: "disabled",
+        mobileProfileReonboardingRequired: true,
+      }),
       buildUser("super_user", "super@peritio.test", {
         accountType: "individual",
         tier: "pro_plus",
@@ -269,7 +330,17 @@ function buildDatabase(): ApiDatabase {
 }
 
 async function readDb(): Promise<ApiDatabase> {
-  return JSON.parse(await readFile(dbPath, "utf8")) as ApiDatabase;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      const payload = await readFile(dbPath, "utf8");
+      return JSON.parse(payload) as ApiDatabase;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  throw lastError;
 }
 
 function auditEventsPath(): string {
@@ -318,6 +389,19 @@ async function waitForPersistedUserOrg(userId: string, orgId: string): Promise<v
   }
   const db = await readDb();
   assert.equal(db.users.find((user) => user.id === userId)?.orgId, orgId);
+}
+
+async function waitForPersistedJoinRequests(
+  predicate: (requests: EnterpriseJoinRequestRecord[]) => boolean
+): Promise<EnterpriseJoinRequestRecord[]> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const db = await readDb();
+    if (predicate(db.enterpriseJoinRequests)) {
+      return db.enterpriseJoinRequests;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return (await readDb()).enterpriseJoinRequests;
 }
 
 async function seedStores(): Promise<void> {
@@ -380,6 +464,36 @@ async function mobileRequest(pathname: string, token: string, init?: RequestInit
     status: response.status,
     body: await response.json() as Record<string, unknown>,
   };
+}
+
+async function publicRequest(pathname: string, init?: RequestInit) {
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    ...init,
+    headers: {
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+  return {
+    status: response.status,
+    body: await response.json() as Record<string, unknown>,
+  };
+}
+
+async function captureVerificationCode<T>(runner: () => Promise<T>): Promise<{ result: T; code: string }> {
+  const originalLog = console.log;
+  const logs: string[] = [];
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map((arg) => String(arg)).join(" "));
+  };
+  try {
+    const result = await runner();
+    const code = logs.join("\n").match(/code=(\d{6})/)?.[1] ?? null;
+    assert.ok(code);
+    return { result, code };
+  } finally {
+    console.log = originalLog;
+  }
 }
 
 async function getAdminToken(): Promise<string> {
@@ -469,33 +583,162 @@ test("dashboard admin users are tenant-scoped and regular users cannot access Ad
   assert.equal(users.find((user) => user.userId === "learner")?.employeeId, "EMP-1");
 });
 
+test("user-admin users are scoped to themselves and directly assigned reports", async () => {
+  const result = await dashboardRequest("/dashboard/admin/users", userAdminToken);
+  assert.equal(result.status, 200);
+
+  const users = result.body.users as Array<{ userId: string }>;
+  const userIds = users.map((user) => user.userId).sort();
+  assert.deepEqual(userIds, ["learner", "learner_atomic", "learner_status", "role_target", "user_admin"]);
+  assert.deepEqual(result.body.managerOptions, []);
+
+  const viewer = result.body.viewer as { capabilities?: { approveRejectAccessRequests?: boolean; assignUserManagers?: boolean } };
+  assert.equal(viewer.capabilities?.approveRejectAccessRequests, false);
+  assert.equal(viewer.capabilities?.assignUserManagers, false);
+});
+
+test("org admins edit names and managers while user-admin managers cannot", async () => {
+  const userAdminNameDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ firstName: "No", lastName: "Access" }),
+  });
+  assert.equal(userAdminNameDenied.status, 403);
+
+  const userAdminRoleDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user_admin" }),
+  });
+  assert.equal(userAdminRoleDenied.status, 403);
+
+  const userAdminManagerDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ managerUserId: "eligible_user_admin" }),
+  });
+  assert.equal(userAdminManagerDenied.status, 403);
+
+  for (const managerUserId of ["other_org_admin", "disabled_user_admin", "regular_dashboard", "unassigned_learner"]) {
+    const invalid = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
+      method: "PATCH",
+      body: JSON.stringify({ managerUserId }),
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.code, "manager_invalid");
+  }
+
+  const selfAssignment = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ managerUserId: "unassigned_learner" }),
+  });
+  assert.equal(selfAssignment.status, 400);
+  assert.equal(selfAssignment.body.code, "manager_invalid");
+
+  const assigned = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({
+      firstName: "  Uma  ",
+      lastName: "  Learner  ",
+      managerUserId: "user_admin",
+    }),
+  });
+  assert.equal(assigned.status, 200);
+  const row = assigned.body.user as {
+    firstName?: string;
+    lastName?: string;
+    managerUserId?: string | null;
+    managerDisplayName?: string | null;
+  };
+  assert.equal(row.firstName, "Uma");
+  assert.equal(row.lastName, "Learner");
+  assert.equal(row.managerUserId, "user_admin");
+  assert.equal(row.managerDisplayName, "Maya Manager");
+
+  const usersResult = await dashboardRequest("/dashboard/admin/users", orgAdminToken);
+  assert.equal(usersResult.status, 200);
+  const managerOptions = usersResult.body.managerOptions as Array<{ userId: string; displayName: string }>;
+  assert.deepEqual(
+    managerOptions.map((manager) => manager.displayName),
+    ["Aaron Lead", "Brie Lead", "Maya Manager", "Zoe Eligible"]
+  );
+  assert.equal(managerOptions.some((manager) => manager.userId === "other_org_admin"), false);
+  assert.equal(managerOptions.some((manager) => manager.userId === "disabled_user_admin"), false);
+});
+
+test("org admin role and status changes update access and clear manager assignments", async () => {
+  const promoted = await dashboardRequest("/dashboard/admin/users/role_target", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user_admin" }),
+  });
+  assert.equal(promoted.status, 200);
+  const promotedRow = promoted.body.user as {
+    orgRole?: string;
+    dashboardAccessEnabled?: boolean;
+    managerUserId?: string | null;
+  };
+  assert.equal(promotedRow.orgRole, "user_admin");
+  assert.equal(promotedRow.dashboardAccessEnabled, true);
+  assert.equal(promotedRow.managerUserId, null);
+
+  const demoted = await dashboardRequest("/dashboard/admin/users/manager_to_demote", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user" }),
+  });
+  assert.equal(demoted.status, 200);
+  const demotedRow = demoted.body.user as {
+    orgRole?: string;
+    dashboardAccessEnabled?: boolean;
+    assignedReportCount?: number;
+  };
+  assert.equal(demotedRow.orgRole, "user");
+  assert.equal(demotedRow.dashboardAccessEnabled, false);
+  assert.equal(demotedRow.assignedReportCount, 0);
+  const demoteReport = await waitForPersistedUserState(
+    "manager_to_demote_report",
+    (user) => user?.managerUserId === null
+  );
+  assert.equal(demoteReport?.managerUserId, null);
+
+  const deactivated = await dashboardRequest("/dashboard/admin/users/manager_to_disable", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled" }),
+  });
+  assert.equal(deactivated.status, 200);
+  const deactivatedRow = deactivated.body.user as { status?: string; assignedReportCount?: number };
+  assert.equal(deactivatedRow.status, "disabled");
+  assert.equal(deactivatedRow.assignedReportCount, 0);
+  const disabledReport = await waitForPersistedUserState(
+    "manager_to_disable_report",
+    (user) => user?.managerUserId === null
+  );
+  assert.equal(disabledReport?.managerUserId, null);
+});
+
 test("dashboard admin role boundaries block user-admin access to administrators", async () => {
   const userAdminDeactivateOrgAdmin = await dashboardRequest("/dashboard/admin/users/org_admin_peer", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" }),
   });
-  assert.equal(userAdminDeactivateOrgAdmin.status, 403);
+  assert.equal(userAdminDeactivateOrgAdmin.status, 404);
   assert.equal((await readUser("org_admin_peer"))?.status, "active");
 
   const userAdminEditOrgAdmin = await dashboardRequest("/dashboard/admin/users/org_admin_peer", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ employeeId: "UA-NOPE" }),
   });
-  assert.equal(userAdminEditOrgAdmin.status, 403);
+  assert.equal(userAdminEditOrgAdmin.status, 404);
   assert.equal((await readUser("org_admin_peer"))?.employeeId, "ADM-2");
 
   const userAdminDeactivateUserAdmin = await dashboardRequest("/dashboard/admin/users/eligible_user_admin", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" }),
   });
-  assert.equal(userAdminDeactivateUserAdmin.status, 403);
+  assert.equal(userAdminDeactivateUserAdmin.status, 404);
   assert.equal((await readUser("eligible_user_admin"))?.status, "active");
 
   const userAdminReactivateUserAdmin = await dashboardRequest("/dashboard/admin/users/disabled_user_admin", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ status: "active" }),
   });
-  assert.equal(userAdminReactivateUserAdmin.status, 403);
+  assert.equal(userAdminReactivateUserAdmin.status, 404);
   assert.equal((await readUser("disabled_user_admin"))?.status, "disabled");
 
   const orgAdminDeactivateUserAdmin = await dashboardRequest("/dashboard/admin/users/eligible_user_admin", orgAdminToken, {
@@ -653,6 +896,148 @@ test("platform user audit metadata does not serialize raw Employee IDs", async (
   assert.equal(auditMetadata.includes("employeeIdChanged"), true);
 });
 
+test("mobile onboarding collects names and company code without granting immediate access", async () => {
+  const missingName = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "missing.name@gmail.com",
+      joinCode: "ACME2026",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(missingName.status, 400);
+  assert.equal(missingName.body.code, "user_name_invalid");
+
+  const { result: gmailOnboard, code: gmailCode } = await captureVerificationCode(() =>
+    publicRequest("/mobile/onboard", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "new.gmail.trial@gmail.com",
+        firstName: "  Gmail  ",
+        lastName: "  User  ",
+        joinCode: "  ACME2026  ",
+        timezone: "America/Denver",
+      }),
+    })
+  );
+  assert.equal(gmailOnboard.status, 201);
+  assert.equal(gmailOnboard.body.verificationRequired, true);
+  const gmailUser = gmailOnboard.body.user as UserProfile;
+  const gmailAuthToken = gmailOnboard.body.authToken as string;
+  assert.equal(gmailUser.orgId, null);
+  assert.equal(gmailUser.firstName, null);
+  assert.equal(gmailUser.lastName, null);
+  assert.equal(typeof gmailAuthToken, "string");
+
+  const gmailVerified = await mobileRequest("/mobile/onboard/verify-email", gmailAuthToken, {
+    method: "POST",
+    body: JSON.stringify({
+      userId: gmailUser.id,
+      code: gmailCode,
+      firstName: "  Gmail  ",
+      lastName: "  User  ",
+      joinCode: "ACME2026",
+    }),
+  });
+  assert.equal(gmailVerified.status, 200);
+  const verifiedGmailUser = gmailVerified.body.user as UserProfile;
+  assert.equal(verifiedGmailUser.firstName, "Gmail");
+  assert.equal(verifiedGmailUser.lastName, "User");
+  assert.equal(verifiedGmailUser.orgId, null);
+  const gmailRequests = await waitForPersistedJoinRequests(
+    (requests) => requests.some((request) => request.userId === gmailUser.id)
+  );
+  const gmailJoinRequests = gmailRequests.filter((request) => request.userId === gmailUser.id);
+  assert.equal(gmailJoinRequests.length, 1);
+  assert.equal(gmailJoinRequests[0].status, "pending");
+  assert.equal(gmailJoinRequests[0].orgId, "org_1");
+
+  const pending = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "pending@gmail.com",
+      firstName: " Pending ",
+      lastName: " Person ",
+      joinCode: "ACME2026",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(pending.status, 200);
+  assert.equal(pending.body.verificationRequired, false);
+  const pendingUser = pending.body.user as UserProfile;
+  assert.equal(pendingUser.firstName, "Pending");
+  assert.equal(pendingUser.lastName, "Person");
+  assert.equal(pendingUser.orgId, null);
+  const pendingRequests = await waitForPersistedJoinRequests(
+    (requests) => requests.filter((request) => request.userId === "pending_user").length === 1
+  );
+  assert.equal(pendingRequests.filter((request) => request.userId === "pending_user").length, 1);
+  assert.equal(pendingRequests.find((request) => request.id === "jr_pending")?.status, "pending");
+
+  const { result: resetOnboard, code: resetCode } = await captureVerificationCode(() =>
+    publicRequest("/mobile/onboard", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "reset.member@gmail.com",
+        firstName: " Reset ",
+        lastName: " Member ",
+        joinCode: "ACME2026",
+        timezone: "America/Denver",
+      }),
+    })
+  );
+  assert.equal(resetOnboard.status, 200);
+  assert.equal(resetOnboard.body.verificationRequired, true);
+  const resetVerified = await mobileRequest("/mobile/onboard/verify-email", resetOnboard.body.authToken as string, {
+    method: "POST",
+    body: JSON.stringify({
+      userId: "reset_member",
+      code: resetCode,
+      firstName: " Reset ",
+      lastName: " Member ",
+      joinCode: "ACME2026",
+    }),
+  });
+  assert.equal(resetVerified.status, 200);
+  const resetUser = resetVerified.body.user as UserProfile;
+  assert.equal(resetUser.firstName, "Reset");
+  assert.equal(resetUser.lastName, "Member");
+  assert.equal(resetUser.orgId, "org_1");
+  assert.equal(resetUser.mobileProfileReonboardingRequired, false);
+  const resetRequests = await waitForPersistedJoinRequests(
+    (requests) => requests.every((request) => request.userId !== "reset_member")
+  );
+  assert.equal(resetRequests.some((request) => request.userId === "reset_member"), false);
+
+  const mismatch = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "reset.mismatch@gmail.com",
+      firstName: "Mismatch",
+      lastName: "Member",
+      joinCode: "OTHER2026",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(mismatch.status, 403);
+  assert.match(String(mismatch.body.error), /does not match/);
+
+  const disabled = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "disabled.member@gmail.com",
+      firstName: "Disabled",
+      lastName: "Member",
+      joinCode: "ACME2026",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(disabled.status, 403);
+  assert.match(String(disabled.body.error), /deactivated/i);
+  const disabledDb = await readDb();
+  assert.equal(disabledDb.mobileAuthTokens.some((token) => token.userId === "disabled_member"), false);
+});
+
 test("company-code join requests accept Gmail, are duplicate-safe, and still require approval", async () => {
   const created = await mobileRequest("/mobile/users/gmail_join/org-access-requests", "token_gmail", {
     method: "POST",
@@ -697,14 +1082,20 @@ test("company-code join requests reject invalid codes and rate-limit repeated at
 });
 
 test("dashboard and mobile approvals use the same pending-request transition", async () => {
-  const approved = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", userAdminToken, {
+  const userAdminDenied = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", userAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "approve" }),
+  });
+  assert.equal(userAdminDenied.status, 403);
+
+  const approved = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", orgAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ action: "approve" }),
   });
   assert.equal(approved.status, 200);
   assert.equal((approved.body.request as { status?: string }).status, "approved");
 
-  const usersAfterApproval = await dashboardRequest("/dashboard/admin/users", userAdminToken);
+  const usersAfterApproval = await dashboardRequest("/dashboard/admin/users", orgAdminToken);
   assert.equal(usersAfterApproval.status, 200);
   const users = usersAfterApproval.body.users as Array<{ userId: string; email: string; status: string; orgRole: string }>;
   assert.equal(
@@ -717,7 +1108,7 @@ test("dashboard and mobile approvals use the same pending-request transition", a
     true
   );
 
-  const rejected = await dashboardRequest("/dashboard/admin/access-requests/jr_reject", userAdminToken, {
+  const rejected = await dashboardRequest("/dashboard/admin/access-requests/jr_reject", orgAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ action: "reject", reason: "Not a trial user." }),
   });

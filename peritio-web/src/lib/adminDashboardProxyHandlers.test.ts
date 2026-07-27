@@ -43,6 +43,9 @@ function createViewer(): DashboardViewer {
       manageRegularOrganizationUsers: true,
       approveRejectAccessRequests: true,
       editEmployeeIds: true,
+      editUserNames: true,
+      manageUserRoles: true,
+      assignUserManagers: true,
       manageOrganizationContent: true,
     },
   };
@@ -52,12 +55,21 @@ function createUserRow(overrides: Partial<DashboardAdminUserRow> = {}): Dashboar
   return {
     userId: "approved_user",
     email: "approved@gmail.com",
+    firstName: "Approved",
+    lastName: "User",
     displayName: "Approved User",
     employeeId: null,
     orgRole: "user",
+    managerUserId: null,
+    managerDisplayName: null,
+    managerEmail: null,
+    assignedReportCount: 0,
     status: "active",
     dashboardAccessEnabled: false,
     canEditEmployeeId: true,
+    canEditNames: true,
+    canChangeRole: true,
+    canAssignManager: true,
     canDeactivate: true,
     canReactivate: false,
     isSelf: false,
@@ -94,16 +106,20 @@ function createExportPayload(overrides: Partial<DashboardAdminUsersExportRespons
     rows: [
       {
         employeeId: "EMP-1",
-        name: "Rob, Admin",
+        firstName: "Rob",
+        lastName: "Admin",
         email: "admin@rob.example",
         role: "Org Admin",
+        manager: "",
         status: "active",
       },
       {
         employeeId: "",
-        name: "=Formula User",
+        firstName: "=Formula",
+        lastName: "User",
         email: "formula@example.com",
         role: "User",
+        manager: "",
         status: "active",
       },
     ],
@@ -208,9 +224,9 @@ test("dashboard admin proxy exports organization users as CSV with safe headers 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("Content-Type"), "text/csv; charset=utf-8");
   assert.equal(response.headers.get("Content-Disposition"), 'attachment; filename="rob-s-company-users.csv"');
-  assert.equal(csv.includes("Employee ID,Name,Email,Role,Status"), true);
-  assert.equal(csv.includes('EMP-1,"Rob, Admin",admin@rob.example,Org Admin,active'), true);
-  assert.equal(csv.includes("'=Formula User"), true);
+  assert.equal(csv.includes("First Name,Last Name,Email,Employee ID,Role,Manager,Status"), true);
+  assert.equal(csv.includes("Rob,Admin,admin@rob.example,EMP-1,Org Admin,,active"), true);
+  assert.equal(csv.includes("'=Formula"), true);
 });
 
 test("dashboard admin proxy lists approved organization users through the JSON path", async () => {
@@ -222,6 +238,7 @@ test("dashboard admin proxy lists approved organization users through the JSON p
         generatedAt: "2026-07-25T15:00:00.000Z",
         org: { id: "org_1", name: "Rob's Company" },
         users: [createUserRow({ userId: "approved_user", email: "approved@gmail.com" })],
+        managerOptions: [],
       };
     },
     getUsersExport: async () => {

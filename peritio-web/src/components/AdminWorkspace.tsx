@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import type {
   DashboardAdminAccessRequestRow,
   DashboardAdminAccessRequestsResponse,
+  DashboardAdminUpdateUserRequest,
   DashboardAdminUserRow,
   DashboardAdminUsersResponse,
+  OrgUserRole,
   UserStatus,
 } from "@voicepractice/shared";
 
@@ -19,6 +21,14 @@ import {
 import { formatDateTime } from "@/src/lib/formatters";
 
 type AdminTab = "users" | "access";
+
+interface UserDraft {
+  firstName: string;
+  lastName: string;
+  employeeId: string;
+  orgRole: OrgUserRole;
+  managerUserId: string;
+}
 
 function encodeOrgQuery(orgId: string | null): string {
   return orgId ? `?orgId=${encodeURIComponent(orgId)}` : "";
@@ -38,9 +48,34 @@ function roleLabel(role: string): string {
   return "User";
 }
 
+function nameLabel(value: string | null | undefined): string {
+  return value?.trim() || "Not provided";
+}
+
+function managerLabel(user: DashboardAdminUserRow): string {
+  if (!user.managerUserId) {
+    return "Unassigned";
+  }
+  return user.managerDisplayName ?? "Not provided";
+}
+
+function createDraft(user: DashboardAdminUserRow): UserDraft {
+  return {
+    firstName: user.firstName ?? "",
+    lastName: user.lastName ?? "",
+    employeeId: user.employeeId ?? "",
+    orgRole: user.orgRole,
+    managerUserId: user.managerUserId ?? "",
+  };
+}
+
+function createDrafts(users: DashboardAdminUserRow[]): Record<string, UserDraft> {
+  return Object.fromEntries(users.map((user) => [user.userId, createDraft(user)]));
+}
+
 async function patchAdminUser(
   userId: string,
-  body: { employeeId?: string | null; status?: UserStatus },
+  body: DashboardAdminUpdateUserRequest,
   orgId: string | null
 ): Promise<DashboardAdminUserRow> {
   const url = `/api/admin/users/${encodeURIComponent(userId)}${encodeOrgQuery(orgId)}`;
@@ -81,14 +116,15 @@ export function AdminWorkspace({
   const [users, setUsers] = useState(usersPayload.users);
   const [requests, setRequests] = useState(accessRequestsPayload.requests);
   const [search, setSearch] = useState("");
-  const [editingEmployeeIds, setEditingEmployeeIds] = useState<Record<string, string>>(() =>
-    Object.fromEntries(usersPayload.users.map((user) => [user.userId, user.employeeId ?? ""]))
-  );
+  const [drafts, setDrafts] = useState<Record<string, UserDraft>>(() => createDrafts(usersPayload.users));
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [savingRequestId, setSavingRequestId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const canManageAccessRequests = usersPayload.viewer.capabilities.approveRejectAccessRequests;
+  const managerOptions = usersPayload.managerOptions ?? [];
 
   const filteredUsers = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -96,25 +132,86 @@ export function AdminWorkspace({
       return users;
     }
     return users.filter((user) =>
-      [user.displayName, user.email, user.employeeId ?? ""].some((value) => value.toLowerCase().includes(query))
+      [
+        user.displayName,
+        user.firstName ?? "",
+        user.lastName ?? "",
+        user.email,
+        user.employeeId ?? "",
+        user.managerDisplayName ?? "",
+        user.managerEmail ?? "",
+      ].some((value) => value.toLowerCase().includes(query))
     );
   }, [search, users]);
 
   const updateUserRow = (next: DashboardAdminUserRow) => {
     setUsers((current) => current.map((user) => (user.userId === next.userId ? next : user)));
-    setEditingEmployeeIds((current) => ({ ...current, [next.userId]: next.employeeId ?? "" }));
+    setDrafts((current) => ({ ...current, [next.userId]: createDraft(next) }));
   };
 
-  const saveEmployeeId = async (user: DashboardAdminUserRow) => {
+  const updateDraft = (userId: string, patch: Partial<UserDraft>) => {
+    setDrafts((current) => {
+      const existing = current[userId];
+      const user = users.find((entry) => entry.userId === userId);
+      if (!existing && !user) {
+        return current;
+      }
+      return {
+        ...current,
+        [userId]: {
+          ...(existing ?? createDraft(user!)),
+          ...patch,
+        },
+      };
+    });
+  };
+
+  const saveUser = async (user: DashboardAdminUserRow) => {
+    const draft = drafts[user.userId] ?? createDraft(user);
+    const body: DashboardAdminUpdateUserRequest = {};
+    if (user.canEditNames && draft.firstName !== (user.firstName ?? "")) {
+      body.firstName = draft.firstName;
+    }
+    if (user.canEditNames && draft.lastName !== (user.lastName ?? "")) {
+      body.lastName = draft.lastName;
+    }
+    if (user.canEditEmployeeId && draft.employeeId !== (user.employeeId ?? "")) {
+      body.employeeId = draft.employeeId;
+    }
+    if (user.canChangeRole && draft.orgRole !== user.orgRole) {
+      body.orgRole = draft.orgRole;
+    }
+    if (user.canAssignManager && draft.orgRole === "user" && (draft.managerUserId || null) !== (user.managerUserId ?? null)) {
+      body.managerUserId = draft.managerUserId || null;
+    }
+
+    if (Object.keys(body).length === 0) {
+      setActionError(null);
+      setActionMessage("No changes to save.");
+      setEditingUserId(null);
+      return;
+    }
+
+    if (
+      user.orgRole === "user_admin" &&
+      body.orgRole === "user" &&
+      !window.confirm(
+        `Demote ${user.email} to User? Dashboard access will be removed, sessions revoked, and ${user.assignedReportCount} direct report assignment${user.assignedReportCount === 1 ? "" : "s"} cleared.`
+      )
+    ) {
+      return;
+    }
+
     setActionError(null);
     setActionMessage(null);
     setSavingUserId(user.userId);
     try {
-      const next = await patchAdminUser(user.userId, { employeeId: editingEmployeeIds[user.userId] ?? "" }, orgId);
+      const next = await patchAdminUser(user.userId, body, orgId);
       updateUserRow(next);
-      setActionMessage("Employee ID saved.");
+      setEditingUserId(null);
+      setActionMessage("User saved.");
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Could not save Employee ID.");
+      setActionError(error instanceof Error ? error.message : "Could not save user.");
     } finally {
       setSavingUserId(null);
     }
@@ -122,7 +219,11 @@ export function AdminWorkspace({
 
   const changeStatus = async (user: DashboardAdminUserRow, status: UserStatus) => {
     const verb = status === "active" ? "reactivate" : "deactivate";
-    if (status === "disabled" && !window.confirm(`Deactivate ${user.email}?`)) {
+    const warning =
+      status === "disabled" && user.orgRole === "user_admin"
+        ? `Deactivate ${user.email}? Their dashboard sessions will be revoked and ${user.assignedReportCount} direct report assignment${user.assignedReportCount === 1 ? "" : "s"} cleared.`
+        : `Deactivate ${user.email}?`;
+    if (status === "disabled" && !window.confirm(warning)) {
       return;
     }
     setActionError(null);
@@ -191,13 +292,15 @@ export function AdminWorkspace({
         >
           Users
         </button>
-        <button
-          type="button"
-          className={`tab-button${activeTab === "access" ? " active" : ""}`}
-          onClick={() => setActiveTab("access")}
-        >
-          Access Requests
-        </button>
+        {canManageAccessRequests ? (
+          <button
+            type="button"
+            className={`tab-button${activeTab === "access" ? " active" : ""}`}
+            onClick={() => setActiveTab("access")}
+          >
+            Access Requests
+          </button>
+        ) : null}
       </div>
 
       {actionMessage ? <div className="notice success">{actionMessage}</div> : null}
@@ -228,83 +331,182 @@ export function AdminWorkspace({
             <table className="data-table admin-table">
               <thead>
                 <tr>
-                  <th>Name</th>
+                  <th>First Name</th>
+                  <th>Last Name</th>
                   <th>Email</th>
                   <th>Employee ID</th>
                   <th>Role</th>
+                  <th>Manager</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredUsers.map((user) => (
-                  <tr key={user.userId}>
-                    <td>{user.displayName}</td>
-                    <td>{user.email}</td>
-                    <td>
-                      <div className="admin-inline-edit">
-                        <input
-                          className="text-input compact-input"
-                          value={editingEmployeeIds[user.userId] ?? ""}
-                          disabled={!user.canEditEmployeeId || savingUserId === user.userId}
-                          onChange={(event) =>
-                            setEditingEmployeeIds((current) => ({ ...current, [user.userId]: event.target.value }))
-                          }
-                        />
-                        <button
-                          type="button"
-                          className="ghost-button compact-button"
-                          disabled={!user.canEditEmployeeId || savingUserId === user.userId}
-                          onClick={() => {
-                            void saveEmployeeId(user);
-                          }}
-                        >
-                          Save
-                        </button>
-                      </div>
-                    </td>
-                    <td>{roleLabel(user.orgRole)}</td>
-                    <td>
-                      <span className={`pill ${user.status === "active" ? "accent" : "muted"}`}>
-                        {statusLabel(user.status)}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="pill-row">
-                        {user.canDeactivate ? (
-                          <button
-                            type="button"
-                            className="ghost-button compact-button danger-button"
+                {filteredUsers.map((user) => {
+                  const isEditing = editingUserId === user.userId;
+                  const draft = drafts[user.userId] ?? createDraft(user);
+                  const canEditUser =
+                    user.canEditNames ||
+                    user.canEditEmployeeId ||
+                    user.canChangeRole ||
+                    (user.canAssignManager && user.orgRole === "user");
+
+                  return (
+                    <tr key={user.userId}>
+                      <td>
+                        {isEditing && user.canEditNames ? (
+                          <input
+                            className="text-input compact-input"
+                            value={draft.firstName}
                             disabled={savingUserId === user.userId}
-                            onClick={() => {
-                              void changeStatus(user, "disabled");
-                            }}
-                          >
-                            Deactivate
-                          </button>
-                        ) : null}
-                        {user.canReactivate ? (
-                          <button
-                            type="button"
-                            className="ghost-button compact-button"
+                            onChange={(event) => updateDraft(user.userId, { firstName: event.target.value })}
+                          />
+                        ) : (
+                          nameLabel(user.firstName)
+                        )}
+                      </td>
+                      <td>
+                        {isEditing && user.canEditNames ? (
+                          <input
+                            className="text-input compact-input"
+                            value={draft.lastName}
                             disabled={savingUserId === user.userId}
-                            onClick={() => {
-                              void changeStatus(user, "active");
-                            }}
+                            onChange={(event) => updateDraft(user.userId, { lastName: event.target.value })}
+                          />
+                        ) : (
+                          nameLabel(user.lastName)
+                        )}
+                      </td>
+                      <td>{user.email}</td>
+                      <td>
+                        {isEditing && user.canEditEmployeeId ? (
+                          <input
+                            className="text-input compact-input"
+                            value={draft.employeeId}
+                            disabled={savingUserId === user.userId}
+                            onChange={(event) => updateDraft(user.userId, { employeeId: event.target.value })}
+                          />
+                        ) : (
+                          user.employeeId ?? "-"
+                        )}
+                      </td>
+                      <td>
+                        {isEditing && user.canChangeRole ? (
+                          <select
+                            className="text-input compact-input"
+                            value={draft.orgRole}
+                            disabled={savingUserId === user.userId}
+                            onChange={(event) =>
+                              updateDraft(user.userId, {
+                                orgRole: event.target.value as OrgUserRole,
+                                managerUserId: event.target.value === "user" ? draft.managerUserId : "",
+                              })
+                            }
                           >
-                            Reactivate
-                          </button>
-                        ) : null}
-                        {!user.canDeactivate && !user.canReactivate ? <span className="table-subcopy">-</span> : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                            <option value="user">User</option>
+                            <option value="user_admin">User Admin</option>
+                          </select>
+                        ) : (
+                          roleLabel(user.orgRole)
+                        )}
+                      </td>
+                      <td>
+                        {isEditing && user.canAssignManager && draft.orgRole === "user" ? (
+                          <select
+                            className="text-input compact-input"
+                            value={draft.managerUserId}
+                            disabled={savingUserId === user.userId}
+                            onChange={(event) => updateDraft(user.userId, { managerUserId: event.target.value })}
+                          >
+                            <option value="">Unassigned</option>
+                            {managerOptions.map((manager) => (
+                              <option key={manager.userId} value={manager.userId}>
+                                {manager.email ? `${manager.displayName} (${manager.email})` : manager.displayName}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          managerLabel(user)
+                        )}
+                      </td>
+                      <td>
+                        <span className={`pill ${user.status === "active" ? "accent" : "muted"}`}>
+                          {statusLabel(user.status)}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="pill-row">
+                          {isEditing ? (
+                            <>
+                              <button
+                                type="button"
+                                className="ghost-button compact-button"
+                                disabled={savingUserId === user.userId}
+                                onClick={() => {
+                                  void saveUser(user);
+                                }}
+                              >
+                                Save
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button compact-button"
+                                disabled={savingUserId === user.userId}
+                                onClick={() => {
+                                  setDrafts((current) => ({ ...current, [user.userId]: createDraft(user) }));
+                                  setEditingUserId(null);
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : canEditUser ? (
+                            <button
+                              type="button"
+                              className="ghost-button compact-button"
+                              disabled={savingUserId === user.userId}
+                              onClick={() => setEditingUserId(user.userId)}
+                            >
+                              Edit
+                            </button>
+                          ) : null}
+                          {user.canDeactivate ? (
+                            <button
+                              type="button"
+                              className="ghost-button compact-button danger-button"
+                              disabled={savingUserId === user.userId}
+                              onClick={() => {
+                                void changeStatus(user, "disabled");
+                              }}
+                            >
+                              Deactivate
+                            </button>
+                          ) : null}
+                          {user.canReactivate ? (
+                            <button
+                              type="button"
+                              className="ghost-button compact-button"
+                              disabled={savingUserId === user.userId}
+                              onClick={() => {
+                                void changeStatus(user, "active");
+                              }}
+                            >
+                              Reactivate
+                            </button>
+                          ) : null}
+                          {!canEditUser && !user.canDeactivate && !user.canReactivate ? (
+                            <span className="table-subcopy">-</span>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </section>
-      ) : (
+      ) : canManageAccessRequests ? (
         <section className="section-card admin-section">
           <div className="section-header">
             <div>
@@ -381,7 +583,7 @@ export function AdminWorkspace({
             </table>
           </div>
         </section>
-      )}
+      ) : null}
     </div>
   );
 }

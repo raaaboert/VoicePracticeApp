@@ -510,6 +510,7 @@ export async function verifyMobileEmail(
   userId: string,
   code: string,
   authToken: string,
+  profile?: Pick<MobileVerifyEmailRequest, "firstName" | "lastName" | "joinCode">,
 ): Promise<{
   user: UserProfile;
   authToken: string;
@@ -517,7 +518,7 @@ export async function verifyMobileEmail(
   verificationExpiresAt: string | null;
   domainMatch: EnterpriseDomainMatch | null;
 }> {
-  const body: MobileVerifyEmailRequest = { userId, code };
+  const body: MobileVerifyEmailRequest = { userId, code, ...profile };
   return requestJson("/mobile/onboard/verify-email", {
     method: "POST",
     body: JSON.stringify(body),

@@ -21,10 +21,15 @@ export default async function AdminPage({
   let usersPayload;
   let accessRequestsPayload;
   try {
-    [usersPayload, accessRequestsPayload] = await Promise.all([
-      getDashboardAdminUsers(orgId),
-      getDashboardAdminAccessRequests(orgId),
-    ]);
+    usersPayload = await getDashboardAdminUsers(orgId);
+    accessRequestsPayload = usersPayload.viewer.capabilities.approveRejectAccessRequests
+      ? await getDashboardAdminAccessRequests(orgId)
+      : {
+          viewer: usersPayload.viewer,
+          generatedAt: usersPayload.generatedAt,
+          org: usersPayload.org,
+          requests: [],
+        };
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());

@@ -22,6 +22,9 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
       manageRegularOrganizationUsers: true,
       approveRejectAccessRequests: true,
       editEmployeeIds: true,
+      editUserNames: true,
+      manageUserRoles: true,
+      assignUserManagers: true,
       manageOrganizationContent: true,
     };
   }
@@ -32,6 +35,9 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
       manageRegularOrganizationUsers: true,
       approveRejectAccessRequests: true,
       editEmployeeIds: true,
+      editUserNames: true,
+      manageUserRoles: true,
+      assignUserManagers: true,
       manageOrganizationContent: true,
     };
   }
@@ -40,8 +46,11 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
     return {
       viewOrganizationUsers: true,
       manageRegularOrganizationUsers: true,
-      approveRejectAccessRequests: true,
+      approveRejectAccessRequests: false,
       editEmployeeIds: true,
+      editUserNames: false,
+      manageUserRoles: false,
+      assignUserManagers: false,
       manageOrganizationContent: false,
     };
   }
@@ -51,6 +60,9 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
     manageRegularOrganizationUsers: false,
     approveRejectAccessRequests: false,
     editEmployeeIds: false,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
     manageOrganizationContent: false,
   };
 }

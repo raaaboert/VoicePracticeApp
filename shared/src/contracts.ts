@@ -221,12 +221,17 @@ export interface TrainingPack {
 export interface UserProfile {
   id: string;
   email: string;
+  firstName?: string | null;
+  lastName?: string | null;
   employeeId: string | null;
+  managerUserId?: string | null;
   emailVerifiedAt: string | null;
   isPlatformAdmin?: boolean;
   isSuperUser?: boolean;
   // Explicit customer-side dashboard authorization. This is separate from mobile/app org role.
   dashboardAccessEnabled?: boolean;
+  // Mobile-only forced profile completion. Dashboard auth keeps using emailVerifiedAt/session state.
+  mobileProfileReonboardingRequired?: boolean;
   accountType: AccountType;
   tier: TierId;
   status: UserStatus;
@@ -1070,6 +1075,9 @@ export interface DashboardAdminCapabilities {
   manageRegularOrganizationUsers: boolean;
   approveRejectAccessRequests: boolean;
   editEmployeeIds: boolean;
+  editUserNames: boolean;
+  manageUserRoles: boolean;
+  assignUserManagers: boolean;
   manageOrganizationContent: boolean;
 }
 
@@ -1822,6 +1830,9 @@ export interface UpdateOrgCustomScenarioRequest {
 export interface MobileOnboardRequest {
   email: string;
   timezone: string;
+  firstName?: string;
+  lastName?: string;
+  joinCode?: string;
 }
 
 export interface MobileOnboardResponse {
@@ -1840,6 +1851,9 @@ export interface MobileUpdateSettingsRequest {
 export interface MobileVerifyEmailRequest {
   userId: string;
   code: string;
+  firstName?: string;
+  lastName?: string;
+  joinCode?: string;
 }
 
 export interface MobileResendVerificationRequest {
@@ -1853,12 +1867,21 @@ export interface MobileSubmitOrgJoinRequest {
 export interface DashboardAdminUserRow {
   userId: string;
   email: string;
+  firstName: string | null;
+  lastName: string | null;
   displayName: string;
   employeeId: string | null;
   orgRole: OrgUserRole;
+  managerUserId: string | null;
+  managerDisplayName: string | null;
+  managerEmail: string | null;
+  assignedReportCount: number;
   status: UserStatus;
   dashboardAccessEnabled: boolean;
   canEditEmployeeId: boolean;
+  canEditNames: boolean;
+  canChangeRole: boolean;
+  canAssignManager: boolean;
   canDeactivate: boolean;
   canReactivate: boolean;
   isSelf: boolean;
@@ -1874,11 +1897,24 @@ export interface DashboardAdminUsersResponse {
     name: string;
   };
   users: DashboardAdminUserRow[];
+  managerOptions: DashboardAdminManagerOption[];
+}
+
+export interface DashboardAdminManagerOption {
+  userId: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  displayName: string;
 }
 
 export interface DashboardAdminUpdateUserRequest {
+  firstName?: string;
+  lastName?: string;
   employeeId?: string | null;
   status?: UserStatus;
+  orgRole?: OrgUserRole;
+  managerUserId?: string | null;
 }
 
 export interface DashboardAdminUpdateUserResponse {
@@ -1888,9 +1924,11 @@ export interface DashboardAdminUpdateUserResponse {
 
 export interface DashboardAdminUsersExportRow {
   employeeId: string;
-  name: string;
+  firstName: string;
+  lastName: string;
   email: string;
   role: string;
+  manager: string;
   status: UserStatus;
 }
 

@@ -3,12 +3,14 @@ import type { DashboardAdminUsersExportResponse } from "@voicepractice/shared";
 import { buildCsv } from "./csv";
 
 export function buildDashboardAdminUsersCsv(payload: DashboardAdminUsersExportResponse): string {
-  const header = ["Employee ID", "Name", "Email", "Role", "Status"];
+  const header = ["First Name", "Last Name", "Email", "Employee ID", "Role", "Manager", "Status"];
   const rows = payload.rows.map((row) => [
-    row.employeeId,
-    row.name,
+    row.firstName,
+    row.lastName,
     row.email,
+    row.employeeId,
     row.role,
+    row.manager,
     row.status,
   ]);
   return buildCsv([header, ...rows]);

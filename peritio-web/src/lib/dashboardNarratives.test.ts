@@ -46,6 +46,9 @@ function createDashboardViewer(): DashboardViewer {
       manageRegularOrganizationUsers: false,
       approveRejectAccessRequests: false,
       editEmployeeIds: false,
+      editUserNames: false,
+      manageUserRoles: false,
+      assignUserManagers: false,
       manageOrganizationContent: false,
     },
   };

@@ -18,6 +18,7 @@ import {
   DashboardAdminCapabilities,
   DashboardAdminDecideAccessRequest,
   DashboardAdminDecideAccessRequestResponse,
+  DashboardAdminManagerOption,
   DashboardAdminUpdateUserRequest,
   DashboardAdminUpdateUserResponse,
   DashboardAdminUserRow,
@@ -248,6 +249,25 @@ import {
   findEmployeeIdConflict,
   normalizeEmployeeIdInput,
 } from "./services/employeeIds.js";
+import {
+  canActorManagePerformanceUser,
+  canActorManageRegularUser,
+  canActorSeeOrganizationUser,
+  canManagerAssignmentTargetBeManaged,
+  canOrgAdminManageRole,
+  clearAssignmentsForManager,
+  getDashboardPermittedUserIds,
+  getUserFirstName,
+  getUserLastName,
+  isEligibleManagerUser,
+  listVisibleOrganizationUsers,
+  normalizeManagerUserId,
+  normalizeOptionalStoredUserName,
+  normalizeRequiredUserNameInput,
+  repairInvalidManagerAssignments,
+  resolveStoredUserDisplayName,
+  validateManagerAssignment,
+} from "./services/userProfiles.js";
 import {
   completeRecognizedSimulationUsage,
   normalizeSimulationSessionId,
@@ -3171,10 +3191,13 @@ function ensureDemoEnterpriseData(db: {
     const existingUser = duplicateById ?? duplicateByEmail;
     if (existingUser) {
       existingUser.emailVerifiedAt = existingUser.emailVerifiedAt ?? existingUser.createdAt ?? now;
+      existingUser.firstName = normalizeOptionalStoredUserName(existingUser.firstName);
+      existingUser.lastName = normalizeOptionalStoredUserName(existingUser.lastName);
       existingUser.accountType = "enterprise";
       existingUser.tier = "enterprise";
       const normalizedEmployeeId = normalizeEmployeeIdInput(existingUser.employeeId);
       existingUser.employeeId = normalizedEmployeeId.ok ? normalizedEmployeeId.value : null;
+      existingUser.managerUserId = normalizeManagerUserId(existingUser.managerUserId);
       existingUser.orgId = demoUser.orgId;
       existingUser.orgRole = demoUser.orgRole;
       existingUser.status = existingUser.status ?? "active";
@@ -3189,7 +3212,10 @@ function ensureDemoEnterpriseData(db: {
     db.users.push({
       id: demoUser.id,
       email: demoUser.email,
+      firstName: null,
+      lastName: null,
       employeeId: null,
+      managerUserId: null,
       emailVerifiedAt: now,
       accountType: "enterprise",
       tier: "enterprise",
@@ -3204,6 +3230,7 @@ function ensureDemoEnterpriseData(db: {
       dailySecondsCapOverride: null,
       allowDailyOverageThisCycle: false,
       dailyOverageExpiresAt: null,
+      mobileProfileReonboardingRequired: false,
       createdAt: now,
       updatedAt: now
     });
@@ -3859,7 +3886,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     activeDivisionIdsByOrg.set(division.orgId, divisionIds);
   }
 
-  const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => {
+  const normalizedUsers: UserProfile[] = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => {
     const candidateUser = user as Partial<UserProfile>;
     const normalizedDivisionId =
       typeof candidateUser.divisionId === "string" ? candidateUser.divisionId.trim() : null;
@@ -3870,13 +3897,19 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
     return {
       ...user,
+      firstName: normalizeOptionalStoredUserName(candidateUser.firstName),
+      lastName: normalizeOptionalStoredUserName(candidateUser.lastName),
       employeeId: (() => {
         const normalizedEmployeeId = normalizeEmployeeIdInput(candidateUser.employeeId);
         return normalizedEmployeeId.ok ? normalizedEmployeeId.value : null;
       })(),
+      managerUserId:
+        candidateUser.accountType === "enterprise" ? normalizeManagerUserId(candidateUser.managerUserId) : null,
       isPlatformAdmin: candidateUser.isPlatformAdmin === true,
       isSuperUser: candidateUser.isSuperUser === true,
       dashboardAccessEnabled: candidateUser.accountType === "enterprise" ? candidateUser.dashboardAccessEnabled === true : false,
+      mobileProfileReonboardingRequired:
+        candidateUser.accountType === "enterprise" ? candidateUser.mobileProfileReonboardingRequired === true : false,
       manualBonusSeconds: clampNonNegativeInteger(candidateUser.manualBonusSeconds, 0),
       emailVerifiedAt:
         typeof candidateUser.emailVerifiedAt === "string" || candidateUser.emailVerifiedAt === null
@@ -3895,6 +3928,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       orgRole: candidateUser.accountType === "enterprise" ? normalizeOrgUserRole(candidateUser.orgRole) : "user"
     };
   });
+  repairInvalidManagerAssignments(normalizedUsers, now);
   const normalizedOrgTrainings = normalizeOrgTrainingRecords(
     (candidate as Partial<ApiDatabase>).orgTrainings,
     validOrgIds,
@@ -5125,14 +5159,15 @@ function filterOrgUsageSessions(
   orgId: string,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): UsageSessionRecord[] {
   return filterRecordsByDivision(
     usageSessionAccess.listByOrgRange(db, {
       orgId,
       startedAtFrom: new Date(startMs),
       startedAtBefore: new Date(endMs)
-    }),
+    }).filter((session) => !permittedUserIds || permittedUserIds.has(session.userId)),
     divisionId
   );
 }
@@ -5142,7 +5177,8 @@ function filterOrgScoreRecords(
   orgId: string,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): SimulationScoreRecord[] {
   return filterRecordsByDivision(
     scoreRecordAccess.listByOrgRange(db, {
@@ -5150,7 +5186,7 @@ function filterOrgScoreRecords(
       endedAtFrom: new Date(startMs),
       endedAtBefore: new Date(endMs),
       conclusiveOnly: true
-    }),
+    }).filter((record) => !permittedUserIds || permittedUserIds.has(record.userId)),
     divisionId
   );
 }
@@ -5160,11 +5196,15 @@ function filterDashboardAccessibleUsageSessions(
   orgIds: Set<string>,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): UsageSessionRecord[] {
   return filterRecordsByDivision(
     listUsageSessions(db).filter((session) => {
       if (!session.orgId || !orgIds.has(session.orgId)) {
+        return false;
+      }
+      if (permittedUserIds && !permittedUserIds.has(session.userId)) {
         return false;
       }
       const startedAtMs = new Date(session.startedAt).getTime();
@@ -5179,11 +5219,15 @@ function filterDashboardAccessibleScoreRecords(
   orgIds: Set<string>,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): SimulationScoreRecord[] {
   return filterRecordsByDivision(
     listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
       if (!record.orgId || !orgIds.has(record.orgId)) {
+        return false;
+      }
+      if (permittedUserIds && !permittedUserIds.has(record.userId)) {
         return false;
       }
       const endedAtMs = new Date(record.endedAt).getTime();
@@ -5697,10 +5741,11 @@ async function buildPerformanceUserContext(
 
 async function listDashboardPerformanceUserContexts(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null,
   explicitOrgId: string | null = null
 ): Promise<PerformancePlanUserContext[]> {
+  const viewer = principal.viewer;
   const accessibleOrgIds = new Set(listDashboardAccessibleOrgs(db, viewer).map((org) => org.id));
   if (explicitOrgId) {
     if (!accessibleOrgIds.has(explicitOrgId)) {
@@ -5709,9 +5754,18 @@ async function listDashboardPerformanceUserContexts(
     accessibleOrgIds.clear();
     accessibleOrgIds.add(explicitOrgId);
   }
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const contexts: PerformancePlanUserContext[] = [];
   for (const user of db.users) {
     if (user.accountType !== "enterprise" || !user.orgId || !accessibleOrgIds.has(user.orgId)) {
+      continue;
+    }
+    if (!permittedUserIds.has(user.id)) {
       continue;
     }
     const context = await buildPerformanceUserContext(db, user);
@@ -5733,7 +5787,7 @@ async function listDashboardPerformanceUserContexts(
 
 async function getDashboardPerformanceUserContext(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   userId: string,
   explicitOrgId: string | null,
   divisionId: string | null
@@ -5742,7 +5796,7 @@ async function getDashboardPerformanceUserContext(
   if (!user || user.accountType !== "enterprise" || !user.orgId) {
     return null;
   }
-  if (!canDashboardViewerAccessPerformanceTarget(db, viewer, user, explicitOrgId, divisionId)) {
+  if (!canDashboardViewerAccessPerformanceTarget(db, principal, user, explicitOrgId, divisionId)) {
     return null;
   }
   const context = await buildPerformanceUserContext(db, user);
@@ -5754,11 +5808,12 @@ async function getDashboardPerformanceUserContext(
 
 function canDashboardViewerAccessPerformanceTarget(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   target: UserProfile,
   explicitOrgId: string | null,
   divisionId: string | null
 ): boolean {
+  const viewer = principal.viewer;
   if (target.accountType !== "enterprise" || !target.orgId) {
     return false;
   }
@@ -5766,6 +5821,15 @@ function canDashboardViewerAccessPerformanceTarget(
     return false;
   }
   if (!canDashboardViewerAccessOrg(viewer, target.orgId)) {
+    return false;
+  }
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([target.orgId]),
+  });
+  if (!permittedUserIds.has(target.id)) {
     return false;
   }
   if (divisionId) {
@@ -5797,22 +5861,7 @@ function getPerformancePlanRowContext(
 }
 
 function canManagePerformancePlanForUser(actor: UserProfile, viewer: DashboardViewer, target: UserProfile): boolean {
-  if (viewer.accessType === "super_user" && actor.isSuperUser === true) {
-    return true;
-  }
-  if (actor.accountType !== "enterprise" || target.accountType !== "enterprise") {
-    return false;
-  }
-  if (!actor.orgId || actor.orgId !== target.orgId) {
-    return false;
-  }
-  if (actor.orgRole === "org_admin") {
-    return true;
-  }
-  if (actor.orgRole === "user_admin") {
-    return target.orgRole !== "org_admin";
-  }
-  return false;
+  return canActorManagePerformanceUser({ actor, viewer, target });
 }
 
 function resolvePerformanceDashboardAuditActorType(viewer: DashboardViewer): AuditActorType {
@@ -5875,36 +5924,60 @@ function buildMobilePerformancePlanInput(
 async function buildDashboardCustomerSummary(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardCustomerSummary> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
   const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
-  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId);
+  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId, permittedUserIds);
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now.getTime() - 60 * 24 * 60 * 60 * 1000;
   const customerUsers = db.users
-    .filter((user) => user.accountType === "enterprise" && user.orgId === normalizedOrg.id)
+    .filter((user) =>
+      user.accountType === "enterprise" &&
+      user.orgId === normalizedOrg.id &&
+      (!permittedUserIds || permittedUserIds.has(user.id))
+    )
     .sort((left, right) => left.email.localeCompare(right.email));
   const activeUserCount = customerUsers.filter((user) => user.status === "active").length;
   const dashboardUserCount = customerUsers.filter((user) => user.dashboardAccessEnabled === true).length;
   const simulationsLast30Days = usageSessionAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     startedAtFrom: new Date(last30DaysThreshold)
-  }).filter((session) => !divisionId || (session.divisionId ?? null) === divisionId).length;
+  }).filter((session) =>
+    (!divisionId || (session.divisionId ?? null) === divisionId) &&
+    (!permittedUserIds || permittedUserIds.has(session.userId))
+  ).length;
 
   const scoresThisPeriod = scoreRecordAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     endedAtFrom: new Date(billing.periodStartAt),
     endedAtBefore: new Date(billing.periodEndAt),
     conclusiveOnly: true
-  }).filter((record) => !divisionId || (record.divisionId ?? null) === divisionId);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime(), divisionId);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  }).filter((record) =>
+    (!divisionId || (record.divisionId ?? null) === divisionId) &&
+    (!permittedUserIds || permittedUserIds.has(record.userId))
+  );
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime(), divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    normalizedOrg.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
   const trainingPacks = await listTrainingPacksForDashboardOrg(normalizedOrg.id);
   const customScenarioCount = ensureOrgCustomScenarioCollection(normalizedOrg).filter((scenario) => scenario.enabled !== false).length;
-  const orgSessions = filterRecordsByDivision(listUsageSessions(db, { orgId: normalizedOrg.id }), divisionId);
-  const orgScores = filterRecordsByDivision(listScoreRecords(db, { orgId: normalizedOrg.id }), divisionId);
+  const orgSessions = filterRecordsByDivision(
+    listUsageSessions(db, { orgId: normalizedOrg.id }).filter((session) => !permittedUserIds || permittedUserIds.has(session.userId)),
+    divisionId
+  );
+  const orgScores = filterRecordsByDivision(
+    listScoreRecords(db, { orgId: normalizedOrg.id }).filter((record) => !permittedUserIds || permittedUserIds.has(record.userId)),
+    divisionId
+  );
   const latestActivityAt = maxIsoDate([
     ...orgSessions.map((session) => session.endedAt),
     ...orgScores.map((record) => record.endedAt)
@@ -5942,15 +6015,16 @@ function buildDashboardCustomerTrend(
   db: ApiDatabase,
   org: EnterpriseOrg,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): DashboardCustomerTrendPoint[] {
   const points: DashboardCustomerTrendPoint[] = [];
 
   for (let offset = 2; offset >= 0; offset -= 1) {
     const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
-    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId);
-    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId);
+    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId, permittedUserIds);
+    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId, permittedUserIds);
     const billedSeconds = sessions.reduce(
       (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
       0
@@ -5974,14 +6048,19 @@ function buildDashboardCustomerUserRows(
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): DashboardCustomerUserPerformanceSummary[] {
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
-  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime(), divisionId);
-  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime(), divisionId);
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime(), divisionId, permittedUserIds);
+  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime(), divisionId, permittedUserIds);
 
   const rows = db.users
-    .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
+    .filter((user) =>
+      user.accountType === "enterprise" &&
+      user.orgId === org.id &&
+      (!permittedUserIds || permittedUserIds.has(user.id))
+    )
     .sort((left, right) => left.email.localeCompare(right.email))
     .map((user): DashboardCustomerUserPerformanceSummary => {
       const userSessions = sessions.filter((session) => session.userId === user.id);
@@ -6022,14 +6101,22 @@ function buildDashboardCustomerScenarioRows(
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): DashboardCustomerScenarioSummary[] {
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs, divisionId);
-  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs, divisionId);
-  const previousScores = filterOrgScoreRecords(db, org.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    org.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
 
   const aggregates = new Map<
     string,
@@ -6140,7 +6227,8 @@ async function buildDashboardTrainingPackRows(
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardCustomerTrainingPackSummary[]> {
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const availableScenarioCount = scenarioCatalog.size;
@@ -6148,11 +6236,15 @@ async function buildDashboardTrainingPackRows(
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
   const allPackSessions = filterRecordsByDivision(
-    listUsageSessions(db, { orgId: org.id }).filter((session) => Boolean(session.trainingPackId)),
+    listUsageSessions(db, { orgId: org.id }).filter(
+      (session) => Boolean(session.trainingPackId) && (!permittedUserIds || permittedUserIds.has(session.userId))
+    ),
     divisionId
   );
   const allPackScores = filterRecordsByDivision(
-    listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter((record) => Boolean(record.trainingPackId)),
+    listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter(
+      (record) => Boolean(record.trainingPackId) && (!permittedUserIds || permittedUserIds.has(record.userId))
+    ),
     divisionId
   );
   const currentSessions = allPackSessions.filter((session) => {
@@ -6190,7 +6282,7 @@ async function buildDashboardTrainingPackRows(
       const previousPackScores = previousScores.filter((record) => record.trainingPackId === pack.id);
       const assignments = listVisibleTrainingPackAssignments(db, org.id, pack.id).map((assignment) =>
         projectTrainingPackAssignmentLifecycle(db, assignment)
-      );
+      ).filter((assignment) => !permittedUserIds || permittedUserIds.has(assignment.userId));
       const assignmentRows = assignments
         .map((assignment) =>
           computeTrainingPackAssignmentProgress({
@@ -6611,11 +6703,12 @@ async function buildDashboardTrainingPackAssignmentDetail(
 
 async function buildDashboardUserDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   userId: string,
   divisionId: string | null = null
 ): Promise<DashboardUserDetailResponse | null> {
-  const report = await buildDashboardUserReport(db, viewer, divisionId);
+  const viewer = principal.viewer;
+  const report = await buildDashboardUserReport(db, principal, divisionId);
   const userRow = report.users.find((entry) => entry.userId === userId);
   if (!userRow || !userRow.orgId) {
     return null;
@@ -6725,10 +6818,11 @@ async function buildDashboardUserDetail(
 
 async function buildDashboardAttemptDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   attemptId: string,
   divisionId: string | null = null
 ): Promise<DashboardAttemptDetailResponse | null> {
+  const viewer = principal.viewer;
   const score = scoreRecordAccess.getById(db, attemptId);
   if (!score || !isConclusiveSimulationScoreRecord(score) || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
     return null;
@@ -6740,6 +6834,15 @@ async function buildDashboardAttemptDetail(
   const org = getOrgById(db, score.orgId);
   const user = getUserById(db, score.userId);
   if (!org || !user) {
+    return null;
+  }
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([org.id]),
+  });
+  if (!permittedUserIds.has(user.id)) {
     return null;
   }
 
@@ -6930,7 +7033,8 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
   db: ApiDatabase,
   org: EnterpriseOrg,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardTrainingWorkspaceRow[]> {
   ensureOrgTrainingCollections(db);
   const normalizedOrg = ensureOrgContractFields(org);
@@ -6942,9 +7046,16 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    normalizedOrg.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
 
   const rows = buildOrgTrainingSummaries({
     db,
@@ -7052,13 +7163,23 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
 
 async function buildDashboardTrainingWorkspace(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null = null
 ): Promise<DashboardTrainingWorkspaceResponse> {
+  const viewer = principal.viewer;
   const now = new Date();
+  const accessibleOrgIds = new Set(listDashboardAccessibleOrgs(db, viewer).map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const trainings = (
     await Promise.all(
-      listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardTrainingWorkspaceRowsForOrg(db, org, now, divisionId))
+      listDashboardAccessibleOrgs(db, viewer).map((org) =>
+        buildDashboardTrainingWorkspaceRowsForOrg(db, org, now, divisionId, permittedUserIds)
+      )
     )
   )
     .flat()
@@ -7098,18 +7219,26 @@ async function buildDashboardTrainingWorkspace(
 async function buildDashboardCustomerInsights(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardCustomerInsights> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
-  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId);
+  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId, permittedUserIds);
   const scenarioCatalog = buildDashboardScenarioCatalog(db, normalizedOrg);
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    normalizedOrg.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
 
   return {
     usage: {
@@ -7120,10 +7249,10 @@ async function buildDashboardCustomerInsights(
       allottedMinutesThisPeriod: usage.allottedMinutes,
       usagePercentThisPeriod: Math.round(usage.usagePercent * 10) / 10
     },
-    trend: buildDashboardCustomerTrend(db, normalizedOrg, now, divisionId),
-    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
-    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
-    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
+    trend: buildDashboardCustomerTrend(db, normalizedOrg, now, divisionId, permittedUserIds),
+    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now, divisionId, permittedUserIds),
+    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now, divisionId, permittedUserIds),
+    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now, divisionId, permittedUserIds),
     trainingPackAttribution: buildTrainingPackAttributionSummary({
       usageSessions: recentSessions,
       scoreRecords: recentScores
@@ -7214,7 +7343,56 @@ function canDashboardAdminEditEmployeeId(params: {
   if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
     return true;
   }
-  return params.actor.orgRole === "user_admin" && params.target.orgRole === "user";
+  return params.actor.orgRole === "user_admin" && canActorManageRegularUser({
+    actor: params.actor,
+    viewer: params.viewer,
+    target: params.target,
+  });
+}
+
+function canDashboardAdminEditNames(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.editUserNames) {
+    return false;
+  }
+  if (!canActorSeeOrganizationUser({ actor: params.actor, viewer: params.viewer, target: params.target })) {
+    return false;
+  }
+  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+}
+
+function canDashboardAdminChangeUserRole(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.manageUserRoles || params.target.id === params.actor.id) {
+    return false;
+  }
+  if (!canOrgAdminManageRole(params.target.orgRole)) {
+    return false;
+  }
+  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+}
+
+function canDashboardAdminAssignManager(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.assignUserManagers) {
+    return false;
+  }
+  if (!canManagerAssignmentTargetBeManaged(params.target)) {
+    return false;
+  }
+  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
 }
 
 function canDashboardAdminChangeUserStatus(params: {
@@ -7240,7 +7418,29 @@ function canDashboardAdminChangeUserStatus(params: {
   if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
     return params.target.orgRole === "user" || params.target.orgRole === "user_admin";
   }
-  return params.actor.orgRole === "user_admin" && params.target.orgRole === "user";
+  return params.actor.orgRole === "user_admin" && canActorManageRegularUser({
+    actor: params.actor,
+    viewer: params.viewer,
+    target: params.target,
+  });
+}
+
+function buildDashboardAdminManagerOptions(orgUsers: readonly UserProfile[], orgId: string): DashboardAdminManagerOption[] {
+  return orgUsers
+    .filter((user) => isEligibleManagerUser(user, orgId))
+    .map((user) => ({
+      userId: user.id,
+      email: user.email,
+      firstName: getUserFirstName(user),
+      lastName: getUserLastName(user),
+      displayName: resolveStoredUserDisplayName(user),
+    }))
+    .sort(
+      (left, right) =>
+        left.displayName.localeCompare(right.displayName, undefined, { sensitivity: "base" }) ||
+        left.email.localeCompare(right.email, undefined, { sensitivity: "base" }) ||
+        left.userId.localeCompare(right.userId)
+    );
 }
 
 function buildDashboardAdminUserRow(params: {
@@ -7266,16 +7466,42 @@ function buildDashboardAdminUserRow(params: {
     nextStatus: "active",
     orgUsers: params.orgUsers,
   });
+  const managerUserId = normalizeManagerUserId(params.user.managerUserId);
+  const manager = managerUserId ? params.orgUsers.find((user) => user.id === managerUserId) ?? null : null;
 
   return {
     userId: params.user.id,
     email: params.user.email,
-    displayName: resolvePerformanceUserDisplayName(params.user),
+    firstName: getUserFirstName(params.user),
+    lastName: getUserLastName(params.user),
+    displayName: resolveStoredUserDisplayName(params.user),
     employeeId: params.user.employeeId ?? null,
     orgRole: params.user.orgRole,
+    managerUserId,
+    managerDisplayName: manager ? resolveStoredUserDisplayName(manager) : null,
+    managerEmail: manager?.email ?? null,
+    assignedReportCount: params.orgUsers.filter((user) => normalizeManagerUserId(user.managerUserId) === params.user.id).length,
     status: params.user.status,
     dashboardAccessEnabled: params.user.dashboardAccessEnabled === true,
     canEditEmployeeId: canDashboardAdminEditEmployeeId({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canEditNames: canDashboardAdminEditNames({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canChangeRole: canDashboardAdminChangeUserRole({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canAssignManager: canDashboardAdminAssignManager({
       actor: params.actor,
       viewer: params.viewer,
       capabilities: params.capabilities,
@@ -7299,7 +7525,7 @@ function buildDashboardAdminAccessRequestRow(
     id: requestRecord.id,
     status: requestRecord.status,
     userId: requestRecord.userId,
-    displayName: user ? resolvePerformanceUserDisplayName(user) : requestRecord.email,
+    displayName: user ? resolveStoredUserDisplayName(user) : "Not provided",
     email: requestRecord.email,
     orgId: org.id,
     orgName: org.name,
@@ -7367,6 +7593,9 @@ function decideEnterpriseJoinRequest(params: {
     targetUser.tier = "enterprise";
     targetUser.orgId = params.org.id;
     targetUser.orgRole = "user";
+    targetUser.managerUserId = null;
+    targetUser.dashboardAccessEnabled = false;
+    targetUser.mobileProfileReonboardingRequired = false;
     targetUser.status = "active";
     targetUser.updatedAt = nowValue;
     const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
@@ -7411,6 +7640,113 @@ function decideEnterpriseJoinRequest(params: {
   return { ok: true, requestRecord };
 }
 
+function findActiveOrgByJoinCode(db: ApiDatabase, joinCode: string): EnterpriseOrg | null {
+  const normalizedJoinCode = normalizeJoinCode(joinCode);
+  if (!normalizedJoinCode) {
+    return null;
+  }
+  return db.orgs.find((org) => org.status === "active" && normalizeJoinCode(org.joinCode) === normalizedJoinCode) ?? null;
+}
+
+function createOrReusePendingOrgJoinRequest(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  org: EnterpriseOrg;
+  now: Date;
+}): { created: boolean; request: EnterpriseJoinRequestRecord } {
+  expireOrgJoinRequests(params.db, params.now);
+  const existingPending = params.db.enterpriseJoinRequests.find(
+    (row) => row.userId === params.user.id && row.orgId === params.org.id && row.status === "pending"
+  );
+  if (existingPending) {
+    return { created: false, request: existingPending };
+  }
+
+  const createdAt = params.now.toISOString();
+  const record: EnterpriseJoinRequestRecord = {
+    id: `jr_${uuid()}`,
+    userId: params.user.id,
+    email: params.user.email,
+    emailDomain: extractEmailDomain(params.user.email) ?? "",
+    orgId: params.org.id,
+    orgNameSnapshot: params.org.name,
+    joinCodeSnapshot: normalizeJoinCode(params.org.joinCode),
+    status: "pending",
+    createdAt,
+    expiresAt: new Date(params.now.getTime() + ORG_JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+    updatedAt: createdAt,
+    decidedAt: null,
+    decidedByUserId: null,
+    decisionReason: null
+  };
+  params.db.enterpriseJoinRequests.push(record);
+  emitMobileUpdateForOrg(params.db, params.org.id, "org");
+  return { created: true, request: record };
+}
+
+function completeMobileCompanyProfile(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  firstName: string;
+  lastName: string;
+  joinCode: string;
+  now: Date;
+}):
+  | { ok: true; org: EnterpriseOrg; request: EnterpriseJoinRequestRecord | null; createdRequest: boolean; restoredExistingMember: boolean }
+  | { ok: false; status: number; error: string } {
+  if (params.user.status !== "active") {
+    return { ok: false, status: 403, error: "Your account is deactivated. Contact your organization admin." };
+  }
+
+  const org = findActiveOrgByJoinCode(params.db, params.joinCode);
+  if (!org) {
+    return { ok: false, status: 404, error: "Company code not found." };
+  }
+
+  if (params.user.accountType === "enterprise" && !isSuperUser(params.user)) {
+    if (params.user.orgId !== org.id) {
+      return { ok: false, status: 403, error: "Company code does not match your active organization." };
+    }
+
+    params.user.firstName = params.firstName;
+    params.user.lastName = params.lastName;
+    params.user.mobileProfileReonboardingRequired = false;
+    params.user.updatedAt = params.now.toISOString();
+    emitMobileUpdateForUser(params.db, params.user.id, "user");
+    return { ok: true, org, request: null, createdRequest: false, restoredExistingMember: true };
+  }
+
+  params.user.firstName = params.firstName;
+  params.user.lastName = params.lastName;
+  params.user.mobileProfileReonboardingRequired = false;
+  params.user.updatedAt = params.now.toISOString();
+
+  if (isSuperUser(params.user)) {
+    emitMobileUpdateForUser(params.db, params.user.id, "user");
+    return { ok: true, org, request: null, createdRequest: false, restoredExistingMember: false };
+  }
+
+  if (params.user.accountType === "enterprise" && params.user.orgId === org.id) {
+    emitMobileUpdateForUser(params.db, params.user.id, "user");
+    return { ok: true, org, request: null, createdRequest: false, restoredExistingMember: true };
+  }
+
+  const requestResult = createOrReusePendingOrgJoinRequest({
+    db: params.db,
+    user: params.user,
+    org,
+    now: params.now,
+  });
+  emitMobileUpdateForUser(params.db, params.user.id, "user");
+  return {
+    ok: true,
+    org,
+    request: requestResult.request,
+    createdRequest: requestResult.created,
+    restoredExistingMember: false,
+  };
+}
+
 async function listDashboardAccessibleCustomers(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardCustomerSummary[]> {
   return Promise.all(listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardCustomerSummary(db, org)));
 }
@@ -7434,14 +7770,21 @@ async function getDashboardAccessibleCustomer(
 
 async function buildDashboardOverview(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null = null
 ): Promise<DashboardOverviewResponse> {
+  const viewer = principal.viewer;
   const accessibleOrgs = listDashboardAccessibleOrgs(db, viewer);
+  const accessibleOrgIds = new Set(accessibleOrgs.map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const customers = await Promise.all(
-    accessibleOrgs.map((org) => buildDashboardCustomerSummary(db, org, divisionId))
+    accessibleOrgs.map((org) => buildDashboardCustomerSummary(db, org, divisionId, permittedUserIds))
   );
-  const accessibleOrgIds = new Set(customers.map((customer) => customer.orgId));
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
@@ -7460,7 +7803,10 @@ async function buildDashboardOverview(
       endedAtFrom: new Date(billing.periodStartAt),
       endedAtBefore: new Date(billing.periodEndAt),
       conclusiveOnly: true,
-    }).filter((record) => !divisionId || (record.divisionId ?? null) === divisionId);
+    }).filter((record) =>
+      (!divisionId || (record.divisionId ?? null) === divisionId) &&
+      permittedUserIds.has(record.userId)
+    );
   });
   const topScenarios = (
     await Promise.all(
@@ -7475,7 +7821,8 @@ async function buildDashboardOverview(
           org,
           buildDashboardScenarioCatalog(db, org),
           now,
-          divisionId
+          divisionId,
+          permittedUserIds
         ).slice(0, 5);
         return scenarios.map(
           (scenario): DashboardPortfolioScenarioSummary => ({
@@ -7500,21 +7847,24 @@ async function buildDashboardOverview(
     accessibleOrgIds,
     last30DaysThreshold,
     nowMs,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const recentScores = filterDashboardAccessibleScoreRecords(
     db,
     accessibleOrgIds,
     last30DaysThreshold,
     nowMs,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const previousScores = filterDashboardAccessibleScoreRecords(
     db,
     accessibleOrgIds,
     previous30DaysThreshold,
     last30DaysThreshold,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
 
   return {
@@ -7551,18 +7901,28 @@ async function buildDashboardOverview(
   };
 }
 
-async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardTrainingReportResponse> {
+async function buildDashboardTrainingReport(
+  db: ApiDatabase,
+  principal: DashboardRequestPrincipal
+): Promise<DashboardTrainingReportResponse> {
+  const viewer = principal.viewer;
   const orgs = listDashboardAccessibleOrgs(db, viewer);
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
   const orgIds = new Set(orgs.map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds,
+  });
   const trainingPacks = (
     await Promise.all(
       orgs.map(async (org) => {
         const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
-        const rows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now);
+        const rows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, null, permittedUserIds);
         return rows.map(
           (row): DashboardTrainingPackReportSummary => ({
             ...row,
@@ -7589,10 +7949,10 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
   for (const row of trainingPacks) {
     if (row.learnerCountLast30Days > 0) {
       const scopedSessions = filterOrgUsageSessions(db, row.orgId, last30DaysThreshold, nowMs).filter(
-        (session) => session.trainingPackId === row.trainingPackId
+        (session) => session.trainingPackId === row.trainingPackId && permittedUserIds.has(session.userId)
       );
       const scopedScores = filterOrgScoreRecords(db, row.orgId, last30DaysThreshold, nowMs).filter(
-        (record) => record.trainingPackId === row.trainingPackId
+        (record) => record.trainingPackId === row.trainingPackId && permittedUserIds.has(record.userId)
       );
       scopedSessions.forEach((session) => engagedLearnerIds.add(session.userId));
       scopedScores.forEach((record) => engagedLearnerIds.add(record.userId));
@@ -7602,11 +7962,17 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
     if (!session.orgId || !orgIds.has(session.orgId)) {
       return false;
     }
+    if (!permittedUserIds.has(session.userId)) {
+      return false;
+    }
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
   const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !orgIds.has(record.orgId)) {
+      return false;
+    }
+    if (!permittedUserIds.has(record.userId)) {
       return false;
     }
     const endedAtMs = new Date(record.endedAt).getTime();
@@ -7667,24 +8033,46 @@ async function findDashboardAccessibleTrainingPack(
 
 async function buildDashboardUserReport(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null = null
 ): Promise<DashboardUserReportResponse> {
+  const viewer = principal.viewer;
   const orgs = listDashboardAccessibleOrgs(db, viewer);
   const orgById = new Map(orgs.map((org) => [org.id, org] as const));
   const accessibleOrgIds = new Set(orgs.map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterDashboardAccessibleUsageSessions(db, accessibleOrgIds, last30DaysThreshold, nowMs, divisionId);
-  const recentScores = filterDashboardAccessibleScoreRecords(db, accessibleOrgIds, last30DaysThreshold, nowMs, divisionId);
+  const recentSessions = filterDashboardAccessibleUsageSessions(
+    db,
+    accessibleOrgIds,
+    last30DaysThreshold,
+    nowMs,
+    divisionId,
+    permittedUserIds
+  );
+  const recentScores = filterDashboardAccessibleScoreRecords(
+    db,
+    accessibleOrgIds,
+    last30DaysThreshold,
+    nowMs,
+    divisionId,
+    permittedUserIds
+  );
   const previousScores = filterDashboardAccessibleScoreRecords(
     db,
     accessibleOrgIds,
     previous30DaysThreshold,
     last30DaysThreshold,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const scenarioCatalogByOrg = new Map<string, Map<string, DashboardScenarioCatalogEntry>>(
     orgs.map((org) => [org.id, buildDashboardScenarioCatalog(db, org)])
@@ -7698,7 +8086,12 @@ async function buildDashboardUserReport(
   }
 
   const users = db.users
-    .filter((user) => user.accountType === "enterprise" && Boolean(user.orgId) && accessibleOrgIds.has(user.orgId!))
+    .filter((user) =>
+      user.accountType === "enterprise" &&
+      Boolean(user.orgId) &&
+      accessibleOrgIds.has(user.orgId!) &&
+      permittedUserIds.has(user.id)
+    )
     .sort((left, right) => left.email.localeCompare(right.email))
     .map((user): DashboardUserReportRow => {
       const userSessions = recentSessions.filter((session) => session.userId === user.id);
@@ -9182,10 +9575,11 @@ function buildDashboardOrgUsageSnapshot(
   db: ApiDatabase,
   org: EnterpriseOrg,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): OrgUsageSnapshot {
   const baseSnapshot = buildOrgUsageSnapshot(db, org, now);
-  if (!divisionId) {
+  if (!divisionId && !permittedUserIds) {
     return baseSnapshot;
   }
 
@@ -9194,7 +9588,8 @@ function buildDashboardOrgUsageSnapshot(
     org.id,
     new Date(baseSnapshot.periodStartAt).getTime(),
     new Date(baseSnapshot.periodEndAt).getTime(),
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const usedSeconds = usageSessionAccess.sumBilledSeconds(filteredSessions);
   const usedMinutes = usedSeconds / 60;
@@ -10017,7 +10412,7 @@ app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAu
       response.status(400).json({ error: divisionFilter.error });
       return;
     }
-    const payload = await buildDashboardOverview(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
+    const payload = await buildDashboardOverview(db, request.dashboard!, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -10036,7 +10431,7 @@ app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: 
     for (const org of listDashboardAccessibleOrgs(db, request.dashboard!.viewer)) {
       await ensureOrgTrainingWorkspace(db, org);
     }
-    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
+    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -10113,7 +10508,7 @@ app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: Das
 
 app.get("/dashboard/training", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardTrainingReport(db, request.dashboard!.viewer);
+    const payload = await buildDashboardTrainingReport(db, request.dashboard!);
     response.json(payload);
   });
 });
@@ -10198,7 +10593,7 @@ app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthR
       response.status(400).json({ error: divisionFilter.error });
       return;
     }
-    const payload = await buildDashboardUserReport(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
+    const payload = await buildDashboardUserReport(db, request.dashboard!, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -10217,7 +10612,7 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
 
     const payload = await buildDashboardUserDetail(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       request.params.userId,
       divisionFilter.appliedDivisionId
     );
@@ -10248,7 +10643,13 @@ app.get("/dashboard/admin/users", requireDashboardAuth, async (request: Dashboar
     const users = db.users
       .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
       .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
-    const rows = users.map((user) => buildDashboardAdminUserRow({
+    const visibleUsers = listVisibleOrganizationUsers({
+      users,
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      orgId: adminContext.org.id,
+    }).sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const rows = visibleUsers.map((user) => buildDashboardAdminUserRow({
       actor: request.dashboard!.user,
       viewer: request.dashboard!.viewer,
       capabilities: adminContext.capabilities,
@@ -10267,6 +10668,9 @@ app.get("/dashboard/admin/users", requireDashboardAuth, async (request: Dashboar
         name: adminContext.org.name,
       },
       users: rows,
+      managerOptions: adminContext.capabilities.assignUserManagers
+        ? buildDashboardAdminManagerOptions(users, adminContext.org.id)
+        : [],
     };
     response.json(payload);
   });
@@ -10287,14 +10691,27 @@ app.get("/dashboard/admin/users/export", requireDashboardAuth, async (request: D
       return;
     }
 
-    const rows = db.users
+    const orgUsers = db.users
       .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
-      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }))
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const visibleUsers = listVisibleOrganizationUsers({
+      users: orgUsers,
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      orgId: adminContext.org.id,
+    }).sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const rows = visibleUsers
       .map((user) => ({
         employeeId: user.employeeId ?? "",
-        name: resolvePerformanceUserDisplayName(user),
+        firstName: getUserFirstName(user) ?? "",
+        lastName: getUserLastName(user) ?? "",
         email: user.email,
         role: ORG_USER_ROLE_LABELS[user.orgRole] ?? user.orgRole,
+        manager: (() => {
+          const managerUserId = normalizeManagerUserId(user.managerUserId);
+          const manager = managerUserId ? orgUsers.find((entry) => entry.id === managerUserId) ?? null : null;
+          return manager ? resolveStoredUserDisplayName(manager) : "";
+        })(),
         status: user.status,
       }));
 
@@ -10312,10 +10729,14 @@ app.get("/dashboard/admin/users/export", requireDashboardAuth, async (request: D
 
 app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const body = request.body as DashboardAdminUpdateUserRequest;
+  const hasFirstNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "firstName");
+  const hasLastNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "lastName");
   const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
   const hasStatusPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "status");
-  if (!hasEmployeeIdPatch && !hasStatusPatch) {
-    response.status(400).json({ error: "Provide employeeId or status." });
+  const hasRolePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "orgRole");
+  const hasManagerPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "managerUserId");
+  if (!hasFirstNamePatch && !hasLastNamePatch && !hasEmployeeIdPatch && !hasStatusPatch && !hasRolePatch && !hasManagerPatch) {
+    response.status(400).json({ error: "Provide firstName, lastName, employeeId, status, orgRole, or managerUserId." });
     return;
   }
 
@@ -10338,11 +10759,63 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
       response.status(404).json({ error: "User not found." });
       return;
     }
+    if (!canActorSeeOrganizationUser({
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      target,
+    })) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
 
+    const beforeFirstName = getUserFirstName(target);
+    const beforeLastName = getUserLastName(target);
     const beforeEmployeeId = target.employeeId ?? null;
     const beforeStatus = target.status;
+    const beforeOrgRole = target.orgRole;
+    const beforeManagerUserId = normalizeManagerUserId(target.managerUserId);
+    const beforeDashboardAccessEnabled = target.dashboardAccessEnabled === true;
+    let nextFirstName = beforeFirstName;
+    let nextLastName = beforeLastName;
     let nextEmployeeId = beforeEmployeeId;
     let nextStatus = beforeStatus;
+    let nextOrgRole = beforeOrgRole;
+    let nextManagerUserId = beforeManagerUserId;
+    let nextDashboardAccessEnabled = beforeDashboardAccessEnabled;
+
+    if (hasFirstNamePatch || hasLastNamePatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editUserNames", response)) {
+        return;
+      }
+      if (!canDashboardAdminEditNames({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+      })) {
+        response.status(403).json({
+          error: "You cannot edit names for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      if (hasFirstNamePatch) {
+        const normalizedFirstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+        if (!normalizedFirstName.ok) {
+          response.status(400).json({ error: normalizedFirstName.error, code: normalizedFirstName.code });
+          return;
+        }
+        nextFirstName = normalizedFirstName.value;
+      }
+      if (hasLastNamePatch) {
+        const normalizedLastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+        if (!normalizedLastName.ok) {
+          response.status(400).json({ error: normalizedLastName.error, code: normalizedLastName.code });
+          return;
+        }
+        nextLastName = normalizedLastName.value;
+      }
+    }
 
     if (hasEmployeeIdPatch) {
       if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editEmployeeIds", response)) {
@@ -10381,6 +10854,71 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
       nextEmployeeId = normalizedEmployeeId.value;
     }
 
+    if (hasRolePatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "manageUserRoles", response)) {
+        return;
+      }
+      const requestedOrgRole = body.orgRole;
+      if (typeof requestedOrgRole !== "string" || !isOrgUserRole(requestedOrgRole) || !canOrgAdminManageRole(requestedOrgRole)) {
+        response.status(400).json({ error: "Role can only be changed between user and user admin." });
+        return;
+      }
+      if (!canDashboardAdminChangeUserRole({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+      })) {
+        response.status(403).json({
+          error: "You cannot change role for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      nextOrgRole = requestedOrgRole;
+      if (nextOrgRole === "user_admin") {
+        nextManagerUserId = null;
+        nextDashboardAccessEnabled = true;
+      } else if (beforeOrgRole === "user_admin") {
+        nextManagerUserId = null;
+        nextDashboardAccessEnabled = false;
+      }
+    }
+
+    if (hasManagerPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "assignUserManagers", response)) {
+        return;
+      }
+      const requestedManagerUserId = normalizeManagerUserId(body.managerUserId);
+      const managerTarget: UserProfile = {
+        ...target,
+        orgRole: nextOrgRole,
+        managerUserId: requestedManagerUserId,
+      };
+      if (!canDashboardAdminAssignManager({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target: managerTarget,
+      })) {
+        response.status(403).json({
+          error: "You cannot assign a manager for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      const managerValidation = validateManagerAssignment({
+        orgUsers,
+        target: managerTarget,
+        managerUserId: requestedManagerUserId,
+      });
+      if (!managerValidation.ok) {
+        response.status(400).json({ error: managerValidation.error, code: managerValidation.code });
+        return;
+      }
+      nextManagerUserId = managerValidation.manager?.id ?? null;
+    }
+
     if (hasStatusPatch) {
       if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "manageRegularOrganizationUsers", response)) {
         return;
@@ -10406,26 +10944,71 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
       }
     }
 
+    if (nextOrgRole !== "user") {
+      nextManagerUserId = null;
+    }
+
+    const now = nowIso();
+    const clearedAssignmentUserIds = new Set<string>();
+    const shouldClearManagerAssignments =
+      beforeOrgRole === "user_admin" && (nextOrgRole !== "user_admin" || nextStatus !== "active");
+    if (shouldClearManagerAssignments) {
+      clearAssignmentsForManager({
+        users: db.users,
+        managerUserId: target.id,
+        updatedAt: now,
+      }).forEach((userId) => clearedAssignmentUserIds.add(userId));
+    }
+
+    const shouldRevokeDashboardSessions =
+      nextStatus !== "active" ||
+      (beforeOrgRole === "user_admin" && nextOrgRole !== "user_admin") ||
+      (beforeDashboardAccessEnabled && !nextDashboardAccessEnabled);
+
+    target.firstName = nextFirstName;
+    target.lastName = nextLastName;
     target.employeeId = nextEmployeeId;
+    target.orgRole = nextOrgRole;
+    target.managerUserId = nextManagerUserId;
+    target.dashboardAccessEnabled = nextDashboardAccessEnabled;
     target.status = nextStatus;
 
     if (hasStatusPatch) {
       if (nextStatus !== "active") {
         revokeMobileAccessForUser(db, target.id, "User access was disabled.");
         db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
-        queueDatabasePostCommitEffect(db, {
-          category: "security_cleanup",
-          description: `Revoke dashboard sessions for deactivated user ${target.id}.`,
-          run: async () => {
-            await revokeWebAuthSessionsForUserId(target.id);
-          }
-        });
       } else {
         emitMobileUpdateForUser(db, target.id, "user");
       }
     }
+    if (shouldRevokeDashboardSessions) {
+      db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
+      queueDatabasePostCommitEffect(db, {
+        category: "security_cleanup",
+        description: `Revoke dashboard sessions for updated dashboard user ${target.id}.`,
+        run: async () => {
+          await revokeWebAuthSessionsForUserId(target.id);
+        }
+      });
+    }
+    emitMobileUpdateForUser(db, target.id, "user");
+    for (const userId of clearedAssignmentUserIds) {
+      emitMobileUpdateForUser(db, userId, "user");
+    }
 
-    target.updatedAt = nowIso();
+    target.updatedAt = now;
+    if (beforeFirstName !== (target.firstName ?? null) || beforeLastName !== (target.lastName ?? null)) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.name.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Updated organization user name.",
+        metadata: {
+          firstNameChanged: beforeFirstName !== (target.firstName ?? null),
+          lastNameChanged: beforeLastName !== (target.lastName ?? null),
+        }
+      });
+    }
     if (beforeEmployeeId !== (target.employeeId ?? null)) {
       appendWebAuditEvent(db, request.dashboard!.user, {
         action: "org_user.employee_id.changed",
@@ -10439,6 +11022,32 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         }
       });
     }
+    if (beforeOrgRole !== target.orgRole) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.role.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Changed organization user role.",
+        metadata: {
+          previousRole: beforeOrgRole,
+          nextRole: target.orgRole,
+          dashboardAccessRevoked: beforeDashboardAccessEnabled && target.dashboardAccessEnabled !== true,
+          clearedAssignedReportCount: clearedAssignmentUserIds.size,
+        }
+      });
+    }
+    if (beforeManagerUserId !== normalizeManagerUserId(target.managerUserId)) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: target.managerUserId ? "org_user.manager.assigned" : "org_user.manager.cleared",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: target.managerUserId ? "Assigned organization user manager." : "Cleared organization user manager.",
+        metadata: {
+          previousManagerPresent: Boolean(beforeManagerUserId),
+          nextManagerPresent: Boolean(target.managerUserId),
+        }
+      });
+    }
     if (beforeStatus !== target.status) {
       appendWebAuditEvent(db, request.dashboard!.user, {
         action: target.status === "active" ? "org_user.reactivated" : "org_user.deactivated",
@@ -10448,6 +11057,19 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         metadata: {
           previousStatus: beforeStatus,
           nextStatus: target.status,
+        }
+      });
+    }
+    if (clearedAssignmentUserIds.size > 0) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.manager_assignments.cleared",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Cleared manager assignments for changed user admin.",
+        metadata: {
+          clearedAssignedReportCount: clearedAssignmentUserIds.size,
+          roleChanged: beforeOrgRole !== target.orgRole,
+          statusChanged: beforeStatus !== target.status,
         }
       });
     }
@@ -10580,7 +11202,7 @@ app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: 
     }
     const payload = await buildDashboardAttemptDetail(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       request.params.attemptId,
       divisionFilter.appliedDivisionId
     );
@@ -10604,13 +11226,16 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
       const orgs = listDashboardAccessibleOrgs(db, request.dashboard!.viewer);
       const organizationSummaries = [];
       for (const org of orgs) {
-        const users = await listDashboardPerformanceUserContexts(db, request.dashboard!.viewer, null, org.id);
+        const users = await listDashboardPerformanceUserContexts(db, request.dashboard!, null, org.id);
+        const visibleUserIds = new Set(users.map((user) => user.userId));
         const orgPayload = await buildDashboardPerformanceWorkspaceResponse({
           store: performancePlanStore,
           viewer: request.dashboard!.viewer,
           users,
-          usageSessions: listUsageSessions(db).filter((session) => session.orgId === org.id),
-          scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId === org.id),
+          usageSessions: listUsageSessions(db).filter((session) => session.orgId === org.id && visibleUserIds.has(session.userId)),
+          scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter(
+            (record) => record.orgId === org.id && visibleUserIds.has(record.userId)
+          ),
           now: new Date(),
           selectedOrg: { orgId: org.id, orgName: org.name },
           canManageUser: (userContext) => {
@@ -10658,16 +11283,21 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
     );
     const users = await listDashboardPerformanceUserContexts(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       divisionFilter.appliedDivisionId,
       requestedOrgId
     );
+    const visibleUserIds = new Set(users.map((user) => user.userId));
     const payload: DashboardPerformanceWorkspaceResponse = await buildDashboardPerformanceWorkspaceResponse({
       store: performancePlanStore,
       viewer: request.dashboard!.viewer,
       users,
-      usageSessions: listUsageSessions(db).filter((session) => session.orgId && orgIds.has(session.orgId)),
-      scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId && orgIds.has(record.orgId)),
+      usageSessions: listUsageSessions(db).filter(
+        (session) => session.orgId && orgIds.has(session.orgId) && visibleUserIds.has(session.userId)
+      ),
+      scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter(
+        (record) => record.orgId && orgIds.has(record.orgId) && visibleUserIds.has(record.userId)
+      ),
       now: new Date(),
       scopeMode: "organization",
       selectedOrg: requestedOrgId
@@ -10718,7 +11348,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     }
     if (!canDashboardViewerAccessPerformanceTarget(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       target,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10742,7 +11372,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     }
     const userContext = await getDashboardPerformanceUserContext(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       body.userId,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10810,7 +11440,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     }
     if (!canDashboardViewerAccessPerformanceTarget(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       target,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10834,7 +11464,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     }
     const userContext = await getDashboardPerformanceUserContext(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       body.userId,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10924,7 +11554,14 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
-    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
@@ -10940,7 +11577,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
     }
     const userContext = await getDashboardPerformanceUserContext(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       loaded.plan.userId,
       loaded.plan.orgId,
       divisionFilter.appliedDivisionId
@@ -11029,6 +11666,14 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
+    const target = getUserById(db, loaded.plan.userId);
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
     const detail = await buildPerformancePlanDetailResponse({
       store: performancePlanStore,
       planId: loaded.plan.id,
@@ -11046,7 +11691,6 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
-    const target = getUserById(db, detail.plan.userId);
     const canCancel =
       detail.plan.status === "active" &&
       Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
@@ -11079,6 +11723,14 @@ app.get("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, as
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    const target = getUserById(db, loaded.plan.userId);
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
@@ -11116,7 +11768,14 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
-    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
@@ -11188,7 +11847,14 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
-    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
@@ -13417,11 +14083,15 @@ app.post("/admin/settings/superusers", requireAdmin, async (request: Request, re
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      firstName: null,
+      lastName: null,
       employeeId: null,
+      managerUserId: null,
       emailVerifiedAt: null,
       isPlatformAdmin: false,
       isSuperUser: true,
       dashboardAccessEnabled: false,
+      mobileProfileReonboardingRequired: false,
       accountType: "individual",
       tier: "free",
       status: "active",
@@ -13587,10 +14257,14 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      firstName: null,
+      lastName: null,
       employeeId: employeeIdResult.value,
+      managerUserId: null,
       emailVerifiedAt: now,
       isPlatformAdmin: body.isPlatformAdmin === true,
       dashboardAccessEnabled: body.accountType === "enterprise" && body.dashboardAccessEnabled === true,
+      mobileProfileReonboardingRequired: false,
       accountType: body.accountType,
       tier: body.tier,
       status: "active",
@@ -13784,10 +14458,25 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     } else {
       user.orgRole = "user";
       user.divisionId = null;
+      user.managerUserId = null;
       user.dashboardAccessEnabled = false;
       user.dailySecondsCapOverride = null;
       user.allowDailyOverageThisCycle = false;
       user.dailyOverageExpiresAt = null;
+    }
+
+    if (user.accountType === "enterprise" && user.orgId) {
+      if (!canManagerAssignmentTargetBeManaged(user)) {
+        user.managerUserId = null;
+      } else {
+        const orgUsers = db.users.filter((entry) => entry.accountType === "enterprise" && entry.orgId === user.orgId);
+        const managerValidation = validateManagerAssignment({
+          orgUsers,
+          target: user,
+          managerUserId: normalizeManagerUserId(user.managerUserId),
+        });
+        user.managerUserId = managerValidation.ok ? managerValidation.manager?.id ?? null : null;
+      }
     }
 
     if (user.accountType === "enterprise" && user.orgId) {
@@ -14004,22 +14693,50 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
 app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, response: Response) => {
   const body = request.body as MobileOnboardRequest;
   const email = body.email?.trim().toLowerCase();
+  const firstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+  const lastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+  const joinCode = normalizeJoinCode(body.joinCode);
 
   if (!email || !isEmailLike(email)) {
     response.status(400).json({ error: "Valid email is required." });
+    return;
+  }
+  if (!firstName.ok) {
+    response.status(400).json({ error: firstName.error, code: firstName.code });
+    return;
+  }
+  if (!lastName.ok) {
+    response.status(400).json({ error: lastName.error, code: lastName.code });
+    return;
+  }
+  if (!joinCode) {
+    response.status(400).json({ error: "Company code is required." });
     return;
   }
 
   const timezone = resolveTimeZone(body.timezone);
 
   await withDatabase(async (db) => {
+    const org = findActiveOrgByJoinCode(db, joinCode);
+    if (!org) {
+      response.status(404).json({ error: "Company code not found." });
+      return;
+    }
     const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
       if (existing.accountType === "enterprise" && !isSuperUser(existing)) {
-        const org = getOrgById(db, existing.orgId);
-        if (!org || org.status !== "active") {
+        const existingOrg = getOrgById(db, existing.orgId);
+        if (!existingOrg || existingOrg.status !== "active") {
           response.status(403).json({ error: "Enterprise account is not active." });
+          return;
+        }
+        if (existing.status !== "active") {
+          response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
+          return;
+        }
+        if (existingOrg.id !== org.id) {
+          response.status(403).json({ error: "Company code does not match your active organization." });
           return;
         }
       }
@@ -14030,12 +14747,25 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       const authToken = upsertMobileAuthToken(db, existing.id, issuedAt);
 
       const hadVerifiedEmail = Boolean(existing.emailVerifiedAt);
-      const shouldRequireVerification = REQUIRE_REVERIFY_ON_ONBOARD || !hadVerifiedEmail;
+      const shouldRequireVerification =
+        REQUIRE_REVERIFY_ON_ONBOARD || !hadVerifiedEmail || existing.mobileProfileReonboardingRequired === true;
       if (hadVerifiedEmail && REQUIRE_REVERIFY_ON_ONBOARD) {
         existing.emailVerifiedAt = null;
       }
 
       if (!shouldRequireVerification) {
+        const completion = completeMobileCompanyProfile({
+          db,
+          user: existing,
+          firstName: firstName.value,
+          lastName: lastName.value,
+          joinCode,
+          now: new Date(issuedAt),
+        });
+        if (!completion.ok) {
+          response.status(completion.status).json({ error: completion.error });
+          return;
+        }
         const payload: MobileOnboardResponse = {
           user: existing,
           authToken,
@@ -14048,7 +14778,9 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
           userId: existing.id,
           message: `Mobile onboarding completed for ${existing.email}.`,
           metadata: {
-            verificationRequired: false
+            verificationRequired: false,
+            restoredExistingMember: completion.restoredExistingMember,
+            joinRequestCreated: completion.createdRequest,
           }
         });
         response.json(payload);
@@ -14080,8 +14812,12 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      firstName: null,
+      lastName: null,
       employeeId: null,
+      managerUserId: null,
       emailVerifiedAt: null,
+      mobileProfileReonboardingRequired: false,
       accountType: "individual",
       tier: "free",
       status: "active",
@@ -14107,7 +14843,8 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       userId: user.id,
       message: `Created user from mobile onboarding (${user.email}).`,
       metadata: {
-        verificationExpiresAt: verification.expiresAt
+        verificationExpiresAt: verification.expiresAt,
+        companyCodeValidated: true,
       }
     });
     const payload: MobileOnboardResponse = {
@@ -14147,7 +14884,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    if (user.emailVerifiedAt) {
+    if (user.emailVerifiedAt && user.mobileProfileReonboardingRequired !== true) {
       response.status(409).json({ error: "Email already verified." });
       return;
     }
@@ -14201,7 +14938,13 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    if (user.emailVerifiedAt) {
+    const needsCodeVerification = !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
+    const profileProvided =
+      body.firstName !== undefined ||
+      body.lastName !== undefined ||
+      body.joinCode !== undefined;
+
+    if (!needsCodeVerification && !profileProvided) {
       const payload: MobileOnboardResponse = {
         user,
         authToken,
@@ -14213,41 +14956,96 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    const pending = db.emailVerifications
-      .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    const latest = pending[0];
-    if (!latest) {
-      response.status(400).json({ error: "No pending verification code. Please resend verification email." });
+    const firstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+    if (!firstName.ok) {
+      response.status(400).json({ error: firstName.error, code: firstName.code });
+      return;
+    }
+    const lastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+    if (!lastName.ok) {
+      response.status(400).json({ error: lastName.error, code: lastName.code });
+      return;
+    }
+    const joinCode = normalizeJoinCode(body.joinCode);
+    if (!joinCode) {
+      response.status(400).json({ error: "Company code is required." });
       return;
     }
 
     const now = new Date();
-    const expiresAtMs = new Date(latest.expiresAt).getTime();
-    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-      latest.consumedAt = now.toISOString();
-      response.status(400).json({ error: "Verification code expired. Please request a new code." });
-      return;
+    const wasReonboarding = user.mobileProfileReonboardingRequired === true;
+    if (needsCodeVerification) {
+      const pending = db.emailVerifications
+        .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      const latest = pending[0];
+      if (!latest) {
+        response.status(400).json({ error: "No pending verification code. Please resend verification email." });
+        return;
+      }
+
+      const expiresAtMs = new Date(latest.expiresAt).getTime();
+      if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+        latest.consumedAt = now.toISOString();
+        response.status(400).json({ error: "Verification code expired. Please request a new code." });
+        return;
+      }
+
+      const expectedHash = Buffer.from(latest.codeHash, "hex");
+      const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
+      if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
+        response.status(400).json({ error: "Invalid verification code." });
+        return;
+      }
+
+      const nowIsoValue = now.toISOString();
+      latest.consumedAt = nowIsoValue;
+      user.emailVerifiedAt = nowIsoValue;
+      user.updatedAt = nowIsoValue;
+      appendMobileAuditEvent(db, user, {
+        action: "mobile.email_verified",
+        userId: user.id,
+        message: `Email verified for ${user.email}.`
+      });
     }
 
-    const expectedHash = Buffer.from(latest.codeHash, "hex");
-    const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
-    if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
-      response.status(400).json({ error: "Invalid verification code." });
-      return;
-    }
-
-    const nowIsoValue = now.toISOString();
-    latest.consumedAt = nowIsoValue;
-    user.emailVerifiedAt = nowIsoValue;
-    user.updatedAt = nowIsoValue;
-    emitMobileUpdateForUser(db, user.id, "user");
-    appendMobileAuditEvent(db, user, {
-      action: "mobile.email_verified",
-      userId: user.id,
-      message: `Email verified for ${user.email}.`
+    const completion = completeMobileCompanyProfile({
+      db,
+      user,
+      firstName: firstName.value,
+      lastName: lastName.value,
+      joinCode,
+      now,
     });
+    if (!completion.ok) {
+      response.status(completion.status).json({ error: completion.error });
+      return;
+    }
+    appendMobileAuditEvent(db, user, {
+      action: wasReonboarding ? "mobile.profile_reonboarding_completed" : "mobile.profile_completed",
+      orgId: completion.org.id,
+      userId: user.id,
+      message: wasReonboarding ? "Completed required mobile profile re-onboarding." : "Completed mobile profile setup.",
+      metadata: {
+        restoredExistingMember: completion.restoredExistingMember,
+        joinRequestCreated: completion.createdRequest,
+        joinRequestReused: Boolean(completion.request && !completion.createdRequest),
+      }
+    });
+    if (completion.request) {
+      appendMobileAuditEvent(db, user, {
+        action: completion.createdRequest ? "org_join.request_created" : "org_join.request_reused",
+        orgId: completion.org.id,
+        userId: user.id,
+        message: completion.createdRequest
+          ? `Submitted org join request for ${completion.org.name}.`
+          : `Existing org join request reused for ${completion.org.name}.`,
+        metadata: {
+          requestId: completion.request.id
+        }
+      });
+    }
 
     const payload: MobileOnboardResponse = {
       user,
@@ -14276,6 +15074,11 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
 
     if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
       response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (user.mobileProfileReonboardingRequired === true) {
+      response.status(403).json({ error: "Mobile profile update required. Please sign in again." });
       return;
     }
 
@@ -14428,16 +15231,17 @@ app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLi
       return;
     }
 
+    if (user.status !== "active") {
+      response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
+      return;
+    }
+
     if (!user.emailVerifiedAt) {
       response.status(403).json({ error: "Verify your email before requesting enterprise access." });
       return;
     }
 
-    const emailDomain = extractEmailDomain(user.email) ?? "";
-
-    const org = db.orgs.find(
-      (entry) => entry.status === "active" && normalizeJoinCode(entry.joinCode) === joinCode
-    );
+    const org = findActiveOrgByJoinCode(db, joinCode);
     if (!org) {
       response.status(404).json({ error: "Join code not found." });
       return;
@@ -14447,72 +15251,32 @@ app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLi
       response.status(409).json({ error: "You are already a member of this organization." });
       return;
     }
-
-    expireOrgJoinRequests(db, new Date());
-    const existingPending = db.enterpriseJoinRequests.find(
-      (row) => row.userId === user.id && row.orgId === org.id && row.status === "pending"
-    );
-    if (existingPending) {
-      appendMobileAuditEvent(db, user, {
-        action: "org_join.request_reused",
-        orgId: org.id,
-        userId: user.id,
-        message: `Existing org join request reused for ${org.name}.`,
-        metadata: {
-          requestId: existingPending.id
-        }
-      });
-      response.json({
-        created: false,
-        request: {
-          id: existingPending.id,
-          status: existingPending.status,
-          orgId: existingPending.orgId,
-          orgName: org.name,
-          emailDomain: existingPending.emailDomain,
-          createdAt: existingPending.createdAt,
-          expiresAt: existingPending.expiresAt,
-          updatedAt: existingPending.updatedAt
-        }
-      });
+    if (user.accountType === "enterprise") {
+      response.status(403).json({ error: "Company code does not match your active organization." });
       return;
     }
 
-    const now = new Date();
-    const createdAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + ORG_JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-
-    const record: EnterpriseJoinRequestRecord = {
-      id: `jr_${uuid()}`,
-      userId: user.id,
-      email: user.email,
-      emailDomain,
-      orgId: org.id,
-      orgNameSnapshot: org.name,
-      joinCodeSnapshot: joinCode,
-      status: "pending",
-      createdAt,
-      expiresAt,
-      updatedAt: createdAt,
-      decidedAt: null,
-      decidedByUserId: null,
-      decisionReason: null
-    };
-
-    db.enterpriseJoinRequests.push(record);
-    emitMobileUpdateForOrg(db, org.id, "org");
+    const requestResult = createOrReusePendingOrgJoinRequest({
+      db,
+      user,
+      org,
+      now: new Date(),
+    });
+    const record = requestResult.request;
     appendMobileAuditEvent(db, user, {
-      action: "org_join.request_created",
+      action: requestResult.created ? "org_join.request_created" : "org_join.request_reused",
       orgId: org.id,
       userId: user.id,
-      message: `Submitted org join request for ${org.name}.`,
+      message: requestResult.created
+        ? `Submitted org join request for ${org.name}.`
+        : `Existing org join request reused for ${org.name}.`,
       metadata: {
         requestId: record.id
       }
     });
 
-    response.status(201).json({
-      created: true,
+    response.status(requestResult.created ? 201 : 200).json({
+      created: requestResult.created,
       request: {
         id: record.id,
         status: record.status,

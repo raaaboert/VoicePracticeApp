@@ -5,7 +5,7 @@ function normalizeSearch(value: string): string {
 }
 
 export function buildPerformanceUserDisplayName(user: DashboardPerformanceUserOption): string {
-  return user.displayName.trim() || user.email.trim() || "Account user";
+  return user.displayName.trim() || "Not provided";
 }
 
 export function sortPerformanceUsersByDisplayName(
