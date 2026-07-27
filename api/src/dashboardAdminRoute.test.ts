@@ -217,6 +217,18 @@ function buildDatabase(): ApiDatabase {
         employeeId: "EMP-DD",
         managerUserId: "manager_to_disable",
       }),
+      buildUser("mobile_scope_manager", "mobile-scope-manager@acme.example", {
+        orgRole: "user_admin",
+        dashboardAccessEnabled: true,
+        firstName: "Mobile",
+        lastName: "Manager",
+        employeeId: "MGR-M",
+      }),
+      buildUser("mobile_scope_report", "mobile-scope-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-M",
+        managerUserId: "mobile_scope_manager",
+      }),
       buildUser("other_org_admin", "admin@other.example", {
         orgId: "org_2",
         orgRole: "org_admin",
@@ -275,6 +287,12 @@ function buildDatabase(): ApiDatabase {
       buildUser("reset_mismatch", "reset.mismatch@gmail.com", {
         mobileProfileReonboardingRequired: true,
       }),
+      buildUser("reset_wrong_code", "reset.wrong-code@gmail.com", {
+        mobileProfileReonboardingRequired: true,
+      }),
+      buildUser("reset_old_token", "reset.old-token@gmail.com", {
+        mobileProfileReonboardingRequired: true,
+      }),
       buildUser("disabled_member", "disabled.member@gmail.com", {
         status: "disabled",
         mobileProfileReonboardingRequired: true,
@@ -313,6 +331,10 @@ function buildDatabase(): ApiDatabase {
       buildMobileToken("gmail_invalid", "token_gmail_invalid"),
       buildMobileToken("rate_limited", "token_rate_limited"),
       buildMobileToken("org_admin", "token_org_admin"),
+      buildMobileToken("user_admin", "token_user_admin"),
+      buildMobileToken("eligible_user_admin", "token_other_manager"),
+      buildMobileToken("mobile_scope_manager", "token_mobile_scope_manager"),
+      buildMobileToken("reset_old_token", "token_before_reset"),
     ],
     emailVerifications: [],
     webAuthChallenges: [],
@@ -595,6 +617,116 @@ test("user-admin users are scoped to themselves and directly assigned reports", 
   const viewer = result.body.viewer as { capabilities?: { approveRejectAccessRequests?: boolean; assignUserManagers?: boolean } };
   assert.equal(viewer.capabilities?.approveRejectAccessRequests, false);
   assert.equal(viewer.capabilities?.assignUserManagers, false);
+});
+
+test("mobile user-admin routes are scoped to self and direct reports", async () => {
+  const orgAdminList = await mobileRequest("/mobile/users/org_admin/admin/org/users", "token_org_admin");
+  assert.equal(orgAdminList.status, 200);
+  const orgAdminUserIds = (orgAdminList.body.users as Array<{ userId: string }>).map((row) => row.userId);
+  assert.equal(orgAdminUserIds.includes("unassigned_learner"), true);
+  assert.equal(orgAdminUserIds.includes("eligible_user_admin"), true);
+  assert.equal(orgAdminUserIds.includes("other_org_user"), false);
+
+  const scopedList = await mobileRequest("/mobile/users/user_admin/admin/org/users", "token_user_admin");
+  assert.equal(scopedList.status, 200);
+  const scopedUserIds = (scopedList.body.users as Array<{ userId: string }>).map((row) => row.userId).sort();
+  assert.deepEqual(scopedUserIds, ["learner", "learner_atomic", "learner_status", "role_target", "user_admin"]);
+
+  const selfDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/user_admin", "token_user_admin");
+  assert.equal(selfDetail.status, 200);
+  const directReportDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin");
+  assert.equal(directReportDetail.status, 200);
+  const unassignedDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/unassigned_learner", "token_user_admin");
+  assert.equal(unassignedDetail.status, 404);
+  const otherManagerReportDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
+  assert.equal(otherManagerReportDetail.status, 404);
+
+  const otherUserAdminPatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/eligible_user_admin", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled" })
+  });
+  assert.equal(otherUserAdminPatch.status, 404);
+  const orgAdminPatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/org_admin", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled" })
+  });
+  assert.equal(orgAdminPatch.status, 404);
+  const usageControlPatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ dailySecondsCapOverride: 60 })
+  });
+  assert.equal(usageControlPatch.status, 403);
+
+  const employeePatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ employeeId: " EMP-MOBILE-1 " })
+  });
+  assert.equal(employeePatch.status, 200);
+  assert.equal((employeePatch.body as { employeeId?: string }).employeeId, "EMP-MOBILE-1");
+  const deactivate = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled" })
+  });
+  assert.equal(deactivate.status, 200);
+  const reactivate = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "active" })
+  });
+  assert.equal(reactivate.status, 200);
+
+  const accessRequestDenied = await mobileRequest(
+    "/mobile/users/user_admin/admin/org/access-requests/jr_pending",
+    "token_user_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ action: "approve" })
+    }
+  );
+  assert.equal(accessRequestDenied.status, 403);
+
+  const crossTenantRead = await mobileRequest("/mobile/users/org_admin/admin/org/users/other_org_user", "token_org_admin");
+  assert.equal(crossTenantRead.status, 404);
+  const crossTenantWrite = await mobileRequest("/mobile/users/org_admin/admin/org/users/other_org_user", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled" })
+  });
+  assert.equal(crossTenantWrite.status, 404);
+});
+
+test("mobile manager scope updates immediately after reassignment and demotion", async () => {
+  const initiallyDenied = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
+  assert.equal(initiallyDenied.status, 404);
+
+  const assigned = await dashboardRequest("/dashboard/admin/users/other_manager_report", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ managerUserId: "user_admin" })
+  });
+  assert.equal(assigned.status, 200);
+  const nowVisible = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
+  assert.equal(nowVisible.status, 200);
+
+  const reassignedAway = await dashboardRequest("/dashboard/admin/users/other_manager_report", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ managerUserId: "eligible_user_admin" })
+  });
+  assert.equal(reassignedAway.status, 200);
+  const noLongerVisible = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
+  assert.equal(noLongerVisible.status, 404);
+
+  const managerList = await mobileRequest("/mobile/users/mobile_scope_manager/admin/org/users", "token_mobile_scope_manager");
+  assert.equal(managerList.status, 200);
+  assert.deepEqual(
+    (managerList.body.users as Array<{ userId: string }>).map((row) => row.userId).sort(),
+    ["mobile_scope_manager", "mobile_scope_report"]
+  );
+
+  const demoted = await dashboardRequest("/dashboard/admin/users/mobile_scope_manager", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user" })
+  });
+  assert.equal(demoted.status, 200);
+  const demotedList = await mobileRequest("/mobile/users/mobile_scope_manager/admin/org/users", "token_mobile_scope_manager");
+  assert.equal(demotedList.status, 403);
 });
 
 test("org admins edit names and managers while user-admin managers cannot", async () => {
@@ -988,7 +1120,26 @@ test("mobile onboarding collects names and company code without granting immedia
   );
   assert.equal(resetOnboard.status, 200);
   assert.equal(resetOnboard.body.verificationRequired, true);
-  const resetVerified = await mobileRequest("/mobile/onboard/verify-email", resetOnboard.body.authToken as string, {
+  const limitedResetToken = resetOnboard.body.authToken as string;
+  const resetEntitlementsDenied = await mobileRequest("/mobile/users/reset_member/entitlements", limitedResetToken);
+  assert.equal(resetEntitlementsDenied.status, 401);
+  const resetSimulationDenied = await mobileRequest("/mobile/users/reset_member/simulation-sessions/start", limitedResetToken, {
+    method: "POST",
+    body: JSON.stringify({
+      simulationSessionId: "sim_reset_denied",
+      segmentId: "manager",
+      scenarioId: "scenario_denied"
+    })
+  });
+  assert.equal(resetSimulationDenied.status, 401);
+  const resetPerformanceDenied = await mobileRequest("/mobile/users/reset_member/performance/current", limitedResetToken);
+  assert.equal(resetPerformanceDenied.status, 401);
+  const resetHistoryDenied = await mobileRequest("/mobile/users/reset_member/scores/summary", limitedResetToken);
+  assert.equal(resetHistoryDenied.status, 401);
+  const resetUpdatesDenied = await mobileRequest("/mobile/users/reset_member/updates", limitedResetToken);
+  assert.equal(resetUpdatesDenied.status, 401);
+
+  const resetVerified = await mobileRequest("/mobile/onboard/verify-email", limitedResetToken, {
     method: "POST",
     body: JSON.stringify({
       userId: "reset_member",
@@ -1004,10 +1155,32 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(resetUser.lastName, "Member");
   assert.equal(resetUser.orgId, "org_1");
   assert.equal(resetUser.mobileProfileReonboardingRequired, false);
+  const normalResetToken = resetVerified.body.authToken as string;
+  assert.notEqual(normalResetToken, limitedResetToken);
+  const limitedTokenAfterCompletion = await mobileRequest("/mobile/users/reset_member/entitlements", limitedResetToken);
+  assert.equal(limitedTokenAfterCompletion.status, 401);
+  const normalTokenAfterCompletion = await mobileRequest("/mobile/users/reset_member/entitlements", normalResetToken);
+  assert.equal(normalTokenAfterCompletion.status, 200);
   const resetRequests = await waitForPersistedJoinRequests(
     (requests) => requests.every((request) => request.userId !== "reset_member")
   );
   assert.equal(resetRequests.some((request) => request.userId === "reset_member"), false);
+
+  const oldTokenDenied = await mobileRequest("/mobile/users/reset_old_token/entitlements", "token_before_reset");
+  assert.equal(oldTokenDenied.status, 401);
+
+  const wrongCode = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "reset.wrong-code@gmail.com",
+      firstName: "Wrong",
+      lastName: "Code",
+      joinCode: "NO-SUCH-CODE",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(wrongCode.status, 404);
+  assert.equal((await readUser("reset_wrong_code"))?.mobileProfileReonboardingRequired, true);
 
   const mismatch = await publicRequest("/mobile/onboard", {
     method: "POST",
@@ -1021,6 +1194,10 @@ test("mobile onboarding collects names and company code without granting immedia
   });
   assert.equal(mismatch.status, 403);
   assert.match(String(mismatch.body.error), /does not match/);
+  assert.equal((await readUser("reset_mismatch"))?.orgId, "org_1");
+  assert.equal((await readUser("reset_mismatch"))?.mobileProfileReonboardingRequired, true);
+  const mismatchRequests = await readDb();
+  assert.equal(mismatchRequests.enterpriseJoinRequests.some((request) => request.userId === "reset_mismatch"), false);
 
   const disabled = await publicRequest("/mobile/onboard", {
     method: "POST",

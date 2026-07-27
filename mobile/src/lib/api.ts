@@ -1715,12 +1715,14 @@ export async function setOrgAdminUserControls(
   authToken: string,
   patch: {
     status?: "active" | "disabled";
+    employeeId?: string | null;
     allowDailyOverageThisCycle?: boolean;
     dailySecondsCapOverride?: number | null;
   },
 ): Promise<{
   userId: string;
   email: string;
+  employeeId: string | null;
   status: string;
   allowDailyOverageThisCycle: boolean;
   dailySecondsCapOverride: number | null;

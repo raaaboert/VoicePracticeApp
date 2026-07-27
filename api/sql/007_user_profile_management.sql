@@ -1,9 +1,12 @@
 -- User management profile fields are stored in the app_state JSON document.
--- Startup normalization backfills these fields idempotently for existing PostgreSQL databases:
+-- Controlled startup initialization durably backfills and normalizes these fields in app_state
+-- when legacy persisted records need repair, then records the user_profile_management_v1 marker:
 --   users[].firstName
 --   users[].lastName
+--   users[].employeeId
 --   users[].managerUserId
 --   users[].mobileProfileReonboardingRequired
--- This file is intentionally a no-op schema marker so database initialization remains safe
--- for existing app_state-backed PostgreSQL deployments.
+-- The migration is idempotent and does not rewrite app_state on subsequent startups once the
+-- persisted profile fields and marker are current. This SQL remains a no-op schema marker so
+-- database initialization is safe for existing app_state-backed PostgreSQL deployments.
 SELECT 1;

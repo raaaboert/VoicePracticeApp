@@ -35,6 +35,9 @@ function fakeStartupMaintenance(calls: string[]) {
     async migrateLegacyWebAuthSessionsFromAppState(): Promise<void> {
       calls.push("migrateLegacyWebAuthSessionsFromAppState");
     },
+    async migrateUserProfileAppStateNormalization(): Promise<void> {
+      calls.push("migrateUserProfileAppStateNormalization");
+    },
     async runStartupUsageIntegrityMaintenance(): Promise<void> {
       calls.push("runStartupUsageIntegrityMaintenance");
     }
@@ -99,6 +102,7 @@ test("database startup initializes Performance tables through the normal extract
     "migrateLegacyWebAuthSessionsFromAppState",
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
+    "migrateUserProfileAppStateNormalization",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
   ]);
@@ -127,6 +131,9 @@ test("database readiness refresh initializes the Performance store before loadin
     },
     async loadDatabase(): Promise<void> {
       calls.push("loadDatabase");
+    },
+    async migrateUserProfileAppStateNormalization(): Promise<void> {
+      calls.push("migrateUserProfileAppStateNormalization");
     }
   });
 
@@ -140,6 +147,48 @@ test("database readiness refresh initializes the Performance store before loadin
     "webAuthSessionStore.initialize",
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
+    "migrateUserProfileAppStateNormalization",
     "loadDatabase"
+  ]);
+});
+
+test("database readiness fails before loading app state when user profile normalization fails", async () => {
+  const calls: string[] = [];
+
+  await assert.rejects(
+    initializeDatabaseStoresForReadiness({
+      stores: {
+        auditEventStore: fakeStore(calls, "auditEventStore"),
+        aiUsageEventStore: fakeStore(calls, "aiUsageEventStore"),
+        simulationSessionStore: fakeStore(calls, "simulationSessionStore"),
+        usageSessionStore: fakeStore(calls, "usageSessionStore"),
+        scoreRecordStore: fakeStore(calls, "scoreRecordStore"),
+        supportCaseStore: fakeStore(calls, "supportCaseStore"),
+        webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
+        performancePlanStore: fakeStore(calls, "performancePlanStore"),
+        userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore")
+      },
+      async migrateUserProfileAppStateNormalization(): Promise<void> {
+        calls.push("migrateUserProfileAppStateNormalization");
+        throw new Error("migration unavailable");
+      },
+      async loadDatabase(): Promise<void> {
+        calls.push("loadDatabase");
+      }
+    }),
+    /migration unavailable/
+  );
+
+  assert.deepEqual(calls, [
+    "auditEventStore.initialize",
+    "aiUsageEventStore.initialize",
+    "simulationSessionStore.initialize",
+    "usageSessionStore.initialize",
+    "scoreRecordStore.initialize",
+    "supportCaseStore.initialize",
+    "webAuthSessionStore.initialize",
+    "performancePlanStore.initialize",
+    "userEmployeeIdClaimStore.initialize",
+    "migrateUserProfileAppStateNormalization"
   ]);
 });

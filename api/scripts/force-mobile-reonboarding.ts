@@ -13,10 +13,10 @@ import {
   assertProductionWriteAllowed,
   inferDatabaseTargetEnvironment,
   parseScriptTarget,
+  PRODUCTION_WRITE_CONFIRMATION,
   type ScriptTargetEnvironment
 } from "../src/productionSafety.js";
 import type { StorageProvider } from "../src/runtimeConfig.js";
-import { createAuditEventStore } from "../src/storage/auditEventStore.js";
 
 const APP_STATE_ROW_ID = "primary";
 const MAX_AUDIT_EVENTS = 10000;
@@ -97,18 +97,34 @@ function resolveStorageTarget(runtimeConfig: RuntimeConfig): StorageTarget {
 }
 
 export function assertTargetSafety(target: StorageTarget, options: CliOptions): ScriptTargetEnvironment | null {
-  if (!options.apply) {
-    return options.target ?? inferDatabaseTargetEnvironment(target.databaseUrl);
+  if (!options.target) {
+    throw new Error('--target staging or --target production is required.');
   }
-  if (target.storageProvider !== "postgres") {
-    return options.target ?? "development";
+  if (options.target !== "staging" && options.target !== "production") {
+    throw new Error('--target must be "staging" or "production" for force-mobile-reonboarding.');
   }
-  return assertProductionWriteAllowed({
-    operationName: "force-mobile-reonboarding",
-    explicitTarget: options.target,
-    inferredTarget: inferDatabaseTargetEnvironment(target.databaseUrl),
-    confirmProduction: options.confirmProduction,
-  });
+
+  const inferredTarget = inferDatabaseTargetEnvironment(target.databaseUrl);
+  if (inferredTarget !== options.target) {
+    throw new Error(
+      `force-mobile-reonboarding target mismatch: --target ${options.target} does not match detected ${inferredTarget ?? "unknown"} target.`
+    );
+  }
+
+  if (options.target === "production") {
+    return assertProductionWriteAllowed({
+      operationName: "force-mobile-reonboarding",
+      explicitTarget: options.target,
+      inferredTarget,
+      confirmProduction: options.confirmProduction,
+    });
+  }
+
+  if (options.confirmProduction === PRODUCTION_WRITE_CONFIRMATION) {
+    throw new Error("Production confirmation is only valid with --target production.");
+  }
+
+  return "staging";
 }
 
 async function loadAppState(target: StorageTarget): Promise<ApiDatabase> {
@@ -208,21 +224,12 @@ export function applyReset(db: ApiDatabase, nowIso: string): {
   };
 }
 
-export async function appendResetAudit(
-  target: StorageTarget,
+export function buildResetAuditEvent(
   report: ReturnType<typeof applyReset>,
-  resolvedTarget: string | null
-): Promise<void> {
-  const store = createAuditEventStore({
-    provider: target.storageProvider,
-    dbPath: target.dbPath,
-    databaseUrl: target.databaseUrl,
-    pgPoolMax: target.pgPoolMax,
-    pgConnectTimeoutMs: target.pgConnectTimeoutMs,
-    pgIdleTimeoutMs: target.pgIdleTimeoutMs,
-  });
-  await store.initialize();
-  const event: AuditEvent = {
+  resolvedTarget: string | null,
+  nowIso = new Date().toISOString()
+): AuditEvent {
+  return {
     id: `audit_${randomUUID()}`,
     actorType: "system",
     actorId: null,
@@ -237,9 +244,19 @@ export async function appendResetAudit(
       newlyFlaggedUserCount: report.newlyFlaggedUserCount,
       revokedMobileTokenCount: report.revokedMobileTokenCount,
     },
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
   };
-  await store.appendEvents([event], { maxRecords: MAX_AUDIT_EVENTS });
+}
+
+export function appendResetAudit(
+  db: ApiDatabase,
+  report: ReturnType<typeof applyReset>,
+  resolvedTarget: string | null,
+  nowIso = new Date().toISOString()
+): AuditEvent {
+  const event = buildResetAuditEvent(report, resolvedTarget, nowIso);
+  db.auditEvents = [...(db.auditEvents ?? []), event].slice(-MAX_AUDIT_EVENTS);
+  return event;
 }
 
 async function main(): Promise<void> {
@@ -247,11 +264,12 @@ async function main(): Promise<void> {
   const target = resolveStorageTarget(loadRuntimeConfig());
   const resolvedTarget = assertTargetSafety(target, options);
   const db = await loadAppState(target);
-  const report = applyReset(db, new Date().toISOString());
+  const now = new Date().toISOString();
+  const report = applyReset(db, now);
 
   if (options.apply) {
+    appendResetAudit(db, report, resolvedTarget, now);
     await saveAppState(target, db);
-    await appendResetAudit(target, report, resolvedTarget);
   }
 
   console.log(JSON.stringify({

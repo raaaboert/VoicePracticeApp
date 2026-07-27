@@ -803,6 +803,7 @@ export default function App() {
   const [adminError, setAdminError] = useState<string | null>(null);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
   const [adminMaxSimulationMinutesInput, setAdminMaxSimulationMinutesInput] = useState<string>("");
+  const [adminEmployeeIdInput, setAdminEmployeeIdInput] = useState<string>("");
   const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
@@ -1653,6 +1654,7 @@ export default function App() {
       try {
         const payload = await fetchOrgAdminUserDetail(user.id, targetUserId, mobileAuthToken, { days: 30 });
         setOrgAdminUserDetail(payload);
+        setAdminEmployeeIdInput(payload.user.employeeId ?? "");
       } catch (caught) {
         const message = getErrorMessage(caught, "Could not load user details.");
         setAdminError(message);
@@ -1714,6 +1716,10 @@ export default function App() {
         setAdminError("Admin access required.");
         return;
       }
+      if (user.orgRole === "user_admin") {
+        setAdminError("User admins cannot modify organization usage controls.");
+        return;
+      }
 
       setAdminLoading(true);
       setAdminError(null);
@@ -1735,6 +1741,48 @@ export default function App() {
       }
     },
     [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
+  );
+
+  const saveOrgUserEmployeeId = useCallback(
+    async (targetUserId: string) => {
+      if (!user || !mobileAuthToken) {
+        return;
+      }
+
+      const actorHasAdminAccess =
+        user.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin");
+      if (!actorHasAdminAccess) {
+        setAdminError("Admin access required.");
+        return;
+      }
+
+      setAdminLoading(true);
+      setAdminError(null);
+
+      try {
+        await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
+          employeeId: adminEmployeeIdInput,
+        });
+        await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
+      } catch (caught) {
+        const message = getErrorMessage(caught, "Could not update Employee ID.");
+        setAdminError(message);
+        void submitAutoErrorReport("admin_user_employee_id.update", caught, {
+          screen: "admin_user_detail",
+          details: { targetUserId },
+        });
+      } finally {
+        setAdminLoading(false);
+      }
+    },
+    [
+      adminEmployeeIdInput,
+      mobileAuthToken,
+      refreshOrgAdminUserDetail,
+      refreshOrgAdminUsers,
+      submitAutoErrorReport,
+      user,
+    ],
   );
 
   const saveOrgAdminSettings = useCallback(async () => {
@@ -3531,14 +3579,14 @@ export default function App() {
             {user?.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin") ? (
               <>
                 <View style={styles.menuSeparator} />
-                <Text style={styles.label}>Admin</Text>
+                <Text style={styles.label}>{isOrgAdmin ? "Admin" : "Team"}</Text>
                 <Pressable
                   style={styles.menuItemButton}
                   onPress={() => {
                     closeHomeMenu("admin_home");
                   }}
                 >
-                  <Text style={styles.menuItemText}>Admin</Text>
+                  <Text style={styles.menuItemText}>{isOrgAdmin ? "Admin" : "Direct Reports"}</Text>
                 </Pressable>
               </>
             ) : null}
@@ -4614,7 +4662,7 @@ export default function App() {
           <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
             <Text style={styles.ghostButtonText}>Back</Text>
           </Pressable>
-          <Text style={styles.topTitle}>Admin</Text>
+          <Text style={styles.topTitle}>{isOrgAdmin ? "Admin" : "Team"}</Text>
           <Pressable
             style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
             disabled={adminLoading}
@@ -4646,7 +4694,9 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.title}>Tools</Text>
             <Text style={styles.body}>
-              Review account performance and manage who can access the app.
+              {isOrgAdmin
+                ? "Review account performance and manage who can access the app."
+                : "Review your direct reports and manage eligible user access."}
             </Text>
             {isOrgAdmin ? (
               <>
@@ -4671,9 +4721,9 @@ export default function App() {
               </>
             ) : (
               <View style={styles.optionCard}>
-                <Text style={styles.optionTitle}>Limited Scope</Text>
+                <Text style={styles.optionTitle}>Direct Reports</Text>
                 <Text style={styles.body}>
-                  User Admins can lock/unlock users and review user-level activity. Contract and org-wide analytics are
+                  You can review yourself and directly assigned users. Membership requests and org-wide analytics are
                   restricted to Org Admins.
                 </Text>
               </View>
@@ -4686,7 +4736,7 @@ export default function App() {
                 setScreen("admin_user_list");
               }}
             >
-              <Text style={styles.menuItemText}>Manage Users</Text>
+              <Text style={styles.menuItemText}>{isOrgAdmin ? "Manage Users" : "Direct Reports"}</Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -5351,12 +5401,15 @@ export default function App() {
     const actorIsTarget = user.id === targetUserId;
     const actorIsUserAdmin = user.orgRole === "user_admin";
     const targetIsOrgAdmin = detail ? detail.user.orgRole === "org_admin" : false;
+    const targetIsRegularUser = detail ? detail.user.orgRole === "user" : false;
     const locked = detail ? detail.user.status !== "active" : false;
     const dailyOverageAllowed = detail ? detail.user.allowDailyOverageThisCycle === true : false;
     const roleLabel = detail
       ? (ORG_USER_ROLE_LABELS as unknown as Record<string, string>)[detail.user.orgRole] ?? detail.user.orgRole
       : "-";
     const accessControlsDisabled = actorIsTarget || (actorIsUserAdmin && targetIsOrgAdmin);
+    const employeeIdControlsDisabled = actorIsTarget || (actorIsUserAdmin && !targetIsRegularUser);
+    const canEditUsageControls = user.orgRole === "org_admin" && !accessControlsDisabled;
 
     const setLocked = (nextLocked: boolean) => {
       if (adminLoading) {
@@ -5411,6 +5464,7 @@ export default function App() {
                 <Text style={styles.title}>{detail.user.email}</Text>
                 <Text style={styles.body}>
                   Role: {roleLabel}{"\n"}
+                  Employee ID: {detail.user.employeeId || "-"}{"\n"}
                   Status: {detail.user.status === "disabled" ? "Locked" : "Active"}{"\n"}
                   Effective daily cap: {formatSecondsAsClock(detail.user.effectiveDailySecondsCap ?? 0)}{"\n"}
                   Overage: {dailyOverageAllowed ? "Allowed" : "Off"}
@@ -5447,47 +5501,77 @@ export default function App() {
                   <Text style={styles.body}>User Admins cannot lock or unlock Org Admins.</Text>
                 ) : null}
 
-                <Text style={styles.hintText}>Daily Overage</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-                  <Pressable
-                    style={[
-                      styles.timezoneChip,
-                      !dailyOverageAllowed ? styles.selectedChip : null,
-                      adminLoading ? styles.disabled : null,
-                    ]}
-                    disabled={adminLoading}
-                    onPress={() => {
-                      if (!dailyOverageAllowed) {
-                        return;
-                      }
-                      void setOrgUserDailyOverage(targetUserId, false);
-                    }}
-                  >
-                    <Text style={styles.chipText}>Off</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[
-                      styles.timezoneChip,
-                      dailyOverageAllowed ? styles.selectedChip : null,
-                      adminLoading ? styles.disabled : null,
-                    ]}
-                    disabled={adminLoading}
-                    onPress={() => {
-                      if (dailyOverageAllowed) {
-                        return;
-                      }
-                      void setOrgUserDailyOverage(targetUserId, true);
-                    }}
-                  >
-                    <Text style={styles.chipText}>Allow</Text>
-                  </Pressable>
-                </ScrollView>
-                {dailyOverageAllowed ? (
-                  <Text style={styles.body}>
-                    Overage currently allowed through {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
-                  </Text>
+                <Text style={styles.hintText}>Employee ID</Text>
+                <TextInput
+                  value={adminEmployeeIdInput}
+                  onChangeText={setAdminEmployeeIdInput}
+                  placeholder="Optional"
+                  placeholderTextColor={theme.hint}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  editable={!employeeIdControlsDisabled && !adminLoading}
+                  style={[styles.input, employeeIdControlsDisabled ? styles.disabled : null]}
+                />
+                <Pressable
+                  style={[styles.primaryButton, employeeIdControlsDisabled || adminLoading ? styles.disabled : null]}
+                  disabled={employeeIdControlsDisabled || adminLoading}
+                  onPress={() => void saveOrgUserEmployeeId(targetUserId)}
+                >
+                  <Text style={styles.primaryButtonText}>{adminLoading ? "Saving..." : "Save Employee ID"}</Text>
+                </Pressable>
+                {employeeIdControlsDisabled ? (
+                  <Text style={styles.body}>Employee ID editing is available for eligible managed users.</Text>
                 ) : (
-                  <Text style={styles.body}>Daily cap enforced for this user.</Text>
+                  <Text style={styles.body}>Blank saves as no Employee ID.</Text>
+                )}
+
+                {canEditUsageControls ? (
+                  <>
+                    <Text style={styles.hintText}>Daily Overage</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+                      <Pressable
+                        style={[
+                          styles.timezoneChip,
+                          !dailyOverageAllowed ? styles.selectedChip : null,
+                          adminLoading ? styles.disabled : null,
+                        ]}
+                        disabled={adminLoading}
+                        onPress={() => {
+                          if (!dailyOverageAllowed) {
+                            return;
+                          }
+                          void setOrgUserDailyOverage(targetUserId, false);
+                        }}
+                      >
+                        <Text style={styles.chipText}>Off</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.timezoneChip,
+                          dailyOverageAllowed ? styles.selectedChip : null,
+                          adminLoading ? styles.disabled : null,
+                        ]}
+                        disabled={adminLoading}
+                        onPress={() => {
+                          if (dailyOverageAllowed) {
+                            return;
+                          }
+                          void setOrgUserDailyOverage(targetUserId, true);
+                        }}
+                      >
+                        <Text style={styles.chipText}>Allow</Text>
+                      </Pressable>
+                    </ScrollView>
+                    {dailyOverageAllowed ? (
+                      <Text style={styles.body}>
+                        Overage currently allowed through {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
+                      </Text>
+                    ) : (
+                      <Text style={styles.body}>Daily cap enforced for this user.</Text>
+                    )}
+                  </>
+                ) : (
+                  <Text style={styles.body}>Daily usage controls are managed by Org Admins.</Text>
                 )}
               </View>
 

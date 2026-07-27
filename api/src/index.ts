@@ -225,6 +225,7 @@ import {
   initializeDatabaseStoresForReadiness,
   initializeDatabaseStoresForStartup
 } from "./services/databaseStoreInitialization.js";
+import { migrateUserProfileAppStateNormalization as migrateUserProfileAppStateNormalizationState } from "./services/userProfileAppStateMigration.js";
 import {
   handleDashboardWebAuthCodeRequest,
 } from "./services/dashboardWebAuthRequest.js";
@@ -253,6 +254,8 @@ import {
   canActorManagePerformanceUser,
   canActorManageRegularUser,
   canActorSeeOrganizationUser,
+  canEnterpriseActorManageRegularUser,
+  canEnterpriseActorSeeOrganizationUser,
   canManagerAssignmentTargetBeManaged,
   canOrgAdminManageRole,
   clearAssignmentsForManager,
@@ -3086,6 +3089,7 @@ function createDefaultDatabase(): ApiDatabase {
     emailVerifications: [],
     webAuthChallenges: [],
     enterpriseJoinRequests: [],
+    appStateMigrations: {},
     admin: {
       passwordHash: null,
       activeSessionIds: []
@@ -4017,6 +4021,14 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     enterpriseJoinRequests: Array.isArray(candidate.enterpriseJoinRequests)
       ? candidate.enterpriseJoinRequests
       : fallback.enterpriseJoinRequests,
+    appStateMigrations:
+      candidate.appStateMigrations && typeof candidate.appStateMigrations === "object" && !Array.isArray(candidate.appStateMigrations)
+        ? Object.fromEntries(
+            Object.entries(candidate.appStateMigrations).filter(
+              (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0
+            )
+          )
+        : {},
     admin: {
       passwordHash:
         candidate.admin && typeof candidate.admin.passwordHash === "string"
@@ -4102,6 +4114,23 @@ async function saveDatabase(db: ApiDatabase): Promise<void> {
   const storage = getOrCreateDatabaseStorage();
   await userEmployeeIdClaimStore.syncFromUsers(db.users);
   await storage.save(buildPersistedDatabaseSnapshot(db));
+}
+
+async function migrateUserProfileAppStateNormalization(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const storage = getOrCreateDatabaseStorage();
+    await migrateUserProfileAppStateNormalizationState({
+      storage,
+      ensureDatabaseShape,
+      buildPersistedDatabaseSnapshot,
+      syncEmployeeIds: async (users) => {
+        await userEmployeeIdClaimStore.syncFromUsers(users);
+      }
+    });
+    const loaded = await storage.load();
+    await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
+    databaseCache = loaded;
+  });
 }
 
 async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
@@ -4406,7 +4435,8 @@ async function refreshDatabaseReadiness(): Promise<void> {
       },
       loadDatabase: async () => {
         await loadDatabase({ forceStorageRead: true });
-      }
+      },
+      migrateUserProfileAppStateNormalization
     });
     isDatabaseReady = true;
     databaseReadyError = null;
@@ -4597,7 +4627,12 @@ function upsertMobileAuthToken(db: ApiDatabase, userId: string, issuedAtIso: str
   return authToken;
 }
 
-function hasValidMobileTokenForUser(db: ApiDatabase, userId: string, token: string): boolean {
+function hasValidMobileTokenForUser(
+  db: ApiDatabase,
+  userId: string,
+  token: string,
+  options?: { allowReonboardingToken?: boolean }
+): boolean {
   const authRecord = db.mobileAuthTokens.find((entry) => entry.userId === userId);
   if (!authRecord || !authRecord.tokenHash) {
     return false;
@@ -4609,7 +4644,16 @@ function hasValidMobileTokenForUser(db: ApiDatabase, userId: string, token: stri
     return false;
   }
 
-  return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+  if (!crypto.timingSafeEqual(expectedBuffer, actualBuffer)) {
+    return false;
+  }
+
+  const user = getUserById(db, userId);
+  if (user?.mobileProfileReonboardingRequired === true && options?.allowReonboardingToken !== true) {
+    return false;
+  }
+
+  return true;
 }
 
 function hashVerificationCode(userId: string, email: string, code: string): string {
@@ -14933,7 +14977,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, { allowReonboardingToken: true })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
@@ -15047,9 +15091,10 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       });
     }
 
+    const responseAuthToken = wasReonboarding ? upsertMobileAuthToken(db, user.id, now.toISOString()) : authToken;
     const payload: MobileOnboardResponse = {
       user,
-      authToken,
+      authToken: responseAuthToken,
       verificationRequired: false,
       verificationExpiresAt: null,
       domainMatch: buildDomainMatchForEmail(db, user.email)
@@ -15072,7 +15117,7 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, { allowReonboardingToken: true })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
@@ -19301,9 +19346,11 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
     }
     const effectiveOrgPerUserDailySecondsCap = resolveEffectiveOrgPerUserDailySecondsCap(org, new Date());
 
-    const users = db.users
+    const orgUsers = db.users
       .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
-      .sort((a, b) => a.email.localeCompare(b.email))
+      .sort((a, b) => a.email.localeCompare(b.email));
+    const visibleUsers = orgUsers
+      .filter((target) => canEnterpriseActorSeeOrganizationUser({ actor, target }))
       .map((user) => {
         const dailyOverageExpiresAt = user.dailyOverageExpiresAt;
         const allowDailyOverageThisCycle =
@@ -19329,7 +19376,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
     response.json({
       generatedAt: nowIso(),
       org: { id: org.id, name: org.name },
-      users
+      users: visibleUsers
     });
   });
 });
@@ -19375,6 +19422,11 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
 
     const target = getUserById(db, targetUserId);
     if (!target || target.accountType !== "enterprise" || target.orgId !== org.id) {
+      response.status(404).json({ error: "Target user not found in organization." });
+      return;
+    }
+
+    if (!canEnterpriseActorSeeOrganizationUser({ actor, target })) {
       response.status(404).json({ error: "Target user not found in organization." });
       return;
     }
@@ -19453,10 +19505,12 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
   const targetUserId = request.params.targetUserId;
   const body = request.body as {
     status?: UserStatus;
+    employeeId?: unknown;
     allowDailyOverageThisCycle?: unknown;
     dailySecondsCapOverride?: unknown;
   };
   const hasStatusPatch = body.status !== undefined;
+  const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
   const hasOveragePatch = typeof body.allowDailyOverageThisCycle === "boolean";
   const hasDailyCapOverridePatch = body.dailySecondsCapOverride !== undefined;
 
@@ -19482,9 +19536,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
-    if (!hasStatusPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
+    if (!hasStatusPatch && !hasEmployeeIdPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
       response.status(400).json({
-        error: "Provide at least one patch field: status, allowDailyOverageThisCycle, or dailySecondsCapOverride."
+        error: "Provide at least one patch field: status, employeeId, allowDailyOverageThisCycle, or dailySecondsCapOverride."
       });
       return;
     }
@@ -19501,13 +19555,24 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
+    if (!canEnterpriseActorSeeOrganizationUser({ actor, target })) {
+      response.status(404).json({ error: "Target user not found in organization." });
+      return;
+    }
+
     if (target.id === actor.id) {
       response.status(403).json({ error: "You cannot lock or unlock your own account." });
       return;
     }
 
-    if (actor.orgRole === "user_admin" && target.orgRole === "org_admin") {
-      response.status(403).json({ error: "User admins cannot modify org admins." });
+    const actorCanManageRegularTarget = canEnterpriseActorManageRegularUser({ actor, target });
+    if (actor.orgRole === "user_admin" && !actorCanManageRegularTarget) {
+      response.status(404).json({ error: "Target user not found in organization." });
+      return;
+    }
+
+    if (actor.orgRole === "user_admin" && (hasDailyCapOverridePatch || hasOveragePatch)) {
+      response.status(403).json({ error: "User admins cannot modify organization usage controls." });
       return;
     }
 
@@ -19516,7 +19581,42 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
         response.status(400).json({ error: "Valid status is required." });
         return;
       }
+      if (target.orgRole === "org_admin" && body.status === "disabled") {
+        const activeOrgAdminCount = db.users.filter(
+          (user) => user.accountType === "enterprise" && user.orgId === org.id && user.orgRole === "org_admin" && user.status === "active"
+        ).length;
+        if (activeOrgAdminCount <= 1) {
+          response.status(403).json({ error: "At least one active org admin is required." });
+          return;
+        }
+      }
       target.status = body.status;
+    }
+
+    if (hasEmployeeIdPatch) {
+      if (actor.orgRole === "user_admin" && !actorCanManageRegularTarget) {
+        response.status(403).json({ error: "You cannot edit Employee ID for this user." });
+        return;
+      }
+      const normalizedEmployeeId = normalizeEmployeeIdInput(body.employeeId);
+      if (!normalizedEmployeeId.ok) {
+        response.status(400).json({ error: normalizedEmployeeId.error, code: normalizedEmployeeId.code });
+        return;
+      }
+      const employeeIdConflict = findEmployeeIdConflict({
+        users: db.users,
+        orgId: org.id,
+        employeeId: normalizedEmployeeId.value,
+        exceptUserId: target.id
+      });
+      if (employeeIdConflict) {
+        response.status(409).json({
+          error: "Employee ID is already assigned within this organization.",
+          code: employeeIdConflict.code,
+        });
+        return;
+      }
+      target.employeeId = normalizedEmployeeId.value;
     }
 
     if (hasDailyCapOverridePatch) {
@@ -19543,6 +19643,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       message: `Updated org-user controls for ${target.email}.`,
       metadata: {
         status: target.status,
+        employeeIdChanged: hasEmployeeIdPatch,
         dailySecondsCapOverride: target.dailySecondsCapOverride,
         allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
         dailyOverageExpiresAt: target.dailyOverageExpiresAt
@@ -19551,6 +19652,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     response.json({
       userId: target.id,
       email: target.email,
+      employeeId: target.employeeId ?? null,
       status: target.status,
       dailySecondsCapOverride: target.dailySecondsCapOverride,
       allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
@@ -20683,6 +20785,7 @@ export async function startApiServer(): Promise<void> {
       migrateLegacyScoreRecordsFromAppState,
       migrateLegacySupportCasesFromAppState,
       migrateLegacyWebAuthSessionsFromAppState,
+      migrateUserProfileAppStateNormalization,
       runStartupUsageIntegrityMaintenance
     }
   });
@@ -20699,7 +20802,7 @@ export async function startApiServer(): Promise<void> {
   readinessInterval.unref();
 }
 
-export { app };
+export { app, createDefaultDatabase, ensureDatabaseShape };
 
 if (runtimeConfig.nodeEnv !== "test") {
   void startApiServer().catch((error: unknown) => {

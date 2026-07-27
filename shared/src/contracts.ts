@@ -1830,10 +1830,13 @@ export interface UpdateOrgCustomScenarioRequest {
 export interface MobileOnboardRequest {
   email: string;
   timezone: string;
-  firstName?: string;
-  lastName?: string;
-  joinCode?: string;
+  firstName: string;
+  lastName: string;
+  joinCode: string;
 }
+
+export type LegacyMobileOnboardRequest = Pick<MobileOnboardRequest, "email" | "timezone"> &
+  Partial<Pick<MobileOnboardRequest, "firstName" | "lastName" | "joinCode">>;
 
 export interface MobileOnboardResponse {
   user: UserProfile;
@@ -2052,6 +2055,7 @@ export interface SimulationScoreCoachingArtifactInput {
 }
 
 export interface ApiDatabase {
+  appStateMigrations?: Record<string, string>;
   config: AppConfig;
   users: UserProfile[];
   orgs: EnterpriseOrg[];

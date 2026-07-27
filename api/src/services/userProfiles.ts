@@ -90,6 +90,13 @@ export function canActorSeeOrganizationUser(params: {
     return true;
   }
 
+  return canEnterpriseActorSeeOrganizationUser(params);
+}
+
+export function canEnterpriseActorSeeOrganizationUser(params: {
+  actor: UserProfile;
+  target: UserProfile;
+}): boolean {
   if (params.actor.accountType !== "enterprise" || params.target.accountType !== "enterprise") {
     return false;
   }
@@ -245,6 +252,14 @@ export function canActorManageRegularUser(params: {
   if (params.viewer.accessType === "super_user" && params.actor.isSuperUser === true) {
     return true;
   }
+
+  return canEnterpriseActorManageRegularUser(params);
+}
+
+export function canEnterpriseActorManageRegularUser(params: {
+  actor: UserProfile;
+  target: UserProfile;
+}): boolean {
   if (params.actor.accountType !== "enterprise" || params.target.accountType !== "enterprise") {
     return false;
   }
