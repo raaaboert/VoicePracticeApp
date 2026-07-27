@@ -3,10 +3,17 @@ import { Pool } from "pg";
 import { ApiDatabase } from "@voicepractice/shared";
 import { StorageProvider } from "./runtimeConfig.js";
 
+export type LockedAppStateUpdate<T> =
+  | { result: T; shouldSave: false }
+  | { result: T; shouldSave: true; state: ApiDatabase };
+
+export type LockedAppStateUpdateHandler<T> = (raw: unknown) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>;
+
 export interface DatabaseStorage {
   loadRaw(): Promise<unknown>;
   load(): Promise<ApiDatabase>;
   save(db: ApiDatabase): Promise<void>;
+  updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T>;
 }
 
 interface CreateDatabaseStorageParams {
@@ -23,7 +30,7 @@ interface CreateDatabaseStorageParams {
 
 const APP_STATE_ROW_ID = "primary";
 
-type AppStateQueryPool = Pick<Pool, "query">;
+type AppStateQueryPool = Pick<Pool, "query"> & Partial<Pick<Pool, "connect">>;
 
 class FileDatabaseStorage implements DatabaseStorage {
   constructor(
@@ -64,6 +71,14 @@ class FileDatabaseStorage implements DatabaseStorage {
 
   async save(db: ApiDatabase): Promise<void> {
     await fs.writeFile(this.dbPath, JSON.stringify(db, null, 2), "utf8");
+  }
+
+  async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T> {
+    const update = await handler(await this.loadRaw());
+    if (update.shouldSave) {
+      await this.save(update.state);
+    }
+    return update.result;
   }
 }
 
@@ -145,6 +160,58 @@ class PostgresDatabaseStorage implements DatabaseStorage {
   async save(db: ApiDatabase): Promise<void> {
     await this.ensureTable();
     await this.writeRow(db);
+  }
+
+  async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T> {
+    await this.ensureTable();
+    if (!this.pool.connect) {
+      throw new Error("PostgreSQL app-state migration requires a transaction-capable query pool.");
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `
+          INSERT INTO app_state (id, state_json, updated_at)
+          VALUES ($1, $2::jsonb, NOW())
+          ON CONFLICT (id) DO NOTHING;
+        `,
+        [APP_STATE_ROW_ID, JSON.stringify(this.createDefaultDatabase())]
+      );
+      const result = await client.query<{ state_json: unknown }>(
+        "SELECT state_json FROM app_state WHERE id = $1 FOR UPDATE",
+        [APP_STATE_ROW_ID]
+      );
+      if (result.rows.length === 0) {
+        throw new Error("PostgreSQL app_state row was not initialized before migration.");
+      }
+
+      const update = await handler(result.rows[0]!.state_json);
+      if (update.shouldSave) {
+        await client.query(
+          `
+            UPDATE app_state
+            SET state_json = $2::jsonb,
+                updated_at = NOW()
+            WHERE id = $1;
+          `,
+          [APP_STATE_ROW_ID, JSON.stringify(update.state)]
+        );
+      }
+
+      await client.query("COMMIT");
+      return update.result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original migration failure for readiness reporting.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

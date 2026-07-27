@@ -487,13 +487,14 @@ export async function getDashboardTrainingWorkspace(
 
 export async function getDashboardTrainingPackDetail(
   trainingPackId: string,
-  divisionId?: string | null
+  divisionId?: string | null,
+  orgId?: string | null
 ): Promise<DashboardTrainingPackDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingPackDetailResponse>(
-      appendDivisionQuery(`/dashboard/training/${encodeURIComponent(trainingPackId)}`, divisionId),
+      appendOrgQuery(appendDivisionQuery(`/dashboard/training/${encodeURIComponent(trainingPackId)}`, divisionId), orgId),
       { token }
     );
   } catch (error) {
@@ -518,15 +519,19 @@ export async function getDashboardTrainingPackDetail(
 export async function getDashboardTrainingPackAssignmentDetail(
   trainingPackId: string,
   assignmentId: string,
-  divisionId?: string | null
+  divisionId?: string | null,
+  orgId?: string | null
 ): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
 
   try {
     return await fetchDashboardApi<DashboardTrainingPackAssignmentDetailResponse>(
-      appendDivisionQuery(
-        `/dashboard/training/${encodeURIComponent(trainingPackId)}/assignments/${encodeURIComponent(assignmentId)}`,
-        divisionId
+      appendOrgQuery(
+        appendDivisionQuery(
+          `/dashboard/training/${encodeURIComponent(trainingPackId)}/assignments/${encodeURIComponent(assignmentId)}`,
+          divisionId
+        ),
+        orgId
       ),
       { token }
     );

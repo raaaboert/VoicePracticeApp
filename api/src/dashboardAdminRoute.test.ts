@@ -13,6 +13,12 @@ import {
   EnterpriseJoinRequestRecord,
   EnterpriseOrg,
   MobileAuthRecord,
+  OrgTrainingPackAttachmentRecord,
+  OrgTrainingRecord,
+  SimulationScoreRecord,
+  TrainingPack,
+  TrainingPackAssignmentRecord,
+  UsageSessionRecord,
   UserProfile
 } from "@voicepractice/shared";
 
@@ -124,6 +130,141 @@ function buildJoinRequest(id: string, userId: string, email: string, orgId = "or
     decidedAt: null,
     decidedByUserId: null,
     decisionReason: null
+  };
+}
+
+function buildTrainingPack(id: string, orgId = "org_1", overrides: Partial<TrainingPack> = {}): TrainingPack {
+  return {
+    id,
+    organizationId: orgId,
+    title: overrides.title ?? (orgId === "org_1" ? "Manager Scope Pack" : "Other Org Pack"),
+    trainingTopic: overrides.trainingTopic ?? "Scope-sensitive coaching",
+    learningObjectives: overrides.learningObjectives ?? ["Practice active listening"],
+    successBehaviors: overrides.successBehaviors ?? [],
+    failurePatterns: overrides.failurePatterns ?? [],
+    requiredBehavioralTriggers: overrides.requiredBehavioralTriggers ?? ["scenario:scenario_scope"],
+    scoringWeightOverrides: overrides.scoringWeightOverrides ?? {},
+    complianceConstraints: overrides.complianceConstraints ?? "",
+    audienceLevel: overrides.audienceLevel ?? "trial",
+    active: overrides.active ?? true,
+    createdAt: overrides.createdAt ?? NOW,
+    updatedAt: overrides.updatedAt ?? NOW,
+  };
+}
+
+function buildOrgTrainingRecord(
+  id: string,
+  orgId: string,
+  overrides: Partial<OrgTrainingRecord> = {}
+): OrgTrainingRecord {
+  return {
+    id,
+    orgId,
+    name: overrides.name ?? "Manager Scope Training",
+    status: overrides.status ?? "active",
+    description: overrides.description ?? "Training workspace row for scope tests.",
+    divisionId: overrides.divisionId ?? null,
+    createdAt: overrides.createdAt ?? NOW,
+    updatedAt: overrides.updatedAt ?? NOW,
+  };
+}
+
+function buildTrainingPackAttachment(
+  trainingId: string,
+  trainingPackId: string,
+  orgId = "org_1"
+): OrgTrainingPackAttachmentRecord {
+  return {
+    id: `att_${trainingId}_${trainingPackId}`,
+    orgId,
+    trainingId,
+    trainingPackId,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+function buildTrainingPackAssignment(
+  id: string,
+  userId: string,
+  overrides: Partial<TrainingPackAssignmentRecord> = {}
+): TrainingPackAssignmentRecord {
+  return {
+    id,
+    trainingPackId: overrides.trainingPackId ?? "pack_scope",
+    orgId: overrides.orgId ?? "org_1",
+    userId,
+    active: overrides.active ?? true,
+    assignedAt: overrides.assignedAt ?? "2026-07-01T12:00:00.000Z",
+    assignedByUserId: overrides.assignedByUserId ?? "org_admin",
+    requiredScenarioIds: overrides.requiredScenarioIds ?? ["scenario_scope"],
+    completionRule: overrides.completionRule ?? "scored_required_scenarios_v1",
+    startedAt: overrides.startedAt ?? null,
+    completedAt: overrides.completedAt ?? null,
+    createdAt: overrides.createdAt ?? NOW,
+    updatedAt: overrides.updatedAt ?? NOW,
+  };
+}
+
+function buildUsageSessionRecord(
+  id: string,
+  userId: string,
+  overrides: Partial<UsageSessionRecord> = {}
+): UsageSessionRecord {
+  return {
+    id,
+    userId,
+    orgId: overrides.orgId === undefined ? "org_1" : overrides.orgId,
+    divisionId: overrides.divisionId ?? null,
+    segmentId: overrides.segmentId ?? "manager",
+    scenarioId: overrides.scenarioId ?? "scenario_scope",
+    trainingId: overrides.trainingId ?? null,
+    trainingPackId: overrides.trainingPackId === undefined ? "pack_scope" : overrides.trainingPackId,
+    startedAt: overrides.startedAt ?? "2026-07-20T12:00:00.000Z",
+    endedAt: overrides.endedAt ?? "2026-07-20T12:05:00.000Z",
+    rawDurationSeconds: overrides.rawDurationSeconds ?? 300,
+    billedSecondsAdded: overrides.billedSecondsAdded ?? 300,
+    createdAt: overrides.createdAt ?? NOW,
+  };
+}
+
+function buildScoreRecord(
+  id: string,
+  userId: string,
+  overrides: Partial<SimulationScoreRecord> = {}
+): SimulationScoreRecord {
+  return {
+    id,
+    simulationSessionId: overrides.simulationSessionId ?? `sim_${id}`,
+    userId,
+    orgId: overrides.orgId === undefined ? "org_1" : overrides.orgId,
+    divisionId: overrides.divisionId ?? null,
+    segmentId: overrides.segmentId ?? "manager",
+    scenarioId: overrides.scenarioId ?? "scenario_scope",
+    trainingId: overrides.trainingId ?? null,
+    trainingPackId: overrides.trainingPackId === undefined ? "pack_scope" : overrides.trainingPackId,
+    industryId: overrides.industryId ?? "people_management",
+    startedAt: overrides.startedAt ?? "2026-07-20T12:00:00.000Z",
+    endedAt: overrides.endedAt ?? "2026-07-20T12:05:00.000Z",
+    communicationScore: overrides.communicationScore ?? 82,
+    outcomeScore: overrides.outcomeScore ?? 80,
+    overallScore: overrides.overallScore ?? 81,
+    completionLevel: overrides.completionLevel ?? "complete",
+    objectiveAchieved: overrides.objectiveAchieved ?? true,
+    persuasion: overrides.persuasion ?? 80,
+    clarity: overrides.clarity ?? 82,
+    empathy: overrides.empathy ?? 84,
+    assertiveness: overrides.assertiveness ?? 78,
+    summary: overrides.summary ?? "Scope test score.",
+    coachingArtifact: overrides.coachingArtifact ?? null,
+    normalizedCoachingThemes: overrides.normalizedCoachingThemes ?? null,
+    rubricVersion: overrides.rubricVersion ?? "test",
+    model: overrides.model ?? "test",
+    promptVersion: overrides.promptVersion ?? "test",
+    inputTokens: overrides.inputTokens ?? 1,
+    outputTokens: overrides.outputTokens ?? 1,
+    totalTokens: overrides.totalTokens ?? 2,
+    createdAt: overrides.createdAt ?? NOW,
   };
 }
 
@@ -293,6 +434,13 @@ function buildDatabase(): ApiDatabase {
       buildUser("reset_old_token", "reset.old-token@gmail.com", {
         mobileProfileReonboardingRequired: true,
       }),
+      buildUser("reset_rate_limited", "reset.rate-limit@gmail.com", {
+        mobileProfileReonboardingRequired: true,
+      }),
+      buildUser("disabled_resend", "disabled.resend@gmail.com", {
+        status: "disabled",
+        mobileProfileReonboardingRequired: true,
+      }),
       buildUser("disabled_member", "disabled.member@gmail.com", {
         status: "disabled",
         mobileProfileReonboardingRequired: true,
@@ -318,12 +466,51 @@ function buildDatabase(): ApiDatabase {
       })
     ],
     orgDivisions: [],
-    orgTrainings: [],
-    orgTrainingPackAttachments: [],
+    orgTrainings: [
+      buildOrgTrainingRecord("training_scope", "org_1"),
+      buildOrgTrainingRecord("training_other_org", "org_2", { name: "Other Org Training" }),
+    ],
+    orgTrainingPackAttachments: [
+      buildTrainingPackAttachment("training_scope", "pack_scope", "org_1"),
+      buildTrainingPackAttachment("training_other_org", "pack_other", "org_2"),
+    ],
     orgTrainingScenarioAttachments: [],
     orgStandardScenarioDivisionAssignments: [],
-    trainingPackAssignments: [],
-    usageSessions: [],
+    trainingPackAssignments: [
+      buildTrainingPackAssignment("assign_self", "user_admin"),
+      buildTrainingPackAssignment("assign_direct", "learner"),
+      buildTrainingPackAssignment("assign_unassigned", "unassigned_learner"),
+      buildTrainingPackAssignment("assign_other_report", "other_manager_report"),
+      buildTrainingPackAssignment("assign_other_org", "other_org_user", {
+        trainingPackId: "pack_other",
+        orgId: "org_2",
+        assignedByUserId: "other_org_admin",
+      }),
+    ],
+    usageSessions: [
+      buildUsageSessionRecord("usage_self", "user_admin", {
+        endedAt: "2026-07-20T12:05:00.000Z",
+        startedAt: "2026-07-20T12:00:00.000Z",
+      }),
+      buildUsageSessionRecord("usage_direct", "learner", {
+        endedAt: "2026-07-21T12:05:00.000Z",
+        startedAt: "2026-07-21T12:00:00.000Z",
+      }),
+      buildUsageSessionRecord("usage_unassigned", "unassigned_learner", {
+        endedAt: "2026-07-22T12:05:00.000Z",
+        startedAt: "2026-07-22T12:00:00.000Z",
+      }),
+      buildUsageSessionRecord("usage_other_report", "other_manager_report", {
+        endedAt: "2026-07-23T12:05:00.000Z",
+        startedAt: "2026-07-23T12:00:00.000Z",
+      }),
+      buildUsageSessionRecord("usage_other_org", "other_org_user", {
+        orgId: "org_2",
+        trainingPackId: "pack_other",
+        endedAt: "2026-07-24T12:05:00.000Z",
+        startedAt: "2026-07-24T12:00:00.000Z",
+      }),
+    ],
     mobileAuthTokens: [
       buildMobileToken("gmail_join", "token_gmail"),
       buildMobileToken("gmail_join_2", "token_gmail_2"),
@@ -335,6 +522,37 @@ function buildDatabase(): ApiDatabase {
       buildMobileToken("eligible_user_admin", "token_other_manager"),
       buildMobileToken("mobile_scope_manager", "token_mobile_scope_manager"),
       buildMobileToken("reset_old_token", "token_before_reset"),
+      buildMobileToken("reset_rate_limited", "token_reset_rate_limited"),
+      buildMobileToken("disabled_resend", "token_disabled_resend"),
+    ],
+    scoreRecords: [
+      buildScoreRecord("score_self", "user_admin", {
+        endedAt: "2026-07-20T12:05:00.000Z",
+        startedAt: "2026-07-20T12:00:00.000Z",
+        overallScore: 80,
+      }),
+      buildScoreRecord("score_direct", "learner", {
+        endedAt: "2026-07-21T12:05:00.000Z",
+        startedAt: "2026-07-21T12:00:00.000Z",
+        overallScore: 90,
+      }),
+      buildScoreRecord("score_unassigned", "unassigned_learner", {
+        endedAt: "2026-07-22T12:05:00.000Z",
+        startedAt: "2026-07-22T12:00:00.000Z",
+        overallScore: 10,
+      }),
+      buildScoreRecord("score_other_report", "other_manager_report", {
+        endedAt: "2026-07-23T12:05:00.000Z",
+        startedAt: "2026-07-23T12:00:00.000Z",
+        overallScore: 20,
+      }),
+      buildScoreRecord("score_other_org", "other_org_user", {
+        orgId: "org_2",
+        trainingPackId: "pack_other",
+        endedAt: "2026-07-24T12:05:00.000Z",
+        startedAt: "2026-07-24T12:00:00.000Z",
+        overallScore: 70,
+      }),
     ],
     emailVerifications: [],
     webAuthChallenges: [],
@@ -429,6 +647,18 @@ async function waitForPersistedJoinRequests(
 async function seedStores(): Promise<void> {
   const db = buildDatabase();
   await writeFile(dbPath, JSON.stringify(db, null, 2), "utf8");
+  const parsed = path.parse(dbPath);
+  const extension = parsed.ext || ".json";
+  await writeFile(
+    path.join(parsed.dir, `${parsed.name}.usage-sessions${extension}`),
+    JSON.stringify({ records: db.usageSessions }, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    path.join(parsed.dir, `${parsed.name}.score-records${extension}`),
+    JSON.stringify({ records: db.scoreRecords }, null, 2),
+    "utf8"
+  );
 
   const webAuthService = createWebAuthService({
     tokenSecret: WEB_AUTH_TOKEN_SECRET,
@@ -569,6 +799,12 @@ before(async () => {
   await seedStores();
 
   const imported = await import("./index.js");
+  imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
+    [
+      buildTrainingPack("pack_scope", "org_1"),
+      buildTrainingPack("pack_other", "org_2"),
+    ].filter((pack) => pack.organizationId === orgId)
+  );
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -617,6 +853,99 @@ test("user-admin users are scoped to themselves and directly assigned reports", 
   const viewer = result.body.viewer as { capabilities?: { approveRejectAccessRequests?: boolean; assignUserManagers?: boolean } };
   assert.equal(viewer.capabilities?.approveRejectAccessRequests, false);
   assert.equal(viewer.capabilities?.assignUserManagers, false);
+});
+
+test("dashboard training drilldowns enforce manager scope", async () => {
+  const workspace = await dashboardRequest("/dashboard/reporting/trainings", userAdminToken);
+  assert.equal(workspace.status, 200);
+  const trainings = workspace.body.trainings as Array<{
+    id: string;
+    summary: { totalAttemptsLast30Days: number; activeLearnerCountLast30Days: number; averageScoreLast30Days: number | null };
+    users: Array<{ userId: string }>;
+  }>;
+  const scopedTraining = trainings.find((row) => row.id === "training_scope");
+  assert.ok(scopedTraining);
+  assert.deepEqual(scopedTraining.users.map((user) => user.userId).sort(), ["learner", "user_admin"]);
+  assert.equal(scopedTraining.summary.totalAttemptsLast30Days, 2);
+  assert.equal(scopedTraining.summary.activeLearnerCountLast30Days, 2);
+  assert.equal(scopedTraining.summary.averageScoreLast30Days, 85);
+
+  const scopedPack = await dashboardRequest("/dashboard/training/pack_scope", userAdminToken);
+  assert.equal(scopedPack.status, 200);
+  const scopedPackRow = scopedPack.body.pack as {
+    assignedLearnerCount: number;
+    attemptsLast30Days: number;
+    averageScoreLast30Days: number | null;
+    assignments: Array<{ assignmentId: string; userId: string }>;
+    scenarios: Array<{ assignedLearnerCount: number; attemptsLast30Days: number; averageScoreLast30Days: number | null }>;
+  };
+  assert.deepEqual(scopedPackRow.assignments.map((assignment) => assignment.userId).sort(), ["learner", "user_admin"]);
+  assert.equal(scopedPackRow.assignedLearnerCount, 2);
+  assert.equal(scopedPackRow.attemptsLast30Days, 2);
+  assert.equal(scopedPackRow.averageScoreLast30Days, 85);
+  assert.equal(scopedPackRow.scenarios[0]?.assignedLearnerCount, 2);
+  assert.equal(scopedPackRow.scenarios[0]?.attemptsLast30Days, 2);
+  assert.equal(scopedPackRow.scenarios[0]?.averageScoreLast30Days, 85);
+
+  const directReportAssignment = await dashboardRequest(
+    "/dashboard/training/pack_scope/assignments/assign_direct",
+    userAdminToken
+  );
+  assert.equal(directReportAssignment.status, 200);
+  assert.equal((directReportAssignment.body.assignment as { userId?: string }).userId, "learner");
+
+  const unassignedAssignment = await dashboardRequest(
+    "/dashboard/training/pack_scope/assignments/assign_unassigned",
+    userAdminToken
+  );
+  assert.equal(unassignedAssignment.status, 404);
+  const otherManagerAssignment = await dashboardRequest(
+    "/dashboard/training/pack_scope/assignments/assign_other_report",
+    userAdminToken
+  );
+  assert.equal(otherManagerAssignment.status, 404);
+  const crossTenantPack = await dashboardRequest("/dashboard/training/pack_other?orgId=org_2", userAdminToken);
+  assert.equal(crossTenantPack.status, 404);
+
+  const orgAdminPack = await dashboardRequest("/dashboard/training/pack_scope", orgAdminToken);
+  assert.equal(orgAdminPack.status, 200);
+  const orgAdminPackRow = orgAdminPack.body.pack as { assignedLearnerCount: number; assignments: Array<{ userId: string }> };
+  assert.equal(orgAdminPackRow.assignedLearnerCount, 4);
+  assert.deepEqual(
+    orgAdminPackRow.assignments.map((assignment) => assignment.userId).sort(),
+    ["learner", "other_manager_report", "unassigned_learner", "user_admin"]
+  );
+
+  const superMissingOrg = await dashboardRequest("/dashboard/training/pack_scope", superToken);
+  assert.equal(superMissingOrg.status, 400);
+  const superScoped = await dashboardRequest("/dashboard/training/pack_other?orgId=org_2", superToken);
+  assert.equal(superScoped.status, 200);
+  assert.deepEqual(
+    (superScoped.body.pack as { assignments: Array<{ userId: string }> }).assignments.map((assignment) => assignment.userId),
+    ["other_org_user"]
+  );
+
+  const assigned = await dashboardRequest("/dashboard/admin/users/other_manager_report", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ managerUserId: "user_admin" })
+  });
+  assert.equal(assigned.status, 200);
+  const visibleAfterReassignment = await dashboardRequest(
+    "/dashboard/training/pack_scope/assignments/assign_other_report",
+    userAdminToken
+  );
+  assert.equal(visibleAfterReassignment.status, 200);
+
+  const restored = await dashboardRequest("/dashboard/admin/users/other_manager_report", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ managerUserId: "eligible_user_admin" })
+  });
+  assert.equal(restored.status, 200);
+  const hiddenAfterRestore = await dashboardRequest(
+    "/dashboard/training/pack_scope/assignments/assign_other_report",
+    userAdminToken
+  );
+  assert.equal(hiddenAfterRestore.status, 404);
 });
 
 test("mobile user-admin routes are scoped to self and direct reports", async () => {
@@ -691,6 +1020,70 @@ test("mobile user-admin routes are scoped to self and direct reports", async () 
     body: JSON.stringify({ status: "disabled" })
   });
   assert.equal(crossTenantWrite.status, 404);
+});
+
+test("mobile admin user patching is atomic across combined status and Employee ID updates", async () => {
+  const conflict = await mobileRequest("/mobile/users/org_admin/admin/org/users/learner_atomic", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled", employeeId: "EMP-S" })
+  });
+  assert.equal(conflict.status, 409);
+  const afterConflict = await readUser("learner_atomic");
+  assert.equal(afterConflict?.status, "active");
+  assert.equal(afterConflict?.employeeId, null);
+
+  const unauthorizedAdmin = await mobileRequest("/mobile/users/user_admin/admin/org/users/eligible_user_admin", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled", employeeId: "EMP-NEW-MGR" })
+  });
+  assert.equal(unauthorizedAdmin.status, 404);
+  const afterUnauthorizedAdmin = await readUser("eligible_user_admin");
+  assert.equal(afterUnauthorizedAdmin?.status, "active");
+  assert.equal(afterUnauthorizedAdmin?.employeeId, "MGR-2");
+
+  const success = await mobileRequest("/mobile/users/org_admin/admin/org/users/learner_atomic", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled", employeeId: "EMP-ATOMIC-MOBILE" })
+  });
+  assert.equal(success.status, 200);
+  assert.equal((success.body as { status?: string; employeeId?: string }).status, "disabled");
+  assert.equal((success.body as { status?: string; employeeId?: string }).employeeId, "EMP-ATOMIC-MOBILE");
+  const afterSuccess = await waitForPersistedUserState(
+    "learner_atomic",
+    (user) => user?.status === "disabled" && user.employeeId === "EMP-ATOMIC-MOBILE"
+  );
+  assert.equal(afterSuccess?.status, "disabled");
+  assert.equal(afterSuccess?.employeeId, "EMP-ATOMIC-MOBILE");
+
+  const restored = await mobileRequest("/mobile/users/org_admin/admin/org/users/learner_atomic", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "active", employeeId: null })
+  });
+  assert.equal(restored.status, 200);
+  const afterRestore = await waitForPersistedUserState(
+    "learner_atomic",
+    (user) => user?.status === "active" && user.employeeId === null
+  );
+  assert.equal(afterRestore?.status, "active");
+  assert.equal(afterRestore?.employeeId, null);
+
+  const scopedBypass = await mobileRequest("/mobile/users/user_admin/admin/org/users/unassigned_learner", "token_user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled", employeeId: "EMP-SCOPE-BYPASS" })
+  });
+  assert.equal(scopedBypass.status, 404);
+  const afterScopedBypass = await readUser("unassigned_learner");
+  assert.equal(afterScopedBypass?.status, "active");
+  assert.equal(afterScopedBypass?.employeeId, "EMP-U");
+
+  const crossTenant = await mobileRequest("/mobile/users/org_admin/admin/org/users/other_org_user", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled", employeeId: "EMP-CROSS-TENANT" })
+  });
+  assert.equal(crossTenant.status, 404);
+  const afterCrossTenant = await readUser("other_org_user");
+  assert.equal(afterCrossTenant?.status, "active");
+  assert.equal(afterCrossTenant?.employeeId, "EMP-1");
 });
 
 test("mobile manager scope updates immediately after reassignment and demotion", async () => {
@@ -1097,6 +1490,7 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(pending.status, 200);
   assert.equal(pending.body.verificationRequired, false);
   const pendingUser = pending.body.user as UserProfile;
+  const pendingAuthToken = pending.body.authToken as string;
   assert.equal(pendingUser.firstName, "Pending");
   assert.equal(pendingUser.lastName, "Person");
   assert.equal(pendingUser.orgId, null);
@@ -1106,7 +1500,7 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(pendingRequests.filter((request) => request.userId === "pending_user").length, 1);
   assert.equal(pendingRequests.find((request) => request.id === "jr_pending")?.status, "pending");
 
-  const { result: resetOnboard, code: resetCode } = await captureVerificationCode(() =>
+  const { result: resetOnboard } = await captureVerificationCode(() =>
     publicRequest("/mobile/onboard", {
       method: "POST",
       body: JSON.stringify({
@@ -1121,6 +1515,8 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(resetOnboard.status, 200);
   assert.equal(resetOnboard.body.verificationRequired, true);
   const limitedResetToken = resetOnboard.body.authToken as string;
+  const resetUserStatusDenied = await mobileRequest("/mobile/users/reset_member", limitedResetToken);
+  assert.equal(resetUserStatusDenied.status, 403);
   const resetEntitlementsDenied = await mobileRequest("/mobile/users/reset_member/entitlements", limitedResetToken);
   assert.equal(resetEntitlementsDenied.status, 401);
   const resetSimulationDenied = await mobileRequest("/mobile/users/reset_member/simulation-sessions/start", limitedResetToken, {
@@ -1138,12 +1534,24 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(resetHistoryDenied.status, 401);
   const resetUpdatesDenied = await mobileRequest("/mobile/users/reset_member/updates", limitedResetToken);
   assert.equal(resetUpdatesDenied.status, 401);
+  const resetAdminDenied = await mobileRequest("/mobile/users/reset_member/admin/org/users", limitedResetToken);
+  assert.equal(resetAdminDenied.status, 401);
+
+  const { result: resend, code: resentCode } = await captureVerificationCode(() =>
+    mobileRequest("/mobile/onboard/resend-verification", limitedResetToken, {
+      method: "POST",
+      body: JSON.stringify({ userId: "reset_member" }),
+    })
+  );
+  assert.equal(resend.status, 200);
+  assert.equal(resend.body.ok, true);
+  assert.equal(typeof resend.body.verificationExpiresAt, "string");
 
   const resetVerified = await mobileRequest("/mobile/onboard/verify-email", limitedResetToken, {
     method: "POST",
     body: JSON.stringify({
       userId: "reset_member",
-      code: resetCode,
+      code: resentCode,
       firstName: " Reset ",
       lastName: " Member ",
       joinCode: "ACME2026",
@@ -1168,6 +1576,33 @@ test("mobile onboarding collects names and company code without granting immedia
 
   const oldTokenDenied = await mobileRequest("/mobile/users/reset_old_token/entitlements", "token_before_reset");
   assert.equal(oldTokenDenied.status, 401);
+
+  const pendingResend = await mobileRequest("/mobile/onboard/resend-verification", pendingAuthToken, {
+    method: "POST",
+    body: JSON.stringify({ userId: "pending_user" }),
+  });
+  assert.equal(pendingResend.status, 409);
+  assert.equal((await readUser("pending_user"))?.orgId, null);
+
+  const disabledResend = await mobileRequest("/mobile/onboard/resend-verification", "token_disabled_resend", {
+    method: "POST",
+    body: JSON.stringify({ userId: "disabled_resend" }),
+  });
+  assert.equal(disabledResend.status, 403);
+  const disabledResendEntitlements = await mobileRequest("/mobile/users/disabled_resend/entitlements", "token_disabled_resend");
+  assert.equal(disabledResendEntitlements.status, 401);
+
+  const legacyMissingNames = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "reset.wrong-code@gmail.com",
+      joinCode: "ACME2026",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(legacyMissingNames.status, 400);
+  assert.equal(legacyMissingNames.body.code, "user_name_invalid");
+  assert.equal((await readUser("reset_wrong_code"))?.mobileProfileReonboardingRequired, true);
 
   const wrongCode = await publicRequest("/mobile/onboard", {
     method: "POST",
@@ -1213,6 +1648,18 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.match(String(disabled.body.error), /deactivated/i);
   const disabledDb = await readDb();
   assert.equal(disabledDb.mobileAuthTokens.some((token) => token.userId === "disabled_member"), false);
+});
+
+test("re-onboarding resend remains rate-limited", async () => {
+  let latestStatus = 0;
+  for (let attempt = 0; attempt < 21; attempt += 1) {
+    const result = await mobileRequest("/mobile/onboard/resend-verification", "token_reset_rate_limited", {
+      method: "POST",
+      body: JSON.stringify({ userId: "reset_rate_limited" }),
+    });
+    latestStatus = result.status;
+  }
+  assert.equal(latestStatus, 429);
 });
 
 test("company-code join requests accept Gmail, are duplicate-safe, and still require approval", async () => {

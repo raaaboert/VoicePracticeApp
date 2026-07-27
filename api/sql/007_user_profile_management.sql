@@ -7,6 +7,9 @@
 --   users[].managerUserId
 --   users[].mobileProfileReonboardingRequired
 -- The migration is idempotent and does not rewrite app_state on subsequent startups once the
--- persisted profile fields and marker are current. This SQL remains a no-op schema marker so
--- database initialization is safe for existing app_state-backed PostgreSQL deployments.
+-- persisted profile fields and marker are current. PostgreSQL startup coordinates this work in
+-- a transaction and re-reads the current app_state row with SELECT ... FOR UPDATE before saving,
+-- so concurrent startup normalizers cannot overwrite newer app_state values. This SQL remains a
+-- no-op schema marker so database initialization is safe for existing app_state-backed
+-- PostgreSQL deployments.
 SELECT 1;

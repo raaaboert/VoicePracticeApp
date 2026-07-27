@@ -1,4 +1,5 @@
 import type { ApiDatabase, UserProfile } from "@voicepractice/shared";
+import type { LockedAppStateUpdate } from "../storage.js";
 
 export const USER_PROFILE_APP_STATE_MIGRATION_KEY = "user_profile_management_v1";
 export const USER_PROFILE_APP_STATE_MIGRATION_VERSION = "2026-07-27";
@@ -8,6 +9,7 @@ const MISSING_FIELD = "__peritio_missing_field__";
 export interface UserProfileAppStateMigrationStorage {
   loadRaw(): Promise<unknown>;
   save(db: ApiDatabase): Promise<void>;
+  updateAppStateWithLock?<T>(handler: (raw: unknown) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>): Promise<T>;
 }
 
 export interface UserProfileAppStateMigrationResult {
@@ -65,34 +67,52 @@ export async function migrateUserProfileAppStateNormalization(params: {
   buildPersistedDatabaseSnapshot: (db: ApiDatabase) => ApiDatabase;
   syncEmployeeIds?: (users: UserProfile[]) => Promise<void>;
 }): Promise<UserProfileAppStateMigrationResult> {
-  const raw = await params.storage.loadRaw();
-  const rawRecord = asRecord(raw);
-  const normalized = params.ensureDatabaseShape(raw);
-  const migrations = normalizeAppStateMigrations(rawRecord.appStateMigrations);
-  const markerChanged = migrations[USER_PROFILE_APP_STATE_MIGRATION_KEY] !== USER_PROFILE_APP_STATE_MIGRATION_VERSION;
-  const profileChanged = !fingerprintsMatch(
-    buildUserProfileMigrationFingerprint(rawRecord.users),
-    buildUserProfileMigrationFingerprint(normalized.users)
-  );
+  const prepareUpdate = async (raw: unknown): Promise<LockedAppStateUpdate<UserProfileAppStateMigrationResult>> => {
+    const rawRecord = asRecord(raw);
+    const normalized = params.ensureDatabaseShape(raw);
+    const migrations = normalizeAppStateMigrations(rawRecord.appStateMigrations);
+    const markerChanged = migrations[USER_PROFILE_APP_STATE_MIGRATION_KEY] !== USER_PROFILE_APP_STATE_MIGRATION_VERSION;
+    const profileChanged = !fingerprintsMatch(
+      buildUserProfileMigrationFingerprint(rawRecord.users),
+      buildUserProfileMigrationFingerprint(normalized.users)
+    );
 
-  normalized.appStateMigrations = {
-    ...migrations,
-    [USER_PROFILE_APP_STATE_MIGRATION_KEY]: USER_PROFILE_APP_STATE_MIGRATION_VERSION
+    normalized.appStateMigrations = {
+      ...migrations,
+      [USER_PROFILE_APP_STATE_MIGRATION_KEY]: USER_PROFILE_APP_STATE_MIGRATION_VERSION
+    };
+
+    if (!profileChanged && !markerChanged) {
+      return {
+        shouldSave: false,
+        result: {
+          saved: false,
+          profileChanged,
+          markerChanged
+        }
+      };
+    }
+
+    await params.syncEmployeeIds?.(normalized.users);
+    return {
+      shouldSave: true,
+      state: params.buildPersistedDatabaseSnapshot(normalized),
+      result: {
+        saved: true,
+        profileChanged,
+        markerChanged
+      }
+    };
   };
 
-  if (!profileChanged && !markerChanged) {
-    return {
-      saved: false,
-      profileChanged,
-      markerChanged
-    };
+  if (params.storage.updateAppStateWithLock) {
+    return params.storage.updateAppStateWithLock(prepareUpdate);
   }
 
-  await params.syncEmployeeIds?.(normalized.users);
-  await params.storage.save(params.buildPersistedDatabaseSnapshot(normalized));
-  return {
-    saved: true,
-    profileChanged,
-    markerChanged
-  };
+  const raw = await params.storage.loadRaw();
+  const update = await prepareUpdate(raw);
+  if (update.shouldSave) {
+    await params.storage.save(update.state);
+  }
+  return update.result;
 }

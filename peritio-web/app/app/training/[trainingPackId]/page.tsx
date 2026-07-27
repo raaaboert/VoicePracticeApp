@@ -42,14 +42,17 @@ export default async function TrainingPackDetailPage({
   searchParams,
 }: {
   params: Promise<{ trainingPackId: string }>;
-  searchParams: Promise<{ divisionId?: string }>;
+  searchParams: Promise<{ divisionId?: string; orgId?: string }>;
 }) {
   const { trainingPackId } = await params;
-  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const resolvedSearchParams = await searchParams;
+  const rawDivisionId = resolvedSearchParams.divisionId?.trim();
   const divisionId = rawDivisionId ? rawDivisionId : null;
+  const rawOrgId = resolvedSearchParams.orgId?.trim();
+  const orgId = rawOrgId ? rawOrgId : null;
   let payload;
   try {
-    payload = await getDashboardTrainingPackDetail(trainingPackId, divisionId);
+    payload = await getDashboardTrainingPackDetail(trainingPackId, divisionId, orgId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -237,7 +240,8 @@ export default async function TrainingPackDetailPage({
                             href={buildDashboardScopedTrainingPackAssignmentHref(
                               pack.trainingPackId,
                               assignment.assignmentId,
-                              divisionId
+                              divisionId,
+                              pack.orgId
                             )}
                           >
                             <strong>{assignment.email}</strong>

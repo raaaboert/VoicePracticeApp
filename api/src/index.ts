@@ -537,6 +537,7 @@ const trainingPackStore = createTrainingPackStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
+let dashboardTrainingPackLoaderForTest: ((orgId: string) => Promise<TrainingPack[]>) | null = null;
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -5640,6 +5641,10 @@ function buildDashboardScenarioCatalog(db: ApiDatabase, org: EnterpriseOrg): Map
 }
 
 async function listTrainingPacksForDashboardOrg(orgId: string): Promise<TrainingPack[]> {
+  if (dashboardTrainingPackLoaderForTest) {
+    return dashboardTrainingPackLoaderForTest(orgId);
+  }
+
   try {
     return await trainingPackStore.listTrainingPacksForOrg(orgId);
   } catch (error) {
@@ -6395,32 +6400,44 @@ function isDashboardDivisionScopedAssignmentVisible(
 
 async function buildDashboardTrainingPackDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   trainingPackId: string,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  explicitOrgId: string | null = null
 ): Promise<DashboardTrainingPackDetailResponse | null> {
-  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  const viewer = principal.viewer;
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId, explicitOrgId);
   if (!located) {
     return null;
   }
 
   const { org, pack, scenarioCatalog } = located;
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([org.id]),
+  });
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, divisionId);
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, divisionId, permittedUserIds);
   const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
   if (!packSummary) {
     return null;
   }
 
   const allPackSessions = filterRecordsByDivision(
-    listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id }),
+    listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id }).filter((session) =>
+      permittedUserIds.has(session.userId)
+    ),
     divisionId
   );
   const allPackScores = filterRecordsByDivision(
-    listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true }),
+    listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true }).filter((record) =>
+      permittedUserIds.has(record.userId)
+    ),
     divisionId
   );
   const recentPackSessions = allPackSessions.filter((session) => {
@@ -6436,6 +6453,7 @@ async function buildDashboardTrainingPackDetail(
     return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
   });
   const assignmentProgressRows = listVisibleTrainingPackAssignments(db, org.id, pack.id)
+    .filter((assignment) => permittedUserIds.has(assignment.userId))
     .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment))
     .map((assignment) => {
       const progress = computeTrainingPackAssignmentProgress({
@@ -6622,18 +6640,28 @@ function sortDashboardAttemptHistoryRows(rows: DashboardAttemptHistoryRow[]): Da
 
 async function buildDashboardTrainingPackAssignmentDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   trainingPackId: string,
   assignmentId: string,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  explicitOrgId: string | null = null
 ): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
-  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  const viewer = principal.viewer;
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId, explicitOrgId);
   if (!located) {
     return null;
   }
 
   const { org, pack, scenarioCatalog } = located;
-  const assignment = listVisibleTrainingPackAssignments(db, org.id, pack.id).find((entry) => entry.id === assignmentId);
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([org.id]),
+  });
+  const assignment = listVisibleTrainingPackAssignments(db, org.id, pack.id)
+    .filter((entry) => permittedUserIds.has(entry.userId))
+    .find((entry) => entry.id === assignmentId);
   if (!assignment) {
     return null;
   }
@@ -6643,7 +6671,7 @@ async function buildDashboardTrainingPackAssignmentDetail(
     return null;
   }
 
-  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date(), divisionId);
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date(), divisionId, permittedUserIds);
   const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
   if (!packSummary) {
     return null;
@@ -8049,7 +8077,8 @@ async function buildDashboardTrainingReport(
 async function findDashboardAccessibleTrainingPack(
   db: ApiDatabase,
   viewer: DashboardViewer,
-  trainingPackId: string
+  trainingPackId: string,
+  explicitOrgId: string | null = null
 ): Promise<{
   org: EnterpriseOrg;
   pack: TrainingPack;
@@ -8060,7 +8089,12 @@ async function findDashboardAccessibleTrainingPack(
     return null;
   }
 
-  for (const org of listDashboardAccessibleOrgs(db, viewer)) {
+  const accessibleOrgs = listDashboardAccessibleOrgs(db, viewer).filter((org) => !explicitOrgId || org.id === explicitOrgId);
+  if (explicitOrgId && !canDashboardViewerAccessOrg(viewer, explicitOrgId)) {
+    return null;
+  }
+
+  for (const org of accessibleOrgs) {
     const packs = await listTrainingPacksForDashboardOrg(org.id);
     const pack = packs.find((entry) => entry.id === normalizedTrainingPackId);
     if (pack) {
@@ -10559,14 +10593,25 @@ app.get("/dashboard/training", requireDashboardAuth, async (request: DashboardAu
 
 app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const located = await findDashboardAccessibleTrainingPack(db, request.dashboard!.viewer, request.params.trainingPackId);
+    const viewer = request.dashboard!.viewer;
+    const requestedOrgId = getSingleQueryParam(request.query.orgId);
+    if (viewer.accessType === "super_user" && !requestedOrgId) {
+      response.status(400).json({ error: "Select an organization before opening training detail." });
+      return;
+    }
+    if (requestedOrgId && !canDashboardViewerAccessOrg(viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Training pack not found." });
+      return;
+    }
+    const explicitOrgId = requestedOrgId ?? viewer.orgId ?? null;
+    const located = await findDashboardAccessibleTrainingPack(db, viewer, request.params.trainingPackId, explicitOrgId);
     if (!located) {
       response.status(404).json({ error: "Training pack not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
       db,
-      viewer: request.dashboard!.viewer,
+      viewer,
       explicitOrgId: located.org.id,
       requestedDivisionId: getSingleQueryParam(request.query.divisionId),
     });
@@ -10576,9 +10621,10 @@ app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (requ
     }
     const payload = await buildDashboardTrainingPackDetail(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       request.params.trainingPackId,
-      divisionFilter.appliedDivisionId
+      divisionFilter.appliedDivisionId,
+      located.org.id
     );
     if (!payload) {
       response.status(404).json({ error: "Training pack not found." });
@@ -10594,14 +10640,25 @@ app.get(
   requireDashboardAuth,
   async (request: DashboardAuthRequest, response: Response) => {
     await withFreshReportingRead(async (db) => {
-      const located = await findDashboardAccessibleTrainingPack(db, request.dashboard!.viewer, request.params.trainingPackId);
+      const viewer = request.dashboard!.viewer;
+      const requestedOrgId = getSingleQueryParam(request.query.orgId);
+      if (viewer.accessType === "super_user" && !requestedOrgId) {
+        response.status(400).json({ error: "Select an organization before opening training detail." });
+        return;
+      }
+      if (requestedOrgId && !canDashboardViewerAccessOrg(viewer, requestedOrgId)) {
+        response.status(404).json({ error: "Training pack assignment not found." });
+        return;
+      }
+      const explicitOrgId = requestedOrgId ?? viewer.orgId ?? null;
+      const located = await findDashboardAccessibleTrainingPack(db, viewer, request.params.trainingPackId, explicitOrgId);
       if (!located) {
         response.status(404).json({ error: "Training pack assignment not found." });
         return;
       }
       const divisionFilter = resolveDashboardDivisionFilter({
         db,
-        viewer: request.dashboard!.viewer,
+        viewer,
         explicitOrgId: located.org.id,
         requestedDivisionId: getSingleQueryParam(request.query.divisionId),
       });
@@ -10611,10 +10668,11 @@ app.get(
       }
       const payload = await buildDashboardTrainingPackAssignmentDetail(
         db,
-        request.dashboard!.viewer,
+        request.dashboard!,
         request.params.trainingPackId,
         request.params.assignmentId,
-        divisionFilter.appliedDivisionId
+        divisionFilter.appliedDivisionId,
+        located.org.id
       );
       if (!payload) {
         response.status(404).json({ error: "Training pack assignment not found." });
@@ -14923,8 +14981,13 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, { allowReonboardingToken: true })) {
       response.status(401).json({ error: "Invalid mobile token." });
+      return;
+    }
+
+    if (user.status !== "active") {
+      response.status(403).json({ error: "This account has been deactivated." });
       return;
     }
 
@@ -19576,6 +19639,12 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
+    let nextStatus = target.status;
+    let nextEmployeeId = target.employeeId ?? null;
+    let nextDailySecondsCapOverride = target.dailySecondsCapOverride;
+    let nextAllowDailyOverageThisCycle = target.allowDailyOverageThisCycle;
+    let nextDailyOverageExpiresAt = target.dailyOverageExpiresAt;
+
     if (hasStatusPatch) {
       if (!body.status || !isUserStatus(body.status)) {
         response.status(400).json({ error: "Valid status is required." });
@@ -19590,7 +19659,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
           return;
         }
       }
-      target.status = body.status;
+      nextStatus = body.status;
     }
 
     if (hasEmployeeIdPatch) {
@@ -19616,24 +19685,29 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
         });
         return;
       }
-      target.employeeId = normalizedEmployeeId.value;
+      nextEmployeeId = normalizedEmployeeId.value;
     }
 
     if (hasDailyCapOverridePatch) {
-      target.dailySecondsCapOverride = normalizeOptionalSecondsCap(body.dailySecondsCapOverride);
+      nextDailySecondsCapOverride = normalizeOptionalSecondsCap(body.dailySecondsCapOverride);
     }
 
     if (hasOveragePatch) {
       const allowDailyOverageThisCycle = body.allowDailyOverageThisCycle === true;
-      target.allowDailyOverageThisCycle = allowDailyOverageThisCycle;
+      nextAllowDailyOverageThisCycle = allowDailyOverageThisCycle;
       if (allowDailyOverageThisCycle) {
         const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, new Date()), new Date());
-        target.dailyOverageExpiresAt = billing.nextRenewalAt;
+        nextDailyOverageExpiresAt = billing.nextRenewalAt;
       } else {
-        target.dailyOverageExpiresAt = null;
+        nextDailyOverageExpiresAt = null;
       }
     }
 
+    target.status = nextStatus;
+    target.employeeId = nextEmployeeId;
+    target.dailySecondsCapOverride = nextDailySecondsCapOverride;
+    target.allowDailyOverageThisCycle = nextAllowDailyOverageThisCycle;
+    target.dailyOverageExpiresAt = nextDailyOverageExpiresAt;
     target.updatedAt = nowIso();
     emitMobileUpdateForUser(db, target.id, "user");
     appendMobileAuditEvent(db, actor, {
@@ -20800,6 +20874,13 @@ export async function startApiServer(): Promise<void> {
     queueDatabaseReadinessRefresh();
   }, READINESS_REFRESH_MS);
   readinessInterval.unref();
+}
+
+export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) => Promise<TrainingPack[]>) | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
+  }
+  dashboardTrainingPackLoaderForTest = loader;
 }
 
 export { app, createDefaultDatabase, ensureDatabaseShape };

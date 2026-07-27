@@ -47,14 +47,17 @@ export default async function TrainingPackAssignmentDetailPage({
   searchParams,
 }: {
   params: Promise<{ trainingPackId: string; assignmentId: string }>;
-  searchParams: Promise<{ divisionId?: string }>;
+  searchParams: Promise<{ divisionId?: string; orgId?: string }>;
 }) {
   const { trainingPackId, assignmentId } = await params;
-  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const resolvedSearchParams = await searchParams;
+  const rawDivisionId = resolvedSearchParams.divisionId?.trim();
   const divisionId = rawDivisionId ? rawDivisionId : null;
+  const rawOrgId = resolvedSearchParams.orgId?.trim();
+  const orgId = rawOrgId ? rawOrgId : null;
   let payload;
   try {
-    payload = await getDashboardTrainingPackAssignmentDetail(trainingPackId, assignmentId, divisionId);
+    payload = await getDashboardTrainingPackAssignmentDetail(trainingPackId, assignmentId, divisionId, orgId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -123,7 +126,7 @@ export default async function TrainingPackAssignmentDetailPage({
         </div>
         <ul className="bullet-list">
           <li>
-            Pack: <Link className="inline-link subtle" href={buildDashboardScopedTrainingPackHref(pack.trainingPackId, divisionId)}>{pack.title}</Link> for{" "}
+            Pack: <Link className="inline-link subtle" href={buildDashboardScopedTrainingPackHref(pack.trainingPackId, divisionId, pack.orgId)}>{pack.title}</Link> for{" "}
             <Link className="inline-link subtle" href={buildDashboardScopedCustomerDetailHref(pack.orgId, divisionId)}>{pack.orgName}</Link>.
           </li>
           <li>

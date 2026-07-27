@@ -217,17 +217,18 @@ test("user profile app-state migration preserves valid fields and clears invalid
   assert.equal(usersById.get("inactive_manager_report")?.managerUserId, null);
 });
 
-test("postgres app-state storage exposes raw load and save for durable profile migration", async () => {
-  let stateJson: unknown = buildDb([
-    buildUser("pg_manager", { orgRole: "user_admin", dashboardAccessEnabled: true }),
-    {
-      ...buildUser("pg_report", { managerUserId: " pg_manager " }),
-      firstName: " Lin ",
-      employeeId: " PG-1 "
-    }
-  ]);
-  let writeCount = 0;
+function createPostgresMigrationHarness(params: {
+  initialState: unknown;
+  beforeLockedRead?: () => void;
+  failUpdate?: boolean;
+}) {
+  let stateJson = params.initialState;
+  let updateCount = 0;
+  let commitCount = 0;
+  let rollbackCount = 0;
+  let releaseCount = 0;
   const queries: string[] = [];
+
   const storage = createDatabaseStorage({
     provider: "postgres",
     dbPath: "unused.json",
@@ -238,41 +239,192 @@ test("postgres app-state storage exposes raw load and save for durable profile m
     ensureDatabaseShape: ensureTestDatabaseShape,
     createDefaultDatabase: () => buildDb([]),
     queryPool: {
-      async query(text: string, values?: unknown[]) {
+      async query(text: string) {
         queries.push(text);
-        if (/SELECT state_json FROM app_state/.test(text)) {
-          return { rows: [{ state_json: stateJson }], rowCount: 1 };
-        }
-        if (/INSERT INTO app_state/.test(text)) {
-          stateJson = JSON.parse(String(values?.[1]));
-          writeCount += 1;
-          return { rows: [], rowCount: 1 };
-        }
         return { rows: [], rowCount: 0 };
+      },
+      async connect() {
+        return {
+          async query(text: string, values?: unknown[]) {
+            queries.push(text);
+            if (/^BEGIN\b/.test(text)) {
+              return { rows: [], rowCount: 0 };
+            }
+            if (/INSERT INTO app_state/.test(text)) {
+              return { rows: [], rowCount: 0 };
+            }
+            if (/SELECT state_json FROM app_state WHERE id = \$1 FOR UPDATE/.test(text)) {
+              params.beforeLockedRead?.();
+              return { rows: [{ state_json: stateJson }], rowCount: 1 };
+            }
+            if (/UPDATE app_state/.test(text)) {
+              if (params.failUpdate) {
+                throw new Error("simulated update failure");
+              }
+              stateJson = JSON.parse(String(values?.[1]));
+              updateCount += 1;
+              return { rows: [], rowCount: 1 };
+            }
+            if (/^COMMIT\b/.test(text)) {
+              commitCount += 1;
+              return { rows: [], rowCount: 0 };
+            }
+            if (/^ROLLBACK\b/.test(text)) {
+              rollbackCount += 1;
+              return { rows: [], rowCount: 0 };
+            }
+            return { rows: [], rowCount: 0 };
+          },
+          release() {
+            releaseCount += 1;
+          }
+        };
       }
     } as any
   });
 
-  const result = await migrateUserProfileAppStateNormalization({
+  return {
     storage,
+    queries,
+    setStateJson(value: unknown) {
+      stateJson = value;
+    },
+    get stateJson() {
+      return stateJson;
+    },
+    get updateCount() {
+      return updateCount;
+    },
+    get commitCount() {
+      return commitCount;
+    },
+    get rollbackCount() {
+      return rollbackCount;
+    },
+    get releaseCount() {
+      return releaseCount;
+    }
+  };
+}
+
+test("postgres app-state migration uses row-level locking and is idempotent", async () => {
+  const harness = createPostgresMigrationHarness({
+    initialState: buildDb([
+      buildUser("pg_manager", { orgRole: "user_admin", dashboardAccessEnabled: true }),
+      {
+        ...buildUser("pg_report", { managerUserId: " pg_manager " }),
+        firstName: " Lin ",
+        employeeId: " PG-1 "
+      }
+    ])
+  });
+
+  const result = await migrateUserProfileAppStateNormalization({
+    storage: harness.storage,
     ensureDatabaseShape: ensureTestDatabaseShape,
     buildPersistedDatabaseSnapshot: persistedSnapshot
   });
 
-  assert.equal(result.saved, true);
-  assert.equal(writeCount, 1);
-  assert.ok(queries.some((query) => /CREATE TABLE IF NOT EXISTS app_state/.test(query)));
-  const saved = stateJson as ApiDatabase;
+  assert.deepEqual(result, { saved: true, profileChanged: true, markerChanged: true });
+  assert.equal(harness.updateCount, 1);
+  assert.equal(harness.commitCount, 1);
+  assert.equal(harness.rollbackCount, 0);
+  assert.equal(harness.releaseCount, 1);
+  assert.ok(harness.queries.some((query) => /CREATE TABLE IF NOT EXISTS app_state/.test(query)));
+  assert.ok(harness.queries.some((query) => /SELECT state_json FROM app_state WHERE id = \$1 FOR UPDATE/.test(query)));
+  assert.ok(harness.queries.some((query) => /UPDATE app_state/.test(query)));
+  const saved = harness.stateJson as ApiDatabase;
   assert.equal(saved.users[1]?.firstName, "Lin");
   assert.equal(saved.users[1]?.employeeId, "PG-1");
   assert.equal(saved.users[1]?.managerUserId, "pg_manager");
   assert.equal(saved.appStateMigrations?.[USER_PROFILE_APP_STATE_MIGRATION_KEY], USER_PROFILE_APP_STATE_MIGRATION_VERSION);
 
+  harness.queries.length = 0;
   const replay = await migrateUserProfileAppStateNormalization({
-    storage,
+    storage: harness.storage,
     ensureDatabaseShape: ensureTestDatabaseShape,
     buildPersistedDatabaseSnapshot: persistedSnapshot
   });
-  assert.equal(replay.saved, false);
-  assert.equal(writeCount, 1);
+  assert.deepEqual(replay, { saved: false, profileChanged: false, markerChanged: false });
+  assert.equal(harness.updateCount, 1);
+  assert.ok(harness.queries.some((query) => /SELECT state_json FROM app_state WHERE id = \$1 FOR UPDATE/.test(query)));
+  assert.equal(harness.queries.some((query) => /UPDATE app_state/.test(query)), false);
+});
+
+test("postgres app-state migration preserves newer state observed under the row lock", async () => {
+  const newerState = buildDb([
+    buildUser("pg_manager", { orgRole: "user_admin", dashboardAccessEnabled: true }),
+    {
+      ...buildUser("pg_report", { managerUserId: " pg_manager " }),
+      firstName: " Newer ",
+      lastName: " Writer ",
+      employeeId: " PG-NEW "
+    }
+  ]);
+  let replacedBeforeRead = false;
+  let harness: ReturnType<typeof createPostgresMigrationHarness>;
+  harness = createPostgresMigrationHarness({
+    initialState: buildDb([
+      buildUser("pg_manager", { orgRole: "user_admin", dashboardAccessEnabled: true }),
+      {
+        ...buildUser("pg_report", { managerUserId: " pg_manager " }),
+        firstName: " Stale ",
+        employeeId: " PG-OLD "
+      }
+    ]),
+    beforeLockedRead: () => {
+      if (!replacedBeforeRead) {
+        harness.setStateJson(newerState);
+        replacedBeforeRead = true;
+      }
+    }
+  });
+
+  const result = await migrateUserProfileAppStateNormalization({
+    storage: harness.storage,
+    ensureDatabaseShape: ensureTestDatabaseShape,
+    buildPersistedDatabaseSnapshot: persistedSnapshot
+  });
+
+  assert.deepEqual(result, { saved: true, profileChanged: true, markerChanged: true });
+  const saved = harness.stateJson as ApiDatabase;
+  assert.equal(saved.users[1]?.firstName, "Newer");
+  assert.equal(saved.users[1]?.lastName, "Writer");
+  assert.equal(saved.users[1]?.employeeId, "PG-NEW");
+  assert.equal(saved.users[1]?.managerUserId, "pg_manager");
+  assert.equal(harness.updateCount, 1);
+});
+
+test("postgres app-state migration rolls back without persisting marker when normalization save fails", async () => {
+  const initialState = buildDb([
+    buildUser("pg_manager", { orgRole: "user_admin", dashboardAccessEnabled: true }),
+    {
+      ...buildUser("pg_report", { managerUserId: "missing_manager" }),
+      firstName: " Fail ",
+      employeeId: " PG-FAIL "
+    }
+  ]);
+  const harness = createPostgresMigrationHarness({
+    initialState,
+    failUpdate: true
+  });
+
+  await assert.rejects(
+    migrateUserProfileAppStateNormalization({
+      storage: harness.storage,
+      ensureDatabaseShape: ensureTestDatabaseShape,
+      buildPersistedDatabaseSnapshot: persistedSnapshot
+    }),
+    /simulated update failure/
+  );
+
+  assert.equal(harness.commitCount, 0);
+  assert.equal(harness.rollbackCount, 1);
+  assert.equal(harness.releaseCount, 1);
+  assert.equal(harness.updateCount, 0);
+  assert.equal(
+    (harness.stateJson as ApiDatabase).appStateMigrations?.[USER_PROFILE_APP_STATE_MIGRATION_KEY],
+    undefined
+  );
+  assert.equal((harness.stateJson as ApiDatabase).users[1]?.managerUserId, "missing_manager");
 });

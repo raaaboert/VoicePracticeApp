@@ -108,7 +108,12 @@ export default async function CustomerDetailPage({
           </div>
 
           <div className="dashboard-proof-block">
-            <CustomerDetailTabs customerName={customer.orgName} insights={insights} divisionId={divisionId} />
+            <CustomerDetailTabs
+              customerName={customer.orgName}
+              customerOrgId={customer.orgId}
+              insights={insights}
+              divisionId={divisionId}
+            />
           </div>
 
           <div className="dashboard-proof-block">
