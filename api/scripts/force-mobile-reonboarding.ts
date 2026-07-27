@@ -38,6 +38,30 @@ interface CliOptions {
   confirmProduction: string | null;
 }
 
+type ResetReport = ReturnType<typeof applyReset>;
+type LockedAppStateUpdate<T> =
+  | { result: T; shouldSave: false }
+  | { result: T; shouldSave: true; state: ApiDatabase };
+type LockedAppStateUpdateHandler<T> = (db: ApiDatabase) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>;
+
+interface PostgresAppStateClient {
+  query<T = Record<string, unknown>>(text: string, values?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
+  release(): void;
+}
+
+interface PostgresAppStatePool {
+  connect(): Promise<PostgresAppStateClient>;
+  end(): Promise<void>;
+}
+
+type PostgresAppStatePoolFactory = (target: StorageTarget) => PostgresAppStatePool;
+
+interface ResetAppStateStorage {
+  load(target: StorageTarget): Promise<ApiDatabase>;
+  save(target: StorageTarget, db: ApiDatabase): Promise<void>;
+  updatePostgresWithLock?<T>(target: StorageTarget, handler: LockedAppStateUpdateHandler<T>): Promise<T>;
+}
+
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
@@ -188,6 +212,75 @@ async function saveAppState(target: StorageTarget, db: ApiDatabase): Promise<voi
   }
 }
 
+function createPostgresAppStatePool(target: StorageTarget): PostgresAppStatePool {
+  if (!target.databaseUrl) {
+    throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
+  }
+  return new Pool({
+    connectionString: target.databaseUrl,
+    max: target.pgPoolMax,
+    connectionTimeoutMillis: target.pgConnectTimeoutMs,
+    idleTimeoutMillis: target.pgIdleTimeoutMs,
+    keepAlive: true,
+  });
+}
+
+export async function updatePostgresAppStateWithLock<T>(
+  target: StorageTarget,
+  handler: LockedAppStateUpdateHandler<T>,
+  poolFactory: PostgresAppStatePoolFactory = createPostgresAppStatePool
+): Promise<T> {
+  const pool = poolFactory(target);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<{ state_json: unknown }>(
+      "SELECT state_json FROM app_state WHERE id = $1 FOR UPDATE",
+      [APP_STATE_ROW_ID]
+    );
+    if (result.rows.length === 0) {
+      throw new Error("app_state primary row was not found.");
+    }
+
+    const current = result.rows[0]!.state_json as ApiDatabase;
+    const update = await handler(current);
+    if (update.shouldSave) {
+      await client.query(
+        `
+          UPDATE app_state
+          SET state_json = $2::jsonb,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [APP_STATE_ROW_ID, JSON.stringify(update.state)]
+      );
+    }
+
+    await client.query("COMMIT");
+    return update.result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Keep the original reset failure visible to the operator.
+    }
+    throw error;
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+const defaultResetAppStateStorage: ResetAppStateStorage = {
+  load: loadAppState,
+  save: saveAppState,
+  updatePostgresWithLock: updatePostgresAppStateWithLock,
+};
+
+function cloneDb(db: ApiDatabase): ApiDatabase {
+  return structuredClone(db) as ApiDatabase;
+}
+
 export function isActiveEnterpriseMobileUser(user: UserProfile): boolean {
   return user.accountType === "enterprise" && user.status === "active" && user.isSuperUser !== true;
 }
@@ -259,18 +352,55 @@ export function appendResetAudit(
   return event;
 }
 
+export async function buildResetDryRunReport(params: {
+  target: StorageTarget;
+  nowIso?: string;
+  storage?: ResetAppStateStorage;
+}): Promise<ResetReport> {
+  const storage = params.storage ?? defaultResetAppStateStorage;
+  const db = cloneDb(await storage.load(params.target));
+  return applyReset(db, params.nowIso ?? new Date().toISOString());
+}
+
+export async function applyResetToTarget(params: {
+  target: StorageTarget;
+  resolvedTarget: string | null;
+  nowIso?: string;
+  storage?: ResetAppStateStorage;
+}): Promise<ResetReport> {
+  const storage = params.storage ?? defaultResetAppStateStorage;
+  const now = params.nowIso ?? new Date().toISOString();
+  const buildUpdate = (currentDb: ApiDatabase): LockedAppStateUpdate<ResetReport> => {
+    const nextDb = cloneDb(currentDb);
+    const report = applyReset(nextDb, now);
+    appendResetAudit(nextDb, report, params.resolvedTarget, now);
+    return {
+      shouldSave: true,
+      state: nextDb,
+      result: report,
+    };
+  };
+
+  if (params.target.storageProvider === "postgres") {
+    if (!storage.updatePostgresWithLock) {
+      throw new Error("PostgreSQL force-mobile-reonboarding apply requires locked app-state update support.");
+    }
+    return storage.updatePostgresWithLock(params.target, buildUpdate);
+  }
+
+  const update = buildUpdate(await storage.load(params.target));
+  await storage.save(params.target, update.state);
+  return update.result;
+}
+
 async function main(): Promise<void> {
   const options = loadCliOptions();
   const target = resolveStorageTarget(loadRuntimeConfig());
   const resolvedTarget = assertTargetSafety(target, options);
-  const db = await loadAppState(target);
   const now = new Date().toISOString();
-  const report = applyReset(db, now);
-
-  if (options.apply) {
-    appendResetAudit(db, report, resolvedTarget, now);
-    await saveAppState(target, db);
-  }
+  const report = options.apply
+    ? await applyResetToTarget({ target, resolvedTarget, nowIso: now })
+    : await buildResetDryRunReport({ target, nowIso: now });
 
   console.log(JSON.stringify({
     mode: options.apply ? "apply" : "dry-run",

@@ -25,7 +25,7 @@
     "db:sanitize-bootstrap": "npm run db:sanitize-bootstrap --workspace api --",
     "smoke:stack": "node scripts/smoke-stack.mjs",
     "test:critical-flow": "node scripts/test-critical-flow.mjs",
-    "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run build --workspace admin-web && npm run build --workspace peritio-web && npx tsc --noEmit -p mobile/tsconfig.json",
+    "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run build --workspace admin-web && npm run build --workspace peritio-web && npm run test --workspace peritio-web && npx tsc --noEmit -p mobile/tsconfig.json",
     "verify:all": "npm run verify:fast && npm run smoke:stack && npm run test:critical-flow"
   }
 }
