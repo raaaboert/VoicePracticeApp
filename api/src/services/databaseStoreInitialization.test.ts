@@ -81,6 +81,8 @@ test("database startup initializes Performance tables through the normal extract
       webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
       performancePlanStore,
       userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
+      orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+      trainingContentStore: fakeStore(calls, "trainingContentStore"),
       trainingPackStore: fakeStore(calls, "trainingPackStore")
     },
     maintenance: fakeStartupMaintenance(calls)
@@ -102,6 +104,8 @@ test("database startup initializes Performance tables through the normal extract
     "migrateLegacyWebAuthSessionsFromAppState",
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
+    "orgModuleEntitlementStore.initialize",
+    "trainingContentStore.initialize",
     "migrateUserProfileAppStateNormalization",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
@@ -127,7 +131,9 @@ test("database readiness refresh initializes the Performance store before loadin
       supportCaseStore: fakeStore(calls, "supportCaseStore"),
       webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
       performancePlanStore: fakeStore(calls, "performancePlanStore"),
-      userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore")
+      userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
+      orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+      trainingContentStore: fakeStore(calls, "trainingContentStore")
     },
     async loadDatabase(): Promise<void> {
       calls.push("loadDatabase");
@@ -147,6 +153,8 @@ test("database readiness refresh initializes the Performance store before loadin
     "webAuthSessionStore.initialize",
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
+    "orgModuleEntitlementStore.initialize",
+    "trainingContentStore.initialize",
     "migrateUserProfileAppStateNormalization",
     "loadDatabase"
   ]);
@@ -166,7 +174,9 @@ test("database readiness fails before loading app state when user profile normal
         supportCaseStore: fakeStore(calls, "supportCaseStore"),
         webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
         performancePlanStore: fakeStore(calls, "performancePlanStore"),
-        userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore")
+        userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
+        orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+        trainingContentStore: fakeStore(calls, "trainingContentStore")
       },
       async migrateUserProfileAppStateNormalization(): Promise<void> {
         calls.push("migrateUserProfileAppStateNormalization");
@@ -189,6 +199,8 @@ test("database readiness fails before loading app state when user profile normal
     "webAuthSessionStore.initialize",
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
+    "orgModuleEntitlementStore.initialize",
+    "trainingContentStore.initialize",
     "migrateUserProfileAppStateNormalization"
   ]);
 });

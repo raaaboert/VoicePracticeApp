@@ -202,6 +202,12 @@ import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
 import {
+  createOrgModuleEntitlementStore,
+  OrgModuleEntitlementStore,
+} from "./storage/orgModuleEntitlementStore.js";
+import { createTrainingContentStore } from "./storage/trainingContentStore.js";
+import { buildOrgModuleEntitlementsResponse } from "./services/organizationModules.js";
+import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
@@ -539,6 +545,20 @@ const trainingPackStore = createTrainingPackStore({
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
 let dashboardTrainingPackLoaderForTest: ((orgId: string) => Promise<TrainingPack[]>) | null = null;
+let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitlementStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+const trainingContentStore = createTrainingContentStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -4433,7 +4453,9 @@ async function refreshDatabaseReadiness(): Promise<void> {
         supportCaseStore,
         webAuthSessionStore,
         performancePlanStore,
-        userEmployeeIdClaimStore
+        userEmployeeIdClaimStore,
+        orgModuleEntitlementStore,
+        trainingContentStore
       },
       loadDatabase: async () => {
         await loadDatabase({ forceStorageRead: true });
@@ -12076,6 +12098,65 @@ app.patch("/config", requireAdmin, async (request: Request, response: Response) 
 app.get("/orgs", requireAdmin, async (_request: Request, response: Response) => {
   await withDatabaseRead(async (db) => {
     response.json(db.orgs);
+  });
+});
+
+app.get("/orgs/:orgId/modules", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId.trim();
+  const orgExists = await withDatabaseRead(async (db) => db.orgs.some((entry) => entry.id === orgId));
+  if (!orgExists) {
+    response.status(404).json({ error: "Organization not found." });
+    return;
+  }
+
+  response.json(await buildOrgModuleEntitlementsResponse(orgModuleEntitlementStore, orgId));
+});
+
+app.patch("/orgs/:orgId/modules/training-content", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId.trim();
+  const body = request.body as { enabled?: unknown };
+  if (typeof body?.enabled !== "boolean") {
+    response.status(400).json({
+      error: "enabled must be a boolean.",
+      code: "module_entitlement_invalid",
+    });
+    return;
+  }
+
+  const orgExists = await withDatabaseRead(async (db) => db.orgs.some((entry) => entry.id === orgId));
+  if (!orgExists) {
+    response.status(404).json({ error: "Organization not found." });
+    return;
+  }
+
+  const changedAt = new Date();
+  const change = await orgModuleEntitlementStore.setOrgModuleEntitlement({
+    orgId,
+    moduleKey: "training_content",
+    enabled: body.enabled,
+    updatedByActorId: PLATFORM_ADMIN_ACTOR_ID,
+    updatedAt: changedAt,
+    auditEvent: {
+      id: `audit_${uuid()}`,
+      actorType: "platform_admin",
+      actorId: PLATFORM_ADMIN_ACTOR_ID,
+      action: "org_module_entitlement_changed",
+      orgId,
+      userId: null,
+      message: "Changed an organization module entitlement.",
+      metadata: {
+        orgId,
+        moduleKey: "training_content",
+        actorId: PLATFORM_ADMIN_ACTOR_ID,
+      },
+      createdAt: changedAt.toISOString(),
+    },
+  });
+
+  const modules = await buildOrgModuleEntitlementsResponse(orgModuleEntitlementStore, orgId);
+  response.json({
+    ...modules,
+    changed: change.changed,
   });
 });
 
@@ -20948,6 +21029,8 @@ export async function startApiServer(): Promise<void> {
       webAuthSessionStore,
       performancePlanStore,
       userEmployeeIdClaimStore,
+      orgModuleEntitlementStore,
+      trainingContentStore,
       trainingPackStore
     },
     maintenance: {
@@ -20979,6 +21062,13 @@ export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) =
     throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
   }
   dashboardTrainingPackLoaderForTest = loader;
+}
+
+export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementStore): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setOrgModuleEntitlementStoreForTest is only available in test.");
+  }
+  orgModuleEntitlementStore = store;
 }
 
 export { app, createDefaultDatabase, ensureDatabaseShape };

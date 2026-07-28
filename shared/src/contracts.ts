@@ -27,6 +27,162 @@ export const ORG_USER_ROLE_LABELS: Record<OrgUserRole, string> = {
   user: "User"
 };
 
+export const ORG_MODULE_KEYS = ["training_content"] as const;
+export type OrgModuleKey = (typeof ORG_MODULE_KEYS)[number];
+
+export interface OrgModuleEntitlementState {
+  moduleKey: OrgModuleKey;
+  enabled: boolean;
+  updatedByActorId: string | null;
+  updatedAt: string | null;
+}
+
+export interface OrgModuleEntitlementsResponse {
+  orgId: string;
+  modules: Record<OrgModuleKey, OrgModuleEntitlementState>;
+}
+
+export interface UpdateOrgModuleEntitlementRequest {
+  enabled: boolean;
+}
+
+export interface UpdateOrgModuleEntitlementResponse extends OrgModuleEntitlementsResponse {
+  changed: boolean;
+}
+
+export const ORGANIZATION_MODULE_DISABLED_CODE = "module_disabled" as const;
+
+export interface OrganizationModuleDisabledErrorResponse {
+  error: string;
+  code: typeof ORGANIZATION_MODULE_DISABLED_CODE;
+  moduleKey: OrgModuleKey;
+}
+
+export const TRAINING_CONTENT_TYPES = [
+  "native",
+  "external_url",
+  "video",
+  "audio",
+  "pdf",
+  "docx",
+  "image"
+] as const;
+export type TrainingContentType = (typeof TRAINING_CONTENT_TYPES)[number];
+
+export const TRAINING_CONTENT_PUBLICATION_STATES = ["draft", "published", "archived"] as const;
+export type TrainingContentPublicationState = (typeof TRAINING_CONTENT_PUBLICATION_STATES)[number];
+
+export const TRAINING_CONTENT_ASSIGNMENT_TYPES = [
+  "organization",
+  "user",
+  "manager",
+  "manager_team"
+] as const;
+export type TrainingContentAssignmentType = (typeof TRAINING_CONTENT_ASSIGNMENT_TYPES)[number];
+
+export const TRAINING_CONTENT_ASSET_ROLES = ["primary", "thumbnail", "inline"] as const;
+export type TrainingContentAssetRole = (typeof TRAINING_CONTENT_ASSET_ROLES)[number];
+
+export const TRAINING_CONTENT_ASSET_UPLOAD_STATES = [
+  "pending",
+  "uploaded",
+  "processing",
+  "ready",
+  "rejected",
+  "superseded",
+  "expired"
+] as const;
+export type TrainingContentAssetUploadState = (typeof TRAINING_CONTENT_ASSET_UPLOAD_STATES)[number];
+
+export const TRAINING_CONTENT_COMPLETION_STATES = ["not_started", "in_progress", "completed"] as const;
+export type TrainingContentCompletionState = (typeof TRAINING_CONTENT_COMPLETION_STATES)[number];
+
+export const TRAINING_CONTENT_COMPLETION_METHODS = ["manual", "media_threshold"] as const;
+export type TrainingContentCompletionMethod = (typeof TRAINING_CONTENT_COMPLETION_METHODS)[number];
+
+export interface TrainingContentItem {
+  id: string;
+  orgId: string;
+  title: string;
+  description: string;
+  focusTopicId: string | null;
+  focusTopicNameSnapshot: string | null;
+  contentType: TrainingContentType;
+  publicationState: TrainingContentPublicationState;
+  nativeBody: string | null;
+  externalUrl: string | null;
+  displayOrder: number;
+  contentVersion: number;
+  createdByActorId: string;
+  updatedByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  archivedAt: string | null;
+}
+
+export interface TrainingContentAsset {
+  id: string;
+  orgId: string;
+  contentId: string;
+  assetRole: TrainingContentAssetRole;
+  version: number;
+  uploadState: TrainingContentAssetUploadState;
+  originalFilename: string | null;
+  declaredMimeType: string | null;
+  detectedMimeType: string | null;
+  fileExtension: string | null;
+  byteSize: number | null;
+  checksumOrEtag: string | null;
+  uploadExpiresAt: string | null;
+  finalizedAt: string | null;
+  supersededAt: string | null;
+  createdByActorId: string;
+  createdAt: string;
+}
+
+export interface TrainingContentAssignment {
+  id: string;
+  orgId: string;
+  contentId: string;
+  assignmentType: TrainingContentAssignmentType;
+  subjectUserId: string | null;
+  createdByActorId: string;
+  createdAt: string;
+  revokedByActorId: string | null;
+  revokedAt: string | null;
+}
+
+export interface TrainingContentScenarioLink {
+  id: string;
+  orgId: string;
+  contentId: string;
+  focusTopicId: string;
+  scenarioId: string;
+  createdByActorId: string;
+  createdAt: string;
+  removedByActorId: string | null;
+  removedAt: string | null;
+}
+
+export interface TrainingContentUsage {
+  orgId: string;
+  contentId: string;
+  userId: string;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  openCount: number;
+  activeSeconds: number;
+  completionState: TrainingContentCompletionState;
+  completionMethod: TrainingContentCompletionMethod | null;
+  completedAt: string | null;
+  completedContentVersion: number | null;
+  mediaPositionSeconds: number | null;
+  mediaDurationSeconds: number | null;
+  uniqueMediaSeconds: number | null;
+  updatedAt: string;
+}
+
 export const INDUSTRY_IDS = ["people_management", "sales", "medical"] as const;
 export type IndustryId = string;
 

@@ -8,9 +8,11 @@ import {
   ORG_USER_ROLE_LABELS,
   ORG_USER_ROLES,
   OrgDivisionListResponse,
+  OrgModuleEntitlementsResponse,
   OrgUserRole,
   EnterpriseOrg,
   OrgDivisionRecord,
+  UpdateOrgModuleEntitlementResponse,
   UserProfile,
   UserStatus,
   formatSecondsAsClock,
@@ -19,6 +21,7 @@ import { AdminShell } from "../../../../src/components/AdminShell";
 import { EnterpriseCompanyDivisionsCard } from "../../../../src/components/EnterpriseCompanyDivisionsCard";
 import { EnterpriseStandardScenarioDivisionCard } from "../../../../src/components/EnterpriseStandardScenarioDivisionCard";
 import { EnterpriseTrainingsWorkspace } from "../../../../src/components/EnterpriseTrainingsWorkspace";
+import { EnterpriseModuleEntitlementsCard } from "../../../../src/components/EnterpriseModuleEntitlementsCard";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../../../src/lib/api";
 import { withAdminMode } from "../../../../src/lib/adminMode";
@@ -169,6 +172,7 @@ export default function EnterpriseOrgPage() {
 
   const [dashboard, setDashboard] = useState<OrgDashboardResponse | null>(null);
   const [divisionPayload, setDivisionPayload] = useState<OrgDivisionListResponse | null>(null);
+  const [moduleEntitlements, setModuleEntitlements] = useState<OrgModuleEntitlementsResponse | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [industries, setIndustries] = useState<AppConfig["industries"]>([]);
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
@@ -182,6 +186,7 @@ export default function EnterpriseOrgPage() {
   const [savingUserOverageId, setSavingUserOverageId] = useState<string | null>(null);
   const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
   const [savingOrgStatus, setSavingOrgStatus] = useState(false);
+  const [savingTrainingContentModule, setSavingTrainingContentModule] = useState(false);
   const [orgDomainInput, setOrgDomainInput] = useState("");
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [monthlyMinutesAllottedInput, setMonthlyMinutesAllottedInput] = useState("0");
@@ -214,14 +219,16 @@ export default function EnterpriseOrgPage() {
       setSuccessMessage(null);
     }
     try {
-      const [payload, configPayload, joinRequestsPayload, divisionsPayload] = await Promise.all([
+      const [payload, configPayload, joinRequestsPayload, divisionsPayload, moduleEntitlementsPayload] = await Promise.all([
         adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`),
         adminFetch<AppConfig>("/config"),
         adminFetch<OrgJoinRequestsResponse>("/org-join-requests?status=pending"),
         adminFetch<OrgDivisionListResponse>(`/orgs/${orgId}/divisions`),
+        adminFetch<OrgModuleEntitlementsResponse>(`/orgs/${orgId}/modules`),
       ]);
       setDashboard(payload);
       setDivisionPayload(divisionsPayload);
+      setModuleEntitlements(moduleEntitlementsPayload);
       setConfig(configPayload);
       setIndustries(configPayload.industries ?? []);
       setOrgDomainInput(payload.org.emailDomain ?? "");
@@ -706,6 +713,34 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const setTrainingContentModuleEnabled = async (enabled: boolean) => {
+    if (!dashboard || savingTrainingContentModule) {
+      return;
+    }
+
+    setSavingTrainingContentModule(true);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updated = await adminFetch<UpdateOrgModuleEntitlementResponse>(
+        `/orgs/${dashboard.org.id}/modules/training-content`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ enabled }),
+        }
+      );
+      setModuleEntitlements({
+        orgId: updated.orgId,
+        modules: updated.modules,
+      });
+      setSuccessMessage(`Training Content ${enabled ? "enabled" : "disabled"}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update Training Content.");
+    } finally {
+      setSavingTrainingContentModule(false);
+    }
+  };
+
   const deleteEnterpriseUser = async (userId: string, email: string) => {
     const firstConfirm = window.confirm("Are you sure? This can not be reversed!");
     if (!firstConfirm) {
@@ -942,6 +977,12 @@ export default function EnterpriseOrgPage() {
                   </div>
                 </div>
               </div>
+
+              <EnterpriseModuleEntitlementsCard
+                trainingContent={moduleEntitlements?.modules.training_content ?? null}
+                saving={savingTrainingContentModule}
+                onTrainingContentChange={(enabled) => void setTrainingContentModuleEnabled(enabled)}
+              />
 
               <div className="enterprise-two-column">
                 <div className="card enterprise-section-card">

@@ -8,6 +8,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 
 import {
+  AuditEvent,
   ApiDatabase,
   createDefaultConfig,
   EnterpriseJoinRequestRecord,
@@ -40,6 +41,14 @@ let userAdminToken: string;
 let regularDashboardToken: string;
 let superToken: string;
 let adminToken: string | null = null;
+const moduleEntitlementRows = new Map<string, {
+  orgId: string;
+  moduleKey: "training_content";
+  enabled: boolean;
+  updatedByActorId: string | null;
+  updatedAt: string | null;
+}>();
+const moduleEntitlementAuditEvents: AuditEvent[] = [];
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
@@ -814,11 +823,155 @@ before(async () => {
       buildTrainingPack("pack_other", "org_2"),
     ].filter((pack) => pack.organizationId === orgId)
   );
+  imported.setOrgModuleEntitlementStoreForTest({
+    async initialize() {
+      // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
+    },
+    async getOrgModuleEntitlement(orgId: string, moduleKey: "training_content") {
+      return moduleEntitlementRows.get(`${orgId}:${moduleKey}`) ?? {
+        orgId,
+        moduleKey,
+        enabled: false,
+        updatedByActorId: null,
+        updatedAt: null,
+      };
+    },
+    async setOrgModuleEntitlement(input) {
+      const key = `${input.orgId}:${input.moduleKey}`;
+      const previous = moduleEntitlementRows.get(key) ?? {
+        orgId: input.orgId,
+        moduleKey: input.moduleKey,
+        enabled: false,
+        updatedByActorId: null,
+        updatedAt: null,
+      };
+      const changed = previous.enabled !== input.enabled;
+      const current = {
+        orgId: input.orgId,
+        moduleKey: input.moduleKey,
+        enabled: input.enabled,
+        updatedByActorId: input.updatedByActorId,
+        updatedAt: (input.updatedAt ?? new Date()).toISOString(),
+      };
+      moduleEntitlementRows.set(key, current);
+      if (changed && input.auditEvent) {
+        moduleEntitlementAuditEvents.push({
+          ...input.auditEvent,
+          metadata: {
+            ...(input.auditEvent.metadata ?? {}),
+            previousEnabled: previous.enabled,
+            newEnabled: current.enabled,
+          },
+        });
+      }
+      return { previous, current, changed };
+    },
+  });
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
   const address = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+test("internal Admin Utility module endpoint is authorized, tenant-scoped, persistent, and auditable", async () => {
+  moduleEntitlementRows.clear();
+  moduleEntitlementAuditEvents.length = 0;
+
+  const unauthorized = await publicRequest("/orgs/org_1/modules/training-content", {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const initial = await adminRequest("/orgs/org_1/modules");
+  assert.equal(initial.status, 200);
+  assert.deepEqual(initial.body, {
+    orgId: "org_1",
+    modules: {
+      training_content: {
+        moduleKey: "training_content",
+        enabled: false,
+        updatedByActorId: null,
+        updatedAt: null,
+      },
+    },
+  });
+
+  const before = await readDb();
+  const enabled = await adminRequest("/orgs/org_1/modules/training-content", {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal((enabled.body.modules as any).training_content.enabled, true);
+  assert.equal(enabled.body.changed, true);
+
+  const repeated = await adminRequest("/orgs/org_1/modules/training-content", {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(repeated.status, 200);
+  assert.equal(repeated.body.changed, false);
+
+  const otherOrg = await adminRequest("/orgs/org_2/modules");
+  assert.equal(otherOrg.status, 200);
+  assert.equal((otherOrg.body.modules as any).training_content.enabled, false);
+
+  const disabled = await adminRequest("/orgs/org_1/modules/training-content", {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: false }),
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal((disabled.body.modules as any).training_content.enabled, false);
+
+  const after = await readDb();
+  assert.deepEqual(after.orgTrainings, before.orgTrainings);
+  assert.deepEqual(after.orgTrainingPackAttachments, before.orgTrainingPackAttachments);
+  assert.deepEqual(after.orgTrainingScenarioAttachments, before.orgTrainingScenarioAttachments);
+  assert.deepEqual(after.trainingPackAssignments, before.trainingPackAssignments);
+  assert.equal(moduleEntitlementAuditEvents.length, 2);
+  assert.deepEqual(
+    moduleEntitlementAuditEvents.map((event) => ({
+      action: event.action,
+      orgId: event.orgId,
+      metadata: event.metadata,
+    })),
+    [
+      {
+        action: "org_module_entitlement_changed",
+        orgId: "org_1",
+        metadata: {
+          orgId: "org_1",
+          moduleKey: "training_content",
+          actorId: "platform_admin",
+          previousEnabled: false,
+          newEnabled: true,
+        },
+      },
+      {
+        action: "org_module_entitlement_changed",
+        orgId: "org_1",
+        metadata: {
+          orgId: "org_1",
+          moduleKey: "training_content",
+          actorId: "platform_admin",
+          previousEnabled: true,
+          newEnabled: false,
+        },
+      },
+    ]
+  );
+
+  const invalid = await adminRequest("/orgs/org_1/modules/training-content", {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: "yes" }),
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.code, "module_entitlement_invalid");
+
+  const missingOrg = await adminRequest("/orgs/org_missing/modules");
+  assert.equal(missingOrg.status, 404);
 });
 
 after(async () => {
