@@ -72,8 +72,8 @@ function buildUser(
   return {
     id,
     email,
-    firstName: overrides.firstName ?? null,
-    lastName: overrides.lastName ?? null,
+    firstName: overrides.firstName === undefined ? "Test" : overrides.firstName,
+    lastName: overrides.lastName === undefined ? "User" : overrides.lastName,
     employeeId: null,
     managerUserId: overrides.managerUserId ?? null,
     emailVerifiedAt: NOW,

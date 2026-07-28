@@ -1832,7 +1832,7 @@ export interface MobileOnboardRequest {
   timezone: string;
   firstName: string;
   lastName: string;
-  joinCode: string;
+  joinCode?: string;
 }
 
 export type LegacyMobileOnboardRequest = Pick<MobileOnboardRequest, "email" | "timezone"> &

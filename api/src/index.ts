@@ -262,6 +262,7 @@ import {
   getDashboardPermittedUserIds,
   getUserFirstName,
   getUserLastName,
+  hasCompleteUserName,
   isEligibleManagerUser,
   listVisibleOrganizationUsers,
   normalizeManagerUserId,
@@ -4628,11 +4629,15 @@ function upsertMobileAuthToken(db: ApiDatabase, userId: string, issuedAtIso: str
   return authToken;
 }
 
+function hasCompleteMobileProfile(user: UserProfile): boolean {
+  return Boolean(user.emailVerifiedAt) && hasCompleteUserName(user);
+}
+
 function hasValidMobileTokenForUser(
   db: ApiDatabase,
   userId: string,
   token: string,
-  options?: { allowReonboardingToken?: boolean }
+  options?: { allowReonboardingToken?: boolean; allowIncompleteProfile?: boolean }
 ): boolean {
   const authRecord = db.mobileAuthTokens.find((entry) => entry.userId === userId);
   if (!authRecord || !authRecord.tokenHash) {
@@ -4651,6 +4656,10 @@ function hasValidMobileTokenForUser(
 
   const user = getUserById(db, userId);
   if (user?.mobileProfileReonboardingRequired === true && options?.allowReonboardingToken !== true) {
+    return false;
+  }
+
+  if (user && !hasCompleteMobileProfile(user) && options?.allowIncompleteProfile !== true) {
     return false;
   }
 
@@ -7756,6 +7765,27 @@ function createOrReusePendingOrgJoinRequest(params: {
   return { created: true, request: record };
 }
 
+type MobileCompanyProfileCompletion = {
+  ok: true;
+  org: EnterpriseOrg;
+  request: EnterpriseJoinRequestRecord | null;
+  createdRequest: boolean;
+  restoredExistingMember: boolean;
+};
+
+type MobileBasicProfileCompletion = {
+  ok: true;
+  restoredExistingMember: boolean;
+};
+
+type MobileProfileCompletionError = { ok: false; status: number; error: string };
+
+function isMobileCompanyProfileCompletion(
+  completion: MobileCompanyProfileCompletion | MobileBasicProfileCompletion
+): completion is MobileCompanyProfileCompletion {
+  return "org" in completion;
+}
+
 function completeMobileCompanyProfile(params: {
   db: ApiDatabase;
   user: UserProfile;
@@ -7763,9 +7793,7 @@ function completeMobileCompanyProfile(params: {
   lastName: string;
   joinCode: string;
   now: Date;
-}):
-  | { ok: true; org: EnterpriseOrg; request: EnterpriseJoinRequestRecord | null; createdRequest: boolean; restoredExistingMember: boolean }
-  | { ok: false; status: number; error: string } {
+}): MobileCompanyProfileCompletion | MobileProfileCompletionError {
   if (params.user.status !== "active") {
     return { ok: false, status: 403, error: "Your account is deactivated. Contact your organization admin." };
   }
@@ -7816,6 +7844,37 @@ function completeMobileCompanyProfile(params: {
     request: requestResult.request,
     createdRequest: requestResult.created,
     restoredExistingMember: false,
+  };
+}
+
+function completeMobileBasicProfile(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  firstName: string;
+  lastName: string;
+  now: Date;
+}): MobileBasicProfileCompletion | MobileProfileCompletionError {
+  if (params.user.status !== "active") {
+    return { ok: false, status: 403, error: "Your account is deactivated. Contact your organization admin." };
+  }
+
+  if (
+    params.user.accountType === "enterprise" &&
+    !isSuperUser(params.user) &&
+    params.user.mobileProfileReonboardingRequired === true
+  ) {
+    return { ok: false, status: 400, error: "Company code is required to confirm your organization." };
+  }
+
+  params.user.firstName = params.firstName;
+  params.user.lastName = params.lastName;
+  params.user.mobileProfileReonboardingRequired = false;
+  params.user.updatedAt = params.now.toISOString();
+  emitMobileUpdateForUser(params.db, params.user.id, "user");
+  return {
+    ok: true,
+    restoredExistingMember:
+      params.user.accountType === "enterprise" && Boolean(params.user.orgId) && !isSuperUser(params.user),
   };
 }
 
@@ -14811,33 +14870,35 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
     response.status(400).json({ error: lastName.error, code: lastName.code });
     return;
   }
-  if (!joinCode) {
-    response.status(400).json({ error: "Company code is required." });
-    return;
-  }
-
   const timezone = resolveTimeZone(body.timezone);
 
   await withDatabase(async (db) => {
-    const org = findActiveOrgByJoinCode(db, joinCode);
-    if (!org) {
+    const requestedOrg = joinCode ? findActiveOrgByJoinCode(db, joinCode) : null;
+    if (joinCode && !requestedOrg) {
       response.status(404).json({ error: "Company code not found." });
       return;
     }
     const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
+      if (existing.status !== "active") {
+        response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
+        return;
+      }
+
       if (existing.accountType === "enterprise" && !isSuperUser(existing)) {
         const existingOrg = getOrgById(db, existing.orgId);
         if (!existingOrg || existingOrg.status !== "active") {
           response.status(403).json({ error: "Enterprise account is not active." });
           return;
         }
-        if (existing.status !== "active") {
-          response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
+
+        if (existing.mobileProfileReonboardingRequired === true && !joinCode) {
+          response.status(400).json({ error: "Company code is required to confirm your organization." });
           return;
         }
-        if (existingOrg.id !== org.id) {
+
+        if (requestedOrg && existingOrg.id !== requestedOrg.id) {
           response.status(403).json({ error: "Company code does not match your active organization." });
           return;
         }
@@ -14856,14 +14917,22 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       }
 
       if (!shouldRequireVerification) {
-        const completion = completeMobileCompanyProfile({
-          db,
-          user: existing,
-          firstName: firstName.value,
-          lastName: lastName.value,
-          joinCode,
-          now: new Date(issuedAt),
-        });
+        const completion = joinCode
+          ? completeMobileCompanyProfile({
+              db,
+              user: existing,
+              firstName: firstName.value,
+              lastName: lastName.value,
+              joinCode,
+              now: new Date(issuedAt),
+            })
+          : completeMobileBasicProfile({
+              db,
+              user: existing,
+              firstName: firstName.value,
+              lastName: lastName.value,
+              now: new Date(issuedAt),
+            });
         if (!completion.ok) {
           response.status(completion.status).json({ error: completion.error });
           return;
@@ -14882,7 +14951,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
           metadata: {
             verificationRequired: false,
             restoredExistingMember: completion.restoredExistingMember,
-            joinRequestCreated: completion.createdRequest,
+            joinRequestCreated: isMobileCompanyProfileCompletion(completion) ? completion.createdRequest : false,
           }
         });
         response.json(payload);
@@ -14946,7 +15015,7 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       message: `Created user from mobile onboarding (${user.email}).`,
       metadata: {
         verificationExpiresAt: verification.expiresAt,
-        companyCodeValidated: true,
+        companyCodeValidated: Boolean(joinCode),
       }
     });
     const payload: MobileOnboardResponse = {
@@ -14981,7 +15050,10 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken, { allowReonboardingToken: true })) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
@@ -15040,7 +15112,10 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken, { allowReonboardingToken: true })) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
@@ -15051,7 +15126,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       body.lastName !== undefined ||
       body.joinCode !== undefined;
 
-    if (!needsCodeVerification && !profileProvided) {
+    if (!needsCodeVerification && !profileProvided && hasCompleteUserName(user)) {
       const payload: MobileOnboardResponse = {
         user,
         authToken,
@@ -15074,13 +15149,26 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
     const joinCode = normalizeJoinCode(body.joinCode);
-    if (!joinCode) {
-      response.status(400).json({ error: "Company code is required." });
+    const wasReonboarding = user.mobileProfileReonboardingRequired === true;
+
+    if (wasReonboarding && user.accountType === "enterprise" && !isSuperUser(user) && !joinCode) {
+      response.status(400).json({ error: "Company code is required to confirm your organization." });
       return;
     }
 
+    if (joinCode) {
+      const requestedOrg = findActiveOrgByJoinCode(db, joinCode);
+      if (!requestedOrg) {
+        response.status(404).json({ error: "Company code not found." });
+        return;
+      }
+      if (user.accountType === "enterprise" && !isSuperUser(user) && user.orgId !== requestedOrg.id) {
+        response.status(403).json({ error: "Company code does not match your active organization." });
+        return;
+      }
+    }
+
     const now = new Date();
-    const wasReonboarding = user.mobileProfileReonboardingRequired === true;
     if (needsCodeVerification) {
       const pending = db.emailVerifications
         .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
@@ -15117,30 +15205,40 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       });
     }
 
-    const completion = completeMobileCompanyProfile({
-      db,
-      user,
-      firstName: firstName.value,
-      lastName: lastName.value,
-      joinCode,
-      now,
-    });
+    const completion = joinCode
+      ? completeMobileCompanyProfile({
+          db,
+          user,
+          firstName: firstName.value,
+          lastName: lastName.value,
+          joinCode,
+          now,
+        })
+      : completeMobileBasicProfile({
+          db,
+          user,
+          firstName: firstName.value,
+          lastName: lastName.value,
+          now,
+        });
     if (!completion.ok) {
       response.status(completion.status).json({ error: completion.error });
       return;
     }
     appendMobileAuditEvent(db, user, {
       action: wasReonboarding ? "mobile.profile_reonboarding_completed" : "mobile.profile_completed",
-      orgId: completion.org.id,
+      orgId: isMobileCompanyProfileCompletion(completion) ? completion.org.id : user.orgId,
       userId: user.id,
       message: wasReonboarding ? "Completed required mobile profile re-onboarding." : "Completed mobile profile setup.",
       metadata: {
         restoredExistingMember: completion.restoredExistingMember,
-        joinRequestCreated: completion.createdRequest,
-        joinRequestReused: Boolean(completion.request && !completion.createdRequest),
+        joinRequestCreated: isMobileCompanyProfileCompletion(completion) ? completion.createdRequest : false,
+        joinRequestReused: isMobileCompanyProfileCompletion(completion)
+          ? Boolean(completion.request && !completion.createdRequest)
+          : false,
       }
     });
-    if (completion.request) {
+    if (isMobileCompanyProfileCompletion(completion) && completion.request) {
       appendMobileAuditEvent(db, user, {
         action: completion.createdRequest ? "org_join.request_created" : "org_join.request_reused",
         orgId: completion.org.id,
@@ -15154,7 +15252,9 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       });
     }
 
-    const responseAuthToken = wasReonboarding ? upsertMobileAuthToken(db, user.id, now.toISOString()) : authToken;
+    const responseAuthToken = needsCodeVerification || wasReonboarding
+      ? upsertMobileAuthToken(db, user.id, now.toISOString())
+      : authToken;
     const payload: MobileOnboardResponse = {
       user,
       authToken: responseAuthToken,
@@ -15180,13 +15280,11 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken, { allowReonboardingToken: true })) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
       response.status(401).json({ error: "Invalid mobile token." });
-      return;
-    }
-
-    if (user.mobileProfileReonboardingRequired === true) {
-      response.status(403).json({ error: "Mobile profile update required. Please sign in again." });
       return;
     }
 

@@ -55,6 +55,10 @@ export function getUserLastName(user: UserProfile): string | null {
   return normalizeOptionalStoredUserName(user.lastName);
 }
 
+export function hasCompleteUserName(user: UserProfile): boolean {
+  return Boolean(getUserFirstName(user) && getUserLastName(user));
+}
+
 export function resolveStoredUserDisplayName(user: UserProfile): string {
   const names = [getUserFirstName(user), getUserLastName(user)].filter(Boolean);
   return names.length > 0 ? names.join(" ") : USER_PROFILE_NAME_NOT_PROVIDED;

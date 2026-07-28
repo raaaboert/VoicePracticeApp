@@ -86,8 +86,8 @@ function buildUser(id: string, email: string, overrides: Partial<UserProfile> = 
   return {
     id,
     email,
-    firstName: overrides.firstName ?? null,
-    lastName: overrides.lastName ?? null,
+    firstName: overrides.firstName === undefined ? "Test" : overrides.firstName,
+    lastName: overrides.lastName === undefined ? "User" : overrides.lastName,
     employeeId: overrides.employeeId ?? null,
     managerUserId: overrides.managerUserId ?? null,
     emailVerifiedAt: overrides.emailVerifiedAt === undefined ? NOW : overrides.emailVerifiedAt,
@@ -416,6 +416,14 @@ function buildDatabase(): ApiDatabase {
         orgId: null,
         orgRole: "user",
       }),
+      buildUser("nameless_free", "nameless.free@gmail.com", {
+        firstName: null,
+        lastName: null,
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user",
+      }),
       buildUser("other_pending", "other-pending@gmail.com", {
         accountType: "individual",
         tier: "free",
@@ -517,6 +525,7 @@ function buildDatabase(): ApiDatabase {
       buildMobileToken("pending_user", "token_pending"),
       buildMobileToken("gmail_invalid", "token_gmail_invalid"),
       buildMobileToken("rate_limited", "token_rate_limited"),
+      buildMobileToken("nameless_free", "token_nameless_free"),
       buildMobileToken("org_admin", "token_org_admin"),
       buildMobileToken("user_admin", "token_user_admin"),
       buildMobileToken("eligible_user_admin", "token_other_manager"),
@@ -1433,6 +1442,52 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(missingName.status, 400);
   assert.equal(missingName.body.code, "user_name_invalid");
 
+  const { result: freeOnboard, code: freeCode } = await captureVerificationCode(() =>
+    publicRequest("/mobile/onboard", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "new.free.trial@gmail.com",
+        firstName: "  Free  ",
+        lastName: "  User  ",
+        timezone: "America/Denver",
+      }),
+    })
+  );
+  assert.equal(freeOnboard.status, 201);
+  assert.equal(freeOnboard.body.verificationRequired, true);
+  const freeUser = freeOnboard.body.user as UserProfile;
+  const freeInterimToken = freeOnboard.body.authToken as string;
+  assert.equal(freeUser.firstName, null);
+  assert.equal(freeUser.lastName, null);
+  assert.equal(freeUser.emailVerifiedAt, null);
+  assert.equal(freeUser.orgId, null);
+  const freeInterimEntitlements = await mobileRequest(`/mobile/users/${freeUser.id}/entitlements`, freeInterimToken);
+  assert.equal(freeInterimEntitlements.status, 401);
+
+  const freeVerified = await mobileRequest("/mobile/onboard/verify-email", freeInterimToken, {
+    method: "POST",
+    body: JSON.stringify({
+      userId: freeUser.id,
+      code: freeCode,
+      firstName: "  Free  ",
+      lastName: "  User  ",
+    }),
+  });
+  assert.equal(freeVerified.status, 200);
+  const verifiedFreeUser = freeVerified.body.user as UserProfile;
+  const freeNormalToken = freeVerified.body.authToken as string;
+  assert.equal(verifiedFreeUser.firstName, "Free");
+  assert.equal(verifiedFreeUser.lastName, "User");
+  assert.equal(verifiedFreeUser.email.includes("Free"), false);
+  assert.equal(verifiedFreeUser.orgId, null);
+  assert.notEqual(freeNormalToken, freeInterimToken);
+  const freeOldTokenDenied = await mobileRequest(`/mobile/users/${freeUser.id}/entitlements`, freeInterimToken);
+  assert.equal(freeOldTokenDenied.status, 401);
+  const freeNormalTokenAllowed = await mobileRequest(`/mobile/users/${freeUser.id}/entitlements`, freeNormalToken);
+  assert.equal(freeNormalTokenAllowed.status, 200);
+  const freeRequests = await readDb();
+  assert.equal(freeRequests.enterpriseJoinRequests.some((request) => request.userId === freeUser.id), false);
+
   const { result: gmailOnboard, code: gmailCode } = await captureVerificationCode(() =>
     publicRequest("/mobile/onboard", {
       method: "POST",
@@ -1469,6 +1524,10 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(verifiedGmailUser.firstName, "Gmail");
   assert.equal(verifiedGmailUser.lastName, "User");
   assert.equal(verifiedGmailUser.orgId, null);
+  const gmailNormalToken = gmailVerified.body.authToken as string;
+  assert.notEqual(gmailNormalToken, gmailAuthToken);
+  const gmailOldTokenDenied = await mobileRequest(`/mobile/users/${gmailUser.id}/entitlements`, gmailAuthToken);
+  assert.equal(gmailOldTokenDenied.status, 401);
   const gmailRequests = await waitForPersistedJoinRequests(
     (requests) => requests.some((request) => request.userId === gmailUser.id)
   );
@@ -1500,6 +1559,34 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(pendingRequests.filter((request) => request.userId === "pending_user").length, 1);
   assert.equal(pendingRequests.find((request) => request.id === "jr_pending")?.status, "pending");
 
+  const namelessBootstrap = await mobileRequest("/mobile/users/nameless_free", "token_nameless_free");
+  assert.equal(namelessBootstrap.status, 200);
+  assert.equal((namelessBootstrap.body as unknown as UserProfile).firstName, null);
+  const namelessProtected = await mobileRequest("/mobile/users/nameless_free/entitlements", "token_nameless_free");
+  assert.equal(namelessProtected.status, 401);
+  const namelessJoinDenied = await mobileRequest("/mobile/users/nameless_free/org-access-requests", "token_nameless_free", {
+    method: "POST",
+    body: JSON.stringify({ joinCode: "ACME2026" }),
+  });
+  assert.equal(namelessJoinDenied.status, 401);
+  const completedNameless = await publicRequest("/mobile/onboard", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "nameless.free@gmail.com",
+      firstName: " Legacy ",
+      lastName: " Free ",
+      timezone: "America/Denver",
+    }),
+  });
+  assert.equal(completedNameless.status, 200);
+  assert.equal(completedNameless.body.verificationRequired, false);
+  const completedNamelessUser = completedNameless.body.user as UserProfile;
+  assert.equal(completedNamelessUser.id, "nameless_free");
+  assert.equal(completedNamelessUser.firstName, "Legacy");
+  assert.equal(completedNamelessUser.lastName, "Free");
+  assert.equal(completedNamelessUser.accountType, "individual");
+  assert.equal(completedNamelessUser.tier, "free");
+
   const { result: resetOnboard } = await captureVerificationCode(() =>
     publicRequest("/mobile/onboard", {
       method: "POST",
@@ -1516,7 +1603,8 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(resetOnboard.body.verificationRequired, true);
   const limitedResetToken = resetOnboard.body.authToken as string;
   const resetUserStatusDenied = await mobileRequest("/mobile/users/reset_member", limitedResetToken);
-  assert.equal(resetUserStatusDenied.status, 403);
+  assert.equal(resetUserStatusDenied.status, 200);
+  assert.equal((resetUserStatusDenied.body as unknown as UserProfile).mobileProfileReonboardingRequired, true);
   const resetEntitlementsDenied = await mobileRequest("/mobile/users/reset_member/entitlements", limitedResetToken);
   assert.equal(resetEntitlementsDenied.status, 401);
   const resetSimulationDenied = await mobileRequest("/mobile/users/reset_member/simulation-sessions/start", limitedResetToken, {
@@ -1633,6 +1721,46 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal((await readUser("reset_mismatch"))?.mobileProfileReonboardingRequired, true);
   const mismatchRequests = await readDb();
   assert.equal(mismatchRequests.enterpriseJoinRequests.some((request) => request.userId === "reset_mismatch"), false);
+
+  const { result: mismatchOnboard, code: mismatchVerificationCode } = await captureVerificationCode(() =>
+    publicRequest("/mobile/onboard", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "reset.mismatch@gmail.com",
+        firstName: "Mismatch",
+        lastName: "Member",
+        joinCode: "ACME2026",
+        timezone: "America/Denver",
+      }),
+    })
+  );
+  assert.equal(mismatchOnboard.status, 200);
+  const mismatchLimitedToken = mismatchOnboard.body.authToken as string;
+  const verifyMismatch = await mobileRequest("/mobile/onboard/verify-email", mismatchLimitedToken, {
+    method: "POST",
+    body: JSON.stringify({
+      userId: "reset_mismatch",
+      code: mismatchVerificationCode,
+      firstName: "Mismatch",
+      lastName: "Member",
+      joinCode: "OTHER2026",
+    }),
+  });
+  assert.equal(verifyMismatch.status, 403);
+  assert.match(String(verifyMismatch.body.error), /does not match/);
+  const verifyMismatchDb = await readDb();
+  assert.equal(verifyMismatchDb.users.find((user) => user.id === "reset_mismatch")?.orgId, "org_1");
+  assert.equal(
+    verifyMismatchDb.users.find((user) => user.id === "reset_mismatch")?.mobileProfileReonboardingRequired,
+    true
+  );
+  assert.equal(
+    verifyMismatchDb.emailVerifications
+      .filter((entry) => entry.userId === "reset_mismatch")
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0]?.consumedAt,
+    null
+  );
+  assert.equal(verifyMismatchDb.enterpriseJoinRequests.some((request) => request.userId === "reset_mismatch"), false);
 
   const disabled = await publicRequest("/mobile/onboard", {
     method: "POST",

@@ -88,6 +88,14 @@ import {
   getMissingUsageRecordFields,
 } from "./src/lib/simulationDiagnostics";
 import {
+  buildMobileOnboardRequest,
+  buildMobileVerifyProfile,
+  canStartMobileUpdates,
+  isCompanyCodeRequiredForSetup,
+  resolveMobileSetupStep,
+  shouldShowOrgRequestPendingScreen,
+} from "./src/lib/onboardingState";
+import {
   speakWithRemoteTtsFallback,
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
   toRemoteTtsPreset,
@@ -1984,7 +1992,11 @@ export default function App() {
     [activeSuperUserOrgId, submitAutoErrorReport, superUserOrgReturnScreen],
   );
 
-  const resetSessionToOnboarding = useCallback(async (notice?: string) => {
+  const resetSessionToOnboarding = useCallback(async (
+    notice?: string,
+    options?: { preserveOnboardingValues?: boolean },
+  ) => {
+    const shouldPreserveOnboardingValues = options?.preserveOnboardingValues === true;
     await clearUserId();
     setActiveSuperUserOrgId(null);
     setActiveSuperUserOrgIdState(null);
@@ -2006,11 +2018,13 @@ export default function App() {
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
     setOrgRequestError(null);
-    setOnboardingEmail("");
-    setOnboardingFirstName("");
-    setOnboardingLastName("");
-    setOnboardingCompanyCode("");
-    setOnboardingTimezone(detectedTimezone);
+    if (!shouldPreserveOnboardingValues) {
+      setOnboardingEmail("");
+      setOnboardingFirstName("");
+      setOnboardingLastName("");
+      setOnboardingCompanyCode("");
+      setOnboardingTimezone(detectedTimezone);
+    }
     setSettingsEmail("");
     setSettingsTimezone(detectedTimezone);
     setAppError(null);
@@ -2132,9 +2146,22 @@ export default function App() {
       setSettingsEmail(userPayload.email);
       setSettingsTimezone(userPayload.timezone);
 
-      if (!userPayload.emailVerifiedAt) {
+      const setupStep = resolveMobileSetupStep(userPayload);
+      if (setupStep === "onboarding") {
+        setPendingVerificationUserId(null);
+        setVerificationCode("");
+        setVerificationExpiresAt(null);
+        setVerificationNotice(null);
+        setVerificationError(null);
+        setOnboardingError(null);
+        setScreen("onboarding");
+        return;
+      }
+
+      if (setupStep === "verify_email") {
         setPendingVerificationUserId(userPayload.id);
         setVerificationCode("");
+        setVerificationExpiresAt(null);
         setVerificationNotice("Check your inbox for a 6-digit code, then verify to continue.");
         setVerificationError(null);
         setScreen("verify_email");
@@ -2199,7 +2226,9 @@ export default function App() {
           lower.includes("fetch failed"));
 
       if (shouldSelfHeal) {
-        await resetSessionToOnboarding("Session self-healed. Please sign in again.");
+        await resetSessionToOnboarding("We need you to sign in again to continue.", {
+          preserveOnboardingValues: true,
+        });
       } else {
         setAppError(message);
         void submitAutoErrorReport("app.initialize", caught, {
@@ -2234,7 +2263,7 @@ export default function App() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!user || !mobileAuthToken || user.isSuperUser) {
+    if (!user || !mobileAuthToken || !canStartMobileUpdates(user, screen)) {
       return;
     }
 
@@ -2297,7 +2326,9 @@ export default function App() {
             lower.includes("user doesn't exist");
 
           if (shouldResetSession) {
-            await resetSessionToOnboarding("Session reset after account update. Please sign in again.");
+            await resetSessionToOnboarding("We need you to sign in again to continue.", {
+              preserveOnboardingValues: true,
+            });
             return;
           }
 
@@ -2352,10 +2383,10 @@ export default function App() {
       longPollFirstFailureAtRef.current = null;
       longPollLastErrorRef.current = null;
     };
-  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user?.id, user?.isSuperUser]);
+  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user]);
 
   useEffect(() => {
-    if (!user || user.emailVerifiedAt) {
+    if (!user) {
       return;
     }
 
@@ -2363,11 +2394,25 @@ export default function App() {
       return;
     }
 
-    setPendingVerificationUserId(user.id);
-    setVerificationCode("");
-    setVerificationNotice("Verify your email to continue.");
-    setVerificationError(null);
-    setScreen("verify_email");
+    const setupStep = resolveMobileSetupStep(user);
+    if (setupStep === "onboarding") {
+      setPendingVerificationUserId(null);
+      setVerificationCode("");
+      setVerificationExpiresAt(null);
+      setVerificationNotice(null);
+      setVerificationError(null);
+      setOnboardingError(null);
+      setScreen("onboarding");
+      return;
+    }
+
+    if (setupStep === "verify_email") {
+      setPendingVerificationUserId(user.id);
+      setVerificationCode("");
+      setVerificationNotice("Verify your email to continue.");
+      setVerificationError(null);
+      setScreen("verify_email");
+    }
   }, [screen, user]);
 
   useEffect(() => {
@@ -2502,8 +2547,8 @@ export default function App() {
       setOnboardingError("Please enter your last name.");
       return;
     }
-    if (!companyCode) {
-      setOnboardingError("Please enter your company code.");
+    if (isCompanyCodeRequiredForSetup(user) && !companyCode) {
+      setOnboardingError("Enter the company code for your organization to confirm your profile.");
       return;
     }
 
@@ -2514,14 +2559,14 @@ export default function App() {
 
     setIsOnboardingSaving(true);
     try {
-      const onboarded = await onboardMobileUser({
+      const onboarded = await onboardMobileUser(buildMobileOnboardRequest({
         email: normalizedEmail,
         firstName,
         lastName,
-        joinCode: companyCode,
+        companyCode,
         timezone: onboardingTimezone.trim(),
-      });
-      void Promise.allSettled([
+      }));
+      await Promise.all([
         saveUserId(onboarded.user.id),
         saveMobileAuthToken(onboarded.authToken),
       ]);
@@ -2556,7 +2601,7 @@ export default function App() {
       if (!scopedConfigLoaded) {
         return;
       }
-      if (onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
+      if (shouldShowOrgRequestPendingScreen(companyCode, onboarded.user)) {
         setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
         setScreen("domain_match");
       } else {
@@ -2592,8 +2637,8 @@ export default function App() {
       setVerificationError("Enter your last name before verifying.");
       return;
     }
-    if (!onboardingCompanyCode.trim()) {
-      setVerificationError("Enter your company code before verifying.");
+    if (isCompanyCodeRequiredForSetup(user) && !onboardingCompanyCode.trim()) {
+      setVerificationError("Enter the company code for your organization before verifying.");
       return;
     }
 
@@ -2601,14 +2646,18 @@ export default function App() {
     setVerificationNotice(null);
     setIsVerificationSaving(true);
     try {
-      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken, {
+      const companyCode = onboardingCompanyCode.trim();
+      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken, buildMobileVerifyProfile({
         firstName: onboardingFirstName.trim(),
         lastName: onboardingLastName.trim(),
-        joinCode: onboardingCompanyCode.trim(),
-      });
+        companyCode,
+      }));
       setUser(payload.user);
       setMobileAuthToken(payload.authToken);
-      void saveMobileAuthToken(payload.authToken);
+      await Promise.all([
+        saveUserId(payload.user.id),
+        saveMobileAuthToken(payload.authToken),
+      ]);
       setVerificationCode("");
       setPendingVerificationUserId(null);
       setVerificationExpiresAt(null);
@@ -2630,7 +2679,7 @@ export default function App() {
         return;
       }
 
-      if (payload.user.accountType === "individual" && !payload.user.isSuperUser) {
+      if (shouldShowOrgRequestPendingScreen(companyCode, payload.user)) {
         setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
         setScreen("domain_match");
       } else {
@@ -2696,6 +2745,27 @@ export default function App() {
   const submitOrgDomainRequest = async () => {
     if (!user || !mobileAuthToken) {
       setOrgRequestError("Session expired. Please sign in again.");
+      return;
+    }
+
+    const setupStep = resolveMobileSetupStep(user);
+    if (setupStep !== "ready") {
+      setOnboardingEmail(user.email);
+      setOnboardingFirstName(user.firstName ?? "");
+      setOnboardingLastName(user.lastName ?? "");
+      setOnboardingTimezone(user.timezone);
+      setOrgRequestError(null);
+      setOrgRequestNotice(null);
+      setOnboardingError("First name, last name, and verified email are required before requesting organization access.");
+      if (setupStep === "verify_email") {
+        setPendingVerificationUserId(user.id);
+        setVerificationCode("");
+        setVerificationNotice("Verify your email to continue.");
+        setVerificationError(null);
+      } else {
+        setPendingVerificationUserId(null);
+      }
+      setScreen(setupStep);
       return;
     }
 
@@ -3682,177 +3752,194 @@ export default function App() {
     </View>
   );
 
-  const renderOnboarding = () => (
-    <KeyboardAvoidingView
-      style={styles.fill}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={20}
-    >
-      <View style={styles.topRow}>
-        <View style={styles.spacer} />
-        <Text style={styles.topTitle}>First-Time Setup</Text>
-        <View style={styles.spacer} />
-      </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Create Your Local Profile</Text>
-          <Text style={styles.body}>
-            This stores your email and timezone for daily reset and monthly renewal timing.
-            {"\n"}
-            Autodetected timezone: {detectedTimezone}
-            {"\n"}
-            You can change timezone now, but future timezone changes apply on the next cycle reset.
-          </Text>
-          <TextInput
-            value={onboardingEmail}
-            onChangeText={setOnboardingEmail}
-            placeholder="Email address"
-            placeholderTextColor={theme.hint}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            style={styles.input}
-          />
-          <TextInput
-            value={onboardingFirstName}
-            onChangeText={setOnboardingFirstName}
-            placeholder="First name"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="words"
-            style={styles.input}
-          />
-          <TextInput
-            value={onboardingLastName}
-            onChangeText={setOnboardingLastName}
-            placeholder="Last name"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="words"
-            style={styles.input}
-          />
-          <TextInput
-            value={onboardingCompanyCode}
-            onChangeText={setOnboardingCompanyCode}
-            placeholder="Company code"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="characters"
-            style={styles.input}
-          />
-          <Text style={styles.hintText}>Timezone</Text>
-          <TimezoneDropdown
-            value={onboardingTimezone}
-            options={mergedTimezones}
-            onChange={setOnboardingTimezone}
-            placeholder="Select timezone"
-            styles={styles}
-          />
-          {onboardingTimezone !== detectedTimezone ? (
-            <Pressable style={styles.inlineActionButton} onPress={() => setOnboardingTimezone(detectedTimezone)}>
-              <Text style={styles.inlineActionButtonText}>Use detected timezone: {detectedTimezone}</Text>
-            </Pressable>
-          ) : null}
-          {onboardingError ? <Text style={styles.errorText}>{onboardingError}</Text> : null}
-        </View>
-      </ScrollView>
-      <Pressable
-        style={[styles.primaryButton, isOnboardingSaving ? styles.disabled : null]}
-        disabled={isOnboardingSaving}
-        onPress={() => {
-          void runOnboarding();
-        }}
-      >
-        <Text style={styles.primaryButtonText}>{isOnboardingSaving ? "Saving..." : "Continue"}</Text>
-      </Pressable>
-    </KeyboardAvoidingView>
-  );
+  const renderOnboarding = () => {
+    const requiresCompanyCode = isCompanyCodeRequiredForSetup(user);
+    const hasCompanyCode = onboardingCompanyCode.trim().length > 0;
+    const title = user ? "Confirm Your Profile" : "Set Up Your Profile";
+    const continueLabel = requiresCompanyCode
+      ? "Verify & Confirm Profile"
+      : hasCompanyCode
+        ? "Verify & Request Access"
+        : "Verify & Continue Free";
 
-  const renderVerifyEmail = () => (
-    <KeyboardAvoidingView
-      style={styles.fill}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={20}
-    >
-      <View style={styles.topRow}>
-        <View style={styles.spacer} />
-        <Text style={styles.topTitle}>Verify Email</Text>
-        <View style={styles.spacer} />
-      </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Enter Verification Code</Text>
-          <Text style={styles.body}>
-            We sent a 6-digit email code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
-            {"\n"}
-            This is not the org join code.
-            {"\n"}
-            {verificationExpiresAt
-              ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
-              : "Use resend if the code has expired."}
-          </Text>
-          <TextInput
-            value={onboardingFirstName}
-            onChangeText={setOnboardingFirstName}
-            placeholder="First name"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="words"
-            style={styles.input}
-          />
-          <TextInput
-            value={onboardingLastName}
-            onChangeText={setOnboardingLastName}
-            placeholder="Last name"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="words"
-            style={styles.input}
-          />
-          <TextInput
-            value={onboardingCompanyCode}
-            onChangeText={setOnboardingCompanyCode}
-            placeholder="Company code"
-            placeholderTextColor={theme.hint}
-            autoCapitalize="characters"
-            style={styles.input}
-          />
-          <TextInput
-            value={verificationCode}
-            onChangeText={setVerificationCode}
-            placeholder="6-digit code"
-            placeholderTextColor={theme.hint}
-            keyboardType="number-pad"
-            maxLength={6}
-            style={styles.input}
-          />
-          {verificationNotice ? <Text style={styles.successText}>{verificationNotice}</Text> : null}
-          {verificationError ? <Text style={styles.errorText}>{verificationError}</Text> : null}
-          <Pressable
-            style={[styles.primaryButton, isVerificationSaving ? styles.disabled : null]}
-            disabled={isVerificationSaving}
-            onPress={() => {
-              void submitVerificationCode();
-            }}
-          >
-            <Text style={styles.primaryButtonText}>{isVerificationSaving ? "Verifying..." : "Verify & Continue"}</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.linkButton, isVerificationSaving ? styles.disabled : null]}
-            disabled={isVerificationSaving}
-            onPress={() => {
-              void resendVerificationCode();
-            }}
-          >
-            <Text style={styles.linkButtonText}>Resend Code</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.ghostButton, isVerificationSaving ? styles.disabled : null]}
-            disabled={isVerificationSaving}
-            onPress={() => {
-              void resetSessionToOnboarding();
-            }}
-          >
-            <Text style={styles.ghostButtonText}>Start Over</Text>
-          </Pressable>
+    return (
+      <KeyboardAvoidingView
+        style={styles.fill}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={20}
+      >
+        <View style={styles.topRow}>
+          <View style={styles.spacer} />
+          <Text style={styles.topTitle}>{user ? "Profile Confirmation" : "Profile Setup"}</Text>
+          <View style={styles.spacer} />
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
-  );
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
+          <View style={styles.card}>
+            <Text style={styles.title}>{title}</Text>
+            <Text style={styles.body}>
+              First name and last name are required. Company code is optional for free users; enter one to request
+              organization access after email verification. Organization access still requires admin approval.
+              {"\n"}
+              Autodetected timezone: {detectedTimezone}
+              {"\n"}
+              You can change timezone now, but future timezone changes apply on the next cycle reset.
+            </Text>
+            <TextInput
+              value={onboardingEmail}
+              onChangeText={setOnboardingEmail}
+              placeholder="Email address"
+              placeholderTextColor={theme.hint}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingFirstName}
+              onChangeText={setOnboardingFirstName}
+              placeholder="First name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingLastName}
+              onChangeText={setOnboardingLastName}
+              placeholder="Last name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingCompanyCode}
+              onChangeText={setOnboardingCompanyCode}
+              placeholder={requiresCompanyCode ? "Company code required" : "Company code (optional)"}
+              placeholderTextColor={theme.hint}
+              autoCapitalize="characters"
+              style={styles.input}
+            />
+            <Text style={styles.hintText}>Timezone</Text>
+            <TimezoneDropdown
+              value={onboardingTimezone}
+              options={mergedTimezones}
+              onChange={setOnboardingTimezone}
+              placeholder="Select timezone"
+              styles={styles}
+            />
+            {onboardingTimezone !== detectedTimezone ? (
+              <Pressable style={styles.inlineActionButton} onPress={() => setOnboardingTimezone(detectedTimezone)}>
+                <Text style={styles.inlineActionButtonText}>Use detected timezone: {detectedTimezone}</Text>
+              </Pressable>
+            ) : null}
+            {onboardingError ? <Text style={styles.errorText}>{onboardingError}</Text> : null}
+          </View>
+        </ScrollView>
+        <Pressable
+          style={[styles.primaryButton, isOnboardingSaving ? styles.disabled : null]}
+          disabled={isOnboardingSaving}
+          onPress={() => {
+            void runOnboarding();
+          }}
+        >
+          <Text style={styles.primaryButtonText}>{isOnboardingSaving ? "Saving..." : continueLabel}</Text>
+        </Pressable>
+      </KeyboardAvoidingView>
+    );
+  };
+
+  const renderVerifyEmail = () => {
+    const requiresCompanyCode = isCompanyCodeRequiredForSetup(user);
+
+    return (
+      <KeyboardAvoidingView
+        style={styles.fill}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={20}
+      >
+        <View style={styles.topRow}>
+          <View style={styles.spacer} />
+          <Text style={styles.topTitle}>Verify Email</Text>
+          <View style={styles.spacer} />
+        </View>
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+          <View style={styles.card}>
+            <Text style={styles.title}>Enter Verification Code</Text>
+            <Text style={styles.body}>
+              We sent a 6-digit email code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
+              {"\n"}
+              First and last name are required. Company code is optional for free users and still requires admin approval
+              for organization access.
+              {"\n"}
+              {verificationExpiresAt
+                ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
+                : "Use resend if the code has expired."}
+            </Text>
+            <TextInput
+              value={onboardingFirstName}
+              onChangeText={setOnboardingFirstName}
+              placeholder="First name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingLastName}
+              onChangeText={setOnboardingLastName}
+              placeholder="Last name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingCompanyCode}
+              onChangeText={setOnboardingCompanyCode}
+              placeholder={requiresCompanyCode ? "Company code required" : "Company code (optional)"}
+              placeholderTextColor={theme.hint}
+              autoCapitalize="characters"
+              style={styles.input}
+            />
+            <TextInput
+              value={verificationCode}
+              onChangeText={setVerificationCode}
+              placeholder="6-digit code"
+              placeholderTextColor={theme.hint}
+              keyboardType="number-pad"
+              maxLength={6}
+              style={styles.input}
+            />
+            {verificationNotice ? <Text style={styles.successText}>{verificationNotice}</Text> : null}
+            {verificationError ? <Text style={styles.errorText}>{verificationError}</Text> : null}
+            <Pressable
+              style={[styles.primaryButton, isVerificationSaving ? styles.disabled : null]}
+              disabled={isVerificationSaving}
+              onPress={() => {
+                void submitVerificationCode();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>{isVerificationSaving ? "Verifying..." : "Verify & Continue"}</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.linkButton, isVerificationSaving ? styles.disabled : null]}
+              disabled={isVerificationSaving}
+              onPress={() => {
+                void resendVerificationCode();
+              }}
+            >
+              <Text style={styles.linkButtonText}>Resend Code</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.ghostButton, isVerificationSaving ? styles.disabled : null]}
+              disabled={isVerificationSaving}
+              onPress={() => {
+                void resetSessionToOnboarding();
+              }}
+            >
+              <Text style={styles.ghostButtonText}>Start Over</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  };
 
   const renderDomainMatch = () => (
     <KeyboardAvoidingView
