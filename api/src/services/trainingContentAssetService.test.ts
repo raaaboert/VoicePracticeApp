@@ -34,6 +34,7 @@ function buildContent(overrides: Partial<TrainingContentItem> = {}): TrainingCon
   return {
     id: overrides.id ?? "11111111-1111-4111-8111-111111111111",
     orgId: overrides.orgId ?? "org_1",
+    categoryId: overrides.categoryId ?? "22222222-2222-4222-8222-222222222222",
     title: overrides.title ?? "Reference PDF",
     description: overrides.description ?? "",
     focusTopicId: overrides.focusTopicId ?? null,

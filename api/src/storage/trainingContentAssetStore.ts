@@ -188,6 +188,7 @@ type AssetQueryPool = Pick<Pool, "query" | "connect">;
 interface ContentRow {
   id: string;
   org_id: string;
+  category_id: string;
   title: string;
   description: string;
   focus_topic_id: string | null;
@@ -1280,6 +1281,7 @@ function mapContentRow(row: ContentRow): TrainingContentItem {
   return {
     id: row.id,
     orgId: row.org_id,
+    categoryId: row.category_id,
     title: row.title,
     description: row.description,
     focusTopicId: row.focus_topic_id,

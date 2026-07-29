@@ -63,6 +63,7 @@ function createStatefulQueryPool() {
             if (
               text.includes("CREATE TABLE IF NOT EXISTS org_module_entitlements")
               || text.includes("ALTER TABLE org_content_assets")
+              || text.includes("CREATE TABLE IF NOT EXISTS org_content_categories")
             ) {
               schemaQueries.push(text);
               return { rows: [], rowCount: 0 };
@@ -182,9 +183,10 @@ test("postgres module store initializes idempotently and preserves tenant-scoped
 
   await store.initialize();
   await store.initialize();
-  assert.equal(fake.schemaQueries.length, 2);
+  assert.equal(fake.schemaQueries.length, 3);
   assert.match(fake.schemaQueries.join("\n"), /PRIMARY KEY \(org_id, module_key\)/);
   assert.match(fake.schemaQueries.join("\n"), /org_content_assets_ready_state_check/);
+  assert.match(fake.schemaQueries.join("\n"), /org_content_items_category_fkey/);
   assert.ok(fake.transactionQueries.some((query) => query.includes("pg_advisory_xact_lock")));
   assert.equal((await store.getOrgModuleEntitlement("org_1", "training_content")).enabled, false);
 

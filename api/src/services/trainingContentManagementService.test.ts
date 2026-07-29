@@ -67,6 +67,7 @@ function content(overrides: Partial<TrainingContentItem> = {}): TrainingContentI
   return {
     id: "content_1",
     orgId: "org_1",
+    categoryId: "category_1",
     title: "Coaching foundation",
     description: "Practice better coaching.",
     focusTopicId: "topic_1",
@@ -90,6 +91,7 @@ function content(overrides: Partial<TrainingContentItem> = {}): TrainingContentI
 function detail(overrides: Partial<TrainingContentItem> = {}, assignments: TrainingContentAssignment[] = []) {
   return {
     content: content(overrides),
+    categoryName: "General",
     currentAsset: null,
     assignments,
     assignmentCounts: {
@@ -136,6 +138,7 @@ function harness(enabled = true) {
       calls.push({ method: "create", input });
       current = detail({
         id: "created",
+        categoryId: input.categoryId,
         title: input.title,
         description: input.description,
         focusTopicId: input.focusTopicId,
@@ -143,7 +146,6 @@ function harness(enabled = true) {
         contentType: input.contentType,
         nativeBody: input.nativeBody,
         externalUrl: input.externalUrl,
-        displayOrder: input.displayOrder,
       });
       return current;
     },
@@ -155,12 +157,12 @@ function harness(enabled = true) {
           Object.entries(input).filter(([key, value]) =>
             value !== undefined && [
               "title",
+              "categoryId",
               "description",
               "focusTopicId",
               "focusTopicNameSnapshot",
               "nativeBody",
               "externalUrl",
-              "displayOrder",
             ].includes(key)
           )
         ),
@@ -204,8 +206,86 @@ function harness(enabled = true) {
       throw new Error("not used");
     },
   };
+  const defaultCategory = {
+    id: "category_1",
+    orgId: "org_1",
+    name: "General",
+    description: "",
+    displayOrder: 0,
+    isDefault: true,
+    createdByActorId: "admin",
+    updatedByActorId: "admin",
+    createdAt: NOW,
+    updatedAt: NOW,
+    archivedAt: null,
+    activeItemCount: 1,
+    archivedItemCount: 0,
+  };
+  const categoryStore = {
+    async initialize() {},
+    async ensureDefaultCategory() {
+      return defaultCategory;
+    },
+    async listCategories() {
+      return { categories: [defaultCategory], orderRevision: NOW };
+    },
+    async getActiveCategoryForOrg(orgId: string, categoryId: string) {
+      return orgId === "org_1" && categoryId === defaultCategory.id ? defaultCategory : null;
+    },
+    async createCategory(input: any) {
+      const category = {
+        ...defaultCategory,
+        id: "category_2",
+        name: input.name,
+        description: input.description,
+        isDefault: false,
+        activeItemCount: 0,
+      };
+      return { category, categories: [defaultCategory, category], orderRevision: NOW };
+    },
+    async updateCategory(input: any) {
+      const category = {
+        ...defaultCategory,
+        name: input.name ?? defaultCategory.name,
+        description: input.description ?? defaultCategory.description,
+      };
+      return { category, categories: [category], orderRevision: NOW };
+    },
+    async reorderCategories() {
+      return { categories: [defaultCategory], orderRevision: NOW };
+    },
+    async archiveCategory() {
+      return {
+        category: { ...defaultCategory, isDefault: false, archivedAt: NOW },
+        movedItemCount: 1,
+        categories: [defaultCategory],
+        orderRevision: NOW,
+      };
+    },
+    async getContentOrder() {
+      return {
+        groups: [{
+          categoryId: defaultCategory.id,
+          categoryName: defaultCategory.name,
+          items: [{
+            id: current.content.id,
+            title: current.content.title,
+            categoryId: defaultCategory.id,
+            publicationState: "draft" as const,
+            displayOrder: 0,
+            updatedAt: NOW,
+          }],
+        }],
+        orderRevision: NOW,
+      };
+    },
+    async reorderContent() {
+      return this.getContentOrder();
+    },
+  };
   const service = createTrainingContentManagementService({
     store: store as any,
+    categoryStore: categoryStore as any,
     entitlementStore: entitlement,
     storageConfig: {
       fileSizeLimits: {
@@ -221,6 +301,7 @@ function harness(enabled = true) {
     service,
     calls,
     store,
+    categoryStore,
     setCurrent(next: ReturnType<typeof detail>) {
       current = next;
     },
@@ -304,6 +385,98 @@ test("native creation accepts constrained Markdown and rejects raw HTML, images,
         && error.code === "training_content_invalid"
     );
   }
+});
+
+test("content categories are required, tenant-scoped, and distinct from optional Focus Topics", async () => {
+  const { service, calls } = harness();
+  const defaulted = await service.createContent({
+    context,
+    references,
+    input: {
+      contentType: "native",
+      title: "General resource",
+      nativeBody: "# General",
+    },
+  });
+  assert.equal(defaulted.categoryId, "category_1");
+  assert.equal(defaulted.categoryName, "General");
+  assert.equal(defaulted.focusTopicId, null);
+  assert.equal(calls.at(-1)?.input.categoryId, "category_1");
+
+  const related = await service.createContent({
+    context,
+    references,
+    input: {
+      contentType: "native",
+      categoryId: "category_1",
+      title: "Related resource",
+      focusTopicId: "topic_1",
+      nativeBody: "# Related",
+    },
+  });
+  assert.equal(related.categoryId, "category_1");
+  assert.equal(related.focusTopicId, "topic_1");
+
+  await assert.rejects(
+    service.createContent({
+      context,
+      references,
+      input: {
+        contentType: "native",
+        categoryId: "foreign_category",
+        title: "Foreign category",
+        nativeBody: "# No",
+      },
+    }),
+    (error: unknown) =>
+      error instanceof TrainingContentManagementServiceError
+      && error.status === 404
+      && error.code === "training_content_category_not_found"
+  );
+});
+
+test("category administration normalizes fields and validates complete ordered ID payloads", async () => {
+  const { service } = harness();
+  const listed = await service.listCategories({ context });
+  assert.deepEqual(listed.categories.map((entry) => entry.name), ["General"]);
+
+  const created = await service.createCategory({
+    context,
+    input: { name: "  Leadership  ", description: "  Manager resources  " },
+  });
+  assert.equal(created.category.name, "Leadership");
+  assert.equal(created.category.description, "Manager resources");
+
+  const updated = await service.updateCategory({
+    context,
+    categoryId: "category_1",
+    input: { expectedUpdatedAt: NOW, name: " Core " },
+  });
+  assert.equal(updated.category.name, "Core");
+
+  await assert.rejects(
+    service.reorderCategories({
+      context,
+      input: {
+        expectedOrderRevision: NOW,
+        categoryIds: ["category_1", "category_1"],
+      },
+    }),
+    /duplicate IDs/
+  );
+  await assert.rejects(
+    service.reorderContent({
+      context,
+      input: {
+        expectedOrderRevision: NOW,
+        categories: [
+          { categoryId: "category_1", contentIds: ["content_1"] },
+          { categoryId: "category_1", contentIds: [] },
+        ],
+      },
+    }),
+    /duplicate category IDs/
+  );
 });
 
 test("external content requires HTTPS without embedded credentials and file drafts reject source fields", async () => {
@@ -532,6 +705,7 @@ test("list filters are bounded and unusual search input remains a parameter valu
     references,
     filters: {
       query: "%_\\'; DROP TABLE org_content_items; --",
+      categoryId: "category_1",
       contentType: "native",
       publicationState: "draft",
       page: "2",
@@ -541,6 +715,7 @@ test("list filters are bounded and unusual search input remains a parameter valu
   });
   assert.equal(calls[0]?.method, "list");
   assert.equal(calls[0]?.input.query, "%_\\'; DROP TABLE org_content_items; --");
+  assert.equal(calls[0]?.input.categoryId, "category_1");
   assert.equal(calls[0]?.input.page, 2);
   assert.equal(calls[0]?.input.pageSize, 50);
 });

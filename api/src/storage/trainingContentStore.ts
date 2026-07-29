@@ -19,6 +19,7 @@ import { initializeTrainingContentSchema } from "./trainingContentMigrations.js"
 
 export type TrainingContentStoreErrorCode =
   | "training_content_not_found"
+  | "training_content_category_not_found"
   | "training_content_archived"
   | "training_content_conflict"
   | "training_content_invalid"
@@ -72,6 +73,7 @@ export interface TrainingContentAssignmentCounts {
 
 export interface TrainingContentManagementListRow {
   content: TrainingContentItem;
+  categoryName: string;
   currentAsset: TrainingContentCurrentAssetRecord | null;
   assignmentCounts: TrainingContentAssignmentCounts;
 }
@@ -89,6 +91,7 @@ export interface TrainingContentManagementListResult {
 
 export interface TrainingContentListFilters {
   query?: string | null;
+  categoryId?: string | null;
   focusTopicId?: string | null;
   contentType?: TrainingContentType | null;
   publicationState?: TrainingContentPublicationState | null;
@@ -99,6 +102,7 @@ export interface TrainingContentListFilters {
 
 export interface CreateTrainingContentInput {
   orgId: string;
+  categoryId: string;
   title: string;
   description: string;
   focusTopicId: string | null;
@@ -106,7 +110,6 @@ export interface CreateTrainingContentInput {
   contentType: TrainingContentType;
   nativeBody: string | null;
   externalUrl: string | null;
-  displayOrder: number;
   actor: TrainingContentMutationActor;
   now?: Date;
 }
@@ -115,13 +118,13 @@ export interface UpdateTrainingContentInput {
   orgId: string;
   contentId: string;
   expectedUpdatedAt: string;
+  categoryId?: string;
   title?: string;
   description?: string;
   focusTopicId?: string | null;
   focusTopicNameSnapshot?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
-  displayOrder?: number;
   actor: TrainingContentMutationActor;
   now?: Date;
 }
@@ -182,6 +185,7 @@ type TrainingContentQueryable = Pick<PoolClient, "query"> | Pick<Pool, "query">;
 interface TrainingContentItemRow {
   id: string;
   org_id: string;
+  category_id: string;
   title: string;
   description: string;
   focus_topic_id: string | null;
@@ -237,6 +241,7 @@ interface TrainingContentAssignmentRow {
 
 interface TrainingContentManagementRow extends TrainingContentItemRow {
   total_count: string | number;
+  category_name: string;
   current_asset_id: string | null;
   current_asset_org_id: string | null;
   current_asset_content_id: string | null;
@@ -263,9 +268,15 @@ interface TrainingContentManagementRow extends TrainingContentItemRow {
   manager_team_assignment_count: string | number;
 }
 
+interface TrainingContentCategoryIdentityRow {
+  id: string;
+  org_id: string;
+}
+
 const CONTENT_COLUMNS = `
   id,
   org_id,
+  category_id,
   title,
   description,
   focus_topic_id,
@@ -425,8 +436,13 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       conditions.push(`(
         STRPOS(LOWER(c.title), LOWER(${parameter})) > 0
         OR STRPOS(LOWER(c.description), LOWER(${parameter})) > 0
+        OR STRPOS(LOWER(category.name), LOWER(${parameter})) > 0
         OR STRPOS(LOWER(COALESCE(c.focus_topic_name_snapshot, '')), LOWER(${parameter})) > 0
       )`);
+    }
+    if (filters.categoryId?.trim()) {
+      values.push(filters.categoryId.trim());
+      conditions.push(`c.category_id = $${values.length}`);
     }
     if (filters.focusTopicId?.trim()) {
       values.push(filters.focusTopicId.trim());
@@ -450,13 +466,16 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     const offsetParameter = `$${values.length}`;
     const orderBy = filters.sort === "title_asc"
       ? "LOWER(c.title) ASC, c.updated_at DESC, c.id ASC"
-      : "c.updated_at DESC, LOWER(c.title) ASC, c.id ASC";
+      : filters.sort === "library_order"
+        ? "category.display_order ASC, c.display_order ASC, LOWER(c.title) ASC, c.id ASC"
+        : "c.updated_at DESC, LOWER(c.title) ASC, c.id ASC";
 
     const result = await this.pool.query<TrainingContentManagementRow>(
       `
         SELECT
           c.*,
           COUNT(*) OVER() AS total_count,
+          category.name AS category_name,
           asset.id AS current_asset_id,
           asset.org_id AS current_asset_org_id,
           asset.content_id AS current_asset_content_id,
@@ -482,6 +501,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           COALESCE(assignments.manager_count, 0) AS manager_assignment_count,
           COALESCE(assignments.manager_team_count, 0) AS manager_team_assignment_count
         FROM org_content_items c
+        INNER JOIN org_content_categories category
+          ON category.org_id = c.org_id
+         AND category.id = c.category_id
         LEFT JOIN LATERAL (
           SELECT ${CURRENT_ASSET_COLUMNS}
           FROM org_content_assets
@@ -517,6 +539,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         `
           SELECT COUNT(*) AS count
           FROM org_content_items c
+          INNER JOIN org_content_categories category
+            ON category.org_id = c.org_id
+           AND category.id = c.category_id
           WHERE ${whereClause}
         `,
         filterValues
@@ -547,11 +572,23 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     const contentId = randomUUID();
     try {
       await client.query("BEGIN");
+      const category = await lockActiveCategory(client, input.orgId, input.categoryId);
+      const orderResult = await client.query<{ max_order: string | number | null }>(
+        `
+          SELECT MAX(display_order) AS max_order
+          FROM org_content_items
+          WHERE org_id = $1 AND category_id = $2
+        `,
+        [category.orgId, category.id]
+      );
+      const displayOrder =
+        (optionalDatabaseInteger(orderResult.rows[0]?.max_order ?? null, "Display order") ?? -1) + 1;
       const inserted = await client.query<TrainingContentItemRow>(
         `
           INSERT INTO org_content_items (
             id,
             org_id,
+            category_id,
             title,
             description,
             focus_topic_id,
@@ -568,13 +605,14 @@ class PostgresTrainingContentStore implements TrainingContentStore {
             updated_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 'draft', $8, $9, $10, 1, $11, $11, $12, $12
+            $1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, 1, $12, $12, $13, $13
           )
           RETURNING ${CONTENT_COLUMNS}
         `,
         [
           contentId,
-          requiredId(input.orgId, "Organization id"),
+          category.orgId,
+          category.id,
           input.title,
           input.description,
           input.focusTopicId,
@@ -582,7 +620,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           input.contentType,
           input.nativeBody,
           input.externalUrl,
-          input.displayOrder,
+          displayOrder,
           requiredId(input.actor.actorId, "Actor id"),
           now,
         ]
@@ -597,6 +635,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         contentVersion: content.contentVersion,
         metadata: {
           publicationState: content.publicationState,
+          categoryId: content.categoryId,
           focusTopicId: content.focusTopicId,
         },
         now,
@@ -617,6 +656,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const requestedCategory = input.categoryId
+        ? await lockActiveCategory(client, input.orgId, input.categoryId)
+        : null;
       const current = await lockContent(client, input.orgId, input.contentId);
       assertExpectedUpdatedAt(current, input.expectedUpdatedAt);
       if (current.publicationState === "archived") {
@@ -627,6 +669,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       }
 
       const next = {
+        categoryId: requestedCategory?.id ?? current.categoryId,
         title: input.title ?? current.title,
         description: input.description ?? current.description,
         focusTopicId: input.focusTopicId === undefined ? current.focusTopicId : input.focusTopicId,
@@ -635,9 +678,24 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           : input.focusTopicNameSnapshot,
         nativeBody: input.nativeBody === undefined ? current.nativeBody : input.nativeBody,
         externalUrl: input.externalUrl === undefined ? current.externalUrl : input.externalUrl,
-        displayOrder: input.displayOrder ?? current.displayOrder,
       };
+      const categoryChanged = next.categoryId !== current.categoryId;
+      let nextDisplayOrder = current.displayOrder;
+      if (categoryChanged) {
+        const orderResult = await client.query<{ max_order: string | number | null }>(
+          `
+            SELECT MAX(display_order) AS max_order
+            FROM org_content_items
+            WHERE org_id = $1 AND category_id = $2
+          `,
+          [current.orgId, next.categoryId]
+        );
+        nextDisplayOrder =
+          (optionalDatabaseInteger(orderResult.rows[0]?.max_order ?? null, "Display order") ?? -1)
+          + 1;
+      }
       const changedFields = [
+        categoryChanged ? "category" : null,
         next.title !== current.title ? "title" : null,
         next.description !== current.description ? "description" : null,
         next.focusTopicId !== current.focusTopicId
@@ -646,7 +704,6 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           : null,
         next.nativeBody !== current.nativeBody ? "nativeBody" : null,
         next.externalUrl !== current.externalUrl ? "externalUrl" : null,
-        next.displayOrder !== current.displayOrder ? "displayOrder" : null,
       ].filter((field): field is string => Boolean(field));
 
       if (changedFields.length === 0) {
@@ -660,29 +717,31 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       const updated = await client.query<TrainingContentItemRow>(
         `
           UPDATE org_content_items
-          SET title = $3,
-              description = $4,
-              focus_topic_id = $5,
-              focus_topic_name_snapshot = $6,
-              native_body = $7,
-              external_url = $8,
-              display_order = $9,
-              content_version = content_version + $10,
-              updated_by_actor_id = $11,
-              updated_at = $12
+          SET category_id = $3,
+              title = $4,
+              description = $5,
+              focus_topic_id = $6,
+              focus_topic_name_snapshot = $7,
+              native_body = $8,
+              external_url = $9,
+              display_order = $10,
+              content_version = content_version + $11,
+              updated_by_actor_id = $12,
+              updated_at = $13
           WHERE org_id = $1 AND id = $2
           RETURNING ${CONTENT_COLUMNS}
         `,
         [
           current.orgId,
           current.id,
+          next.categoryId,
           next.title,
           next.description,
           next.focusTopicId,
           next.focusTopicNameSnapshot,
           next.nativeBody,
           next.externalUrl,
-          next.displayOrder,
+          nextDisplayOrder,
           sourceChanged ? 1 : 0,
           requiredId(input.actor.actorId, "Actor id"),
           now,
@@ -705,6 +764,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           contentVersion: content.contentVersion,
           metadata: {
             changedFields: metadataFields,
+            categoryId: content.categoryId,
             focusTopicId: content.focusTopicId,
           },
           now,
@@ -990,6 +1050,30 @@ async function lockContent(
   return mapContentItemRow(result.rows[0]);
 }
 
+async function lockActiveCategory(
+  client: Pick<PoolClient, "query">,
+  orgId: string,
+  categoryId: string
+): Promise<{ id: string; orgId: string }> {
+  const result = await client.query<TrainingContentCategoryIdentityRow>(
+    `
+      SELECT id, org_id
+      FROM org_content_categories
+      WHERE org_id = $1 AND id = $2 AND archived_at IS NULL
+      FOR UPDATE
+    `,
+    [requiredId(orgId, "Organization id"), requiredId(categoryId, "Category id")]
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new TrainingContentStoreError(
+      "Content Category was not found.",
+      "training_content_category_not_found"
+    );
+  }
+  return { id: row.id, orgId: row.org_id };
+}
+
 async function readContentDetail(
   queryable: TrainingContentQueryable,
   orgId: string,
@@ -999,7 +1083,16 @@ async function readContentDetail(
   if (!content) {
     return null;
   }
-  const [assetResult, assignmentResult] = await Promise.all([
+  const [categoryResult, assetResult, assignmentResult] = await Promise.all([
+    queryable.query<{ name: string }>(
+      `
+        SELECT name
+        FROM org_content_categories
+        WHERE org_id = $1 AND id = $2
+        LIMIT 1
+      `,
+      [content.orgId, content.categoryId]
+    ),
     queryable.query<TrainingContentAssetRow>(
       `
         SELECT ${CURRENT_ASSET_COLUMNS}
@@ -1022,9 +1115,14 @@ async function readContentDetail(
       [content.orgId, content.id]
     ),
   ]);
+  const categoryName = categoryResult.rows[0]?.name;
+  if (!categoryName) {
+    throw new Error("Training Content category row is missing.");
+  }
   const assignments = assignmentResult.rows.map(mapAssignmentRow);
   return {
     content,
+    categoryName,
     currentAsset: assetResult.rows[0] ? mapCurrentAssetRow(assetResult.rows[0]) : null,
     assignments,
     assignmentCounts: countAssignments(assignments),
@@ -1114,6 +1212,7 @@ function isValidStoredHttpsUrl(value: string | null): boolean {
 function mapManagementRow(row: TrainingContentManagementRow): TrainingContentManagementListRow {
   return {
     content: mapContentItemRow(row),
+    categoryName: row.category_name,
     currentAsset: mapPrefixedCurrentAssetRow(row),
     assignmentCounts: {
       organization: databaseInteger(row.organization_assignment_count, "Organization assignment count"),
@@ -1197,6 +1296,7 @@ function mapContentItemRow(row: TrainingContentItemRow): TrainingContentItem {
   return {
     id: row.id,
     orgId: row.org_id,
+    categoryId: row.category_id,
     title: row.title,
     description: row.description,
     focusTopicId: row.focus_topic_id,

@@ -7,6 +7,7 @@ import { createTrainingContentStore } from "./trainingContentStore.js";
 const CONTENT_ROW = {
   id: "7d8ac3f7-7596-4c64-83f3-3a38f2118fc2",
   org_id: "org_1",
+  category_id: "2d8ac3f7-7596-4c64-83f3-3a38f2118fc2",
   title: "Coaching foundation",
   description: "Foundation content",
   focus_topic_id: "training_1",
@@ -78,6 +79,7 @@ test("Training Content store initializes once and scopes every content read by o
             || text.includes("pg_advisory_xact_lock")
             || text.includes("CREATE TABLE IF NOT EXISTS org_content_items")
             || text.includes("ALTER TABLE org_content_assets")
+            || text.includes("CREATE TABLE IF NOT EXISTS org_content_categories")
           ) {
             return { rows: [], rowCount: 0 };
           }
@@ -108,14 +110,16 @@ test("Training Content store initializes once and scopes every content read by o
   assert.equal(queries.filter((query) =>
     query.text.includes("CREATE TABLE IF NOT EXISTS")
     || query.text.includes("ALTER TABLE org_content_assets")
-  ).length, 2);
+  ).length, 3);
   assert.ok(queries.some((query) => query.text.includes("pg_advisory_xact_lock")));
   assert.equal(orgOne.length, 1);
   assert.equal(orgTwo.length, 0);
   assert.equal(scoped?.orgId, "org_1");
   assert.equal(crossTenant, null);
   assert.deepEqual(
-    queries.filter((query) => query.text.includes("FROM org_content_items")).map((query) => query.values),
+    queries
+      .filter((query) => query.text.includes("FROM org_content_items") && query.values)
+      .map((query) => query.values),
     [["org_1"], ["org_2"], ["org_1", CONTENT_ROW.id], ["org_2", CONTENT_ROW.id]]
   );
 });

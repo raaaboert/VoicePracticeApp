@@ -5,6 +5,7 @@ import type { Pool, PoolClient } from "pg";
 const TRAINING_CONTENT_MIGRATIONS = [
   "008_training_content.sql",
   "009_training_content_storage.sql",
+  "010_training_content_categories.sql",
 ] as const;
 
 type MigrationPool = Pick<Pool, "connect">;

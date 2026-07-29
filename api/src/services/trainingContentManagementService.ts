@@ -4,28 +4,41 @@ import {
   TRAINING_CONTENT_LIST_SORTS,
   TRAINING_CONTENT_PUBLICATION_STATES,
   TRAINING_CONTENT_TYPES,
+  type ArchiveDashboardTrainingContentCategoryRequest,
   type CreateDashboardTrainingContentRequest,
+  type CreateDashboardTrainingContentCategoryRequest,
   type DashboardTrainingContentAsset,
   type DashboardTrainingContentAssignmentSelection,
   type DashboardTrainingContentAssignmentSummary,
+  type DashboardTrainingContentCategory,
   type DashboardTrainingContentDetail,
   type DashboardTrainingContentFocusTopic,
   type DashboardTrainingContentLifecycleRequest,
   type DashboardTrainingContentListItem,
+  type DashboardTrainingContentOrderGroup,
   type DashboardTrainingContentTarget,
   type OrgTrainingRecord,
+  type ReorderDashboardTrainingContentCategoriesRequest,
+  type ReorderDashboardTrainingContentRequest,
   type TrainingContentAssignmentType,
   type TrainingContentFileLimitsBytes,
   type TrainingContentListSort,
   type TrainingContentPublicationState,
   type TrainingContentType,
   type UpdateDashboardTrainingContentAssignmentsRequest,
+  type UpdateDashboardTrainingContentCategoryRequest,
   type UpdateDashboardTrainingContentRequest,
   type UserProfile,
 } from "@voicepractice/shared";
 
 import type { TrainingContentStorageConfig } from "../trainingContentStorageConfig.js";
 import type { OrgModuleEntitlementStore } from "../storage/orgModuleEntitlementStore.js";
+import {
+  type TrainingContentCategoryStore,
+  TrainingContentCategoryStoreError,
+  type TrainingContentCategorySummary,
+  type TrainingContentOrderResult,
+} from "../storage/trainingContentCategoryStore.js";
 import {
   type TrainingContentListFilters,
   type TrainingContentManagementDetail,
@@ -60,6 +73,22 @@ export interface TrainingContentManagementList {
   total: number;
 }
 
+export interface TrainingContentCategoryManagementList {
+  categories: DashboardTrainingContentCategory[];
+  orderRevision: string;
+}
+
+export interface TrainingContentCategoryManagementMutation {
+  category: DashboardTrainingContentCategory;
+  movedItemCount?: number;
+  orderRevision: string;
+}
+
+export interface TrainingContentOrderManagementResult {
+  groups: DashboardTrainingContentOrderGroup[];
+  orderRevision: string;
+}
+
 export class TrainingContentManagementServiceError extends Error {
   constructor(
     message: string,
@@ -79,6 +108,7 @@ export interface TrainingContentManagementService {
     references: TrainingContentReferenceData;
     filters?: {
       query?: unknown;
+      categoryId?: unknown;
       focusTopicId?: unknown;
       contentType?: unknown;
       publicationState?: unknown;
@@ -134,10 +164,45 @@ export interface TrainingContentManagementService {
     context: TrainingContentManagementRequestContext;
     references: TrainingContentReferenceData;
   }): Promise<DashboardTrainingContentFocusTopic[]>;
+  listCategories(params: {
+    context: TrainingContentManagementRequestContext;
+    includeArchived?: unknown;
+  }): Promise<TrainingContentCategoryManagementList>;
+  createCategory(params: {
+    context: TrainingContentManagementRequestContext;
+    input: CreateDashboardTrainingContentCategoryRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementMutation>;
+  updateCategory(params: {
+    context: TrainingContentManagementRequestContext;
+    categoryId: string;
+    input: UpdateDashboardTrainingContentCategoryRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementMutation>;
+  reorderCategories(params: {
+    context: TrainingContentManagementRequestContext;
+    input: ReorderDashboardTrainingContentCategoriesRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementList>;
+  archiveCategory(params: {
+    context: TrainingContentManagementRequestContext;
+    categoryId: string;
+    input: ArchiveDashboardTrainingContentCategoryRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementMutation>;
+  getContentOrder(params: {
+    context: TrainingContentManagementRequestContext;
+  }): Promise<TrainingContentOrderManagementResult>;
+  reorderContent(params: {
+    context: TrainingContentManagementRequestContext;
+    input: ReorderDashboardTrainingContentRequest;
+    now?: Date;
+  }): Promise<TrainingContentOrderManagementResult>;
 }
 
 interface TrainingContentManagementServiceParams {
   store: TrainingContentStore;
+  categoryStore: TrainingContentCategoryStore;
   entitlementStore: OrgModuleEntitlementStore;
   storageConfig: TrainingContentStorageConfig;
 }
@@ -154,6 +219,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     references: TrainingContentReferenceData;
     filters?: {
       query?: unknown;
+      categoryId?: unknown;
       focusTopicId?: unknown;
       contentType?: unknown;
       publicationState?: unknown;
@@ -201,13 +267,26 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     await this.authorize(params.context);
     assertOnlyFields(params.input, [
       "contentType",
+      "categoryId",
       "title",
       "description",
       "focusTopicId",
       "nativeBody",
       "externalUrl",
-      "displayOrder",
     ]);
+    const actor = buildActor(params.context);
+    const category = params.input.categoryId === undefined
+      || params.input.categoryId === null
+      || params.input.categoryId === ""
+      ? await this.dependencies.categoryStore.ensureDefaultCategory({
+        orgId: params.context.orgId,
+        actor,
+        now: params.now,
+      })
+      : await this.getRequiredActiveCategory(
+        params.context.orgId,
+        params.input.categoryId
+      );
     const contentType = normalizeContentType(params.input.contentType);
     const focusTopic = resolveFocusTopic(
       params.references,
@@ -218,6 +297,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     const externalUrl = normalizeExternalUrlForType(params.input.externalUrl, contentType);
     const detail = await this.dependencies.store.createContent({
       orgId: params.context.orgId,
+      categoryId: category.id,
       title: normalizeTitle(params.input.title),
       description: normalizeDescription(params.input.description),
       focusTopicId: focusTopic?.id ?? null,
@@ -225,8 +305,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       contentType,
       nativeBody,
       externalUrl,
-      displayOrder: normalizeDisplayOrder(params.input.displayOrder),
-      actor: buildActor(params.context),
+      actor,
       now: params.now,
     });
     return mapDetail(detail, params.context.orgId, params.references);
@@ -242,12 +321,12 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     await this.authorize(params.context);
     assertOnlyFields(params.input, [
       "expectedUpdatedAt",
+      "categoryId",
       "title",
       "description",
       "focusTopicId",
       "nativeBody",
       "externalUrl",
-      "displayOrder",
     ]);
     const contentId = requiredId(params.contentId, "Content id");
     const current = await this.dependencies.store.getContentDetailForOrg(
@@ -265,10 +344,17 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         params.context.orgId,
         params.input.focusTopicId
       );
+    const categoryId = params.input.categoryId === undefined
+      ? undefined
+      : (await this.getRequiredActiveCategory(
+        params.context.orgId,
+        params.input.categoryId
+      )).id;
     const detail = await this.dependencies.store.updateContent({
       orgId: params.context.orgId,
       contentId,
       expectedUpdatedAt: normalizeExpectedUpdatedAt(params.input.expectedUpdatedAt),
+      categoryId,
       title: params.input.title === undefined ? undefined : normalizeTitle(params.input.title),
       description: params.input.description === undefined
         ? undefined
@@ -283,9 +369,6 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       externalUrl: params.input.externalUrl === undefined
         ? undefined
         : normalizeExternalUrlForType(params.input.externalUrl, current.content.contentType),
-      displayOrder: params.input.displayOrder === undefined
-        ? undefined
-        : normalizeDisplayOrder(params.input.displayOrder),
       actor: buildActor(params.context),
       now: params.now,
     });
@@ -466,6 +549,165 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       }));
   }
 
+  async listCategories(params: {
+    context: TrainingContentManagementRequestContext;
+    includeArchived?: unknown;
+  }): Promise<TrainingContentCategoryManagementList> {
+    await this.authorize(params.context);
+    await this.ensureDefaultCategory(params.context);
+    const result = await this.dependencies.categoryStore.listCategories({
+      orgId: params.context.orgId,
+      includeArchived: normalizeOptionalBoolean(params.includeArchived, "includeArchived"),
+    });
+    return mapCategoryList(result);
+  }
+
+  async createCategory(params: {
+    context: TrainingContentManagementRequestContext;
+    input: CreateDashboardTrainingContentCategoryRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementMutation> {
+    await this.authorize(params.context);
+    assertOnlyFields(params.input, ["name", "description"]);
+    const actor = buildActor(params.context);
+    await this.dependencies.categoryStore.ensureDefaultCategory({
+      orgId: params.context.orgId,
+      actor,
+      now: params.now,
+    });
+    const result = await this.dependencies.categoryStore.createCategory({
+      orgId: params.context.orgId,
+      name: normalizeCategoryName(params.input.name),
+      description: normalizeCategoryDescription(params.input.description),
+      actor,
+      now: params.now,
+    });
+    return mapCategoryMutation(result);
+  }
+
+  async updateCategory(params: {
+    context: TrainingContentManagementRequestContext;
+    categoryId: string;
+    input: UpdateDashboardTrainingContentCategoryRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementMutation> {
+    await this.authorize(params.context);
+    assertOnlyFields(params.input, ["expectedUpdatedAt", "name", "description"]);
+    if (params.input.name === undefined && params.input.description === undefined) {
+      throw validationError("Provide a category name or description.");
+    }
+    const result = await this.dependencies.categoryStore.updateCategory({
+      orgId: params.context.orgId,
+      categoryId: requiredId(params.categoryId, "Category id"),
+      expectedUpdatedAt: normalizeExpectedUpdatedAt(params.input.expectedUpdatedAt),
+      name: params.input.name === undefined
+        ? undefined
+        : normalizeCategoryName(params.input.name),
+      description: params.input.description === undefined
+        ? undefined
+        : normalizeCategoryDescription(params.input.description),
+      actor: buildActor(params.context),
+      now: params.now,
+    });
+    return mapCategoryMutation(result);
+  }
+
+  async reorderCategories(params: {
+    context: TrainingContentManagementRequestContext;
+    input: ReorderDashboardTrainingContentCategoriesRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementList> {
+    await this.authorize(params.context);
+    assertOnlyFields(params.input, ["expectedOrderRevision", "categoryIds"]);
+    const result = await this.dependencies.categoryStore.reorderCategories({
+      orgId: params.context.orgId,
+      categoryIds: normalizeOrderedIdArray(params.input.categoryIds, "categoryIds", 500),
+      expectedOrderRevision: normalizeExpectedUpdatedAt(params.input.expectedOrderRevision),
+      actor: buildActor(params.context),
+      now: params.now,
+    });
+    return mapCategoryList(result);
+  }
+
+  async archiveCategory(params: {
+    context: TrainingContentManagementRequestContext;
+    categoryId: string;
+    input: ArchiveDashboardTrainingContentCategoryRequest;
+    now?: Date;
+  }): Promise<TrainingContentCategoryManagementMutation> {
+    await this.authorize(params.context);
+    assertOnlyFields(params.input, ["expectedUpdatedAt", "destinationCategoryId"]);
+    const result = await this.dependencies.categoryStore.archiveCategory({
+      orgId: params.context.orgId,
+      categoryId: requiredId(params.categoryId, "Category id"),
+      destinationCategoryId: requiredString(
+        params.input.destinationCategoryId,
+        "destinationCategoryId",
+        200
+      ),
+      expectedUpdatedAt: normalizeExpectedUpdatedAt(params.input.expectedUpdatedAt),
+      actor: buildActor(params.context),
+      now: params.now,
+    });
+    return {
+      category: mapCategory(result.category),
+      movedItemCount: result.movedItemCount,
+      orderRevision: result.orderRevision,
+    };
+  }
+
+  async getContentOrder(params: {
+    context: TrainingContentManagementRequestContext;
+  }): Promise<TrainingContentOrderManagementResult> {
+    await this.authorize(params.context);
+    await this.ensureDefaultCategory(params.context);
+    return mapContentOrder(
+      await this.dependencies.categoryStore.getContentOrder(params.context.orgId)
+    );
+  }
+
+  async reorderContent(params: {
+    context: TrainingContentManagementRequestContext;
+    input: ReorderDashboardTrainingContentRequest;
+    now?: Date;
+  }): Promise<TrainingContentOrderManagementResult> {
+    await this.authorize(params.context);
+    assertOnlyFields(params.input, ["expectedOrderRevision", "categories"]);
+    const categories = normalizeContentOrderGroups(params.input.categories);
+    const result = await this.dependencies.categoryStore.reorderContent({
+      orgId: params.context.orgId,
+      categories,
+      expectedOrderRevision: normalizeExpectedUpdatedAt(params.input.expectedOrderRevision),
+      actor: buildActor(params.context),
+      now: params.now,
+    });
+    return mapContentOrder(result);
+  }
+
+  private async ensureDefaultCategory(
+    context: TrainingContentManagementRequestContext
+  ): Promise<void> {
+    await this.dependencies.categoryStore.ensureDefaultCategory({
+      orgId: context.orgId,
+      actor: buildActor(context),
+    });
+  }
+
+  private async getRequiredActiveCategory(
+    orgId: string,
+    value: unknown
+  ): Promise<{ id: string }> {
+    const categoryId = requiredString(value, "categoryId", 200);
+    const category = await this.dependencies.categoryStore.getActiveCategoryForOrg(
+      orgId,
+      categoryId
+    );
+    if (!category) {
+      throw categoryNotFoundError();
+    }
+    return category;
+  }
+
   private async authorize(context: TrainingContentManagementRequestContext): Promise<void> {
     const orgId = requiredId(context.orgId, "Organization id");
     const entitlement = await this.dependencies.entitlementStore.getOrgModuleEntitlement(
@@ -492,6 +734,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
 
 function normalizeListFilters(input: {
   query?: unknown;
+  categoryId?: unknown;
   focusTopicId?: unknown;
   contentType?: unknown;
   publicationState?: unknown;
@@ -514,10 +757,11 @@ function normalizeListFilters(input: {
     | null;
   return {
     query: normalizeOptionalString(input.query, 200),
+    categoryId: normalizeOptionalString(input.categoryId, 200),
     focusTopicId: normalizeOptionalString(input.focusTopicId, 200),
     contentType,
     publicationState,
-    sort: sort ?? "updated_desc",
+    sort: sort ?? "library_order",
     page: normalizeQueryInteger(input.page, "page", 1, 10_000, 1),
     pageSize: normalizeQueryInteger(input.pageSize, "pageSize", 1, 100, 25),
   };
@@ -541,6 +785,8 @@ function mapListItem(
   ) ?? null;
   return {
     id: row.content.id,
+    categoryId: row.content.categoryId,
+    categoryName: row.categoryName,
     title: row.content.title,
     description: row.content.description,
     focusTopicId: row.content.focusTopicId,
@@ -548,7 +794,6 @@ function mapListItem(
     focusTopicAvailable: row.content.focusTopicId === null || currentTopic !== null,
     contentType: row.content.contentType,
     publicationState: row.content.publicationState,
-    displayOrder: row.content.displayOrder,
     contentVersion: row.content.contentVersion,
     currentAsset: row.currentAsset ? {
       id: row.currentAsset.id,
@@ -592,6 +837,56 @@ function mapDetail(
     nativeBody: detail.content.nativeBody,
     externalUrl: detail.content.externalUrl,
     assignments: mapAssignmentSelection(detail, orgId, references),
+  };
+}
+
+function mapCategoryList(result: {
+  categories: TrainingContentCategorySummary[];
+  orderRevision: string;
+}): TrainingContentCategoryManagementList {
+  return {
+    categories: result.categories.map(mapCategory),
+    orderRevision: result.orderRevision,
+  };
+}
+
+function mapCategoryMutation(result: {
+  category: TrainingContentCategorySummary;
+  orderRevision: string;
+}): TrainingContentCategoryManagementMutation {
+  return {
+    category: mapCategory(result.category),
+    orderRevision: result.orderRevision,
+  };
+}
+
+function mapCategory(category: TrainingContentCategorySummary): DashboardTrainingContentCategory {
+  return {
+    id: category.id,
+    name: category.name,
+    description: category.description,
+    isDefault: category.isDefault,
+    activeItemCount: category.activeItemCount,
+    archivedItemCount: category.archivedItemCount,
+    createdAt: category.createdAt,
+    updatedAt: category.updatedAt,
+    archivedAt: category.archivedAt,
+  };
+}
+
+function mapContentOrder(result: TrainingContentOrderResult): TrainingContentOrderManagementResult {
+  return {
+    groups: result.groups.map((group) => ({
+      categoryId: group.categoryId,
+      categoryName: group.categoryName,
+      items: group.items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        categoryId: item.categoryId,
+        publicationState: item.publicationState,
+      })),
+    })),
+    orderRevision: result.orderRevision,
   };
 }
 
@@ -929,16 +1224,24 @@ function normalizeExternalUrlForType(
   }
 }
 
-function normalizeDisplayOrder(value: unknown): number {
-  if (value === undefined || value === null || value === "") {
-    return 0;
+function normalizeCategoryName(value: unknown): string {
+  return requiredString(value, "name", 120);
+}
+
+function normalizeCategoryDescription(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
   }
-  if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 1_000_000) {
-    throw validationError("Display order must be a whole number from 0 to 1,000,000.", {
-      field: "displayOrder",
+  if (typeof value !== "string") {
+    throw validationError("Category description must be text.", { field: "description" });
+  }
+  const normalized = value.trim();
+  if (normalized.length > 1_000) {
+    throw validationError("Category description must be 1,000 characters or fewer.", {
+      field: "description",
     });
   }
-  return Number(value);
+  return normalized;
 }
 
 function normalizeExpectedUpdatedAt(value: unknown): string {
@@ -961,6 +1264,72 @@ function normalizeIdArray(value: unknown, field: string): string[] {
   }
   const normalized = value.map((entry) => requiredString(entry, field, 200));
   return [...new Set(normalized)].sort();
+}
+
+function normalizeOrderedIdArray(value: unknown, field: string, limit: number): string[] {
+  if (!Array.isArray(value)) {
+    throw validationError(`${field} must be an array.`, { field });
+  }
+  if (value.length > limit) {
+    throw validationError(`${field} cannot contain more than ${limit} entries.`, { field });
+  }
+  const normalized = value.map((entry) => requiredString(entry, field, 200));
+  if (normalized.length !== new Set(normalized).size) {
+    throw validationError(`${field} cannot contain duplicate IDs.`, { field });
+  }
+  return normalized;
+}
+
+function normalizeContentOrderGroups(
+  value: unknown
+): Array<{ categoryId: string; contentIds: string[] }> {
+  if (!Array.isArray(value)) {
+    throw validationError("categories must be an array.", { field: "categories" });
+  }
+  if (value.length > 500) {
+    throw validationError("categories cannot contain more than 500 entries.", {
+      field: "categories",
+    });
+  }
+  const groups = value.map((entry, index) => {
+    assertOnlyFields(entry, ["categoryId", "contentIds"]);
+    const record = entry as { categoryId?: unknown; contentIds?: unknown };
+    return {
+      categoryId: requiredString(record.categoryId, `categories[${index}].categoryId`, 200),
+      contentIds: normalizeOrderedIdArray(
+        record.contentIds,
+        `categories[${index}].contentIds`,
+        2_000
+      ),
+    };
+  });
+  if (groups.length !== new Set(groups.map((entry) => entry.categoryId)).size) {
+    throw validationError("categories cannot contain duplicate category IDs.", {
+      field: "categories",
+    });
+  }
+  const contentIds = groups.flatMap((entry) => entry.contentIds);
+  if (contentIds.length > 2_000) {
+    throw validationError("Content order cannot contain more than 2,000 items.", {
+      field: "categories",
+    });
+  }
+  if (contentIds.length !== new Set(contentIds).size) {
+    throw validationError("Content order cannot contain duplicate item IDs.", {
+      field: "categories",
+    });
+  }
+  return groups;
+}
+
+function normalizeOptionalBoolean(value: unknown, field: string): boolean {
+  if (value === undefined || value === null || value === "" || value === false || value === "false") {
+    return false;
+  }
+  if (value === true || value === "true") {
+    return true;
+  }
+  throw validationError(`${field} must be true or false.`, { field });
 }
 
 function normalizeSearchQuery(value: unknown): string {
@@ -1077,6 +1446,14 @@ function notFoundError(): TrainingContentManagementServiceError {
   );
 }
 
+function categoryNotFoundError(): TrainingContentManagementServiceError {
+  return new TrainingContentManagementServiceError(
+    "Content Category was not found.",
+    404,
+    "training_content_category_not_found"
+  );
+}
+
 export function mapTrainingContentManagementServiceError(
   error: unknown
 ): TrainingContentManagementServiceError {
@@ -1085,9 +1462,24 @@ export function mapTrainingContentManagementServiceError(
   }
   if (error instanceof TrainingContentStoreError) {
     const status = error.code === "training_content_not_found"
+      || error.code === "training_content_category_not_found"
       ? 404
       : error.code === "training_content_publish_invalid"
         ? 422
+        : 409;
+    return new TrainingContentManagementServiceError(
+      error.message,
+      status,
+      error.code,
+      error.details
+    );
+  }
+  if (error instanceof TrainingContentCategoryStoreError) {
+    const status = error.code === "training_content_category_not_found"
+      ? 404
+      : error.code === "training_content_category_reorder_invalid"
+        || error.code === "training_content_reorder_invalid"
+        ? 400
         : 409;
     return new TrainingContentManagementServiceError(
       error.message,

@@ -46,6 +46,7 @@ function content(overrides: Partial<TrainingContentItem> = {}): TrainingContentI
   return {
     id: "content_1",
     orgId: "org_1",
+    categoryId: "category_1",
     title: "Coaching",
     description: "",
     focusTopicId: null,

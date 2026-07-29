@@ -1124,6 +1124,107 @@ before(async () => {
         status: "active",
       }] as any;
     },
+    async listCategories(params) {
+      trainingContentManagementRouteCalls.push({ method: "categories", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        categories: [{
+          id: "22222222-2222-4222-8222-222222222222",
+          name: "General",
+          description: "",
+          isDefault: true,
+          activeItemCount: 1,
+          archivedItemCount: 0,
+          createdAt: NOW,
+          updatedAt: NOW,
+          archivedAt: null,
+        }],
+        orderRevision: NOW,
+      };
+    },
+    async createCategory(params) {
+      trainingContentManagementRouteCalls.push({ method: "create-category", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        category: {
+          id: "33333333-3333-4333-8333-333333333333",
+          name: params.input.name,
+          description: params.input.description ?? "",
+          isDefault: false,
+          activeItemCount: 0,
+          archivedItemCount: 0,
+          createdAt: NOW,
+          updatedAt: NOW,
+          archivedAt: null,
+        },
+        orderRevision: NOW,
+      };
+    },
+    async updateCategory(params) {
+      trainingContentManagementRouteCalls.push({ method: "update-category", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        category: {
+          id: params.categoryId,
+          name: params.input.name ?? "General",
+          description: params.input.description ?? "",
+          isDefault: false,
+          activeItemCount: 1,
+          archivedItemCount: 0,
+          createdAt: NOW,
+          updatedAt: NOW,
+          archivedAt: null,
+        },
+        orderRevision: NOW,
+      };
+    },
+    async reorderCategories(params) {
+      trainingContentManagementRouteCalls.push({ method: "reorder-categories", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        categories: [],
+        orderRevision: NOW,
+      };
+    },
+    async archiveCategory(params) {
+      trainingContentManagementRouteCalls.push({ method: "archive-category", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        category: {
+          id: params.categoryId,
+          name: "Archived",
+          description: "",
+          isDefault: false,
+          activeItemCount: 0,
+          archivedItemCount: 0,
+          createdAt: NOW,
+          updatedAt: NOW,
+          archivedAt: NOW,
+        },
+        movedItemCount: 1,
+        orderRevision: NOW,
+      };
+    },
+    async getContentOrder(params) {
+      trainingContentManagementRouteCalls.push({ method: "content-order", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        groups: [{
+          categoryId: "22222222-2222-4222-8222-222222222222",
+          categoryName: "General",
+          items: [],
+        }],
+        orderRevision: NOW,
+      };
+    },
+    async reorderContent(params) {
+      trainingContentManagementRouteCalls.push({ method: "reorder-content", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        groups: [],
+        orderRevision: NOW,
+      };
+    },
   });
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
@@ -1511,6 +1612,113 @@ test("Training Content management routes enforce module, capability, explicit sc
     orgAdminToken
   );
   assert.equal(focusTopics.status, 200);
+
+  const categories = await dashboardRequest(
+    "/dashboard/admin/training-content/categories",
+    orgAdminToken
+  );
+  assert.equal(categories.status, 200);
+  assert.equal((categories.body.categories as any[])[0]?.name, "General");
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.params.context.orgId, "org_1");
+
+  const categoryDenied = await dashboardRequest(
+    "/dashboard/admin/training-content/categories",
+    userAdminToken
+  );
+  assert.equal(categoryDenied.status, 403);
+  assert.equal(categoryDenied.body.code, "dashboard_scope_denied");
+
+  const categoryCreated = await dashboardRequest(
+    "/dashboard/admin/training-content/categories",
+    orgAdminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({ name: "Leadership", description: "Manager resources" }),
+    }
+  );
+  assert.equal(categoryCreated.status, 201);
+  assert.equal((categoryCreated.body.category as any).name, "Leadership");
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.params.context.actorId, "org_admin");
+
+  const categoryId = "33333333-3333-4333-8333-333333333333";
+  const categoryUpdated = await dashboardRequest(
+    `/dashboard/admin/training-content/categories/${categoryId}`,
+    orgAdminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ expectedUpdatedAt: NOW, name: "Leadership library" }),
+    }
+  );
+  assert.equal(categoryUpdated.status, 200);
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.params.categoryId, categoryId);
+
+  const categoryReordered = await dashboardRequest(
+    "/dashboard/admin/training-content/categories/reorder",
+    orgAdminToken,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        expectedOrderRevision: NOW,
+        categoryIds: [
+          "22222222-2222-4222-8222-222222222222",
+          categoryId,
+        ],
+      }),
+    }
+  );
+  assert.equal(categoryReordered.status, 200);
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.method, "reorder-categories");
+
+  const categoryArchived = await dashboardRequest(
+    `/dashboard/admin/training-content/categories/${categoryId}/archive`,
+    orgAdminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedUpdatedAt: NOW,
+        destinationCategoryId: "22222222-2222-4222-8222-222222222222",
+      }),
+    }
+  );
+  assert.equal(categoryArchived.status, 200);
+  assert.equal(categoryArchived.body.movedItemCount, 1);
+
+  const contentOrder = await dashboardRequest(
+    "/dashboard/admin/training-content/reorder",
+    orgAdminToken
+  );
+  assert.equal(contentOrder.status, 200);
+  assert.equal((contentOrder.body.groups as any[])[0]?.categoryName, "General");
+
+  const contentReordered = await dashboardRequest(
+    "/dashboard/admin/training-content/reorder",
+    orgAdminToken,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        expectedOrderRevision: NOW,
+        categories: [{
+          categoryId: "22222222-2222-4222-8222-222222222222",
+          contentIds: [],
+        }],
+      }),
+    }
+  );
+  assert.equal(contentReordered.status, 200);
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.method, "reorder-content");
+
+  const callsBeforeCategoryOwnedField = trainingContentManagementRouteCalls.length;
+  const categoryOwnedField = await dashboardRequest(
+    "/dashboard/admin/training-content/categories",
+    orgAdminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({ name: "Unsafe", orgId: "org_2", actorId: "other" }),
+    }
+  );
+  assert.equal(categoryOwnedField.status, 400);
+  assert.equal(categoryOwnedField.body.code, "training_content_server_owned_field");
+  assert.equal(trainingContentManagementRouteCalls.length, callsBeforeCategoryOwnedField);
 });
 
 after(async () => {

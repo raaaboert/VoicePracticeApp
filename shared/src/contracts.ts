@@ -103,6 +103,7 @@ export type TrainingContentCompletionMethod = (typeof TRAINING_CONTENT_COMPLETIO
 export interface TrainingContentItem {
   id: string;
   orgId: string;
+  categoryId: string;
   title: string;
   description: string;
   focusTopicId: string | null;
@@ -153,8 +154,26 @@ export interface TrainingContentAssignment {
   revokedAt: string | null;
 }
 
-export const TRAINING_CONTENT_LIST_SORTS = ["updated_desc", "title_asc"] as const;
+export const TRAINING_CONTENT_LIST_SORTS = [
+  "library_order",
+  "updated_desc",
+  "title_asc"
+] as const;
 export type TrainingContentListSort = (typeof TRAINING_CONTENT_LIST_SORTS)[number];
+
+export interface TrainingContentCategory {
+  id: string;
+  orgId: string;
+  name: string;
+  description: string;
+  displayOrder: number;
+  isDefault: boolean;
+  createdByActorId: string;
+  updatedByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
 
 export interface TrainingContentFileLimitsBytes {
   video: number;
@@ -227,6 +246,8 @@ export interface DashboardTrainingContentAssignmentSummary {
 
 export interface DashboardTrainingContentListItem {
   id: string;
+  categoryId: string;
+  categoryName: string;
   title: string;
   description: string;
   focusTopicId: string | null;
@@ -234,7 +255,6 @@ export interface DashboardTrainingContentListItem {
   focusTopicAvailable: boolean;
   contentType: TrainingContentType;
   publicationState: TrainingContentPublicationState;
-  displayOrder: number;
   contentVersion: number;
   currentAsset: DashboardTrainingContentAsset | null;
   assignmentSummary: DashboardTrainingContentAssignmentSummary;
@@ -296,22 +316,22 @@ export interface DashboardTrainingContentDetailResponse {
 
 export interface CreateDashboardTrainingContentRequest {
   contentType: TrainingContentType;
+  categoryId?: string | null;
   title: string;
   description?: string;
   focusTopicId?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
-  displayOrder?: number;
 }
 
 export interface UpdateDashboardTrainingContentRequest {
   expectedUpdatedAt: string;
+  categoryId?: string;
   title?: string;
   description?: string;
   focusTopicId?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
-  displayOrder?: number;
 }
 
 export interface UpdateDashboardTrainingContentAssignmentsRequest {
@@ -344,6 +364,85 @@ export interface DashboardTrainingContentFocusTopicsResponse {
   org: DashboardTrainingContentOrganization;
   generatedAt: string;
   focusTopics: DashboardTrainingContentFocusTopic[];
+}
+
+export interface DashboardTrainingContentCategory {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  activeItemCount: number;
+  archivedItemCount: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface DashboardTrainingContentCategoriesResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  categories: DashboardTrainingContentCategory[];
+  orderRevision: string;
+}
+
+export interface CreateDashboardTrainingContentCategoryRequest {
+  name: string;
+  description?: string;
+}
+
+export interface UpdateDashboardTrainingContentCategoryRequest {
+  expectedUpdatedAt: string;
+  name?: string;
+  description?: string;
+}
+
+export interface ReorderDashboardTrainingContentCategoriesRequest {
+  expectedOrderRevision: string;
+  categoryIds: string[];
+}
+
+export interface ArchiveDashboardTrainingContentCategoryRequest {
+  expectedUpdatedAt: string;
+  destinationCategoryId: string;
+}
+
+export interface DashboardTrainingContentCategoryMutationResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  category: DashboardTrainingContentCategory;
+  movedItemCount?: number;
+  orderRevision: string;
+}
+
+export interface DashboardTrainingContentOrderItem {
+  id: string;
+  title: string;
+  categoryId: string;
+  publicationState: Exclude<TrainingContentPublicationState, "archived">;
+}
+
+export interface DashboardTrainingContentOrderGroup {
+  categoryId: string;
+  categoryName: string;
+  items: DashboardTrainingContentOrderItem[];
+}
+
+export interface DashboardTrainingContentOrderResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  groups: DashboardTrainingContentOrderGroup[];
+  orderRevision: string;
+}
+
+export interface ReorderDashboardTrainingContentRequest {
+  expectedOrderRevision: string;
+  categories: Array<{
+    categoryId: string;
+    contentIds: string[];
+  }>;
 }
 
 export interface TrainingContentScenarioLink {
