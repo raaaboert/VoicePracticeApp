@@ -11,7 +11,8 @@
     "eas-build-post-install": "npm --prefix .. run build:shared"
   },
   "dependencies": {
-    "@config-plugins/react-native-pdf": "^12.0.0",
+    "@config-plugins/react-native-blob-util": "~12.0.0",
+    "@config-plugins/react-native-pdf": "~12.0.0",
     "@expo/vector-icons": "^15.0.3",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@voicepractice/shared": "file:../shared",
@@ -27,8 +28,8 @@
     "expo-video": "~3.0.15",
     "react": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-blob-util": "^0.24.10",
-    "react-native-pdf": "^7.0.4",
+    "react-native-blob-util": "0.21.2",
+    "react-native-pdf": "6.7.7",
     "react-native-safe-area-context": "^5.6.2"
   },
   "devDependencies": {
