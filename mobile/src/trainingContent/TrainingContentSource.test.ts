@@ -20,6 +20,10 @@ test("Training Content is a first-class entitlement-controlled home module", () 
   assert.match(home, /trainingContentEnabled\s*\?\s*\(/);
   assert.match(home, /Review company resources and learning materials\./);
   assert.match(home, /void openTrainingContent\(\)/);
+  assert.ok(
+    home.indexOf('accessibilityLabel="Open Training Content"') >
+      home.indexOf("activeSegment ? (")
+  );
   assert.doesNotMatch(menu, /Training Content/);
   assert.match(app, /screen === "training_content"/);
   assert.match(app, /fetchMobileModules\(user\.id, mobileAuthToken\)/);

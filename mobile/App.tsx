@@ -3827,40 +3827,6 @@ export default function App() {
           </View>
         </LinearGradient>
 
-        {trainingContentEnabled ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Open Training Content"
-            style={[
-              styles.trainingModuleTile,
-              isTrainingContentOpening ? styles.disabled : null,
-            ]}
-            disabled={isTrainingContentOpening}
-            onPress={() => {
-              void openTrainingContent();
-            }}
-          >
-            <View style={styles.trainingModuleIconFrame}>
-              <MaterialCommunityIcons
-                name="bookshelf"
-                size={28}
-                color={APP_SURFACE_COLORS.goldMuted}
-              />
-            </View>
-            <View style={styles.trainingModuleCopy}>
-              <Text style={styles.trainingModuleTitle}>Training Content</Text>
-              <Text style={styles.trainingModuleBody}>
-                Review company resources and learning materials.
-              </Text>
-            </View>
-            {isTrainingContentOpening ? (
-              <ActivityIndicator size="small" color={theme.accent} />
-            ) : (
-              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
-            )}
-          </Pressable>
-        ) : null}
-
         {trainingContentNotice ? (
           <View style={styles.warningCard}>
             <Text style={styles.warningText}>{trainingContentNotice}</Text>
@@ -3912,6 +3878,40 @@ export default function App() {
             <Text style={styles.segmentSummary}>{activeSegment.summary}</Text>
             <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
           </View>
+        ) : null}
+
+        {trainingContentEnabled ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open Training Content"
+            style={[
+              styles.trainingModuleTile,
+              isTrainingContentOpening ? styles.disabled : null,
+            ]}
+            disabled={isTrainingContentOpening}
+            onPress={() => {
+              void openTrainingContent();
+            }}
+          >
+            <View style={styles.trainingModuleIconFrame}>
+              <MaterialCommunityIcons
+                name="bookshelf"
+                size={28}
+                color={APP_SURFACE_COLORS.goldMuted}
+              />
+            </View>
+            <View style={styles.trainingModuleCopy}>
+              <Text style={styles.trainingModuleTitle}>Training Content</Text>
+              <Text style={styles.trainingModuleBody}>
+                Review company resources and learning materials.
+              </Text>
+            </View>
+            {isTrainingContentOpening ? (
+              <ActivityIndicator size="small" color={theme.accent} />
+            ) : (
+              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
+            )}
+          </Pressable>
         ) : null}
       </ScrollView>
     </View>
@@ -4017,7 +4017,7 @@ export default function App() {
     return (
       <KeyboardAvoidingView
         style={styles.fill}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={20}
       >
         <View style={styles.topRow}>
@@ -4025,7 +4025,12 @@ export default function App() {
           <Text style={styles.topTitle}>Verify Email</Text>
           <View style={styles.spacer} />
         </View>
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[styles.scrollContent, styles.verifyEmailScrollContent]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        >
           <View style={styles.card}>
             <Text style={styles.title}>Enter Verification Code</Text>
             <Text style={styles.body}>
@@ -6200,6 +6205,7 @@ function createStyles(theme: ThemeTokens) {
     sectionTitle: { color: theme.text, fontSize: 19, fontWeight: "700", marginTop: 4, marginBottom: 10 },
     scroll: { flex: 1 },
     scrollContent: { paddingBottom: 24 },
+    verifyEmailScrollContent: { flexGrow: 1, paddingBottom: 48 },
     setupScrollContent: { paddingBottom: 14 },
     ghostButton: { minWidth: 84, height: 38, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.ghostButtonBg },
     ghostButtonText: { color: theme.text, fontSize: 14, fontWeight: "700" },
