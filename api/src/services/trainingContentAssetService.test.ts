@@ -752,6 +752,34 @@ test("authorized access is short-lived, capped by content type, and unavailable 
   );
 });
 
+test("authorized admins can inspect the retained current asset after content is archived", async () => {
+  const harness = buildHarness();
+  const initiated = await initiatePdf(harness);
+  putInitiatedUpload(harness, initiated.asset.id);
+  await harness.service.finalizeUpload({
+    context: ORG_ADMIN_CONTEXT,
+    contentId: buildContent().id,
+    assetId: initiated.asset.id,
+    now: NOW,
+  });
+  const archived = buildContent({
+    publicationState: "archived",
+    archivedAt: new Date(NOW.getTime() + 1000).toISOString(),
+  });
+  harness.assetStore.contents.set(`${archived.orgId}:${archived.id}`, archived);
+
+  const access = await harness.service.createAdminPreviewAccess({
+    context: ORG_ADMIN_CONTEXT,
+    contentId: archived.id,
+    assetId: initiated.asset.id,
+    now: NOW,
+  });
+
+  assert.match(access.access.url, /^https:\/\/access\.invalid\//);
+  assert.equal(harness.assetStore.assets.get(initiated.asset.id)?.isCurrent, true);
+  assert.equal(harness.assetStore.assets.get(initiated.asset.id)?.objectDeletedAt, null);
+});
+
 function clone<T>(value: T): T {
   return structuredClone(value);
 }

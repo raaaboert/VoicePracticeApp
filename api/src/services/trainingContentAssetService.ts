@@ -480,7 +480,7 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
       params.context.orgId,
       contentId
     );
-    if (!content || content.publicationState === "archived") {
+    if (!content) {
       throw new TrainingContentAssetServiceError(
         "Training Content item was not found.",
         404,
@@ -742,7 +742,15 @@ export function mapTrainingContentAssetServiceError(error: unknown): TrainingCon
   }
   if (error instanceof TrainingContentAssetStoreError) {
     const status = error.code.endsWith("_not_found") ? 404 : 409;
-    return new TrainingContentAssetServiceError(error.message, status, error.code);
+    const publicCode = {
+      content_not_found: "training_content_not_found",
+      content_archived: "training_content_archived",
+      asset_not_found: "training_content_asset_not_found",
+      asset_state_conflict: "training_content_asset_state_conflict",
+      replacement_conflict: "training_content_replacement_conflict",
+      pending_upload_limit_exceeded: "training_content_pending_upload_limit_exceeded",
+    }[error.code];
+    return new TrainingContentAssetServiceError(error.message, status, publicCode);
   }
   return new TrainingContentAssetServiceError(
     "Training Content asset operation failed.",

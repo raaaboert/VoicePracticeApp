@@ -358,9 +358,23 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         subjectUserId,
       }))
     );
+    const current = await this.dependencies.store.getContentDetailForOrg(
+      params.context.orgId,
+      requiredId(params.contentId, "Content id")
+    );
+    if (!current) {
+      throw notFoundError();
+    }
+    if (current.content.publicationState === "published") {
+      assertHasEffectiveAssignment(
+        assignments.map((assignment) => ({ ...assignment, revokedAt: null })),
+        params.context.orgId,
+        params.references
+      );
+    }
     const detail = await this.dependencies.store.replaceAssignments({
       orgId: params.context.orgId,
-      contentId: requiredId(params.contentId, "Content id"),
+      contentId: current.content.id,
       expectedUpdatedAt: normalizeExpectedUpdatedAt(params.input.expectedUpdatedAt),
       assignments,
       actor: buildActor(params.context),
@@ -379,6 +393,20 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
   }): Promise<DashboardTrainingContentDetail> {
     await this.authorize(params.context);
     assertOnlyFields(params.input, ["expectedUpdatedAt"]);
+    if (params.action === "publish") {
+      const current = await this.dependencies.store.getContentDetailForOrg(
+        params.context.orgId,
+        requiredId(params.contentId, "Content id")
+      );
+      if (!current) {
+        throw notFoundError();
+      }
+      assertHasEffectiveAssignment(
+        current.assignments,
+        params.context.orgId,
+        params.references
+      );
+    }
     const detail = await this.dependencies.store.transitionContent({
       orgId: params.context.orgId,
       contentId: requiredId(params.contentId, "Content id"),
@@ -698,6 +726,44 @@ function isActiveOrganizationUser(user: UserProfile | null, orgId: string): user
     && user.orgId === orgId
     && user.status === "active"
   );
+}
+
+function assertHasEffectiveAssignment(
+  assignments: readonly {
+    assignmentType: TrainingContentAssignmentType;
+    subjectUserId: string | null;
+    revokedAt: string | null;
+  }[],
+  orgId: string,
+  references: TrainingContentReferenceData
+): void {
+  const usersById = new Map(
+    references.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === orgId)
+      .map((user) => [user.id, user])
+  );
+  const hasEffectiveAssignment = assignments.some((assignment) => {
+    if (assignment.revokedAt !== null) {
+      return false;
+    }
+    if (assignment.assignmentType === "organization") {
+      return true;
+    }
+    const user = assignment.subjectUserId
+      ? usersById.get(assignment.subjectUserId) ?? null
+      : null;
+    return assignment.assignmentType === "user"
+      ? isActiveOrganizationUser(user, orgId)
+      : Boolean(user && isEligibleManagerUser(user, orgId));
+  });
+  if (!hasEffectiveAssignment) {
+    throw new TrainingContentManagementServiceError(
+      "Training Content is not ready to publish.",
+      422,
+      "training_content_publish_invalid",
+      { reasons: ["assignment_required"] }
+    );
+  }
 }
 
 function resolveFocusTopic(

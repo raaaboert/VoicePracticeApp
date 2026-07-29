@@ -4,7 +4,10 @@ import test from "node:test";
 
 import { Pool, type PoolClient } from "pg";
 
-import { createTrainingContentAssetStore } from "./trainingContentAssetStore.js";
+import {
+  createTrainingContentAssetStore,
+  TrainingContentAssetStoreError,
+} from "./trainingContentAssetStore.js";
 import {
   createTrainingContentStore,
   TrainingContentStoreError,
@@ -869,6 +872,64 @@ test(
           && error.details.reasons.includes("assignment_required")
       );
 
+      const publishedInvariant = await store.createContent({
+        orgId: "org_a",
+        title: "Published invariant",
+        description: "",
+        focusTopicId: null,
+        focusTopicNameSnapshot: null,
+        contentType: "native",
+        nativeBody: "# Required body",
+        externalUrl: null,
+        displayOrder: 0,
+        actor,
+      });
+      const assignedInvariant = await store.replaceAssignments({
+        orgId: "org_a",
+        contentId: publishedInvariant.content.id,
+        expectedUpdatedAt: publishedInvariant.content.updatedAt,
+        assignments: [{ assignmentType: "organization", subjectUserId: null }],
+        actor,
+      });
+      const activeInvariant = await store.transitionContent({
+        orgId: "org_a",
+        contentId: publishedInvariant.content.id,
+        expectedUpdatedAt: assignedInvariant.content.updatedAt,
+        action: "publish",
+        actor,
+      });
+      await assert.rejects(
+        store.updateContent({
+          orgId: "org_a",
+          contentId: activeInvariant.content.id,
+          expectedUpdatedAt: activeInvariant.content.updatedAt,
+          nativeBody: null,
+          actor,
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentStoreError
+          && error.code === "training_content_publish_invalid"
+      );
+      await assert.rejects(
+        store.replaceAssignments({
+          orgId: "org_a",
+          contentId: activeInvariant.content.id,
+          expectedUpdatedAt: activeInvariant.content.updatedAt,
+          assignments: [],
+          actor,
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentStoreError
+          && error.code === "training_content_publish_invalid"
+      );
+      const invariantAfterRejectedEdits = await store.getContentDetailForOrg(
+        "org_a",
+        activeInvariant.content.id
+      );
+      assert.equal(invariantAfterRejectedEdits?.content.nativeBody, "# Required body");
+      assert.equal(invariantAfterRejectedEdits?.content.updatedAt, activeInvariant.content.updatedAt);
+      assert.equal(invariantAfterRejectedEdits?.assignments.length, 1);
+
       const external = await store.createContent({
         orgId: "org_a",
         title: "External reference",
@@ -1000,6 +1061,79 @@ test(
       assert.equal(uploadedAfterReplacement?.content.contentVersion, 2);
       assert.equal(uploadedAfterReplacement?.currentAsset?.id, secondReady.asset.id);
 
+      const thirdPending = await assetStore.createPendingAsset({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetRole: "primary",
+        originalFilename: "third.pdf",
+        declaredMimeType: "application/pdf",
+        fileExtension: "pdf",
+        declaredByteSize: 10,
+        replacementAssetId: secondReady.asset.id,
+        uploadTtlSeconds: 600,
+        maxPendingBytesForOrganization: 1_000_000,
+        actor,
+        now: new Date("2026-07-28T12:03:00.000Z"),
+      });
+      const thirdClaim = await assetStore.claimFinalization({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetId: thirdPending.asset.id,
+        actualByteSize: 10,
+        detectedMimeType: "application/pdf",
+        checksumOrEtag: "etag-3",
+        leaseSeconds: 300,
+        actor,
+        now: new Date("2026-07-28T12:03:01.000Z"),
+      });
+      assert.equal(thirdClaim.status, "claimed");
+      const archivedUploaded = await store.transitionContent({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        expectedUpdatedAt: uploadedAfterReplacement!.content.updatedAt,
+        action: "archive",
+        actor,
+        now: new Date("2026-07-28T12:03:02.000Z"),
+      });
+      assert.equal(archivedUploaded.content.publicationState, "archived");
+      await assert.rejects(
+        assetStore.claimFinalization({
+          orgId: "org_a",
+          contentId: uploaded.content.id,
+          assetId: thirdPending.asset.id,
+          actualByteSize: 10,
+          detectedMimeType: "application/pdf",
+          checksumOrEtag: "etag-3",
+          leaseSeconds: 300,
+          actor,
+          now: new Date("2026-07-28T12:03:03.000Z"),
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentAssetStoreError
+          && error.code === "content_archived"
+      );
+      await assert.rejects(
+        assetStore.completeFinalization({
+          orgId: "org_a",
+          contentId: uploaded.content.id,
+          assetId: thirdPending.asset.id,
+          finalObjectKey: thirdClaim.asset.finalObjectKey!,
+          actualByteSize: 10,
+          detectedMimeType: "application/pdf",
+          checksumOrEtag: "etag-3",
+          actor,
+          now: new Date("2026-07-28T12:03:04.000Z"),
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentAssetStoreError
+          && error.code === "content_archived"
+      );
+      const retainedAfterArchive = await store.getContentDetailForOrg(
+        "org_a",
+        uploaded.content.id
+      );
+      assert.equal(retainedAfterArchive?.currentAsset?.id, secondReady.asset.id);
+
       const beforeRollback = await store.getContentDetailForOrg("org_a", external.content.id);
       assert.ok(beforeRollback);
       await scopedPool.query(`
@@ -1064,6 +1198,12 @@ test(
       });
       assert.equal(activeList.items.length, 2);
       assert.equal(activeList.total, 3);
+      const beyondLastPage = await store.listContentForManagement("org_a", {
+        page: 999,
+        pageSize: 2,
+      });
+      assert.equal(beyondLastPage.items.length, 0);
+      assert.equal(beyondLastPage.total, 3);
       assert.equal(
         activeList.items.some((row) => row.content.publicationState === "archived"),
         false
@@ -1072,8 +1212,8 @@ test(
         publicationState: "archived",
       });
       assert.deepEqual(
-        archivedList.items.map((row) => row.content.id),
-        [native.content.id]
+        archivedList.items.map((row) => row.content.id).sort(),
+        [native.content.id, uploaded.content.id].sort()
       );
       const unusualSearch = await store.listContentForManagement("org_a", {
         query: "%_\\'; DROP TABLE org_content_items; --",

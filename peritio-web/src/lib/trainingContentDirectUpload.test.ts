@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { directUploadTrainingContentAsset } from "./trainingContentDirectUpload";
+import {
+  directUploadTrainingContentAsset,
+  TrainingContentDirectUploadError,
+} from "./trainingContentDirectUpload";
 
 class FakeXmlHttpRequest {
   static status = 200;
@@ -110,7 +113,10 @@ test("direct upload returns safe storage and network errors", async () => {
         new Blob(["training"]),
         () => undefined
       ),
-      /Private storage rejected the upload \(403\)\./
+      (error: unknown) =>
+        error instanceof TrainingContentDirectUploadError
+        && error.status === 403
+        && /rejected or expired/.test(error.message)
     );
 
     FakeXmlHttpRequest.failure = "error";
@@ -125,7 +131,10 @@ test("direct upload returns safe storage and network errors", async () => {
         new Blob(["training"]),
         () => undefined
       ),
-      /could not reach private storage/
+      (error: unknown) =>
+        error instanceof TrainingContentDirectUploadError
+        && error.status === null
+        && /could not reach private storage/.test(error.message)
     );
   } finally {
     FakeXmlHttpRequest.failure = "none";

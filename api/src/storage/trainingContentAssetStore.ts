@@ -659,15 +659,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     const now = params.now ?? new Date();
     try {
       await client.query("BEGIN");
-      await client.query(
-        `
-          SELECT id
-          FROM org_content_items
-          WHERE org_id = $1 AND id = $2
-          FOR UPDATE
-        `,
-        [requiredId(params.orgId, "Organization id"), requiredId(params.contentId, "Content id")]
-      );
+      await lockFinalizableContent(client, params.orgId, params.contentId);
       const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
       if (asset.uploadState === "ready") {
         await client.query("COMMIT");
@@ -785,6 +777,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     const now = params.now ?? new Date();
     try {
       await client.query("BEGIN");
+      await lockFinalizableContent(client, params.orgId, params.contentId);
       const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
       if (asset.uploadState === "ready") {
         if (asset.finalObjectKey !== params.finalObjectKey) {
@@ -1129,6 +1122,36 @@ async function lockAsset(
     throw new TrainingContentAssetStoreError("Training Content asset was not found.", "asset_not_found");
   }
   return mapAssetRow(result.rows[0]);
+}
+
+async function lockFinalizableContent(
+  client: Pick<PoolClient, "query">,
+  orgId: string,
+  contentId: string
+): Promise<void> {
+  const result = await client.query<{
+    publication_state: TrainingContentPublicationState;
+  }>(
+    `
+      SELECT publication_state
+      FROM org_content_items
+      WHERE org_id = $1 AND id = $2
+      FOR UPDATE
+    `,
+    [requiredId(orgId, "Organization id"), requiredId(contentId, "Content id")]
+  );
+  if (!result.rows[0]) {
+    throw new TrainingContentAssetStoreError(
+      "Training Content item was not found.",
+      "content_not_found"
+    );
+  }
+  if (result.rows[0].publication_state === "archived") {
+    throw new TrainingContentAssetStoreError(
+      "Archived Training Content cannot be finalized.",
+      "content_archived"
+    );
+  }
 }
 
 async function expireLockedAsset(

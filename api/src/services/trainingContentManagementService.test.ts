@@ -217,7 +217,14 @@ function harness(enabled = true) {
       },
     } as any,
   });
-  return { service, calls, store };
+  return {
+    service,
+    calls,
+    store,
+    setCurrent(next: ReturnType<typeof detail>) {
+      current = next;
+    },
+  };
 }
 
 const context = {
@@ -411,6 +418,111 @@ test("assignment writes preserve separate manager and team rules and reject inva
       /selected/
     );
   }
+});
+
+test("publishing ignores assignments whose user or manager is no longer active", async () => {
+  const direct = harness();
+  await direct.service.updateAssignments({
+    context,
+    references,
+    contentId: "content_1",
+    input: {
+      expectedUpdatedAt: NOW,
+      availableToEveryone: false,
+      userIds: ["learner"],
+      managerIds: [],
+      managerTeamIds: [],
+    },
+  });
+  const referencesWithInactiveLearner = {
+    ...references,
+    users: references.users.map((entry) =>
+      entry.id === "learner" ? { ...entry, status: "disabled" as const } : entry
+    ),
+  };
+  await assert.rejects(
+    direct.service.transitionContent({
+      context,
+      references: referencesWithInactiveLearner,
+      contentId: "content_1",
+      action: "publish",
+      input: { expectedUpdatedAt: NOW },
+    }),
+    (error: unknown) =>
+      error instanceof TrainingContentManagementServiceError
+      && error.status === 422
+      && error.code === "training_content_publish_invalid"
+      && Array.isArray(error.details?.reasons)
+      && error.details.reasons.includes("assignment_required")
+  );
+  assert.equal(direct.calls.some((call) => call.method === "transition"), false);
+
+  const manager = harness();
+  await manager.service.updateAssignments({
+    context,
+    references,
+    contentId: "content_1",
+    input: {
+      expectedUpdatedAt: NOW,
+      availableToEveryone: false,
+      userIds: [],
+      managerIds: ["manager"],
+      managerTeamIds: ["manager"],
+    },
+  });
+  const referencesWithDemotedManager = {
+    ...references,
+    users: references.users.map((entry) =>
+      entry.id === "manager" ? { ...entry, orgRole: "user" as const } : entry
+    ),
+  };
+  await assert.rejects(
+    manager.service.transitionContent({
+      context,
+      references: referencesWithDemotedManager,
+      contentId: "content_1",
+      action: "publish",
+      input: { expectedUpdatedAt: NOW },
+    }),
+    (error: unknown) =>
+      error instanceof TrainingContentManagementServiceError
+      && error.code === "training_content_publish_invalid"
+  );
+  assert.equal(manager.calls.some((call) => call.method === "transition"), false);
+});
+
+test("published assignment updates require a currently effective target", async () => {
+  const published = harness();
+  published.setCurrent(detail(
+    { publicationState: "published" },
+    [assignment("user", "learner")]
+  ));
+  const referencesWithInactiveLearner = {
+    ...references,
+    users: references.users.map((entry) =>
+      entry.id === "learner" ? { ...entry, status: "disabled" as const } : entry
+    ),
+  };
+
+  await assert.rejects(
+    published.service.updateAssignments({
+      context,
+      references: referencesWithInactiveLearner,
+      contentId: "content_1",
+      input: {
+        expectedUpdatedAt: NOW,
+        availableToEveryone: false,
+        userIds: [],
+        managerIds: [],
+        managerTeamIds: [],
+      },
+    }),
+    (error: unknown) =>
+      error instanceof TrainingContentManagementServiceError
+      && error.status === 422
+      && error.code === "training_content_publish_invalid"
+  );
+  assert.equal(published.calls.some((call) => call.method === "assign"), false);
 });
 
 test("list filters are bounded and unusual search input remains a parameter value", async () => {

@@ -34,6 +34,8 @@ test("Training Content editor guards destructive actions, conflicts, and duplica
   assert.equal(editorSource.includes("window.confirm(\"Replace the current file"), true);
   assert.equal(editorSource.includes("Reload current version"), true);
   assert.equal(editorSource.includes("disabled={saving || uploading}"), true);
+  assert.equal(editorSource.includes("await saveChanges();\n      let initiated"), true);
+  assert.equal(editorSource.includes("caught instanceof TrainingContentDirectUploadError"), true);
 });
 
 test("Training Content preview uses safe Markdown and temporary access without embedded DOCX claims", () => {

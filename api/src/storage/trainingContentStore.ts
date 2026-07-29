@@ -443,6 +443,8 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       conditions.push("c.publication_state <> 'archived'");
     }
 
+    const whereClause = conditions.join("\n          AND ");
+    const filterValues = [...values];
     values.push(pageSize, (page - 1) * pageSize);
     const limitParameter = `$${values.length - 1}`;
     const offsetParameter = `$${values.length}`;
@@ -500,19 +502,33 @@ class PostgresTrainingContentStore implements TrainingContentStore {
             AND content_id = c.id
             AND revoked_at IS NULL
         ) assignments ON TRUE
-        WHERE ${conditions.join("\n          AND ")}
+        WHERE ${whereClause}
         ORDER BY ${orderBy}
         LIMIT ${limitParameter}
         OFFSET ${offsetParameter}
       `,
       values
     );
+    let total = result.rows[0]
+      ? databaseInteger(result.rows[0].total_count, "Content total")
+      : 0;
+    if (result.rows.length === 0 && page > 1) {
+      const countResult = await this.pool.query<{ count: string | number }>(
+        `
+          SELECT COUNT(*) AS count
+          FROM org_content_items c
+          WHERE ${whereClause}
+        `,
+        filterValues
+      );
+      total = databaseInteger(countResult.rows[0]?.count ?? 0, "Content total");
+    }
 
     return {
       items: result.rows.map(mapManagementRow),
       page,
       pageSize,
-      total: result.rows[0] ? databaseInteger(result.rows[0].total_count, "Content total") : 0,
+      total,
     };
   }
 
@@ -673,6 +689,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         ]
       );
       const content = mapRequiredContentRow(updated.rows[0]);
+      if (content.publicationState === "published") {
+        await assertPublishable(client, content);
+      }
       const metadataFields = changedFields.filter(
         (field) => field !== "nativeBody" && field !== "externalUrl"
       );
@@ -804,6 +823,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
             now,
           ]
         );
+      }
+      if (content.publicationState === "published") {
+        await assertPublishable(client, content);
       }
       await client.query(
         `

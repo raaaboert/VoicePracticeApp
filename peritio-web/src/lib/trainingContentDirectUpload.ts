@@ -1,5 +1,15 @@
 import type { DashboardTrainingContentUploadInitiationResponse } from "@voicepractice/shared";
 
+export class TrainingContentDirectUploadError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null
+  ) {
+    super(message);
+    this.name = "TrainingContentDirectUploadError";
+  }
+}
+
 export function directUploadTrainingContentAsset(
   upload: DashboardTrainingContentUploadInitiationResponse["upload"],
   file: Blob,
@@ -22,12 +32,20 @@ export function directUploadTrainingContentAsset(
         resolve();
         return;
       }
-      reject(new Error(`Private storage rejected the upload (${request.status}).`));
+      reject(new TrainingContentDirectUploadError(
+        `The private upload link was rejected or expired (${request.status}).`,
+        request.status
+      ));
     };
     request.onerror = () => {
-      reject(new Error("The browser could not reach private storage. Check the connection and retry."));
+      reject(new TrainingContentDirectUploadError(
+        "The browser could not reach private storage. Check the connection and retry.",
+        null
+      ));
     };
-    request.onabort = () => reject(new Error("The upload was cancelled."));
+    request.onabort = () => reject(
+      new TrainingContentDirectUploadError("The upload was cancelled.", null)
+    );
     request.send(file);
   });
 }

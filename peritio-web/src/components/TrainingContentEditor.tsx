@@ -52,7 +52,10 @@ import {
   trainingContentTypeLabel,
   validateTrainingContentFileSelection,
 } from "@/src/lib/trainingContentPresentation";
-import { directUploadTrainingContentAsset } from "@/src/lib/trainingContentDirectUpload";
+import {
+  directUploadTrainingContentAsset,
+  TrainingContentDirectUploadError,
+} from "@/src/lib/trainingContentDirectUpload";
 
 interface ContentDraft {
   title: string;
@@ -324,6 +327,10 @@ export function TrainingContentEditor({
         }
       );
       next = response.item;
+      setItem(next);
+      setDraft(createDraft(next));
+      setConflict(false);
+      setPreviewUrl(null);
     }
     if (hasAssignmentChanges(item, assignments)) {
       const input: UpdateDashboardTrainingContentAssignmentsRequest = {
@@ -462,10 +469,12 @@ export function TrainingContentEditor({
       return;
     }
     setUploading(true);
+    setSaving(true);
     setError(null);
     setErrorItems([]);
     setMessage(null);
     try {
+      await saveChanges();
       let initiated = pendingUpload;
       if (!initiated) {
         initiated = await fetchAdminApiJson<DashboardTrainingContentUploadInitiationResponse>(
@@ -506,14 +515,23 @@ export function TrainingContentEditor({
       setMessage(replacing ? "Replacement file is ready." : "File is ready.");
     } catch (caught) {
       if (
-        caught instanceof AdminApiClientError
-        && caught.code === "training_content_upload_expired"
+        (
+          caught instanceof AdminApiClientError
+          && caught.code === "training_content_upload_expired"
+        )
+        || (
+          caught instanceof TrainingContentDirectUploadError
+          && caught.status !== null
+          && caught.status >= 400
+          && caught.status < 500
+        )
       ) {
         setPendingUpload(null);
       }
       handleError(caught, "Could not complete the upload.");
     } finally {
       setUploading(false);
+      setSaving(false);
     }
   };
 
@@ -779,6 +797,11 @@ export function TrainingContentEditor({
             ) : (
               <p className="muted-copy">No ready file.</p>
             )}
+            {item.currentAsset && item.contentType === "docx" ? (
+              <p className="muted-copy">
+                DOCX opens as a secure file. An in-app converted preview is not available yet.
+              </p>
+            ) : null}
 
             {!archived && policy ? (
               <div className="upload-controls">
@@ -842,9 +865,6 @@ export function TrainingContentEditor({
                 ) : null}
                 {item.contentType === "docx" ? (
                   <div className="docx-preview-action">
-                    <p className="muted-copy">
-                      DOCX opens as a secure file. An in-app converted preview is not available yet.
-                    </p>
                     <a
                       className="primary-button icon-text-button"
                       href={previewUrl}
