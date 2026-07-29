@@ -1,5 +1,3 @@
-import { ArrowLeft } from "lucide-react";
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { PageHeader } from "@/src/components/PageHeader";
@@ -8,14 +6,12 @@ import { TrainingContentEditor } from "@/src/components/TrainingContentEditor";
 import {
   DashboardApiError,
   DashboardSessionInvalidError,
+  getDashboardTrainingContentCategories,
   getDashboardTrainingContentDetail,
   getDashboardTrainingContentFocusTopics,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
-import {
-  trainingContentOrgQuery,
-  trainingContentTypeLabel,
-} from "@/src/lib/trainingContentPresentation";
+import { trainingContentTypeLabel } from "@/src/lib/trainingContentPresentation";
 
 export default async function TrainingContentDetailPage({
   params,
@@ -28,10 +24,12 @@ export default async function TrainingContentDetailPage({
   const orgId = query.orgId?.trim() || null;
   let detail;
   let topics;
+  let categories;
   try {
-    [detail, topics] = await Promise.all([
+    [detail, topics, categories] = await Promise.all([
       getDashboardTrainingContentDetail(contentId, orgId),
       getDashboardTrainingContentFocusTopics(orgId),
+      getDashboardTrainingContentCategories(orgId),
     ]);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
@@ -55,19 +53,11 @@ export default async function TrainingContentDetailPage({
         eyebrow={`${trainingContentTypeLabel(detail.item.contentType)} | Version ${detail.item.contentVersion}`}
         title={detail.item.title}
         description={detail.item.description || `Training Content for ${detail.org.name}.`}
-        actions={
-          <Link
-            className="ghost-button icon-text-button"
-            href={`/app/admin/training-content${trainingContentOrgQuery(orgId)}`}
-          >
-            <ArrowLeft size={17} aria-hidden="true" />
-            Back to list
-          </Link>
-        }
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />
       <TrainingContentEditor
         initialItem={detail.item}
+        categories={categories.categories}
         focusTopics={topics.focusTopics}
         fileLimits={detail.fileLimitsBytes}
         orgId={orgId}

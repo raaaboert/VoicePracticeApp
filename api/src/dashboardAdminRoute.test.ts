@@ -1455,7 +1455,7 @@ test("Training Content management routes enforce module, capability, explicit sc
     updatedAt: NOW,
   });
   const listed = await dashboardRequest(
-    "/dashboard/admin/training-content?q=%25_%5C%27&page=1&pageSize=25",
+    "/dashboard/admin/training-content?q=%25_%5C%27&categoryId=category_1&page=1&pageSize=25",
     orgAdminToken
   );
   assert.equal(listed.status, 200);
@@ -1466,6 +1466,7 @@ test("Training Content management routes enforce module, capability, explicit sc
   assert.equal(listCall?.params.context.orgId, "org_1");
   assert.equal(listCall?.params.context.actorId, "org_admin");
   assert.equal(listCall?.params.filters.query, "%_\\'");
+  assert.equal(listCall?.params.filters.categoryId, "category_1");
   assert.equal(
     listCall?.params.references.users.every((entry: UserProfile) => entry.orgId === "org_1"),
     true

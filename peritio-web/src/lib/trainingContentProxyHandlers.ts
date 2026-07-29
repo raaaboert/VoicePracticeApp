@@ -1,16 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import type {
+  ArchiveDashboardTrainingContentCategoryRequest,
+  CreateDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentRequest,
   DashboardTrainingContentAssetAccessResponse,
   DashboardTrainingContentAssetFinalizationResponse,
   DashboardTrainingContentDetailResponse,
+  DashboardTrainingContentCategoriesResponse,
+  DashboardTrainingContentCategoryMutationResponse,
   DashboardTrainingContentFocusTopicsResponse,
   DashboardTrainingContentLifecycleRequest,
   DashboardTrainingContentListResponse,
+  DashboardTrainingContentOrderResponse,
   DashboardTrainingContentTargetsResponse,
   DashboardTrainingContentUploadInitiationRequest,
   DashboardTrainingContentUploadInitiationResponse,
+  ReorderDashboardTrainingContentCategoriesRequest,
+  ReorderDashboardTrainingContentRequest,
   UpdateDashboardTrainingContentAssignmentsRequest,
+  UpdateDashboardTrainingContentCategoryRequest,
   UpdateDashboardTrainingContentRequest,
 } from "@voicepractice/shared";
 
@@ -25,6 +33,7 @@ export interface TrainingContentProxyServices {
   listContent: (options: {
     orgId?: string | null;
     q?: string | null;
+    categoryId?: string | null;
     focusTopicId?: string | null;
     contentType?: string | null;
     status?: string | null;
@@ -67,6 +76,35 @@ export interface TrainingContentProxyServices {
   getFocusTopics: (
     orgId?: string | null
   ) => Promise<DashboardTrainingContentFocusTopicsResponse>;
+  getCategories: (
+    orgId?: string | null,
+    includeArchived?: boolean
+  ) => Promise<DashboardTrainingContentCategoriesResponse>;
+  createCategory: (
+    input: CreateDashboardTrainingContentCategoryRequest,
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentCategoryMutationResponse>;
+  updateCategory: (
+    categoryId: string,
+    input: UpdateDashboardTrainingContentCategoryRequest,
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentCategoryMutationResponse>;
+  reorderCategories: (
+    input: ReorderDashboardTrainingContentCategoriesRequest,
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentCategoriesResponse>;
+  archiveCategory: (
+    categoryId: string,
+    input: ArchiveDashboardTrainingContentCategoryRequest,
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentCategoryMutationResponse>;
+  getContentOrder: (
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentOrderResponse>;
+  reorderContent: (
+    input: ReorderDashboardTrainingContentRequest,
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentOrderResponse>;
   initiateUpload: (
     contentId: string,
     input: DashboardTrainingContentUploadInitiationRequest,
@@ -111,6 +149,7 @@ export async function handleTrainingContentListGet(
   return handleJson(() => services.listContent({
     orgId: requestedOrgId(request),
     q: request.nextUrl.searchParams.get("q"),
+    categoryId: request.nextUrl.searchParams.get("categoryId"),
     focusTopicId: request.nextUrl.searchParams.get("focusTopicId"),
     contentType: request.nextUrl.searchParams.get("contentType"),
     status: request.nextUrl.searchParams.get("status"),
@@ -234,6 +273,129 @@ export async function handleTrainingContentFocusTopicsGet(
     return hostResponse;
   }
   return handleJson(() => services.getFocusTopics(requestedOrgId(request)));
+}
+
+export async function handleTrainingContentCategoriesGet(
+  request: NextRequest,
+  services: Pick<TrainingContentProxyServices, "getCategories">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  return handleJson(() => services.getCategories(
+    requestedOrgId(request),
+    request.nextUrl.searchParams.get("includeArchived") === "true"
+  ));
+}
+
+export async function handleTrainingContentCategoryCreate(
+  request: NextRequest,
+  services: Pick<TrainingContentProxyServices, "createCategory">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  try {
+    const input = await readDashboardJsonBody(request) as
+      CreateDashboardTrainingContentCategoryRequest;
+    return noStore(NextResponse.json(
+      await services.createCategory(input, requestedOrgId(request)),
+      { status: 201 }
+    ));
+  } catch (error) {
+    return dashboardApiErrorResponse(error);
+  }
+}
+
+export async function handleTrainingContentCategoryUpdate(
+  request: NextRequest,
+  categoryId: string,
+  services: Pick<TrainingContentProxyServices, "updateCategory">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  try {
+    const input = await readDashboardJsonBody(request) as
+      UpdateDashboardTrainingContentCategoryRequest;
+    return noStore(NextResponse.json(
+      await services.updateCategory(categoryId, input, requestedOrgId(request))
+    ));
+  } catch (error) {
+    return dashboardApiErrorResponse(error);
+  }
+}
+
+export async function handleTrainingContentCategoriesReorder(
+  request: NextRequest,
+  services: Pick<TrainingContentProxyServices, "reorderCategories">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  try {
+    const input = await readDashboardJsonBody(request) as
+      ReorderDashboardTrainingContentCategoriesRequest;
+    return noStore(NextResponse.json(
+      await services.reorderCategories(input, requestedOrgId(request))
+    ));
+  } catch (error) {
+    return dashboardApiErrorResponse(error);
+  }
+}
+
+export async function handleTrainingContentCategoryArchive(
+  request: NextRequest,
+  categoryId: string,
+  services: Pick<TrainingContentProxyServices, "archiveCategory">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  try {
+    const input = await readDashboardJsonBody(request) as
+      ArchiveDashboardTrainingContentCategoryRequest;
+    return noStore(NextResponse.json(
+      await services.archiveCategory(categoryId, input, requestedOrgId(request))
+    ));
+  } catch (error) {
+    return dashboardApiErrorResponse(error);
+  }
+}
+
+export async function handleTrainingContentOrderGet(
+  request: NextRequest,
+  services: Pick<TrainingContentProxyServices, "getContentOrder">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  return handleJson(() => services.getContentOrder(requestedOrgId(request)));
+}
+
+export async function handleTrainingContentOrderUpdate(
+  request: NextRequest,
+  services: Pick<TrainingContentProxyServices, "reorderContent">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  try {
+    const input = await readDashboardJsonBody(request) as
+      ReorderDashboardTrainingContentRequest;
+    return noStore(NextResponse.json(
+      await services.reorderContent(input, requestedOrgId(request))
+    ));
+  } catch (error) {
+    return dashboardApiErrorResponse(error);
+  }
 }
 
 export async function handleTrainingContentUploadInitiate(

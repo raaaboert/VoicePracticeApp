@@ -11090,6 +11090,7 @@ app.get(
         references: resources.references,
         filters: {
           query: getSingleQueryParam(request.query.q),
+          categoryId: getSingleQueryParam(request.query.categoryId),
           focusTopicId: getSingleQueryParam(request.query.focusTopicId),
           contentType: getSingleQueryParam(request.query.contentType),
           publicationState: getSingleQueryParam(request.query.status),

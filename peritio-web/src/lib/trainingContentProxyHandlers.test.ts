@@ -12,8 +12,15 @@ import { DashboardApiError } from "./dashboardApiErrorTypes";
 import {
   handleTrainingContentAssignmentsUpdate,
   handleTrainingContentAssetAccess,
+  handleTrainingContentCategoriesGet,
+  handleTrainingContentCategoriesReorder,
+  handleTrainingContentCategoryArchive,
+  handleTrainingContentCategoryCreate,
+  handleTrainingContentCategoryUpdate,
   handleTrainingContentCreate,
   handleTrainingContentListGet,
+  handleTrainingContentOrderGet,
+  handleTrainingContentOrderUpdate,
   handleTrainingContentTransition,
   handleTrainingContentUpdate,
   handleTrainingContentUploadFinalize,
@@ -26,12 +33,12 @@ process.env.PERITIO_PUBLIC_HOST = "peritio.ai";
 const NOW = "2026-07-28T12:00:00.000Z";
 
 function request(pathname: string, init?: RequestInit): NextRequest {
+  const headers = new Headers(init?.headers);
+  headers.set("host", "app.peritio.ai");
   return new NextRequest(`https://app.peritio.ai${pathname}`, {
-    ...init,
-    headers: {
-      host: "app.peritio.ai",
-      ...(init?.headers ?? {}),
-    },
+    method: init?.method,
+    body: init?.body,
+    headers,
   });
 }
 
@@ -67,6 +74,8 @@ function detailResponse(
     fileLimitsBytes: { video: 500, audio: 100, pdf: 50, docx: 25, image: 20 },
     item: {
       id: "content_1",
+      categoryId: "category_1",
+      categoryName: "General",
       title: "Coaching",
       description: "",
       focusTopicId: null,
@@ -74,7 +83,6 @@ function detailResponse(
       focusTopicAvailable: true,
       contentType: "native",
       publicationState: "draft",
-      displayOrder: 0,
       contentVersion: 1,
       currentAsset: null,
       assignmentSummary: {
@@ -107,7 +115,7 @@ test("Training Content list proxy forwards bounded filters and explicit organiza
   let captured: unknown;
   const response = await handleTrainingContentListGet(
     request(
-      "/api/admin/training-content?orgId=org_1&q=%25_%5C%27&focusTopicId=topic_1&contentType=pdf&status=draft&sort=title_asc&page=2&pageSize=25"
+      "/api/admin/training-content?orgId=org_1&q=%25_%5C%27&categoryId=category_1&focusTopicId=topic_1&contentType=pdf&status=draft&sort=title_asc&page=2&pageSize=25"
     ),
     {
       listContent: async (options) => {
@@ -131,6 +139,7 @@ test("Training Content list proxy forwards bounded filters and explicit organiza
   assert.deepEqual(captured, {
     orgId: "org_1",
     q: "%_\\'",
+    categoryId: "category_1",
     focusTopicId: "topic_1",
     contentType: "pdf",
     status: "draft",
@@ -138,6 +147,178 @@ test("Training Content list proxy forwards bounded filters and explicit organiza
     page: "2",
     pageSize: "25",
   });
+});
+
+test("Training Content category and ordering proxies forward bodies and explicit organization context", async () => {
+  const calls: unknown[] = [];
+  const category = {
+    id: "category_1",
+    name: "General",
+    description: "",
+    isDefault: true,
+    activeItemCount: 1,
+    archivedItemCount: 0,
+    createdAt: NOW,
+    updatedAt: NOW,
+    archivedAt: null,
+  };
+  const categoryList = {
+    viewer: viewer(),
+    org: { id: "org_1", name: "Example" },
+    generatedAt: NOW,
+    categories: [category],
+    orderRevision: NOW,
+  };
+
+  const listed = await handleTrainingContentCategoriesGet(
+    request("/api/admin/training-content/categories?orgId=org_1&includeArchived=true"),
+    {
+      getCategories: async (orgId, includeArchived) => {
+        calls.push({ method: "list-categories", orgId, includeArchived });
+        return categoryList;
+      },
+    }
+  );
+  assert.equal(listed.status, 200);
+
+  const created = await handleTrainingContentCategoryCreate(
+    request("/api/admin/training-content/categories?orgId=org_1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Leadership", description: "Manager resources" }),
+    }),
+    {
+      createCategory: async (input, orgId) => {
+        calls.push({ method: "create-category", input, orgId });
+        return { ...categoryList, category: { ...category, name: input.name } };
+      },
+    }
+  );
+  assert.equal(created.status, 201);
+
+  const updated = await handleTrainingContentCategoryUpdate(
+    request("/api/admin/training-content/categories/category_1?orgId=org_1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedUpdatedAt: NOW, name: "Core" }),
+    }),
+    "category_1",
+    {
+      updateCategory: async (categoryId, input, orgId) => {
+        calls.push({ method: "update-category", categoryId, input, orgId });
+        return { ...categoryList, category: { ...category, name: input.name ?? category.name } };
+      },
+    }
+  );
+  assert.equal(updated.status, 200);
+
+  const reorderedCategories = await handleTrainingContentCategoriesReorder(
+    request("/api/admin/training-content/categories/reorder?orgId=org_1", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedOrderRevision: NOW, categoryIds: ["category_1"] }),
+    }),
+    {
+      reorderCategories: async (input, orgId) => {
+        calls.push({ method: "reorder-categories", input, orgId });
+        return categoryList;
+      },
+    }
+  );
+  assert.equal(reorderedCategories.status, 200);
+
+  const archived = await handleTrainingContentCategoryArchive(
+    request("/api/admin/training-content/categories/category_2/archive?orgId=org_1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedUpdatedAt: NOW,
+        destinationCategoryId: "category_1",
+      }),
+    }),
+    "category_2",
+    {
+      archiveCategory: async (categoryId, input, orgId) => {
+        calls.push({ method: "archive-category", categoryId, input, orgId });
+        return {
+          ...categoryList,
+          category: { ...category, id: categoryId, archivedAt: NOW, isDefault: false },
+          movedItemCount: 1,
+        };
+      },
+    }
+  );
+  assert.equal(archived.status, 200);
+
+  const orderPayload = {
+    viewer: viewer(),
+    org: { id: "org_1", name: "Example" },
+    generatedAt: NOW,
+    groups: [{ categoryId: "category_1", categoryName: "General", items: [] }],
+    orderRevision: NOW,
+  };
+  const order = await handleTrainingContentOrderGet(
+    request("/api/admin/training-content/reorder?orgId=org_1"),
+    {
+      getContentOrder: async (orgId) => {
+        calls.push({ method: "content-order", orgId });
+        return orderPayload;
+      },
+    }
+  );
+  assert.equal(order.status, 200);
+
+  const reorderedContent = await handleTrainingContentOrderUpdate(
+    request("/api/admin/training-content/reorder?orgId=org_1", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedOrderRevision: NOW,
+        categories: [{ categoryId: "category_1", contentIds: [] }],
+      }),
+    }),
+    {
+      reorderContent: async (input, orgId) => {
+        calls.push({ method: "reorder-content", input, orgId });
+        return orderPayload;
+      },
+    }
+  );
+  assert.equal(reorderedContent.status, 200);
+  assert.deepEqual(calls, [
+    { method: "list-categories", orgId: "org_1", includeArchived: true },
+    {
+      method: "create-category",
+      input: { name: "Leadership", description: "Manager resources" },
+      orgId: "org_1",
+    },
+    {
+      method: "update-category",
+      categoryId: "category_1",
+      input: { expectedUpdatedAt: NOW, name: "Core" },
+      orgId: "org_1",
+    },
+    {
+      method: "reorder-categories",
+      input: { expectedOrderRevision: NOW, categoryIds: ["category_1"] },
+      orgId: "org_1",
+    },
+    {
+      method: "archive-category",
+      categoryId: "category_2",
+      input: { expectedUpdatedAt: NOW, destinationCategoryId: "category_1" },
+      orgId: "org_1",
+    },
+    { method: "content-order", orgId: "org_1" },
+    {
+      method: "reorder-content",
+      input: {
+        expectedOrderRevision: NOW,
+        categories: [{ categoryId: "category_1", contentIds: [] }],
+      },
+      orgId: "org_1",
+    },
+  ]);
 });
 
 test("Training Content proxy forwards create, PATCH, assignment PUT, and lifecycle bodies", async () => {

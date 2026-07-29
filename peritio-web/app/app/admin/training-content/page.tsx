@@ -2,6 +2,8 @@ import {
   ArrowLeft,
   ArrowRight,
   FilePlus2,
+  FolderCog,
+  ListOrdered,
   Search,
 } from "lucide-react";
 import Link from "next/link";
@@ -13,6 +15,7 @@ import {
   DashboardApiError,
   DashboardSessionInvalidError,
   getDashboardTrainingContent,
+  getDashboardTrainingContentCategories,
   getDashboardTrainingContentFocusTopics,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
@@ -22,6 +25,7 @@ import {
   trainingContentStatusLabel,
   trainingContentTypeLabel,
 } from "@/src/lib/trainingContentPresentation";
+import type { DashboardTrainingContentListItem } from "@voicepractice/shared";
 
 function single(value: string | string[] | undefined): string {
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
@@ -36,6 +40,79 @@ function pageHref(
   return `/app/admin/training-content?${query.toString()}`;
 }
 
+function ContentTable({
+  items,
+  orgId,
+  showCategory,
+}: {
+  items: DashboardTrainingContentListItem[];
+  orgId: string | null;
+  showCategory: boolean;
+}) {
+  return (
+    <div className="table-wrap">
+      <table className="data-table training-content-table">
+        <thead>
+          <tr>
+            <th>Title</th>
+            {showCategory ? <th>Content Category</th> : null}
+            <th>Type</th>
+            <th>Related Focus Topic</th>
+            <th>Status</th>
+            <th>Availability</th>
+            <th>File</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={item.id}>
+              <td>
+                <Link
+                  className="table-primary-link"
+                  href={`/app/admin/training-content/${encodeURIComponent(item.id)}${trainingContentOrgQuery(orgId)}`}
+                >
+                  {item.title}
+                </Link>
+                {item.description ? (
+                  <span className="table-secondary-text">{item.description}</span>
+                ) : null}
+              </td>
+              {showCategory ? <td>{item.categoryName}</td> : null}
+              <td>{trainingContentTypeLabel(item.contentType)}</td>
+              <td>
+                {item.focusTopicName ?? "None"}
+                {!item.focusTopicAvailable ? (
+                  <span className="table-secondary-text">No longer available</span>
+                ) : null}
+              </td>
+              <td>
+                <span className={`status-badge status-${item.publicationState}`}>
+                  {trainingContentStatusLabel(item.publicationState)}
+                </span>
+              </td>
+              <td>{item.assignmentSummary.label}</td>
+              <td>
+                {item.currentAsset
+                  ? `${item.currentAsset.originalFilename ?? "File"} (${item.currentAsset.uploadState})`
+                  : item.contentType === "native" || item.contentType === "external_url"
+                    ? "-"
+                    : "No ready file"}
+              </td>
+              <td>
+                {formatDateTime(item.updatedAt)}
+                {item.updatedByDisplayName ? (
+                  <span className="table-secondary-text">{item.updatedByDisplayName}</span>
+                ) : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default async function TrainingContentPage({
   searchParams,
 }: {
@@ -44,27 +121,31 @@ export default async function TrainingContentPage({
   const raw = await searchParams;
   const orgId = single(raw.orgId).trim() || null;
   const q = single(raw.q);
+  const categoryId = single(raw.categoryId);
   const focusTopicId = single(raw.focusTopicId);
   const contentType = single(raw.contentType);
   const status = single(raw.status);
-  const sort = single(raw.sort) || "updated_desc";
+  const sort = single(raw.sort) || "library_order";
   const page = single(raw.page) || "1";
 
   let payload;
   let topicsPayload;
+  let categoriesPayload;
   try {
-    [payload, topicsPayload] = await Promise.all([
+    [payload, topicsPayload, categoriesPayload] = await Promise.all([
       getDashboardTrainingContent({
         orgId,
         q,
+        categoryId,
         focusTopicId,
         contentType,
         status,
         sort,
         page,
-        pageSize: 25,
+        pageSize: 100,
       }),
       getDashboardTrainingContentFocusTopics(orgId),
+      getDashboardTrainingContentCategories(orgId),
     ]);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
@@ -83,6 +164,7 @@ export default async function TrainingContentPage({
   for (const [key, value] of Object.entries({
     orgId: orgId ?? "",
     q,
+    categoryId,
     focusTopicId,
     contentType,
     status,
@@ -92,6 +174,12 @@ export default async function TrainingContentPage({
       queryState[key] = value;
     }
   }
+  const grouped = !q
+    && !categoryId
+    && !focusTopicId
+    && !contentType
+    && !status
+    && sort === "library_order";
 
   return (
     <>
@@ -100,13 +188,29 @@ export default async function TrainingContentPage({
         title="Training Content"
         description={`Manage learning resources for ${payload.org.name}.`}
         actions={
-          <Link
-            className="primary-button icon-text-button"
-            href={`/app/admin/training-content/new${trainingContentOrgQuery(orgId)}`}
-          >
-            <FilePlus2 size={18} aria-hidden="true" />
-            Add Training Content
-          </Link>
+          <div className="page-actions training-content-page-actions">
+            <Link
+              className="ghost-button icon-text-button"
+              href={`/app/admin/training-content/categories${trainingContentOrgQuery(orgId)}`}
+            >
+              <FolderCog size={18} aria-hidden="true" />
+              Manage Categories
+            </Link>
+            <Link
+              className="ghost-button icon-text-button"
+              href={`/app/admin/training-content/reorder${trainingContentOrgQuery(orgId)}`}
+            >
+              <ListOrdered size={18} aria-hidden="true" />
+              Reorder Content
+            </Link>
+            <Link
+              className="primary-button icon-text-button"
+              href={`/app/admin/training-content/new${trainingContentOrgQuery(orgId)}`}
+            >
+              <FilePlus2 size={18} aria-hidden="true" />
+              Add Training Content
+            </Link>
+          </div>
         }
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />
@@ -122,12 +226,23 @@ export default async function TrainingContentPage({
                 className="text-input"
                 name="q"
                 defaultValue={q}
-                placeholder="Title, description, or Focus Topic"
+                placeholder="Title, description, category, or Focus Topic"
               />
             </span>
           </label>
           <label className="field-label">
-            Focus Topic
+            Content Category
+            <select className="text-input" name="categoryId" defaultValue={categoryId}>
+              <option value="">All Content Categories</option>
+              {categoriesPayload.categories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-label">
+            Related Focus Topic
             <select className="text-input" name="focusTopicId" defaultValue={focusTopicId}>
               <option value="">All Focus Topics</option>
               {topicsPayload.focusTopics.map((topic) => (
@@ -161,6 +276,7 @@ export default async function TrainingContentPage({
           <label className="field-label">
             Sort
             <select className="text-input" name="sort" defaultValue={sort}>
+              <option value="library_order">Library order</option>
               <option value="updated_desc">Recently updated</option>
               <option value="title_asc">Title A-Z</option>
             </select>
@@ -189,65 +305,28 @@ export default async function TrainingContentPage({
             <h3>No Training Content found</h3>
             <p>Adjust the current filters or add a new item.</p>
           </div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data-table training-content-table">
-              <thead>
-                <tr>
-                  <th>Title</th>
-                  <th>Type</th>
-                  <th>Focus Topic</th>
-                  <th>Status</th>
-                  <th>Availability</th>
-                  <th>File</th>
-                  <th>Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payload.items.map((item) => (
-                  <tr key={item.id}>
-                    <td>
-                      <Link
-                        className="table-primary-link"
-                        href={`/app/admin/training-content/${encodeURIComponent(item.id)}${trainingContentOrgQuery(orgId)}`}
-                      >
-                        {item.title}
-                      </Link>
-                      {item.description ? (
-                        <span className="table-secondary-text">{item.description}</span>
-                      ) : null}
-                    </td>
-                    <td>{trainingContentTypeLabel(item.contentType)}</td>
-                    <td>
-                      {item.focusTopicName ?? "General"}
-                      {!item.focusTopicAvailable ? (
-                        <span className="table-secondary-text">No longer available</span>
-                      ) : null}
-                    </td>
-                    <td>
-                      <span className={`status-badge status-${item.publicationState}`}>
-                        {trainingContentStatusLabel(item.publicationState)}
-                      </span>
-                    </td>
-                    <td>{item.assignmentSummary.label}</td>
-                    <td>
-                      {item.currentAsset
-                        ? `${item.currentAsset.originalFilename ?? "File"} (${item.currentAsset.uploadState})`
-                        : item.contentType === "native" || item.contentType === "external_url"
-                          ? "-"
-                          : "No ready file"}
-                    </td>
-                    <td>
-                      {formatDateTime(item.updatedAt)}
-                      {item.updatedByDisplayName ? (
-                        <span className="table-secondary-text">{item.updatedByDisplayName}</span>
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        ) : grouped ? (
+          <div className="training-content-category-groups">
+            {categoriesPayload.categories.map((category) => {
+              const items = payload.items.filter((item) => item.categoryId === category.id);
+              return (
+                <section key={category.id} className="training-content-category-group">
+                  <div className="training-content-category-heading">
+                    <div>
+                      <h3>{category.name}</h3>
+                      {category.description ? <p>{category.description}</p> : null}
+                    </div>
+                    <span>{category.activeItemCount} item{category.activeItemCount === 1 ? "" : "s"}</span>
+                  </div>
+                  {items.length > 0
+                    ? <ContentTable items={items} orgId={orgId} showCategory={false} />
+                    : <p className="muted-copy">No active items in this category.</p>}
+                </section>
+              );
+            })}
           </div>
+        ) : (
+          <ContentTable items={payload.items} orgId={orgId} showCategory />
         )}
 
         {payload.totalPages > 1 ? (

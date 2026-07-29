@@ -2,6 +2,7 @@
 
 import {
   Archive,
+  ArrowLeft,
   Check,
   Download,
   ExternalLink,
@@ -26,6 +27,7 @@ import {
 import type {
   DashboardTrainingContentAssetAccessResponse,
   DashboardTrainingContentAssetFinalizationResponse,
+  DashboardTrainingContentCategory,
   DashboardTrainingContentDetail,
   DashboardTrainingContentDetailResponse,
   DashboardTrainingContentFocusTopic,
@@ -38,6 +40,7 @@ import type {
 } from "@voicepractice/shared";
 
 import { TrainingContentMarkdown } from "@/src/components/TrainingContentMarkdown";
+import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
 import {
   AdminApiClientError,
   fetchAdminApiJson,
@@ -58,10 +61,10 @@ import {
 } from "@/src/lib/trainingContentDirectUpload";
 
 interface ContentDraft {
+  categoryId: string;
   title: string;
   description: string;
   focusTopicId: string;
-  displayOrder: string;
   nativeBody: string;
   externalUrl: string;
 }
@@ -75,10 +78,10 @@ interface AssignmentDraft {
 
 function createDraft(item: DashboardTrainingContentDetail): ContentDraft {
   return {
+    categoryId: item.categoryId,
     title: item.title,
     description: item.description,
     focusTopicId: item.focusTopicId ?? "",
-    displayOrder: String(item.displayOrder),
     nativeBody: item.nativeBody ?? "",
     externalUrl: item.externalUrl ?? "",
   };
@@ -124,15 +127,14 @@ function buildMetadataPatch(
   if (draft.title !== item.title) {
     patch.title = draft.title;
   }
+  if (draft.categoryId !== item.categoryId) {
+    patch.categoryId = draft.categoryId;
+  }
   if (draft.description !== item.description) {
     patch.description = draft.description;
   }
   if ((draft.focusTopicId || null) !== item.focusTopicId) {
     patch.focusTopicId = draft.focusTopicId || null;
-  }
-  const displayOrder = Number(draft.displayOrder);
-  if (Number.isInteger(displayOrder) && displayOrder !== item.displayOrder) {
-    patch.displayOrder = displayOrder;
   }
   if (item.contentType === "native" && draft.nativeBody !== (item.nativeBody ?? "")) {
     patch.nativeBody = draft.nativeBody || null;
@@ -179,11 +181,13 @@ function errorDetails(error: unknown): string[] {
 
 export function TrainingContentEditor({
   initialItem,
+  categories,
   focusTopics,
   fileLimits,
   orgId,
 }: {
   initialItem: DashboardTrainingContentDetail;
+  categories: DashboardTrainingContentCategory[];
   focusTopics: DashboardTrainingContentFocusTopic[];
   fileLimits: TrainingContentFileLimitsBytes;
   orgId: string | null;
@@ -211,10 +215,12 @@ export function TrainingContentEditor({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
 
   const archived = item.publicationState === "archived";
   const dirty = hasMetadataChanges(item, draft) || hasAssignmentChanges(item, assignments);
   const policy = getTrainingContentFilePolicy(item.contentType);
+  const listPath = `/app/admin/training-content${orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""}`;
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -225,6 +231,14 @@ export function TrainingContentEditor({
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [dirty]);
+
+  const navigateAway = () => {
+    if (dirty) {
+      setPendingNavigation(listPath);
+      return;
+    }
+    router.push(listPath);
+  };
 
   useEffect(() => {
     if (userQuery.trim().length < 2) {
@@ -566,10 +580,12 @@ export function TrainingContentEditor({
     }
   };
 
-  const addUser = (target: DashboardTrainingContentTarget) => {
+  const toggleUser = (target: DashboardTrainingContentTarget, checked: boolean) => {
     setAssignments((current) => ({
       ...current,
-      users: mergeTrainingContentTargets(current.users, [target]),
+      users: checked
+        ? mergeTrainingContentTargets(current.users, [target])
+        : current.users.filter((entry) => entry.userId !== target.userId),
     }));
   };
 
@@ -596,8 +612,25 @@ export function TrainingContentEditor({
     }));
   };
 
+  const removeManagerRules = (userId: string) => {
+    setAssignments((current) => ({
+      ...current,
+      managers: current.managers.filter((target) => target.userId !== userId),
+      managerTeams: current.managerTeams.filter((target) => target.userId !== userId),
+    }));
+  };
+
   return (
     <div className="training-content-editor">
+      <button
+        className="training-content-back-link"
+        type="button"
+        onClick={navigateAway}
+        disabled={saving || uploading}
+      >
+        <ArrowLeft size={17} aria-hidden="true" />
+        Back to Training Content
+      </button>
       {message ? <div className="notice success">{message}</div> : null}
       {error ? (
         <div className="notice danger">
@@ -648,7 +681,24 @@ export function TrainingContentEditor({
             />
           </label>
           <label className="field-label">
-            Focus Topic
+            Content Category
+            <select
+              className="text-input"
+              value={draft.categoryId}
+              disabled={archived || saving}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, categoryId: event.target.value }))
+              }
+            >
+              {categories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}{category.isDefault ? " (Default)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-label">
+            Related Focus Topic
             <select
               className="text-input"
               value={draft.focusTopicId}
@@ -657,7 +707,7 @@ export function TrainingContentEditor({
                 setDraft((current) => ({ ...current, focusTopicId: event.target.value }))
               }
             >
-              <option value="">General</option>
+              <option value="">None</option>
               {!item.focusTopicAvailable && item.focusTopicId ? (
                 <option value={item.focusTopicId}>
                   {item.focusTopicName ?? "Prior Focus Topic"} (no longer available)
@@ -667,21 +717,6 @@ export function TrainingContentEditor({
                 <option key={topic.id} value={topic.id}>{topic.name}</option>
               ))}
             </select>
-          </label>
-          <label className="field-label">
-            Display order
-            <input
-              className="text-input"
-              type="number"
-              min={0}
-              max={1_000_000}
-              step={1}
-              value={draft.displayOrder}
-              disabled={archived || saving}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, displayOrder: event.target.value }))
-              }
-            />
           </label>
         </div>
       </section>
@@ -903,13 +938,44 @@ export function TrainingContentEditor({
           />
           <span>
             <strong>Available to everyone</strong>
-            <small>All active organization users</small>
+            <small>All active organization users qualify.</small>
           </span>
         </label>
+        {assignments.availableToEveryone ? (
+          <p className="muted-copy assignment-everyone-note">
+            Targeted assignments remain saved, but Available to everyone currently supersedes them.
+          </p>
+        ) : null}
 
         <div className="assignment-columns">
           <div>
             <h3>Specific users</h3>
+            <div className="assignment-selection-summary">
+              <strong>Selected users ({assignments.users.length})</strong>
+              {assignments.users.length > 0 ? (
+                <div className="assignment-chips">
+                  {assignments.users.map((target) => (
+                    <span
+                      key={target.userId}
+                      className={`assignment-chip${target.available ? "" : " unavailable"}`}
+                    >
+                      {target.displayName}
+                      {!target.available ? " (Inactive)" : ""}
+                      {!archived ? (
+                        <button
+                          type="button"
+                          onClick={() => removeTarget("users", target.userId)}
+                          aria-label={`Remove ${target.displayName}`}
+                          title={`Remove ${target.displayName}`}
+                        >
+                          <X size={14} aria-hidden="true" />
+                        </button>
+                      ) : null}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
             <label className="field-label">
               Search users
               <span className="input-with-icon">
@@ -932,49 +998,71 @@ export function TrainingContentEditor({
                     (entry) => entry.userId === target.userId
                   );
                   return (
-                    <div key={target.userId} className="assignment-result-row">
+                    <label key={target.userId} className="assignment-result-row">
                       <span>
                         <strong>{target.displayName}</strong>
                         <small>{target.email}{target.employeeId ? ` | ${target.employeeId}` : ""}</small>
                       </span>
-                      <button
-                        type="button"
-                        className="icon-button"
-                        title={selected ? "Assigned" : "Assign user"}
-                        onClick={() => addUser(target)}
-                        disabled={selected || archived || saving}
-                      >
-                        <Check size={17} aria-hidden="true" />
-                      </button>
-                    </div>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={archived || saving}
+                        onChange={(event) => toggleUser(target, event.target.checked)}
+                        aria-label={`Assign ${target.displayName}`}
+                      />
+                    </label>
                   );
                 })}
               </div>
             ) : null}
-            <div className="selected-targets">
-              {assignments.users.map((target) => (
-                <div key={target.userId} className={`selected-target${target.available ? "" : " unavailable"}`}>
-                  <span>
-                    <strong>{target.displayName}</strong>
-                    <small>{target.email}</small>
-                  </span>
-                  {!archived ? (
-                    <button
-                      type="button"
-                      className="icon-button"
-                      title="Remove user assignment"
-                      onClick={() => removeTarget("users", target.userId)}
-                    >
-                      <X size={16} aria-hidden="true" />
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
           </div>
 
           <div>
             <h3>Managers</h3>
+            <div className="assignment-selection-summary">
+              <strong>
+                Selected manager rules ({
+                  managerChoices.filter((target) =>
+                    assignments.managers.some((entry) => entry.userId === target.userId)
+                    || assignments.managerTeams.some((entry) => entry.userId === target.userId)
+                  ).length
+                })
+              </strong>
+              <div className="assignment-chips">
+                {managerChoices
+                  .filter((target) =>
+                    assignments.managers.some((entry) => entry.userId === target.userId)
+                    || assignments.managerTeams.some((entry) => entry.userId === target.userId)
+                  )
+                  .map((target) => {
+                    const manager = assignments.managers.some(
+                      (entry) => entry.userId === target.userId
+                    );
+                    const team = assignments.managerTeams.some(
+                      (entry) => entry.userId === target.userId
+                    );
+                    const rule = manager && team ? "Manager + Team" : manager ? "Manager" : "Team";
+                    return (
+                      <span
+                        key={target.userId}
+                        className={`assignment-chip${target.available ? "" : " unavailable"}`}
+                      >
+                        {target.displayName} - {rule}{!target.available ? " (Inactive)" : ""}
+                        {!archived ? (
+                          <button
+                            type="button"
+                            onClick={() => removeManagerRules(target.userId)}
+                            aria-label={`Remove ${target.displayName} manager rules`}
+                            title={`Remove ${target.displayName} manager rules`}
+                          >
+                            <X size={14} aria-hidden="true" />
+                          </button>
+                        ) : null}
+                      </span>
+                    );
+                  })}
+              </div>
+            </div>
             <label className="field-label">
               Search managers
               <span className="input-with-icon">
@@ -1005,7 +1093,11 @@ export function TrainingContentEditor({
                   >
                     <span>
                       <strong>{target.displayName}</strong>
-                      <small>{target.available ? target.email : "No longer an active User Admin"}</small>
+                      <small>
+                        {target.available
+                          ? `${target.email}${target.employeeId ? ` | ${target.employeeId}` : ""}`
+                          : "No longer an active User Admin"}
+                      </small>
                     </span>
                     <label>
                       <input
@@ -1027,7 +1119,7 @@ export function TrainingContentEditor({
                           toggleManagerRule("managerTeams", target, event.target.checked)
                         }
                       />
-                      Manager&apos;s team
+                      Assign to manager&apos;s team
                     </label>
                     {!target.available && !archived ? (
                       <button
@@ -1050,21 +1142,29 @@ export function TrainingContentEditor({
         </div>
       </section>
 
-      <section className="training-content-band training-content-publishing">
+      <div className="training-content-sticky-actions training-content-editor-actions">
         <div>
-          <p className="eyebrow">Publishing</p>
-          <h2>{trainingContentStatusLabel(item.publicationState)}</h2>
           <p className="muted-copy">
-            Source version {item.contentVersion} | Last updated {new Date(item.updatedAt).toLocaleString()}
+            {trainingContentStatusLabel(item.publicationState)}
+            {" | "}
+            Version {item.contentVersion}
           </p>
         </div>
         <div className="page-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={navigateAway}
+            disabled={saving || uploading}
+          >
+            Close
+          </button>
           {!archived ? (
             <button
               type="button"
               className="ghost-button icon-text-button"
               onClick={save}
-              disabled={saving || uploading || (!dirty && item.publicationState !== "draft")}
+              disabled={saving || uploading || !dirty}
             >
               {saving
                 ? <LoaderCircle size={17} className="spin" aria-hidden="true" />
@@ -1110,7 +1210,18 @@ export function TrainingContentEditor({
             </button>
           ) : null}
         </div>
-      </section>
+      </div>
+      <UnsavedChangesDialog
+        open={pendingNavigation !== null}
+        onStay={() => setPendingNavigation(null)}
+        onLeave={() => {
+          const destination = pendingNavigation;
+          setPendingNavigation(null);
+          if (destination) {
+            router.push(destination);
+          }
+        }}
+      />
     </div>
   );
 }

@@ -16,13 +16,18 @@ import {
   DashboardAdminUpdateUserResponse,
   DashboardAdminUsersExportResponse,
   DashboardAdminUsersResponse,
+  ArchiveDashboardTrainingContentCategoryRequest,
+  CreateDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentRequest,
   DashboardTrainingContentAssetAccessResponse,
   DashboardTrainingContentAssetFinalizationResponse,
   DashboardTrainingContentDetailResponse,
+  DashboardTrainingContentCategoriesResponse,
+  DashboardTrainingContentCategoryMutationResponse,
   DashboardTrainingContentFocusTopicsResponse,
   DashboardTrainingContentLifecycleRequest,
   DashboardTrainingContentListResponse,
+  DashboardTrainingContentOrderResponse,
   DashboardTrainingContentTargetsResponse,
   DashboardTrainingContentUploadInitiationRequest,
   DashboardTrainingContentUploadInitiationResponse,
@@ -48,9 +53,12 @@ import {
   PerformancePlanUpdatesResponse,
   PerformancePlanPreviewRequest,
   PerformancePlanPreviewResponse,
+  ReorderDashboardTrainingContentCategoriesRequest,
+  ReorderDashboardTrainingContentRequest,
   UpdatePerformancePlanRequest,
   UpdatePerformancePlanResponse,
   UpdateDashboardTrainingContentAssignmentsRequest,
+  UpdateDashboardTrainingContentCategoryRequest,
   UpdateDashboardTrainingContentRequest,
   WebAuthRequestCodeResponse,
   WebAuthSessionResponse,
@@ -684,6 +692,8 @@ function appendTrainingContentQuery(
   options?: {
     orgId?: string | null;
     q?: string | null;
+    categoryId?: string | null;
+    includeArchived?: string | null;
     focusTopicId?: string | null;
     contentType?: string | null;
     status?: string | null;
@@ -818,6 +828,93 @@ export async function getDashboardTrainingContentFocusTopics(
   return fetchDashboardApi<DashboardTrainingContentFocusTopicsResponse>(
     appendOrgQuery("/dashboard/admin/training-content-targets/focus-topics", orgId),
     { token }
+  );
+}
+
+export async function getDashboardTrainingContentCategories(
+  orgId?: string | null,
+  includeArchived = false
+): Promise<DashboardTrainingContentCategoriesResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentCategoriesResponse>(
+    appendTrainingContentQuery("/dashboard/admin/training-content/categories", {
+      orgId,
+      ...(includeArchived ? { includeArchived: "true" } : {}),
+    }),
+    { token }
+  );
+}
+
+export async function createDashboardTrainingContentCategory(
+  input: CreateDashboardTrainingContentCategoryRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentCategoryMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentCategoryMutationResponse>(
+    appendOrgQuery("/dashboard/admin/training-content/categories", orgId),
+    { method: "POST", body: JSON.stringify(input), token }
+  );
+}
+
+export async function updateDashboardTrainingContentCategory(
+  categoryId: string,
+  input: UpdateDashboardTrainingContentCategoryRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentCategoryMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentCategoryMutationResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/categories/${encodeURIComponent(categoryId)}`,
+      orgId
+    ),
+    { method: "PATCH", body: JSON.stringify(input), token }
+  );
+}
+
+export async function reorderDashboardTrainingContentCategories(
+  input: ReorderDashboardTrainingContentCategoriesRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentCategoriesResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentCategoriesResponse>(
+    appendOrgQuery("/dashboard/admin/training-content/categories/reorder", orgId),
+    { method: "PUT", body: JSON.stringify(input), token }
+  );
+}
+
+export async function archiveDashboardTrainingContentCategory(
+  categoryId: string,
+  input: ArchiveDashboardTrainingContentCategoryRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentCategoryMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentCategoryMutationResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/categories/${encodeURIComponent(categoryId)}/archive`,
+      orgId
+    ),
+    { method: "POST", body: JSON.stringify(input), token }
+  );
+}
+
+export async function getDashboardTrainingContentOrder(
+  orgId?: string | null
+): Promise<DashboardTrainingContentOrderResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentOrderResponse>(
+    appendOrgQuery("/dashboard/admin/training-content/reorder", orgId),
+    { token }
+  );
+}
+
+export async function reorderDashboardTrainingContent(
+  input: ReorderDashboardTrainingContentRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentOrderResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentOrderResponse>(
+    appendOrgQuery("/dashboard/admin/training-content/reorder", orgId),
+    { method: "PUT", body: JSON.stringify(input), token }
   );
 }
 

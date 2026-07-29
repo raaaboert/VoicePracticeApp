@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowLeft,
   AudioLines,
   ExternalLink,
   File,
@@ -10,14 +11,16 @@ import {
   Video,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import type {
   CreateDashboardTrainingContentRequest,
+  DashboardTrainingContentCategory,
   DashboardTrainingContentDetailResponse,
   DashboardTrainingContentFocusTopic,
   TrainingContentType,
 } from "@voicepractice/shared";
 
+import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
 import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
 import {
   trainingContentOrgQuery,
@@ -40,13 +43,19 @@ const CONTENT_TYPES: Array<{
 
 export function TrainingContentCreateForm({
   orgId,
+  categories,
   focusTopics,
 }: {
   orgId: string | null;
+  categories: DashboardTrainingContentCategory[];
   focusTopics: DashboardTrainingContentFocusTopic[];
 }) {
   const router = useRouter();
+  const defaultCategoryId = categories.find((category) => category.isDefault)?.id
+    ?? categories[0]?.id
+    ?? "";
   const [contentType, setContentType] = useState<TrainingContentType | null>(null);
+  const [categoryId, setCategoryId] = useState(defaultCategoryId);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [focusTopicId, setFocusTopicId] = useState("");
@@ -54,6 +63,35 @@ export function TrainingContentCreateForm({
   const [externalUrl, setExternalUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
+  const listPath = `/app/admin/training-content${trainingContentOrgQuery(orgId)}`;
+  const dirty = Boolean(
+    contentType
+    || title
+    || description
+    || focusTopicId
+    || nativeBody
+    || externalUrl
+    || categoryId !== defaultCategoryId
+  );
+
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (dirty) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [dirty]);
+
+  const navigateAway = () => {
+    if (dirty) {
+      setPendingNavigation(listPath);
+      return;
+    }
+    router.push(listPath);
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -61,11 +99,16 @@ export function TrainingContentCreateForm({
       setError("Select a Training Content type.");
       return;
     }
+    if (!categoryId) {
+      setError("Select a Content Category.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       const input: CreateDashboardTrainingContentRequest = {
         contentType,
+        categoryId,
         title,
         description,
         focusTopicId: focusTopicId || null,
@@ -97,6 +140,15 @@ export function TrainingContentCreateForm({
 
   return (
     <form className="training-content-create" onSubmit={submit}>
+      <button
+        className="training-content-back-link"
+        type="button"
+        onClick={navigateAway}
+        disabled={saving}
+      >
+        <ArrowLeft size={17} aria-hidden="true" />
+        Back to Training Content
+      </button>
       <section className="training-content-band">
         <div className="section-header">
           <div>
@@ -161,14 +213,30 @@ export function TrainingContentCreateForm({
                 />
               </label>
               <label className="field-label">
-                Focus Topic
+                Content Category
+                <select
+                  className="text-input"
+                  value={categoryId}
+                  onChange={(event) => setCategoryId(event.target.value)}
+                  required
+                  disabled={saving}
+                >
+                  {categories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}{category.isDefault ? " (Default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field-label">
+                Related Focus Topic
                 <select
                   className="text-input"
                   value={focusTopicId}
                   onChange={(event) => setFocusTopicId(event.target.value)}
                   disabled={saving}
                 >
-                  <option value="">General</option>
+                  <option value="">None</option>
                   {focusTopics.map((topic) => (
                     <option key={topic.id} value={topic.id}>
                       {topic.name}
@@ -224,6 +292,14 @@ export function TrainingContentCreateForm({
 
           {error ? <div className="notice danger">{error}</div> : null}
           <div className="training-content-sticky-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={navigateAway}
+              disabled={saving}
+            >
+              Cancel
+            </button>
             <button type="submit" className="primary-button" disabled={saving}>
               {saving ? <LoaderCircle size={17} className="spin" aria-hidden="true" /> : null}
               {saving ? "Creating..." : "Create draft"}
@@ -231,6 +307,17 @@ export function TrainingContentCreateForm({
           </div>
         </>
       ) : null}
+      <UnsavedChangesDialog
+        open={pendingNavigation !== null}
+        onStay={() => setPendingNavigation(null)}
+        onLeave={() => {
+          const destination = pendingNavigation;
+          setPendingNavigation(null);
+          if (destination) {
+            router.push(destination);
+          }
+        }}
+      />
     </form>
   );
 }

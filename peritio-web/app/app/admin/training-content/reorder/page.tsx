@@ -2,29 +2,24 @@ import { redirect } from "next/navigation";
 
 import { PageHeader } from "@/src/components/PageHeader";
 import { TrainingContentAdminNav } from "@/src/components/TrainingContentAdminNav";
-import { TrainingContentCreateForm } from "@/src/components/TrainingContentCreateForm";
+import { TrainingContentReorder } from "@/src/components/TrainingContentReorder";
 import {
   DashboardApiError,
   DashboardSessionInvalidError,
-  getDashboardTrainingContentCategories,
-  getDashboardTrainingContentFocusTopics,
+  getDashboardTrainingContentOrder,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
-export default async function NewTrainingContentPage({
+export default async function ReorderTrainingContentPage({
   searchParams,
 }: {
   searchParams: Promise<{ orgId?: string }>;
 }) {
   const params = await searchParams;
   const orgId = params.orgId?.trim() || null;
-  let topics;
-  let categories;
+  let payload;
   try {
-    [topics, categories] = await Promise.all([
-      getDashboardTrainingContentFocusTopics(orgId),
-      getDashboardTrainingContentCategories(orgId),
-    ]);
+    payload = await getDashboardTrainingContentOrder(orgId);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -42,14 +37,14 @@ export default async function NewTrainingContentPage({
     <>
       <PageHeader
         eyebrow="Training Content"
-        title="New Training Content"
-        description={`Create a draft for ${topics.org.name}.`}
+        title="Reorder Content"
+        description={`Set the library order for ${payload.org.name}.`}
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />
-      <TrainingContentCreateForm
+      <TrainingContentReorder
+        initialGroups={payload.groups}
+        initialOrderRevision={payload.orderRevision}
         orgId={orgId}
-        categories={categories.categories}
-        focusTopics={topics.focusTopics}
       />
     </>
   );

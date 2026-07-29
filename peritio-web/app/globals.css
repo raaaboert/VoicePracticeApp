@@ -1430,9 +1430,34 @@ html[data-theme="light"] .progress-track {
 }
 
 .training-content-create,
-.training-content-editor {
+.training-content-editor,
+.training-content-category-manager,
+.training-content-reorder {
   display: grid;
   gap: 1.2rem;
+}
+
+.training-content-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.training-content-back-link:hover {
+  color: var(--accent);
+}
+
+.training-content-back-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
 }
 
 .training-content-band {
@@ -1535,15 +1560,26 @@ html[data-theme="light"] .progress-track {
   bottom: 0;
   z-index: 4;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
   padding: 0.85rem 0;
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
 
+.training-content-sticky-actions .muted-copy {
+  margin: 0;
+}
+
+.training-content-page-actions {
+  justify-content: flex-end;
+}
+
 .training-content-filters {
   display: grid;
-  grid-template-columns: minmax(240px, 2fr) repeat(4, minmax(145px, 1fr)) auto;
+  grid-template-columns: minmax(240px, 2fr) repeat(5, minmax(145px, 1fr)) auto;
   gap: 0.75rem;
   align-items: end;
 }
@@ -1880,7 +1916,6 @@ html[data-theme="light"] .progress-track {
 }
 
 .assignment-search-results,
-.selected-targets,
 .manager-assignment-list {
   display: grid;
   gap: 0.5rem;
@@ -1910,6 +1945,247 @@ html[data-theme="light"] .progress-track {
 
 .manager-assignment-row input {
   accent-color: var(--accent);
+}
+
+.assignment-result-row {
+  cursor: pointer;
+}
+
+.assignment-result-row input {
+  width: 1.1rem;
+  height: 1.1rem;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.assignment-selection-summary {
+  display: grid;
+  gap: 0.6rem;
+  min-height: 2rem;
+}
+
+.assignment-chips {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.assignment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  min-height: 2rem;
+  padding: 0.3rem 0.45rem 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-muted);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.assignment-chip button {
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.assignment-chip button:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.assignment-everyone-note {
+  margin: 0.75rem 0 0;
+}
+
+.training-content-category-groups {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.training-content-category-group {
+  min-width: 0;
+  padding: 0 0 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.training-content-category-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.training-content-category-heading h2,
+.training-content-category-heading h3,
+.training-content-category-heading p {
+  margin: 0;
+}
+
+.training-content-category-heading p,
+.training-content-category-heading > span {
+  color: var(--text-muted);
+}
+
+.training-content-category-heading p {
+  margin-top: 0.3rem;
+  line-height: 1.5;
+}
+
+.training-content-category-heading > span {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.training-content-category-create {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 2fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.training-content-order-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.training-content-order-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-muted);
+}
+
+.training-content-order-copy {
+  display: grid;
+  gap: 0.25rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.training-content-order-copy strong,
+.training-content-order-copy span,
+.training-content-order-copy small {
+  overflow-wrap: anywhere;
+}
+
+.training-content-order-copy span,
+.training-content-order-copy small {
+  color: var(--text-muted);
+}
+
+.training-content-order-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.training-content-category-edit {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 2fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+  width: 100%;
+}
+
+.training-content-move-select {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 11rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.training-content-archived-categories {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.training-content-archived-categories > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.training-content-archived-categories span {
+  color: var(--text-muted);
+}
+
+.confirmation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.confirmation-dialog {
+  display: grid;
+  gap: 1rem;
+  width: min(32rem, 100%);
+  max-height: calc(100vh - 2rem);
+  padding: 1.1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 1.2rem 3rem rgba(0, 0, 0, 0.32);
+  overflow-y: auto;
+}
+
+.confirmation-dialog-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.confirmation-dialog-header h2,
+.confirmation-dialog-header p {
+  margin: 0;
+}
+
+.confirmation-dialog-header p {
+  margin-top: 0.35rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.confirmation-dialog-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.confirmation-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  flex-wrap: wrap;
 }
 
 .training-content-publishing {
@@ -1987,6 +2263,16 @@ html[data-theme="light"] .progress-track {
 
   .manager-assignment-row {
     grid-template-columns: minmax(12rem, 1fr) auto;
+  }
+
+  .training-content-category-create,
+  .training-content-category-edit {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .training-content-category-create > button,
+  .training-content-category-edit .page-actions {
+    grid-column: 1 / -1;
   }
 }
 
@@ -2066,5 +2352,47 @@ html[data-theme="light"] .progress-track {
 
   .manager-assignment-row label {
     white-space: normal;
+  }
+
+  .training-content-page-actions,
+  .training-content-page-actions > *,
+  .training-content-sticky-actions,
+  .training-content-sticky-actions > *,
+  .training-content-sticky-actions .page-actions,
+  .training-content-sticky-actions .page-actions > * {
+    width: 100%;
+  }
+
+  .training-content-sticky-actions .page-actions > * {
+    flex: 1 1 10rem;
+  }
+
+  .training-content-category-create,
+  .training-content-category-edit {
+    grid-template-columns: 1fr;
+  }
+
+  .training-content-category-create > button,
+  .training-content-category-edit .page-actions {
+    grid-column: auto;
+  }
+
+  .training-content-order-row,
+  .training-content-category-heading,
+  .training-content-archived-categories > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .training-content-order-controls {
+    justify-content: flex-start;
+  }
+
+  .training-content-move-select {
+    flex: 1 1 100%;
+  }
+
+  .confirmation-dialog-actions > * {
+    flex: 1 1 10rem;
   }
 }

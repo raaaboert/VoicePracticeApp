@@ -85,7 +85,8 @@ test("assignment target merge deduplicates users and keeps deterministic display
     displayName,
     email,
     employeeId: null,
-    role: "user",
+    orgRole: "user",
+    status: "active",
     available: true,
   });
   const merged = mergeTrainingContentTargets(
