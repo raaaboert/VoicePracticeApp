@@ -7,12 +7,16 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
+    "test": "tsx --test src/**/*.test.ts",
     "eas-build-post-install": "npm --prefix .. run build:shared"
   },
   "dependencies": {
+    "@config-plugins/react-native-pdf": "^12.0.0",
+    "@expo/vector-icons": "^15.0.3",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@voicepractice/shared": "file:../shared",
     "expo": "~54.0.33",
+    "expo-audio": "~1.1.1",
     "expo-av": "^16.0.8",
     "expo-file-system": "^19.0.17",
     "expo-linear-gradient": "^15.0.8",
@@ -20,12 +24,16 @@
     "expo-sharing": "^14.0.8",
     "expo-speech": "^14.0.8",
     "expo-status-bar": "~3.0.9",
+    "expo-video": "~3.0.15",
     "react": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-blob-util": "^0.24.10",
+    "react-native-pdf": "^7.0.4",
     "react-native-safe-area-context": "^5.6.2"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "tsx": "^4.20.6",
     "typescript": "~5.9.2"
   },
   "private": true

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import { Audio, InterruptionModeIOS } from "expo-av";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import appManifest from "./app.json";
@@ -122,6 +123,13 @@ import {
 import { ScorecardView } from "./src/screens/ScorecardView";
 import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
+import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
+import { fetchMobileModules } from "./src/trainingContent/api";
+import {
+  canRequestTrainingContentModule,
+  isTrainingContentModuleRemoval,
+  trainingContentErrorMessage,
+} from "./src/trainingContent/model";
 import {
   AiVoiceGender,
   AiVoiceProfile,
@@ -169,6 +177,7 @@ type Screen =
   | "simulation"
   | "scorecard"
   | "performance"
+  | "training_content"
   | "usage_dashboard"
   | "admin_home"
   | "admin_org_dashboard"
@@ -722,6 +731,9 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
   const [entitlements, setEntitlements] = useState<UserEntitlementsResponse | null>(null);
+  const [trainingContentEnabled, setTrainingContentEnabled] = useState(false);
+  const [trainingContentNotice, setTrainingContentNotice] = useState<string | null>(null);
+  const [isTrainingContentOpening, setIsTrainingContentOpening] = useState(false);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
@@ -2010,6 +2022,9 @@ export default function App() {
     setEntitlements(null);
     setMobileAuthToken(null);
     setPendingVerificationUserId(null);
+    setTrainingContentEnabled(false);
+    setTrainingContentNotice(null);
+    setIsTrainingContentOpening(false);
     setVerificationCode("");
     setVerificationExpiresAt(null);
     setVerificationNotice(null);
@@ -3525,6 +3540,110 @@ export default function App() {
   const isOrgAdmin = Boolean(user?.accountType === "enterprise" && user.orgRole === "org_admin");
 
   useEffect(() => {
+    let cancelled = false;
+    if (!user || !mobileAuthToken || !canRequestTrainingContentModule(user)) {
+      setTrainingContentEnabled(false);
+      setTrainingContentNotice(null);
+      setIsTrainingContentOpening(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (screen !== "home") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setTrainingContentEnabled(false);
+    void fetchMobileModules(user.id, mobileAuthToken)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setTrainingContentEnabled(response.modules.trainingContent.enabled);
+        if (response.modules.trainingContent.enabled) {
+          setTrainingContentNotice(null);
+        }
+      })
+      .catch((caught) => {
+        if (cancelled) {
+          return;
+        }
+        setTrainingContentEnabled(false);
+        if (isTrainingContentModuleRemoval(caught)) {
+          setTrainingContentNotice(null);
+          return;
+        }
+        setTrainingContentNotice(
+          trainingContentErrorMessage(
+            caught,
+            "Training Content availability could not be checked."
+          )
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    mobileAuthToken,
+    screen,
+    user?.accountType,
+    user?.emailVerifiedAt,
+    user?.firstName,
+    user?.id,
+    user?.lastName,
+    user?.mobileProfileReonboardingRequired,
+    user?.orgId,
+    user?.status,
+  ]);
+
+  const openTrainingContent = useCallback(async () => {
+    if (
+      !user
+      || !mobileAuthToken
+      || !canRequestTrainingContentModule(user)
+      || isTrainingContentOpening
+    ) {
+      return;
+    }
+    setIsTrainingContentOpening(true);
+    setTrainingContentNotice(null);
+    try {
+      const response = await fetchMobileModules(user.id, mobileAuthToken);
+      if (!response.modules.trainingContent.enabled) {
+        setTrainingContentEnabled(false);
+        setTrainingContentNotice("Training Content is no longer enabled.");
+        return;
+      }
+      setTrainingContentEnabled(true);
+      setScreen("training_content");
+    } catch (caught) {
+      if (isTrainingContentModuleRemoval(caught)) {
+        setTrainingContentEnabled(false);
+      }
+      setTrainingContentNotice(
+        trainingContentErrorMessage(
+          caught,
+          "Training Content could not be opened."
+        )
+      );
+    } finally {
+      setIsTrainingContentOpening(false);
+    }
+  }, [isTrainingContentOpening, mobileAuthToken, user]);
+
+  const returnFromTrainingContent = useCallback((message?: string) => {
+    setTrainingContentNotice(message ?? null);
+    setScreen("home");
+  }, []);
+
+  const handleTrainingContentAvailability = useCallback((enabled: boolean) => {
+    setTrainingContentEnabled(enabled);
+  }, []);
+
+  useEffect(() => {
     if (screen !== "scorecard" && lastTranscript) {
       setLastTranscript(null);
     }
@@ -3664,91 +3783,137 @@ export default function App() {
         </View>
       </Modal>
 
-      <LinearGradient
-        colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
-        start={{ x: 0.04, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={[styles.heroCard, useIosCompactHomeLayout ? styles.heroCardCompactHome : null]}
+      <ScrollView
+        style={styles.fill}
+        contentContainerStyle={styles.homeScrollContent}
+        showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.heroMarkFrame, useIosCompactHomeLayout ? styles.heroMarkFrameCompactHome : null]}>
-          <Image
-            source={APP_ICON_ART}
-            style={[styles.heroMarkImage, useIosCompactHomeLayout ? styles.heroMarkImageCompactHome : null]}
-            resizeMode="contain"
-          />
-        </View>
-        <Text style={styles.heroKicker} maxFontSizeMultiplier={1.1}>Peritio</Text>
-        <Text
-          style={[styles.heroTitle, useIosCompactHomeLayout ? styles.heroTitleCompactHome : null]}
-          maxFontSizeMultiplier={1.05}
+        <LinearGradient
+          colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
+          start={{ x: 0.04, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[styles.heroCard, useIosCompactHomeLayout ? styles.heroCardCompactHome : null]}
         >
-          Improve with precision.
-        </Text>
-        <Text
-          style={[styles.heroBody, useIosCompactHomeLayout ? styles.heroBodyCompactHome : null]}
-          maxFontSizeMultiplier={1.1}
-        >
-          Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
-        </Text>
-        <View style={[styles.heroMetaRow, useIosCompactHomeLayout ? styles.heroMetaRowCompactHome : null]}>
-          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Voice practice</Text>
+          <View style={[styles.heroMarkFrame, useIosCompactHomeLayout ? styles.heroMarkFrameCompactHome : null]}>
+            <Image
+              source={APP_ICON_ART}
+              style={[styles.heroMarkImage, useIosCompactHomeLayout ? styles.heroMarkImageCompactHome : null]}
+              resizeMode="contain"
+            />
           </View>
-          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scenario drills</Text>
-          </View>
-          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scored feedback</Text>
-          </View>
-        </View>
-      </LinearGradient>
-
-      {!apiConfigured ? (
-        <View style={styles.warningCard}>
-          <Text style={styles.warningText}>
-            Remote AI is intentionally disabled in this build. Simulation and scoring run in local mode only.
+          <Text style={styles.heroKicker} maxFontSizeMultiplier={1.1}>Peritio</Text>
+          <Text
+            style={[styles.heroTitle, useIosCompactHomeLayout ? styles.heroTitleCompactHome : null]}
+            maxFontSizeMultiplier={1.05}
+          >
+            Improve with precision.
           </Text>
-        </View>
-      ) : null}
-
-      {entitlements?.lockReason ? (
-        <View style={styles.errorCard}>
-          <Text style={styles.errorText}>{entitlements.lockReason}</Text>
-        </View>
-      ) : null}
-
-      {user?.isSuperUser && activeSuperUserOrg ? (
-        <View style={styles.card}>
-          <Text style={styles.label}>Environment</Text>
-          <Text style={styles.title}>{activeSuperUserOrg.orgName}</Text>
-          <Text style={styles.body}>
-            Status: {activeSuperUserOrg.orgStatus === "active" ? "Active" : "Deactivated"}
+          <Text
+            style={[styles.heroBody, useIosCompactHomeLayout ? styles.heroBodyCompactHome : null]}
+            maxFontSizeMultiplier={1.1}
+          >
+            Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
           </Text>
-        </View>
-      ) : null}
-
-      <Pressable
-        style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
-        onPress={() => setScreen("setup")}
-      >
-        <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
-      </Pressable>
-
-      {activeSegment ? (
-        <View style={[styles.card, styles.segmentCard]}>
-          <View style={styles.segmentHeaderRow}>
-            <View style={styles.segmentHeaderCopy}>
-              <Text style={styles.segmentLabel}>Active role</Text>
-              <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+          <View style={[styles.heroMetaRow, useIosCompactHomeLayout ? styles.heroMetaRowCompactHome : null]}>
+            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Voice practice</Text>
             </View>
-            <View style={styles.segmentBadge}>
-              <Text style={styles.segmentBadgeText}>Ready</Text>
+            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scenario drills</Text>
+            </View>
+            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scored feedback</Text>
             </View>
           </View>
-          <Text style={styles.segmentSummary}>{activeSegment.summary}</Text>
-          <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
-        </View>
-      ) : null}
+        </LinearGradient>
+
+        {trainingContentEnabled ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open Training Content"
+            style={[
+              styles.trainingModuleTile,
+              isTrainingContentOpening ? styles.disabled : null,
+            ]}
+            disabled={isTrainingContentOpening}
+            onPress={() => {
+              void openTrainingContent();
+            }}
+          >
+            <View style={styles.trainingModuleIconFrame}>
+              <MaterialCommunityIcons
+                name="bookshelf"
+                size={28}
+                color={APP_SURFACE_COLORS.goldMuted}
+              />
+            </View>
+            <View style={styles.trainingModuleCopy}>
+              <Text style={styles.trainingModuleTitle}>Training Content</Text>
+              <Text style={styles.trainingModuleBody}>
+                Review company resources and learning materials.
+              </Text>
+            </View>
+            {isTrainingContentOpening ? (
+              <ActivityIndicator size="small" color={theme.accent} />
+            ) : (
+              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
+            )}
+          </Pressable>
+        ) : null}
+
+        {trainingContentNotice ? (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>{trainingContentNotice}</Text>
+          </View>
+        ) : null}
+
+        {!apiConfigured ? (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>
+              Remote AI is intentionally disabled in this build. Simulation and scoring run in local mode only.
+            </Text>
+          </View>
+        ) : null}
+
+        {entitlements?.lockReason ? (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>{entitlements.lockReason}</Text>
+          </View>
+        ) : null}
+
+        {user?.isSuperUser && activeSuperUserOrg ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>Environment</Text>
+            <Text style={styles.title}>{activeSuperUserOrg.orgName}</Text>
+            <Text style={styles.body}>
+              Status: {activeSuperUserOrg.orgStatus === "active" ? "Active" : "Deactivated"}
+            </Text>
+          </View>
+        ) : null}
+
+        <Pressable
+          style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
+          onPress={() => setScreen("setup")}
+        >
+          <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
+        </Pressable>
+
+        {activeSegment ? (
+          <View style={[styles.card, styles.segmentCard]}>
+            <View style={styles.segmentHeaderRow}>
+              <View style={styles.segmentHeaderCopy}>
+                <Text style={styles.segmentLabel}>Active role</Text>
+                <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+              </View>
+              <View style={styles.segmentBadge}>
+                <Text style={styles.segmentBadgeText}>Ready</Text>
+              </View>
+            </View>
+            <Text style={styles.segmentSummary}>{activeSegment.summary}</Text>
+            <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
+          </View>
+        ) : null}
+      </ScrollView>
     </View>
   );
 
@@ -5819,6 +5984,18 @@ export default function App() {
       );
     }
 
+    if (screen === "training_content" && user && mobileAuthToken) {
+      return (
+        <TrainingContentScreen
+          userId={user.id}
+          authToken={mobileAuthToken}
+          colorScheme={colorScheme}
+          onBackToHome={returnFromTrainingContent}
+          onModuleAvailabilityChange={handleTrainingContentAvailability}
+        />
+      );
+    }
+
     if (screen === "performance" && user && mobileAuthToken) {
       return (
         <PerformanceScreen
@@ -5888,6 +6065,7 @@ function createStyles(theme: ThemeTokens) {
     safeArea: { flex: 1, paddingHorizontal: 16, paddingBottom: 12 },
     fill: { flex: 1 },
     homeFillCompact: { justifyContent: "flex-start" },
+    homeScrollContent: { paddingBottom: 18 },
     centered: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
     topRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
     homeTopRowCompact: { marginBottom: 8 },
@@ -5961,6 +6139,32 @@ function createStyles(theme: ThemeTokens) {
       paddingVertical: 4,
     },
     heroMetaText: { color: "rgba(248, 238, 217, 0.9)", fontSize: 12, fontWeight: "700", letterSpacing: 0.2 },
+    trainingModuleTile: {
+      minHeight: 92,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: theme.accent,
+      backgroundColor: theme.panel,
+      paddingHorizontal: 14,
+      paddingVertical: 13,
+      marginBottom: 14,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    trainingModuleIconFrame: {
+      width: 48,
+      height: 48,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: "rgba(181, 146, 76, 0.42)",
+      backgroundColor: APP_SURFACE_COLORS.sage,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    trainingModuleCopy: { flex: 1, gap: 4 },
+    trainingModuleTitle: { color: theme.text, fontSize: 18, lineHeight: 22, fontWeight: "800" },
+    trainingModuleBody: { color: theme.textMuted, fontSize: 13.5, lineHeight: 19 },
     segmentCard: {
       marginTop: 4,
       borderColor: theme.accent,
