@@ -8,6 +8,7 @@ import type {
   TrainingContentAssignmentType,
   TrainingContentAssetRole,
   TrainingContentAssetUploadState,
+  TrainingContentCategory,
   TrainingContentItem,
   TrainingContentListSort,
   TrainingContentPublicationState,
@@ -89,6 +90,32 @@ export interface TrainingContentManagementListResult {
   total: number;
 }
 
+export interface TrainingContentMobileAssetRecord {
+  id: string;
+  orgId: string;
+  contentId: string;
+  uploadState: TrainingContentAssetUploadState;
+  originalFilename: string | null;
+  detectedMimeType: string | null;
+  fileExtension: string | null;
+  byteSize: number | null;
+  isCurrent: boolean;
+  finalObjectKey: string | null;
+  objectDeletedAt: string | null;
+}
+
+export interface TrainingContentMobileReadRecord {
+  content: TrainingContentItem;
+  category: TrainingContentCategory;
+  currentAsset: TrainingContentMobileAssetRecord | null;
+  assignments: TrainingContentAssignment[];
+}
+
+export interface TrainingContentMobileReadResult {
+  items: TrainingContentMobileReadRecord[];
+  truncated: boolean;
+}
+
 export interface TrainingContentListFilters {
   query?: string | null;
   categoryId?: string | null;
@@ -154,6 +181,14 @@ export interface TrainingContentStore {
   initialize(): Promise<void>;
   listContentItemsForOrg(orgId: string): Promise<TrainingContentItem[]>;
   getContentItemForOrg(orgId: string, contentId: string): Promise<TrainingContentItem | null>;
+  listPublishedContentForMobile(
+    orgId: string,
+    maximumItems?: number
+  ): Promise<TrainingContentMobileReadResult>;
+  getPublishedContentForMobile(
+    orgId: string,
+    contentId: string
+  ): Promise<TrainingContentMobileReadRecord | null>;
   listContentForManagement(
     orgId: string,
     filters?: TrainingContentListFilters
@@ -268,6 +303,29 @@ interface TrainingContentManagementRow extends TrainingContentItemRow {
   manager_team_assignment_count: string | number;
 }
 
+interface TrainingContentMobileRow extends TrainingContentItemRow {
+  category_name: string;
+  category_description: string;
+  category_display_order: number;
+  category_is_default: boolean;
+  category_created_by_actor_id: string;
+  category_updated_by_actor_id: string;
+  category_created_at: string | Date;
+  category_updated_at: string | Date;
+  category_archived_at: string | Date | null;
+  current_asset_id: string | null;
+  current_asset_org_id: string | null;
+  current_asset_content_id: string | null;
+  current_asset_upload_state: TrainingContentAssetUploadState | null;
+  current_asset_original_filename: string | null;
+  current_asset_detected_mime_type: string | null;
+  current_asset_file_extension: string | null;
+  current_asset_byte_size: string | number | null;
+  current_asset_is_current: boolean | null;
+  current_asset_final_object_key: string | null;
+  current_asset_object_deleted_at: string | Date | null;
+}
+
 interface TrainingContentCategoryIdentityRow {
   id: string;
   org_id: string;
@@ -340,6 +398,14 @@ class NullTrainingContentStore implements TrainingContentStore {
   }
 
   async getContentItemForOrg(): Promise<TrainingContentItem | null> {
+    return null;
+  }
+
+  async listPublishedContentForMobile(): Promise<TrainingContentMobileReadResult> {
+    return { items: [], truncated: false };
+  }
+
+  async getPublishedContentForMobile(): Promise<TrainingContentMobileReadRecord | null> {
     return null;
   }
 
@@ -416,6 +482,48 @@ class PostgresTrainingContentStore implements TrainingContentStore {
   async getContentItemForOrg(orgId: string, contentId: string): Promise<TrainingContentItem | null> {
     await this.initialize();
     return getContentItem(this.pool, orgId, contentId);
+  }
+
+  async listPublishedContentForMobile(
+    orgId: string,
+    maximumItems = 500
+  ): Promise<TrainingContentMobileReadResult> {
+    await this.initialize();
+    const normalizedOrgId = requiredId(orgId, "Organization id");
+    const limit = boundedInteger(maximumItems, 1, 500, 500);
+    const result = await this.pool.query<TrainingContentMobileRow>(
+      mobilePublishedContentQuery(""),
+      [normalizedOrgId, limit + 1]
+    );
+    const selectedRows = result.rows.slice(0, limit);
+    const assignments = await listActiveAssignments(
+      this.pool,
+      normalizedOrgId,
+      selectedRows.map((row) => row.id)
+    );
+    return {
+      items: selectedRows.map((row) => mapMobileReadRow(row, assignments.get(row.id) ?? [])),
+      truncated: result.rows.length > limit,
+    };
+  }
+
+  async getPublishedContentForMobile(
+    orgId: string,
+    contentId: string
+  ): Promise<TrainingContentMobileReadRecord | null> {
+    await this.initialize();
+    const normalizedOrgId = requiredId(orgId, "Organization id");
+    const normalizedContentId = requiredId(contentId, "Content id");
+    const result = await this.pool.query<TrainingContentMobileRow>(
+      mobilePublishedContentQuery("AND c.id = $2", "LIMIT 1"),
+      [normalizedOrgId, normalizedContentId]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+    const assignments = await listActiveAssignments(this.pool, normalizedOrgId, [row.id]);
+    return mapMobileReadRow(row, assignments.get(row.id) ?? []);
   }
 
   async listContentForManagement(
@@ -1207,6 +1315,154 @@ function isValidStoredHttpsUrl(value: string | null): boolean {
   } catch {
     return false;
   }
+}
+
+function mobilePublishedContentQuery(
+  additionalCondition: string,
+  limitClause = "LIMIT $2"
+): string {
+  return `
+    SELECT
+      c.*,
+      category.name AS category_name,
+      category.description AS category_description,
+      category.display_order AS category_display_order,
+      category.is_default AS category_is_default,
+      category.created_by_actor_id AS category_created_by_actor_id,
+      category.updated_by_actor_id AS category_updated_by_actor_id,
+      category.created_at AS category_created_at,
+      category.updated_at AS category_updated_at,
+      category.archived_at AS category_archived_at,
+      asset.id AS current_asset_id,
+      asset.org_id AS current_asset_org_id,
+      asset.content_id AS current_asset_content_id,
+      asset.upload_state AS current_asset_upload_state,
+      asset.original_filename AS current_asset_original_filename,
+      asset.detected_mime_type AS current_asset_detected_mime_type,
+      asset.file_extension AS current_asset_file_extension,
+      asset.byte_size AS current_asset_byte_size,
+      asset.is_current AS current_asset_is_current,
+      asset.final_object_key AS current_asset_final_object_key,
+      asset.object_deleted_at AS current_asset_object_deleted_at
+    FROM org_content_items c
+    INNER JOIN org_content_categories category
+      ON category.org_id = c.org_id
+     AND category.id = c.category_id
+     AND category.archived_at IS NULL
+    LEFT JOIN LATERAL (
+      SELECT
+        id,
+        org_id,
+        content_id,
+        upload_state,
+        original_filename,
+        detected_mime_type,
+        file_extension,
+        byte_size,
+        is_current,
+        final_object_key,
+        object_deleted_at
+      FROM org_content_assets
+      WHERE org_id = c.org_id
+        AND content_id = c.id
+        AND asset_role = 'primary'
+        AND upload_state = 'ready'
+        AND is_current = TRUE
+        AND object_deleted_at IS NULL
+      LIMIT 1
+    ) asset ON TRUE
+    WHERE c.org_id = $1
+      AND c.publication_state = 'published'
+      AND c.archived_at IS NULL
+      ${additionalCondition}
+    ORDER BY
+      category.display_order ASC,
+      c.display_order ASC,
+      LOWER(c.title) ASC,
+      c.id ASC
+    ${limitClause}
+  `;
+}
+
+async function listActiveAssignments(
+  queryable: TrainingContentQueryable,
+  orgId: string,
+  contentIds: string[]
+): Promise<Map<string, TrainingContentAssignment[]>> {
+  const byContentId = new Map<string, TrainingContentAssignment[]>();
+  if (contentIds.length === 0) {
+    return byContentId;
+  }
+  const result = await queryable.query<TrainingContentAssignmentRow>(
+    `
+      SELECT ${ASSIGNMENT_COLUMNS}
+      FROM org_content_assignments
+      WHERE org_id = $1
+        AND content_id = ANY($2::uuid[])
+        AND revoked_at IS NULL
+      ORDER BY content_id ASC, assignment_type ASC, subject_user_id ASC NULLS FIRST, id ASC
+    `,
+    [orgId, contentIds]
+  );
+  for (const row of result.rows) {
+    const mapped = mapAssignmentRow(row);
+    const assignments = byContentId.get(mapped.contentId) ?? [];
+    assignments.push(mapped);
+    byContentId.set(mapped.contentId, assignments);
+  }
+  return byContentId;
+}
+
+function mapMobileReadRow(
+  row: TrainingContentMobileRow,
+  assignments: TrainingContentAssignment[]
+): TrainingContentMobileReadRecord {
+  return {
+    content: mapContentItemRow(row),
+    category: {
+      id: row.category_id,
+      orgId: row.org_id,
+      name: row.category_name,
+      description: row.category_description,
+      displayOrder: row.category_display_order,
+      isDefault: row.category_is_default,
+      createdByActorId: row.category_created_by_actor_id,
+      updatedByActorId: row.category_updated_by_actor_id,
+      createdAt: requiredIso(row.category_created_at, "Category created time"),
+      updatedAt: requiredIso(row.category_updated_at, "Category updated time"),
+      archivedAt: optionalIso(row.category_archived_at),
+    },
+    currentAsset: mapMobileAssetRow(row),
+    assignments,
+  };
+}
+
+function mapMobileAssetRow(
+  row: TrainingContentMobileRow
+): TrainingContentMobileAssetRecord | null {
+  if (!row.current_asset_id) {
+    return null;
+  }
+  if (
+    !row.current_asset_org_id
+    || !row.current_asset_content_id
+    || !row.current_asset_upload_state
+  ) {
+    throw new Error("Current Training Content mobile asset row is incomplete.");
+  }
+  return {
+    id: row.current_asset_id,
+    orgId: row.current_asset_org_id,
+    contentId: row.current_asset_content_id,
+    uploadState: row.current_asset_upload_state,
+    originalFilename: row.current_asset_original_filename,
+    detectedMimeType: row.current_asset_detected_mime_type,
+    fileExtension: row.current_asset_file_extension,
+    byteSize: optionalDatabaseInteger(row.current_asset_byte_size, "Byte size"),
+    isCurrent: row.current_asset_is_current === true,
+    finalObjectKey: row.current_asset_final_object_key,
+    objectDeletedAt: optionalIso(row.current_asset_object_deleted_at),
+  };
 }
 
 function mapManagementRow(row: TrainingContentManagementRow): TrainingContentManagementListRow {

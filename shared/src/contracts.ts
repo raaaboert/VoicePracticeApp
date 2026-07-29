@@ -175,6 +175,72 @@ export interface TrainingContentCategory {
   archivedAt: string | null;
 }
 
+export interface MobileModuleAvailabilityResponse {
+  modules: {
+    trainingContent: {
+      enabled: boolean;
+    };
+  };
+}
+
+export interface MobileTrainingContentCategory {
+  id: string;
+  name: string;
+  description: string;
+  itemCount: number;
+  displayOrder: number;
+}
+
+export interface MobileTrainingContentCategoryReference {
+  id: string;
+  name: string;
+}
+
+export interface MobileTrainingContentSummary {
+  id: string;
+  contentType: TrainingContentType;
+  title: string;
+  description: string;
+  category: MobileTrainingContentCategoryReference;
+  relatedFocusTopic: string | null;
+}
+
+export interface MobileTrainingContentAssetMetadata {
+  filename: string | null;
+  mimeType: string | null;
+  fileExtension: string | null;
+  byteSize: number | null;
+}
+
+export interface MobileTrainingContentDetail extends MobileTrainingContentSummary {
+  nativeBody: string | null;
+  externalUrl: string | null;
+  asset: MobileTrainingContentAssetMetadata | null;
+  contentVersion: number;
+}
+
+export interface MobileTrainingContentLibraryResponse {
+  categories: MobileTrainingContentCategory[];
+  items: MobileTrainingContentSummary[];
+  truncated: boolean;
+}
+
+export interface MobileTrainingContentCategoriesResponse {
+  categories: MobileTrainingContentCategory[];
+}
+
+export interface MobileTrainingContentDetailResponse {
+  item: MobileTrainingContentDetail;
+}
+
+export interface MobileTrainingContentAssetAccessResponse {
+  access: {
+    url: string;
+    expiresAt: string;
+    requiredHeaders: Record<string, string>;
+  };
+}
+
 export interface TrainingContentFileLimitsBytes {
   video: number;
   audio: number;

@@ -1674,3 +1674,165 @@ test(
     }
   }
 );
+
+test(
+  "real PostgreSQL mobile reads enforce tenant, publication, category, assignment, asset, and ordering filters",
+  { skip: !databaseUrl },
+  async () => {
+    assertSafeIntegrationDatabase(databaseUrl);
+    const setupPool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 15_000,
+      idleTimeoutMillis: 10_000,
+    });
+    const schema = `tc_mobile_read_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let scopedPool: Pool | null = null;
+    try {
+      await setupPool.query(`CREATE SCHEMA ${quotedSchema}`);
+      scopedPool = new Pool({
+        connectionString: databaseUrl,
+        max: 2,
+        connectionTimeoutMillis: 15_000,
+        idleTimeoutMillis: 10_000,
+        options: `-c search_path=${schema}`,
+      });
+      const store = createTrainingContentStore({
+        provider: "postgres",
+        databaseUrl,
+        pgPoolMax: 2,
+        pgConnectTimeoutMs: 15_000,
+        pgIdleTimeoutMs: 10_000,
+        queryPool: scopedPool,
+      });
+      await store.initialize();
+
+      const categoryFirst = randomUUID();
+      const categorySecond = randomUUID();
+      const categoryArchived = randomUUID();
+      await scopedPool.query(
+        `
+          INSERT INTO org_content_categories (
+            id, org_id, name, description, display_order, is_default,
+            created_by_actor_id, updated_by_actor_id, archived_at
+          )
+          VALUES
+            ($1, 'org_a', 'First', '', 0, TRUE, 'admin', 'admin', NULL),
+            ($2, 'org_a', 'Second', '', 1, FALSE, 'admin', 'admin', NULL),
+            ($3, 'org_a', 'Archived', '', 2, FALSE, 'admin', 'admin', NOW()),
+            ($4, 'org_b', 'Other tenant', '', 0, TRUE, 'admin', 'admin', NULL)
+        `,
+        [categoryFirst, categorySecond, categoryArchived, randomUUID()]
+      );
+
+      const publishedFirst = randomUUID();
+      const publishedSecond = randomUUID();
+      const draft = randomUUID();
+      const archivedCategoryContent = randomUUID();
+      const otherTenantContent = randomUUID();
+      await scopedPool.query(
+        `
+          INSERT INTO org_content_items (
+            id, org_id, category_id, title, description, content_type,
+            publication_state, native_body, display_order, content_version,
+            created_by_actor_id, updated_by_actor_id, published_at
+          )
+          VALUES
+            ($1, 'org_a', $6, 'First item', '', 'native', 'published', '# First', 1, 1, 'admin', 'admin', NOW()),
+            ($2, 'org_a', $7, 'Second item', '', 'pdf', 'published', NULL, 0, 1, 'admin', 'admin', NOW()),
+            ($3, 'org_a', $6, 'Draft item', '', 'native', 'draft', '# Draft', 0, 1, 'admin', 'admin', NULL),
+            ($4, 'org_a', $8, 'Archived category item', '', 'native', 'published', '# Hidden', 0, 1, 'admin', 'admin', NOW()),
+            ($5, 'org_b', (
+              SELECT id FROM org_content_categories WHERE org_id = 'org_b' LIMIT 1
+            ), 'Other tenant item', '', 'native', 'published', '# Other', 0, 1, 'admin', 'admin', NOW())
+        `,
+        [
+          publishedFirst,
+          publishedSecond,
+          draft,
+          archivedCategoryContent,
+          otherTenantContent,
+          categoryFirst,
+          categorySecond,
+          categoryArchived,
+        ]
+      );
+      await scopedPool.query(
+        `
+          INSERT INTO org_content_assignments (
+            id, org_id, content_id, assignment_type, subject_user_id,
+            created_by_actor_id, revoked_at
+          )
+          VALUES
+            ($1, 'org_a', $4, 'organization', NULL, 'admin', NULL),
+            ($2, 'org_a', $5, 'user', 'learner', 'admin', NULL),
+            ($3, 'org_a', $5, 'manager_team', 'old_manager', 'admin', NOW())
+        `,
+        [randomUUID(), randomUUID(), randomUUID(), publishedFirst, publishedSecond]
+      );
+      const readyAssetId = randomUUID();
+      await scopedPool.query(
+        `
+          INSERT INTO org_content_assets (
+            id, org_id, content_id, asset_role, version, upload_state,
+            storage_provider, final_object_key, original_filename,
+            detected_mime_type, file_extension, byte_size, finalized_at,
+            created_by_actor_id, is_current
+          )
+          VALUES (
+            $1, 'org_a', $2, 'primary', 1, 'ready',
+            'r2', 'orgs/org_a/content/pdf/current.pdf', 'current.pdf',
+            'application/pdf', 'pdf', 100, NOW(), 'admin', TRUE
+          )
+        `,
+        [readyAssetId, publishedSecond]
+      );
+
+      const mobile = await store.listPublishedContentForMobile("org_a", 500);
+      assert.equal(mobile.truncated, false);
+      assert.deepEqual(
+        mobile.items.map((entry) => entry.content.id),
+        [publishedFirst, publishedSecond]
+      );
+      assert.deepEqual(
+        mobile.items.map((entry) => entry.category.name),
+        ["First", "Second"]
+      );
+      assert.equal(mobile.items[0]?.assignments.length, 1);
+      assert.equal(mobile.items[1]?.assignments.length, 1);
+      assert.equal(mobile.items[1]?.assignments[0]?.assignmentType, "user");
+      assert.equal(mobile.items[1]?.currentAsset?.id, readyAssetId);
+      assert.equal(
+        mobile.items[1]?.currentAsset?.finalObjectKey,
+        "orgs/org_a/content/pdf/current.pdf"
+      );
+      assert.equal(await store.getPublishedContentForMobile("org_a", draft), null);
+      assert.equal(
+        await store.getPublishedContentForMobile("org_a", archivedCategoryContent),
+        null
+      );
+      assert.equal(
+        await store.getPublishedContentForMobile("org_a", otherTenantContent),
+        null
+      );
+      assert.equal(
+        await store.getPublishedContentForMobile("org_b", publishedFirst),
+        null
+      );
+
+      const bounded = await store.listPublishedContentForMobile("org_a", 1);
+      assert.equal(bounded.items.length, 1);
+      assert.equal(bounded.truncated, true);
+    } finally {
+      if (scopedPool) {
+        await scopedPool.end();
+      }
+      try {
+        await setupPool.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      } finally {
+        await setupPool.end();
+      }
+    }
+  }
+);

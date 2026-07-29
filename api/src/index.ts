@@ -236,6 +236,12 @@ import {
   TrainingContentReferenceData,
 } from "./services/trainingContentManagementService.js";
 import {
+  createTrainingContentMobileService,
+  mapTrainingContentMobileServiceError,
+  MobileTrainingContentRequestContext,
+  TrainingContentMobileService,
+} from "./services/trainingContentMobileService.js";
+import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
@@ -624,6 +630,15 @@ const defaultTrainingContentManagementService = createTrainingContentManagementS
 });
 let trainingContentManagementService: TrainingContentManagementService =
   defaultTrainingContentManagementService;
+const defaultTrainingContentMobileService = createTrainingContentMobileService({
+  store: trainingContentStore,
+  entitlementStore: orgModuleEntitlementStore,
+  objectStorage: trainingContentObjectStorage,
+  readiness: trainingContentStorageReadiness,
+  storageConfig: runtimeConfig.trainingContentStorage,
+});
+let trainingContentMobileService: TrainingContentMobileService =
+  defaultTrainingContentMobileService;
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -4759,6 +4774,42 @@ function hasValidMobileTokenForUser(
   }
 
   return true;
+}
+
+async function withMobileTrainingContentContext<T>(
+  request: Request,
+  response: Response,
+  handler: (context: MobileTrainingContentRequestContext) => Promise<T>
+): Promise<T | null> {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return null;
+  }
+
+  return withFreshDatabaseRead(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return null;
+    }
+
+    const organization = user.orgId ? getOrgById(db, user.orgId) : null;
+    return handler({
+      user,
+      users: db.users,
+      organizationActive: organization?.status === "active",
+    });
+  });
+}
+
+function respondWithTrainingContentMobileError(error: unknown, response: Response): void {
+  const mapped = mapTrainingContentMobileServiceError(error);
+  response.status(mapped.status).json(mapped.body);
 }
 
 function hashVerificationCode(userId: string, email: string, code: string): string {
@@ -16146,6 +16197,87 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
   });
 });
 
+app.get("/mobile/users/:userId/modules", async (request: Request, response: Response) => {
+  try {
+    const result = await withMobileTrainingContentContext(request, response, (context) =>
+      trainingContentMobileService.getModules(context)
+    );
+    if (result) {
+      response.json(result);
+    }
+  } catch (error) {
+    respondWithTrainingContentMobileError(error, response);
+  }
+});
+
+app.get(
+  "/mobile/users/:userId/training-content/categories",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getCategories(context)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/mobile/users/:userId/training-content",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getLibrary(context)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/mobile/users/:userId/training-content/:contentId",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getDetail(context, request.params.contentId)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/mobile/users/:userId/training-content/:contentId/asset-access",
+  trainingContentStorageRateLimiter,
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.createAssetAccess(
+          context,
+          request.params.contentId
+        )
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
 app.get("/mobile/users/:userId/superuser/orgs", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
@@ -21871,6 +22003,15 @@ export function setTrainingContentManagementServiceForTest(
     throw new Error("setTrainingContentManagementServiceForTest is only available in test.");
   }
   trainingContentManagementService = service ?? defaultTrainingContentManagementService;
+}
+
+export function setTrainingContentMobileServiceForTest(
+  service: TrainingContentMobileService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingContentMobileServiceForTest is only available in test.");
+  }
+  trainingContentMobileService = service ?? defaultTrainingContentMobileService;
 }
 
 export { app, createDefaultDatabase, ensureDatabaseShape };

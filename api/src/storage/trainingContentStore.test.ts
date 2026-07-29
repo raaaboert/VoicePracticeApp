@@ -123,3 +123,100 @@ test("Training Content store initializes once and scopes every content read by o
     [["org_1"], ["org_2"], ["org_1", CONTENT_ROW.id], ["org_2", CONTENT_ROW.id]]
   );
 });
+
+test("mobile Training Content reads are bounded, published-only, ordered, and tenant-scoped", async () => {
+  const publishedRow = {
+    ...CONTENT_ROW,
+    publication_state: "published",
+    published_at: new Date("2026-07-28T12:01:00.000Z"),
+    category_name: "General",
+    category_description: "General resources",
+    category_display_order: 0,
+    category_is_default: true,
+    category_created_by_actor_id: "admin_1",
+    category_updated_by_actor_id: "admin_1",
+    category_created_at: new Date("2026-07-28T12:00:00.000Z"),
+    category_updated_at: new Date("2026-07-28T12:00:00.000Z"),
+    category_archived_at: null,
+    current_asset_id: null,
+    current_asset_org_id: null,
+    current_asset_content_id: null,
+    current_asset_upload_state: null,
+    current_asset_original_filename: null,
+    current_asset_detected_mime_type: null,
+    current_asset_file_extension: null,
+    current_asset_byte_size: null,
+    current_asset_is_current: null,
+    current_asset_final_object_key: null,
+    current_asset_object_deleted_at: null,
+  };
+  const assignmentRow = {
+    id: "4d8ac3f7-7596-4c64-83f3-3a38f2118fc2",
+    org_id: "org_1",
+    content_id: CONTENT_ROW.id,
+    assignment_type: "organization",
+    subject_user_id: null,
+    created_by_actor_id: "admin_1",
+    created_at: new Date("2026-07-28T12:00:00.000Z"),
+    revoked_by_actor_id: null,
+    revoked_at: null,
+  };
+  const queries: Array<{ text: string; values?: readonly unknown[] }> = [];
+  const queryPool = {
+    async query(text: string, values?: readonly unknown[]) {
+      queries.push({ text, values });
+      if (text.includes("FROM org_content_items c") && text.includes("category.archived_at IS NULL")) {
+        const correctOrg = values?.[0] === "org_1";
+        const correctContent =
+          values?.length !== 2
+          || typeof values?.[1] === "number"
+          || values?.[1] === CONTENT_ROW.id;
+        return { rows: correctOrg && correctContent ? [publishedRow] : [], rowCount: 1 };
+      }
+      if (text.includes("FROM org_content_assignments")) {
+        return { rows: values?.[0] === "org_1" ? [assignmentRow] : [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    },
+    async connect() {
+      return {
+        async query() {
+          return { rows: [], rowCount: 0 };
+        },
+        release() {},
+      };
+    },
+  };
+  const store = createTrainingContentStore({
+    provider: "postgres",
+    databaseUrl: "postgres://example.invalid/peritio",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: queryPool as any,
+  });
+
+  const library = await store.listPublishedContentForMobile("org_1", 25);
+  const detail = await store.getPublishedContentForMobile("org_1", CONTENT_ROW.id);
+  const crossTenant = await store.getPublishedContentForMobile("org_2", CONTENT_ROW.id);
+
+  assert.equal(library.items.length, 1);
+  assert.equal(library.items[0]?.content.publicationState, "published");
+  assert.equal(library.items[0]?.category.name, "General");
+  assert.equal(library.items[0]?.assignments[0]?.assignmentType, "organization");
+  assert.equal(detail?.content.id, CONTENT_ROW.id);
+  assert.equal(crossTenant, null);
+  const listQuery = queries.find(
+    (query) => query.text.includes("FROM org_content_items c") && query.values?.[1] === 26
+  );
+  assert.ok(listQuery);
+  assert.match(listQuery.text, /c\.publication_state = 'published'/);
+  assert.match(listQuery.text, /category\.archived_at IS NULL/);
+  assert.match(listQuery.text, /ORDER BY\s+category\.display_order ASC,\s+c\.display_order ASC/s);
+  assert.match(listQuery.text, /upload_state = 'ready'/);
+  assert.match(listQuery.text, /object_deleted_at IS NULL/);
+  assert.ok(queries.some((query) =>
+    query.text.includes("content_id = ANY($2::uuid[])")
+    && query.values?.[0] === "org_1"
+  ));
+});
