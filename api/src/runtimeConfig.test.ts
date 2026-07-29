@@ -88,6 +88,24 @@ test("staging refuses an obvious production database URL", () => {
   );
 });
 
+test("R2 Training Content storage requires relational PostgreSQL state", () => {
+  assert.throws(
+    () =>
+      loadRuntimeConfig(
+        makeEnv({
+          TRAINING_CONTENT_STORAGE_PROVIDER: "r2",
+          TRAINING_CONTENT_R2_ENVIRONMENT: "development",
+          TRAINING_CONTENT_R2_ACCOUNT_ID: "abc123",
+          TRAINING_CONTENT_R2_BUCKET: "peritio-training-content-development",
+          TRAINING_CONTENT_R2_ACCESS_KEY_ID: "test-access-key",
+          TRAINING_CONTENT_R2_SECRET_ACCESS_KEY: "test-secret-key",
+          TRAINING_CONTENT_R2_ENDPOINT: "https://abc123.r2.cloudflarestorage.com",
+        })
+      ),
+    /STORAGE_PROVIDER must be "postgres" when TRAINING_CONTENT_STORAGE_PROVIDER=r2/
+  );
+});
+
 test("production accepts strict postgres, resend, and unique-secret settings", () => {
   const config = loadRuntimeConfig(makeProductionEnv());
 

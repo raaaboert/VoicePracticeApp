@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-
 import { Pool } from "pg";
 
 import {
@@ -9,6 +7,7 @@ import {
 } from "@voicepractice/shared";
 
 import { StorageProvider } from "../runtimeConfig.js";
+import { initializeTrainingContentSchema } from "./trainingContentMigrations.js";
 
 export interface TrainingContentStore {
   initialize(): Promise<void>;
@@ -84,24 +83,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
 
   async initialize(): Promise<void> {
     if (!this.ensureSchemaPromise) {
-      this.ensureSchemaPromise = (async () => {
-        const migrationUrl = new URL("../../sql/008_training_content.sql", import.meta.url);
-        const migrationSql = await fs.readFile(migrationUrl, "utf8");
-        const client = await this.pool.connect();
-        try {
-          await client.query("BEGIN");
-          await client.query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('peritio_training_content_schema_v1', 0))"
-          );
-          await client.query(migrationSql);
-          await client.query("COMMIT");
-        } catch (error) {
-          await client.query("ROLLBACK");
-          throw error;
-        } finally {
-          client.release();
-        }
-      })();
+      this.ensureSchemaPromise = initializeTrainingContentSchema(this.pool);
     }
 
     await this.ensureSchemaPromise;

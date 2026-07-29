@@ -8,6 +8,7 @@ import {
 } from "@voicepractice/shared";
 
 import { StorageProvider } from "../runtimeConfig.js";
+import { initializeTrainingContentSchema } from "./trainingContentMigrations.js";
 
 export interface StoredOrgModuleEntitlement extends OrgModuleEntitlementState {
   orgId: string;
@@ -98,32 +99,7 @@ class PostgresOrgModuleEntitlementStore implements OrgModuleEntitlementStore {
   }
 
   private async initializeSchema(): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended('peritio_training_content_schema_v1', 0))"
-      );
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS org_module_entitlements (
-          org_id TEXT NOT NULL,
-          module_key TEXT NOT NULL,
-          enabled BOOLEAN NOT NULL DEFAULT FALSE,
-          updated_by_actor_id TEXT NULL,
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          PRIMARY KEY (org_id, module_key)
-        );
-
-        CREATE INDEX IF NOT EXISTS org_module_entitlements_enabled_idx
-          ON org_module_entitlements (module_key, enabled, org_id);
-      `);
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    await initializeTrainingContentSchema(this.pool);
   }
 
   async getOrgModuleEntitlement(orgId: string, moduleKey: OrgModuleKey): Promise<StoredOrgModuleEntitlement> {

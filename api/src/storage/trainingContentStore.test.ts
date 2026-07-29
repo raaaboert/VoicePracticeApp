@@ -77,6 +77,7 @@ test("Training Content store initializes once and scopes every content read by o
             || text.trim() === "ROLLBACK"
             || text.includes("pg_advisory_xact_lock")
             || text.includes("CREATE TABLE IF NOT EXISTS org_content_items")
+            || text.includes("ALTER TABLE org_content_assets")
           ) {
             return { rows: [], rowCount: 0 };
           }
@@ -104,7 +105,10 @@ test("Training Content store initializes once and scopes every content read by o
   const scoped = await store.getContentItemForOrg("org_1", CONTENT_ROW.id);
   const crossTenant = await store.getContentItemForOrg("org_2", CONTENT_ROW.id);
 
-  assert.equal(queries.filter((query) => query.text.includes("CREATE TABLE IF NOT EXISTS")).length, 1);
+  assert.equal(queries.filter((query) =>
+    query.text.includes("CREATE TABLE IF NOT EXISTS")
+    || query.text.includes("ALTER TABLE org_content_assets")
+  ).length, 2);
   assert.ok(queries.some((query) => query.text.includes("pg_advisory_xact_lock")));
   assert.equal(orgOne.length, 1);
   assert.equal(orgTwo.length, 0);
