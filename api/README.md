@@ -6,6 +6,7 @@ Express API for Phase 1 development.
 
 - `GET /health`
 - `GET /ready`
+- `GET /ready/training-content-storage`
 - `GET /meta/environment`
 - `POST /auth/login`
 - `POST /auth/change-password`
@@ -144,6 +145,8 @@ SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 - Default support behavior stores no transcript. If a user explicitly consents in a support case, transcript data is retained for up to 10 days.
 - `/ready` returns `503` while database connectivity is unavailable. All non-health routes are gated behind readiness.
 - Audit events are stored in `auditEvents` and exposed via `GET /audit/events` with org/actor/date filters.
+- Training Content R2 setup, lifecycle, CORS, cleanup, and smoke-test instructions are in
+  [`../docs/Peritio_Training_Content_Storage.md`](../docs/Peritio_Training_Content_Storage.md).
 
 ## Database Bootstrap / Refresh
 

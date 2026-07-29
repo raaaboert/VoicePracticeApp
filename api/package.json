@@ -10,6 +10,8 @@
     "seed:dashboard-local": "node ./scripts/seed-dashboard-local.mjs",
     "db:sanitize-bootstrap": "tsx ./scripts/sanitize-bootstrap.ts",
     "force:mobile-reonboarding": "tsx ./scripts/force-mobile-reonboarding.ts",
+    "cleanup:training-content": "tsx ./scripts/cleanup-training-content-storage.ts",
+    "smoke:training-content-r2": "tsx ./scripts/smoke-training-content-r2.ts",
     "test:postgres:training-content": "tsx --test src/storage/trainingContentPostgres.integration.test.ts",
     "reset:simulation-baseline": "tsx ./scripts/reset-simulation-baseline.ts",
     "reset:pretester-history": "tsx ./scripts/reset-pretester-history.ts --local-file",
