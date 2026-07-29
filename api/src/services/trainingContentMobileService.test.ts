@@ -469,6 +469,14 @@ test("detail revalidates publication, tenant, category, assignment, and module e
       && error.code === "training_content_not_found"
   );
   fixture.store.records[0].category.archivedAt = null;
+  fixture.store.records[0].content.categoryId = "cross_org_category";
+  await assert.rejects(
+    fixture.service.getDetail(fixture.context, content.id),
+    (error: unknown) =>
+      error instanceof TrainingContentMobileServiceError
+      && error.code === "training_content_not_found"
+  );
+  fixture.store.records[0].content.categoryId = category.id;
   fixture.store.records[0].assignments = [];
   await assert.rejects(
     fixture.service.getDetail(fixture.context, content.id),

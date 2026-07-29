@@ -240,6 +240,8 @@ function isEligible(
 ): boolean {
   if (
     record.category.orgId !== orgId
+    || record.content.orgId !== orgId
+    || record.content.categoryId !== record.category.id
     || record.category.archivedAt !== null
     || record.content.archivedAt !== null
   ) {
