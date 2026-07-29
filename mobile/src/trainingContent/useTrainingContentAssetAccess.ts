@@ -8,6 +8,15 @@ import {
   isTrainingContentModuleRemoval,
   trainingContentErrorMessage,
 } from "./model";
+import {
+  activateViewerRequestLifecycle,
+  beginViewerRequest,
+  cancelViewerRequests,
+  createViewerRequestLifecycle,
+  disposeViewerRequestLifecycle,
+  getAssetAccessRenewalDelayMs,
+  isViewerRequestCurrent,
+} from "./nativeViewerLifecycle";
 
 type AssetAccess = MobileTrainingContentAssetAccessResponse["access"];
 
@@ -19,13 +28,23 @@ export function useTrainingContentAssetAccess(params: {
   onItemRemoved: (message: string) => void;
 }) {
   const [access, setAccess] = useState<AssetAccess | null>(null);
+  const [accessRevision, setAccessRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const requestGeneration = useRef(0);
+  const requestLifecycle = useRef(createViewerRequestLifecycle());
+
+  useEffect(() => {
+    activateViewerRequestLifecycle(requestLifecycle.current);
+    return () => {
+      disposeViewerRequestLifecycle(requestLifecycle.current);
+    };
+  }, []);
 
   const load = useCallback(async () => {
-    const generation = requestGeneration.current + 1;
-    requestGeneration.current = generation;
+    const generation = beginViewerRequest(requestLifecycle.current);
+    if (generation === null) {
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -34,11 +53,12 @@ export function useTrainingContentAssetAccess(params: {
         params.contentId,
         params.authToken
       );
-      if (requestGeneration.current === generation) {
+      if (isViewerRequestCurrent(requestLifecycle.current, generation)) {
         setAccess(response.access);
+        setAccessRevision((current) => current + 1);
       }
     } catch (caught) {
-      if (requestGeneration.current !== generation) {
+      if (!isViewerRequestCurrent(requestLifecycle.current, generation)) {
         return;
       }
       setAccess(null);
@@ -56,7 +76,7 @@ export function useTrainingContentAssetAccess(params: {
       }
       setError(message);
     } finally {
-      if (requestGeneration.current === generation) {
+      if (isViewerRequestCurrent(requestLifecycle.current, generation)) {
         setLoading(false);
       }
     }
@@ -71,7 +91,7 @@ export function useTrainingContentAssetAccess(params: {
   useEffect(() => {
     void load();
     return () => {
-      requestGeneration.current += 1;
+      cancelViewerRequests(requestLifecycle.current);
     };
   }, [load]);
 
@@ -79,16 +99,15 @@ export function useTrainingContentAssetAccess(params: {
     if (!access) {
       return;
     }
-    const expiresAtMs = new Date(access.expiresAt).getTime();
-    if (!Number.isFinite(expiresAtMs)) {
+    const refreshInMs = getAssetAccessRenewalDelayMs(access.expiresAt);
+    if (refreshInMs === null) {
       return;
     }
-    const refreshInMs = Math.max(1_000, expiresAtMs - Date.now() - 15_000);
     const timer = setTimeout(() => {
       void load();
     }, refreshInMs);
     return () => clearTimeout(timer);
   }, [access, load]);
 
-  return { access, loading, error, refresh: load };
+  return { access, accessRevision, loading, error, refresh: load };
 }

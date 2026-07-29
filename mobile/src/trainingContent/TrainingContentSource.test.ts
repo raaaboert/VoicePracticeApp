@@ -59,10 +59,16 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   assert.match(viewer, /AudioContentViewer/);
   assert.match(viewer, /PdfContentViewer/);
   assert.match(viewer, /DocxContentViewer/);
-  assert.match(video, /player\.pause\(\)/);
+  assert.doesNotMatch(video, /player\.(?:pause|release)\(\)/);
+  assert.match(video, /buildProgressiveVideoSource/);
+  assert.match(video, /return \(\) => clearTimeout\(timer\)/);
   assert.match(audio, /player\.pause\(\)/);
-  assert.match(pdf, /cache:\s*false/);
+  assert.match(pdf, /buildPrivatePdfSource/);
+  assert.match(pdf, /NATIVE_VIEWER_LOAD_TIMEOUT_MS/);
+  assert.match(pdf, /settleNativeViewerLoad/);
+  assert.match(pdf, /disposeNativeViewerLoadGuard/);
   assert.match(pdf, /trustAllCerts=\{false\}/);
+  assert.match(viewer, /accessState\.accessRevision/);
   assert.match(docx, /FileSystem\.deleteAsync/);
 });
 

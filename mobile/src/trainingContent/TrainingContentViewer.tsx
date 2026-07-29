@@ -10,6 +10,7 @@ import {
 
 import { confirmAndOpenExternalLink } from "./externalLinks";
 import { NativeMarkdownViewer } from "./NativeMarkdownViewer";
+import { createNativeViewerInstanceKey } from "./nativeViewerLifecycle";
 import type { TrainingContentTheme } from "./theme";
 import { useTrainingContentAssetAccess } from "./useTrainingContentAssetAccess";
 import { AudioContentViewer } from "./viewers/AudioContentViewer";
@@ -119,6 +120,10 @@ function UploadedContentViewer(props: TrainingContentViewerProps) {
   }
 
   const access = accessState.access;
+  const viewerInstanceKey = createNativeViewerInstanceKey(
+    props.item.id,
+    accessState.accessRevision
+  );
   switch (props.item.contentType) {
     case "image":
       return (
@@ -132,6 +137,7 @@ function UploadedContentViewer(props: TrainingContentViewerProps) {
     case "video":
       return (
         <VideoContentViewer
+          key={`video:${viewerInstanceKey}`}
           url={access.url}
           headers={access.requiredHeaders}
           theme={props.theme}
@@ -150,6 +156,7 @@ function UploadedContentViewer(props: TrainingContentViewerProps) {
     case "pdf":
       return (
         <PdfContentViewer
+          key={`pdf:${viewerInstanceKey}`}
           url={access.url}
           headers={access.requiredHeaders}
           theme={props.theme}

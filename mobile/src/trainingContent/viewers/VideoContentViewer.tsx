@@ -1,8 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useEvent } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 
+import {
+  buildProgressiveVideoSource,
+  NATIVE_VIEWER_LOAD_TIMEOUT_MS,
+} from "../nativeViewerLifecycle";
 import type { TrainingContentTheme } from "../theme";
 
 interface VideoContentViewerProps {
@@ -18,8 +22,12 @@ export function VideoContentViewer({
   theme,
   onAccessError,
 }: VideoContentViewerProps) {
+  const source = useMemo(
+    () => buildProgressiveVideoSource(url, headers),
+    [headers, url]
+  );
   const player = useVideoPlayer(
-    { uri: url, headers, useCaching: false, contentType: "progressive" },
+    source,
     (created) => {
       created.loop = false;
       created.staysActiveInBackground = false;
@@ -28,12 +36,19 @@ export function VideoContentViewer({
     }
   );
   const status = useEvent(player, "statusChange", { status: player.status });
+  const [timedOut, setTimedOut] = useState(false);
+  const waitingForPlayback = status.status === "idle" || status.status === "loading";
 
   useEffect(() => {
-    return () => {
-      player.pause();
-    };
-  }, [player]);
+    setTimedOut(false);
+    if (!waitingForPlayback) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setTimedOut(true);
+    }, NATIVE_VIEWER_LOAD_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [source, waitingForPlayback]);
 
   return (
     <View style={styles.root}>
@@ -45,16 +60,18 @@ export function VideoContentViewer({
         allowsPictureInPicture={false}
         style={[styles.video, { backgroundColor: theme.mediaBackground }]}
       />
-      {status.status === "loading" ? (
+      {waitingForPlayback && !timedOut ? (
         <View style={styles.statusRow}>
           <ActivityIndicator color={theme.accent} />
           <Text style={[styles.statusText, { color: theme.muted }]}>Buffering...</Text>
         </View>
       ) : null}
-      {status.status === "error" ? (
+      {status.status === "error" || timedOut ? (
         <View style={styles.statusRow}>
           <Text style={[styles.errorText, { color: theme.danger }]}>
-            This video cannot be played on this device.
+            {timedOut
+              ? "This video is taking too long to load."
+              : "This video cannot be played on this device."}
           </Text>
           <Text style={[styles.retry, { color: theme.accent }]} onPress={onAccessError}>
             Refresh access
