@@ -206,7 +206,19 @@ import {
   OrgModuleEntitlementStore,
 } from "./storage/orgModuleEntitlementStore.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
+import {
+  createTrainingContentAssetStore,
+  TrainingContentAssetStore,
+} from "./storage/trainingContentAssetStore.js";
+import { createTrainingContentObjectStorage } from "./storage/trainingContentObjectStorage.js";
 import { buildOrgModuleEntitlementsResponse } from "./services/organizationModules.js";
+import {
+  createTrainingContentAssetService,
+  mapTrainingContentAssetServiceError,
+  TrainingContentAssetService,
+  TrainingContentManagementRequestContext,
+} from "./services/trainingContentAssetService.js";
+import { TrainingContentStorageReadinessService } from "./services/trainingContentStorageReadiness.js";
 import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
@@ -559,6 +571,28 @@ const trainingContentStore = createTrainingContentStore({
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
 });
+const trainingContentAssetStore: TrainingContentAssetStore = createTrainingContentAssetStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+const trainingContentObjectStorage = createTrainingContentObjectStorage(
+  runtimeConfig.trainingContentStorage
+);
+const trainingContentStorageReadiness = new TrainingContentStorageReadinessService(
+  runtimeConfig.trainingContentStorage,
+  trainingContentObjectStorage
+);
+const defaultTrainingContentAssetService = createTrainingContentAssetService({
+  config: runtimeConfig.trainingContentStorage,
+  assetStore: trainingContentAssetStore,
+  entitlementStore: orgModuleEntitlementStore,
+  objectStorage: trainingContentObjectStorage,
+  readiness: trainingContentStorageReadiness,
+});
+let trainingContentAssetService: TrainingContentAssetService = defaultTrainingContentAssetService;
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -4455,7 +4489,8 @@ async function refreshDatabaseReadiness(): Promise<void> {
         performancePlanStore,
         userEmployeeIdClaimStore,
         orgModuleEntitlementStore,
-        trainingContentStore
+        trainingContentStore,
+        trainingContentAssetStore
       },
       loadDatabase: async () => {
         await loadDatabase({ forceStorageRead: true });
@@ -7434,6 +7469,71 @@ function rejectMissingDashboardAdminCapability(
   return true;
 }
 
+const TRAINING_CONTENT_CLIENT_OWNED_FIELDS = new Set([
+  "orgid",
+  "organizationid",
+  "actorid",
+  "storageprovider",
+  "bucket",
+  "bucketname",
+  "temporaryobjectkey",
+  "finalobjectkey",
+  "objectkey",
+  "version",
+  "assetversion",
+]);
+
+function rejectTrainingContentClientOwnedFields(body: unknown, response: Response): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return false;
+  }
+  const rejectedFields = Object.keys(body).filter((field) => {
+    const normalized = field.toLowerCase().replace(/[_-]+/g, "");
+    return TRAINING_CONTENT_CLIENT_OWNED_FIELDS.has(normalized);
+  });
+  if (rejectedFields.length === 0) {
+    return false;
+  }
+  response.status(400).json({
+    error: "The request contains server-owned Training Content fields.",
+    code: "training_content_server_owned_field",
+    fields: rejectedFields.sort(),
+  });
+  return true;
+}
+
+async function resolveTrainingContentManagementContext(
+  request: DashboardAuthRequest,
+  response: Response
+): Promise<TrainingContentManagementRequestContext | null> {
+  return withDatabaseRead(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return null;
+    }
+    return {
+      orgId: adminContext.org.id,
+      actorId: request.dashboard!.user.id,
+      capabilities: adminContext.capabilities,
+      actorType: "web_user",
+    };
+  });
+}
+
+function respondWithTrainingContentAssetError(error: unknown, response: Response): void {
+  const mapped = mapTrainingContentAssetServiceError(error);
+  response.status(mapped.status).json({
+    error: mapped.message,
+    code: mapped.code,
+    ...(mapped.details ?? {}),
+  });
+}
+
 function canDashboardAdminEditEmployeeId(params: {
   actor: UserProfile;
   viewer: DashboardViewer;
@@ -10098,6 +10198,12 @@ const aiRouteRateLimiter = createRateLimiter({
   keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
 });
 
+const trainingContentStorageRateLimiter = createRateLimiter({
+  name: "training-content-storage",
+  windowMs: 15 * 60 * 1000,
+  max: 120
+});
+
 function isRemoteAiConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
 }
@@ -10150,6 +10256,11 @@ app.get("/ready", (_request, response) => {
     consecutiveFailures: databaseReadyConsecutiveFailures,
     failureThreshold: READINESS_FAILURE_THRESHOLD
   });
+});
+
+app.get("/ready/training-content-storage", (_request, response) => {
+  const status = trainingContentStorageReadiness.getStatus();
+  response.status(status.enabled && !status.available ? 503 : 200).json(status);
 });
 
 app.get("/version", (_request, response) => {
@@ -10807,6 +10918,90 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
     response.json(payload);
   });
 });
+
+app.post(
+  "/dashboard/admin/training-content/:contentId/assets/uploads",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const body = request.body as {
+      assetRole?: unknown;
+      originalFilename?: unknown;
+      declaredMimeType?: unknown;
+      declaredByteSize?: unknown;
+      replacementAssetId?: unknown;
+    };
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      const result = await trainingContentAssetService.initiateUpload({
+        context,
+        contentId: request.params.contentId,
+        assetRole: body?.assetRole,
+        originalFilename: body?.originalFilename,
+        declaredMimeType: body?.declaredMimeType,
+        declaredByteSize: body?.declaredByteSize,
+        replacementAssetId: body?.replacementAssetId,
+      });
+      response.status(201).json(result);
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content/:contentId/assets/:assetId/finalize",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      response.json(await trainingContentAssetService.finalizeUpload({
+        context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      }));
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content/:contentId/assets/:assetId/access",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      response.json(await trainingContentAssetService.createAdminPreviewAccess({
+        context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      }));
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
 
 app.get("/dashboard/admin/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withDatabaseRead(async (db) => {
@@ -21031,6 +21226,7 @@ export async function startApiServer(): Promise<void> {
       userEmployeeIdClaimStore,
       orgModuleEntitlementStore,
       trainingContentStore,
+      trainingContentAssetStore,
       trainingPackStore
     },
     maintenance: {
@@ -21049,6 +21245,17 @@ export async function startApiServer(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
+
+  const trainingContentStorageStatus = await trainingContentStorageReadiness.refresh();
+  if (trainingContentStorageStatus.enabled && !trainingContentStorageStatus.available) {
+    logWarn("[training-content-storage] configured provider is currently unavailable.");
+  }
+  if (trainingContentStorageStatus.enabled) {
+    const trainingContentStorageReadinessInterval = setInterval(() => {
+      void trainingContentStorageReadiness.refresh();
+    }, 60_000);
+    trainingContentStorageReadinessInterval.unref();
+  }
 
   await refreshDatabaseReadiness();
   const readinessInterval = setInterval(() => {
@@ -21069,6 +21276,15 @@ export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementS
     throw new Error("setOrgModuleEntitlementStoreForTest is only available in test.");
   }
   orgModuleEntitlementStore = store;
+}
+
+export function setTrainingContentAssetServiceForTest(
+  service: TrainingContentAssetService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingContentAssetServiceForTest is only available in test.");
+  }
+  trainingContentAssetService = service ?? defaultTrainingContentAssetService;
 }
 
 export { app, createDefaultDatabase, ensureDatabaseShape };

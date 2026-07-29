@@ -83,6 +83,7 @@ test("database startup initializes Performance tables through the normal extract
       userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
       orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
       trainingContentStore: fakeStore(calls, "trainingContentStore"),
+      trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore"),
       trainingPackStore: fakeStore(calls, "trainingPackStore")
     },
     maintenance: fakeStartupMaintenance(calls)
@@ -106,6 +107,7 @@ test("database startup initializes Performance tables through the normal extract
     "userEmployeeIdClaimStore.initialize",
     "orgModuleEntitlementStore.initialize",
     "trainingContentStore.initialize",
+    "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
@@ -133,7 +135,8 @@ test("database readiness refresh initializes the Performance store before loadin
       performancePlanStore: fakeStore(calls, "performancePlanStore"),
       userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
       orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
-      trainingContentStore: fakeStore(calls, "trainingContentStore")
+      trainingContentStore: fakeStore(calls, "trainingContentStore"),
+      trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
     },
     async loadDatabase(): Promise<void> {
       calls.push("loadDatabase");
@@ -155,6 +158,7 @@ test("database readiness refresh initializes the Performance store before loadin
     "userEmployeeIdClaimStore.initialize",
     "orgModuleEntitlementStore.initialize",
     "trainingContentStore.initialize",
+    "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization",
     "loadDatabase"
   ]);
@@ -176,7 +180,8 @@ test("database readiness fails before loading app state when user profile normal
         performancePlanStore: fakeStore(calls, "performancePlanStore"),
         userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
         orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
-        trainingContentStore: fakeStore(calls, "trainingContentStore")
+        trainingContentStore: fakeStore(calls, "trainingContentStore"),
+        trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
       },
       async migrateUserProfileAppStateNormalization(): Promise<void> {
         calls.push("migrateUserProfileAppStateNormalization");
@@ -201,6 +206,7 @@ test("database readiness fails before loading app state when user profile normal
     "userEmployeeIdClaimStore.initialize",
     "orgModuleEntitlementStore.initialize",
     "trainingContentStore.initialize",
+    "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization"
   ]);
 });

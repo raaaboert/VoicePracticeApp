@@ -24,6 +24,7 @@ import {
 } from "@voicepractice/shared";
 
 import { createWebAuthService } from "./services/webAuth.js";
+import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 
 const NOW = "2026-07-25T15:00:00.000Z";
@@ -49,6 +50,10 @@ const moduleEntitlementRows = new Map<string, {
   updatedAt: string | null;
 }>();
 const moduleEntitlementAuditEvents: AuditEvent[] = [];
+const trainingContentAssetRouteCalls: Array<{
+  method: string;
+  params: Record<string, any>;
+}> = [];
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
@@ -867,6 +872,89 @@ before(async () => {
       return { previous, current, changed };
     },
   });
+  imported.setTrainingContentAssetServiceForTest({
+    async initiateUpload(params) {
+      trainingContentAssetRouteCalls.push({ method: "initiate", params });
+      if (!params.context.capabilities.manageOrganizationContent) {
+        throw new TrainingContentAssetServiceError(
+          "Training Content administration is not available for this account.",
+          403,
+          "dashboard_scope_denied"
+        );
+      }
+      return {
+        asset: {
+          id: "11111111-1111-4111-8111-111111111111",
+          contentId: params.contentId,
+          assetRole: "primary",
+          version: 1,
+          uploadState: "pending",
+          originalFilename: "reference.pdf",
+          declaredMimeType: "application/pdf",
+          detectedMimeType: null,
+          fileExtension: "pdf",
+          declaredByteSize: 8,
+          byteSize: null,
+          checksumOrEtag: null,
+          uploadExpiresAt: NOW,
+          finalizedAt: null,
+          supersededAt: null,
+          replacementForAssetId: null,
+          isCurrent: false,
+          cleanupPending: false,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+        upload: {
+          url: "https://upload.invalid/signed",
+          expiresAt: NOW,
+          method: "PUT",
+          requiredHeaders: {
+            "content-type": "application/pdf",
+            "content-length": "8",
+          },
+        },
+      };
+    },
+    async finalizeUpload(params) {
+      trainingContentAssetRouteCalls.push({ method: "finalize", params });
+      return {
+        asset: {
+          id: params.assetId,
+          contentId: params.contentId,
+          assetRole: "primary",
+          version: 1,
+          uploadState: "ready",
+          originalFilename: "reference.pdf",
+          declaredMimeType: "application/pdf",
+          detectedMimeType: "application/pdf",
+          fileExtension: "pdf",
+          declaredByteSize: 8,
+          byteSize: 8,
+          checksumOrEtag: "\"etag\"",
+          uploadExpiresAt: null,
+          finalizedAt: NOW,
+          supersededAt: null,
+          replacementForAssetId: null,
+          isCurrent: true,
+          cleanupPending: false,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+        replacedAssetId: null,
+      };
+    },
+    async createAdminPreviewAccess(params) {
+      trainingContentAssetRouteCalls.push({ method: "access", params });
+      return {
+        access: {
+          url: "https://access.invalid/signed",
+          expiresAt: NOW,
+          requiredHeaders: {},
+        },
+      };
+    },
+  });
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -972,6 +1060,107 @@ test("internal Admin Utility module endpoint is authorized, tenant-scoped, persi
 
   const missingOrg = await adminRequest("/orgs/org_missing/modules");
   assert.equal(missingOrg.status, 404);
+});
+
+test("Training Content asset routes derive tenant and actor, require explicit super-user scope, and reject server-owned fields", async () => {
+  trainingContentAssetRouteCalls.length = 0;
+  const contentId = "22222222-2222-4222-8222-222222222222";
+  const assetId = "33333333-3333-4333-8333-333333333333";
+  const uploadBody = {
+    assetRole: "primary",
+    originalFilename: "reference.pdf",
+    declaredMimeType: "application/pdf",
+    declaredByteSize: 8,
+  };
+
+  const unauthorized = await publicRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads`,
+    { method: "POST", body: JSON.stringify(uploadBody) }
+  );
+  assert.equal(unauthorized.status, 401);
+
+  const initiated = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads`,
+    orgAdminToken,
+    { method: "POST", body: JSON.stringify(uploadBody) }
+  );
+  assert.equal(initiated.status, 201);
+  const initiateCall = trainingContentAssetRouteCalls.at(-1);
+  assert.equal(initiateCall?.method, "initiate");
+  assert.equal(initiateCall?.params.context.orgId, "org_1");
+  assert.equal(initiateCall?.params.context.actorId, "org_admin");
+  assert.equal(initiateCall?.params.context.capabilities.manageOrganizationContent, true);
+  assert.equal("orgId" in initiated.body, false);
+  assert.equal(JSON.stringify(initiated.body).includes("ObjectKey"), false);
+
+  const userAdminDenied = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads`,
+    userAdminToken,
+    { method: "POST", body: JSON.stringify(uploadBody) }
+  );
+  assert.equal(userAdminDenied.status, 403);
+  assert.equal(userAdminDenied.body.code, "dashboard_scope_denied");
+
+  const crossTenant = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads?orgId=org_2`,
+    orgAdminToken,
+    { method: "POST", body: JSON.stringify(uploadBody) }
+  );
+  assert.equal(crossTenant.status, 404);
+
+  const superWithoutContext = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads`,
+    superToken,
+    { method: "POST", body: JSON.stringify(uploadBody) }
+  );
+  assert.equal(superWithoutContext.status, 400);
+  assert.equal(superWithoutContext.body.code, "dashboard_scope_denied");
+
+  const superScoped = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads?orgId=org_2`,
+    superToken,
+    { method: "POST", body: JSON.stringify(uploadBody) }
+  );
+  assert.equal(superScoped.status, 201);
+  assert.equal(trainingContentAssetRouteCalls.at(-1)?.params.context.orgId, "org_2");
+  assert.equal(
+    trainingContentAssetRouteCalls.at(-1)?.params.context.capabilities.manageOrganizationContent,
+    true
+  );
+
+  const callsBeforeRejectedBody = trainingContentAssetRouteCalls.length;
+  const serverOwnedField = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/uploads`,
+    orgAdminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...uploadBody,
+        org_id: "org_2",
+        temporary_object_key: "client/chosen",
+      }),
+    }
+  );
+  assert.equal(serverOwnedField.status, 400);
+  assert.equal(serverOwnedField.body.code, "training_content_server_owned_field");
+  assert.equal(trainingContentAssetRouteCalls.length, callsBeforeRejectedBody);
+
+  const finalized = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/${assetId}/finalize`,
+    orgAdminToken,
+    { method: "POST", body: "{}" }
+  );
+  assert.equal(finalized.status, 200);
+  assert.equal(trainingContentAssetRouteCalls.at(-1)?.method, "finalize");
+  assert.equal(trainingContentAssetRouteCalls.at(-1)?.params.context.orgId, "org_1");
+
+  const access = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/${assetId}/access`,
+    orgAdminToken,
+    { method: "POST", body: "{}" }
+  );
+  assert.equal(access.status, 200);
+  assert.equal(trainingContentAssetRouteCalls.at(-1)?.method, "access");
 });
 
 after(async () => {
