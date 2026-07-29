@@ -659,6 +659,15 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     const now = params.now ?? new Date();
     try {
       await client.query("BEGIN");
+      await client.query(
+        `
+          SELECT id
+          FROM org_content_items
+          WHERE org_id = $1 AND id = $2
+          FOR UPDATE
+        `,
+        [requiredId(params.orgId, "Organization id"), requiredId(params.contentId, "Content id")]
+      );
       const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
       if (asset.uploadState === "ready") {
         await client.query("COMMIT");
@@ -855,6 +864,22 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
         ]
       );
       const readyAsset = mapRequiredAssetRow(finalized.rows[0]);
+      await client.query(
+        `
+          UPDATE org_content_items
+          SET content_version = content_version + $3,
+              updated_by_actor_id = $4,
+              updated_at = GREATEST(updated_at + INTERVAL '1 millisecond', $5)
+          WHERE org_id = $1 AND id = $2
+        `,
+        [
+          readyAsset.orgId,
+          readyAsset.contentId,
+          replacedAsset ? 1 : 0,
+          requiredId(params.actor.actorId, "Actor id"),
+          now,
+        ]
+      );
       await insertTechnicalAudit(client, {
         actor: params.actor,
         action: "training_content_asset_finalized",

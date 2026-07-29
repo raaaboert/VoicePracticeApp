@@ -24,6 +24,8 @@ import {
   DashboardAdminUserRow,
   DashboardAdminUsersExportResponse,
   DashboardAdminUsersResponse,
+  CreateDashboardTrainingContentRequest,
+  DashboardTrainingContentLifecycleRequest,
   DashboardAttemptDetailResponse,
   DashboardAttemptHistoryRow,
   DashboardCoachingInsights,
@@ -141,6 +143,8 @@ import {
   UpdateOrgDivisionSettingsRequest,
   UpdateOrgTrainingRequest,
   UpdateOrgCustomScenarioRequest,
+  UpdateDashboardTrainingContentAssignmentsRequest,
+  UpdateDashboardTrainingContentRequest,
   UpdatePerformancePlanRequest,
   UpdateConfigRequest,
   UpdateUserRequest,
@@ -219,6 +223,12 @@ import {
   TrainingContentManagementRequestContext,
 } from "./services/trainingContentAssetService.js";
 import { TrainingContentStorageReadinessService } from "./services/trainingContentStorageReadiness.js";
+import {
+  createTrainingContentManagementService,
+  mapTrainingContentManagementServiceError,
+  TrainingContentManagementService,
+  TrainingContentReferenceData,
+} from "./services/trainingContentManagementService.js";
 import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
@@ -593,6 +603,13 @@ const defaultTrainingContentAssetService = createTrainingContentAssetService({
   readiness: trainingContentStorageReadiness,
 });
 let trainingContentAssetService: TrainingContentAssetService = defaultTrainingContentAssetService;
+const defaultTrainingContentManagementService = createTrainingContentManagementService({
+  store: trainingContentStore,
+  entitlementStore: orgModuleEntitlementStore,
+  storageConfig: runtimeConfig.trainingContentStorage,
+});
+let trainingContentManagementService: TrainingContentManagementService =
+  defaultTrainingContentManagementService;
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -4211,6 +4228,13 @@ async function withDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T)
   });
 }
 
+async function withFreshDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    const db = await loadDatabase({ forceStorageRead: true });
+    return await handler(db);
+  });
+}
+
 async function refreshReportingSnapshots(): Promise<void> {
   await usageSessionStore.refreshSnapshot();
   await scoreRecordStore.refreshSnapshot();
@@ -7502,11 +7526,17 @@ function rejectTrainingContentClientOwnedFields(body: unknown, response: Respons
   return true;
 }
 
-async function resolveTrainingContentManagementContext(
+interface ResolvedTrainingContentManagementResources {
+  context: TrainingContentManagementRequestContext;
+  references: TrainingContentReferenceData;
+  org: EnterpriseOrg;
+}
+
+async function resolveTrainingContentManagementResources(
   request: DashboardAuthRequest,
   response: Response
-): Promise<TrainingContentManagementRequestContext | null> {
-  return withDatabaseRead(async (db) => {
+): Promise<ResolvedTrainingContentManagementResources | null> {
+  return withFreshDatabaseRead(async (db) => {
     const adminContext = resolveDashboardAdminOrgContext(
       db,
       request.dashboard!,
@@ -7517,16 +7547,43 @@ async function resolveTrainingContentManagementContext(
       return null;
     }
     return {
-      orgId: adminContext.org.id,
-      actorId: request.dashboard!.user.id,
-      capabilities: adminContext.capabilities,
-      actorType: "web_user",
+      context: {
+        orgId: adminContext.org.id,
+        actorId: request.dashboard!.user.id,
+        capabilities: adminContext.capabilities,
+        actorType: "web_user",
+      },
+      references: {
+        users: db.users.filter(
+          (user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id
+        ),
+        focusTopics: db.orgTrainings.filter(
+          (topic) => topic.orgId === adminContext.org.id
+        ),
+      },
+      org: adminContext.org,
     };
   });
 }
 
+async function resolveTrainingContentManagementContext(
+  request: DashboardAuthRequest,
+  response: Response
+): Promise<TrainingContentManagementRequestContext | null> {
+  return (await resolveTrainingContentManagementResources(request, response))?.context ?? null;
+}
+
 function respondWithTrainingContentAssetError(error: unknown, response: Response): void {
   const mapped = mapTrainingContentAssetServiceError(error);
+  response.status(mapped.status).json({
+    error: mapped.message,
+    code: mapped.code,
+    ...(mapped.details ?? {}),
+  });
+}
+
+function respondWithTrainingContentManagementError(error: unknown, response: Response): void {
+  const mapped = mapTrainingContentManagementServiceError(error);
   response.status(mapped.status).json({
     error: mapped.message,
     code: mapped.code,
@@ -10918,6 +10975,299 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
     response.json(payload);
   });
 });
+
+app.get(
+  "/dashboard/admin/training-content-targets/users",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const targets = await trainingContentManagementService.listUserTargets({
+        context: resources.context,
+        references: resources.references,
+        query: getSingleQueryParam(request.query.q),
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        targets,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content-targets/managers",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const targets = await trainingContentManagementService.listManagerTargets({
+        context: resources.context,
+        references: resources.references,
+        query: getSingleQueryParam(request.query.q),
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        targets,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content-targets/focus-topics",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const focusTopics = await trainingContentManagementService.listFocusTopics({
+        context: resources.context,
+        references: resources.references,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        focusTopics,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.listContent({
+        context: resources.context,
+        references: resources.references,
+        filters: {
+          query: getSingleQueryParam(request.query.q),
+          focusTopicId: getSingleQueryParam(request.query.focusTopicId),
+          contentType: getSingleQueryParam(request.query.contentType),
+          publicationState: getSingleQueryParam(request.query.status),
+          sort: getSingleQueryParam(request.query.sort),
+          page: getSingleQueryParam(request.query.page),
+          pageSize: getSingleQueryParam(request.query.pageSize),
+        },
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+        totalPages: Math.max(1, Math.ceil(result.total / result.pageSize)),
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.createContent({
+        context: resources.context,
+        references: resources.references,
+        input: request.body as CreateDashboardTrainingContentRequest,
+      });
+      response.status(201).json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content/:contentId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.getContent({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.patch(
+  "/dashboard/admin/training-content/:contentId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.updateContent({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+        input: request.body as UpdateDashboardTrainingContentRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.put(
+  "/dashboard/admin/training-content/:contentId/assignments",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.updateAssignments({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+        input: request.body as UpdateDashboardTrainingContentAssignmentsRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+for (const action of ["publish", "unpublish", "archive"] as const) {
+  app.post(
+    `/dashboard/admin/training-content/:contentId/${action}`,
+    requireDashboardAuth,
+    async (request: DashboardAuthRequest, response: Response) => {
+      if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+        return;
+      }
+      const resources = await resolveTrainingContentManagementResources(request, response);
+      if (!resources) {
+        return;
+      }
+      try {
+        const item = await trainingContentManagementService.transitionContent({
+          context: resources.context,
+          references: resources.references,
+          contentId: request.params.contentId,
+          action,
+          input: request.body as DashboardTrainingContentLifecycleRequest,
+        });
+        response.json({
+          viewer: {
+            ...request.dashboard!.viewer,
+            capabilities: resources.context.capabilities,
+          },
+          org: { id: resources.org.id, name: resources.org.name },
+          generatedAt: nowIso(),
+          item,
+          fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+        });
+      } catch (error) {
+        respondWithTrainingContentManagementError(error, response);
+      }
+    }
+  );
+}
 
 app.post(
   "/dashboard/admin/training-content/:contentId/assets/uploads",
@@ -21285,6 +21635,15 @@ export function setTrainingContentAssetServiceForTest(
     throw new Error("setTrainingContentAssetServiceForTest is only available in test.");
   }
   trainingContentAssetService = service ?? defaultTrainingContentAssetService;
+}
+
+export function setTrainingContentManagementServiceForTest(
+  service: TrainingContentManagementService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingContentManagementServiceForTest is only available in test.");
+  }
+  trainingContentManagementService = service ?? defaultTrainingContentManagementService;
 }
 
 export { app, createDefaultDatabase, ensureDatabaseShape };

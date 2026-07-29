@@ -25,6 +25,7 @@ import {
 
 import { createWebAuthService } from "./services/webAuth.js";
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
+import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 
 const NOW = "2026-07-25T15:00:00.000Z";
@@ -54,6 +55,48 @@ const trainingContentAssetRouteCalls: Array<{
   method: string;
   params: Record<string, any>;
 }> = [];
+const trainingContentManagementRouteCalls: Array<{
+  method: string;
+  params: Record<string, any>;
+}> = [];
+
+function buildTrainingContentRouteItem(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "22222222-2222-4222-8222-222222222222",
+    title: "Coaching foundation",
+    description: "Practice better coaching.",
+    focusTopicId: "training_scope",
+    focusTopicName: "Manager Scope Training",
+    focusTopicAvailable: true,
+    contentType: "native",
+    publicationState: "draft",
+    displayOrder: 0,
+    contentVersion: 1,
+    currentAsset: null,
+    assignmentSummary: {
+      availableToEveryone: false,
+      userCount: 0,
+      managerCount: 0,
+      managerTeamCount: 0,
+      label: "Not assigned",
+    },
+    updatedByActorId: "org_admin",
+    updatedByDisplayName: "Org Admin",
+    createdAt: NOW,
+    updatedAt: NOW,
+    publishedAt: null,
+    archivedAt: null,
+    nativeBody: "# Coaching",
+    externalUrl: null,
+    assignments: {
+      availableToEveryone: false,
+      users: [],
+      managers: [],
+      managerTeams: [],
+    },
+    ...overrides,
+  };
+}
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
@@ -955,6 +998,133 @@ before(async () => {
       };
     },
   });
+  const authorizeTrainingContentManagement = (params: Record<string, any>) => {
+    if (!params.context.capabilities.manageOrganizationContent) {
+      throw new TrainingContentManagementServiceError(
+        "Training Content administration is not available for this account.",
+        403,
+        "dashboard_scope_denied"
+      );
+    }
+    const entitlement = moduleEntitlementRows.get(
+      `${params.context.orgId}:training_content`
+    );
+    if (!entitlement?.enabled) {
+      throw new TrainingContentManagementServiceError(
+        "Training Content is not enabled for this organization.",
+        403,
+        "module_disabled",
+        { moduleKey: "training_content" }
+      );
+    }
+  };
+  imported.setTrainingContentManagementServiceForTest({
+    getFileLimits() {
+      return { video: 500, audio: 100, pdf: 50, docx: 25, image: 20 };
+    },
+    async listContent(params) {
+      trainingContentManagementRouteCalls.push({ method: "list", params });
+      authorizeTrainingContentManagement(params);
+      return {
+        items: [buildTrainingContentRouteItem()],
+        page: 1,
+        pageSize: 25,
+        total: 1,
+      } as any;
+    },
+    async getContent(params) {
+      trainingContentManagementRouteCalls.push({ method: "get", params });
+      authorizeTrainingContentManagement(params);
+      if (params.contentId === "99999999-9999-4999-8999-999999999999") {
+        throw new TrainingContentManagementServiceError(
+          "Training Content item was not found.",
+          404,
+          "training_content_not_found"
+        );
+      }
+      return buildTrainingContentRouteItem() as any;
+    },
+    async createContent(params) {
+      trainingContentManagementRouteCalls.push({ method: "create", params });
+      authorizeTrainingContentManagement(params);
+      return buildTrainingContentRouteItem({
+        title: params.input.title,
+        contentType: params.input.contentType,
+      }) as any;
+    },
+    async updateContent(params) {
+      trainingContentManagementRouteCalls.push({ method: "update", params });
+      authorizeTrainingContentManagement(params);
+      if (params.input.expectedUpdatedAt === "conflict") {
+        throw new TrainingContentManagementServiceError(
+          "Training Content changed in another session. Reload before saving.",
+          409,
+          "training_content_conflict",
+          { currentUpdatedAt: NOW }
+        );
+      }
+      return buildTrainingContentRouteItem({ title: params.input.title ?? "Coaching foundation" }) as any;
+    },
+    async updateAssignments(params) {
+      trainingContentManagementRouteCalls.push({ method: "assign", params });
+      authorizeTrainingContentManagement(params);
+      return buildTrainingContentRouteItem({
+        assignmentSummary: {
+          availableToEveryone: params.input.availableToEveryone,
+          userCount: params.input.userIds.length,
+          managerCount: params.input.managerIds.length,
+          managerTeamCount: params.input.managerTeamIds.length,
+          label: "Assigned",
+        },
+      }) as any;
+    },
+    async transitionContent(params) {
+      trainingContentManagementRouteCalls.push({ method: params.action, params });
+      authorizeTrainingContentManagement(params);
+      return buildTrainingContentRouteItem({
+        publicationState: params.action === "publish"
+          ? "published"
+          : params.action === "archive"
+            ? "archived"
+            : "draft",
+      }) as any;
+    },
+    async listUserTargets(params) {
+      trainingContentManagementRouteCalls.push({ method: "users", params });
+      authorizeTrainingContentManagement(params);
+      return [{
+        userId: "learner",
+        displayName: "Test User",
+        email: "learner@acme.example",
+        employeeId: "EMP-1",
+        orgRole: "user",
+        status: "active",
+        available: true,
+      }] as any;
+    },
+    async listManagerTargets(params) {
+      trainingContentManagementRouteCalls.push({ method: "managers", params });
+      authorizeTrainingContentManagement(params);
+      return [{
+        userId: "user_admin",
+        displayName: "Test User",
+        email: "manager@acme.example",
+        employeeId: null,
+        orgRole: "user_admin",
+        status: "active",
+        available: true,
+      }] as any;
+    },
+    async listFocusTopics(params) {
+      trainingContentManagementRouteCalls.push({ method: "topics", params });
+      authorizeTrainingContentManagement(params);
+      return [{
+        id: "training_scope",
+        name: "Manager Scope Training",
+        status: "active",
+      }] as any;
+    },
+  });
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -1161,6 +1331,186 @@ test("Training Content asset routes derive tenant and actor, require explicit su
   );
   assert.equal(access.status, 200);
   assert.equal(trainingContentAssetRouteCalls.at(-1)?.method, "access");
+});
+
+test("Training Content management routes enforce module, capability, explicit scope, and tenant-derived references", async () => {
+  trainingContentManagementRouteCalls.length = 0;
+  moduleEntitlementRows.delete("org_1:training_content");
+  moduleEntitlementRows.delete("org_2:training_content");
+
+  const unauthorized = await publicRequest("/dashboard/admin/training-content");
+  assert.equal(unauthorized.status, 401);
+
+  const disabled = await dashboardRequest("/dashboard/admin/training-content", orgAdminToken);
+  assert.equal(disabled.status, 403);
+  assert.equal(disabled.body.code, "module_disabled");
+  assert.equal(disabled.body.moduleKey, "training_content");
+
+  moduleEntitlementRows.set("org_1:training_content", {
+    orgId: "org_1",
+    moduleKey: "training_content",
+    enabled: true,
+    updatedByActorId: "platform_admin",
+    updatedAt: NOW,
+  });
+  const listed = await dashboardRequest(
+    "/dashboard/admin/training-content?q=%25_%5C%27&page=1&pageSize=25",
+    orgAdminToken
+  );
+  assert.equal(listed.status, 200);
+  assert.equal((listed.body.items as unknown[]).length, 1);
+  assert.equal((listed.body.viewer as any).capabilities.manageOrganizationContent, true);
+  const listCall = trainingContentManagementRouteCalls.at(-1);
+  assert.equal(listCall?.method, "list");
+  assert.equal(listCall?.params.context.orgId, "org_1");
+  assert.equal(listCall?.params.context.actorId, "org_admin");
+  assert.equal(listCall?.params.filters.query, "%_\\'");
+  assert.equal(
+    listCall?.params.references.users.every((entry: UserProfile) => entry.orgId === "org_1"),
+    true
+  );
+  assert.equal(
+    listCall?.params.references.focusTopics.every((entry: OrgTrainingRecord) => entry.orgId === "org_1"),
+    true
+  );
+
+  const userAdminDenied = await dashboardRequest(
+    "/dashboard/admin/training-content",
+    userAdminToken
+  );
+  assert.equal(userAdminDenied.status, 403);
+  assert.equal(userAdminDenied.body.code, "dashboard_scope_denied");
+
+  const crossTenant = await dashboardRequest(
+    "/dashboard/admin/training-content?orgId=org_2",
+    orgAdminToken
+  );
+  assert.equal(crossTenant.status, 404);
+
+  const superWithoutContext = await dashboardRequest(
+    "/dashboard/admin/training-content",
+    superToken
+  );
+  assert.equal(superWithoutContext.status, 400);
+  assert.equal(superWithoutContext.body.code, "dashboard_scope_denied");
+
+  moduleEntitlementRows.set("org_2:training_content", {
+    orgId: "org_2",
+    moduleKey: "training_content",
+    enabled: true,
+    updatedByActorId: "platform_admin",
+    updatedAt: NOW,
+  });
+  const superScoped = await dashboardRequest(
+    "/dashboard/admin/training-content?orgId=org_2",
+    superToken
+  );
+  assert.equal(superScoped.status, 200);
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.params.context.orgId, "org_2");
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.params.context.actorId, "super_user");
+
+  const callsBeforeServerOwned = trainingContentManagementRouteCalls.length;
+  const serverOwned = await dashboardRequest(
+    "/dashboard/admin/training-content",
+    orgAdminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        contentType: "native",
+        title: "Unsafe",
+        orgId: "org_2",
+        actorId: "other",
+      }),
+    }
+  );
+  assert.equal(serverOwned.status, 400);
+  assert.equal(serverOwned.body.code, "training_content_server_owned_field");
+  assert.equal(trainingContentManagementRouteCalls.length, callsBeforeServerOwned);
+
+  const created = await dashboardRequest(
+    "/dashboard/admin/training-content",
+    orgAdminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        contentType: "native",
+        title: "Created content",
+      }),
+    }
+  );
+  assert.equal(created.status, 201);
+  assert.equal((created.body.item as any).title, "Created content");
+
+  const contentId = "22222222-2222-4222-8222-222222222222";
+  const updated = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}`,
+    orgAdminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ expectedUpdatedAt: NOW, title: "Updated content" }),
+    }
+  );
+  assert.equal(updated.status, 200);
+  assert.equal((updated.body.item as any).title, "Updated content");
+  assert.equal(trainingContentManagementRouteCalls.at(-1)?.params.context.orgId, "org_1");
+
+  const conflict = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}`,
+    orgAdminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ expectedUpdatedAt: "conflict", title: "Stale" }),
+    }
+  );
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.body.code, "training_content_conflict");
+  assert.equal(conflict.body.currentUpdatedAt, NOW);
+
+  const assignments = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assignments`,
+    orgAdminToken,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        expectedUpdatedAt: NOW,
+        availableToEveryone: true,
+        userIds: ["learner"],
+        managerIds: ["user_admin"],
+        managerTeamIds: ["user_admin"],
+      }),
+    }
+  );
+  assert.equal(assignments.status, 200);
+  assert.equal((assignments.body.item as any).assignmentSummary.userCount, 1);
+
+  for (const action of ["publish", "unpublish", "archive"]) {
+    const result = await dashboardRequest(
+      `/dashboard/admin/training-content/${contentId}/${action}`,
+      orgAdminToken,
+      {
+        method: "POST",
+        body: JSON.stringify({ expectedUpdatedAt: NOW }),
+      }
+    );
+    assert.equal(result.status, 200);
+  }
+
+  const users = await dashboardRequest(
+    "/dashboard/admin/training-content-targets/users?q=EMP",
+    orgAdminToken
+  );
+  assert.equal(users.status, 200);
+  assert.equal((users.body.targets as any[])[0]?.employeeId, "EMP-1");
+  const managers = await dashboardRequest(
+    "/dashboard/admin/training-content-targets/managers",
+    orgAdminToken
+  );
+  assert.equal(managers.status, 200);
+  const focusTopics = await dashboardRequest(
+    "/dashboard/admin/training-content-targets/focus-topics",
+    orgAdminToken
+  );
+  assert.equal(focusTopics.status, 200);
 });
 
 after(async () => {

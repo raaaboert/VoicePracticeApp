@@ -5,6 +5,10 @@ import test from "node:test";
 import { Pool, type PoolClient } from "pg";
 
 import { createTrainingContentAssetStore } from "./trainingContentAssetStore.js";
+import {
+  createTrainingContentStore,
+  TrainingContentStoreError,
+} from "./trainingContentStore.js";
 import { loadTrainingContentMigrationSql } from "./trainingContentMigrations.js";
 
 const databaseUrl = process.env.TRAINING_CONTENT_INTEGRATION_DATABASE_URL?.trim() || "";
@@ -606,6 +610,485 @@ test(
         client.release();
         await pool.end();
       }
+    }
+  }
+);
+
+test(
+  "real PostgreSQL Training Content management is tenant-scoped, transactional, versioned, and conflict-safe",
+  { skip: !databaseUrl },
+  async () => {
+    assertSafeIntegrationDatabase(databaseUrl);
+    const setupPool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 15_000,
+      idleTimeoutMillis: 10_000,
+    });
+    const schema = `tc_management_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let scopedPool: Pool | null = null;
+    try {
+      await setupPool.query(`CREATE SCHEMA ${quotedSchema}`);
+      scopedPool = new Pool({
+        connectionString: databaseUrl,
+        max: 4,
+        connectionTimeoutMillis: 15_000,
+        idleTimeoutMillis: 10_000,
+        options: `-c search_path=${schema}`,
+      });
+      await scopedPool.query(`
+        CREATE TABLE audit_events (
+          id TEXT PRIMARY KEY,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          org_id TEXT NULL,
+          user_id TEXT NULL,
+          message TEXT NOT NULL,
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+      const store = createTrainingContentStore({
+        provider: "postgres",
+        databaseUrl,
+        pgPoolMax: 4,
+        pgConnectTimeoutMs: 15_000,
+        pgIdleTimeoutMs: 10_000,
+        queryPool: scopedPool,
+      });
+      await store.initialize();
+      await store.initialize();
+
+      const actor = { actorType: "web_user" as const, actorId: "admin_a" };
+      const native = await store.createContent({
+        orgId: "org_a",
+        title: "Coaching foundation",
+        description: "Initial description",
+        focusTopicId: "topic_a",
+        focusTopicNameSnapshot: "Coaching",
+        contentType: "native",
+        nativeBody: "# Foundation",
+        externalUrl: null,
+        displayOrder: 0,
+        actor,
+        now: new Date("2026-07-28T12:00:00.000Z"),
+      });
+      const otherOrg = await store.createContent({
+        orgId: "org_b",
+        title: "Other organization",
+        description: "",
+        focusTopicId: null,
+        focusTopicNameSnapshot: null,
+        contentType: "native",
+        nativeBody: "# Other",
+        externalUrl: null,
+        displayOrder: 0,
+        actor: { actorType: "web_user", actorId: "admin_b" },
+        now: new Date("2026-07-28T12:00:00.000Z"),
+      });
+      assert.equal(await store.getContentDetailForOrg("org_b", native.content.id), null);
+      assert.equal(await store.getContentDetailForOrg("org_a", otherOrg.content.id), null);
+      await assert.rejects(
+        store.updateContent({
+          orgId: "org_b",
+          contentId: native.content.id,
+          expectedUpdatedAt: native.content.updatedAt,
+          title: "Cross tenant",
+          actor: { actorType: "web_user", actorId: "admin_b" },
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentStoreError
+          && error.code === "training_content_not_found"
+      );
+
+      const metadataUpdated = await store.updateContent({
+        orgId: "org_a",
+        contentId: native.content.id,
+        expectedUpdatedAt: native.content.updatedAt,
+        title: "Coaching foundations",
+        actor,
+        now: new Date("2026-07-28T12:00:01.000Z"),
+      });
+      assert.equal(metadataUpdated.content.contentVersion, 1);
+      const sourceUpdated = await store.updateContent({
+        orgId: "org_a",
+        contentId: native.content.id,
+        expectedUpdatedAt: metadataUpdated.content.updatedAt,
+        nativeBody: "# Revised foundation",
+        actor,
+        now: new Date("2026-07-28T12:00:02.000Z"),
+      });
+      assert.equal(sourceUpdated.content.contentVersion, 2);
+
+      const assignments = await store.replaceAssignments({
+        orgId: "org_a",
+        contentId: native.content.id,
+        expectedUpdatedAt: sourceUpdated.content.updatedAt,
+        assignments: [
+          { assignmentType: "organization", subjectUserId: null },
+          { assignmentType: "user", subjectUserId: "learner_a" },
+          { assignmentType: "user", subjectUserId: "learner_a" },
+          { assignmentType: "manager", subjectUserId: "manager_a" },
+          { assignmentType: "manager_team", subjectUserId: "manager_a" },
+        ],
+        actor,
+        now: new Date("2026-07-28T12:00:03.000Z"),
+      });
+      assert.deepEqual(assignments.assignmentCounts, {
+        organization: 1,
+        user: 1,
+        manager: 1,
+        managerTeam: 1,
+      });
+
+      await assert.rejects(
+        store.updateContent({
+          orgId: "org_a",
+          contentId: native.content.id,
+          expectedUpdatedAt: sourceUpdated.content.updatedAt,
+          title: "Stale overwrite",
+          actor,
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentStoreError
+          && error.code === "training_content_conflict"
+      );
+
+      const currentRevision = assignments.content.updatedAt;
+      const concurrentResults = await Promise.allSettled([
+        store.updateContent({
+          orgId: "org_a",
+          contentId: native.content.id,
+          expectedUpdatedAt: currentRevision,
+          description: "Admin one",
+          actor,
+          now: new Date("2026-07-28T12:00:04.000Z"),
+        }),
+        store.updateContent({
+          orgId: "org_a",
+          contentId: native.content.id,
+          expectedUpdatedAt: currentRevision,
+          description: "Admin two",
+          actor: { actorType: "web_user", actorId: "admin_two" },
+          now: new Date("2026-07-28T12:00:04.000Z"),
+        }),
+      ]);
+      assert.equal(
+        concurrentResults.filter((result) => result.status === "fulfilled").length,
+        1
+      );
+      assert.equal(
+        concurrentResults.filter((result) =>
+          result.status === "rejected"
+          && result.reason instanceof TrainingContentStoreError
+          && result.reason.code === "training_content_conflict"
+        ).length,
+        1
+      );
+
+      let current = await store.getContentDetailForOrg("org_a", native.content.id);
+      assert.ok(current);
+      const unpublishedAssignments = current.assignments.map((entry) => ({
+        assignmentType: entry.assignmentType,
+        subjectUserId: entry.subjectUserId,
+      }));
+      const published = await store.transitionContent({
+        orgId: "org_a",
+        contentId: native.content.id,
+        expectedUpdatedAt: current.content.updatedAt,
+        action: "publish",
+        actor,
+        now: new Date("2026-07-28T12:00:05.000Z"),
+      });
+      assert.equal(published.content.publicationState, "published");
+      const unpublished = await store.transitionContent({
+        orgId: "org_a",
+        contentId: native.content.id,
+        expectedUpdatedAt: published.content.updatedAt,
+        action: "unpublish",
+        actor,
+        now: new Date("2026-07-28T12:00:06.000Z"),
+      });
+      assert.equal(unpublished.content.publicationState, "draft");
+      assert.deepEqual(
+        unpublished.assignments.map((entry) => ({
+          assignmentType: entry.assignmentType,
+          subjectUserId: entry.subjectUserId,
+        })),
+        unpublishedAssignments
+      );
+      const archived = await store.transitionContent({
+        orgId: "org_a",
+        contentId: native.content.id,
+        expectedUpdatedAt: unpublished.content.updatedAt,
+        action: "archive",
+        actor,
+        now: new Date("2026-07-28T12:00:07.000Z"),
+      });
+      assert.equal(archived.content.publicationState, "archived");
+      assert.equal(archived.assignments.length, 0);
+      const assignmentHistory = await scopedPool.query<{ total: string; revoked: string }>(
+        `
+          SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE revoked_at IS NOT NULL) AS revoked
+          FROM org_content_assignments
+          WHERE org_id = $1 AND content_id = $2
+        `,
+        ["org_a", native.content.id]
+      );
+      assert.equal(Number(assignmentHistory.rows[0]?.total), 4);
+      assert.equal(Number(assignmentHistory.rows[0]?.revoked), 4);
+
+      const unassigned = await store.createContent({
+        orgId: "org_a",
+        title: "Not ready",
+        description: "",
+        focusTopicId: null,
+        focusTopicNameSnapshot: null,
+        contentType: "native",
+        nativeBody: "# Ready body",
+        externalUrl: null,
+        displayOrder: 0,
+        actor,
+      });
+      await assert.rejects(
+        store.transitionContent({
+          orgId: "org_a",
+          contentId: unassigned.content.id,
+          expectedUpdatedAt: unassigned.content.updatedAt,
+          action: "publish",
+          actor,
+        }),
+        (error: unknown) =>
+          error instanceof TrainingContentStoreError
+          && error.code === "training_content_publish_invalid"
+          && Array.isArray(error.details?.reasons)
+          && error.details.reasons.includes("assignment_required")
+      );
+
+      const external = await store.createContent({
+        orgId: "org_a",
+        title: "External reference",
+        description: "",
+        focusTopicId: null,
+        focusTopicNameSnapshot: null,
+        contentType: "external_url",
+        nativeBody: null,
+        externalUrl: "https://example.com/one",
+        displayOrder: 0,
+        actor,
+      });
+      const externalUpdated = await store.updateContent({
+        orgId: "org_a",
+        contentId: external.content.id,
+        expectedUpdatedAt: external.content.updatedAt,
+        externalUrl: "https://example.com/two",
+        actor,
+      });
+      assert.equal(externalUpdated.content.contentVersion, 2);
+
+      const uploaded = await store.createContent({
+        orgId: "org_a",
+        title: "Uploaded PDF",
+        description: "",
+        focusTopicId: null,
+        focusTopicNameSnapshot: null,
+        contentType: "pdf",
+        nativeBody: null,
+        externalUrl: null,
+        displayOrder: 0,
+        actor,
+      });
+      const assetStore = createTrainingContentAssetStore({
+        provider: "postgres",
+        databaseUrl,
+        pgPoolMax: 4,
+        pgConnectTimeoutMs: 15_000,
+        pgIdleTimeoutMs: 10_000,
+        queryPool: scopedPool,
+      });
+      const firstPending = await assetStore.createPendingAsset({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetRole: "primary",
+        originalFilename: "first.pdf",
+        declaredMimeType: "application/pdf",
+        fileExtension: "pdf",
+        declaredByteSize: 8,
+        replacementAssetId: null,
+        uploadTtlSeconds: 600,
+        maxPendingBytesForOrganization: 1_000_000,
+        actor,
+        now: new Date("2026-07-28T12:01:00.000Z"),
+      });
+      const firstClaim = await assetStore.claimFinalization({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetId: firstPending.asset.id,
+        actualByteSize: 8,
+        detectedMimeType: "application/pdf",
+        checksumOrEtag: "etag-1",
+        leaseSeconds: 300,
+        actor,
+        now: new Date("2026-07-28T12:01:01.000Z"),
+      });
+      assert.equal(firstClaim.status, "claimed");
+      assert.ok(firstClaim.asset.finalObjectKey);
+      const firstReady = await assetStore.completeFinalization({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetId: firstPending.asset.id,
+        finalObjectKey: firstClaim.asset.finalObjectKey!,
+        actualByteSize: 8,
+        detectedMimeType: "application/pdf",
+        checksumOrEtag: "etag-1",
+        actor,
+        now: new Date("2026-07-28T12:01:02.000Z"),
+      });
+      assert.equal(firstReady.replacedAsset, null);
+      assert.equal(
+        (await store.getContentDetailForOrg("org_a", uploaded.content.id))?.content.contentVersion,
+        1
+      );
+
+      const secondPending = await assetStore.createPendingAsset({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetRole: "primary",
+        originalFilename: "second.pdf",
+        declaredMimeType: "application/pdf",
+        fileExtension: "pdf",
+        declaredByteSize: 9,
+        replacementAssetId: firstReady.asset.id,
+        uploadTtlSeconds: 600,
+        maxPendingBytesForOrganization: 1_000_000,
+        actor,
+        now: new Date("2026-07-28T12:02:00.000Z"),
+      });
+      const secondClaim = await assetStore.claimFinalization({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetId: secondPending.asset.id,
+        actualByteSize: 9,
+        detectedMimeType: "application/pdf",
+        checksumOrEtag: "etag-2",
+        leaseSeconds: 300,
+        actor,
+        now: new Date("2026-07-28T12:02:01.000Z"),
+      });
+      assert.equal(secondClaim.status, "claimed");
+      const secondReady = await assetStore.completeFinalization({
+        orgId: "org_a",
+        contentId: uploaded.content.id,
+        assetId: secondPending.asset.id,
+        finalObjectKey: secondClaim.asset.finalObjectKey!,
+        actualByteSize: 9,
+        detectedMimeType: "application/pdf",
+        checksumOrEtag: "etag-2",
+        actor,
+        now: new Date("2026-07-28T12:02:02.000Z"),
+      });
+      assert.equal(secondReady.replacedAsset?.id, firstReady.asset.id);
+      assert.equal(secondReady.replacedAsset?.uploadState, "superseded");
+      const uploadedAfterReplacement = await store.getContentDetailForOrg(
+        "org_a",
+        uploaded.content.id
+      );
+      assert.equal(uploadedAfterReplacement?.content.contentVersion, 2);
+      assert.equal(uploadedAfterReplacement?.currentAsset?.id, secondReady.asset.id);
+
+      const beforeRollback = await store.getContentDetailForOrg("org_a", external.content.id);
+      assert.ok(beforeRollback);
+      await scopedPool.query(`
+        CREATE FUNCTION reject_training_content_audit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.action = 'training_content_metadata_updated' THEN
+            RAISE EXCEPTION 'simulated audit failure';
+          END IF;
+          RETURN NEW;
+        END
+        $$
+      `);
+      await scopedPool.query(`
+        CREATE TRIGGER reject_training_content_audit_trigger
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION reject_training_content_audit()
+      `);
+      await assert.rejects(
+        store.updateContent({
+          orgId: "org_a",
+          contentId: external.content.id,
+          expectedUpdatedAt: beforeRollback.content.updatedAt,
+          title: "Must roll back",
+          actor,
+        }),
+        /simulated audit failure/
+      );
+      const afterRollback = await store.getContentDetailForOrg("org_a", external.content.id);
+      assert.equal(afterRollback?.content.title, beforeRollback.content.title);
+      assert.equal(afterRollback?.content.updatedAt, beforeRollback.content.updatedAt);
+
+      const auditActions = await scopedPool.query<{ action: string }>(
+        `
+          SELECT action
+          FROM audit_events
+          WHERE org_id = 'org_a'
+          ORDER BY created_at ASC, id ASC
+        `
+      );
+      for (const expectedAction of [
+        "training_content_created",
+        "training_content_metadata_updated",
+        "training_content_native_body_updated",
+        "training_content_assignments_changed",
+        "training_content_published",
+        "training_content_unpublished",
+        "training_content_archived",
+        "training_content_external_url_updated",
+      ]) {
+        assert.ok(auditActions.rows.some((row) => row.action === expectedAction));
+      }
+      const auditJson = JSON.stringify(
+        await scopedPool.query<{ metadata: unknown }>("SELECT metadata FROM audit_events")
+      );
+      assert.equal(auditJson.includes("# Revised foundation"), false);
+      assert.equal(auditJson.includes("example.com/two"), false);
+
+      const activeList = await store.listContentForManagement("org_a", {
+        page: 1,
+        pageSize: 2,
+      });
+      assert.equal(activeList.items.length, 2);
+      assert.equal(activeList.total, 3);
+      assert.equal(
+        activeList.items.some((row) => row.content.publicationState === "archived"),
+        false
+      );
+      const archivedList = await store.listContentForManagement("org_a", {
+        publicationState: "archived",
+      });
+      assert.deepEqual(
+        archivedList.items.map((row) => row.content.id),
+        [native.content.id]
+      );
+      const unusualSearch = await store.listContentForManagement("org_a", {
+        query: "%_\\'; DROP TABLE org_content_items; --",
+      });
+      assert.equal(unusualSearch.total, 0);
+      assert.equal(
+        Number((await scopedPool.query("SELECT COUNT(*) FROM org_content_items")).rows[0]?.count) > 0,
+        true
+      );
+    } finally {
+      if (scopedPool) {
+        await scopedPool.end();
+      }
+      await setupPool.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      await setupPool.end();
     }
   }
 );

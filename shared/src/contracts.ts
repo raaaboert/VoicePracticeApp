@@ -153,6 +153,168 @@ export interface TrainingContentAssignment {
   revokedAt: string | null;
 }
 
+export const TRAINING_CONTENT_LIST_SORTS = ["updated_desc", "title_asc"] as const;
+export type TrainingContentListSort = (typeof TRAINING_CONTENT_LIST_SORTS)[number];
+
+export interface TrainingContentFileLimitsBytes {
+  video: number;
+  audio: number;
+  pdf: number;
+  docx: number;
+  image: number;
+}
+
+export interface DashboardTrainingContentAsset {
+  id: string;
+  contentId: string;
+  assetRole: TrainingContentAssetRole;
+  version: number;
+  uploadState: TrainingContentAssetUploadState;
+  originalFilename: string | null;
+  declaredMimeType: string | null;
+  detectedMimeType: string | null;
+  fileExtension: string | null;
+  declaredByteSize: number | null;
+  byteSize: number | null;
+  uploadExpiresAt: string | null;
+  finalizedAt: string | null;
+  supersededAt: string | null;
+  replacementForAssetId: string | null;
+  isCurrent: boolean;
+  cleanupPending: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DashboardTrainingContentAssignmentSummary {
+  availableToEveryone: boolean;
+  userCount: number;
+  managerCount: number;
+  managerTeamCount: number;
+  label: string;
+}
+
+export interface DashboardTrainingContentListItem {
+  id: string;
+  title: string;
+  description: string;
+  focusTopicId: string | null;
+  focusTopicName: string | null;
+  focusTopicAvailable: boolean;
+  contentType: TrainingContentType;
+  publicationState: TrainingContentPublicationState;
+  displayOrder: number;
+  contentVersion: number;
+  currentAsset: DashboardTrainingContentAsset | null;
+  assignmentSummary: DashboardTrainingContentAssignmentSummary;
+  updatedByActorId: string;
+  updatedByDisplayName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  archivedAt: string | null;
+}
+
+export interface DashboardTrainingContentTarget {
+  userId: string;
+  displayName: string;
+  email: string;
+  employeeId: string | null;
+  orgRole: OrgUserRole;
+  status: UserStatus;
+  available: boolean;
+}
+
+export interface DashboardTrainingContentAssignmentSelection {
+  availableToEveryone: boolean;
+  users: DashboardTrainingContentTarget[];
+  managers: DashboardTrainingContentTarget[];
+  managerTeams: DashboardTrainingContentTarget[];
+}
+
+export interface DashboardTrainingContentDetail extends DashboardTrainingContentListItem {
+  nativeBody: string | null;
+  externalUrl: string | null;
+  assignments: DashboardTrainingContentAssignmentSelection;
+}
+
+export interface DashboardTrainingContentOrganization {
+  id: string;
+  name: string;
+}
+
+export interface DashboardTrainingContentListResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  items: DashboardTrainingContentListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  fileLimitsBytes: TrainingContentFileLimitsBytes;
+}
+
+export interface DashboardTrainingContentDetailResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  item: DashboardTrainingContentDetail;
+  fileLimitsBytes: TrainingContentFileLimitsBytes;
+}
+
+export interface CreateDashboardTrainingContentRequest {
+  contentType: TrainingContentType;
+  title: string;
+  description?: string;
+  focusTopicId?: string | null;
+  nativeBody?: string | null;
+  externalUrl?: string | null;
+  displayOrder?: number;
+}
+
+export interface UpdateDashboardTrainingContentRequest {
+  expectedUpdatedAt: string;
+  title?: string;
+  description?: string;
+  focusTopicId?: string | null;
+  nativeBody?: string | null;
+  externalUrl?: string | null;
+  displayOrder?: number;
+}
+
+export interface UpdateDashboardTrainingContentAssignmentsRequest {
+  expectedUpdatedAt: string;
+  availableToEveryone: boolean;
+  userIds: string[];
+  managerIds: string[];
+  managerTeamIds: string[];
+}
+
+export interface DashboardTrainingContentLifecycleRequest {
+  expectedUpdatedAt: string;
+}
+
+export interface DashboardTrainingContentTargetsResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  targets: DashboardTrainingContentTarget[];
+}
+
+export interface DashboardTrainingContentFocusTopic {
+  id: string;
+  name: string;
+  status: OrgTrainingStatus;
+}
+
+export interface DashboardTrainingContentFocusTopicsResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  focusTopics: DashboardTrainingContentFocusTopic[];
+}
+
 export interface TrainingContentScenarioLink {
   id: string;
   orgId: string;
