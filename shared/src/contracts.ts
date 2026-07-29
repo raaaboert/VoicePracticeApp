@@ -186,6 +186,37 @@ export interface DashboardTrainingContentAsset {
   updatedAt: string;
 }
 
+export interface DashboardTrainingContentUploadInitiationRequest {
+  assetRole: TrainingContentAssetRole;
+  originalFilename: string;
+  declaredMimeType: string;
+  declaredByteSize: number;
+  replacementAssetId?: string | null;
+}
+
+export interface DashboardTrainingContentUploadInitiationResponse {
+  asset: DashboardTrainingContentAsset;
+  upload: {
+    url: string;
+    expiresAt: string;
+    method: "PUT";
+    requiredHeaders: Record<string, string>;
+  };
+}
+
+export interface DashboardTrainingContentAssetFinalizationResponse {
+  asset: DashboardTrainingContentAsset;
+  replacedAssetId: string | null;
+}
+
+export interface DashboardTrainingContentAssetAccessResponse {
+  access: {
+    url: string;
+    expiresAt: string;
+    requiredHeaders: Record<string, string>;
+  };
+}
+
 export interface DashboardTrainingContentAssignmentSummary {
   availableToEveryone: boolean;
   userCount: number;

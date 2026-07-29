@@ -36,7 +36,11 @@ export function dashboardApiErrorResponse(error: unknown): NextResponse {
     return noStore(NextResponse.json({ error: error.message }, { status: 403 }));
   }
   if (error instanceof DashboardApiError) {
-    return noStore(NextResponse.json({ error: error.message, code: error.code }, { status: error.status }));
+    return noStore(NextResponse.json({
+      error: error.message,
+      code: error.code,
+      ...(error.details ?? {}),
+    }, { status: error.status }));
   }
   console.error("[dashboard-api-proxy] request failed", error);
   return noStore(NextResponse.json({ error: "Dashboard request failed. Please retry." }, { status: 500 }));

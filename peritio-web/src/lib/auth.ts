@@ -16,6 +16,16 @@ import {
   DashboardAdminUpdateUserResponse,
   DashboardAdminUsersExportResponse,
   DashboardAdminUsersResponse,
+  CreateDashboardTrainingContentRequest,
+  DashboardTrainingContentAssetAccessResponse,
+  DashboardTrainingContentAssetFinalizationResponse,
+  DashboardTrainingContentDetailResponse,
+  DashboardTrainingContentFocusTopicsResponse,
+  DashboardTrainingContentLifecycleRequest,
+  DashboardTrainingContentListResponse,
+  DashboardTrainingContentTargetsResponse,
+  DashboardTrainingContentUploadInitiationRequest,
+  DashboardTrainingContentUploadInitiationResponse,
   DashboardOverviewResponse,
   DashboardCustomerDetailResponse,
   DashboardCustomerListResponse,
@@ -40,6 +50,8 @@ import {
   PerformancePlanPreviewResponse,
   UpdatePerformancePlanRequest,
   UpdatePerformancePlanResponse,
+  UpdateDashboardTrainingContentAssignmentsRequest,
+  UpdateDashboardTrainingContentRequest,
   WebAuthRequestCodeResponse,
   WebAuthSessionResponse,
   WebAuthVerifyCodeResponse,
@@ -71,24 +83,38 @@ export function assertDashboardAuthConfig(): void {
 
 async function parseErrorPayload(
   response: Response
-): Promise<{ message: string; code: DashboardApiErrorCode | null }> {
+): Promise<{
+  message: string;
+  code: DashboardApiErrorCode | null;
+  details: Record<string, unknown> | null;
+}> {
   const payload = (await response.json().catch(() => null)) as
-    | { error?: string; code?: string }
+    | Record<string, unknown>
     | null;
 
-  const code = payload?.code;
+  const code = typeof payload?.code === "string" ? payload.code : null;
   const normalizedCode =
     code === "dashboard_scope_denied" ||
     code === "dashboard_session_invalid" ||
     code === "web_auth_invalid" ||
     code === "employee_id_conflict" ||
-    code === "employee_id_invalid"
-      ? code
+    code === "employee_id_invalid" ||
+    code === "module_disabled" ||
+    code?.startsWith("training_content_")
+      ? code as DashboardApiErrorCode
       : null;
+  const details = payload ? { ...payload } : null;
+  if (details) {
+    delete details.error;
+    delete details.code;
+  }
 
   return {
-    message: payload?.error || `Dashboard API request failed (${response.status}).`,
+    message: typeof payload?.error === "string" && payload.error.trim()
+      ? payload.error
+      : `Dashboard API request failed (${response.status}).`,
     code: normalizedCode,
+    details: details && Object.keys(details).length > 0 ? details : null,
   };
 }
 
@@ -149,7 +175,7 @@ async function fetchDashboardApi<T>(
 
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
-    throw new DashboardApiError(response.status, payload.message, payload.code);
+    throw new DashboardApiError(response.status, payload.message, payload.code, payload.details);
   }
 
   return (await response.json()) as T;
@@ -650,6 +676,193 @@ export async function decideDashboardAdminAccessRequest(
       body: JSON.stringify(input),
       token,
     }
+  );
+}
+
+function appendTrainingContentQuery(
+  pathname: string,
+  options?: {
+    orgId?: string | null;
+    q?: string | null;
+    focusTopicId?: string | null;
+    contentType?: string | null;
+    status?: string | null;
+    sort?: string | null;
+    page?: number | string | null;
+    pageSize?: number | string | null;
+  }
+): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(options ?? {})) {
+    if (value !== undefined && value !== null && String(value).trim()) {
+      params.set(key, String(value).trim());
+    }
+  }
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
+export async function getDashboardTrainingContent(
+  options?: Parameters<typeof appendTrainingContentQuery>[1]
+): Promise<DashboardTrainingContentListResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentListResponse>(
+    appendTrainingContentQuery("/dashboard/admin/training-content", options),
+    { token }
+  );
+}
+
+export async function getDashboardTrainingContentDetail(
+  contentId: string,
+  orgId?: string | null
+): Promise<DashboardTrainingContentDetailResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentDetailResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}`,
+      orgId
+    ),
+    { token }
+  );
+}
+
+export async function createDashboardTrainingContent(
+  input: CreateDashboardTrainingContentRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentDetailResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentDetailResponse>(
+    appendOrgQuery("/dashboard/admin/training-content", orgId),
+    { method: "POST", body: JSON.stringify(input), token }
+  );
+}
+
+export async function updateDashboardTrainingContent(
+  contentId: string,
+  input: UpdateDashboardTrainingContentRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentDetailResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentDetailResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}`,
+      orgId
+    ),
+    { method: "PATCH", body: JSON.stringify(input), token }
+  );
+}
+
+export async function updateDashboardTrainingContentAssignments(
+  contentId: string,
+  input: UpdateDashboardTrainingContentAssignmentsRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentDetailResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentDetailResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}/assignments`,
+      orgId
+    ),
+    { method: "PUT", body: JSON.stringify(input), token }
+  );
+}
+
+export async function transitionDashboardTrainingContent(
+  contentId: string,
+  action: "publish" | "unpublish" | "archive",
+  input: DashboardTrainingContentLifecycleRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentDetailResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentDetailResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}/${action}`,
+      orgId
+    ),
+    { method: "POST", body: JSON.stringify(input), token }
+  );
+}
+
+export async function getDashboardTrainingContentUserTargets(
+  q: string,
+  orgId?: string | null
+): Promise<DashboardTrainingContentTargetsResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentTargetsResponse>(
+    appendTrainingContentQuery("/dashboard/admin/training-content-targets/users", {
+      orgId,
+      q,
+    }),
+    { token }
+  );
+}
+
+export async function getDashboardTrainingContentManagerTargets(
+  q: string,
+  orgId?: string | null
+): Promise<DashboardTrainingContentTargetsResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentTargetsResponse>(
+    appendTrainingContentQuery("/dashboard/admin/training-content-targets/managers", {
+      orgId,
+      q,
+    }),
+    { token }
+  );
+}
+
+export async function getDashboardTrainingContentFocusTopics(
+  orgId?: string | null
+): Promise<DashboardTrainingContentFocusTopicsResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentFocusTopicsResponse>(
+    appendOrgQuery("/dashboard/admin/training-content-targets/focus-topics", orgId),
+    { token }
+  );
+}
+
+export async function initiateDashboardTrainingContentUpload(
+  contentId: string,
+  input: DashboardTrainingContentUploadInitiationRequest,
+  orgId?: string | null
+): Promise<DashboardTrainingContentUploadInitiationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentUploadInitiationResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}/assets/uploads`,
+      orgId
+    ),
+    { method: "POST", body: JSON.stringify(input), token }
+  );
+}
+
+export async function finalizeDashboardTrainingContentUpload(
+  contentId: string,
+  assetId: string,
+  orgId?: string | null
+): Promise<DashboardTrainingContentAssetFinalizationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentAssetFinalizationResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}/assets/${encodeURIComponent(assetId)}/finalize`,
+      orgId
+    ),
+    { method: "POST", body: "{}", token }
+  );
+}
+
+export async function getDashboardTrainingContentAssetAccess(
+  contentId: string,
+  assetId: string,
+  orgId?: string | null
+): Promise<DashboardTrainingContentAssetAccessResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentAssetAccessResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}/assets/${encodeURIComponent(assetId)}/access`,
+      orgId
+    ),
+    { method: "POST", body: "{}", token }
   );
 }
 

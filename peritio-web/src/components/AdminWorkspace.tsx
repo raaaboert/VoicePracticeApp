@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type {
@@ -105,10 +106,12 @@ export function AdminWorkspace({
   usersPayload,
   accessRequestsPayload,
   orgId,
+  trainingContentAvailable,
 }: {
   usersPayload: DashboardAdminUsersResponse;
   accessRequestsPayload: DashboardAdminAccessRequestsResponse;
   orgId: string | null;
+  trainingContentAvailable: boolean;
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -300,6 +303,14 @@ export function AdminWorkspace({
           >
             Access Requests
           </button>
+        ) : null}
+        {trainingContentAvailable ? (
+          <Link
+            className="tab-button"
+            href={`/app/admin/training-content${encodeOrgQuery(orgId)}`}
+          >
+            Training Content
+          </Link>
         ) : null}
       </div>
 

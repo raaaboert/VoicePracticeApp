@@ -2,13 +2,21 @@ export class AdminApiClientError extends Error {
   status: number | null;
   code: string | null;
   url: string;
+  details: Record<string, unknown> | null;
 
-  constructor(params: { message: string; status: number | null; code?: string | null; url: string }) {
+  constructor(params: {
+    message: string;
+    status: number | null;
+    code?: string | null;
+    url: string;
+    details?: Record<string, unknown> | null;
+  }) {
     super(params.message);
     this.name = "AdminApiClientError";
     this.status = params.status;
     this.code = params.code ?? null;
     this.url = params.url;
+    this.details = params.details ?? null;
   }
 }
 
@@ -55,6 +63,7 @@ export async function assertAdminApiOk(response: Response, url: string): Promise
     message: errorMessageForResponse(response, payload),
     status: response.status,
     code: typeof payload?.code === "string" ? payload.code : null,
+    details: payload,
     url,
   });
 }
@@ -66,6 +75,7 @@ export async function readAdminApiJson<T>(response: Response, url: string): Prom
       message: errorMessageForResponse(response, payload),
       status: response.status,
       code: typeof payload?.code === "string" ? payload.code : null,
+      details: payload,
       url,
     });
   }

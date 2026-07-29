@@ -27,6 +27,16 @@ test("middleware allows dashboard admin API calls on the app host", () => {
   assert.equal(response.headers.get("location"), null);
 });
 
+test("middleware allows nested Training Content proxy calls on the app host", () => {
+  const response = middleware(
+    appHostRequest("/api/admin/training-content/content_1/assets/asset_1/finalize")
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-middleware-next"), "1");
+  assert.equal(response.headers.get("location"), null);
+});
+
 test("middleware still redirects non-app API paths away from the app host", () => {
   const response = middleware(appHostRequest("/api/unknown"));
 

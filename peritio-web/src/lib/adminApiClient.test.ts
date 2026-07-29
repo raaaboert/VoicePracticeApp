@@ -29,6 +29,10 @@ test("readAdminApiJson includes server message and status for API errors", async
         (error as AdminApiClientError).message,
         "Employee ID is already assigned within this organization. (409)."
       );
+      assert.deepEqual((error as AdminApiClientError).details, {
+        error: "Employee ID is already assigned within this organization.",
+        code: "employee_id_conflict",
+      });
       return true;
     }
   );

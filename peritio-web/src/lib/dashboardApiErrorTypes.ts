@@ -10,12 +10,19 @@ export class DashboardAccessDeniedError extends Error {
 export class DashboardApiError extends Error {
   status: number;
   code: DashboardApiErrorCode | null;
+  details: Record<string, unknown> | null;
 
-  constructor(status: number, message: string, code: DashboardApiErrorCode | null = null) {
+  constructor(
+    status: number,
+    message: string,
+    code: DashboardApiErrorCode | null = null,
+    details: Record<string, unknown> | null = null
+  ) {
     super(message);
     this.name = "DashboardApiError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
