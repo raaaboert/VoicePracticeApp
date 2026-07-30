@@ -1,7 +1,8 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -15,9 +16,10 @@ import {
   buildLocalPdfSource,
   createNativeViewerLoadGuard,
   disposeNativeViewerLoadGuard,
+  isValidPdfPageProgress,
   NATIVE_VIEWER_LOAD_TIMEOUT_MS,
   resetNativeViewerLoadGuard,
-  settleNativeViewerLoad,
+  resolvePdfNativeRenderSignal,
 } from "../nativeViewerLifecycle";
 import {
   deleteManagedTemporaryPdf,
@@ -75,6 +77,9 @@ const PDF_FILE_SYSTEM: PdfTemporaryFileSystem = {
   deleteAsync: (uri, options) => FileSystem.deleteAsync(uri, options),
 };
 
+const StableAndroidPdf = memo(Pdf);
+const PdfRenderer = Platform.OS === "android" ? StableAndroidPdf : Pdf;
+
 export function PdfContentViewer({
   url,
   headers,
@@ -94,12 +99,12 @@ export function PdfContentViewer({
   const renderGuard = useRef(createNativeViewerLoadGuard());
   const renderTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const clearRenderTimeout = () => {
+  const clearRenderTimeout = useCallback(() => {
     if (renderTimeout.current) {
       clearTimeout(renderTimeout.current);
       renderTimeout.current = null;
     }
-  };
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -133,7 +138,11 @@ export function PdfContentViewer({
           if (
             mounted.current &&
             operationGeneration.current === generation &&
-            settleNativeViewerLoad(renderGuard.current)
+            resolvePdfNativeRenderSignal(
+              renderGuard.current,
+              "timeout",
+              Platform.OS
+            ) === "failed"
           ) {
             recordTrainingContentViewerDiagnostic("pdf_render_timeout");
             setViewerState({
@@ -199,6 +208,107 @@ export function PdfContentViewer({
     });
   };
 
+  const activeLocalUri =
+    viewerState.stage === "rendering" || viewerState.stage === "loaded"
+      ? viewerState.localUri
+      : null;
+  const source = useMemo(
+    () => (activeLocalUri ? buildLocalPdfSource(activeLocalUri) : null),
+    [activeLocalUri]
+  );
+  const pdfStyle = useMemo(
+    () => [
+      styles.pdf,
+      {
+        height: Math.max(360, Math.min(620, height * 0.62)),
+        backgroundColor: theme.surfaceStrong,
+      },
+    ],
+    [height, theme.surfaceStrong]
+  );
+  const renderPdfActivityIndicator = useCallback(
+    () => <ActivityIndicator color={theme.accent} />,
+    [theme.accent]
+  );
+  const handleLoadComplete = useCallback(
+    (pages: number) => {
+      if (
+        resolvePdfNativeRenderSignal(
+          renderGuard.current,
+          "load_complete",
+          Platform.OS
+        ) !== "loaded"
+      ) {
+        return;
+      }
+      const uri = localUri.current;
+      if (!mounted.current || !uri) {
+        return;
+      }
+      clearRenderTimeout();
+      setViewerState({ stage: "loaded", localUri: uri });
+      setPageLabel(`${pages} ${pages === 1 ? "page" : "pages"}`);
+    },
+    [clearRenderTimeout]
+  );
+  const handlePageChanged = useCallback(
+    (page: number, pages: number) => {
+      if (!mounted.current || !isValidPdfPageProgress(page, pages)) {
+        return;
+      }
+      if (
+        resolvePdfNativeRenderSignal(
+          renderGuard.current,
+          "page_changed",
+          Platform.OS
+        ) === "loaded"
+      ) {
+        const uri = localUri.current;
+        if (uri) {
+          clearRenderTimeout();
+          setViewerState({ stage: "loaded", localUri: uri });
+        }
+      }
+      setPageLabel(`Page ${page} of ${pages}`);
+    },
+    [clearRenderTimeout]
+  );
+  const handlePdfError = useCallback(
+    (error: object) => {
+      if (
+        resolvePdfNativeRenderSignal(
+          renderGuard.current,
+          "error",
+          Platform.OS
+        ) !== "failed"
+      ) {
+        return;
+      }
+      clearRenderTimeout();
+      const nativeErrorClass = classifyPdfNativeError(error);
+      recordTrainingContentViewerDiagnostic("pdf_render_failed", {
+        nativeErrorClass,
+      });
+      setViewerState({
+        stage: "failed",
+        errorCode: "pdf_render_failed",
+        nativeErrorClass,
+        message: "This PDF could not be displayed.",
+      });
+      const uriToDelete = localUri.current;
+      localUri.current = null;
+      void deleteManagedTemporaryPdf(PDF_FILE_SYSTEM, uriToDelete);
+    },
+    [clearRenderTimeout]
+  );
+  const handlePdfLink = useCallback(
+    (urlToOpen: string) =>
+      confirmAndOpenExternalLink(urlToOpen, {
+        allowMailto: true,
+      }),
+    []
+  );
+
   if (
     viewerState.stage === "downloading" ||
     viewerState.stage === "getting_access"
@@ -235,7 +345,6 @@ export function PdfContentViewer({
     );
   }
 
-  const source = buildLocalPdfSource(viewerState.localUri);
   return (
     <View style={styles.root}>
       {viewerState.stage === "rendering" ? (
@@ -250,65 +359,19 @@ export function PdfContentViewer({
           {pageLabel}
         </Text>
       ) : null}
-      <Pdf
-        source={source}
+      <PdfRenderer
+        source={source!}
         trustAllCerts={false}
         enablePaging={false}
         enableDoubleTapZoom
         horizontal={false}
         spacing={8}
-        style={[
-          styles.pdf,
-          {
-            height: Math.max(360, Math.min(620, height * 0.62)),
-            backgroundColor: theme.surfaceStrong,
-          },
-        ]}
-        renderActivityIndicator={() => (
-          <ActivityIndicator color={theme.accent} />
-        )}
-        onLoadComplete={(pages) => {
-          if (!settleNativeViewerLoad(renderGuard.current)) {
-            return;
-          }
-          clearRenderTimeout();
-          setViewerState({
-            stage: "loaded",
-            localUri: viewerState.localUri,
-          });
-          setPageLabel(
-            `${pages} ${pages === 1 ? "page" : "pages"}`
-          );
-        }}
-        onPageChanged={(page, pages) => {
-          if (mounted.current) {
-            setPageLabel(`Page ${page} of ${pages}`);
-          }
-        }}
-        onError={(error) => {
-          if (!settleNativeViewerLoad(renderGuard.current)) {
-            return;
-          }
-          clearRenderTimeout();
-          const nativeErrorClass = classifyPdfNativeError(error);
-          recordTrainingContentViewerDiagnostic("pdf_render_failed", {
-            nativeErrorClass,
-          });
-          setViewerState({
-            stage: "failed",
-            errorCode: "pdf_render_failed",
-            nativeErrorClass,
-            message: "This PDF could not be displayed.",
-          });
-          const uriToDelete = localUri.current;
-          localUri.current = null;
-          void deleteManagedTemporaryPdf(PDF_FILE_SYSTEM, uriToDelete);
-        }}
-        onPressLink={(urlToOpen) =>
-          confirmAndOpenExternalLink(urlToOpen, {
-            allowMailto: true,
-          })
-        }
+        style={pdfStyle}
+        renderActivityIndicator={renderPdfActivityIndicator}
+        onLoadComplete={handleLoadComplete}
+        onPageChanged={handlePageChanged}
+        onError={handlePdfError}
+        onPressLink={handlePdfLink}
       />
     </View>
   );

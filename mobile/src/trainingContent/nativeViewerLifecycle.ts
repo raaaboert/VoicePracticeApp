@@ -11,6 +11,14 @@ export interface NativeViewerLoadGuard {
   settled: boolean;
 }
 
+export type PdfNativeRenderSignal =
+  | "load_complete"
+  | "page_changed"
+  | "error"
+  | "timeout";
+
+export type PdfNativeRenderOutcome = "loaded" | "failed";
+
 export interface ProgressiveVideoSource {
   uri: string;
   useCaching: false;
@@ -42,6 +50,36 @@ export function settleNativeViewerLoad(guard: NativeViewerLoadGuard): boolean {
   }
   guard.settled = true;
   return true;
+}
+
+export function isValidPdfPageProgress(
+  currentPage: number,
+  pageCount: number
+): boolean {
+  return (
+    Number.isSafeInteger(currentPage) &&
+    currentPage > 0 &&
+    Number.isSafeInteger(pageCount) &&
+    pageCount > 0 &&
+    currentPage <= pageCount
+  );
+}
+
+export function resolvePdfNativeRenderSignal(
+  guard: NativeViewerLoadGuard,
+  signal: PdfNativeRenderSignal,
+  platform: string
+): PdfNativeRenderOutcome | null {
+  const isReadySignal =
+    signal === "load_complete" ||
+    (platform === "android" && signal === "page_changed");
+  if (signal === "page_changed" && !isReadySignal) {
+    return null;
+  }
+  if (!settleNativeViewerLoad(guard)) {
+    return null;
+  }
+  return isReadySignal ? "loaded" : "failed";
 }
 
 export function disposeNativeViewerLoadGuard(guard: NativeViewerLoadGuard): void {

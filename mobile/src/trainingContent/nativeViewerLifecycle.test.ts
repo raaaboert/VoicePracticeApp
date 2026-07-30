@@ -13,8 +13,10 @@ import {
   disposeNativeViewerLoadGuard,
   disposeViewerRequestLifecycle,
   getAssetAccessRenewalDelayMs,
+  isValidPdfPageProgress,
   isViewerRequestCurrent,
   resetNativeViewerLoadGuard,
+  resolvePdfNativeRenderSignal,
   settleNativeViewerLoad,
 } from "./nativeViewerLifecycle";
 
@@ -69,6 +71,49 @@ test("native load success, error, timeout, and teardown accept one terminal call
   resetNativeViewerLoadGuard(guard);
   disposeNativeViewerLoadGuard(guard);
   assert.equal(settleNativeViewerLoad(guard), false);
+});
+
+test("Android PDF page progress settles rendering before the watchdog can fail it", () => {
+  const guard = createNativeViewerLoadGuard();
+
+  assert.equal(isValidPdfPageProgress(1, 24), true);
+  assert.equal(
+    resolvePdfNativeRenderSignal(guard, "page_changed", "android"),
+    "loaded"
+  );
+  assert.equal(
+    resolvePdfNativeRenderSignal(guard, "timeout", "android"),
+    null
+  );
+  assert.equal(
+    resolvePdfNativeRenderSignal(guard, "error", "android"),
+    null
+  );
+});
+
+test("iOS PDF readiness remains tied to load completion", () => {
+  const guard = createNativeViewerLoadGuard();
+
+  assert.equal(
+    resolvePdfNativeRenderSignal(guard, "page_changed", "ios"),
+    null
+  );
+  assert.equal(
+    resolvePdfNativeRenderSignal(guard, "load_complete", "ios"),
+    "loaded"
+  );
+});
+
+test("invalid PDF page progress cannot settle Android rendering", () => {
+  for (const [currentPage, pageCount] of [
+    [0, 12],
+    [1, 0],
+    [13, 12],
+    [1.5, 12],
+    [1, Number.NaN],
+  ]) {
+    assert.equal(isValidPdfPageProgress(currentPage, pageCount), false);
+  }
 });
 
 test("signed access renewal is bounded and invalid expiration is ignored", () => {

@@ -87,8 +87,14 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
     assert.match(pdf, new RegExp(`stage: "${stage}"`));
   }
   assert.match(pdf, /NATIVE_VIEWER_LOAD_TIMEOUT_MS/);
-  assert.match(pdf, /settleNativeViewerLoad/);
+  assert.match(pdf, /resolvePdfNativeRenderSignal/);
   assert.match(pdf, /disposeNativeViewerLoadGuard/);
+  assert.match(pdf, /const StableAndroidPdf = memo\(Pdf\)/);
+  assert.match(
+    pdf,
+    /Platform\.OS === "android" \? StableAndroidPdf : Pdf/
+  );
+  assert.match(pdf, /"page_changed"/);
   assert.match(pdf, /trustAllCerts=\{false\}/);
   assert.match(pdf, /classifyPdfNativeError/);
   assert.match(viewer, /accessState\.accessRevision/);

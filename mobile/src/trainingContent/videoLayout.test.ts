@@ -15,6 +15,14 @@ test("video layout accepts landscape metadata", () => {
   assert.equal(resolveVideoAspectRatio({ width: 1920, height: 1080 }), 16 / 9);
 });
 
+test("video layout consumes iOS display-oriented dimensions after a 90-degree track transform", () => {
+  const encodedNaturalSize = { width: 1080, height: 1920 };
+  const transformedDisplaySize = { width: 1920, height: 1080 };
+
+  assert.equal(resolveVideoAspectRatio(encodedNaturalSize), 9 / 16);
+  assert.equal(resolveVideoAspectRatio(transformedDisplaySize), 16 / 9);
+});
+
 test("video layout accepts portrait metadata without blindly inverting it", () => {
   assert.equal(resolveVideoAspectRatio({ width: 1080, height: 1920 }), 9 / 16);
 });
