@@ -80,6 +80,7 @@ import {
   toRemoteTtsPreset,
 } from "../lib/ttsPlayback";
 import type { PreparedRemoteAudioSource, TtsPlaybackResult } from "../lib/ttsPlayback";
+import { runTtsChunkSequence } from "../lib/ttsChunkSequence";
 import { splitTextForRemoteTtsFastStart } from "../lib/ttsFastStart";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
@@ -931,8 +932,24 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     correlationId?: string,
     chunkIndex?: number,
     chunkCount?: number,
+    sequenceRequestGeneration?: number,
   ): Promise<TtsPlaybackResult> => {
-    const requestGeneration = ttsRequestGenerationRef.current;
+    const requestGeneration = sequenceRequestGeneration ?? ttsRequestGenerationRef.current;
+    if (
+      ttsRequestGenerationRef.current !== requestGeneration
+      || simulationClosedRef.current
+      || unmountedRef.current
+    ) {
+      return {
+        outcome: "tts_cancelled",
+        mode: "cancelled",
+        degraded: true,
+        timedOut: false,
+        reason: "sequence_cancelled",
+        chunkIndex,
+        chunkCount,
+      };
+    }
     const abortController = new AbortController();
     const priorController = remoteTtsAbortControllerRef.current;
     remoteTtsAbortControllerRef.current = abortController;
@@ -1121,107 +1138,110 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         }),
       );
     }
-    for (let index = 1; index < chunks.length; index += 1) {
-      startPrefetchForChunk(index);
-    }
-
     try {
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index];
-        let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
-        const preparedPromise = preparedChunkByIndex.get(index);
-        if (preparedPromise) {
-          preparedRemoteAudio = await preparedPromise;
-          if (preparedRemoteAudio) {
-            resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
-            logSimulationTiming({
-              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-              phase: "tts_chunk_prepared",
-              details: {
-                chunkIndex: index,
-                chunkCount: chunks.length,
-                sourceKind: preparedRemoteAudio.sourceKind,
-              },
-            });
-          }
-        }
-        const utteranceResult = await speakSingleUtterance(
-          chunk,
-          index === 0 ? assistantTextReceivedAtMs : Date.now(),
-          (startedAtMs) => {
-            if (index === 0) {
-              handlePlaybackStart();
-            }
-            const boundaryGapMs =
-              index > 0 && typeof previousChunkCompletedAtMs === "number"
-                ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
-                : null;
-            if (typeof boundaryGapMs === "number") {
+      await runTtsChunkSequence({
+        chunks,
+        runChunk: async (chunk, index) => {
+          let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
+          const preparedPromise = preparedChunkByIndex.get(index);
+          if (preparedPromise) {
+            preparedRemoteAudio = await preparedPromise;
+            if (preparedRemoteAudio) {
+              resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
               logSimulationTiming({
                 correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-                phase: "tts_chunk_boundary_gap",
+                phase: "tts_chunk_prepared",
+                details: {
+                  chunkIndex: index,
+                  chunkCount: chunks.length,
+                  sourceKind: preparedRemoteAudio.sourceKind,
+                },
+              });
+            }
+          }
+          const utteranceResult = await speakSingleUtterance(
+            chunk,
+            index === 0 ? assistantTextReceivedAtMs : Date.now(),
+            (startedAtMs) => {
+              if (index === 0) {
+                handlePlaybackStart();
+              }
+              const boundaryGapMs =
+                index > 0 && typeof previousChunkCompletedAtMs === "number"
+                  ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
+                  : null;
+              if (typeof boundaryGapMs === "number") {
+                logSimulationTiming({
+                  correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                  phase: "tts_chunk_boundary_gap",
+                  details: {
+                    chunkIndex: index,
+                    chunkCount: chunks.length,
+                    boundaryGapMs,
+                  },
+                });
+              }
+              logSimulationTiming({
+                correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                phase: "tts_chunk_playback_started",
                 details: {
                   chunkIndex: index,
                   chunkCount: chunks.length,
                   boundaryGapMs,
                 },
               });
-            }
-            logSimulationTiming({
-              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-              phase: "tts_chunk_playback_started",
-              details: {
-                chunkIndex: index,
-                chunkCount: chunks.length,
-                boundaryGapMs,
-              },
-            });
-          },
-          preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
-          preparedRemoteAudio,
-          correlationId,
-          index,
-          chunks.length,
-        );
-        recordSpeechResult(utteranceResult);
-        if (preparedRemoteAudio) {
-          resolvedPreparedChunkByIndex.delete(index);
-        }
-        if (index === 0) {
-          handlePlaybackStart();
-        }
-        previousChunkCompletedAtMs = Date.now();
-        logSimulationTiming({
-          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-          phase: utteranceResult.degraded
-            ? utteranceResult.timedOut
-              ? "tts_chunk_timeout_unblocked"
-              : "tts_chunk_degraded_complete"
-            : "tts_chunk_completed",
-          details: {
-            chunkIndex: index,
-            chunkCount: chunks.length,
-            outcome: utteranceResult.outcome,
-            mode: utteranceResult.mode,
-            degraded: utteranceResult.degraded,
-            timedOut: utteranceResult.timedOut,
-            reason: utteranceResult.reason,
-            sourceKind: utteranceResult.sourceKind ?? null,
-          },
-        });
-        logSimulationTiming({
-          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-          phase: "tts_chunk_playback_completed",
-          details: {
-            chunkIndex: index,
-            chunkCount: chunks.length,
-            outcome: utteranceResult.outcome,
-            mode: utteranceResult.mode,
-            degraded: utteranceResult.degraded,
-            timedOut: utteranceResult.timedOut,
-          },
-        });
-      }
+            },
+            preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
+            preparedRemoteAudio,
+            correlationId,
+            index,
+            chunks.length,
+            requestGeneration,
+          );
+          recordSpeechResult(utteranceResult);
+          if (preparedRemoteAudio) {
+            resolvedPreparedChunkByIndex.delete(index);
+          }
+          if (index === 0 && utteranceResult.outcome !== "tts_cancelled") {
+            handlePlaybackStart();
+          }
+          previousChunkCompletedAtMs = Date.now();
+          logSimulationTiming({
+            correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+            phase: utteranceResult.degraded
+              ? utteranceResult.timedOut
+                ? "tts_chunk_timeout_unblocked"
+                : "tts_chunk_degraded_complete"
+              : "tts_chunk_completed",
+            details: {
+              chunkIndex: index,
+              chunkCount: chunks.length,
+              outcome: utteranceResult.outcome,
+              mode: utteranceResult.mode,
+              degraded: utteranceResult.degraded,
+              timedOut: utteranceResult.timedOut,
+              reason: utteranceResult.reason,
+              sourceKind: utteranceResult.sourceKind ?? null,
+            },
+          });
+          logSimulationTiming({
+            correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+            phase: "tts_chunk_playback_completed",
+            details: {
+              chunkIndex: index,
+              chunkCount: chunks.length,
+              outcome: utteranceResult.outcome,
+              mode: utteranceResult.mode,
+              degraded: utteranceResult.degraded,
+              timedOut: utteranceResult.timedOut,
+            },
+          });
+          if (utteranceResult.outcome !== "tts_cancelled") {
+            startPrefetchForChunk(index + 1);
+          }
+          return utteranceResult;
+        },
+      });
       const finalResult: TtsPlaybackResult = aggregateSpeechResult ?? {
         outcome: "remote_tts_completed",
         mode: "remote",
@@ -4061,7 +4081,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         >
           {showUserTurnInstruction ? (
             <Text style={styles.userTurnInstruction}>
-              Record your response, then submit when finished.
+              Your turn — record your response, then submit when finished.
             </Text>
           ) : null}
           <Pressable
