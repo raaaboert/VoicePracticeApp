@@ -2,7 +2,19 @@ export const PDF_DOWNLOAD_TIMEOUT_MS = 45_000;
 
 export type PdfFileDiagnosticCategory =
   | "pdf_download_failed"
-  | "pdf_local_file_missing";
+  | "pdf_local_file_missing"
+  | "pdf_signature_invalid"
+  | "pdf_size_mismatch";
+
+const PDF_SIGNATURE_BYTE_LENGTH = 5;
+const PDF_SIGNATURE_BASE64 = "JVBERi0=";
+
+interface PdfDownloadResult {
+  status: number;
+  uri: string;
+  headers?: Record<string, string>;
+  mimeType?: string | null;
+}
 
 export interface PdfTemporaryFileSystem {
   cacheDirectory: string | null;
@@ -11,12 +23,16 @@ export interface PdfTemporaryFileSystem {
     destinationUri: string,
     options: { headers?: Record<string, string> }
   ) => {
-    downloadAsync: () => Promise<{ status: number; uri: string } | undefined>;
+    downloadAsync: () => Promise<PdfDownloadResult | undefined>;
     cancelAsync: () => Promise<void>;
   };
   getInfoAsync: (
     uri: string
   ) => Promise<{ exists: boolean; size?: number }>;
+  readAsStringAsync: (
+    uri: string,
+    options: { encoding: "base64"; position: number; length: number }
+  ) => Promise<string>;
   deleteAsync: (
     uri: string,
     options: { idempotent: true }
@@ -41,6 +57,50 @@ export class PdfTemporaryFileError extends Error {
 
 function normalizedCacheDirectory(cacheDirectory: string): string {
   return cacheDirectory.endsWith("/") ? cacheDirectory : `${cacheDirectory}/`;
+}
+
+function positiveByteSize(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+    ? value
+    : null;
+}
+
+function responseHeader(
+  headers: Record<string, string> | undefined,
+  name: string
+): string | null {
+  if (!headers) {
+    return null;
+  }
+  const normalizedName = name.toLowerCase();
+  const entry = Object.entries(headers).find(
+    ([headerName]) => headerName.toLowerCase() === normalizedName
+  );
+  return entry?.[1] ?? null;
+}
+
+function responseContentLength(response: PdfDownloadResult): number | null {
+  if (response.status !== 200) {
+    return null;
+  }
+  const contentEncoding = responseHeader(response.headers, "content-encoding");
+  if (
+    contentEncoding &&
+    contentEncoding.trim().toLowerCase() !== "identity"
+  ) {
+    return null;
+  }
+  const rawContentLength = responseHeader(response.headers, "content-length");
+  if (!rawContentLength || !/^\d+$/.test(rawContentLength.trim())) {
+    return null;
+  }
+  return positiveByteSize(Number(rawContentLength));
+}
+
+export function hasPdfFileSignature(base64Prefix: string): boolean {
+  return base64Prefix.replace(/\s/g, "") === PDF_SIGNATURE_BASE64;
 }
 
 export function createTemporaryPdfUri(
@@ -91,6 +151,7 @@ export function startTemporaryPdfDownload(params: {
   fileSystem: PdfTemporaryFileSystem;
   url: string;
   headers: Record<string, string>;
+  expectedByteSize?: number | null;
   timeoutMs?: number;
   nowMs?: number;
   randomValue?: number;
@@ -133,8 +194,36 @@ export function startTemporaryPdfDownload(params: {
       if (canceled) {
         throw new PdfTemporaryFileError("pdf_download_failed", true);
       }
-      if (!info.exists || info.size === 0) {
+      const actualByteSize = positiveByteSize(info.size);
+      if (!info.exists || actualByteSize === null) {
         throw new PdfTemporaryFileError("pdf_local_file_missing");
+      }
+      const expectedByteSizes = [
+        positiveByteSize(params.expectedByteSize),
+        responseContentLength(response),
+      ].filter((value): value is number => value !== null);
+      if (
+        expectedByteSizes.some(
+          (expectedByteSize) => expectedByteSize !== actualByteSize
+        )
+      ) {
+        throw new PdfTemporaryFileError("pdf_size_mismatch");
+      }
+      let signature: string;
+      try {
+        signature = await params.fileSystem.readAsStringAsync(destinationUri, {
+          encoding: "base64",
+          position: 0,
+          length: PDF_SIGNATURE_BYTE_LENGTH,
+        });
+      } catch {
+        throw new PdfTemporaryFileError("pdf_signature_invalid");
+      }
+      if (canceled) {
+        throw new PdfTemporaryFileError("pdf_download_failed", true);
+      }
+      if (!hasPdfFileSignature(signature)) {
+        throw new PdfTemporaryFileError("pdf_signature_invalid");
       }
       return destinationUri;
     } catch (caught) {

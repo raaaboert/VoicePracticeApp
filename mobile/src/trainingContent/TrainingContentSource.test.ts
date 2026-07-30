@@ -70,7 +70,9 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   assert.match(audio, /player\.pause\(\)/);
   assert.match(pdf, /buildLocalPdfSource/);
   assert.match(pdf, /startTemporaryPdfDownload/);
+  assert.match(pdf, /expectedByteSize/);
   assert.match(pdf, /FileSystem\.cacheDirectory/);
+  assert.match(pdf, /FileSystem\.readAsStringAsync/);
   assert.match(pdf, /deleteManagedTemporaryPdf/);
   assert.match(pdf, /refreshTemporaryPdf/);
   assert.doesNotMatch(pdf, /source=\{\{\s*uri:\s*url/);
@@ -88,12 +90,21 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   assert.match(pdf, /settleNativeViewerLoad/);
   assert.match(pdf, /disposeNativeViewerLoadGuard/);
   assert.match(pdf, /trustAllCerts=\{false\}/);
+  assert.match(pdf, /classifyPdfNativeError/);
   assert.match(viewer, /accessState\.accessRevision/);
   assert.match(video, /styles\.videoFrame/);
   assert.match(video, /styles\.videoSurface/);
   assert.match(video, /contentFit="contain"/);
   assert.match(video, /contentPosition=\{\{\s*dx:\s*0,\s*dy:\s*0\s*\}\}/);
-  assert.match(video, /videoFrame:[\s\S]*?aspectRatio:\s*16\s*\/\s*9/);
+  assert.match(video, /VIDEO_ASPECT_RATIO_FALLBACK/);
+  assert.match(
+    video,
+    /style=\{\[styles\.videoFrame,\s*\{\s*aspectRatio:\s*videoAspectRatio\s*\}\]\}/
+  );
+  assert.doesNotMatch(
+    video,
+    /videoFrame:[\s\S]*?aspectRatio:\s*16\s*\/\s*9/
+  );
   assert.match(video, /videoFrame:[\s\S]*?overflow:\s*"hidden"/);
   assert.match(video, /videoSurface:[\s\S]*?height:\s*"100%"/);
   assert.match(video, /backgroundColor:\s*"#000000"/);

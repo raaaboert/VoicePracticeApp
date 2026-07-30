@@ -8,6 +8,10 @@ import {
   NATIVE_VIEWER_LOAD_TIMEOUT_MS,
 } from "../nativeViewerLifecycle";
 import type { TrainingContentTheme } from "../theme";
+import {
+  getValidatedVideoAspectRatio,
+  VIDEO_ASPECT_RATIO_FALLBACK,
+} from "../videoLayout";
 import { recordTrainingContentViewerDiagnostic } from "../viewerDiagnostics";
 
 interface VideoContentViewerProps {
@@ -38,16 +42,28 @@ export function VideoContentViewer({
   );
   const status = useEvent(player, "statusChange", { status: player.status });
   const [timedOut, setTimedOut] = useState(false);
+  const [videoAspectRatio, setVideoAspectRatio] = useState(
+    VIDEO_ASPECT_RATIO_FALLBACK
+  );
   const waitingForPlayback = status.status === "idle" || status.status === "loading";
 
   useEventListener(player, "sourceLoad", ({ availableVideoTracks }) => {
     const size = availableVideoTracks.find(
-      (track) => track.size.width > 0 && track.size.height > 0
+      (track) => getValidatedVideoAspectRatio(track.size) !== null
     )?.size;
     if (size) {
+      setVideoAspectRatio(
+        getValidatedVideoAspectRatio(size) ?? VIDEO_ASPECT_RATIO_FALLBACK
+      );
       recordTrainingContentViewerDiagnostic("video_track_dimensions", size);
+    } else {
+      setVideoAspectRatio(VIDEO_ASPECT_RATIO_FALLBACK);
     }
   });
+
+  useEffect(() => {
+    setVideoAspectRatio(VIDEO_ASPECT_RATIO_FALLBACK);
+  }, [source]);
 
   useEffect(() => {
     setTimedOut(false);
@@ -63,7 +79,7 @@ export function VideoContentViewer({
   return (
     <View style={styles.root}>
       <View
-        style={styles.videoFrame}
+        style={[styles.videoFrame, { aspectRatio: videoAspectRatio }]}
         onLayout={({ nativeEvent }) => {
           recordTrainingContentViewerDiagnostic(
             "video_surface_layout",
@@ -112,7 +128,6 @@ const styles = StyleSheet.create({
   root: { gap: 10 },
   videoFrame: {
     width: "100%",
-    aspectRatio: 16 / 9,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",

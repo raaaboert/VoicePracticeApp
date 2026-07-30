@@ -26,23 +26,39 @@ import {
   type PdfTemporaryFileSystem,
   refreshTemporaryPdf,
   startTemporaryPdfDownload,
+  type PdfFileDiagnosticCategory,
 } from "../pdfTemporaryFile";
 import type { TrainingContentTheme } from "../theme";
-import { recordTrainingContentViewerDiagnostic } from "../viewerDiagnostics";
+import {
+  classifyPdfNativeError,
+  type PdfNativeErrorClass,
+  recordTrainingContentViewerDiagnostic,
+} from "../viewerDiagnostics";
 
 interface PdfContentViewerProps {
   url: string;
   headers: Record<string, string>;
+  expectedByteSize: number | null;
   theme: TrainingContentTheme;
   onAccessError: () => Promise<void>;
 }
+
+type PdfViewerFailureCode =
+  | PdfFileDiagnosticCategory
+  | "pdf_render_failed"
+  | "pdf_render_timeout";
 
 type PdfViewerState =
   | { stage: "downloading" }
   | { stage: "rendering"; localUri: string }
   | { stage: "loaded"; localUri: string }
   | { stage: "getting_access" }
-  | { stage: "failed"; message: string };
+  | {
+      stage: "failed";
+      errorCode: PdfViewerFailureCode;
+      message: string;
+      nativeErrorClass?: PdfNativeErrorClass;
+    };
 
 const PDF_FILE_SYSTEM: PdfTemporaryFileSystem = {
   cacheDirectory: FileSystem.cacheDirectory,
@@ -54,12 +70,15 @@ const PDF_FILE_SYSTEM: PdfTemporaryFileSystem = {
       ? { exists: true, size: info.size }
       : { exists: false };
   },
+  readAsStringAsync: (uri, options) =>
+    FileSystem.readAsStringAsync(uri, options),
   deleteAsync: (uri, options) => FileSystem.deleteAsync(uri, options),
 };
 
 export function PdfContentViewer({
   url,
   headers,
+  expectedByteSize,
   theme,
   onAccessError,
 }: PdfContentViewerProps) {
@@ -96,6 +115,7 @@ export function PdfContentViewer({
           fileSystem: PDF_FILE_SYSTEM,
           url,
           headers,
+          expectedByteSize,
         });
         activeDownload.current = session;
         const downloadedUri = await session.result;
@@ -118,6 +138,7 @@ export function PdfContentViewer({
             recordTrainingContentViewerDiagnostic("pdf_render_timeout");
             setViewerState({
               stage: "failed",
+              errorCode: "pdf_render_timeout",
               message: "This PDF could not be displayed.",
             });
             const uriToDelete = localUri.current;
@@ -140,6 +161,7 @@ export function PdfContentViewer({
         recordTrainingContentViewerDiagnostic(category);
         setViewerState({
           stage: "failed",
+          errorCode: category,
           message: "This PDF could not be prepared.",
         });
       }
@@ -157,7 +179,7 @@ export function PdfContentViewer({
       void sessionToCancel?.cancel();
       void deleteManagedTemporaryPdf(PDF_FILE_SYSTEM, uriToDelete);
     };
-  }, [headers, url]);
+  }, [expectedByteSize, headers, url]);
 
   const refreshAccess = async () => {
     operationGeneration.current += 1;
@@ -263,14 +285,19 @@ export function PdfContentViewer({
             setPageLabel(`Page ${page} of ${pages}`);
           }
         }}
-        onError={() => {
+        onError={(error) => {
           if (!settleNativeViewerLoad(renderGuard.current)) {
             return;
           }
           clearRenderTimeout();
-          recordTrainingContentViewerDiagnostic("pdf_render_failed");
+          const nativeErrorClass = classifyPdfNativeError(error);
+          recordTrainingContentViewerDiagnostic("pdf_render_failed", {
+            nativeErrorClass,
+          });
           setViewerState({
             stage: "failed",
+            errorCode: "pdf_render_failed",
+            nativeErrorClass,
             message: "This PDF could not be displayed.",
           });
           const uriToDelete = localUri.current;

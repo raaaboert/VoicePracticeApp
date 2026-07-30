@@ -4,28 +4,48 @@ import test from "node:test";
 import {
   createTemporaryPdfUri,
   deleteManagedTemporaryPdf,
+  hasPdfFileSignature,
   type PdfTemporaryFileSystem,
   PdfTemporaryFileError,
   refreshTemporaryPdf,
   startTemporaryPdfDownload,
 } from "./pdfTemporaryFile";
 
+interface DownloadResult {
+  status: number;
+  uri: string;
+  headers?: Record<string, string>;
+  mimeType?: string | null;
+}
+
 function createFileSystem(params: {
-  downloadResult?: { status: number; uri: string } | undefined;
+  downloadResult?: DownloadResult | undefined;
   fileInfo?: { exists: boolean; size?: number };
-  downloadPromise?: Promise<{ status: number; uri: string } | undefined>;
+  downloadPromise?: Promise<DownloadResult | undefined>;
+  signatureBase64?: string;
   onCancel?: () => void;
   events?: string[];
 } = {}): PdfTemporaryFileSystem & {
   destinations: string[];
   requestOptions: Array<{ headers?: Record<string, string> }>;
+  readOptions: Array<{
+    encoding: "base64";
+    position: number;
+    length: number;
+  }>;
 } {
   const destinations: string[] = [];
   const requestOptions: Array<{ headers?: Record<string, string> }> = [];
+  const readOptions: Array<{
+    encoding: "base64";
+    position: number;
+    length: number;
+  }> = [];
   return {
     cacheDirectory: "file:///app-cache/",
     destinations,
     requestOptions,
+    readOptions,
     createDownloadResumable: (_url, destination, options) => {
       destinations.push(destination);
       requestOptions.push(options);
@@ -43,6 +63,10 @@ function createFileSystem(params: {
     },
     getInfoAsync: async () =>
       params.fileInfo ?? { exists: true, size: 5_500_000 },
+    readAsStringAsync: async (_uri, options) => {
+      readOptions.push(options);
+      return params.signatureBase64 ?? "JVBERi0=";
+    },
     deleteAsync: async (uri) => {
       params.events?.push(`delete:${uri}`);
     },
@@ -63,20 +87,102 @@ test("temporary PDF names are generated in cache without signed or user path dat
   assert.doesNotMatch(uri, /X-Amz|signature|customer|document-name/i);
 });
 
-test("PDF download streams to cache, preserves required headers, and verifies nonzero size", async () => {
-  const fileSystem = createFileSystem();
+test("PDF download preserves headers and accepts a valid local PDF signature", async () => {
+  const fileSystem = createFileSystem({
+    downloadResult: {
+      status: 200,
+      uri: "file:///app-cache/download.pdf",
+      headers: { "Content-Length": "5500000" },
+    },
+  });
   const headers = { "x-required-header": "signed-value" };
   const session = startTemporaryPdfDownload({
     fileSystem,
     url: "https://asset.invalid/private?signature=secret",
     headers,
+    expectedByteSize: 5_500_000,
     nowMs: 10,
     randomValue: 0.5,
   });
 
   assert.equal(await session.result, session.destinationUri);
   assert.deepEqual(fileSystem.requestOptions, [{ headers }]);
+  assert.deepEqual(fileSystem.readOptions, [
+    { encoding: "base64", position: 0, length: 5 },
+  ]);
+  assert.equal(hasPdfFileSignature("JVBERi0="), true);
   assert.doesNotMatch(session.destinationUri, /signature|secret/);
+});
+
+test("non-PDF downloaded content fails safely and deletes the cache target", async () => {
+  const events: string[] = [];
+  const fileSystem = createFileSystem({
+    signatureBase64: "PGh0bWw=",
+    events,
+  });
+  const session = startTemporaryPdfDownload({
+    fileSystem,
+    url: "https://asset.invalid/private",
+    headers: {},
+    nowMs: 10,
+    randomValue: 0.75,
+  });
+
+  await assert.rejects(
+    session.result,
+    (caught) =>
+      caught instanceof PdfTemporaryFileError &&
+      caught.diagnosticCategory === "pdf_signature_invalid"
+  );
+  assert.equal(hasPdfFileSignature("PGh0bWw="), false);
+  assert.deepEqual(events, [`delete:${session.destinationUri}`]);
+});
+
+test("PDF download size must match asset or response metadata when available", async () => {
+  const assetEvents: string[] = [];
+  const assetFileSystem = createFileSystem({
+    fileInfo: { exists: true, size: 1_024 },
+    events: assetEvents,
+  });
+  const assetSession = startTemporaryPdfDownload({
+    fileSystem: assetFileSystem,
+    url: "https://asset.invalid/private",
+    headers: {},
+    expectedByteSize: 2_048,
+    nowMs: 10,
+    randomValue: 0.8,
+  });
+
+  await assert.rejects(
+    assetSession.result,
+    (caught) =>
+      caught instanceof PdfTemporaryFileError &&
+      caught.diagnosticCategory === "pdf_size_mismatch"
+  );
+  assert.deepEqual(assetEvents, [`delete:${assetSession.destinationUri}`]);
+
+  const responseFileSystem = createFileSystem({
+    fileInfo: { exists: true, size: 1_024 },
+    downloadResult: {
+      status: 200,
+      uri: "file:///app-cache/download.pdf",
+      headers: { "Content-Length": "2048" },
+    },
+  });
+  const responseSession = startTemporaryPdfDownload({
+    fileSystem: responseFileSystem,
+    url: "https://asset.invalid/private",
+    headers: {},
+    nowMs: 10,
+    randomValue: 0.85,
+  });
+
+  await assert.rejects(
+    responseSession.result,
+    (caught) =>
+      caught instanceof PdfTemporaryFileError &&
+      caught.diagnosticCategory === "pdf_size_mismatch"
+  );
 });
 
 test("empty required headers are omitted from the filesystem request options", async () => {

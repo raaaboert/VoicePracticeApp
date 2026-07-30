@@ -8,7 +8,8 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "test": "tsx --test src/**/*.test.ts",
-    "eas-build-post-install": "npm --prefix .. run build:shared"
+    "postinstall": "node ./scripts/apply-react-native-pdf-ios-codegen-patch.mjs",
+    "eas-build-post-install": "node ./scripts/apply-react-native-pdf-ios-codegen-patch.mjs && npm --prefix .. run build:shared"
   },
   "dependencies": {
     "@config-plugins/react-native-blob-util": "~12.0.0",

@@ -180,6 +180,7 @@ function UploadedContentViewer(props: TrainingContentViewerProps) {
           key={`pdf:${viewerInstanceKey}`}
           url={access.url}
           headers={access.requiredHeaders}
+          expectedByteSize={props.item.asset?.byteSize ?? null}
           theme={props.theme}
           onAccessError={accessState.refresh}
         />
