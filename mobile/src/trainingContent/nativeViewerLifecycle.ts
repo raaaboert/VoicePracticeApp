@@ -18,10 +18,9 @@ export interface ProgressiveVideoSource {
   headers?: Record<string, string>;
 }
 
-export interface PrivatePdfSource {
+export interface LocalPdfSource {
   uri: string;
   cache: false;
-  headers?: Record<string, string>;
 }
 
 export function createViewerRequestLifecycle(): ViewerRequestLifecycle {
@@ -104,14 +103,10 @@ export function buildProgressiveVideoSource(
   };
 }
 
-export function buildPrivatePdfSource(
-  url: string,
-  headers: Record<string, string>
-): PrivatePdfSource {
+export function buildLocalPdfSource(localUri: string): LocalPdfSource {
   return {
-    uri: url,
+    uri: localUri,
     cache: false,
-    ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
 }
 

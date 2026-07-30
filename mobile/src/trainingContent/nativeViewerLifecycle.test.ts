@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   activateViewerRequestLifecycle,
   beginViewerRequest,
-  buildPrivatePdfSource,
+  buildLocalPdfSource,
   buildProgressiveVideoSource,
   cancelViewerRequests,
   createNativeViewerLoadGuard,
@@ -18,14 +18,14 @@ import {
   settleNativeViewerLoad,
 } from "./nativeViewerLifecycle";
 
-test("private native sources omit unnecessary empty request headers", () => {
+test("private video omits empty headers and PDF rendering uses only a local file", () => {
   assert.deepEqual(buildProgressiveVideoSource("https://asset.invalid/video", {}), {
     uri: "https://asset.invalid/video",
     useCaching: false,
     contentType: "progressive",
   });
-  assert.deepEqual(buildPrivatePdfSource("https://asset.invalid/pdf", {}), {
-    uri: "https://asset.invalid/pdf",
+  assert.deepEqual(buildLocalPdfSource("file:///cache/peritio-pdf-test.pdf"), {
+    uri: "file:///cache/peritio-pdf-test.pdf",
     cache: false,
   });
 });
@@ -34,7 +34,6 @@ test("required signed-access headers are preserved without changing source secur
   const headers = { "x-required-header": "signed-value" };
 
   assert.equal(buildProgressiveVideoSource("https://asset.invalid/video", headers).headers, headers);
-  assert.equal(buildPrivatePdfSource("https://asset.invalid/pdf", headers).headers, headers);
 });
 
 test("disposed and superseded access requests cannot commit viewer state", () => {

@@ -1,5 +1,6 @@
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import type { MobileTrainingContentDetail } from "@voicepractice/shared";
+import { useEffect } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -13,6 +14,7 @@ import { NativeMarkdownViewer } from "./NativeMarkdownViewer";
 import { createNativeViewerInstanceKey } from "./nativeViewerLifecycle";
 import type { TrainingContentTheme } from "./theme";
 import { useTrainingContentAssetAccess } from "./useTrainingContentAssetAccess";
+import { recordTrainingContentViewerDiagnostic } from "./viewerDiagnostics";
 import { AudioContentViewer } from "./viewers/AudioContentViewer";
 import { DocxContentViewer } from "./viewers/DocxContentViewer";
 import { ImageContentViewer } from "./viewers/ImageContentViewer";
@@ -93,11 +95,30 @@ function UploadedContentViewer(props: TrainingContentViewerProps) {
     onModuleRemoved: props.onModuleRemoved,
     onItemRemoved: props.onItemRemoved,
   });
+  useEffect(() => {
+    if (
+      props.item.contentType === "pdf" &&
+      !accessState.loading &&
+      !accessState.access &&
+      accessState.error
+    ) {
+      recordTrainingContentViewerDiagnostic("asset_access_failed");
+    }
+  }, [
+    accessState.access,
+    accessState.error,
+    accessState.loading,
+    props.item.contentType,
+  ]);
   if (accessState.loading && !accessState.access) {
     return (
       <View style={styles.state}>
         <ActivityIndicator color={props.theme.accent} />
-        <Text style={styles.stateText}>Opening resource...</Text>
+        <Text style={styles.stateText}>
+          {props.item.contentType === "pdf"
+            ? "Getting document access..."
+            : "Opening resource..."}
+        </Text>
       </View>
     );
   }
@@ -160,7 +181,7 @@ function UploadedContentViewer(props: TrainingContentViewerProps) {
           url={access.url}
           headers={access.requiredHeaders}
           theme={props.theme}
-          onAccessError={() => { void accessState.refresh(); }}
+          onAccessError={accessState.refresh}
         />
       );
     case "docx":

@@ -53,6 +53,7 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   const video = source("./viewers/VideoContentViewer.tsx");
   const audio = source("./viewers/AudioContentViewer.tsx");
   const pdf = source("./viewers/PdfContentViewer.tsx");
+  const pdfTemporaryFile = source("./pdfTemporaryFile.ts");
   const docx = source("./viewers/DocxContentViewer.tsx");
 
   assert.doesNotMatch(hook, /AsyncStorage|SecureStore|console\./);
@@ -67,12 +68,37 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   assert.match(video, /buildProgressiveVideoSource/);
   assert.match(video, /return \(\) => clearTimeout\(timer\)/);
   assert.match(audio, /player\.pause\(\)/);
-  assert.match(pdf, /buildPrivatePdfSource/);
+  assert.match(pdf, /buildLocalPdfSource/);
+  assert.match(pdf, /startTemporaryPdfDownload/);
+  assert.match(pdf, /FileSystem\.cacheDirectory/);
+  assert.match(pdf, /deleteManagedTemporaryPdf/);
+  assert.match(pdf, /refreshTemporaryPdf/);
+  assert.doesNotMatch(pdf, /source=\{\{\s*uri:\s*url/);
+  assert.doesNotMatch(pdfTemporaryFile, /AsyncStorage|SecureStore|console\./);
+  for (const stage of [
+    "getting_access",
+    "downloading",
+    "rendering",
+    "loaded",
+    "failed",
+  ]) {
+    assert.match(pdf, new RegExp(`stage: "${stage}"`));
+  }
   assert.match(pdf, /NATIVE_VIEWER_LOAD_TIMEOUT_MS/);
   assert.match(pdf, /settleNativeViewerLoad/);
   assert.match(pdf, /disposeNativeViewerLoadGuard/);
   assert.match(pdf, /trustAllCerts=\{false\}/);
   assert.match(viewer, /accessState\.accessRevision/);
+  assert.match(video, /styles\.videoFrame/);
+  assert.match(video, /styles\.videoSurface/);
+  assert.match(video, /contentFit="contain"/);
+  assert.match(video, /contentPosition=\{\{\s*dx:\s*0,\s*dy:\s*0\s*\}\}/);
+  assert.match(video, /videoFrame:[\s\S]*?aspectRatio:\s*16\s*\/\s*9/);
+  assert.match(video, /videoFrame:[\s\S]*?overflow:\s*"hidden"/);
+  assert.match(video, /videoSurface:[\s\S]*?height:\s*"100%"/);
+  assert.match(video, /backgroundColor:\s*"#000000"/);
+  assert.match(video, /useEventListener\(player,\s*"sourceLoad"/);
+  assert.match(video, /onFirstFrameRender/);
   assert.match(docx, /FileSystem\.deleteAsync/);
 });
 
