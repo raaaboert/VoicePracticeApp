@@ -7,7 +7,9 @@ export type TrainingContentViewerDiagnosticCategory =
   | "pdf_render_failed"
   | "pdf_render_timeout"
   | "video_first_frame_rendered"
+  | "video_source_load"
   | "video_surface_layout"
+  | "video_view_layout"
   | "video_track_dimensions";
 
 export type PdfNativeErrorClass =
@@ -20,8 +22,12 @@ export type PdfNativeErrorClass =
   | "unknown";
 
 interface ViewerDiagnosticDetails {
+  aspectRatio?: number;
   width?: number;
   height?: number;
+  platform?: string;
+  sourceLoadFired?: boolean;
+  trackCount?: number;
   nativeErrorClass?: PdfNativeErrorClass;
 }
 
@@ -40,6 +46,7 @@ const PDF_NATIVE_ERROR_CLASSES = new Set<PdfNativeErrorClass>([
   "source_missing",
   "unknown",
 ]);
+const VIEWER_PLATFORMS = new Set(["android", "ios"]);
 
 function nativeErrorMessage(error: unknown): string {
   if (typeof error === "string") {
@@ -108,10 +115,29 @@ export function recordTrainingContentViewerDiagnostic(
     return;
   }
   const payload: Record<string, unknown> = { category };
-  if (Number.isFinite(details.width) && (details.width ?? 0) > 0) {
+  if (details.platform && VIEWER_PLATFORMS.has(details.platform)) {
+    payload.platform = details.platform;
+  }
+  if (typeof details.sourceLoadFired === "boolean") {
+    payload.sourceLoadFired = details.sourceLoadFired;
+  }
+  if (
+    Number.isSafeInteger(details.trackCount) &&
+    (details.trackCount ?? -1) >= 0
+  ) {
+    payload.trackCount = details.trackCount;
+  }
+  if (
+    Number.isFinite(details.aspectRatio) &&
+    (details.aspectRatio ?? 0) > 0
+  ) {
+    payload.aspectRatio =
+      Math.round((details.aspectRatio ?? 0) * 10_000) / 10_000;
+  }
+  if (Number.isFinite(details.width) && (details.width ?? -1) >= 0) {
     payload.width = Math.round(details.width!);
   }
-  if (Number.isFinite(details.height) && (details.height ?? 0) > 0) {
+  if (Number.isFinite(details.height) && (details.height ?? -1) >= 0) {
     payload.height = Math.round(details.height!);
   }
   if (
