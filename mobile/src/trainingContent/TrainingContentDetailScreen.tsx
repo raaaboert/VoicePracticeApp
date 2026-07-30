@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
-  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -37,20 +36,15 @@ export function TrainingContentDetailScreen(
 ) {
   const [item, setItem] = useState<MobileTrainingContentDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const generation = useRef(0);
   const styles = createStyles(props.theme);
 
-  const load = useCallback(async (asRefresh = false) => {
+  const load = useCallback(async () => {
     const currentGeneration = generation.current + 1;
     generation.current = currentGeneration;
-    if (asRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
+    setLoading(true);
     setError(null);
     setViewerError(null);
     try {
@@ -82,7 +76,6 @@ export function TrainingContentDetailScreen(
     } finally {
       if (generation.current === currentGeneration) {
         setLoading(false);
-        setRefreshing(false);
       }
     }
   }, [
@@ -130,12 +123,6 @@ export function TrainingContentDetailScreen(
         <ScrollView
           style={styles.fill}
           contentContainerStyle={styles.content}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => { void load(true); }}
-            />
-          }
         >
           <Text style={styles.typeLabel}>
             {TRAINING_CONTENT_TYPE_LABELS[item.contentType]}

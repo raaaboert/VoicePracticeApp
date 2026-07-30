@@ -43,7 +43,9 @@ test("library navigation keeps search, category, detail, and empty states inside
   assert.match(library, /All Content/);
   assert.match(library, /TRAINING_CONTENT_EMPTY_MESSAGE/);
   assert.match(category, /onOpenItem/);
-  assert.match(detail, /refreshControl/);
+  assert.doesNotMatch(detail, /RefreshControl|refreshControl|refreshing/);
+  assert.match(library, /refreshControl/);
+  assert.match(category, /refreshControl/);
   assert.doesNotMatch(`${library}${category}${detail}`, /Mark Complete|assignment details|publication state/i);
 });
 
