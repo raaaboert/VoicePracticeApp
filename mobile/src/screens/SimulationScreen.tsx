@@ -40,8 +40,13 @@ import {
   createSimulationCorrelationId,
   createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
+  getSimulationLifecycleResumeIntent,
+  getSimulationPrimaryButtonRoute,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
+  shouldCommitResumedAssistantResponse,
+  shouldShowUserTurnInstruction,
+  SimulationLifecycleResumeIntent,
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
 } from "../lib/simulationInteractionModel";
@@ -92,6 +97,10 @@ interface SimulationScreenProps {
 }
 
 type OpeningLinePayload = Awaited<ReturnType<typeof createOpeningLine>>;
+type ActiveAssistantSpeech = {
+  message: DialogueMessage;
+  committed: boolean;
+};
 
 const SOFT_TURN_NOTICE_MS = 35000;
 const ABSOLUTE_TURN_NOTICE_MS = 60000;
@@ -400,6 +409,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const [actionDockHeight, setActionDockHeight] = useState(0);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isStartingTurn, setIsStartingTurn] = useState(false);
+  const [isResumingLifecyclePause, setIsResumingLifecyclePause] = useState(false);
   const [lifecyclePauseActive, setLifecyclePauseActive] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
@@ -500,6 +510,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const lifecyclePauseStartedAtRef = useRef<number | null>(null);
   const lifecyclePauseReasonRef = useRef<"background" | null>(null);
   const currentBackgroundedAtRef = useRef<number | null>(null);
+  const activeAssistantSpeechRef = useRef<ActiveAssistantSpeech | null>(null);
+  const lifecycleResumeIntentRef = useRef<SimulationLifecycleResumeIntent | null>(null);
+  const lifecycleResumeInProgressRef = useRef(false);
+  const activeTurnSettlementRef = useRef<Promise<void> | null>(null);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -1326,6 +1340,15 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       ?? createSimulationCorrelationId(config.simulationSessionId, "appstate-pause");
     const recordingActive = Boolean(recordingRef.current);
     const currentMode = modeRef.current;
+    lifecycleResumeIntentRef.current = getSimulationLifecycleResumeIntent({
+      activeAssistantSpeech: activeAssistantSpeechRef.current
+        ? {
+            messageId: activeAssistantSpeechRef.current.message.id,
+            text: activeAssistantSpeechRef.current.message.content,
+            committed: activeAssistantSpeechRef.current.committed,
+          }
+        : null,
+    });
 
     if (lifecyclePauseStartedAtRef.current === null) {
       lifecyclePauseStartedAtRef.current = nowMs;
@@ -1803,6 +1826,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
 
     processingRef.current = true;
+    let resolveActiveTurnSettlement: () => void = () => undefined;
+    const activeTurnSettlement = new Promise<void>((resolve) => {
+      resolveActiveTurnSettlement = resolve;
+    });
+    activeTurnSettlementRef.current = activeTurnSettlement;
     clearTurnMonitoring();
     setMode("thinking");
     setStatus("Finalizing your audio...");
@@ -2538,11 +2566,17 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             }
             await prepareIosPlaybackAudioMode(correlationId, "assistant_reply");
             throwIfSessionLifecycleInterrupted();
+            const activeAssistantSpeech: ActiveAssistantSpeech = {
+              message: assistantMessage,
+              committed: assistantMessageCommitted,
+            };
+            activeAssistantSpeechRef.current = activeAssistantSpeech;
             const speakPromise = speakAssistantResponse(
               reply,
               assistantTextReceivedAtMs,
               () => {
                 commitAssistantMessageIfNeeded();
+                activeAssistantSpeech.committed = assistantMessageCommitted;
                 setMode("speaking");
                 setStatus("AI is speaking...");
                 playbackStartedAtMs = Date.now();
@@ -2560,20 +2594,27 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             );
             let speechResult: TtsPlaybackResult;
             try {
-              speechResult = await speakPromise;
-            } catch (speechError) {
-              if (isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
-                commitAssistantMessageIfNeeded();
-                logSimulationTiming({
-                  correlationId,
-                  phase: "assistant_speech_failed",
-                  startedAtMs: effectiveSubmitStartedAtMs,
-                  details: {
-                    error: getErrorMessage(speechError, "Assistant speech failed."),
-                  },
-                });
+              try {
+                speechResult = await speakPromise;
+              } catch (speechError) {
+                if (isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
+                  commitAssistantMessageIfNeeded();
+                  activeAssistantSpeech.committed = assistantMessageCommitted;
+                  logSimulationTiming({
+                    correlationId,
+                    phase: "assistant_speech_failed",
+                    startedAtMs: effectiveSubmitStartedAtMs,
+                    details: {
+                      error: getErrorMessage(speechError, "Assistant speech failed."),
+                    },
+                  });
+                }
+                throw speechError;
               }
-              throw speechError;
+            } finally {
+              if (activeAssistantSpeechRef.current === activeAssistantSpeech) {
+                activeAssistantSpeechRef.current = null;
+              }
             }
             throwIfSessionLifecycleInterrupted();
             speakingCompletedAtMs = Date.now();
@@ -2695,6 +2736,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         void startListeningTurn();
       } else if (!unmountedRef.current) {
         setMode("idle");
+      }
+      resolveActiveTurnSettlement();
+      if (activeTurnSettlementRef.current === activeTurnSettlement) {
+        activeTurnSettlementRef.current = null;
       }
     }
   };
@@ -3125,7 +3170,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     setIsStartingSession(false);
     recordingStartInProgressRef.current = false;
     recordingPrepareInProgressRef.current = false;
+    lifecycleResumeInProgressRef.current = false;
+    lifecycleResumeIntentRef.current = null;
+    activeAssistantSpeechRef.current = null;
     setIsStartingTurn(false);
+    setIsResumingLifecyclePause(false);
     openingTtsInProgressRef.current = false;
     abortActiveTurnRequests();
     await cancelPendingTts(true);
@@ -3200,19 +3249,152 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
   }, [config, onSessionComplete]);
 
+  const resumeLifecyclePausedTurn = async () => {
+    if (
+      lifecycleResumeInProgressRef.current
+      || lifecyclePauseReasonRef.current !== "background"
+      || !sessionActiveRef.current
+      || simulationClosedRef.current
+      || unmountedRef.current
+    ) {
+      return;
+    }
+
+    lifecycleResumeInProgressRef.current = true;
+    setIsResumingLifecyclePause(true);
+    setError(null);
+    setStatus("Resuming turn...");
+
+    const resumeIntent = lifecycleResumeIntentRef.current ?? getSimulationLifecycleResumeIntent({
+      activeAssistantSpeech: activeAssistantSpeechRef.current
+        ? {
+            messageId: activeAssistantSpeechRef.current.message.id,
+            text: activeAssistantSpeechRef.current.message.content,
+            committed: activeAssistantSpeechRef.current.committed,
+          }
+        : null,
+    });
+    const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
+    const interruptedTurnSettlement = activeTurnSettlementRef.current;
+    clearLifecyclePause(Date.now());
+
+    try {
+      if (interruptedTurnSettlement) {
+        await interruptedTurnSettlement;
+      }
+      assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+      if (resumeIntent.kind === "replay_assistant") {
+        const correlationId = createSimulationCorrelationId(
+          config.simulationSessionId,
+          "resume-assistant-speech",
+        );
+        const assistantMessage: DialogueMessage = {
+          id: resumeIntent.assistantMessageId,
+          role: "assistant",
+          content: resumeIntent.assistantText,
+        };
+        if (shouldCommitResumedAssistantResponse({
+          intent: resumeIntent,
+          committedMessageIds: messagesRef.current.map((message) => message.id),
+        })) {
+          commitAssistantMessage({
+            message: assistantMessage,
+            correlationId,
+            phase: "assistant_message_committed_on_resume",
+          });
+        }
+        const assistantTextReceivedAtMs = Date.now();
+        setMode("thinking");
+        setStatus("Restarting the interrupted AI response...");
+        await prepareIosPlaybackAudioMode(correlationId, "resume_assistant_reply");
+        assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+        const activeAssistantSpeech: ActiveAssistantSpeech = {
+          message: assistantMessage,
+          committed: true,
+        };
+        activeAssistantSpeechRef.current = activeAssistantSpeech;
+        try {
+          await speakAssistantResponse(
+            resumeIntent.assistantText,
+            assistantTextReceivedAtMs,
+            () => {
+              if (!isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
+                return;
+              }
+              setMode("speaking");
+              setStatus("AI is speaking...");
+            },
+            correlationId,
+          );
+        } finally {
+          if (activeAssistantSpeechRef.current === activeAssistantSpeech) {
+            activeAssistantSpeechRef.current = null;
+          }
+        }
+        assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+      }
+
+      if (lifecycleResumeIntentRef.current === resumeIntent) {
+        lifecycleResumeIntentRef.current = null;
+      }
+      await startListeningTurn();
+    } catch (resumeError) {
+      if (
+        isSimulationLifecycleInterruptedError(resumeError)
+        || !isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
+      ) {
+        return;
+      }
+
+      logSimulationTiming({
+        correlationId: createSimulationCorrelationId(config.simulationSessionId, "resume-turn"),
+        phase: "simulation_lifecycle_resume_failed",
+        details: {
+          resumeKind: resumeIntent.kind,
+          message: getErrorMessage(resumeError, "Could not resume the interrupted turn."),
+        },
+      });
+      setError("The interrupted AI audio could not be replayed. Peritio is continuing with your response.");
+      if (lifecycleResumeIntentRef.current === resumeIntent) {
+        lifecycleResumeIntentRef.current = null;
+      }
+      await startListeningTurn();
+    } finally {
+      lifecycleResumeInProgressRef.current = false;
+      if (!unmountedRef.current) {
+        setIsResumingLifecyclePause(false);
+      }
+    }
+  };
+
   const onPrimaryButton = async () => {
+    const primaryButtonRoute = getSimulationPrimaryButtonRoute({
+      lifecycleResumeInProgress: lifecycleResumeInProgressRef.current,
+      sessionActive: sessionActiveRef.current,
+      mode,
+      lifecyclePauseActive: lifecyclePauseReasonRef.current === "background",
+    });
+    if (primaryButtonRoute === "ignore") {
+      return;
+    }
     if (isInitializing) {
       return;
     }
 
-    if (sessionActiveRef.current) {
-      if (mode === "recording") {
-        requestFinalizeTurn();
-      } else if (mode === "idle") {
-        setError(null);
-        setStatus("Reconnecting microphone...");
-        void startListeningTurn();
-      }
+    if (primaryButtonRoute === "submit_response") {
+      requestFinalizeTurn();
+      return;
+    }
+    if (primaryButtonRoute === "resume_lifecycle") {
+      void resumeLifecyclePausedTurn();
+      return;
+    }
+    if (primaryButtonRoute === "restart_recording") {
+      setError(null);
+      setStatus("Reconnecting microphone...");
+      void startListeningTurn();
       return;
     }
 
@@ -3352,6 +3534,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       recordingStartInProgressRef.current = false;
       recordingPrepareInProgressRef.current = false;
       setIsStartingTurn(false);
+      lifecycleResumeInProgressRef.current = false;
+      lifecycleResumeIntentRef.current = null;
+      activeAssistantSpeechRef.current = null;
+      activeTurnSettlementRef.current = null;
+      setIsResumingLifecyclePause(false);
       sessionLifecycleGenerationRef.current += 1;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
@@ -3424,6 +3611,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       turnLoopReadyRef.current = false;
       recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
+      lifecycleResumeInProgressRef.current = false;
+      lifecycleResumeIntentRef.current = null;
+      activeAssistantSpeechRef.current = null;
+      activeTurnSettlementRef.current = null;
       openingTtsInProgressRef.current = false;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
@@ -3534,7 +3725,13 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     isInitializing,
     mode,
     isStartingSession,
-    isStartingTurn,
+    isStartingTurn: isStartingTurn || isResumingLifecyclePause,
+  });
+  const showUserTurnInstruction = shouldShowUserTurnInstruction({
+    sessionActive,
+    mode,
+    lifecyclePauseActive,
+    isStartingTurn: isStartingTurn || isResumingLifecyclePause,
   });
   const endButtonDisabled = isInitializing || !sessionActive || sessionCompletionInProgressRef.current;
   const hintText = localTestMode
@@ -3862,6 +4059,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             },
           ]}
         >
+          {showUserTurnInstruction ? (
+            <Text style={styles.userTurnInstruction}>
+              Record your response, then submit when finished.
+            </Text>
+          ) : null}
           <Pressable
             style={[
               styles.primaryButton,
@@ -4496,6 +4698,13 @@ function createStyles(palette: SimulationPalette) {
       fontWeight: "800",
       fontSize: 16,
       letterSpacing: 0.2,
+    },
+    userTurnInstruction: {
+      color: palette.text,
+      fontSize: 14,
+      fontWeight: "700",
+      lineHeight: 19,
+      textAlign: "center",
     },
     busyButtonText: {
       color: palette.busyButtonText,
