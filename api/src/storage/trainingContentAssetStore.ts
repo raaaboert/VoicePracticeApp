@@ -979,7 +979,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     const result = await this.pool.query<AssetRow>(
       `
         WITH candidate AS (
-          SELECT asset.id
+          SELECT asset.id AS candidate_asset_id
           FROM org_content_assets asset
           INNER JOIN org_content_items content
             ON content.org_id = asset.org_id
@@ -1008,7 +1008,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
             finalization_started_at = $2,
             updated_at = $2
         FROM candidate
-        WHERE asset.id = candidate.id
+        WHERE asset.id = candidate.candidate_asset_id
         RETURNING ${ASSET_COLUMNS}
       `,
       [maximumAttempts, now, leaseToken, leaseExpiresAt]

@@ -87,6 +87,11 @@ test("PostgreSQL video claim is atomic, skips locked rows, and cannot return one
   assert.equal(first?.asset.id, ASSET_ROW.id);
   assert.equal(first?.asset.processingAttemptCount, 1);
   assert.equal(second, null);
+  assert.match(claimQueries[0]!, /SELECT asset\.id AS candidate_asset_id/);
+  assert.match(
+    claimQueries[0]!,
+    /WHERE asset\.id = candidate\.candidate_asset_id/
+  );
   assert.match(claimQueries[0]!, /FOR UPDATE OF asset SKIP LOCKED/);
   assert.match(claimQueries[0]!, /content\.content_type = 'video'/);
   assert.match(claimQueries[0]!, /processing_lease_expires_at/);

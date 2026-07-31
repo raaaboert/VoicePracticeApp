@@ -33,6 +33,20 @@ export type TrainingContentVideoWorkerRunResult =
   | "retry_scheduled"
   | "failed";
 
+export type TrainingContentVideoWorkerPollFailureCategory =
+  | "poll_sweep_failed"
+  | "poll_claim_failed";
+
+export class TrainingContentVideoWorkerPollError extends Error {
+  constructor(
+    readonly category: TrainingContentVideoWorkerPollFailureCategory,
+    cause: unknown
+  ) {
+    super("Training Content video worker polling failed.", { cause });
+    this.name = "TrainingContentVideoWorkerPollError";
+  }
+}
+
 interface TrainingContentVideoWorkerDependencies {
   config: TrainingContentVideoWorkerConfig;
   assetStore: TrainingContentAssetStore;
@@ -55,16 +69,25 @@ export async function processNextTrainingContentVideo(
     return "idle";
   }
   const now = dependencies.now?.() ?? new Date();
-  await dependencies.assetStore.rejectExhaustedVideoProcessing({
-    maximumAttempts: dependencies.config.maximumAttempts,
-    actor: SYSTEM_ACTOR,
-    now,
-  });
-  const claim = await dependencies.assetStore.claimNextVideoProcessing({
-    leaseSeconds: dependencies.config.leaseSeconds,
-    maximumAttempts: dependencies.config.maximumAttempts,
-    now,
-  });
+  try {
+    await dependencies.assetStore.rejectExhaustedVideoProcessing({
+      maximumAttempts: dependencies.config.maximumAttempts,
+      actor: SYSTEM_ACTOR,
+      now,
+    });
+  } catch (error) {
+    throw new TrainingContentVideoWorkerPollError("poll_sweep_failed", error);
+  }
+  let claim: ClaimedTrainingContentVideoProcessing | null;
+  try {
+    claim = await dependencies.assetStore.claimNextVideoProcessing({
+      leaseSeconds: dependencies.config.leaseSeconds,
+      maximumAttempts: dependencies.config.maximumAttempts,
+      now,
+    });
+  } catch (error) {
+    throw new TrainingContentVideoWorkerPollError("poll_claim_failed", error);
+  }
   if (!claim) {
     return "idle";
   }

@@ -23,6 +23,7 @@ import {
 import {
   processNextTrainingContentVideo,
   TrainingContentVideoWorkerConfig,
+  TrainingContentVideoWorkerPollError,
 } from "./trainingContentVideoWorker.js";
 
 const NOW = new Date("2026-07-30T12:00:00.000Z");
@@ -363,6 +364,49 @@ test("transient failure schedules a bounded retry and the final allowed attempt 
     assert.equal(store.current.uploadState, "rejected");
     assert.equal(store.current.processingNextAttemptAt, null);
   });
+});
+
+test("first-poll sweep and claim failures retain safe runtime categories", async () => {
+  let claimCalls = 0;
+  await assert.rejects(
+    processNextTrainingContentVideo({
+      config: WORKER_CONFIG,
+      assetStore: {
+        rejectExhaustedVideoProcessing: async () => {
+          throw new Error("private database error");
+        },
+        claimNextVideoProcessing: async () => {
+          claimCalls += 1;
+          return null;
+        },
+      } as unknown as TrainingContentAssetStore,
+      objectStorage: {} as TrainingContentObjectStorage,
+      mediaProcessor: {} as TrainingContentVideoMediaProcessor,
+      now: () => NOW,
+    }),
+    (error: unknown) =>
+      error instanceof TrainingContentVideoWorkerPollError
+      && error.category === "poll_sweep_failed"
+  );
+  assert.equal(claimCalls, 0);
+
+  await assert.rejects(
+    processNextTrainingContentVideo({
+      config: WORKER_CONFIG,
+      assetStore: {
+        rejectExhaustedVideoProcessing: async () => 0,
+        claimNextVideoProcessing: async () => {
+          throw new Error("private database error");
+        },
+      } as unknown as TrainingContentAssetStore,
+      objectStorage: {} as TrainingContentObjectStorage,
+      mediaProcessor: {} as TrainingContentVideoMediaProcessor,
+      now: () => NOW,
+    }),
+    (error: unknown) =>
+      error instanceof TrainingContentVideoWorkerPollError
+      && error.category === "poll_claim_failed"
+  );
 });
 
 async function runWorker(

@@ -20,6 +20,88 @@ export interface TrainingContentVideoWorkerRuntimeConfig {
   worker: TrainingContentVideoWorkerConfig;
 }
 
+export type TrainingContentVideoWorkerFailureStage =
+  | "config"
+  | "database"
+  | "r2"
+  | "media"
+  | "polling";
+
+export type TrainingContentVideoWorkerFailureCategory =
+  | "startup_config_invalid"
+  | "environment_lane_mismatch"
+  | "r2_config_invalid"
+  | "database_initialization_failed"
+  | "r2_connection_failed"
+  | "ffmpeg_runtime_invalid"
+  | "ffprobe_runtime_invalid"
+  | "media_tool_version_invalid"
+  | "media_runtime_invalid"
+  | "poll_sweep_failed"
+  | "poll_claim_failed"
+  | "worker_runtime_failure";
+
+export function classifyTrainingContentVideoWorkerFailure(
+  stage: TrainingContentVideoWorkerFailureStage,
+  error: unknown
+): TrainingContentVideoWorkerFailureCategory {
+  if (stage === "config") {
+    const message = error instanceof Error ? error.message : "";
+    if (
+      message.includes("cannot use the production database")
+      || message.includes("cannot use the staging database")
+      || message.includes("must match PERITIO_ENV")
+      || message.includes("Staging Training Content storage")
+      || message.includes("Production Training Content storage")
+      || message.includes("Development Training Content storage")
+    ) {
+      return "environment_lane_mismatch";
+    }
+    if (
+      message.includes("TRAINING_CONTENT_STORAGE_PROVIDER")
+      || message.includes("TRAINING_CONTENT_R2_")
+      || message.includes("R2 object storage")
+    ) {
+      return "r2_config_invalid";
+    }
+    return "startup_config_invalid";
+  }
+  if (stage === "database") {
+    return "database_initialization_failed";
+  }
+  if (stage === "r2") {
+    return "r2_connection_failed";
+  }
+  if (stage === "media") {
+    const category = typeof error === "object"
+      && error !== null
+      && "category" in error
+      && typeof error.category === "string"
+      ? error.category
+      : "";
+    if (category === "ffmpeg_unavailable") {
+      return "ffmpeg_runtime_invalid";
+    }
+    if (category === "ffprobe_unavailable") {
+      return "ffprobe_runtime_invalid";
+    }
+    if (category === "media_tool_version_mismatch") {
+      return "media_tool_version_invalid";
+    }
+    return "media_runtime_invalid";
+  }
+  const runtimeCategory = typeof error === "object"
+    && error !== null
+    && "category" in error
+    && typeof error.category === "string"
+    ? error.category
+    : "";
+  if (runtimeCategory === "poll_sweep_failed" || runtimeCategory === "poll_claim_failed") {
+    return runtimeCategory;
+  }
+  return "worker_runtime_failure";
+}
+
 export function loadTrainingContentVideoWorkerConfig(
   env: NodeJS.ProcessEnv = process.env
 ): TrainingContentVideoWorkerRuntimeConfig {

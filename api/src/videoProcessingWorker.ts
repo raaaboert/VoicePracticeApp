@@ -9,10 +9,14 @@ import {
 import { createTrainingContentAssetStore } from "./storage/trainingContentAssetStore.js";
 import { createTrainingContentObjectStorage } from "./storage/trainingContentObjectStorage.js";
 import {
+  classifyTrainingContentVideoWorkerFailure,
   loadTrainingContentVideoWorkerConfig,
+  type TrainingContentVideoWorkerFailureStage,
 } from "./trainingContentVideoWorkerConfig.js";
 
 dotenv.config();
+
+let failureStage: TrainingContentVideoWorkerFailureStage = "config";
 
 async function run(): Promise<void> {
   const config = loadTrainingContentVideoWorkerConfig();
@@ -29,8 +33,11 @@ async function run(): Promise<void> {
     ffprobePath: config.ffprobePath,
     expectedVersionPrefix: config.mediaToolVersionPrefix,
   });
+  failureStage = "database";
   await assetStore.initialize();
+  failureStage = "r2";
   await objectStorage.verifyReadiness();
+  failureStage = "media";
   await mediaProcessor.verifyRuntime();
 
   const shutdown = new AbortController();
@@ -38,6 +45,7 @@ async function run(): Promise<void> {
   process.once("SIGINT", requestShutdown);
   process.once("SIGTERM", requestShutdown);
   console.log("[training-content-video-worker] ready; concurrency=1");
+  failureStage = "polling";
 
   while (!shutdown.signal.aborted) {
     const result = await processNextTrainingContentVideo({
@@ -70,7 +78,10 @@ async function waitForPoll(milliseconds: number, signal: AbortSignal): Promise<v
   });
 }
 
-run().catch(() => {
-  console.error("[training-content-video-worker] fatal startup/runtime failure");
+run().catch((error: unknown) => {
+  const category = classifyTrainingContentVideoWorkerFailure(failureStage, error);
+  console.error(
+    `[training-content-video-worker] fatal startup/runtime failure category=${category}`
+  );
   process.exitCode = 1;
 });
