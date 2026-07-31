@@ -115,6 +115,11 @@ export interface TrainingContentProxyServices {
     assetId: string,
     orgId?: string | null
   ) => Promise<DashboardTrainingContentAssetFinalizationResponse>;
+  getAssetStatus: (
+    contentId: string,
+    assetId: string,
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentAssetFinalizationResponse>;
   getAssetAccess: (
     contentId: string,
     assetId: string,
@@ -429,6 +434,21 @@ export async function handleTrainingContentUploadFinalize(
   }
   return handleJson(() =>
     services.finalizeUpload(contentId, assetId, requestedOrgId(request))
+  );
+}
+
+export async function handleTrainingContentAssetStatus(
+  request: NextRequest,
+  contentId: string,
+  assetId: string,
+  services: Pick<TrainingContentProxyServices, "getAssetStatus">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  return handleJson(() =>
+    services.getAssetStatus(contentId, assetId, requestedOrgId(request))
   );
 }
 

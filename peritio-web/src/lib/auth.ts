@@ -948,6 +948,21 @@ export async function finalizeDashboardTrainingContentUpload(
   );
 }
 
+export async function getDashboardTrainingContentAssetStatus(
+  contentId: string,
+  assetId: string,
+  orgId?: string | null
+): Promise<DashboardTrainingContentAssetFinalizationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentAssetFinalizationResponse>(
+    appendOrgQuery(
+      `/dashboard/admin/training-content/${encodeURIComponent(contentId)}/assets/${encodeURIComponent(assetId)}`,
+      orgId
+    ),
+    { token }
+  );
+}
+
 export async function getDashboardTrainingContentAssetAccess(
   contentId: string,
   assetId: string,

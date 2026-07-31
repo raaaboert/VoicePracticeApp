@@ -42,9 +42,17 @@ import type {
 import { TrainingContentMarkdown } from "@/src/components/TrainingContentMarkdown";
 import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
 import {
+  formatTrainingContentVideoFailureCategory,
+  pollTrainingContentVideoStatus,
+  restoreTrainingContentVideoProcessingAsset,
+  TRAINING_CONTENT_VIDEO_STATUS_POLL_MS,
+  trainingContentVideoUploadIsBlocked,
+} from "@/src/components/trainingContentVideoProcessingState";
+import {
   AdminApiClientError,
   fetchAdminApiJson,
 } from "@/src/lib/adminApiClient";
+import { formatDateTime } from "@/src/lib/formatters";
 import {
   formatFileSize,
   getTrainingContentFilePolicy,
@@ -217,10 +225,14 @@ export function TrainingContentEditor({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
+  const [latestVideoUploadAsset, setLatestVideoUploadAsset] = useState(() =>
+    restoreTrainingContentVideoProcessingAsset(initialItem)
+  );
 
   const archived = item.publicationState === "archived";
   const dirty = hasMetadataChanges(item, draft) || hasAssignmentChanges(item, assignments);
   const policy = getTrainingContentFilePolicy(item.contentType);
+  const videoUploadBlocked = trainingContentVideoUploadIsBlocked(latestVideoUploadAsset);
   const listPath = `/app/admin/training-content${orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""}`;
 
   useEffect(() => {
@@ -316,9 +328,76 @@ export function TrainingContentEditor({
     setItem(next);
     setDraft(createDraft(next));
     setAssignments(createAssignmentDraft(next));
+    setLatestVideoUploadAsset(restoreTrainingContentVideoProcessingAsset(next));
     setConflict(false);
     setPreviewUrl(null);
   };
+
+  useEffect(() => {
+    if (!latestVideoUploadAsset || latestVideoUploadAsset.uploadState !== "processing") {
+      return;
+    }
+    const controller = new AbortController();
+    let timer: number | null = null;
+    const schedule = () => {
+      if (!controller.signal.aborted) {
+        timer = window.setTimeout(poll, TRAINING_CONTENT_VIDEO_STATUS_POLL_MS);
+      }
+    };
+    const poll = async () => {
+      try {
+        const { result, refreshedItem } = await pollTrainingContentVideoStatus({
+          loadStatus: () =>
+            fetchAdminApiJson<DashboardTrainingContentAssetFinalizationResponse>(
+              withOrg(
+                `/api/admin/training-content/${encodeURIComponent(item.id)}/assets/${encodeURIComponent(latestVideoUploadAsset.id)}`,
+                orgId
+              ),
+              { signal: controller.signal }
+            ),
+          refreshReadyItem: async () => {
+            const refreshed = await fetchAdminApiJson<DashboardTrainingContentDetailResponse>(
+              withOrg(`/api/admin/training-content/${encodeURIComponent(item.id)}`, orgId),
+              { signal: controller.signal }
+            );
+            return refreshed.item;
+          },
+        });
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (result.action === "continue") {
+          setLatestVideoUploadAsset(result.asset);
+          schedule();
+          return;
+        }
+        if (result.action === "ready") {
+          setItem(refreshedItem!);
+          setLatestVideoUploadAsset(null);
+          setPreviewUrl(null);
+          setError(null);
+          setErrorItems([]);
+          setMessage("Video processing complete. File is ready.");
+          return;
+        }
+        if (result.action === "failed") {
+          setLatestVideoUploadAsset(result.asset);
+          setMessage(null);
+          return;
+        }
+        setLatestVideoUploadAsset(null);
+      } catch {
+        schedule();
+      }
+    };
+    schedule();
+    return () => {
+      controller.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [item.id, latestVideoUploadAsset?.id, latestVideoUploadAsset?.uploadState, orgId]);
 
   const handleError = (caught: unknown, fallback: string) => {
     const nextError = caught instanceof Error ? caught.message : fallback;
@@ -471,6 +550,10 @@ export function TrainingContentEditor({
   };
 
   const uploadFile = async () => {
+    if (videoUploadBlocked) {
+      setError("A video upload is already processing.");
+      return;
+    }
     if (!selectedFile) {
       setError("Choose a file to upload.");
       return;
@@ -522,6 +605,9 @@ export function TrainingContentEditor({
           orgId
         ),
         { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+      );
+      setLatestVideoUploadAsset(
+        finalized.asset.uploadState === "processing" ? finalized.asset : null
       );
       await refreshItem();
       setPendingUpload(null);
@@ -810,6 +896,7 @@ export function TrainingContentEditor({
               <div className="current-file-row">
                 <FileUp size={20} aria-hidden="true" />
                 <div>
+                  <span className="current-file-label">Current published file</span>
                   <strong>{item.currentAsset.originalFilename ?? "Uploaded file"}</strong>
                   <span>
                     Version {item.currentAsset.version}
@@ -817,6 +904,9 @@ export function TrainingContentEditor({
                     {formatFileSize(item.currentAsset.byteSize ?? item.currentAsset.declaredByteSize)}
                     {" | "}
                     {item.currentAsset.uploadState}
+                    {item.currentAsset.finalizedAt
+                      ? ` | Ready ${formatDateTime(item.currentAsset.finalizedAt)}`
+                      : ""}
                   </span>
                 </div>
                 <button
@@ -836,6 +926,48 @@ export function TrainingContentEditor({
             ) : (
               <p className="muted-copy">No ready file.</p>
             )}
+            {latestVideoUploadAsset ? (
+              <div
+                className={`notice video-processing-card${
+                  latestVideoUploadAsset.uploadState === "rejected" ? " danger" : ""
+                }`}
+                role="status"
+                aria-live="polite"
+              >
+                {latestVideoUploadAsset.uploadState === "processing" ? (
+                  <LoaderCircle size={18} className="spin" aria-hidden="true" />
+                ) : (
+                  <X size={18} aria-hidden="true" />
+                )}
+                <div>
+                  <strong>
+                    {latestVideoUploadAsset.replacementForAssetId || item.currentAsset
+                      ? "Replacement video"
+                      : "Video upload"}
+                    {latestVideoUploadAsset.uploadState === "processing"
+                      ? ": Processing"
+                      : ": Processing failed"}
+                  </strong>
+                  <span>
+                    {latestVideoUploadAsset.uploadState === "processing"
+                      ? "You can leave this page. Processing will continue in the background."
+                      : "Video processing failed."}
+                  </span>
+                  {latestVideoUploadAsset.uploadState === "rejected"
+                    && formatTrainingContentVideoFailureCategory(
+                      latestVideoUploadAsset.processingErrorCategory
+                        ?? latestVideoUploadAsset.rejectionReasonCategory
+                    ) ? (
+                      <span>
+                        Reason: {formatTrainingContentVideoFailureCategory(
+                          latestVideoUploadAsset.processingErrorCategory
+                            ?? latestVideoUploadAsset.rejectionReasonCategory
+                        )}
+                      </span>
+                    ) : null}
+                </div>
+              </div>
+            ) : null}
             {item.currentAsset && item.contentType === "docx" ? (
               <p className="muted-copy">
                 DOCX opens as a secure file. An in-app converted preview is not available yet.
@@ -851,7 +983,7 @@ export function TrainingContentEditor({
                     type="file"
                     accept={policy.accept}
                     onChange={selectFile}
-                    disabled={uploading}
+                    disabled={uploading || videoUploadBlocked}
                   />
                 </label>
                 <span className="muted-copy">
@@ -862,7 +994,7 @@ export function TrainingContentEditor({
                     type="button"
                     className="primary-button icon-text-button"
                     onClick={uploadFile}
-                    disabled={uploading}
+                    disabled={uploading || videoUploadBlocked}
                   >
                     {uploading
                       ? <LoaderCircle size={17} className="spin" aria-hidden="true" />

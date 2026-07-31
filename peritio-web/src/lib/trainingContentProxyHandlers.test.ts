@@ -12,6 +12,7 @@ import { DashboardApiError } from "./dashboardApiErrorTypes";
 import {
   handleTrainingContentAssignmentsUpdate,
   handleTrainingContentAssetAccess,
+  handleTrainingContentAssetStatus,
   handleTrainingContentCategoriesGet,
   handleTrainingContentCategoriesReorder,
   handleTrainingContentCategoryArchive,
@@ -515,6 +516,31 @@ test("Training Content upload proxy returns signing metadata while bytes bypass 
     }
   );
   assert.equal(finalized.status, 200);
+
+  const status = await handleTrainingContentAssetStatus(
+    request("/api/admin/training-content/content_1/assets/asset_1?orgId=org_1"),
+    "content_1",
+    "asset_1",
+    {
+      getAssetStatus: async (contentId, assetId, orgId) => {
+        assert.deepEqual({ contentId, assetId, orgId }, {
+          contentId: "content_1",
+          assetId: "asset_1",
+          orgId: "org_1",
+        });
+        return {
+          asset: {
+            ...initiatedPayload.asset,
+            uploadState: "processing",
+            processingAttemptCount: 0,
+          },
+          replacedAssetId: null,
+        };
+      },
+    }
+  );
+  assert.equal(status.status, 200);
+  assert.equal((await status.json() as any).asset.uploadState, "processing");
 
   const access = await handleTrainingContentAssetAccess(
     request("/api/admin/training-content/content_1/assets/asset_1/access?orgId=org_1", {

@@ -56,6 +56,10 @@ export interface TrainingContentCurrentAssetRecord {
   declaredByteSize: number | null;
   byteSize: number | null;
   uploadExpiresAt: string | null;
+  processingAttemptCount?: number;
+  processingNextAttemptAt?: string | null;
+  processingErrorCategory?: string | null;
+  rejectionReasonCategory?: string | null;
   finalizedAt: string | null;
   supersededAt: string | null;
   replacementForAssetId: string | null;
@@ -76,10 +80,12 @@ export interface TrainingContentManagementListRow {
   content: TrainingContentItem;
   categoryName: string;
   currentAsset: TrainingContentCurrentAssetRecord | null;
+  hasActiveVideoProcessing?: boolean;
   assignmentCounts: TrainingContentAssignmentCounts;
 }
 
 export interface TrainingContentManagementDetail extends TrainingContentManagementListRow {
+  latestVideoUploadAsset?: TrainingContentCurrentAssetRecord | null;
   assignments: TrainingContentAssignment[];
 }
 
@@ -253,6 +259,10 @@ interface TrainingContentAssetRow {
   declared_byte_size: string | number | null;
   byte_size: string | number | null;
   upload_expires_at: string | Date | null;
+  processing_attempt_count: string | number;
+  processing_next_attempt_at: string | Date | null;
+  processing_error_category: string | null;
+  rejection_reason_category: string | null;
   finalized_at: string | Date | null;
   superseded_at: string | Date | null;
   replacement_for_asset_id: string | null;
@@ -290,6 +300,10 @@ interface TrainingContentManagementRow extends TrainingContentItemRow {
   current_asset_declared_byte_size: string | number | null;
   current_asset_byte_size: string | number | null;
   current_asset_upload_expires_at: string | Date | null;
+  current_asset_processing_attempt_count: string | number | null;
+  current_asset_processing_next_attempt_at: string | Date | null;
+  current_asset_processing_error_category: string | null;
+  current_asset_rejection_reason_category: string | null;
   current_asset_finalized_at: string | Date | null;
   current_asset_superseded_at: string | Date | null;
   current_asset_replacement_for_asset_id: string | null;
@@ -297,6 +311,7 @@ interface TrainingContentManagementRow extends TrainingContentItemRow {
   current_asset_cleanup_pending: boolean | null;
   current_asset_created_at: string | Date | null;
   current_asset_updated_at: string | Date | null;
+  has_active_video_processing: boolean;
   organization_assignment_count: string | number;
   user_assignment_count: string | number;
   manager_assignment_count: string | number;
@@ -367,6 +382,10 @@ const CURRENT_ASSET_COLUMNS = `
   declared_byte_size,
   byte_size,
   upload_expires_at,
+  processing_attempt_count,
+  processing_next_attempt_at,
+  processing_error_category,
+  rejection_reason_category,
   finalized_at,
   superseded_at,
   replacement_for_asset_id,
@@ -597,6 +616,10 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           asset.declared_byte_size AS current_asset_declared_byte_size,
           asset.byte_size AS current_asset_byte_size,
           asset.upload_expires_at AS current_asset_upload_expires_at,
+          asset.processing_attempt_count AS current_asset_processing_attempt_count,
+          asset.processing_next_attempt_at AS current_asset_processing_next_attempt_at,
+          asset.processing_error_category AS current_asset_processing_error_category,
+          asset.rejection_reason_category AS current_asset_rejection_reason_category,
           asset.finalized_at AS current_asset_finalized_at,
           asset.superseded_at AS current_asset_superseded_at,
           asset.replacement_for_asset_id AS current_asset_replacement_for_asset_id,
@@ -604,6 +627,14 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           asset.cleanup_pending AS current_asset_cleanup_pending,
           asset.created_at AS current_asset_created_at,
           asset.updated_at AS current_asset_updated_at,
+          EXISTS (
+            SELECT 1
+            FROM org_content_assets processing_asset
+            WHERE processing_asset.org_id = c.org_id
+              AND processing_asset.content_id = c.id
+              AND processing_asset.asset_role = 'primary'
+              AND processing_asset.upload_state = 'processing'
+          ) AS has_active_video_processing,
           COALESCE(assignments.organization_count, 0) AS organization_assignment_count,
           COALESCE(assignments.user_count, 0) AS user_assignment_count,
           COALESCE(assignments.manager_count, 0) AS manager_assignment_count,
@@ -1191,7 +1222,8 @@ async function readContentDetail(
   if (!content) {
     return null;
   }
-  const [categoryResult, assetResult, assignmentResult] = await Promise.all([
+  const [categoryResult, assetResult, latestVideoUploadResult, assignmentResult] =
+    await Promise.all([
     queryable.query<{ name: string }>(
       `
         SELECT name
@@ -1213,6 +1245,29 @@ async function readContentDetail(
       `,
       [content.orgId, content.id]
     ),
+    content.contentType === "video"
+      ? queryable.query<TrainingContentAssetRow>(
+        `
+          SELECT ${CURRENT_ASSET_COLUMNS}
+          FROM org_content_assets candidate
+          WHERE candidate.org_id = $1
+            AND candidate.content_id = $2
+            AND candidate.asset_role = 'primary'
+            AND candidate.upload_state IN ('processing', 'rejected')
+            AND candidate.version > COALESCE((
+              SELECT MAX(current_asset.version)
+              FROM org_content_assets current_asset
+              WHERE current_asset.org_id = candidate.org_id
+                AND current_asset.content_id = candidate.content_id
+                AND current_asset.asset_role = candidate.asset_role
+                AND current_asset.is_current = TRUE
+            ), 0)
+          ORDER BY candidate.version DESC
+          LIMIT 1
+        `,
+        [content.orgId, content.id]
+      )
+      : Promise.resolve({ rows: [] as TrainingContentAssetRow[] }),
     queryable.query<TrainingContentAssignmentRow>(
       `
         SELECT ${ASSIGNMENT_COLUMNS}
@@ -1232,6 +1287,11 @@ async function readContentDetail(
     content,
     categoryName,
     currentAsset: assetResult.rows[0] ? mapCurrentAssetRow(assetResult.rows[0]) : null,
+    hasActiveVideoProcessing:
+      latestVideoUploadResult.rows[0]?.upload_state === "processing",
+    latestVideoUploadAsset: latestVideoUploadResult.rows[0]
+      ? mapCurrentAssetRow(latestVideoUploadResult.rows[0])
+      : null,
     assignments,
     assignmentCounts: countAssignments(assignments),
   };
@@ -1470,6 +1530,7 @@ function mapManagementRow(row: TrainingContentManagementRow): TrainingContentMan
     content: mapContentItemRow(row),
     categoryName: row.category_name,
     currentAsset: mapPrefixedCurrentAssetRow(row),
+    hasActiveVideoProcessing: row.has_active_video_processing === true,
     assignmentCounts: {
       organization: databaseInteger(row.organization_assignment_count, "Organization assignment count"),
       user: databaseInteger(row.user_assignment_count, "User assignment count"),
@@ -1513,6 +1574,13 @@ function mapPrefixedCurrentAssetRow(
     ),
     byteSize: optionalDatabaseInteger(row.current_asset_byte_size, "Byte size"),
     uploadExpiresAt: optionalIso(row.current_asset_upload_expires_at),
+    processingAttemptCount: optionalDatabaseInteger(
+      row.current_asset_processing_attempt_count,
+      "Processing attempt count"
+    ) ?? 0,
+    processingNextAttemptAt: optionalIso(row.current_asset_processing_next_attempt_at),
+    processingErrorCategory: row.current_asset_processing_error_category,
+    rejectionReasonCategory: row.current_asset_rejection_reason_category,
     finalizedAt: optionalIso(row.current_asset_finalized_at),
     supersededAt: optionalIso(row.current_asset_superseded_at),
     replacementForAssetId: row.current_asset_replacement_for_asset_id,
@@ -1538,6 +1606,13 @@ function mapCurrentAssetRow(row: TrainingContentAssetRow): TrainingContentCurren
     declaredByteSize: optionalDatabaseInteger(row.declared_byte_size, "Declared byte size"),
     byteSize: optionalDatabaseInteger(row.byte_size, "Byte size"),
     uploadExpiresAt: optionalIso(row.upload_expires_at),
+    processingAttemptCount: databaseInteger(
+      row.processing_attempt_count,
+      "Processing attempt count"
+    ),
+    processingNextAttemptAt: optionalIso(row.processing_next_attempt_at),
+    processingErrorCategory: row.processing_error_category,
+    rejectionReasonCategory: row.rejection_reason_category,
     finalizedAt: optionalIso(row.finalized_at),
     supersededAt: optionalIso(row.superseded_at),
     replacementForAssetId: row.replacement_for_asset_id,

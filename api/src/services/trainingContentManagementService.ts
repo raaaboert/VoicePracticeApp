@@ -40,6 +40,7 @@ import {
   type TrainingContentOrderResult,
 } from "../storage/trainingContentCategoryStore.js";
 import {
+  type TrainingContentCurrentAssetRecord,
   type TrainingContentListFilters,
   type TrainingContentManagementDetail,
   type TrainingContentManagementListRow,
@@ -795,27 +796,8 @@ function mapListItem(
     contentType: row.content.contentType,
     publicationState: row.content.publicationState,
     contentVersion: row.content.contentVersion,
-    currentAsset: row.currentAsset ? {
-      id: row.currentAsset.id,
-      contentId: row.currentAsset.contentId,
-      assetRole: row.currentAsset.assetRole,
-      version: row.currentAsset.version,
-      uploadState: row.currentAsset.uploadState,
-      originalFilename: row.currentAsset.originalFilename,
-      declaredMimeType: row.currentAsset.declaredMimeType,
-      detectedMimeType: row.currentAsset.detectedMimeType,
-      fileExtension: row.currentAsset.fileExtension,
-      declaredByteSize: row.currentAsset.declaredByteSize,
-      byteSize: row.currentAsset.byteSize,
-      uploadExpiresAt: row.currentAsset.uploadExpiresAt,
-      finalizedAt: row.currentAsset.finalizedAt,
-      supersededAt: row.currentAsset.supersededAt,
-      replacementForAssetId: row.currentAsset.replacementForAssetId,
-      isCurrent: row.currentAsset.isCurrent,
-      cleanupPending: row.currentAsset.cleanupPending,
-      createdAt: row.currentAsset.createdAt,
-      updatedAt: row.currentAsset.updatedAt,
-    } satisfies DashboardTrainingContentAsset : null,
+    currentAsset: row.currentAsset ? mapDashboardAsset(row.currentAsset) : null,
+    hasActiveVideoProcessing: row.hasActiveVideoProcessing === true,
     assignmentSummary: buildAssignmentSummary(row),
     updatedByActorId: row.content.updatedByActorId,
     updatedByDisplayName: updatedBy ? resolveStoredUserDisplayName(updatedBy) : null,
@@ -836,7 +818,40 @@ function mapDetail(
     ...base,
     nativeBody: detail.content.nativeBody,
     externalUrl: detail.content.externalUrl,
+    latestVideoUploadAsset: detail.latestVideoUploadAsset
+      ? mapDashboardAsset(detail.latestVideoUploadAsset)
+      : null,
     assignments: mapAssignmentSelection(detail, orgId, references),
+  };
+}
+
+function mapDashboardAsset(
+  asset: TrainingContentCurrentAssetRecord
+): DashboardTrainingContentAsset {
+  return {
+    id: asset.id,
+    contentId: asset.contentId,
+    assetRole: asset.assetRole,
+    version: asset.version,
+    uploadState: asset.uploadState,
+    originalFilename: asset.originalFilename,
+    declaredMimeType: asset.declaredMimeType,
+    detectedMimeType: asset.detectedMimeType,
+    fileExtension: asset.fileExtension,
+    declaredByteSize: asset.declaredByteSize,
+    byteSize: asset.byteSize,
+    uploadExpiresAt: asset.uploadExpiresAt,
+    processingAttemptCount: asset.processingAttemptCount,
+    processingNextAttemptAt: asset.processingNextAttemptAt,
+    processingErrorCategory: asset.processingErrorCategory,
+    rejectionReasonCategory: asset.rejectionReasonCategory,
+    finalizedAt: asset.finalizedAt,
+    supersededAt: asset.supersededAt,
+    replacementForAssetId: asset.replacementForAssetId,
+    isCurrent: asset.isCurrent,
+    cleanupPending: asset.cleanupPending,
+    createdAt: asset.createdAt,
+    updatedAt: asset.updatedAt,
   };
 }
 

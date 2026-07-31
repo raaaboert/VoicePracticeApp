@@ -93,11 +93,16 @@ function ContentTable({
               </td>
               <td>{item.assignmentSummary.label}</td>
               <td>
-                {item.currentAsset
-                  ? `${item.currentAsset.originalFilename ?? "File"} (${item.currentAsset.uploadState})`
-                  : item.contentType === "native" || item.contentType === "external_url"
-                    ? "-"
-                    : "No ready file"}
+                {item.hasActiveVideoProcessing ? (
+                  <span className="status-badge status-processing">Processing</span>
+                ) : null}
+                <span className={item.hasActiveVideoProcessing ? "table-secondary-text" : undefined}>
+                  {item.currentAsset
+                    ? `${item.currentAsset.originalFilename ?? "File"} (${item.currentAsset.uploadState})`
+                    : item.contentType === "native" || item.contentType === "external_url"
+                      ? "-"
+                      : "No ready file"}
+                </span>
               </td>
               <td>
                 {formatDateTime(item.updatedAt)}

@@ -13,6 +13,9 @@ import {
   loadTrainingContentVideoWorkerConfig,
   type TrainingContentVideoWorkerFailureStage,
 } from "./trainingContentVideoWorkerConfig.js";
+import {
+  waitForTrainingContentVideoPoll,
+} from "./trainingContentVideoWorkerPolling.js";
 
 dotenv.config();
 
@@ -59,23 +62,9 @@ async function run(): Promise<void> {
       console.log(`[training-content-video-worker] job outcome=${result}`);
       continue;
     }
-    await waitForPoll(config.pollIntervalMs, shutdown.signal);
+    await waitForTrainingContentVideoPoll(config.pollIntervalMs, shutdown.signal);
   }
   console.log("[training-content-video-worker] stopped");
-}
-
-async function waitForPoll(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(resolve, milliseconds);
-    timeout.unref();
-    signal.addEventListener("abort", () => {
-      clearTimeout(timeout);
-      resolve();
-    }, { once: true });
-  });
 }
 
 run().catch((error: unknown) => {

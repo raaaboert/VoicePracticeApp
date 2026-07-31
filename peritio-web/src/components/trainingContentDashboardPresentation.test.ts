@@ -84,6 +84,18 @@ test("Training Content library groups the default view and exposes category-awar
   assert.equal(librarySource.includes("showCategory"), true);
 });
 
+test("video processing status persists in the editor and is visible in the library", () => {
+  assert.equal(editorSource.includes("TRAINING_CONTENT_VIDEO_STATUS_POLL_MS"), true);
+  assert.equal(editorSource.includes("/assets/${encodeURIComponent(latestVideoUploadAsset.id)}"), true);
+  assert.equal(editorSource.includes("Video processing complete. File is ready."), true);
+  assert.equal(editorSource.includes("Video processing failed."), true);
+  assert.equal(editorSource.includes("Current published file"), true);
+  assert.equal(editorSource.includes("disabled={uploading || videoUploadBlocked}"), true);
+  assert.equal(librarySource.includes("item.hasActiveVideoProcessing"), true);
+  assert.equal(librarySource.includes("status-processing"), true);
+  assert.equal(librarySource.includes(">Processing</span>"), true);
+});
+
 test("category and content ordering use accessible controls and optimistic revisions", () => {
   assert.equal(categoriesSource.includes("Move ${category.name} up"), true);
   assert.equal(categoriesSource.includes("Move ${category.name} down"), true);

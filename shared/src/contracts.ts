@@ -327,6 +327,7 @@ export interface DashboardTrainingContentListItem {
   publicationState: TrainingContentPublicationState;
   contentVersion: number;
   currentAsset: DashboardTrainingContentAsset | null;
+  hasActiveVideoProcessing?: boolean;
   assignmentSummary: DashboardTrainingContentAssignmentSummary;
   updatedByActorId: string;
   updatedByDisplayName: string | null;
@@ -356,6 +357,7 @@ export interface DashboardTrainingContentAssignmentSelection {
 export interface DashboardTrainingContentDetail extends DashboardTrainingContentListItem {
   nativeBody: string | null;
   externalUrl: string | null;
+  latestVideoUploadAsset?: DashboardTrainingContentAsset | null;
   assignments: DashboardTrainingContentAssignmentSelection;
 }
 

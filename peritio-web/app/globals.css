@@ -1670,6 +1670,11 @@ html[data-theme="light"] .progress-track {
   color: var(--success);
 }
 
+.status-processing {
+  border-color: var(--border-strong);
+  color: var(--accent);
+}
+
 .status-archived {
   opacity: 0.72;
 }
@@ -1792,6 +1797,7 @@ html[data-theme="light"] .progress-track {
 }
 
 .current-file-row > div,
+.video-processing-card > div,
 .assignment-result-row > span,
 .selected-target > span,
 .manager-assignment-row > span {
@@ -1800,6 +1806,8 @@ html[data-theme="light"] .progress-track {
 
 .current-file-row strong,
 .current-file-row span,
+.video-processing-card strong,
+.video-processing-card span,
 .assignment-result-row strong,
 .assignment-result-row small,
 .selected-target strong,
@@ -1807,6 +1815,31 @@ html[data-theme="light"] .progress-track {
 .manager-assignment-row strong,
 .manager-assignment-row small {
   overflow-wrap: anywhere;
+}
+
+.current-file-label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.video-processing-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  border-color: var(--border-strong);
+}
+
+.video-processing-card > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.video-processing-card span {
+  color: var(--text-muted);
+  line-height: 1.45;
 }
 
 .upload-controls {

@@ -124,6 +124,100 @@ test("Training Content store initializes once and scopes every content read by o
   );
 });
 
+test("Training Content detail exposes a newer active video replacement for editor restoration", async () => {
+  const currentAsset = {
+    id: "1d8ac3f7-7596-4c64-83f3-3a38f2118fc2",
+    org_id: "org_1",
+    content_id: CONTENT_ROW.id,
+    asset_role: "primary",
+    version: 1,
+    upload_state: "ready",
+    original_filename: "current.mp4",
+    declared_mime_type: "video/mp4",
+    detected_mime_type: "video/mp4",
+    file_extension: "mp4",
+    declared_byte_size: 100,
+    byte_size: 100,
+    upload_expires_at: null,
+    processing_attempt_count: 0,
+    processing_next_attempt_at: null,
+    processing_error_category: null,
+    rejection_reason_category: null,
+    finalized_at: new Date("2026-07-28T12:00:00.000Z"),
+    superseded_at: null,
+    replacement_for_asset_id: null,
+    is_current: true,
+    cleanup_pending: false,
+    created_at: new Date("2026-07-28T12:00:00.000Z"),
+    updated_at: new Date("2026-07-28T12:00:00.000Z"),
+  };
+  const processingAsset = {
+    ...currentAsset,
+    id: "3d8ac3f7-7596-4c64-83f3-3a38f2118fc2",
+    version: 2,
+    upload_state: "processing",
+    original_filename: "replacement.mp4",
+    processing_next_attempt_at: new Date("2026-07-28T12:01:00.000Z"),
+    finalized_at: null,
+    replacement_for_asset_id: currentAsset.id,
+    is_current: false,
+  };
+  const queries: string[] = [];
+  const queryPool = {
+    async query(text: string) {
+      queries.push(text);
+      if (text.includes("FROM org_content_items")) {
+        return {
+          rows: [{ ...CONTENT_ROW, content_type: "video", native_body: null }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes("FROM org_content_categories")) {
+        return { rows: [{ name: "General" }], rowCount: 1 };
+      }
+      if (text.includes("FROM org_content_assets candidate")) {
+        return { rows: [processingAsset], rowCount: 1 };
+      }
+      if (text.includes("FROM org_content_assets")) {
+        return { rows: [currentAsset], rowCount: 1 };
+      }
+      if (text.includes("FROM org_content_assignments")) {
+        return { rows: [], rowCount: 0 };
+      }
+      throw new Error(`Unexpected query: ${text}`);
+    },
+    async connect() {
+      return {
+        async query() {
+          return { rows: [], rowCount: 0 };
+        },
+        release() {},
+      };
+    },
+  };
+  const store = createTrainingContentStore({
+    provider: "postgres",
+    databaseUrl: "postgres://example.invalid/peritio",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: queryPool as any,
+  });
+
+  const loaded = await store.getContentDetailForOrg("org_1", CONTENT_ROW.id);
+
+  assert.equal(loaded?.currentAsset?.id, currentAsset.id);
+  assert.equal(loaded?.latestVideoUploadAsset?.id, processingAsset.id);
+  assert.equal(loaded?.latestVideoUploadAsset?.uploadState, "processing");
+  assert.equal(loaded?.hasActiveVideoProcessing, true);
+  const activeAssetQuery = queries.find((text) =>
+    text.includes("FROM org_content_assets candidate")
+  );
+  assert.ok(activeAssetQuery);
+  assert.match(activeAssetQuery, /upload_state IN \('processing', 'rejected'\)/);
+  assert.match(activeAssetQuery, /candidate\.version > COALESCE/);
+});
+
 test("mobile Training Content reads are bounded, published-only, ordered, and tenant-scoped", async () => {
   const publishedRow = {
     ...CONTENT_ROW,

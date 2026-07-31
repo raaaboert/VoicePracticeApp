@@ -13,6 +13,10 @@ import {
   createTrainingContentManagementService,
   TrainingContentManagementServiceError,
 } from "./trainingContentManagementService.js";
+import type {
+  TrainingContentCurrentAssetRecord,
+  TrainingContentManagementDetail,
+} from "../storage/trainingContentStore.js";
 
 const NOW = "2026-07-28T12:00:00.000Z";
 
@@ -88,7 +92,10 @@ function content(overrides: Partial<TrainingContentItem> = {}): TrainingContentI
   };
 }
 
-function detail(overrides: Partial<TrainingContentItem> = {}, assignments: TrainingContentAssignment[] = []) {
+function detail(
+  overrides: Partial<TrainingContentItem> = {},
+  assignments: TrainingContentAssignment[] = []
+): TrainingContentManagementDetail {
   return {
     content: content(overrides),
     categoryName: "General",
@@ -100,6 +107,38 @@ function detail(overrides: Partial<TrainingContentItem> = {}, assignments: Train
       manager: assignments.filter((entry) => entry.assignmentType === "manager").length,
       managerTeam: assignments.filter((entry) => entry.assignmentType === "manager_team").length,
     },
+  };
+}
+
+function currentAsset(
+  overrides: Partial<TrainingContentCurrentAssetRecord> = {}
+): TrainingContentCurrentAssetRecord {
+  return {
+    id: "asset_current",
+    orgId: "org_1",
+    contentId: "content_1",
+    assetRole: "primary",
+    version: 1,
+    uploadState: "ready",
+    originalFilename: "training.mp4",
+    declaredMimeType: "video/mp4",
+    detectedMimeType: "video/mp4",
+    fileExtension: "mp4",
+    declaredByteSize: 1024,
+    byteSize: 1024,
+    uploadExpiresAt: null,
+    processingAttemptCount: 0,
+    processingNextAttemptAt: null,
+    processingErrorCategory: null,
+    rejectionReasonCategory: null,
+    finalizedAt: NOW,
+    supersededAt: null,
+    replacementForAssetId: null,
+    isCurrent: true,
+    cleanupPending: false,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
   };
 }
 
@@ -718,4 +757,35 @@ test("list filters are bounded and unusual search input remains a parameter valu
   assert.equal(calls[0]?.input.categoryId, "category_1");
   assert.equal(calls[0]?.input.page, 2);
   assert.equal(calls[0]?.input.pageSize, 50);
+});
+
+test("management responses expose an active video replacement for list and editor persistence", async () => {
+  const { service, setCurrent } = harness();
+  const processing = currentAsset({
+    id: "asset_processing",
+    version: 2,
+    uploadState: "processing",
+    finalizedAt: null,
+    replacementForAssetId: "asset_current",
+    isCurrent: false,
+  });
+  setCurrent({
+    ...detail({ contentType: "video" }),
+    currentAsset: currentAsset(),
+    hasActiveVideoProcessing: true,
+    latestVideoUploadAsset: processing,
+  });
+
+  const listed = await service.listContent({ context, references });
+  assert.equal(listed.items[0]?.hasActiveVideoProcessing, true);
+
+  const loaded = await service.getContent({
+    context,
+    references,
+    contentId: "content_1",
+  });
+  assert.equal(loaded.currentAsset?.id, "asset_current");
+  assert.equal(loaded.latestVideoUploadAsset?.id, "asset_processing");
+  assert.equal(loaded.latestVideoUploadAsset?.uploadState, "processing");
+  assert.equal(loaded.latestVideoUploadAsset?.processingAttemptCount, 0);
 });
