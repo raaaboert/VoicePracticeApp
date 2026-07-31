@@ -101,6 +101,7 @@ class PostgresUserEmployeeIdClaimStore implements UserEmployeeIdClaimStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await client.query("LOCK TABLE user_employee_id_claims IN SHARE ROW EXCLUSIVE MODE");
       await client.query("DELETE FROM user_employee_id_claims");
       for (const row of rows) {
         await client.query(
