@@ -196,6 +196,7 @@ import {
   requestSpeechSynthesis,
   requestTranscription
 } from "./openaiClient.js";
+import { resolveSimulationRequestConfig } from "./openaiModelConfig.js";
 import type { OpenAiCompletionApiFamily, SimulationRoute } from "./openaiModelConfig.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
@@ -436,6 +437,7 @@ const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_MODEL_CONFIG = runtimeConfig.openAi;
 const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
 const OPENAI_SIMULATION_MODEL = OPENAI_MODEL_CONFIG.simulation.model;
+const OPENAI_SCORING_MODEL = OPENAI_MODEL_CONFIG.scoring.model;
 const OPENAI_TRANSCRIPTION_MODEL = OPENAI_MODEL_CONFIG.transcription.model;
 const ENABLE_REMOTE_TTS = runtimeConfig.enableRemoteTts;
 const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
@@ -854,16 +856,15 @@ async function requestSimulationCompletion(params: {
   correlationId: string;
 }): Promise<{ completion: SimulationCompletionResult; latencyMs: number; apiPathUsed: SimulationApiPath }> {
   const requestStartedAt = Date.now();
-  const simulationConfig = OPENAI_MODEL_CONFIG.simulation;
-  const routeConfig = simulationConfig.routes[params.route];
-  const requestedModel = simulationConfig.model;
-  const apiPathUsed = toSimulationApiPath(simulationConfig.apiFamily);
+  const routeConfig = resolveSimulationRequestConfig(OPENAI_MODEL_CONFIG, params.route);
+  const requestedModel = routeConfig.model;
+  const apiPathUsed = toSimulationApiPath(routeConfig.apiFamily);
   const promptChars = params.messages.reduce((total, message) => total + message.content.length, 0);
   const messageCount = params.messages.length;
 
   try {
     const completion = await requestCompletion({
-      apiFamily: simulationConfig.apiFamily,
+      apiFamily: routeConfig.apiFamily,
       model: requestedModel,
       messages: params.messages,
       maxOutputTokens: routeConfig.maxOutputTokens,
@@ -19343,7 +19344,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       correlationId
     });
     const aiDetails = buildPersistedSimulationAiDetails({
-      requestedModel: OPENAI_SIMULATION_MODEL,
+      requestedModel: OPENAI_SCORING_MODEL,
       responseModel: completion.model,
       usage: completion.usage,
       latencyMs
