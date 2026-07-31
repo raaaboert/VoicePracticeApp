@@ -9,10 +9,12 @@ const APP_VARIANTS = {
   staging: {
     name: "Peritio Staging",
     iosBundleIdentifier: "com.peritio.practice.staging",
+    androidPackage: "com.peritio.practice.staging",
   },
   production: {
     name: "Peritio",
     iosBundleIdentifier: "com.peritio.practice",
+    androidPackage: "com.anonymous.VoicePracticeApp",
   },
 };
 
@@ -98,7 +100,7 @@ module.exports = () => {
     },
     android: {
       ...expo.android,
-      package: expo.android.package,
+      package: appVariant.androidPackage,
     },
     extra: {
       ...expo.extra,
