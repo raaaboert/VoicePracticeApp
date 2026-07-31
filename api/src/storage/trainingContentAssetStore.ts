@@ -58,6 +58,11 @@ export interface TrainingContentAssetRecord {
   uploadExpiresAt: string | null;
   finalizationNonce: string | null;
   finalizationStartedAt: string | null;
+  processingAttemptCount: number;
+  processingLeaseToken: string | null;
+  processingLeaseExpiresAt: string | null;
+  processingNextAttemptAt: string | null;
+  processingErrorCategory: string | null;
   replacementForAssetId: string | null;
   isCurrent: boolean;
   cleanupPending: boolean;
@@ -96,6 +101,17 @@ export type ClaimTrainingContentAssetFinalizationResult =
   | { status: "ready"; asset: TrainingContentAssetRecord; recovered: false }
   | { status: "expired"; asset: TrainingContentAssetRecord; recovered: false }
   | { status: "terminal"; asset: TrainingContentAssetRecord; recovered: false };
+
+export type QueueTrainingContentVideoProcessingResult =
+  | { status: "queued"; asset: TrainingContentAssetRecord }
+  | { status: "ready"; asset: TrainingContentAssetRecord }
+  | { status: "expired"; asset: TrainingContentAssetRecord }
+  | { status: "terminal"; asset: TrainingContentAssetRecord };
+
+export interface ClaimedTrainingContentVideoProcessing {
+  asset: TrainingContentAssetRecord;
+  leaseToken: string;
+}
 
 export interface TrainingContentAssetCleanupCandidate {
   asset: TrainingContentAssetRecord;
@@ -137,6 +153,37 @@ export interface TrainingContentAssetStore {
     actor: TrainingContentAuditActor;
     now?: Date;
   }): Promise<ClaimTrainingContentAssetFinalizationResult>;
+  queueVideoProcessing(params: {
+    orgId: string;
+    contentId: string;
+    assetId: string;
+    actualByteSize: number;
+    detectedMimeType: string;
+    checksumOrEtag: string | null;
+    actor: TrainingContentAuditActor;
+    now?: Date;
+  }): Promise<QueueTrainingContentVideoProcessingResult>;
+  claimNextVideoProcessing(params: {
+    leaseSeconds: number;
+    maximumAttempts: number;
+    now?: Date;
+  }): Promise<ClaimedTrainingContentVideoProcessing | null>;
+  rejectExhaustedVideoProcessing(params: {
+    maximumAttempts: number;
+    actor: TrainingContentAuditActor;
+    now?: Date;
+    limit?: number;
+  }): Promise<number>;
+  recordVideoProcessingFailure(params: {
+    orgId: string;
+    contentId: string;
+    assetId: string;
+    leaseToken: string;
+    errorCategory: string;
+    retryAt: Date | null;
+    actor: TrainingContentAuditActor;
+    now?: Date;
+  }): Promise<TrainingContentAssetRecord>;
   completeFinalization(params: {
     orgId: string;
     contentId: string;
@@ -145,6 +192,7 @@ export interface TrainingContentAssetStore {
     actualByteSize: number;
     detectedMimeType: string;
     checksumOrEtag: string | null;
+    processingLeaseToken?: string;
     actor: TrainingContentAuditActor;
     now?: Date;
   }): Promise<{ asset: TrainingContentAssetRecord; replacedAsset: TrainingContentAssetRecord | null }>;
@@ -227,6 +275,11 @@ interface AssetRow {
   upload_expires_at: string | Date | null;
   finalization_nonce: string | null;
   finalization_started_at: string | Date | null;
+  processing_attempt_count: string | number;
+  processing_lease_token: string | null;
+  processing_lease_expires_at: string | Date | null;
+  processing_next_attempt_at: string | Date | null;
+  processing_error_category: string | null;
   replacement_for_asset_id: string | null;
   is_current: boolean;
   cleanup_pending: boolean;
@@ -259,6 +312,11 @@ const ASSET_COLUMNS = `
   upload_expires_at,
   finalization_nonce,
   finalization_started_at,
+  processing_attempt_count,
+  processing_lease_token,
+  processing_lease_expires_at,
+  processing_next_attempt_at,
+  processing_error_category,
   replacement_for_asset_id,
   is_current,
   cleanup_pending,
@@ -291,6 +349,22 @@ class UnavailableTrainingContentAssetStore implements TrainingContentAssetStore 
   }
 
   async claimFinalization(): Promise<ClaimTrainingContentAssetFinalizationResult> {
+    return this.unavailable();
+  }
+
+  async queueVideoProcessing(): Promise<QueueTrainingContentVideoProcessingResult> {
+    return this.unavailable();
+  }
+
+  async claimNextVideoProcessing(): Promise<ClaimedTrainingContentVideoProcessing | null> {
+    return this.unavailable();
+  }
+
+  async rejectExhaustedVideoProcessing(): Promise<number> {
+    return this.unavailable();
+  }
+
+  async recordVideoProcessingFailure(): Promise<TrainingContentAssetRecord> {
     return this.unavailable();
   }
 
@@ -612,6 +686,9 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
               cleanup_pending = TRUE,
               rejection_reason_category = $4,
               finalization_started_at = NULL,
+              processing_lease_token = NULL,
+              processing_lease_expires_at = NULL,
+              processing_next_attempt_at = NULL,
               updated_at = $5
           WHERE org_id = $1 AND content_id = $2 AND id = $3
           RETURNING ${ASSET_COLUMNS}
@@ -762,6 +839,364 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     }
   }
 
+  async queueVideoProcessing(params: {
+    orgId: string;
+    contentId: string;
+    assetId: string;
+    actualByteSize: number;
+    detectedMimeType: string;
+    checksumOrEtag: string | null;
+    actor: TrainingContentAuditActor;
+    now?: Date;
+  }): Promise<QueueTrainingContentVideoProcessingResult> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    const now = params.now ?? new Date();
+    try {
+      await client.query("BEGIN");
+      await lockFinalizableContent(client, params.orgId, params.contentId);
+      const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
+      if (asset.uploadState === "ready") {
+        await client.query("COMMIT");
+        return { status: "ready", asset };
+      }
+      if (asset.uploadState === "processing") {
+        await client.query("COMMIT");
+        return { status: "queued", asset };
+      }
+      if (asset.uploadState === "pending" || asset.uploadState === "uploaded") {
+        if (!asset.uploadExpiresAt || new Date(asset.uploadExpiresAt).getTime() <= now.getTime()) {
+          const expired = await expireLockedAsset(client, asset, params.actor, now);
+          await client.query("COMMIT");
+          return { status: "expired", asset: expired };
+        }
+      } else {
+        await client.query("COMMIT");
+        return { status: "terminal", asset };
+      }
+      if (!asset.finalizationNonce) {
+        throw new TrainingContentAssetStoreError(
+          "Training Content asset is missing finalization metadata.",
+          "asset_state_conflict"
+        );
+      }
+
+      let uploaded = asset;
+      if (asset.uploadState === "pending") {
+        assertTrainingContentAssetTransition("pending", "uploaded");
+        const result = await client.query<AssetRow>(
+          `
+            UPDATE org_content_assets
+            SET upload_state = 'uploaded',
+                byte_size = $4,
+                detected_mime_type = $5,
+                checksum_or_etag = $6,
+                updated_at = $7
+            WHERE org_id = $1 AND content_id = $2 AND id = $3
+            RETURNING ${ASSET_COLUMNS}
+          `,
+          [
+            asset.orgId,
+            asset.contentId,
+            asset.id,
+            params.actualByteSize,
+            params.detectedMimeType,
+            params.checksumOrEtag,
+            now,
+          ]
+        );
+        uploaded = mapRequiredAssetRow(result.rows[0]);
+      }
+      assertTrainingContentAssetTransition("uploaded", "processing");
+      const finalObjectKey = createTrainingContentFinalObjectKey({
+        orgId: uploaded.orgId,
+        contentId: uploaded.contentId,
+        assetRole: uploaded.assetRole,
+        version: uploaded.version,
+        finalizationNonce: uploaded.finalizationNonce!,
+      });
+      const queuedResult = await client.query<AssetRow>(
+        `
+          UPDATE org_content_assets
+          SET upload_state = 'processing',
+              final_object_key = $4,
+              finalization_started_at = NULL,
+              byte_size = $5,
+              detected_mime_type = $6,
+              checksum_or_etag = $7,
+              processing_lease_token = NULL,
+              processing_lease_expires_at = NULL,
+              processing_next_attempt_at = NULL,
+              processing_error_category = NULL,
+              updated_at = $8
+          WHERE org_id = $1 AND content_id = $2 AND id = $3
+          RETURNING ${ASSET_COLUMNS}
+        `,
+        [
+          uploaded.orgId,
+          uploaded.contentId,
+          uploaded.id,
+          finalObjectKey,
+          params.actualByteSize,
+          params.detectedMimeType,
+          params.checksumOrEtag,
+          now,
+        ]
+      );
+      const queued = mapRequiredAssetRow(queuedResult.rows[0]);
+      await insertTechnicalAudit(client, {
+        actor: params.actor,
+        action: "training_content_video_processing_queued",
+        orgId: queued.orgId,
+        contentId: queued.contentId,
+        asset: queued,
+        now,
+      });
+      await client.query("COMMIT");
+      return { status: "queued", asset: queued };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async claimNextVideoProcessing(params: {
+    leaseSeconds: number;
+    maximumAttempts: number;
+    now?: Date;
+  }): Promise<ClaimedTrainingContentVideoProcessing | null> {
+    await this.initialize();
+    const now = params.now ?? new Date();
+    const leaseSeconds = requirePositiveInteger(params.leaseSeconds, "Processing lease seconds");
+    const maximumAttempts = requirePositiveInteger(
+      params.maximumAttempts,
+      "Maximum processing attempts"
+    );
+    const leaseToken = randomUUID();
+    const leaseExpiresAt = new Date(now.getTime() + leaseSeconds * 1000);
+    const result = await this.pool.query<AssetRow>(
+      `
+        WITH candidate AS (
+          SELECT asset.id
+          FROM org_content_assets asset
+          INNER JOIN org_content_items content
+            ON content.org_id = asset.org_id
+           AND content.id = asset.content_id
+          WHERE asset.upload_state = 'processing'
+            AND content.content_type = 'video'
+            AND asset.processing_attempt_count < $1
+            AND (
+              asset.processing_next_attempt_at IS NULL
+              OR asset.processing_next_attempt_at <= $2
+            )
+            AND (
+              asset.processing_lease_expires_at IS NULL
+              OR asset.processing_lease_expires_at <= $2
+            )
+          ORDER BY asset.processing_next_attempt_at NULLS FIRST, asset.created_at, asset.id
+          FOR UPDATE OF asset SKIP LOCKED
+          LIMIT 1
+        )
+        UPDATE org_content_assets asset
+        SET processing_attempt_count = asset.processing_attempt_count + 1,
+            processing_lease_token = $3,
+            processing_lease_expires_at = $4,
+            processing_next_attempt_at = NULL,
+            processing_error_category = NULL,
+            finalization_started_at = $2,
+            updated_at = $2
+        FROM candidate
+        WHERE asset.id = candidate.id
+        RETURNING ${ASSET_COLUMNS}
+      `,
+      [maximumAttempts, now, leaseToken, leaseExpiresAt]
+    );
+    const row = result.rows[0];
+    return row ? { asset: mapAssetRow(row), leaseToken } : null;
+  }
+
+  async rejectExhaustedVideoProcessing(params: {
+    maximumAttempts: number;
+    actor: TrainingContentAuditActor;
+    now?: Date;
+    limit?: number;
+  }): Promise<number> {
+    await this.initialize();
+    const maximumAttempts = requirePositiveInteger(
+      params.maximumAttempts,
+      "Maximum processing attempts"
+    );
+    const limit = Math.max(1, Math.min(100, params.limit ?? 25));
+    const now = params.now ?? new Date();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const exhausted = await client.query<AssetRow>(
+        `
+          SELECT asset.*
+          FROM org_content_assets asset
+          INNER JOIN org_content_items content
+            ON content.org_id = asset.org_id
+           AND content.id = asset.content_id
+          WHERE asset.upload_state = 'processing'
+            AND content.content_type = 'video'
+            AND asset.processing_attempt_count >= $1
+            AND (
+              asset.processing_lease_expires_at IS NULL
+              OR asset.processing_lease_expires_at <= $2
+            )
+          ORDER BY asset.updated_at, asset.id
+          FOR UPDATE OF asset SKIP LOCKED
+          LIMIT $3
+        `,
+        [maximumAttempts, now, limit]
+      );
+      for (const row of exhausted.rows) {
+        const asset = mapAssetRow(row);
+        assertTrainingContentAssetTransition("processing", "rejected");
+        const updated = await client.query<AssetRow>(
+          `
+            UPDATE org_content_assets
+            SET upload_state = 'rejected',
+                is_current = FALSE,
+                cleanup_pending = TRUE,
+                rejection_reason_category = 'video_processing_attempts_exhausted',
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                processing_next_attempt_at = NULL,
+                processing_error_category = 'attempts_exhausted',
+                finalization_started_at = NULL,
+                updated_at = $4
+            WHERE org_id = $1 AND content_id = $2 AND id = $3
+            RETURNING ${ASSET_COLUMNS}
+          `,
+          [asset.orgId, asset.contentId, asset.id, now]
+        );
+        const failed = mapRequiredAssetRow(updated.rows[0]);
+        await insertTechnicalAudit(client, {
+          actor: params.actor,
+          action: "training_content_video_processing_failed",
+          orgId: failed.orgId,
+          contentId: failed.contentId,
+          asset: failed,
+          now,
+          extraMetadata: { processingErrorCategory: "attempts_exhausted" },
+        });
+      }
+      await client.query("COMMIT");
+      return exhausted.rows.length;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordVideoProcessingFailure(params: {
+    orgId: string;
+    contentId: string;
+    assetId: string;
+    leaseToken: string;
+    errorCategory: string;
+    retryAt: Date | null;
+    actor: TrainingContentAuditActor;
+    now?: Date;
+  }): Promise<TrainingContentAssetRecord> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    const now = params.now ?? new Date();
+    const errorCategory = normalizeReasonCategory(params.errorCategory);
+    try {
+      await client.query("BEGIN");
+      const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
+      if (
+        asset.uploadState !== "processing"
+        || asset.processingLeaseToken !== requiredId(params.leaseToken, "Processing lease token")
+        || !asset.processingLeaseExpiresAt
+        || new Date(asset.processingLeaseExpiresAt).getTime() <= now.getTime()
+      ) {
+        throw new TrainingContentAssetStoreError(
+          "Training Content video processing lease is no longer owned.",
+          "asset_state_conflict"
+        );
+      }
+
+      let result;
+      if (params.retryAt) {
+        result = await client.query<AssetRow>(
+          `
+            UPDATE org_content_assets
+            SET processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                processing_next_attempt_at = $4,
+                processing_error_category = $5,
+                finalization_started_at = NULL,
+                updated_at = $6
+            WHERE org_id = $1 AND content_id = $2 AND id = $3
+            RETURNING ${ASSET_COLUMNS}
+          `,
+          [
+            asset.orgId,
+            asset.contentId,
+            asset.id,
+            params.retryAt,
+            errorCategory,
+            now,
+          ]
+        );
+      } else {
+        assertTrainingContentAssetTransition("processing", "rejected");
+        result = await client.query<AssetRow>(
+          `
+            UPDATE org_content_assets
+            SET upload_state = 'rejected',
+                is_current = FALSE,
+                cleanup_pending = TRUE,
+                rejection_reason_category = $4,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                processing_next_attempt_at = NULL,
+                processing_error_category = $5,
+                finalization_started_at = NULL,
+                updated_at = $6
+            WHERE org_id = $1 AND content_id = $2 AND id = $3
+            RETURNING ${ASSET_COLUMNS}
+          `,
+          [
+            asset.orgId,
+            asset.contentId,
+            asset.id,
+            `video_processing_${errorCategory}`.slice(0, 80),
+            errorCategory,
+            now,
+          ]
+        );
+      }
+      const updated = mapRequiredAssetRow(result.rows[0]);
+      await insertTechnicalAudit(client, {
+        actor: params.actor,
+        action: params.retryAt
+          ? "training_content_video_processing_retry_scheduled"
+          : "training_content_video_processing_failed",
+        orgId: updated.orgId,
+        contentId: updated.contentId,
+        asset: updated,
+        now,
+        extraMetadata: { processingErrorCategory: errorCategory },
+      });
+      await client.query("COMMIT");
+      return updated;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async completeFinalization(params: {
     orgId: string;
     contentId: string;
@@ -770,6 +1205,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     actualByteSize: number;
     detectedMimeType: string;
     checksumOrEtag: string | null;
+    processingLeaseToken?: string;
     actor: TrainingContentAuditActor;
     now?: Date;
   }): Promise<{ asset: TrainingContentAssetRecord; replacedAsset: TrainingContentAssetRecord | null }> {
@@ -793,6 +1229,19 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
       if (asset.uploadState !== "processing" || asset.finalObjectKey !== params.finalObjectKey) {
         throw new TrainingContentAssetStoreError(
           "Training Content asset is not ready to commit finalization.",
+          "asset_state_conflict"
+        );
+      }
+      if (
+        params.processingLeaseToken
+        && (
+          asset.processingLeaseToken !== params.processingLeaseToken
+          || !asset.processingLeaseExpiresAt
+          || new Date(asset.processingLeaseExpiresAt).getTime() <= now.getTime()
+        )
+      ) {
+        throw new TrainingContentAssetStoreError(
+          "Training Content video processing lease is no longer owned.",
           "asset_state_conflict"
         );
       }
@@ -839,6 +1288,10 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
               is_current = TRUE,
               finalized_at = $4,
               finalization_started_at = NULL,
+              processing_lease_token = NULL,
+              processing_lease_expires_at = NULL,
+              processing_next_attempt_at = NULL,
+              processing_error_category = NULL,
               byte_size = $5,
               detected_mime_type = $6,
               checksum_or_etag = $7,
@@ -1322,6 +1775,14 @@ function mapAssetRow(row: AssetRow): TrainingContentAssetRecord {
     uploadExpiresAt: optionalIso(row.upload_expires_at),
     finalizationNonce: row.finalization_nonce,
     finalizationStartedAt: optionalIso(row.finalization_started_at),
+    processingAttemptCount: parseDatabaseInteger(
+      row.processing_attempt_count,
+      "Processing attempt count"
+    ),
+    processingLeaseToken: row.processing_lease_token,
+    processingLeaseExpiresAt: optionalIso(row.processing_lease_expires_at),
+    processingNextAttemptAt: optionalIso(row.processing_next_attempt_at),
+    processingErrorCategory: row.processing_error_category,
     replacementForAssetId: row.replacement_for_asset_id,
     isCurrent: row.is_current === true,
     cleanupPending: row.cleanup_pending === true,
@@ -1361,6 +1822,13 @@ function parseDatabaseInteger(value: string | number, label: string): number {
     throw new Error(`${label} is outside the supported integer range.`);
   }
   return parsed;
+}
+
+function requirePositiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return value;
 }
 
 function optionalDatabaseInteger(

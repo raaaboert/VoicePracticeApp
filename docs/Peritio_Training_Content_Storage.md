@@ -100,10 +100,13 @@ Cloudflare references:
 3. The browser uploads directly to the short-lived presigned R2 PUT URL.
 4. Finalization reauthorizes, re-reads the asset, verifies expiry, performs HEAD and bounded
    signature/container reads, and rejects type or size mismatches.
-5. A valid temporary object progresses through `uploaded` and `processing`, is copied once
-   to its immutable final key using a provider-enforced destination `If-None-Match` guard,
+5. Non-video assets retain the synchronous finalization path: a valid temporary object
+   progresses through `uploaded` and `processing`, is copied once to its immutable final key,
    is verified again, and becomes `ready`.
-6. The relational ready transition and replacement selection commit atomically. Temporary
+6. Video finalization stops after the bounded validation and durable `processing` transition.
+   A separate PostgreSQL-backed worker inspects and, only when necessary, losslessly remuxes
+   the private temporary MP4 before publishing an immutable final object.
+7. The relational ready transition and replacement selection commit atomically. Temporary
    deletion follows; a failed delete is retained as cleanup work.
 
 Finalization retries reuse the stored finalization nonce and final key. A copied object with
@@ -133,8 +136,9 @@ entries and bounds entry count, expansion size, compression ratio, encryption, a
 paths without extracting files.
 
 Legacy DOC, executables, scripts, HTML, SVG, archives, spreadsheets, presentations, and
-unknown binary types are rejected. DOCX conversion, video transcoding, and codec metadata
-extraction are not implemented.
+unknown binary types are rejected. DOCX conversion and video transcoding are not implemented.
+Video codec/container metadata inspection and lossless MP4 remuxing are performed by the
+worker described below.
 
 Malware scanning is also not implemented. Current compensating controls are private
 quarantine objects, no access before `ready`, a strict allowlist, hard size limits,
@@ -169,3 +173,59 @@ The command is staging-only. It verifies provider readiness, browser-style PUT C
 HEAD, byte-range read, immutable copy, overwrite prevention, temporary GET access/CORS, and
 deletion. It prints no signed URLs, object keys, or credentials. Automated tests do not
 depend on live R2.
+
+## Video Processing Worker
+
+Video assets remain private and non-current while `uploadState` is `processing`. The worker:
+
+1. claims one eligible video row with PostgreSQL `FOR UPDATE SKIP LOCKED`;
+2. records a bounded lease and attempt count on that asset row;
+3. downloads the temporary R2 object into a unique ephemeral working directory;
+4. inspects FFprobe stream metadata and MP4 `tkhd`/H.264 sample-entry dimensions;
+5. accepts only one H.264 video stream with optional AAC audio streams;
+6. compares decoded dimensions with MP4 sample-entry and track dimensions, accounting for
+   valid quarter-turn display rotation;
+7. copies a healthy MP4 directly to its immutable final key, or runs an FFmpeg `-c copy`
+   remux when dimensions disagree;
+8. re-inspects the candidate, verifies duration and stream preservation, performs a complete
+   packet-read pass, then publishes and confirms the immutable R2 object;
+9. atomically commits `ready` only while it still owns the processing lease.
+
+Temporary local files are removed in a `finally` path. The worker checks available disk before
+downloading, accepts at most the configured 500 MB platform limit, processes one asset at a
+time, and aborts work that exceeds 20 minutes. Transient failures use bounded PostgreSQL retry
+state; permanent media failures or an exhausted third attempt become `rejected` with a safe
+error category and remain unavailable to clients.
+
+An authorized administrator can inspect safe state without receiving object keys or URLs:
+
+```text
+GET /dashboard/admin/training-content/:contentId/assets/:assetId
+```
+
+The response distinguishes `pending`, `processing`, `ready`, and `rejected`, and exposes only
+the attempt count, next retry time, and allowlisted error category.
+
+### Render Runtime
+
+The staging worker is declared in the repository `render.yaml` as a single-instance Docker
+background worker. `api/Dockerfile.video-worker` pins Node 20.20.2 and Debian FFmpeg/FFprobe
+5.1.9. Worker startup verifies both tool versions before claiming any work.
+
+The worker uses Render's ephemeral filesystem only as scratch space; PostgreSQL and private R2
+remain the durable sources of truth. Configure the worker with the same staging database and
+R2 lane as the staging API. Do not attach production credentials to the staging worker.
+
+Worker-only bounded settings:
+
+```dotenv
+TRAINING_CONTENT_VIDEO_WORKER_CONCURRENCY=1
+TRAINING_CONTENT_VIDEO_POLL_INTERVAL_MS=2000
+TRAINING_CONTENT_VIDEO_MAX_ATTEMPTS=3
+TRAINING_CONTENT_VIDEO_JOB_TIMEOUT_SECONDS=1200
+TRAINING_CONTENT_VIDEO_LEASE_SECONDS=1800
+TRAINING_CONTENT_VIDEO_MINIMUM_FREE_DISK_BYTES=268435456
+TRAINING_CONTENT_FFMPEG_PATH=ffmpeg
+TRAINING_CONTENT_FFPROBE_PATH=ffprobe
+TRAINING_CONTENT_MEDIA_TOOL_VERSION_PREFIX=5.1.9
+```

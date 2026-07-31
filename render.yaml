@@ -1,0 +1,42 @@
+services:
+  - type: worker
+    name: peritio-training-content-video-worker-staging
+    runtime: docker
+    plan: standard
+    numInstances: 1
+    dockerfilePath: ./api/Dockerfile.video-worker
+    dockerContext: .
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: PERITIO_ENV
+        value: staging
+      - key: STORAGE_PROVIDER
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      - key: TRAINING_CONTENT_STORAGE_PROVIDER
+        value: r2
+      - key: TRAINING_CONTENT_R2_ENVIRONMENT
+        value: staging
+      - key: TRAINING_CONTENT_R2_ACCOUNT_ID
+        sync: false
+      - key: TRAINING_CONTENT_R2_BUCKET
+        value: peritio-training-content-staging
+      - key: TRAINING_CONTENT_R2_ACCESS_KEY_ID
+        sync: false
+      - key: TRAINING_CONTENT_R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: TRAINING_CONTENT_R2_ENDPOINT
+        sync: false
+      - key: TRAINING_CONTENT_VIDEO_WORKER_CONCURRENCY
+        value: "1"
+      - key: TRAINING_CONTENT_VIDEO_MAX_ATTEMPTS
+        value: "3"
+      - key: TRAINING_CONTENT_VIDEO_JOB_TIMEOUT_SECONDS
+        value: "1200"
+      - key: TRAINING_CONTENT_VIDEO_LEASE_SECONDS
+        value: "1800"
+      - key: TRAINING_CONTENT_VIDEO_MINIMUM_FREE_DISK_BYTES
+        value: "268435456"
+      - key: TRAINING_CONTENT_MEDIA_TOOL_VERSION_PREFIX
+        value: "5.1.9"

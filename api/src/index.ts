@@ -11596,7 +11596,29 @@ app.post(
       return;
     }
     try {
-      response.json(await trainingContentAssetService.finalizeUpload({
+      const result = await trainingContentAssetService.finalizeUpload({
+        context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      });
+      response.status(result.asset.uploadState === "processing" ? 202 : 200).json(result);
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content/:contentId/assets/:assetId",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      response.json(await trainingContentAssetService.getUploadStatus({
         context,
         contentId: request.params.contentId,
         assetId: request.params.assetId,

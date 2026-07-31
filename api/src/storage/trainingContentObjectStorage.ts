@@ -9,6 +9,10 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createReadStream, createWriteStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import type { TrainingContentStorageConfig } from "../trainingContentStorageConfig.js";
 
@@ -41,10 +45,27 @@ export interface TrainingContentObjectStorage {
     expiresInSeconds: number;
     now?: Date;
   }): Promise<TrainingContentPresignedRequest>;
-  headObject(key: string): Promise<TrainingContentStoredObject | null>;
+  headObject(key: string, signal?: AbortSignal): Promise<TrainingContentStoredObject | null>;
   readObjectRange(key: string, start: number, endInclusive: number): Promise<Uint8Array>;
   readObjectBytes(key: string, maximumBytes: number): Promise<Uint8Array>;
-  copyObject(params: { sourceKey: string; destinationKey: string }): Promise<void>;
+  downloadObjectToFile(params: {
+    key: string;
+    destinationPath: string;
+    maximumBytes: number;
+    signal?: AbortSignal;
+  }): Promise<{ byteSize: number }>;
+  uploadFileImmutable(params: {
+    key: string;
+    sourcePath: string;
+    contentType: string;
+    contentLength: number;
+    signal?: AbortSignal;
+  }): Promise<TrainingContentStoredObject>;
+  copyObject(params: {
+    sourceKey: string;
+    destinationKey: string;
+    signal?: AbortSignal;
+  }): Promise<void>;
   deleteObject(key: string): Promise<void>;
   createPresignedAccess(params: {
     key: string;
@@ -92,6 +113,14 @@ class DisabledTrainingContentObjectStorage implements TrainingContentObjectStora
     return this.unavailable();
   }
 
+  async downloadObjectToFile(): Promise<{ byteSize: number }> {
+    return this.unavailable();
+  }
+
+  async uploadFileImmutable(): Promise<TrainingContentStoredObject> {
+    return this.unavailable();
+  }
+
   async copyObject(): Promise<void> {
     return this.unavailable();
   }
@@ -116,7 +145,7 @@ class DisabledTrainingContentObjectStorage implements TrainingContentObjectStora
 }
 
 interface R2Client {
-  send(command: unknown): Promise<any>;
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<any>;
 }
 
 type Presigner = (
@@ -178,13 +207,16 @@ export class R2TrainingContentObjectStorage implements TrainingContentObjectStor
     };
   }
 
-  async headObject(key: string): Promise<TrainingContentStoredObject | null> {
+  async headObject(key: string, signal?: AbortSignal): Promise<TrainingContentStoredObject | null> {
     const normalizedKey = normalizeObjectKey(key);
     try {
-      const result = await this.client.send(new HeadObjectCommand({
-        Bucket: this.bucket,
-        Key: normalizedKey,
-      }));
+      const result = await this.client.send(
+        new HeadObjectCommand({
+          Bucket: this.bucket,
+          Key: normalizedKey,
+        }),
+        { abortSignal: signal }
+      );
       return {
         key: normalizedKey,
         byteSize: normalizeContentLength(result.ContentLength),
@@ -226,7 +258,96 @@ export class R2TrainingContentObjectStorage implements TrainingContentObjectStor
     return bytes;
   }
 
-  async copyObject(params: { sourceKey: string; destinationKey: string }): Promise<void> {
+  async downloadObjectToFile(params: {
+    key: string;
+    destinationPath: string;
+    maximumBytes: number;
+    signal?: AbortSignal;
+  }): Promise<{ byteSize: number }> {
+    const maximumBytes = requirePositiveInteger(params.maximumBytes, "Maximum object bytes");
+    const result = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: normalizeObjectKey(params.key),
+      }),
+      { abortSignal: params.signal }
+    );
+    const declaredLength = result.ContentLength === undefined
+      ? null
+      : normalizeContentLength(result.ContentLength);
+    if (declaredLength !== null && (declaredLength === 0 || declaredLength > maximumBytes)) {
+      throw new Error("Object size is outside the configured download bound.");
+    }
+    if (!result.Body) {
+      throw new Error("Object storage did not return a readable response body.");
+    }
+
+    let byteSize = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        byteSize += chunk.byteLength;
+        if (byteSize > maximumBytes) {
+          callback(new Error("Object download exceeded the configured byte limit."));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+    await pipeline(
+      result.Body as NodeJS.ReadableStream,
+      limiter,
+      createWriteStream(params.destinationPath, { flags: "wx" }),
+      { signal: params.signal }
+    );
+    if (byteSize === 0 || (declaredLength !== null && byteSize !== declaredLength)) {
+      throw new Error("Object download was empty or truncated.");
+    }
+    return { byteSize };
+  }
+
+  async uploadFileImmutable(params: {
+    key: string;
+    sourcePath: string;
+    contentType: string;
+    contentLength: number;
+    signal?: AbortSignal;
+  }): Promise<TrainingContentStoredObject> {
+    const key = normalizeObjectKey(params.key);
+    const contentLength = requirePositiveInteger(params.contentLength, "Upload content length");
+    const sourceStat = await stat(params.sourcePath);
+    if (!sourceStat.isFile() || sourceStat.size !== contentLength) {
+      throw new Error("Local upload candidate size does not match the declared content length.");
+    }
+    try {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Body: createReadStream(params.sourcePath),
+          ContentType: params.contentType,
+          ContentLength: contentLength,
+          IfNoneMatch: "*",
+        }),
+        { abortSignal: params.signal }
+      );
+    } catch (error) {
+      if (!isPreconditionFailedError(error)) {
+        throw error;
+      }
+      // A previous verified attempt already published this immutable object key.
+    }
+    const stored = await this.headObject(key, params.signal);
+    if (!stored || stored.byteSize !== contentLength) {
+      throw new Error("Object storage did not confirm the immutable upload.");
+    }
+    return stored;
+  }
+
+  async copyObject(params: {
+    sourceKey: string;
+    destinationKey: string;
+    signal?: AbortSignal;
+  }): Promise<void> {
     const sourceKey = normalizeObjectKey(params.sourceKey);
     const destinationKey = normalizeObjectKey(params.destinationKey);
     const command = new CopyObjectCommand({
@@ -251,7 +372,7 @@ export class R2TrainingContentObjectStorage implements TrainingContentObjectStor
       }
     );
     try {
-      await this.client.send(command);
+      await this.client.send(command, { abortSignal: params.signal });
     } catch (error) {
       if (!isPreconditionFailedError(error)) {
         throw error;

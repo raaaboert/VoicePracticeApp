@@ -51,6 +51,7 @@ import {
   isUploadedTrainingContentType,
   mergeTrainingContentTargets,
   trainingContentDeclaredMimeType,
+  trainingContentUploadFinalizationMessage,
   trainingContentStatusLabel,
   trainingContentTypeLabel,
   validateTrainingContentFileSelection,
@@ -515,7 +516,7 @@ export function TrainingContentEditor({
         selectedFile,
         setUploadProgress
       );
-      await fetchAdminApiJson<DashboardTrainingContentAssetFinalizationResponse>(
+      const finalized = await fetchAdminApiJson<DashboardTrainingContentAssetFinalizationResponse>(
         withOrg(
           `/api/admin/training-content/${encodeURIComponent(item.id)}/assets/${encodeURIComponent(initiated.asset.id)}/finalize`,
           orgId
@@ -526,7 +527,10 @@ export function TrainingContentEditor({
       setPendingUpload(null);
       setSelectedFile(null);
       setUploadProgress(0);
-      setMessage(replacing ? "Replacement file is ready." : "File is ready.");
+      setMessage(trainingContentUploadFinalizationMessage({
+        uploadState: finalized.asset.uploadState,
+        replacing,
+      }));
     } catch (caught) {
       if (
         (

@@ -1,4 +1,5 @@
 import type {
+  TrainingContentAssetUploadState,
   DashboardTrainingContentTarget,
   TrainingContentFileLimitsBytes,
   TrainingContentPublicationState,
@@ -75,6 +76,18 @@ export function trainingContentStatusLabel(
   status: TrainingContentPublicationState
 ): string {
   return STATUS_LABELS[status];
+}
+
+export function trainingContentUploadFinalizationMessage(params: {
+  uploadState: TrainingContentAssetUploadState;
+  replacing: boolean;
+}): string {
+  if (params.uploadState === "processing") {
+    return params.replacing
+      ? "Replacement video uploaded. Processing is in progress."
+      : "Video uploaded. Processing is in progress.";
+  }
+  return params.replacing ? "Replacement file is ready." : "File is ready.";
 }
 
 export function trainingContentOrgQuery(orgId: string | null): string {

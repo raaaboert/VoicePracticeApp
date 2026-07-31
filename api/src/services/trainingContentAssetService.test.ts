@@ -29,6 +29,14 @@ import { loadTrainingContentStorageConfig } from "../trainingContentStorageConfi
 
 const NOW = new Date("2026-07-28T12:00:00.000Z");
 const PDF_BYTES = Buffer.from("%PDF-1.7", "ascii");
+const MP4_BYTES = (() => {
+  const bytes = Buffer.alloc(24);
+  bytes.writeUInt32BE(bytes.byteLength, 0);
+  bytes.write("ftyp", 4, "ascii");
+  bytes.write("isom", 8, "ascii");
+  bytes.write("isom", 16, "ascii");
+  return bytes;
+})();
 
 function buildContent(overrides: Partial<TrainingContentItem> = {}): TrainingContentItem {
   return {
@@ -129,6 +137,11 @@ class FakeAssetStore implements TrainingContentAssetStore {
       ).toISOString(),
       finalizationNonce,
       finalizationStartedAt: null,
+      processingAttemptCount: 0,
+      processingLeaseToken: null,
+      processingLeaseExpiresAt: null,
+      processingNextAttemptAt: null,
+      processingErrorCategory: null,
       replacementForAssetId: input.replacementAssetId,
       isCurrent: false,
       cleanupPending: false,
@@ -200,6 +213,53 @@ class FakeAssetStore implements TrainingContentAssetStore {
     return { status: "claimed", asset: clone(asset), recovered };
   }
 
+  async queueVideoProcessing(params: any): Promise<any> {
+    const asset = this.requireAsset(params.assetId);
+    if (asset.uploadState === "ready") {
+      return { status: "ready", asset: clone(asset) };
+    }
+    if (["rejected", "expired", "superseded"].includes(asset.uploadState)) {
+      return { status: "terminal", asset: clone(asset) };
+    }
+    if (asset.uploadState !== "processing") {
+      asset.uploadState = "processing";
+      asset.finalObjectKey ??= createTrainingContentFinalObjectKey({
+        orgId: asset.orgId,
+        contentId: asset.contentId,
+        assetRole: asset.assetRole,
+        version: asset.version,
+        finalizationNonce: asset.finalizationNonce!,
+      });
+      asset.byteSize = params.actualByteSize;
+      asset.detectedMimeType = params.detectedMimeType;
+      asset.checksumOrEtag = params.checksumOrEtag;
+      asset.updatedAt = (params.now ?? NOW).toISOString();
+    }
+    return { status: "queued", asset: clone(asset) };
+  }
+
+  async claimNextVideoProcessing(): Promise<any> {
+    return null;
+  }
+
+  async rejectExhaustedVideoProcessing() {
+    return 0;
+  }
+
+  async recordVideoProcessingFailure(params: any) {
+    const asset = this.requireAsset(params.assetId);
+    asset.processingLeaseToken = null;
+    asset.processingLeaseExpiresAt = null;
+    asset.processingNextAttemptAt = params.retryAt?.toISOString() ?? null;
+    asset.processingErrorCategory = params.errorCategory;
+    if (!params.retryAt) {
+      asset.uploadState = "rejected";
+      asset.rejectionReasonCategory = `video_processing_${params.errorCategory}`;
+      asset.cleanupPending = true;
+    }
+    return clone(asset);
+  }
+
   async completeFinalization(params: any) {
     if (this.failCompleteOnce) {
       this.failCompleteOnce = false;
@@ -221,6 +281,10 @@ class FakeAssetStore implements TrainingContentAssetStore {
     asset.uploadState = "ready";
     asset.isCurrent = true;
     asset.finalizationStartedAt = null;
+    asset.processingLeaseToken = null;
+    asset.processingLeaseExpiresAt = null;
+    asset.processingNextAttemptAt = null;
+    asset.processingErrorCategory = null;
     asset.finalizedAt = (params.now ?? NOW).toISOString();
     asset.byteSize = params.actualByteSize;
     asset.detectedMimeType = params.detectedMimeType;
@@ -350,6 +414,14 @@ class FakeObjectStorage implements TrainingContentObjectStorage {
     return object.bytes.slice(0, maximumBytes);
   }
 
+  async downloadObjectToFile(): Promise<{ byteSize: number }> {
+    throw new Error("not used");
+  }
+
+  async uploadFileImmutable(): Promise<TrainingContentStoredObject> {
+    throw new Error("not used");
+  }
+
   async copyObject(params: any) {
     const source = this.objects.get(params.sourceKey);
     if (!source) {
@@ -445,6 +517,18 @@ async function initiatePdf(harness: ReturnType<typeof buildHarness>, replacement
     declaredMimeType: "application/pdf",
     declaredByteSize: PDF_BYTES.byteLength,
     replacementAssetId,
+    now: NOW,
+  });
+}
+
+async function initiateVideo(harness: ReturnType<typeof buildHarness>) {
+  return harness.service.initiateUpload({
+    context: ORG_ADMIN_CONTEXT,
+    contentId: buildContent({ contentType: "video" }).id,
+    assetRole: "primary",
+    originalFilename: "coaching.mp4",
+    declaredMimeType: "video/mp4",
+    declaredByteSize: MP4_BYTES.byteLength,
     now: NOW,
   });
 }
@@ -566,6 +650,37 @@ test("finalization validates both temporary and final objects and commits ready 
   assert.equal(auditJson.includes("ObjectKey"), false);
   assert.equal(auditJson.includes("https://"), false);
   assert.equal(auditJson.includes("reference.pdf"), false);
+});
+
+test("video finalization queues durable processing without copying or publishing in the HTTP request", async () => {
+  const content = buildContent({ contentType: "video", title: "Coaching video" });
+  const harness = buildHarness({ content });
+  const initiated = await initiateVideo(harness);
+  putInitiatedUpload(harness, initiated.asset.id, MP4_BYTES, "video/mp4");
+
+  const finalized = await harness.service.finalizeUpload({
+    context: ORG_ADMIN_CONTEXT,
+    contentId: content.id,
+    assetId: initiated.asset.id,
+    now: NOW,
+  });
+
+  assert.equal(finalized.asset.uploadState, "processing");
+  assert.equal(finalized.asset.isCurrent, false);
+  assert.equal(harness.objectStorage.copyCount, 0);
+  const stored = harness.assetStore.assets.get(initiated.asset.id)!;
+  assert.equal(stored.uploadState, "processing");
+  assert.equal(Boolean(stored.temporaryObjectKey), true);
+  assert.equal(Boolean(stored.finalObjectKey), true);
+  assert.equal(await harness.objectStorage.headObject(stored.finalObjectKey!), null);
+
+  const status = await harness.service.getUploadStatus({
+    context: ORG_ADMIN_CONTEXT,
+    contentId: content.id,
+    assetId: initiated.asset.id,
+  });
+  assert.equal(status.asset.uploadState, "processing");
+  assert.equal(status.asset.processingAttemptCount, 0);
 });
 
 test("actual size, MIME, and magic-byte mismatches reject the upload without serving it", async () => {

@@ -51,6 +51,10 @@ export interface TrainingContentAssetPublicRecord {
   byteSize: number | null;
   checksumOrEtag: string | null;
   uploadExpiresAt: string | null;
+  processingAttemptCount?: number;
+  processingNextAttemptAt?: string | null;
+  processingErrorCategory?: string | null;
+  rejectionReasonCategory?: string | null;
   finalizedAt: string | null;
   supersededAt: string | null;
   replacementForAssetId: string | null;
@@ -111,6 +115,11 @@ export interface TrainingContentAssetService {
     contentId: string;
     assetId: string;
     now?: Date;
+  }): Promise<TrainingContentAssetFinalizationResponse>;
+  getUploadStatus(params: {
+    context: TrainingContentManagementRequestContext;
+    contentId: string;
+    assetId: string;
   }): Promise<TrainingContentAssetFinalizationResponse>;
   createAdminPreviewAccess(params: {
     context: TrainingContentManagementRequestContext;
@@ -333,6 +342,55 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
       fileKind: declaredFile.kind,
     });
 
+    if (content.contentType === "video") {
+      const source = await this.safeHeadObject(asset.temporaryObjectKey);
+      if (!source) {
+        throw new TrainingContentAssetServiceError(
+          "The uploaded object is not available yet.",
+          409,
+          "training_content_upload_not_found"
+        );
+      }
+      await this.validateStoredObjectOrReject({
+        asset,
+        object: source,
+        objectKey: asset.temporaryObjectKey,
+        declaredFile,
+        actor: buildActor(params.context),
+        now,
+        reasonPrefix: "temporary",
+      });
+      const queued = await this.dependencies.assetStore.queueVideoProcessing({
+        orgId: asset.orgId,
+        contentId: asset.contentId,
+        assetId: asset.id,
+        actualByteSize: source.byteSize,
+        detectedMimeType: declaredFile.mimeType,
+        checksumOrEtag: source.etag,
+        actor: buildActor(params.context),
+        now,
+      });
+      if (queued.status === "ready" || queued.status === "queued") {
+        return {
+          asset: toPublicAsset(queued.asset),
+          replacedAssetId: queued.asset.replacementForAssetId,
+        };
+      }
+      if (queued.status === "expired") {
+        throw new TrainingContentAssetServiceError(
+          "The upload URL has expired. Start a new upload.",
+          410,
+          "training_content_upload_expired"
+        );
+      }
+      throw new TrainingContentAssetServiceError(
+        "Training Content asset cannot be finalized from its current state.",
+        409,
+        "training_content_asset_state_conflict",
+        { uploadState: queued.asset.uploadState }
+      );
+    }
+
     let existingFinalObject: TrainingContentStoredObject | null = null;
     if (asset.uploadState === "processing" && asset.finalObjectKey) {
       existingFinalObject = await this.safeHeadObject(asset.finalObjectKey);
@@ -462,6 +520,43 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
     return {
       asset: toPublicAsset(refreshed ?? completed.asset),
       replacedAssetId: completed.replacedAsset?.id ?? null,
+    };
+  }
+
+  async getUploadStatus(params: {
+    context: TrainingContentManagementRequestContext;
+    contentId: string;
+    assetId: string;
+  }): Promise<TrainingContentAssetFinalizationResponse> {
+    await this.authorizeManagement(params.context);
+    const contentId = requiredId(params.contentId, "Content id");
+    const assetId = requiredId(params.assetId, "Asset id");
+    const content = await this.dependencies.assetStore.getContentItemForOrg(
+      params.context.orgId,
+      contentId
+    );
+    if (!content) {
+      throw new TrainingContentAssetServiceError(
+        "Training Content item was not found.",
+        404,
+        "training_content_not_found"
+      );
+    }
+    const asset = await this.dependencies.assetStore.getAssetForOrg(
+      params.context.orgId,
+      contentId,
+      assetId
+    );
+    if (!asset) {
+      throw new TrainingContentAssetServiceError(
+        "Training Content asset was not found.",
+        404,
+        "training_content_asset_not_found"
+      );
+    }
+    return {
+      asset: toPublicAsset(asset),
+      replacedAssetId: asset.replacementForAssetId,
     };
   }
 
@@ -713,6 +808,10 @@ function toPublicAsset(asset: TrainingContentAssetRecord): TrainingContentAssetP
     byteSize: asset.byteSize,
     checksumOrEtag: asset.checksumOrEtag,
     uploadExpiresAt: asset.uploadExpiresAt,
+    processingAttemptCount: asset.processingAttemptCount,
+    processingNextAttemptAt: asset.processingNextAttemptAt,
+    processingErrorCategory: asset.processingErrorCategory,
+    rejectionReasonCategory: asset.rejectionReasonCategory,
     finalizedAt: asset.finalizedAt,
     supersededAt: asset.supersededAt,
     replacementForAssetId: asset.replacementForAssetId,

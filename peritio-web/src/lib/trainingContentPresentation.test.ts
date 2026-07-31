@@ -11,6 +11,7 @@ import {
   mergeTrainingContentTargets,
   safeTrainingContentMarkdownUrl,
   trainingContentDeclaredMimeType,
+  trainingContentUploadFinalizationMessage,
   validateTrainingContentFileSelection,
 } from "./trainingContentPresentation";
 
@@ -59,6 +60,36 @@ test("Training Content file selection follows the effective API limits and allow
   assert.equal(
     trainingContentDeclaredMimeType("audio", { name: "briefing.m4a", type: "" }),
     "audio/mp4"
+  );
+});
+
+test("synchronously ready uploads retain the ready message", () => {
+  assert.equal(
+    trainingContentUploadFinalizationMessage({
+      uploadState: "ready",
+      replacing: false,
+    }),
+    "File is ready."
+  );
+});
+
+test("processing video uploads report processing instead of ready", () => {
+  assert.equal(
+    trainingContentUploadFinalizationMessage({
+      uploadState: "processing",
+      replacing: false,
+    }),
+    "Video uploaded. Processing is in progress."
+  );
+});
+
+test("processing replacement videos report processing instead of ready", () => {
+  assert.equal(
+    trainingContentUploadFinalizationMessage({
+      uploadState: "processing",
+      replacing: true,
+    }),
+    "Replacement video uploaded. Processing is in progress."
   );
 });
 

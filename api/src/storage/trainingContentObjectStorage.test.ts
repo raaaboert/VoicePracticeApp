@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import {
@@ -195,3 +199,68 @@ test("storage readiness exposes only structured availability and recovers on a l
   assert.equal(available.available, true);
   assert.equal(available.code, "storage_ready");
 });
+
+test("R2 adapter streams bounded downloads and conditionally uploads immutable local candidates", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "peritio-r2-test-"));
+  try {
+    const bytes = Buffer.from("bounded-video", "ascii");
+    const downloadPath = path.join(workspace, "download.mp4");
+    const uploadPath = path.join(workspace, "upload.mp4");
+    await writeFile(uploadPath, bytes, { flag: "wx" });
+    let uploadedBytes = Buffer.alloc(0);
+    let uploadedInput: any = null;
+    const storage = new R2TrainingContentObjectStorage(R2_CONFIG, {
+      client: {
+        async send(command: any) {
+          if (command.constructor.name === "GetObjectCommand") {
+            return {
+              ContentLength: bytes.byteLength,
+              Body: Readable.from([bytes]),
+            };
+          }
+          if (command.constructor.name === "PutObjectCommand") {
+            uploadedInput = command.input;
+            const chunks: Buffer[] = [];
+            for await (const chunk of command.input.Body) {
+              chunks.push(Buffer.from(chunk));
+            }
+            uploadedBytes = Buffer.concat(chunks);
+            return { ETag: "\"uploaded\"" };
+          }
+          if (command.constructor.name === "HeadObjectCommand") {
+            return {
+              ContentLength: bytes.byteLength,
+              ContentType: "video/mp4",
+              ETag: "\"uploaded\"",
+              LastModified: NOW_DATE,
+            };
+          }
+          throw new Error(`Unexpected command ${command.constructor.name}`);
+        },
+      },
+    });
+
+    const downloaded = await storage.downloadObjectToFile({
+      key: "tmp/org/content/asset/nonce",
+      destinationPath: downloadPath,
+      maximumBytes: 1024,
+    });
+    assert.equal(downloaded.byteSize, bytes.byteLength);
+    assert.deepEqual(await readFile(downloadPath), bytes);
+
+    const uploaded = await storage.uploadFileImmutable({
+      key: "objects/org/content/primary/1/nonce",
+      sourcePath: uploadPath,
+      contentType: "video/mp4",
+      contentLength: bytes.byteLength,
+    });
+    assert.deepEqual(uploadedBytes, bytes);
+    assert.equal(uploadedInput.IfNoneMatch, "*");
+    assert.equal(uploadedInput.ContentLength, bytes.byteLength);
+    assert.equal(uploaded.byteSize, bytes.byteLength);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+const NOW_DATE = new Date("2026-07-28T00:00:00.000Z");

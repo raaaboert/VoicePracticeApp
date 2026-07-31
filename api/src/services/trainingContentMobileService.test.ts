@@ -240,6 +240,8 @@ class FakeObjectStorage implements TrainingContentObjectStorage {
   async headObject(): Promise<never> { throw new Error("not used"); }
   async readObjectRange(): Promise<never> { throw new Error("not used"); }
   async readObjectBytes(): Promise<never> { throw new Error("not used"); }
+  async downloadObjectToFile(): Promise<never> { throw new Error("not used"); }
+  async uploadFileImmutable(): Promise<never> { throw new Error("not used"); }
   async copyObject(): Promise<never> { throw new Error("not used"); }
   async deleteObject(): Promise<never> { throw new Error("not used"); }
   async listObjects(): Promise<never> { throw new Error("not used"); }

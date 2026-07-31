@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:video-worker": "tsx watch src/videoProcessingWorker.ts",
     "build": "tsc -p tsconfig.json && node ./scripts/copy-sql.mjs",
     "start": "node dist/index.js",
+    "start:video-worker": "node dist/videoProcessingWorker.js",
     "seed:dashboard-local": "node ./scripts/seed-dashboard-local.mjs",
     "db:sanitize-bootstrap": "tsx ./scripts/sanitize-bootstrap.ts",
     "force:mobile-reonboarding": "tsx ./scripts/force-mobile-reonboarding.ts",

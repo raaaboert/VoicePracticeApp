@@ -987,6 +987,34 @@ before(async () => {
         replacedAssetId: null,
       };
     },
+    async getUploadStatus(params) {
+      trainingContentAssetRouteCalls.push({ method: "status", params });
+      return {
+        asset: {
+          id: params.assetId,
+          contentId: params.contentId,
+          assetRole: "primary",
+          version: 1,
+          uploadState: "ready",
+          originalFilename: "reference.pdf",
+          declaredMimeType: "application/pdf",
+          detectedMimeType: "application/pdf",
+          fileExtension: "pdf",
+          declaredByteSize: 8,
+          byteSize: 8,
+          checksumOrEtag: "\"etag\"",
+          uploadExpiresAt: null,
+          finalizedAt: NOW,
+          supersededAt: null,
+          replacementForAssetId: null,
+          isCurrent: true,
+          cleanupPending: false,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+        replacedAssetId: null,
+      };
+    },
     async createAdminPreviewAccess(params) {
       trainingContentAssetRouteCalls.push({ method: "access", params });
       return {
@@ -1423,6 +1451,14 @@ test("Training Content asset routes derive tenant and actor, require explicit su
   );
   assert.equal(finalized.status, 200);
   assert.equal(trainingContentAssetRouteCalls.at(-1)?.method, "finalize");
+  assert.equal(trainingContentAssetRouteCalls.at(-1)?.params.context.orgId, "org_1");
+
+  const status = await dashboardRequest(
+    `/dashboard/admin/training-content/${contentId}/assets/${assetId}`,
+    orgAdminToken
+  );
+  assert.equal(status.status, 200);
+  assert.equal(trainingContentAssetRouteCalls.at(-1)?.method, "status");
   assert.equal(trainingContentAssetRouteCalls.at(-1)?.params.context.orgId, "org_1");
 
   const access = await dashboardRequest(

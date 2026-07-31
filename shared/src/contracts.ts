@@ -262,6 +262,10 @@ export interface DashboardTrainingContentAsset {
   declaredByteSize: number | null;
   byteSize: number | null;
   uploadExpiresAt: string | null;
+  processingAttemptCount?: number;
+  processingNextAttemptAt?: string | null;
+  processingErrorCategory?: string | null;
+  rejectionReasonCategory?: string | null;
   finalizedAt: string | null;
   supersededAt: string | null;
   replacementForAssetId: string | null;
