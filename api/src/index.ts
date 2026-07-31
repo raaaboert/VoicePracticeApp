@@ -196,7 +196,10 @@ import {
   requestSpeechSynthesis,
   requestTranscription
 } from "./openaiClient.js";
-import { resolveSimulationRequestConfig } from "./openaiModelConfig.js";
+import {
+  buildOpenAiRoutingStartupLogLines,
+  resolveSimulationRequestConfig,
+} from "./openaiModelConfig.js";
 import type { OpenAiCompletionApiFamily, SimulationRoute } from "./openaiModelConfig.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
@@ -439,6 +442,10 @@ const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
 const OPENAI_SIMULATION_MODEL = OPENAI_MODEL_CONFIG.simulation.model;
 const OPENAI_SCORING_MODEL = OPENAI_MODEL_CONFIG.scoring.model;
 const OPENAI_TRANSCRIPTION_MODEL = OPENAI_MODEL_CONFIG.transcription.model;
+for (const line of buildOpenAiRoutingStartupLogLines(OPENAI_MODEL_CONFIG)) {
+  // eslint-disable-next-line no-console
+  console.log(line);
+}
 const ENABLE_REMOTE_TTS = runtimeConfig.enableRemoteTts;
 const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
 const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;

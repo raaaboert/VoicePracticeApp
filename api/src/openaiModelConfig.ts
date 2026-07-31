@@ -270,3 +270,21 @@ export function resolveSimulationRequestConfig(
     reasoningEffort: config.simulation.routes[route].reasoningEffort,
   };
 }
+
+export function buildOpenAiRoutingStartupLogLines(config: OpenAiModelConfig): [string, string] {
+  const opening = resolveSimulationRequestConfig(config, "opening");
+  const turn = resolveSimulationRequestConfig(config, "turn");
+  const score = resolveSimulationRequestConfig(config, "score");
+  const simulationReasoning = opening.reasoningEffort === turn.reasoningEffort
+    ? formatReasoningEffort(opening.reasoningEffort)
+    : `opening:${formatReasoningEffort(opening.reasoningEffort)},turn:${formatReasoningEffort(turn.reasoningEffort)}`;
+
+  return [
+    `[openai-routing] simulation model=${opening.model} api=${opening.apiFamily} reasoning=${simulationReasoning}`,
+    `[openai-routing] scoring model=${score.model} api=${score.apiFamily} reasoning=${formatReasoningEffort(score.reasoningEffort)}`,
+  ];
+}
+
+function formatReasoningEffort(value: OpenAiReasoningEffort | null): string {
+  return value ?? "default";
+}

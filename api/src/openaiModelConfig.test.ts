@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildOpenAiRoutingStartupLogLines,
   loadOpenAiModelConfig,
   resolveSimulationRequestConfig,
 } from "./openaiModelConfig.js";
@@ -214,6 +215,38 @@ test("explicit scoring config wins without leaking into opening or live turns", 
     maxOutputTokens: 1200,
     reasoningEffort: "medium",
   });
+});
+
+test("startup observability logs only the resolved non-secret routing values", () => {
+  const config = loadOpenAiModelConfig({
+    OPENAI_API_KEY: "must-not-appear",
+    OPENAI_SIMULATION_MODEL: "gpt-5.6-luna",
+    OPENAI_SIMULATION_API_FAMILY: "responses",
+    OPENAI_SIMULATION_REASONING_EFFORT: "low",
+    OPENAI_SCORING_MODEL: "gpt-5.6-terra",
+    OPENAI_SCORING_API_FAMILY: "responses",
+    OPENAI_SCORING_REASONING_EFFORT: "medium",
+  });
+
+  const lines = buildOpenAiRoutingStartupLogLines(config);
+
+  assert.deepEqual(lines, [
+    "[openai-routing] simulation model=gpt-5.6-luna api=responses reasoning=low",
+    "[openai-routing] scoring model=gpt-5.6-terra api=responses reasoning=medium",
+  ]);
+  assert.equal(lines.join("\n").includes("must-not-appear"), false);
+});
+
+test("startup observability reports divergent legacy live reasoning without hiding either value", () => {
+  const config = loadOpenAiModelConfig({
+    OPENAI_SIMULATION_OPENING_REASONING_EFFORT: "none",
+    OPENAI_SIMULATION_TURN_REASONING_EFFORT: "low",
+  });
+
+  assert.equal(
+    buildOpenAiRoutingStartupLogLines(config)[0],
+    "[openai-routing] simulation model=gpt-5.4 api=responses reasoning=opening:none,turn:low"
+  );
 });
 
 test("rejects invalid explicit OpenAI configuration", () => {
