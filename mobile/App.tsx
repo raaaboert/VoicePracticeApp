@@ -84,6 +84,7 @@ import {
 } from "./src/lib/simulationScoreHandling";
 import { createSimulationCorrelationId } from "./src/lib/simulationInteractionModel";
 import { shouldBlockForMissingAuthenticatedScopedConfig } from "./src/lib/scopedConfigGuard";
+import { isOrganizationAccessRequiredError } from "./src/lib/apiError";
 import {
   getLongPollFailureReportDecision,
   getMissingUsageRecordFields,
@@ -94,7 +95,7 @@ import {
   canStartMobileUpdates,
   isCompanyCodeRequiredForSetup,
   resolveMobileSetupStep,
-  shouldShowOrgRequestPendingScreen,
+  shouldShowCompanyAccessScreen,
 } from "./src/lib/onboardingState";
 import {
   speakWithRemoteTtsFallback,
@@ -124,6 +125,7 @@ import { ScorecardView } from "./src/screens/ScorecardView";
 import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
+import { confirmAndOpenExternalLink } from "./src/trainingContent/externalLinks";
 import { fetchMobileModules } from "./src/trainingContent/api";
 import {
   canRequestTrainingContentModule,
@@ -2213,6 +2215,14 @@ export default function App() {
         return;
       }
 
+      if (shouldShowCompanyAccessScreen(userPayload)) {
+        setEntitlements(null);
+        setOrgRequestError(null);
+        setOrgRequestNotice(null);
+        setScreen("domain_match");
+        return;
+      }
+
       const entitlementsPayload = await fetchEntitlements(storedUserId, storedMobileToken);
       setEntitlements(entitlementsPayload);
       const scopedConfigLoaded = await loadAuthenticatedScopedConfig(userPayload, storedMobileToken, {
@@ -2224,6 +2234,14 @@ export default function App() {
       }
       setScreen("home");
     } catch (caught) {
+      if (isOrganizationAccessRequiredError(caught) && hadStoredSession) {
+        setEntitlements(null);
+        setAppError(null);
+        setOrgRequestError(null);
+        setOrgRequestNotice(null);
+        setScreen("domain_match");
+        return;
+      }
       const message = getErrorMessage(caught, "Could not initialize app.");
       const lower = message.toLowerCase();
       const shouldResetSession =
@@ -2427,6 +2445,15 @@ export default function App() {
       setVerificationNotice("Verify your email to continue.");
       setVerificationError(null);
       setScreen("verify_email");
+      return;
+    }
+
+    if (shouldShowCompanyAccessScreen(user)) {
+      if (screen !== "domain_match") {
+        setOrgRequestError(null);
+        setScreen("domain_match");
+      }
+      return;
     }
   }, [screen, user]);
 
@@ -2607,6 +2634,18 @@ export default function App() {
         return;
       }
 
+      if (shouldShowCompanyAccessScreen(onboarded.user)) {
+        setEntitlements(null);
+        setOrgRequestError(null);
+        setOrgRequestNotice(
+          companyCode
+            ? "Request submitted. Your organization administrator can approve your membership."
+            : null,
+        );
+        setScreen("domain_match");
+        return;
+      }
+
       const nextEntitlements = await fetchEntitlements(onboarded.user.id, onboarded.authToken);
       setEntitlements(nextEntitlements);
       const scopedConfigLoaded = await loadAuthenticatedScopedConfig(onboarded.user, onboarded.authToken, {
@@ -2616,12 +2655,7 @@ export default function App() {
       if (!scopedConfigLoaded) {
         return;
       }
-      if (shouldShowOrgRequestPendingScreen(companyCode, onboarded.user)) {
-        setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
-        setScreen("domain_match");
-      } else {
-        setScreen("home");
-      }
+      setScreen("home");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not complete onboarding.");
       setOnboardingError(message);
@@ -2684,6 +2718,18 @@ export default function App() {
         return;
       }
 
+      if (shouldShowCompanyAccessScreen(payload.user)) {
+        setEntitlements(null);
+        setOrgRequestError(null);
+        setOrgRequestNotice(
+          companyCode
+            ? "Request submitted. Your organization administrator can approve your membership."
+            : null,
+        );
+        setScreen("domain_match");
+        return;
+      }
+
       const nextEntitlements = await fetchEntitlements(payload.user.id, payload.authToken);
       setEntitlements(nextEntitlements);
       const scopedConfigLoaded = await loadAuthenticatedScopedConfig(payload.user, payload.authToken, {
@@ -2694,12 +2740,7 @@ export default function App() {
         return;
       }
 
-      if (shouldShowOrgRequestPendingScreen(companyCode, payload.user)) {
-        setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
-        setScreen("domain_match");
-      } else {
-        setScreen("home");
-      }
+      setScreen("home");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not verify email.");
       setVerificationError(message);
@@ -3032,6 +3073,12 @@ export default function App() {
     try {
       const latestEntitlements = await refreshEntitlements();
       if (latestEntitlements && !latestEntitlements.canStartSimulation) {
+        if (latestEntitlements.lockCode === "ORG_ACCESS_REQUIRED") {
+          setOrgRequestError(null);
+          setOrgRequestNotice("Enter your organization access code to continue with Peritio AI.");
+          setScreen("domain_match");
+          return;
+        }
         throw new Error(latestEntitlements.lockReason || "Time allotment reached.");
       }
 
@@ -3073,6 +3120,13 @@ export default function App() {
       setScorecardDiagnostics(null);
       setScreen("simulation");
     } catch (caught) {
+      if (isOrganizationAccessRequiredError(caught)) {
+        setSetupError(null);
+        setOrgRequestError(null);
+        setOrgRequestNotice("Enter your organization access code to continue with Peritio AI.");
+        setScreen("domain_match");
+        return;
+      }
       const message = getErrorMessage(caught, "Could not start simulation.");
       setSetupError(message);
       void submitAutoErrorReport("simulation.start", caught, {
@@ -3925,12 +3979,12 @@ export default function App() {
       ? "Verify & Confirm Profile"
       : hasCompanyCode
         ? "Verify & Request Access"
-        : "Verify & Continue Free";
+        : "Verify Email";
 
     return (
       <KeyboardAvoidingView
         style={styles.fill}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={20}
       >
         <View style={styles.topRow}>
@@ -3938,12 +3992,17 @@ export default function App() {
           <Text style={styles.topTitle}>{user ? "Profile Confirmation" : "Profile Setup"}</Text>
           <View style={styles.spacer} />
         </View>
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[styles.scrollContent, styles.companyCodeScrollContent]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        >
           <View style={styles.card}>
             <Text style={styles.title}>{title}</Text>
             <Text style={styles.body}>
-              First name and last name are required. Company code is optional for free users; enter one to request
-              organization access after email verification. Organization access still requires admin approval.
+              Peritio is built for organizations and their teams. Complete your profile and enter your company code if
+              your organization provided one. Organization access requires administrator approval.
               {"\n"}
               Autodetected timezone: {detectedTimezone}
               {"\n"}
@@ -3977,7 +4036,7 @@ export default function App() {
             <TextInput
               value={onboardingCompanyCode}
               onChangeText={setOnboardingCompanyCode}
-              placeholder={requiresCompanyCode ? "Company code required" : "Company code (optional)"}
+              placeholder={requiresCompanyCode ? "Company code required" : "Company code"}
               placeholderTextColor={theme.hint}
               autoCapitalize="characters"
               style={styles.input}
@@ -3996,17 +4055,17 @@ export default function App() {
               </Pressable>
             ) : null}
             {onboardingError ? <Text style={styles.errorText}>{onboardingError}</Text> : null}
+            <Pressable
+              style={[styles.primaryButton, isOnboardingSaving ? styles.disabled : null]}
+              disabled={isOnboardingSaving}
+              onPress={() => {
+                void runOnboarding();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>{isOnboardingSaving ? "Saving..." : continueLabel}</Text>
+            </Pressable>
           </View>
         </ScrollView>
-        <Pressable
-          style={[styles.primaryButton, isOnboardingSaving ? styles.disabled : null]}
-          disabled={isOnboardingSaving}
-          onPress={() => {
-            void runOnboarding();
-          }}
-        >
-          <Text style={styles.primaryButtonText}>{isOnboardingSaving ? "Saving..." : continueLabel}</Text>
-        </Pressable>
       </KeyboardAvoidingView>
     );
   };
@@ -4036,8 +4095,8 @@ export default function App() {
             <Text style={styles.body}>
               We sent a 6-digit email code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
               {"\n"}
-              First and last name are required. Company code is optional for free users and still requires admin approval
-              for organization access.
+              First and last name are required. Enter your company code if your organization provided one. Membership
+              still requires administrator approval.
               {"\n"}
               {verificationExpiresAt
                 ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
@@ -4062,7 +4121,7 @@ export default function App() {
             <TextInput
               value={onboardingCompanyCode}
               onChangeText={setOnboardingCompanyCode}
-              placeholder={requiresCompanyCode ? "Company code required" : "Company code (optional)"}
+              placeholder={requiresCompanyCode ? "Company code required" : "Company code"}
               placeholderTextColor={theme.hint}
               autoCapitalize="characters"
               style={styles.input}
@@ -4114,23 +4173,27 @@ export default function App() {
   const renderDomainMatch = () => (
     <KeyboardAvoidingView
       style={styles.fill}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
       keyboardVerticalOffset={20}
     >
       <View style={styles.topRow}>
-        <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
-          <Text style={styles.ghostButtonText}>Skip</Text>
-        </Pressable>
+        <View style={styles.spacer} />
         <Text style={styles.topTitle}>Company Access</Text>
         <View style={styles.spacer} />
       </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.scrollContent, styles.companyCodeScrollContent]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+      >
         <View style={styles.card}>
           <Text style={styles.title}>Enter Company Code</Text>
           <Text style={styles.body}>
-            Enter the company code from your organization admin to request membership. The code identifies the company,
-            but access is only granted after an administrator approves your request. Dashboard access, if you need it
-            later, is enabled separately by your admin.
+            Peritio is built for organizations and their teams.
+            {"\n\n"}
+            If your organization has provided you with an access code, enter it below to get started. Access is granted
+            after an administrator approves your request.
           </Text>
           <TextInput
             value={orgJoinCodeInput}
@@ -4151,9 +4214,21 @@ export default function App() {
           >
             <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Membership"}</Text>
           </Pressable>
-          <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
-            <Text style={styles.ghostButtonText}>Continue Without Company</Text>
-          </Pressable>
+          <View style={styles.companyInterestBlock}>
+            <Text style={styles.body}>Interested in Peritio for your organization?</Text>
+            <Pressable
+              style={styles.linkButton}
+              onPress={() => {
+                confirmAndOpenExternalLink("https://peritio.ai", {
+                  confirmationTitle: "Visit Peritio.ai",
+                  confirmationMessage: "Open Peritio.ai in your browser?",
+                  onError: setOrgRequestError,
+                });
+              }}
+            >
+              <Text style={styles.linkButtonText}>Learn more at Peritio.ai</Text>
+            </Pressable>
+          </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -5958,6 +6033,13 @@ export default function App() {
           colorScheme={colorScheme}
           userId={user.id}
           authToken={mobileAuthToken}
+          onOrganizationAccessRequired={() => {
+            setSimulationConfig(null);
+            setSetupError(null);
+            setOrgRequestError(null);
+            setOrgRequestNotice("Enter your organization access code to continue with Peritio AI.");
+            setScreen("domain_match");
+          }}
           onExit={(message) => {
             setSimulationConfig(null);
             setSetupError(message ?? null);
@@ -6206,7 +6288,8 @@ function createStyles(theme: ThemeTokens) {
     scroll: { flex: 1 },
     scrollContent: { paddingBottom: 24 },
     verifyEmailScrollContent: { flexGrow: 1, paddingBottom: 48 },
-    setupScrollContent: { paddingBottom: 14 },
+    companyCodeScrollContent: { flexGrow: 1, paddingBottom: 48 },
+    companyInterestBlock: { gap: 6, marginTop: 8 },
     ghostButton: { minWidth: 84, height: 38, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.ghostButtonBg },
     ghostButtonText: { color: theme.text, fontSize: 14, fontWeight: "700" },
     menuButton: { width: 84, height: 38, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.ghostButtonBg },

@@ -320,6 +320,21 @@ async function main() {
       throw new Error("Verify response missing mobile auth token.");
     }
 
+    log("Confirming paid AI remains locked before organization approval...");
+    const preApprovalEntitlements = await apiRequest(
+      baseUrl,
+      `/mobile/users/${encodeURIComponent(userId)}/entitlements`,
+      { mobileToken },
+    );
+    if (preApprovalEntitlements?.canStartSimulation !== false) {
+      throw new Error("Expected paid AI access to remain disabled before organization approval.");
+    }
+    if (preApprovalEntitlements?.lockCode !== "ORG_ACCESS_REQUIRED") {
+      throw new Error(
+        `Expected lockCode=ORG_ACCESS_REQUIRED, received ${preApprovalEntitlements?.lockCode ?? "null"}.`,
+      );
+    }
+
     log("Submitting org join request...");
     const joinRequest = await apiRequest(baseUrl, `/mobile/users/${encodeURIComponent(userId)}/org-access-requests`, {
       method: "POST",
@@ -354,6 +369,17 @@ async function main() {
     }
     if (enterpriseUser?.orgRole !== "org_admin") {
       throw new Error(`Expected orgRole=org_admin, received ${enterpriseUser?.orgRole ?? "unknown"}.`);
+    }
+
+    const approvedEntitlements = await apiRequest(
+      baseUrl,
+      `/mobile/users/${encodeURIComponent(userId)}/entitlements`,
+      { mobileToken },
+    );
+    if (approvedEntitlements?.canStartSimulation !== true) {
+      throw new Error(
+        `Expected approved organization member to have paid AI access, received ${approvedEntitlements?.lockReason ?? "locked"}.`,
+      );
     }
 
     log("Checking audit trail contains key events...");

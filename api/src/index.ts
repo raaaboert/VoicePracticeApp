@@ -212,6 +212,10 @@ import { createSupportCaseStore } from "./storage/supportCaseStore.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import {
+  ORG_ACCESS_REQUIRED_CODE,
+  resolveMobilePaidAiOrganizationAccess,
+} from "./services/mobileAiAccessPolicy.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
 import {
@@ -1568,8 +1572,10 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       correlationId: params.correlationId,
       stage: "speech_prefetch_skipped",
       reason: "first_chunk_too_large",
+      fullResponseChars: trimmedText.length,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
+      chunkChars: chunks.map((chunk) => chunk.length),
     });
     return null;
   }
@@ -1587,8 +1593,10 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
     speed: ttsConfig.speed,
     instructionsIncluded: ttsConfig.instructionsIncluded,
     responseFormat: ttsConfig.responseFormat,
+    fullResponseChars: trimmedText.length,
     firstChunkChars: firstChunk.length,
     chunkCount: chunks.length,
+    chunkChars: chunks.map((chunk) => chunk.length),
   });
 
   try {
@@ -1614,8 +1622,10 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       speed: ttsConfig.speed,
       instructionsIncluded: ttsConfig.instructionsIncluded,
       responseFormat: ttsConfig.responseFormat,
+      fullResponseChars: trimmedText.length,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
+      chunkChars: chunks.map((chunk) => chunk.length),
       bytes: ttsResult.audioBuffer.byteLength,
       ttsLatencyMs,
     });
@@ -5232,7 +5242,10 @@ function resolveMobileAccessContext(
     const requestedOrgId = getIncomingSuperUserOrgId(request);
     if (!requestedOrgId) {
       if (options?.requireSuperUserOrgSelection === true) {
-        response.status(400).json({ error: "Select an enterprise account environment first." });
+        response.status(400).json({
+          error: "Select an enterprise account environment first.",
+          code: ORG_ACCESS_REQUIRED_CODE,
+        });
         return null;
       }
 
@@ -5261,7 +5274,10 @@ function resolveMobileAccessContext(
   if (user.accountType === "enterprise") {
     const actingOrg = getOrgById(db, user.orgId);
     if (!actingOrg || actingOrg.status !== "active") {
-      response.status(403).json({ error: "Enterprise account is not active." });
+      response.status(403).json({
+        error: "Enterprise account is not active.",
+        code: ORG_ACCESS_REQUIRED_CODE,
+      });
       return null;
     }
 
@@ -9253,8 +9269,20 @@ function computeEntitlements(
   let userDailyOverageAllowed = false;
   let nextRenewalAt = computeNextRenewalAt(user.planAnchorAt, now);
   let lockReason: string | null = null;
+  let lockCode: UserEntitlementsResponse["lockCode"] = null;
+  const organizationAccess = resolveMobilePaidAiOrganizationAccess({
+    accountType: user.accountType,
+    userOrgId: user.orgId,
+    isSuperUser: isSuperUser(user),
+    actingOrg: org,
+  });
 
-  if (isSuperUser(user)) {
+  if (!organizationAccess.allowed) {
+    dailySecondsRemaining = 0;
+    lockReason = organizationAccess.reason;
+    lockCode = organizationAccess.code;
+    clearSimulationOrgMonthlyOverrunGrace(user.id);
+  } else if (isSuperUser(user)) {
     dailySecondsLimit = null;
     if (!org) {
       lockReason = "Select an enterprise account environment.";
@@ -9342,12 +9370,14 @@ function computeEntitlements(
 
   if (!user.emailVerifiedAt) {
     lockReason = "Email verification required.";
+    lockCode = null;
     dailySecondsRemaining = 0;
     clearSimulationOrgMonthlyOverrunGrace(user.id);
   }
 
   if (user.status !== "active") {
     lockReason = "User account is disabled.";
+    lockCode = null;
     dailySecondsRemaining = 0;
     clearSimulationOrgMonthlyOverrunGrace(user.id);
   }
@@ -9387,8 +9417,16 @@ function computeEntitlements(
       nextRenewalAt
     },
     canStartSimulation: user.status === "active" && !lockReason,
-    lockReason
+    lockReason,
+    lockCode,
   };
+}
+
+function respondWithEntitlementDenial(response: Response, entitlements: UserEntitlementsResponse): void {
+  response.status(403).json({
+    error: entitlements.lockReason ?? "Simulation unavailable.",
+    ...(entitlements.lockCode ? { code: entitlements.lockCode } : {}),
+  });
 }
 
 function pruneExpiredSimulationAiBudgetGrace(nowMs = Date.now()): void {
@@ -9414,6 +9452,13 @@ function activateSimulationAiBudgetGrace(userId: string, maxSimulationMinutes: n
     Math.max(1, baseMinutes + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES)
   );
   simulationAiBudgetGraceByUserId.set(userId, nowMs + graceMinutes * 60 * 1000);
+}
+
+export function setSimulationAiBudgetGraceForTest(userId: string, expiresAtMs: number): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setSimulationAiBudgetGraceForTest is only available in test.");
+  }
+  simulationAiBudgetGraceByUserId.set(userId, expiresAtMs);
 }
 
 function clearSimulationAiBudgetGrace(userId: string): void {
@@ -17046,7 +17091,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       actingOrgId: accessContext.actingOrgId
     });
     if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      respondWithEntitlementDenial(response, entitlements);
       return null;
     }
 
@@ -17267,7 +17312,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       actingOrgId: resolvedAccessContext.actingOrgId,
     });
     if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      respondWithEntitlementDenial(response, entitlements);
       return null;
     }
 
@@ -17888,7 +17933,10 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     }
     // eslint-disable-next-line no-console
     console.error("[tts-error]", payload);
-    response.status(params.status).json({ error: params.message });
+    response.status(params.status).json({
+      error: params.message,
+      ...(params.code ? { code: params.code } : {}),
+    });
   };
 
   if (!ENABLE_REMOTE_TTS) {
@@ -17977,7 +18025,8 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
     if (!entitlements.canStartSimulation) {
       respondWithTtsError({
         status: 403,
-        message: entitlements.lockReason ?? "Simulation unavailable."
+        message: entitlements.lockReason ?? "Simulation unavailable.",
+        code: entitlements.lockCode,
       });
       return null;
     }
@@ -18527,7 +18576,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
         actingOrgId: accessContext.actingOrgId,
       });
       if (!entitlements.canStartSimulation) {
-        response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+        respondWithEntitlementDenial(response, entitlements);
         return null;
       }
 
@@ -18872,7 +18921,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
         actingOrgId: accessContext.actingOrgId
       });
       if (!entitlements.canStartSimulation) {
-        response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+        respondWithEntitlementDenial(response, entitlements);
         return null;
       }
 
@@ -19216,7 +19265,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       actingOrgId: accessContext.actingOrgId
     });
     if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      respondWithEntitlementDenial(response, entitlements);
       return null;
     }
 
@@ -20987,7 +21036,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       actingOrgId: accessContext.actingOrgId,
     });
     if (!entitlements.canStartSimulation) {
-      response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+      respondWithEntitlementDenial(response, entitlements);
       return;
     }
 
@@ -21171,7 +21220,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
     });
     if (!entitlements.canStartSimulation) {
       if (!isQuotaLockReason(entitlements.lockReason)) {
-        response.status(403).json({ error: entitlements.lockReason ?? "Simulation unavailable." });
+        respondWithEntitlementDenial(response, entitlements);
         return;
       }
     }

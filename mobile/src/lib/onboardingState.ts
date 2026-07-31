@@ -95,6 +95,17 @@ export function buildMobileVerifyProfile(input: {
   return profile;
 }
 
-export function shouldShowOrgRequestPendingScreen(companyCode: string, user: UserProfile): boolean {
-  return Boolean(companyCode.trim() && user.accountType === "individual" && user.isSuperUser !== true);
+export function hasApprovedMobileOrganizationAccess(
+  user: Pick<UserProfile, "accountType" | "orgId" | "isSuperUser" | "status"> | null | undefined,
+): boolean {
+  return Boolean(
+    user?.isSuperUser === true
+      || (user?.status === "active" && user.accountType === "enterprise" && user.orgId),
+  );
+}
+
+export function shouldShowCompanyAccessScreen(
+  user: Pick<UserProfile, "accountType" | "orgId" | "isSuperUser" | "status"> | null | undefined,
+): boolean {
+  return Boolean(user && !hasApprovedMobileOrganizationAccess(user));
 }

@@ -7,10 +7,11 @@ import {
   buildMobileOnboardRequest,
   buildMobileVerifyProfile,
   canStartMobileUpdates,
+  hasApprovedMobileOrganizationAccess,
   hasCompleteMobileProfile,
   isCompanyCodeRequiredForSetup,
   resolveMobileSetupStep,
-  shouldShowOrgRequestPendingScreen,
+  shouldShowCompanyAccessScreen,
 } from "./onboardingState";
 
 const COMPLETE_USER = {
@@ -20,6 +21,7 @@ const COMPLETE_USER = {
   firstName: "Free",
   lastName: "User",
   accountType: "individual",
+  status: "active",
   isSuperUser: false,
   mobileProfileReonboardingRequired: false,
 } as UserProfile;
@@ -87,15 +89,22 @@ test("mobile onboarding payloads omit blank company code and trim provided value
   );
 });
 
-test("mobile onboarding only shows pending org access after an individual submitted a company code", () => {
-  assert.equal(shouldShowOrgRequestPendingScreen("", COMPLETE_USER), false);
-  assert.equal(shouldShowOrgRequestPendingScreen("ACME2026", COMPLETE_USER), true);
+test("verified individual and pending users remain in Company Access until enterprise approval", () => {
+  assert.equal(hasApprovedMobileOrganizationAccess(COMPLETE_USER), false);
+  assert.equal(shouldShowCompanyAccessScreen(COMPLETE_USER), true);
   assert.equal(
-    shouldShowOrgRequestPendingScreen("ACME2026", {
+    shouldShowCompanyAccessScreen({
       ...COMPLETE_USER,
       accountType: "enterprise",
       orgId: "org_1",
     } as UserProfile),
     false,
+  );
+  assert.equal(
+    hasApprovedMobileOrganizationAccess({
+      ...COMPLETE_USER,
+      isSuperUser: true,
+    } as UserProfile),
+    true,
   );
 });

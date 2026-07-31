@@ -43,6 +43,7 @@ let userAdminToken: string;
 let regularDashboardToken: string;
 let superToken: string;
 let adminToken: string | null = null;
+let setSimulationAiBudgetGraceForTest: (userId: string, expiresAtMs: number) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -461,6 +462,18 @@ function buildDatabase(): ApiDatabase {
         orgId: null,
         orgRole: "user",
       }),
+      buildUser("rejected_ai", "rejected-ai@gmail.com", {
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user",
+      }),
+      buildUser("inactive_org_user", "inactive@disabled.example", {
+        orgId: "org_disabled",
+      }),
+      buildUser("disabled_ai_user", "disabled-ai@acme.example", {
+        status: "disabled",
+      }),
       buildUser("gmail_invalid", "invalid.gmail@gmail.com", {
         accountType: "individual",
         tier: "free",
@@ -528,7 +541,15 @@ function buildDatabase(): ApiDatabase {
         contactEmail: "admin@other.example",
         emailDomain: "other.example",
         joinCode: "OTHER2026",
-      })
+      }),
+      buildOrg({
+        id: "org_disabled",
+        name: "Disabled Organization",
+        status: "disabled",
+        contactEmail: "admin@disabled.example",
+        emailDomain: "disabled.example",
+        joinCode: "DISABLED2026",
+      }),
     ],
     orgDivisions: [],
     orgTrainings: [
@@ -590,6 +611,11 @@ function buildDatabase(): ApiDatabase {
       buildMobileToken("reset_old_token", "token_before_reset"),
       buildMobileToken("reset_rate_limited", "token_reset_rate_limited"),
       buildMobileToken("disabled_resend", "token_disabled_resend"),
+      buildMobileToken("reject_user", "token_reject"),
+      buildMobileToken("rejected_ai", "token_rejected_ai"),
+      buildMobileToken("inactive_org_user", "token_inactive_org"),
+      buildMobileToken("disabled_ai_user", "token_disabled_ai"),
+      buildMobileToken("super_user", "token_super_mobile"),
     ],
     scoreRecords: [
       buildScoreRecord("score_self", "user_admin", {
@@ -627,6 +653,13 @@ function buildDatabase(): ApiDatabase {
       buildJoinRequest("jr_reject", "reject_user", "reject@gmail.com"),
       buildJoinRequest("jr_mobile", "gmail_join_2", "gmail.two@gmail.com"),
       buildJoinRequest("jr_other", "other_pending", "other-pending@gmail.com", "org_2"),
+      {
+        ...buildJoinRequest("jr_rejected_ai", "rejected_ai", "rejected-ai@gmail.com"),
+        status: "rejected",
+        decidedAt: NOW,
+        decidedByUserId: "org_admin",
+        decisionReason: "Not approved for this organization.",
+      },
     ],
     admin: {
       passwordHash: null,
@@ -770,10 +803,11 @@ async function dashboardRequest(pathname: string, token = orgAdminToken, init?: 
 }
 
 async function mobileRequest(pathname: string, token: string, init?: RequestInit) {
+  const hasFormDataBody = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const response = await fetch(`${baseUrl}${pathname}`, {
     ...init,
     headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body && !hasFormDataBody ? { "Content-Type": "application/json" } : {}),
       Authorization: `Bearer ${token}`,
       ...(init?.headers ?? {}),
     },
@@ -860,11 +894,14 @@ before(async () => {
   process.env.MOBILE_TOKEN_SECRET = MOBILE_TOKEN_SECRET;
   process.env.SUPPORT_TRANSCRIPT_SECRET = "support_transcript_secret_for_dashboard_admin_route_tests";
   process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
+  process.env.ENABLE_REMOTE_TTS = "true";
+  process.env.OPENAI_API_KEY = "test-openai-key";
   delete process.env.DATABASE_URL;
 
   await seedStores();
 
   const imported = await import("./index.js");
+  setSimulationAiBudgetGraceForTest = imported.setSimulationAiBudgetGraceForTest;
   imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
     [
       buildTrainingPack("pack_scope", "org_1"),
@@ -1259,6 +1296,201 @@ before(async () => {
   });
   const address = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+test("paid mobile AI requires approved organization access before quota grace or provider work", async () => {
+  for (const [userId, token] of [
+    ["gmail_join", "token_gmail"],
+    ["pending_user", "token_pending"],
+    ["reject_user", "token_reject"],
+    ["rejected_ai", "token_rejected_ai"],
+  ] as const) {
+    const entitlements = await mobileRequest(`/mobile/users/${userId}/entitlements`, token);
+    assert.equal(entitlements.status, 200);
+    assert.equal(entitlements.body.canStartSimulation, false);
+    assert.equal(entitlements.body.lockCode, "ORG_ACCESS_REQUIRED");
+  }
+
+  const inactiveOrg = await mobileRequest(
+    "/mobile/users/inactive_org_user/entitlements",
+    "token_inactive_org",
+  );
+  assert.equal(inactiveOrg.status, 403);
+  assert.equal(inactiveOrg.body.code, "ORG_ACCESS_REQUIRED");
+
+  const disabledUser = await mobileRequest(
+    "/mobile/users/disabled_ai_user/entitlements",
+    "token_disabled_ai",
+  );
+  assert.equal(disabledUser.status, 403);
+  assert.match(String(disabledUser.body.error), /disabled/i);
+
+  const approved = await mobileRequest("/mobile/users/org_admin/entitlements", "token_org_admin");
+  assert.equal(approved.status, 200);
+  assert.equal(approved.body.canStartSimulation, true);
+  assert.equal(approved.body.lockCode, null);
+
+  const superWithoutOrg = await mobileRequest("/mobile/users/super_user/entitlements", "token_super_mobile");
+  assert.equal(superWithoutOrg.status, 200);
+  assert.equal(superWithoutOrg.body.canStartSimulation, false);
+  assert.equal(superWithoutOrg.body.lockCode, "ORG_ACCESS_REQUIRED");
+
+  const superWithOrg = await mobileRequest("/mobile/users/super_user/entitlements", "token_super_mobile", {
+    headers: { "X-Superuser-Org-Id": "org_1" },
+  });
+  assert.equal(superWithOrg.status, 200);
+  assert.equal(superWithOrg.body.canStartSimulation, true);
+
+  const config = (await readDb()).config;
+  const segment = config.segments.find((entry) => entry.scenarios.some((scenario) => scenario.enabled !== false));
+  const scenario = segment?.scenarios.find((entry) => entry.enabled !== false);
+  assert.ok(segment && scenario);
+  const startBody = {
+    segmentId: segment.id,
+    scenarioId: scenario.id,
+    clientStartedAt: new Date().toISOString(),
+  };
+  const deniedStart = await mobileRequest(
+    "/mobile/users/gmail_join/simulation-sessions/start",
+    "token_gmail",
+    {
+      method: "POST",
+      body: JSON.stringify({ ...startBody, simulationSessionId: "sim_free_org_lock" }),
+    },
+  );
+  assert.equal(deniedStart.status, 403);
+  assert.equal(deniedStart.body.code, "ORG_ACCESS_REQUIRED");
+
+  const approvedStart = await mobileRequest(
+    "/mobile/users/org_admin/simulation-sessions/start",
+    "token_org_admin",
+    {
+      method: "POST",
+      body: JSON.stringify({ ...startBody, simulationSessionId: "sim_approved_org_access" }),
+    },
+  );
+  assert.equal(approvedStart.status, 201, JSON.stringify(approvedStart.body));
+  assert.equal(approvedStart.body.recognized, true);
+
+  const superStart = await mobileRequest(
+    "/mobile/users/super_user/simulation-sessions/start",
+    "token_super_mobile",
+    {
+      method: "POST",
+      headers: { "X-Superuser-Org-Id": "org_1" },
+      body: JSON.stringify({ ...startBody, simulationSessionId: "sim_super_org_access" }),
+    },
+  );
+  assert.equal(superStart.status, 201, JSON.stringify(superStart.body));
+  assert.equal(superStart.body.recognized, false);
+
+  setSimulationAiBudgetGraceForTest("gmail_join", Date.now() + 60_000);
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.startsWith("https://api.openai.com/")) {
+      providerCalls += 1;
+      return new Response(JSON.stringify({ error: { message: "Provider should not be invoked." } }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return originalFetch(input, init);
+  };
+  try {
+    const assertOrganizationAccessRequired = (
+      result: Awaited<ReturnType<typeof mobileRequest>>,
+      route: string,
+    ) => {
+      assert.equal(result.status, 403, `${route}: ${JSON.stringify(result.body)}`);
+      assert.equal(result.body.code, "ORG_ACCESS_REQUIRED", route);
+    };
+    const history = [
+      { role: "assistant", content: "How would you approach this conversation?" },
+      { role: "user", content: "I would begin by clarifying the team's shared priorities." },
+    ];
+
+    const transcribeForm = new FormData();
+    transcribeForm.append("file", new Blob(["test audio"], { type: "audio/m4a" }), "test.m4a");
+    assertOrganizationAccessRequired(
+      await mobileRequest("/mobile/users/gmail_join/ai/transcribe", "token_gmail", {
+        method: "POST",
+        body: transcribeForm,
+      }),
+      "transcribe",
+    );
+
+    const submitTurnForm = new FormData();
+    submitTurnForm.append("file", new Blob(["test audio"], { type: "audio/m4a" }), "test.m4a");
+    submitTurnForm.append("payload", JSON.stringify({
+      scenarioId: scenario.id,
+      simulationSessionId: "sim_free_submit_turn_org_lock",
+      history,
+    }));
+    assertOrganizationAccessRequired(
+      await mobileRequest("/mobile/users/gmail_join/ai/submit-turn", "token_gmail", {
+        method: "POST",
+        body: submitTurnForm,
+      }),
+      "submit-turn",
+    );
+
+    for (const [route, body] of [
+      ["opening", {
+        scenarioId: scenario.id,
+        simulationSessionId: "sim_free_opening_org_lock",
+      }],
+      ["turn", {
+        scenarioId: scenario.id,
+        simulationSessionId: "sim_free_turn_org_lock",
+        history,
+      }],
+      ["score", {
+        scenarioId: scenario.id,
+        simulationSessionId: "sim_free_score_org_lock",
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        endedAt: new Date().toISOString(),
+        history,
+      }],
+    ] as const) {
+      assertOrganizationAccessRequired(
+        await mobileRequest(`/mobile/users/gmail_join/ai/${route}`, "token_gmail", {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+        route,
+      );
+    }
+
+    assertOrganizationAccessRequired(
+      await mobileRequest("/mobile/users/gmail_join/ai/tts", "token_gmail", {
+        method: "POST",
+        body: JSON.stringify({ text: "This request must be denied before synthesis.", preset: "female-balanced" }),
+      }),
+      "tts",
+    );
+
+    assertOrganizationAccessRequired(
+      await mobileRequest("/usage/sessions", "token_gmail", {
+        method: "POST",
+        body: JSON.stringify({
+          userId: "gmail_join",
+          simulationSessionId: "sim_free_usage_org_lock",
+          segmentId: segment.id,
+          scenarioId: scenario.id,
+          startedAt: new Date(Date.now() - 60_000).toISOString(),
+          endedAt: new Date().toISOString(),
+          rawDurationSeconds: 60,
+        }),
+      }),
+      "usage-sessions",
+    );
+
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("internal Admin Utility module endpoint is authorized, tenant-scoped, persistent, and auditable", async () => {
