@@ -7,7 +7,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "test": "tsx --test src/**/*.test.ts scripts/**/*.test.mjs",
+    "test": "node ../scripts/run-tsx-tests.mjs src=.test.ts scripts=.test.mjs",
     "postinstall": "node ./scripts/apply-react-native-pdf-ios-codegen-patch.mjs && node ./scripts/apply-react-native-pdf-android-gesture-patch.mjs",
     "eas-build-post-install": "node ./scripts/apply-react-native-pdf-ios-codegen-patch.mjs && node ./scripts/apply-react-native-pdf-android-gesture-patch.mjs && npm --prefix .. run build:shared"
   },
