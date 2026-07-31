@@ -57,6 +57,13 @@
         "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
         "EXPO_PUBLIC_API_BASE_URL": "https://peritio-api-prod.onrender.com"
       }
+    },
+    "production-apk": {
+      "extends": "production",
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
     }
   },
   "submit": {
