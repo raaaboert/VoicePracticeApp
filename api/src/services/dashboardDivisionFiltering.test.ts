@@ -120,6 +120,17 @@ function createViewer(overrides?: Partial<DashboardViewer>): DashboardViewer {
     isSuperUser: overrides?.isSuperUser ?? false,
     orgId: overrides?.orgId ?? "org_1",
     orgName: overrides?.orgName ?? "Org 1",
+    orgRole: overrides?.orgRole ?? "org_admin",
+    capabilities: overrides?.capabilities ?? {
+      viewOrganizationUsers: true,
+      manageRegularOrganizationUsers: true,
+      approveRejectAccessRequests: true,
+      editEmployeeIds: true,
+      editUserNames: true,
+      manageUserRoles: true,
+      assignUserManagers: true,
+      manageOrganizationContent: true,
+    },
   };
 }
 

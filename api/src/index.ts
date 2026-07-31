@@ -13,6 +13,21 @@ import {
   ApiDatabase,
   AiUsageEvent,
   AppConfig,
+  DashboardAdminAccessRequestsResponse,
+  DashboardAdminAccessRequestRow,
+  DashboardAdminCapabilities,
+  DashboardAdminDecideAccessRequest,
+  DashboardAdminDecideAccessRequestResponse,
+  DashboardAdminManagerOption,
+  DashboardAdminUpdateUserRequest,
+  DashboardAdminUpdateUserResponse,
+  DashboardAdminUserRow,
+  DashboardAdminUsersExportResponse,
+  DashboardAdminUsersResponse,
+  ArchiveDashboardTrainingContentCategoryRequest,
+  CreateDashboardTrainingContentCategoryRequest,
+  CreateDashboardTrainingContentRequest,
+  DashboardTrainingContentLifecycleRequest,
   DashboardAttemptDetailResponse,
   DashboardAttemptHistoryRow,
   DashboardCoachingInsights,
@@ -95,6 +110,7 @@ import {
   OrgTrainingRecord,
   OrgTrainingSummary,
   OrgTrainingStatus,
+  ORG_USER_ROLE_LABELS,
   OrgUsageBillingResponse,
   MobileResendVerificationRequest,
   MobileSubmitOrgJoinRequest,
@@ -111,6 +127,8 @@ import {
   SetOrgTrainingPackAttachmentsRequest,
   SetOrgTrainingScenarioAttachmentsRequest,
   SetTrainingPackAssignmentsRequest,
+  ReorderDashboardTrainingContentCategoriesRequest,
+  ReorderDashboardTrainingContentRequest,
   SimulationScoreCoachingArtifact,
   SimulationScoreCoachingArtifactInput,
   CreateSuperUserRequest,
@@ -129,6 +147,9 @@ import {
   UpdateOrgDivisionSettingsRequest,
   UpdateOrgTrainingRequest,
   UpdateOrgCustomScenarioRequest,
+  UpdateDashboardTrainingContentAssignmentsRequest,
+  UpdateDashboardTrainingContentCategoryRequest,
+  UpdateDashboardTrainingContentRequest,
   UpdatePerformancePlanRequest,
   UpdateConfigRequest,
   UpdateUserRequest,
@@ -175,6 +196,10 @@ import {
   requestSpeechSynthesis,
   requestTranscription
 } from "./openaiClient.js";
+import {
+  buildOpenAiRoutingStartupLogLines,
+  resolveSimulationRequestConfig,
+} from "./openaiModelConfig.js";
 import type { OpenAiCompletionApiFamily, SimulationRoute } from "./openaiModelConfig.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
@@ -185,14 +210,47 @@ import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createSimulationSessionStore } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
+import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
+import {
+  createOrgModuleEntitlementStore,
+  OrgModuleEntitlementStore,
+} from "./storage/orgModuleEntitlementStore.js";
+import { createTrainingContentStore } from "./storage/trainingContentStore.js";
+import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
+import {
+  createTrainingContentAssetStore,
+  TrainingContentAssetStore,
+} from "./storage/trainingContentAssetStore.js";
+import { createTrainingContentObjectStorage } from "./storage/trainingContentObjectStorage.js";
+import { buildOrgModuleEntitlementsResponse } from "./services/organizationModules.js";
+import {
+  createTrainingContentAssetService,
+  mapTrainingContentAssetServiceError,
+  TrainingContentAssetService,
+  TrainingContentManagementRequestContext,
+} from "./services/trainingContentAssetService.js";
+import { TrainingContentStorageReadinessService } from "./services/trainingContentStorageReadiness.js";
+import {
+  createTrainingContentManagementService,
+  mapTrainingContentManagementServiceError,
+  TrainingContentManagementService,
+  TrainingContentReferenceData,
+} from "./services/trainingContentManagementService.js";
+import {
+  createTrainingContentMobileService,
+  mapTrainingContentMobileServiceError,
+  MobileTrainingContentRequestContext,
+  TrainingContentMobileService,
+} from "./services/trainingContentMobileService.js";
 import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
 import {
+  buildDashboardAdminCapabilities,
   canDashboardViewerAccessCustomerDirectory,
   canDashboardViewerAccessOrg,
   resolveDashboardAccessEligibility,
@@ -211,6 +269,7 @@ import {
   initializeDatabaseStoresForReadiness,
   initializeDatabaseStoresForStartup
 } from "./services/databaseStoreInitialization.js";
+import { migrateUserProfileAppStateNormalization as migrateUserProfileAppStateNormalizationState } from "./services/userProfileAppStateMigration.js";
 import {
   handleDashboardWebAuthCodeRequest,
 } from "./services/dashboardWebAuthRequest.js";
@@ -231,6 +290,32 @@ import {
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
+import {
+  findEmployeeIdConflict,
+  normalizeEmployeeIdInput,
+} from "./services/employeeIds.js";
+import {
+  canActorManagePerformanceUser,
+  canActorManageRegularUser,
+  canActorSeeOrganizationUser,
+  canEnterpriseActorManageRegularUser,
+  canEnterpriseActorSeeOrganizationUser,
+  canManagerAssignmentTargetBeManaged,
+  canOrgAdminManageRole,
+  clearAssignmentsForManager,
+  getDashboardPermittedUserIds,
+  getUserFirstName,
+  getUserLastName,
+  hasCompleteUserName,
+  isEligibleManagerUser,
+  listVisibleOrganizationUsers,
+  normalizeManagerUserId,
+  normalizeOptionalStoredUserName,
+  normalizeRequiredUserNameInput,
+  repairInvalidManagerAssignments,
+  resolveStoredUserDisplayName,
+  validateManagerAssignment,
+} from "./services/userProfiles.js";
 import {
   completeRecognizedSimulationUsage,
   normalizeSimulationSessionId,
@@ -355,7 +440,12 @@ const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const OPENAI_MODEL_CONFIG = runtimeConfig.openAi;
 const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
 const OPENAI_SIMULATION_MODEL = OPENAI_MODEL_CONFIG.simulation.model;
+const OPENAI_SCORING_MODEL = OPENAI_MODEL_CONFIG.scoring.model;
 const OPENAI_TRANSCRIPTION_MODEL = OPENAI_MODEL_CONFIG.transcription.model;
+for (const line of buildOpenAiRoutingStartupLogLines(OPENAI_MODEL_CONFIG)) {
+  // eslint-disable-next-line no-console
+  console.log(line);
+}
 const ENABLE_REMOTE_TTS = runtimeConfig.enableRemoteTts;
 const OPENAI_MAX_DAILY_CALLS_PER_USER = runtimeConfig.openAiMaxDailyCallsPerUser;
 const OPENAI_MAX_DAILY_CALLS_GLOBAL = runtimeConfig.openAiMaxDailyCallsGlobal;
@@ -497,6 +587,67 @@ const trainingPackStore = createTrainingPackStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
+let dashboardTrainingPackLoaderForTest: ((orgId: string) => Promise<TrainingPack[]>) | null = null;
+let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitlementStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+const trainingContentStore = createTrainingContentStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+const trainingContentCategoryStore = createTrainingContentCategoryStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+const trainingContentAssetStore: TrainingContentAssetStore = createTrainingContentAssetStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+const trainingContentObjectStorage = createTrainingContentObjectStorage(
+  runtimeConfig.trainingContentStorage
+);
+const trainingContentStorageReadiness = new TrainingContentStorageReadinessService(
+  runtimeConfig.trainingContentStorage,
+  trainingContentObjectStorage
+);
+const defaultTrainingContentAssetService = createTrainingContentAssetService({
+  config: runtimeConfig.trainingContentStorage,
+  assetStore: trainingContentAssetStore,
+  entitlementStore: orgModuleEntitlementStore,
+  objectStorage: trainingContentObjectStorage,
+  readiness: trainingContentStorageReadiness,
+});
+let trainingContentAssetService: TrainingContentAssetService = defaultTrainingContentAssetService;
+const defaultTrainingContentManagementService = createTrainingContentManagementService({
+  store: trainingContentStore,
+  categoryStore: trainingContentCategoryStore,
+  entitlementStore: orgModuleEntitlementStore,
+  storageConfig: runtimeConfig.trainingContentStorage,
+});
+let trainingContentManagementService: TrainingContentManagementService =
+  defaultTrainingContentManagementService;
+const defaultTrainingContentMobileService = createTrainingContentMobileService({
+  store: trainingContentStore,
+  entitlementStore: orgModuleEntitlementStore,
+  objectStorage: trainingContentObjectStorage,
+  readiness: trainingContentStorageReadiness,
+  storageConfig: runtimeConfig.trainingContentStorage,
+});
+let trainingContentMobileService: TrainingContentMobileService =
+  defaultTrainingContentMobileService;
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -556,6 +707,13 @@ const webAuthSessionStore = createWebAuthSessionStore({
 const performancePlanStore = createPerformancePlanStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const userEmployeeIdClaimStore = createUserEmployeeIdClaimStore({
+  provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
@@ -705,16 +863,15 @@ async function requestSimulationCompletion(params: {
   correlationId: string;
 }): Promise<{ completion: SimulationCompletionResult; latencyMs: number; apiPathUsed: SimulationApiPath }> {
   const requestStartedAt = Date.now();
-  const simulationConfig = OPENAI_MODEL_CONFIG.simulation;
-  const routeConfig = simulationConfig.routes[params.route];
-  const requestedModel = simulationConfig.model;
-  const apiPathUsed = toSimulationApiPath(simulationConfig.apiFamily);
+  const routeConfig = resolveSimulationRequestConfig(OPENAI_MODEL_CONFIG, params.route);
+  const requestedModel = routeConfig.model;
+  const apiPathUsed = toSimulationApiPath(routeConfig.apiFamily);
   const promptChars = params.messages.reduce((total, message) => total + message.content.length, 0);
   const messageCount = params.messages.length;
 
   try {
     const completion = await requestCompletion({
-      apiFamily: simulationConfig.apiFamily,
+      apiFamily: routeConfig.apiFamily,
       model: requestedModel,
       messages: params.messages,
       maxOutputTokens: routeConfig.maxOutputTokens,
@@ -3042,6 +3199,7 @@ function createDefaultDatabase(): ApiDatabase {
     emailVerifications: [],
     webAuthChallenges: [],
     enterpriseJoinRequests: [],
+    appStateMigrations: {},
     admin: {
       passwordHash: null,
       activeSessionIds: []
@@ -3147,8 +3305,13 @@ function ensureDemoEnterpriseData(db: {
     const existingUser = duplicateById ?? duplicateByEmail;
     if (existingUser) {
       existingUser.emailVerifiedAt = existingUser.emailVerifiedAt ?? existingUser.createdAt ?? now;
+      existingUser.firstName = normalizeOptionalStoredUserName(existingUser.firstName);
+      existingUser.lastName = normalizeOptionalStoredUserName(existingUser.lastName);
       existingUser.accountType = "enterprise";
       existingUser.tier = "enterprise";
+      const normalizedEmployeeId = normalizeEmployeeIdInput(existingUser.employeeId);
+      existingUser.employeeId = normalizedEmployeeId.ok ? normalizedEmployeeId.value : null;
+      existingUser.managerUserId = normalizeManagerUserId(existingUser.managerUserId);
       existingUser.orgId = demoUser.orgId;
       existingUser.orgRole = demoUser.orgRole;
       existingUser.status = existingUser.status ?? "active";
@@ -3163,6 +3326,10 @@ function ensureDemoEnterpriseData(db: {
     db.users.push({
       id: demoUser.id,
       email: demoUser.email,
+      firstName: null,
+      lastName: null,
+      employeeId: null,
+      managerUserId: null,
       emailVerifiedAt: now,
       accountType: "enterprise",
       tier: "enterprise",
@@ -3177,6 +3344,7 @@ function ensureDemoEnterpriseData(db: {
       dailySecondsCapOverride: null,
       allowDailyOverageThisCycle: false,
       dailyOverageExpiresAt: null,
+      mobileProfileReonboardingRequired: false,
       createdAt: now,
       updatedAt: now
     });
@@ -3832,7 +4000,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     activeDivisionIdsByOrg.set(division.orgId, divisionIds);
   }
 
-  const normalizedUsers = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => {
+  const normalizedUsers: UserProfile[] = (Array.isArray(candidate.users) ? candidate.users : fallback.users).map((user) => {
     const candidateUser = user as Partial<UserProfile>;
     const normalizedDivisionId =
       typeof candidateUser.divisionId === "string" ? candidateUser.divisionId.trim() : null;
@@ -3843,9 +4011,19 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
     return {
       ...user,
+      firstName: normalizeOptionalStoredUserName(candidateUser.firstName),
+      lastName: normalizeOptionalStoredUserName(candidateUser.lastName),
+      employeeId: (() => {
+        const normalizedEmployeeId = normalizeEmployeeIdInput(candidateUser.employeeId);
+        return normalizedEmployeeId.ok ? normalizedEmployeeId.value : null;
+      })(),
+      managerUserId:
+        candidateUser.accountType === "enterprise" ? normalizeManagerUserId(candidateUser.managerUserId) : null,
       isPlatformAdmin: candidateUser.isPlatformAdmin === true,
       isSuperUser: candidateUser.isSuperUser === true,
       dashboardAccessEnabled: candidateUser.accountType === "enterprise" ? candidateUser.dashboardAccessEnabled === true : false,
+      mobileProfileReonboardingRequired:
+        candidateUser.accountType === "enterprise" ? candidateUser.mobileProfileReonboardingRequired === true : false,
       manualBonusSeconds: clampNonNegativeInteger(candidateUser.manualBonusSeconds, 0),
       emailVerifiedAt:
         typeof candidateUser.emailVerifiedAt === "string" || candidateUser.emailVerifiedAt === null
@@ -3864,6 +4042,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       orgRole: candidateUser.accountType === "enterprise" ? normalizeOrgUserRole(candidateUser.orgRole) : "user"
     };
   });
+  repairInvalidManagerAssignments(normalizedUsers, now);
   const normalizedOrgTrainings = normalizeOrgTrainingRecords(
     (candidate as Partial<ApiDatabase>).orgTrainings,
     validOrgIds,
@@ -3952,6 +4131,14 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     enterpriseJoinRequests: Array.isArray(candidate.enterpriseJoinRequests)
       ? candidate.enterpriseJoinRequests
       : fallback.enterpriseJoinRequests,
+    appStateMigrations:
+      candidate.appStateMigrations && typeof candidate.appStateMigrations === "object" && !Array.isArray(candidate.appStateMigrations)
+        ? Object.fromEntries(
+            Object.entries(candidate.appStateMigrations).filter(
+              (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0
+            )
+          )
+        : {},
     admin: {
       passwordHash:
         candidate.admin && typeof candidate.admin.passwordHash === "string"
@@ -4016,6 +4203,7 @@ async function loadDatabase(options?: { forceStorageRead?: boolean }): Promise<A
 
   const storage = getOrCreateDatabaseStorage();
   const loaded = await storage.load();
+  await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
   databaseCache = loaded;
   return loaded;
 }
@@ -4034,7 +4222,25 @@ function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
 async function saveDatabase(db: ApiDatabase): Promise<void> {
   databaseCache = db;
   const storage = getOrCreateDatabaseStorage();
+  await userEmployeeIdClaimStore.syncFromUsers(db.users);
   await storage.save(buildPersistedDatabaseSnapshot(db));
+}
+
+async function migrateUserProfileAppStateNormalization(): Promise<void> {
+  await withDatabaseLock(async () => {
+    const storage = getOrCreateDatabaseStorage();
+    await migrateUserProfileAppStateNormalizationState({
+      storage,
+      ensureDatabaseShape,
+      buildPersistedDatabaseSnapshot,
+      syncEmployeeIds: async (users) => {
+        await userEmployeeIdClaimStore.syncFromUsers(users);
+      }
+    });
+    const loaded = await storage.load();
+    await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
+    databaseCache = loaded;
+  });
 }
 
 async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
@@ -4055,6 +4261,13 @@ async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
 async function withDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
   return await withDatabaseLock(async () => {
     const db = await loadDatabase();
+    return await handler(db);
+  });
+}
+
+async function withFreshDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    const db = await loadDatabase({ forceStorageRead: true });
     return await handler(db);
   });
 }
@@ -4334,11 +4547,16 @@ async function refreshDatabaseReadiness(): Promise<void> {
         scoreRecordStore,
         supportCaseStore,
         webAuthSessionStore,
-        performancePlanStore
+        performancePlanStore,
+        userEmployeeIdClaimStore,
+        orgModuleEntitlementStore,
+        trainingContentStore,
+        trainingContentAssetStore
       },
       loadDatabase: async () => {
         await loadDatabase({ forceStorageRead: true });
-      }
+      },
+      migrateUserProfileAppStateNormalization
     });
     isDatabaseReady = true;
     databaseReadyError = null;
@@ -4529,7 +4747,16 @@ function upsertMobileAuthToken(db: ApiDatabase, userId: string, issuedAtIso: str
   return authToken;
 }
 
-function hasValidMobileTokenForUser(db: ApiDatabase, userId: string, token: string): boolean {
+function hasCompleteMobileProfile(user: UserProfile): boolean {
+  return Boolean(user.emailVerifiedAt) && hasCompleteUserName(user);
+}
+
+function hasValidMobileTokenForUser(
+  db: ApiDatabase,
+  userId: string,
+  token: string,
+  options?: { allowReonboardingToken?: boolean; allowIncompleteProfile?: boolean }
+): boolean {
   const authRecord = db.mobileAuthTokens.find((entry) => entry.userId === userId);
   if (!authRecord || !authRecord.tokenHash) {
     return false;
@@ -4541,7 +4768,56 @@ function hasValidMobileTokenForUser(db: ApiDatabase, userId: string, token: stri
     return false;
   }
 
-  return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+  if (!crypto.timingSafeEqual(expectedBuffer, actualBuffer)) {
+    return false;
+  }
+
+  const user = getUserById(db, userId);
+  if (user?.mobileProfileReonboardingRequired === true && options?.allowReonboardingToken !== true) {
+    return false;
+  }
+
+  if (user && !hasCompleteMobileProfile(user) && options?.allowIncompleteProfile !== true) {
+    return false;
+  }
+
+  return true;
+}
+
+async function withMobileTrainingContentContext<T>(
+  request: Request,
+  response: Response,
+  handler: (context: MobileTrainingContentRequestContext) => Promise<T>
+): Promise<T | null> {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return null;
+  }
+
+  return withFreshDatabaseRead(async (db) => {
+    const user = getUserById(db, request.params.userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found." });
+      return null;
+    }
+    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+      response.status(401).json({ error: "Invalid mobile token." });
+      return null;
+    }
+
+    const organization = user.orgId ? getOrgById(db, user.orgId) : null;
+    return handler({
+      user,
+      users: db.users,
+      organizationActive: organization?.status === "active",
+    });
+  });
+}
+
+function respondWithTrainingContentMobileError(error: unknown, response: Response): void {
+  const mapped = mapTrainingContentMobileServiceError(error);
+  response.status(mapped.status).json(mapped.body);
 }
 
 function hashVerificationCode(userId: string, email: string, code: string): string {
@@ -5091,14 +5367,15 @@ function filterOrgUsageSessions(
   orgId: string,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): UsageSessionRecord[] {
   return filterRecordsByDivision(
     usageSessionAccess.listByOrgRange(db, {
       orgId,
       startedAtFrom: new Date(startMs),
       startedAtBefore: new Date(endMs)
-    }),
+    }).filter((session) => !permittedUserIds || permittedUserIds.has(session.userId)),
     divisionId
   );
 }
@@ -5108,7 +5385,8 @@ function filterOrgScoreRecords(
   orgId: string,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): SimulationScoreRecord[] {
   return filterRecordsByDivision(
     scoreRecordAccess.listByOrgRange(db, {
@@ -5116,7 +5394,7 @@ function filterOrgScoreRecords(
       endedAtFrom: new Date(startMs),
       endedAtBefore: new Date(endMs),
       conclusiveOnly: true
-    }),
+    }).filter((record) => !permittedUserIds || permittedUserIds.has(record.userId)),
     divisionId
   );
 }
@@ -5126,11 +5404,15 @@ function filterDashboardAccessibleUsageSessions(
   orgIds: Set<string>,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): UsageSessionRecord[] {
   return filterRecordsByDivision(
     listUsageSessions(db).filter((session) => {
       if (!session.orgId || !orgIds.has(session.orgId)) {
+        return false;
+      }
+      if (permittedUserIds && !permittedUserIds.has(session.userId)) {
         return false;
       }
       const startedAtMs = new Date(session.startedAt).getTime();
@@ -5145,11 +5427,15 @@ function filterDashboardAccessibleScoreRecords(
   orgIds: Set<string>,
   startMs: number,
   endMs: number,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): SimulationScoreRecord[] {
   return filterRecordsByDivision(
     listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
       if (!record.orgId || !orgIds.has(record.orgId)) {
+        return false;
+      }
+      if (permittedUserIds && !permittedUserIds.has(record.userId)) {
         return false;
       }
       const endedAtMs = new Date(record.endedAt).getTime();
@@ -5518,6 +5804,10 @@ function buildDashboardScenarioCatalog(db: ApiDatabase, org: EnterpriseOrg): Map
 }
 
 async function listTrainingPacksForDashboardOrg(orgId: string): Promise<TrainingPack[]> {
+  if (dashboardTrainingPackLoaderForTest) {
+    return dashboardTrainingPackLoaderForTest(orgId);
+  }
+
   try {
     return await trainingPackStore.listTrainingPacksForOrg(orgId);
   } catch (error) {
@@ -5663,10 +5953,11 @@ async function buildPerformanceUserContext(
 
 async function listDashboardPerformanceUserContexts(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null,
   explicitOrgId: string | null = null
 ): Promise<PerformancePlanUserContext[]> {
+  const viewer = principal.viewer;
   const accessibleOrgIds = new Set(listDashboardAccessibleOrgs(db, viewer).map((org) => org.id));
   if (explicitOrgId) {
     if (!accessibleOrgIds.has(explicitOrgId)) {
@@ -5675,9 +5966,18 @@ async function listDashboardPerformanceUserContexts(
     accessibleOrgIds.clear();
     accessibleOrgIds.add(explicitOrgId);
   }
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const contexts: PerformancePlanUserContext[] = [];
   for (const user of db.users) {
     if (user.accountType !== "enterprise" || !user.orgId || !accessibleOrgIds.has(user.orgId)) {
+      continue;
+    }
+    if (!permittedUserIds.has(user.id)) {
       continue;
     }
     const context = await buildPerformanceUserContext(db, user);
@@ -5699,7 +5999,7 @@ async function listDashboardPerformanceUserContexts(
 
 async function getDashboardPerformanceUserContext(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   userId: string,
   explicitOrgId: string | null,
   divisionId: string | null
@@ -5708,7 +6008,7 @@ async function getDashboardPerformanceUserContext(
   if (!user || user.accountType !== "enterprise" || !user.orgId) {
     return null;
   }
-  if (!canDashboardViewerAccessPerformanceTarget(db, viewer, user, explicitOrgId, divisionId)) {
+  if (!canDashboardViewerAccessPerformanceTarget(db, principal, user, explicitOrgId, divisionId)) {
     return null;
   }
   const context = await buildPerformanceUserContext(db, user);
@@ -5720,11 +6020,12 @@ async function getDashboardPerformanceUserContext(
 
 function canDashboardViewerAccessPerformanceTarget(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   target: UserProfile,
   explicitOrgId: string | null,
   divisionId: string | null
 ): boolean {
+  const viewer = principal.viewer;
   if (target.accountType !== "enterprise" || !target.orgId) {
     return false;
   }
@@ -5732,6 +6033,15 @@ function canDashboardViewerAccessPerformanceTarget(
     return false;
   }
   if (!canDashboardViewerAccessOrg(viewer, target.orgId)) {
+    return false;
+  }
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([target.orgId]),
+  });
+  if (!permittedUserIds.has(target.id)) {
     return false;
   }
   if (divisionId) {
@@ -5763,22 +6073,7 @@ function getPerformancePlanRowContext(
 }
 
 function canManagePerformancePlanForUser(actor: UserProfile, viewer: DashboardViewer, target: UserProfile): boolean {
-  if (viewer.accessType === "super_user" && actor.isSuperUser === true) {
-    return true;
-  }
-  if (actor.accountType !== "enterprise" || target.accountType !== "enterprise") {
-    return false;
-  }
-  if (!actor.orgId || actor.orgId !== target.orgId) {
-    return false;
-  }
-  if (actor.orgRole === "org_admin") {
-    return true;
-  }
-  if (actor.orgRole === "user_admin") {
-    return target.orgRole !== "org_admin";
-  }
-  return false;
+  return canActorManagePerformanceUser({ actor, viewer, target });
 }
 
 function resolvePerformanceDashboardAuditActorType(viewer: DashboardViewer): AuditActorType {
@@ -5841,36 +6136,60 @@ function buildMobilePerformancePlanInput(
 async function buildDashboardCustomerSummary(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardCustomerSummary> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
   const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
-  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId);
+  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId, permittedUserIds);
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now.getTime() - 60 * 24 * 60 * 60 * 1000;
   const customerUsers = db.users
-    .filter((user) => user.accountType === "enterprise" && user.orgId === normalizedOrg.id)
+    .filter((user) =>
+      user.accountType === "enterprise" &&
+      user.orgId === normalizedOrg.id &&
+      (!permittedUserIds || permittedUserIds.has(user.id))
+    )
     .sort((left, right) => left.email.localeCompare(right.email));
   const activeUserCount = customerUsers.filter((user) => user.status === "active").length;
   const dashboardUserCount = customerUsers.filter((user) => user.dashboardAccessEnabled === true).length;
   const simulationsLast30Days = usageSessionAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     startedAtFrom: new Date(last30DaysThreshold)
-  }).filter((session) => !divisionId || (session.divisionId ?? null) === divisionId).length;
+  }).filter((session) =>
+    (!divisionId || (session.divisionId ?? null) === divisionId) &&
+    (!permittedUserIds || permittedUserIds.has(session.userId))
+  ).length;
 
   const scoresThisPeriod = scoreRecordAccess.listByOrgRange(db, {
     orgId: normalizedOrg.id,
     endedAtFrom: new Date(billing.periodStartAt),
     endedAtBefore: new Date(billing.periodEndAt),
     conclusiveOnly: true
-  }).filter((record) => !divisionId || (record.divisionId ?? null) === divisionId);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime(), divisionId);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  }).filter((record) =>
+    (!divisionId || (record.divisionId ?? null) === divisionId) &&
+    (!permittedUserIds || permittedUserIds.has(record.userId))
+  );
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, now.getTime(), divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    normalizedOrg.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
   const trainingPacks = await listTrainingPacksForDashboardOrg(normalizedOrg.id);
   const customScenarioCount = ensureOrgCustomScenarioCollection(normalizedOrg).filter((scenario) => scenario.enabled !== false).length;
-  const orgSessions = filterRecordsByDivision(listUsageSessions(db, { orgId: normalizedOrg.id }), divisionId);
-  const orgScores = filterRecordsByDivision(listScoreRecords(db, { orgId: normalizedOrg.id }), divisionId);
+  const orgSessions = filterRecordsByDivision(
+    listUsageSessions(db, { orgId: normalizedOrg.id }).filter((session) => !permittedUserIds || permittedUserIds.has(session.userId)),
+    divisionId
+  );
+  const orgScores = filterRecordsByDivision(
+    listScoreRecords(db, { orgId: normalizedOrg.id }).filter((record) => !permittedUserIds || permittedUserIds.has(record.userId)),
+    divisionId
+  );
   const latestActivityAt = maxIsoDate([
     ...orgSessions.map((session) => session.endedAt),
     ...orgScores.map((record) => record.endedAt)
@@ -5908,15 +6227,16 @@ function buildDashboardCustomerTrend(
   db: ApiDatabase,
   org: EnterpriseOrg,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): DashboardCustomerTrendPoint[] {
   const points: DashboardCustomerTrendPoint[] = [];
 
   for (let offset = 2; offset >= 0; offset -= 1) {
     const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
-    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId);
-    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId);
+    const sessions = filterOrgUsageSessions(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId, permittedUserIds);
+    const scores = filterOrgScoreRecords(db, org.id, monthStart.getTime(), monthEnd.getTime(), divisionId, permittedUserIds);
     const billedSeconds = sessions.reduce(
       (total, session) => total + calculateBilledSecondsFromRaw(session.rawDurationSeconds),
       0
@@ -5940,14 +6260,19 @@ function buildDashboardCustomerUserRows(
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): DashboardCustomerUserPerformanceSummary[] {
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
-  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime(), divisionId);
-  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime(), divisionId);
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, now.getTime(), divisionId, permittedUserIds);
+  const scores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, now.getTime(), divisionId, permittedUserIds);
 
   const rows = db.users
-    .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
+    .filter((user) =>
+      user.accountType === "enterprise" &&
+      user.orgId === org.id &&
+      (!permittedUserIds || permittedUserIds.has(user.id))
+    )
     .sort((left, right) => left.email.localeCompare(right.email))
     .map((user): DashboardCustomerUserPerformanceSummary => {
       const userSessions = sessions.filter((session) => session.userId === user.id);
@@ -5968,6 +6293,7 @@ function buildDashboardCustomerUserRows(
       return {
         userId: user.id,
         email: user.email,
+        employeeId: user.employeeId ?? null,
         status: user.status,
         orgRole: user.orgRole,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
@@ -5987,14 +6313,22 @@ function buildDashboardCustomerScenarioRows(
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): DashboardCustomerScenarioSummary[] {
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs, divisionId);
-  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs, divisionId);
-  const previousScores = filterOrgScoreRecords(db, org.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  const sessions = filterOrgUsageSessions(db, org.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const currentScores = filterOrgScoreRecords(db, org.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    org.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
 
   const aggregates = new Map<
     string,
@@ -6105,7 +6439,8 @@ async function buildDashboardTrainingPackRows(
   org: EnterpriseOrg,
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardCustomerTrainingPackSummary[]> {
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const availableScenarioCount = scenarioCatalog.size;
@@ -6113,11 +6448,15 @@ async function buildDashboardTrainingPackRows(
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
   const allPackSessions = filterRecordsByDivision(
-    listUsageSessions(db, { orgId: org.id }).filter((session) => Boolean(session.trainingPackId)),
+    listUsageSessions(db, { orgId: org.id }).filter(
+      (session) => Boolean(session.trainingPackId) && (!permittedUserIds || permittedUserIds.has(session.userId))
+    ),
     divisionId
   );
   const allPackScores = filterRecordsByDivision(
-    listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter((record) => Boolean(record.trainingPackId)),
+    listScoreRecords(db, { orgId: org.id, conclusiveOnly: true }).filter(
+      (record) => Boolean(record.trainingPackId) && (!permittedUserIds || permittedUserIds.has(record.userId))
+    ),
     divisionId
   );
   const currentSessions = allPackSessions.filter((session) => {
@@ -6155,7 +6494,7 @@ async function buildDashboardTrainingPackRows(
       const previousPackScores = previousScores.filter((record) => record.trainingPackId === pack.id);
       const assignments = listVisibleTrainingPackAssignments(db, org.id, pack.id).map((assignment) =>
         projectTrainingPackAssignmentLifecycle(db, assignment)
-      );
+      ).filter((assignment) => !permittedUserIds || permittedUserIds.has(assignment.userId));
       const assignmentRows = assignments
         .map((assignment) =>
           computeTrainingPackAssignmentProgress({
@@ -6224,32 +6563,44 @@ function isDashboardDivisionScopedAssignmentVisible(
 
 async function buildDashboardTrainingPackDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   trainingPackId: string,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  explicitOrgId: string | null = null
 ): Promise<DashboardTrainingPackDetailResponse | null> {
-  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  const viewer = principal.viewer;
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId, explicitOrgId);
   if (!located) {
     return null;
   }
 
   const { org, pack, scenarioCatalog } = located;
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([org.id]),
+  });
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, divisionId);
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, divisionId, permittedUserIds);
   const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
   if (!packSummary) {
     return null;
   }
 
   const allPackSessions = filterRecordsByDivision(
-    listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id }),
+    listUsageSessions(db, { orgId: org.id, trainingPackId: pack.id }).filter((session) =>
+      permittedUserIds.has(session.userId)
+    ),
     divisionId
   );
   const allPackScores = filterRecordsByDivision(
-    listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true }),
+    listScoreRecords(db, { orgId: org.id, trainingPackId: pack.id, conclusiveOnly: true }).filter((record) =>
+      permittedUserIds.has(record.userId)
+    ),
     divisionId
   );
   const recentPackSessions = allPackSessions.filter((session) => {
@@ -6265,6 +6616,7 @@ async function buildDashboardTrainingPackDetail(
     return Number.isFinite(endedAtMs) && endedAtMs >= previous30DaysThreshold && endedAtMs < last30DaysThreshold;
   });
   const assignmentProgressRows = listVisibleTrainingPackAssignments(db, org.id, pack.id)
+    .filter((assignment) => permittedUserIds.has(assignment.userId))
     .map((assignment) => projectTrainingPackAssignmentLifecycle(db, assignment))
     .map((assignment) => {
       const progress = computeTrainingPackAssignmentProgress({
@@ -6451,18 +6803,28 @@ function sortDashboardAttemptHistoryRows(rows: DashboardAttemptHistoryRow[]): Da
 
 async function buildDashboardTrainingPackAssignmentDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   trainingPackId: string,
   assignmentId: string,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  explicitOrgId: string | null = null
 ): Promise<DashboardTrainingPackAssignmentDetailResponse | null> {
-  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId);
+  const viewer = principal.viewer;
+  const located = await findDashboardAccessibleTrainingPack(db, viewer, trainingPackId, explicitOrgId);
   if (!located) {
     return null;
   }
 
   const { org, pack, scenarioCatalog } = located;
-  const assignment = listVisibleTrainingPackAssignments(db, org.id, pack.id).find((entry) => entry.id === assignmentId);
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([org.id]),
+  });
+  const assignment = listVisibleTrainingPackAssignments(db, org.id, pack.id)
+    .filter((entry) => permittedUserIds.has(entry.userId))
+    .find((entry) => entry.id === assignmentId);
   if (!assignment) {
     return null;
   }
@@ -6472,7 +6834,7 @@ async function buildDashboardTrainingPackAssignmentDetail(
     return null;
   }
 
-  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date(), divisionId);
+  const packRows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, new Date(), divisionId, permittedUserIds);
   const packSummary = packRows.find((row) => row.trainingPackId === pack.id);
   if (!packSummary) {
     return null;
@@ -6576,11 +6938,12 @@ async function buildDashboardTrainingPackAssignmentDetail(
 
 async function buildDashboardUserDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   userId: string,
   divisionId: string | null = null
 ): Promise<DashboardUserDetailResponse | null> {
-  const report = await buildDashboardUserReport(db, viewer, divisionId);
+  const viewer = principal.viewer;
+  const report = await buildDashboardUserReport(db, principal, divisionId);
   const userRow = report.users.find((entry) => entry.userId === userId);
   if (!userRow || !userRow.orgId) {
     return null;
@@ -6690,10 +7053,11 @@ async function buildDashboardUserDetail(
 
 async function buildDashboardAttemptDetail(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   attemptId: string,
   divisionId: string | null = null
 ): Promise<DashboardAttemptDetailResponse | null> {
+  const viewer = principal.viewer;
   const score = scoreRecordAccess.getById(db, attemptId);
   if (!score || !isConclusiveSimulationScoreRecord(score) || !score.orgId || !canDashboardViewerAccessOrg(viewer, score.orgId)) {
     return null;
@@ -6705,6 +7069,15 @@ async function buildDashboardAttemptDetail(
   const org = getOrgById(db, score.orgId);
   const user = getUserById(db, score.userId);
   if (!org || !user) {
+    return null;
+  }
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: new Set([org.id]),
+  });
+  if (!permittedUserIds.has(user.id)) {
     return null;
   }
 
@@ -6825,6 +7198,7 @@ function buildDashboardTrainingWorkspaceUserRows(params: {
       return {
         userId: user.id,
         email: user.email,
+        employeeId: user.employeeId ?? null,
         orgId: params.org.id,
         orgName: params.org.name,
         status: user.status,
@@ -6894,7 +7268,8 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
   db: ApiDatabase,
   org: EnterpriseOrg,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardTrainingWorkspaceRow[]> {
   ensureOrgTrainingCollections(db);
   const normalizedOrg = ensureOrgContractFields(org);
@@ -6906,9 +7281,16 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    normalizedOrg.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
 
   const rows = buildOrgTrainingSummaries({
     db,
@@ -7016,13 +7398,23 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
 
 async function buildDashboardTrainingWorkspace(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null = null
 ): Promise<DashboardTrainingWorkspaceResponse> {
+  const viewer = principal.viewer;
   const now = new Date();
+  const accessibleOrgIds = new Set(listDashboardAccessibleOrgs(db, viewer).map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const trainings = (
     await Promise.all(
-      listDashboardAccessibleOrgs(db, viewer).map((org) => buildDashboardTrainingWorkspaceRowsForOrg(db, org, now, divisionId))
+      listDashboardAccessibleOrgs(db, viewer).map((org) =>
+        buildDashboardTrainingWorkspaceRowsForOrg(db, org, now, divisionId, permittedUserIds)
+      )
     )
   )
     .flat()
@@ -7062,18 +7454,26 @@ async function buildDashboardTrainingWorkspace(
 async function buildDashboardCustomerInsights(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): Promise<DashboardCustomerInsights> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
-  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId);
+  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId, permittedUserIds);
   const scenarioCatalog = buildDashboardScenarioCatalog(db, normalizedOrg);
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId);
-  const previousScores = filterOrgScoreRecords(db, normalizedOrg.id, previous30DaysThreshold, last30DaysThreshold, divisionId);
+  const recentSessions = filterOrgUsageSessions(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const recentScores = filterOrgScoreRecords(db, normalizedOrg.id, last30DaysThreshold, nowMs, divisionId, permittedUserIds);
+  const previousScores = filterOrgScoreRecords(
+    db,
+    normalizedOrg.id,
+    previous30DaysThreshold,
+    last30DaysThreshold,
+    divisionId,
+    permittedUserIds
+  );
 
   return {
     usage: {
@@ -7084,10 +7484,10 @@ async function buildDashboardCustomerInsights(
       allottedMinutesThisPeriod: usage.allottedMinutes,
       usagePercentThisPeriod: Math.round(usage.usagePercent * 10) / 10
     },
-    trend: buildDashboardCustomerTrend(db, normalizedOrg, now, divisionId),
-    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
-    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
-    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now, divisionId),
+    trend: buildDashboardCustomerTrend(db, normalizedOrg, now, divisionId, permittedUserIds),
+    trainingPacks: await buildDashboardTrainingPackRows(db, normalizedOrg, scenarioCatalog, now, divisionId, permittedUserIds),
+    users: buildDashboardCustomerUserRows(db, normalizedOrg, scenarioCatalog, now, divisionId, permittedUserIds),
+    scenarios: buildDashboardCustomerScenarioRows(db, normalizedOrg, scenarioCatalog, now, divisionId, permittedUserIds),
     trainingPackAttribution: buildTrainingPackAttributionSummary({
       usageSessions: recentSessions,
       scoreRecords: recentScores
@@ -7103,6 +7503,631 @@ function listDashboardAccessibleOrgs(db: ApiDatabase, viewer: DashboardViewer): 
   return viewer.accessType === "super_user"
     ? db.orgs.slice().sort((left, right) => left.name.localeCompare(right.name))
     : db.orgs.filter((org) => org.id === viewer.orgId);
+}
+
+interface DashboardAdminOrgContext {
+  org: EnterpriseOrg;
+  capabilities: DashboardAdminCapabilities;
+}
+
+function resolveDashboardAdminOrgContext(
+  db: ApiDatabase,
+  principal: DashboardRequestPrincipal,
+  requestedOrgId: string | null,
+  response: Response
+): DashboardAdminOrgContext | null {
+  let orgId: string | null = null;
+  let capabilities = principal.viewer.capabilities;
+
+  if (principal.viewer.accessType === "super_user") {
+    if (!requestedOrgId) {
+      response.status(400).json({
+        error: "Select an organization before using Admin.",
+        code: "dashboard_scope_denied",
+      });
+      return null;
+    }
+    if (!canDashboardViewerAccessOrg(principal.viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Organization not found." });
+      return null;
+    }
+    orgId = requestedOrgId;
+    capabilities = buildDashboardAdminCapabilities(null, { superUserOrgContext: true });
+  } else {
+    orgId = principal.viewer.orgId;
+    if (requestedOrgId && requestedOrgId !== orgId) {
+      response.status(404).json({ error: "Organization not found." });
+      return null;
+    }
+  }
+
+  const org = getOrgById(db, orgId);
+  if (!org || org.status !== "active") {
+    response.status(404).json({ error: "Organization not found." });
+    return null;
+  }
+
+  return { org, capabilities };
+}
+
+function rejectMissingDashboardAdminCapability(
+  capabilities: DashboardAdminCapabilities,
+  capability: keyof DashboardAdminCapabilities,
+  response: Response
+): boolean {
+  if (capabilities[capability]) {
+    return false;
+  }
+
+  response.status(403).json({
+    error: "Admin access is not available for this account.",
+    code: "dashboard_scope_denied",
+  });
+  return true;
+}
+
+const TRAINING_CONTENT_CLIENT_OWNED_FIELDS = new Set([
+  "orgid",
+  "organizationid",
+  "actorid",
+  "storageprovider",
+  "bucket",
+  "bucketname",
+  "temporaryobjectkey",
+  "finalobjectkey",
+  "objectkey",
+  "version",
+  "assetversion",
+]);
+
+function rejectTrainingContentClientOwnedFields(body: unknown, response: Response): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return false;
+  }
+  const rejectedFields = Object.keys(body).filter((field) => {
+    const normalized = field.toLowerCase().replace(/[_-]+/g, "");
+    return TRAINING_CONTENT_CLIENT_OWNED_FIELDS.has(normalized);
+  });
+  if (rejectedFields.length === 0) {
+    return false;
+  }
+  response.status(400).json({
+    error: "The request contains server-owned Training Content fields.",
+    code: "training_content_server_owned_field",
+    fields: rejectedFields.sort(),
+  });
+  return true;
+}
+
+interface ResolvedTrainingContentManagementResources {
+  context: TrainingContentManagementRequestContext;
+  references: TrainingContentReferenceData;
+  org: EnterpriseOrg;
+}
+
+async function resolveTrainingContentManagementResources(
+  request: DashboardAuthRequest,
+  response: Response
+): Promise<ResolvedTrainingContentManagementResources | null> {
+  return withFreshDatabaseRead(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return null;
+    }
+    return {
+      context: {
+        orgId: adminContext.org.id,
+        actorId: request.dashboard!.user.id,
+        capabilities: adminContext.capabilities,
+        actorType: "web_user",
+      },
+      references: {
+        users: db.users.filter(
+          (user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id
+        ),
+        focusTopics: db.orgTrainings.filter(
+          (topic) => topic.orgId === adminContext.org.id
+        ),
+      },
+      org: adminContext.org,
+    };
+  });
+}
+
+async function resolveTrainingContentManagementContext(
+  request: DashboardAuthRequest,
+  response: Response
+): Promise<TrainingContentManagementRequestContext | null> {
+  return (await resolveTrainingContentManagementResources(request, response))?.context ?? null;
+}
+
+function respondWithTrainingContentAssetError(error: unknown, response: Response): void {
+  const mapped = mapTrainingContentAssetServiceError(error);
+  response.status(mapped.status).json({
+    error: mapped.message,
+    code: mapped.code,
+    ...(mapped.details ?? {}),
+  });
+}
+
+function respondWithTrainingContentManagementError(error: unknown, response: Response): void {
+  const mapped = mapTrainingContentManagementServiceError(error);
+  response.status(mapped.status).json({
+    error: mapped.message,
+    code: mapped.code,
+    ...(mapped.details ?? {}),
+  });
+}
+
+function canDashboardAdminEditEmployeeId(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.editEmployeeIds) {
+    return false;
+  }
+  if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
+    return true;
+  }
+  return params.actor.orgRole === "user_admin" && canActorManageRegularUser({
+    actor: params.actor,
+    viewer: params.viewer,
+    target: params.target,
+  });
+}
+
+function canDashboardAdminEditNames(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.editUserNames) {
+    return false;
+  }
+  if (!canActorSeeOrganizationUser({ actor: params.actor, viewer: params.viewer, target: params.target })) {
+    return false;
+  }
+  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+}
+
+function canDashboardAdminChangeUserRole(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.manageUserRoles || params.target.id === params.actor.id) {
+    return false;
+  }
+  if (!canOrgAdminManageRole(params.target.orgRole)) {
+    return false;
+  }
+  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+}
+
+function canDashboardAdminAssignManager(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+}): boolean {
+  if (!params.capabilities.assignUserManagers) {
+    return false;
+  }
+  if (!canManagerAssignmentTargetBeManaged(params.target)) {
+    return false;
+  }
+  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+}
+
+function canDashboardAdminChangeUserStatus(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  target: UserProfile;
+  nextStatus: UserStatus;
+  orgUsers: readonly UserProfile[];
+}): boolean {
+  if (!params.capabilities.manageRegularOrganizationUsers || params.target.id === params.actor.id) {
+    return false;
+  }
+  if (params.target.orgRole === "org_admin") {
+    if (params.viewer.accessType !== "super_user" && params.actor.orgRole !== "org_admin") {
+      return false;
+    }
+    const activeOrgAdminCount = params.orgUsers.filter(
+      (user) => user.orgRole === "org_admin" && user.status === "active"
+    ).length;
+    return params.nextStatus !== "disabled" || activeOrgAdminCount > 1;
+  }
+  if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
+    return params.target.orgRole === "user" || params.target.orgRole === "user_admin";
+  }
+  return params.actor.orgRole === "user_admin" && canActorManageRegularUser({
+    actor: params.actor,
+    viewer: params.viewer,
+    target: params.target,
+  });
+}
+
+function buildDashboardAdminManagerOptions(orgUsers: readonly UserProfile[], orgId: string): DashboardAdminManagerOption[] {
+  return orgUsers
+    .filter((user) => isEligibleManagerUser(user, orgId))
+    .map((user) => ({
+      userId: user.id,
+      email: user.email,
+      firstName: getUserFirstName(user),
+      lastName: getUserLastName(user),
+      displayName: resolveStoredUserDisplayName(user),
+    }))
+    .sort(
+      (left, right) =>
+        left.displayName.localeCompare(right.displayName, undefined, { sensitivity: "base" }) ||
+        left.email.localeCompare(right.email, undefined, { sensitivity: "base" }) ||
+        left.userId.localeCompare(right.userId)
+    );
+}
+
+function buildDashboardAdminUserRow(params: {
+  actor: UserProfile;
+  viewer: DashboardViewer;
+  capabilities: DashboardAdminCapabilities;
+  user: UserProfile;
+  orgUsers: readonly UserProfile[];
+}): DashboardAdminUserRow {
+  const canDeactivate = params.user.status === "active" && canDashboardAdminChangeUserStatus({
+    actor: params.actor,
+    viewer: params.viewer,
+    capabilities: params.capabilities,
+    target: params.user,
+    nextStatus: "disabled",
+    orgUsers: params.orgUsers,
+  });
+  const canReactivate = params.user.status === "disabled" && canDashboardAdminChangeUserStatus({
+    actor: params.actor,
+    viewer: params.viewer,
+    capabilities: params.capabilities,
+    target: params.user,
+    nextStatus: "active",
+    orgUsers: params.orgUsers,
+  });
+  const managerUserId = normalizeManagerUserId(params.user.managerUserId);
+  const manager = managerUserId ? params.orgUsers.find((user) => user.id === managerUserId) ?? null : null;
+
+  return {
+    userId: params.user.id,
+    email: params.user.email,
+    firstName: getUserFirstName(params.user),
+    lastName: getUserLastName(params.user),
+    displayName: resolveStoredUserDisplayName(params.user),
+    employeeId: params.user.employeeId ?? null,
+    orgRole: params.user.orgRole,
+    managerUserId,
+    managerDisplayName: manager ? resolveStoredUserDisplayName(manager) : null,
+    managerEmail: manager?.email ?? null,
+    assignedReportCount: params.orgUsers.filter((user) => normalizeManagerUserId(user.managerUserId) === params.user.id).length,
+    status: params.user.status,
+    dashboardAccessEnabled: params.user.dashboardAccessEnabled === true,
+    canEditEmployeeId: canDashboardAdminEditEmployeeId({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canEditNames: canDashboardAdminEditNames({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canChangeRole: canDashboardAdminChangeUserRole({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canAssignManager: canDashboardAdminAssignManager({
+      actor: params.actor,
+      viewer: params.viewer,
+      capabilities: params.capabilities,
+      target: params.user,
+    }),
+    canDeactivate,
+    canReactivate,
+    isSelf: params.user.id === params.actor.id,
+    createdAt: params.user.createdAt,
+    updatedAt: params.user.updatedAt,
+  };
+}
+
+function buildDashboardAdminAccessRequestRow(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  requestRecord: EnterpriseJoinRequestRecord
+): DashboardAdminAccessRequestRow {
+  const user = getUserById(db, requestRecord.userId);
+  return {
+    id: requestRecord.id,
+    status: requestRecord.status,
+    userId: requestRecord.userId,
+    displayName: user ? resolveStoredUserDisplayName(user) : "Not provided",
+    email: requestRecord.email,
+    orgId: org.id,
+    orgName: org.name,
+    createdAt: requestRecord.createdAt,
+    expiresAt: requestRecord.expiresAt,
+    updatedAt: requestRecord.updatedAt,
+    decidedAt: requestRecord.decidedAt,
+    decisionReason: requestRecord.decisionReason,
+  };
+}
+
+type OrgJoinDecisionChannel = "mobile" | "dashboard";
+
+type OrgJoinDecisionResult =
+  | { ok: true; requestRecord: EnterpriseJoinRequestRecord }
+  | { ok: false; status: number; error: string };
+
+function decideEnterpriseJoinRequest(params: {
+  db: ApiDatabase;
+  actor: UserProfile;
+  org: EnterpriseOrg;
+  requestId: string;
+  action: "approve" | "reject";
+  reason?: string | null;
+  channel: OrgJoinDecisionChannel;
+}): OrgJoinDecisionResult {
+  const requestRecord = params.db.enterpriseJoinRequests.find((row) => row.id === params.requestId);
+  if (!requestRecord || requestRecord.orgId !== params.org.id) {
+    return { ok: false, status: 404, error: "Join request not found." };
+  }
+
+  if (requestRecord.status !== "pending") {
+    return { ok: false, status: 409, error: `Join request is already ${requestRecord.status}.` };
+  }
+
+  const targetUser = getUserById(params.db, requestRecord.userId);
+  if (!targetUser) {
+    const nowValue = nowIso();
+    requestRecord.status = "rejected";
+    requestRecord.updatedAt = nowValue;
+    requestRecord.decidedAt = nowValue;
+    requestRecord.decidedByUserId = params.actor.id;
+    requestRecord.decisionReason = "Target user no longer exists.";
+    return { ok: false, status: 404, error: "Target user not found." };
+  }
+
+  const nowValue = nowIso();
+  const appendDecisionAudit = (action: string, message: string, metadata: Record<string, unknown>) => {
+    const input = {
+      action,
+      orgId: params.org.id,
+      userId: targetUser.id,
+      message,
+      metadata,
+    };
+    if (params.channel === "mobile") {
+      appendMobileAuditEvent(params.db, params.actor, input);
+    } else {
+      appendWebAuditEvent(params.db, params.actor, input);
+    }
+  };
+
+  if (params.action === "approve") {
+    targetUser.accountType = "enterprise";
+    targetUser.tier = "enterprise";
+    targetUser.orgId = params.org.id;
+    targetUser.orgRole = "user";
+    targetUser.managerUserId = null;
+    targetUser.dashboardAccessEnabled = false;
+    targetUser.mobileProfileReonboardingRequired = false;
+    targetUser.status = "active";
+    targetUser.updatedAt = nowValue;
+    const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
+      assignments: params.db.trainingPackAssignments ?? [],
+      userId: targetUser.id,
+      user: targetUser,
+      nowIso: nowValue,
+    });
+    requestRecord.status = "approved";
+    requestRecord.updatedAt = nowValue;
+    requestRecord.decidedAt = nowValue;
+    requestRecord.decidedByUserId = params.actor.id;
+    requestRecord.decisionReason = params.reason?.trim() || null;
+    emitMobileUpdateForUser(params.db, targetUser.id, "user");
+    emitMobileUpdateForOrg(params.db, params.org.id, "org");
+    appendDecisionAudit(
+      params.channel === "mobile" ? "org_join.approved_by_org_admin" : "org_join.approved_by_dashboard_admin",
+      `Approved org join request for ${targetUser.email}.`,
+      {
+        requestId: requestRecord.id,
+        deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
+      }
+    );
+  } else {
+    requestRecord.status = "rejected";
+    requestRecord.updatedAt = nowValue;
+    requestRecord.decidedAt = nowValue;
+    requestRecord.decidedByUserId = params.actor.id;
+    requestRecord.decisionReason = params.reason?.trim() || "Rejected by organization admin.";
+    emitMobileUpdateForUser(params.db, targetUser.id, "user");
+    emitMobileUpdateForOrg(params.db, params.org.id, "org");
+    appendDecisionAudit(
+      params.channel === "mobile" ? "org_join.rejected_by_org_admin" : "org_join.rejected_by_dashboard_admin",
+      `Rejected org join request for ${targetUser.email}.`,
+      {
+        requestId: requestRecord.id,
+        reasonProvided: Boolean(requestRecord.decisionReason)
+      }
+    );
+  }
+
+  return { ok: true, requestRecord };
+}
+
+function findActiveOrgByJoinCode(db: ApiDatabase, joinCode: string): EnterpriseOrg | null {
+  const normalizedJoinCode = normalizeJoinCode(joinCode);
+  if (!normalizedJoinCode) {
+    return null;
+  }
+  return db.orgs.find((org) => org.status === "active" && normalizeJoinCode(org.joinCode) === normalizedJoinCode) ?? null;
+}
+
+function createOrReusePendingOrgJoinRequest(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  org: EnterpriseOrg;
+  now: Date;
+}): { created: boolean; request: EnterpriseJoinRequestRecord } {
+  expireOrgJoinRequests(params.db, params.now);
+  const existingPending = params.db.enterpriseJoinRequests.find(
+    (row) => row.userId === params.user.id && row.orgId === params.org.id && row.status === "pending"
+  );
+  if (existingPending) {
+    return { created: false, request: existingPending };
+  }
+
+  const createdAt = params.now.toISOString();
+  const record: EnterpriseJoinRequestRecord = {
+    id: `jr_${uuid()}`,
+    userId: params.user.id,
+    email: params.user.email,
+    emailDomain: extractEmailDomain(params.user.email) ?? "",
+    orgId: params.org.id,
+    orgNameSnapshot: params.org.name,
+    joinCodeSnapshot: normalizeJoinCode(params.org.joinCode),
+    status: "pending",
+    createdAt,
+    expiresAt: new Date(params.now.getTime() + ORG_JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+    updatedAt: createdAt,
+    decidedAt: null,
+    decidedByUserId: null,
+    decisionReason: null
+  };
+  params.db.enterpriseJoinRequests.push(record);
+  emitMobileUpdateForOrg(params.db, params.org.id, "org");
+  return { created: true, request: record };
+}
+
+type MobileCompanyProfileCompletion = {
+  ok: true;
+  org: EnterpriseOrg;
+  request: EnterpriseJoinRequestRecord | null;
+  createdRequest: boolean;
+  restoredExistingMember: boolean;
+};
+
+type MobileBasicProfileCompletion = {
+  ok: true;
+  restoredExistingMember: boolean;
+};
+
+type MobileProfileCompletionError = { ok: false; status: number; error: string };
+
+function isMobileCompanyProfileCompletion(
+  completion: MobileCompanyProfileCompletion | MobileBasicProfileCompletion
+): completion is MobileCompanyProfileCompletion {
+  return "org" in completion;
+}
+
+function completeMobileCompanyProfile(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  firstName: string;
+  lastName: string;
+  joinCode: string;
+  now: Date;
+}): MobileCompanyProfileCompletion | MobileProfileCompletionError {
+  if (params.user.status !== "active") {
+    return { ok: false, status: 403, error: "Your account is deactivated. Contact your organization admin." };
+  }
+
+  const org = findActiveOrgByJoinCode(params.db, params.joinCode);
+  if (!org) {
+    return { ok: false, status: 404, error: "Company code not found." };
+  }
+
+  if (params.user.accountType === "enterprise" && !isSuperUser(params.user)) {
+    if (params.user.orgId !== org.id) {
+      return { ok: false, status: 403, error: "Company code does not match your active organization." };
+    }
+
+    params.user.firstName = params.firstName;
+    params.user.lastName = params.lastName;
+    params.user.mobileProfileReonboardingRequired = false;
+    params.user.updatedAt = params.now.toISOString();
+    emitMobileUpdateForUser(params.db, params.user.id, "user");
+    return { ok: true, org, request: null, createdRequest: false, restoredExistingMember: true };
+  }
+
+  params.user.firstName = params.firstName;
+  params.user.lastName = params.lastName;
+  params.user.mobileProfileReonboardingRequired = false;
+  params.user.updatedAt = params.now.toISOString();
+
+  if (isSuperUser(params.user)) {
+    emitMobileUpdateForUser(params.db, params.user.id, "user");
+    return { ok: true, org, request: null, createdRequest: false, restoredExistingMember: false };
+  }
+
+  if (params.user.accountType === "enterprise" && params.user.orgId === org.id) {
+    emitMobileUpdateForUser(params.db, params.user.id, "user");
+    return { ok: true, org, request: null, createdRequest: false, restoredExistingMember: true };
+  }
+
+  const requestResult = createOrReusePendingOrgJoinRequest({
+    db: params.db,
+    user: params.user,
+    org,
+    now: params.now,
+  });
+  emitMobileUpdateForUser(params.db, params.user.id, "user");
+  return {
+    ok: true,
+    org,
+    request: requestResult.request,
+    createdRequest: requestResult.created,
+    restoredExistingMember: false,
+  };
+}
+
+function completeMobileBasicProfile(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  firstName: string;
+  lastName: string;
+  now: Date;
+}): MobileBasicProfileCompletion | MobileProfileCompletionError {
+  if (params.user.status !== "active") {
+    return { ok: false, status: 403, error: "Your account is deactivated. Contact your organization admin." };
+  }
+
+  if (
+    params.user.accountType === "enterprise" &&
+    !isSuperUser(params.user) &&
+    params.user.mobileProfileReonboardingRequired === true
+  ) {
+    return { ok: false, status: 400, error: "Company code is required to confirm your organization." };
+  }
+
+  params.user.firstName = params.firstName;
+  params.user.lastName = params.lastName;
+  params.user.mobileProfileReonboardingRequired = false;
+  params.user.updatedAt = params.now.toISOString();
+  emitMobileUpdateForUser(params.db, params.user.id, "user");
+  return {
+    ok: true,
+    restoredExistingMember:
+      params.user.accountType === "enterprise" && Boolean(params.user.orgId) && !isSuperUser(params.user),
+  };
 }
 
 async function listDashboardAccessibleCustomers(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardCustomerSummary[]> {
@@ -7128,14 +8153,21 @@ async function getDashboardAccessibleCustomer(
 
 async function buildDashboardOverview(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null = null
 ): Promise<DashboardOverviewResponse> {
+  const viewer = principal.viewer;
   const accessibleOrgs = listDashboardAccessibleOrgs(db, viewer);
+  const accessibleOrgIds = new Set(accessibleOrgs.map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const customers = await Promise.all(
-    accessibleOrgs.map((org) => buildDashboardCustomerSummary(db, org, divisionId))
+    accessibleOrgs.map((org) => buildDashboardCustomerSummary(db, org, divisionId, permittedUserIds))
   );
-  const accessibleOrgIds = new Set(customers.map((customer) => customer.orgId));
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
@@ -7154,7 +8186,10 @@ async function buildDashboardOverview(
       endedAtFrom: new Date(billing.periodStartAt),
       endedAtBefore: new Date(billing.periodEndAt),
       conclusiveOnly: true,
-    }).filter((record) => !divisionId || (record.divisionId ?? null) === divisionId);
+    }).filter((record) =>
+      (!divisionId || (record.divisionId ?? null) === divisionId) &&
+      permittedUserIds.has(record.userId)
+    );
   });
   const topScenarios = (
     await Promise.all(
@@ -7169,7 +8204,8 @@ async function buildDashboardOverview(
           org,
           buildDashboardScenarioCatalog(db, org),
           now,
-          divisionId
+          divisionId,
+          permittedUserIds
         ).slice(0, 5);
         return scenarios.map(
           (scenario): DashboardPortfolioScenarioSummary => ({
@@ -7194,21 +8230,24 @@ async function buildDashboardOverview(
     accessibleOrgIds,
     last30DaysThreshold,
     nowMs,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const recentScores = filterDashboardAccessibleScoreRecords(
     db,
     accessibleOrgIds,
     last30DaysThreshold,
     nowMs,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const previousScores = filterDashboardAccessibleScoreRecords(
     db,
     accessibleOrgIds,
     previous30DaysThreshold,
     last30DaysThreshold,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
 
   return {
@@ -7245,18 +8284,28 @@ async function buildDashboardOverview(
   };
 }
 
-async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardViewer): Promise<DashboardTrainingReportResponse> {
+async function buildDashboardTrainingReport(
+  db: ApiDatabase,
+  principal: DashboardRequestPrincipal
+): Promise<DashboardTrainingReportResponse> {
+  const viewer = principal.viewer;
   const orgs = listDashboardAccessibleOrgs(db, viewer);
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
   const orgIds = new Set(orgs.map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds,
+  });
   const trainingPacks = (
     await Promise.all(
       orgs.map(async (org) => {
         const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
-        const rows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now);
+        const rows = await buildDashboardTrainingPackRows(db, org, scenarioCatalog, now, null, permittedUserIds);
         return rows.map(
           (row): DashboardTrainingPackReportSummary => ({
             ...row,
@@ -7283,10 +8332,10 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
   for (const row of trainingPacks) {
     if (row.learnerCountLast30Days > 0) {
       const scopedSessions = filterOrgUsageSessions(db, row.orgId, last30DaysThreshold, nowMs).filter(
-        (session) => session.trainingPackId === row.trainingPackId
+        (session) => session.trainingPackId === row.trainingPackId && permittedUserIds.has(session.userId)
       );
       const scopedScores = filterOrgScoreRecords(db, row.orgId, last30DaysThreshold, nowMs).filter(
-        (record) => record.trainingPackId === row.trainingPackId
+        (record) => record.trainingPackId === row.trainingPackId && permittedUserIds.has(record.userId)
       );
       scopedSessions.forEach((session) => engagedLearnerIds.add(session.userId));
       scopedScores.forEach((record) => engagedLearnerIds.add(record.userId));
@@ -7296,11 +8345,17 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
     if (!session.orgId || !orgIds.has(session.orgId)) {
       return false;
     }
+    if (!permittedUserIds.has(session.userId)) {
+      return false;
+    }
     const startedAtMs = new Date(session.startedAt).getTime();
     return Number.isFinite(startedAtMs) && startedAtMs >= last30DaysThreshold && startedAtMs < nowMs;
   });
   const recentScores = listScoreRecords(db, { conclusiveOnly: true }).filter((record) => {
     if (!record.orgId || !orgIds.has(record.orgId)) {
+      return false;
+    }
+    if (!permittedUserIds.has(record.userId)) {
       return false;
     }
     const endedAtMs = new Date(record.endedAt).getTime();
@@ -7333,7 +8388,8 @@ async function buildDashboardTrainingReport(db: ApiDatabase, viewer: DashboardVi
 async function findDashboardAccessibleTrainingPack(
   db: ApiDatabase,
   viewer: DashboardViewer,
-  trainingPackId: string
+  trainingPackId: string,
+  explicitOrgId: string | null = null
 ): Promise<{
   org: EnterpriseOrg;
   pack: TrainingPack;
@@ -7344,7 +8400,12 @@ async function findDashboardAccessibleTrainingPack(
     return null;
   }
 
-  for (const org of listDashboardAccessibleOrgs(db, viewer)) {
+  const accessibleOrgs = listDashboardAccessibleOrgs(db, viewer).filter((org) => !explicitOrgId || org.id === explicitOrgId);
+  if (explicitOrgId && !canDashboardViewerAccessOrg(viewer, explicitOrgId)) {
+    return null;
+  }
+
+  for (const org of accessibleOrgs) {
     const packs = await listTrainingPacksForDashboardOrg(org.id);
     const pack = packs.find((entry) => entry.id === normalizedTrainingPackId);
     if (pack) {
@@ -7361,24 +8422,46 @@ async function findDashboardAccessibleTrainingPack(
 
 async function buildDashboardUserReport(
   db: ApiDatabase,
-  viewer: DashboardViewer,
+  principal: DashboardRequestPrincipal,
   divisionId: string | null = null
 ): Promise<DashboardUserReportResponse> {
+  const viewer = principal.viewer;
   const orgs = listDashboardAccessibleOrgs(db, viewer);
   const orgById = new Map(orgs.map((org) => [org.id, org] as const));
   const accessibleOrgIds = new Set(orgs.map((org) => org.id));
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db,
+    actor: principal.user,
+    viewer,
+    orgIds: accessibleOrgIds,
+  });
   const now = new Date();
   const nowMs = now.getTime();
   const last30DaysThreshold = nowMs - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = nowMs - 60 * 24 * 60 * 60 * 1000;
-  const recentSessions = filterDashboardAccessibleUsageSessions(db, accessibleOrgIds, last30DaysThreshold, nowMs, divisionId);
-  const recentScores = filterDashboardAccessibleScoreRecords(db, accessibleOrgIds, last30DaysThreshold, nowMs, divisionId);
+  const recentSessions = filterDashboardAccessibleUsageSessions(
+    db,
+    accessibleOrgIds,
+    last30DaysThreshold,
+    nowMs,
+    divisionId,
+    permittedUserIds
+  );
+  const recentScores = filterDashboardAccessibleScoreRecords(
+    db,
+    accessibleOrgIds,
+    last30DaysThreshold,
+    nowMs,
+    divisionId,
+    permittedUserIds
+  );
   const previousScores = filterDashboardAccessibleScoreRecords(
     db,
     accessibleOrgIds,
     previous30DaysThreshold,
     last30DaysThreshold,
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const scenarioCatalogByOrg = new Map<string, Map<string, DashboardScenarioCatalogEntry>>(
     orgs.map((org) => [org.id, buildDashboardScenarioCatalog(db, org)])
@@ -7392,7 +8475,12 @@ async function buildDashboardUserReport(
   }
 
   const users = db.users
-    .filter((user) => user.accountType === "enterprise" && Boolean(user.orgId) && accessibleOrgIds.has(user.orgId!))
+    .filter((user) =>
+      user.accountType === "enterprise" &&
+      Boolean(user.orgId) &&
+      accessibleOrgIds.has(user.orgId!) &&
+      permittedUserIds.has(user.id)
+    )
     .sort((left, right) => left.email.localeCompare(right.email))
     .map((user): DashboardUserReportRow => {
       const userSessions = recentSessions.filter((session) => session.userId === user.id);
@@ -7422,6 +8510,7 @@ async function buildDashboardUserReport(
       return {
         userId: user.id,
         email: user.email,
+        employeeId: user.employeeId ?? null,
         orgId,
         orgName: orgId ? orgById.get(orgId)?.name ?? null : null,
         status: user.status,
@@ -8875,10 +9964,11 @@ function buildDashboardOrgUsageSnapshot(
   db: ApiDatabase,
   org: EnterpriseOrg,
   now: Date,
-  divisionId: string | null = null
+  divisionId: string | null = null,
+  permittedUserIds: ReadonlySet<string> | null = null
 ): OrgUsageSnapshot {
   const baseSnapshot = buildOrgUsageSnapshot(db, org, now);
-  if (!divisionId) {
+  if (!divisionId && !permittedUserIds) {
     return baseSnapshot;
   }
 
@@ -8887,7 +9977,8 @@ function buildDashboardOrgUsageSnapshot(
     org.id,
     new Date(baseSnapshot.periodStartAt).getTime(),
     new Date(baseSnapshot.periodEndAt).getTime(),
-    divisionId
+    divisionId,
+    permittedUserIds
   );
   const usedSeconds = usageSessionAccess.sumBilledSeconds(filteredSessions);
   const usedMinutes = usedSeconds / 60;
@@ -9217,6 +10308,13 @@ const mobileVerificationRateLimiter = createRateLimiter({
   }
 });
 
+const mobileOrgJoinRequestRateLimiter = createRateLimiter({
+  name: "mobile-org-join-request",
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
+});
+
 const mobilePublicErrorReportRateLimiter = createRateLimiter({
   name: "mobile-public-error-report",
   windowMs: 60 * 60 * 1000,
@@ -9228,6 +10326,12 @@ const aiRouteRateLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
   max: 120,
   keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
+});
+
+const trainingContentStorageRateLimiter = createRateLimiter({
+  name: "training-content-storage",
+  windowMs: 15 * 60 * 1000,
+  max: 120
 });
 
 function isRemoteAiConfigured(): boolean {
@@ -9282,6 +10386,11 @@ app.get("/ready", (_request, response) => {
     consecutiveFailures: databaseReadyConsecutiveFailures,
     failureThreshold: READINESS_FAILURE_THRESHOLD
   });
+});
+
+app.get("/ready/training-content-storage", (_request, response) => {
+  const status = trainingContentStorageReadiness.getStatus();
+  response.status(status.enabled && !status.available ? 503 : 200).json(status);
 });
 
 app.get("/version", (_request, response) => {
@@ -9703,7 +10812,7 @@ app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAu
       response.status(400).json({ error: divisionFilter.error });
       return;
     }
-    const payload = await buildDashboardOverview(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
+    const payload = await buildDashboardOverview(db, request.dashboard!, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -9722,7 +10831,7 @@ app.get("/dashboard/reporting/trainings", requireDashboardAuth, async (request: 
     for (const org of listDashboardAccessibleOrgs(db, request.dashboard!.viewer)) {
       await ensureOrgTrainingWorkspace(db, org);
     }
-    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
+    const payload = await buildDashboardTrainingWorkspace(db, request.dashboard!, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -9799,21 +10908,32 @@ app.get("/dashboard/customers/:orgId", requireDashboardAuth, async (request: Das
 
 app.get("/dashboard/training", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const payload = await buildDashboardTrainingReport(db, request.dashboard!.viewer);
+    const payload = await buildDashboardTrainingReport(db, request.dashboard!);
     response.json(payload);
   });
 });
 
 app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
-    const located = await findDashboardAccessibleTrainingPack(db, request.dashboard!.viewer, request.params.trainingPackId);
+    const viewer = request.dashboard!.viewer;
+    const requestedOrgId = getSingleQueryParam(request.query.orgId);
+    if (viewer.accessType === "super_user" && !requestedOrgId) {
+      response.status(400).json({ error: "Select an organization before opening training detail." });
+      return;
+    }
+    if (requestedOrgId && !canDashboardViewerAccessOrg(viewer, requestedOrgId)) {
+      response.status(404).json({ error: "Training pack not found." });
+      return;
+    }
+    const explicitOrgId = requestedOrgId ?? viewer.orgId ?? null;
+    const located = await findDashboardAccessibleTrainingPack(db, viewer, request.params.trainingPackId, explicitOrgId);
     if (!located) {
       response.status(404).json({ error: "Training pack not found." });
       return;
     }
     const divisionFilter = resolveDashboardDivisionFilter({
       db,
-      viewer: request.dashboard!.viewer,
+      viewer,
       explicitOrgId: located.org.id,
       requestedDivisionId: getSingleQueryParam(request.query.divisionId),
     });
@@ -9823,9 +10943,10 @@ app.get("/dashboard/training/:trainingPackId", requireDashboardAuth, async (requ
     }
     const payload = await buildDashboardTrainingPackDetail(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       request.params.trainingPackId,
-      divisionFilter.appliedDivisionId
+      divisionFilter.appliedDivisionId,
+      located.org.id
     );
     if (!payload) {
       response.status(404).json({ error: "Training pack not found." });
@@ -9841,14 +10962,25 @@ app.get(
   requireDashboardAuth,
   async (request: DashboardAuthRequest, response: Response) => {
     await withFreshReportingRead(async (db) => {
-      const located = await findDashboardAccessibleTrainingPack(db, request.dashboard!.viewer, request.params.trainingPackId);
+      const viewer = request.dashboard!.viewer;
+      const requestedOrgId = getSingleQueryParam(request.query.orgId);
+      if (viewer.accessType === "super_user" && !requestedOrgId) {
+        response.status(400).json({ error: "Select an organization before opening training detail." });
+        return;
+      }
+      if (requestedOrgId && !canDashboardViewerAccessOrg(viewer, requestedOrgId)) {
+        response.status(404).json({ error: "Training pack assignment not found." });
+        return;
+      }
+      const explicitOrgId = requestedOrgId ?? viewer.orgId ?? null;
+      const located = await findDashboardAccessibleTrainingPack(db, viewer, request.params.trainingPackId, explicitOrgId);
       if (!located) {
         response.status(404).json({ error: "Training pack assignment not found." });
         return;
       }
       const divisionFilter = resolveDashboardDivisionFilter({
         db,
-        viewer: request.dashboard!.viewer,
+        viewer,
         explicitOrgId: located.org.id,
         requestedDivisionId: getSingleQueryParam(request.query.divisionId),
       });
@@ -9858,10 +10990,11 @@ app.get(
       }
       const payload = await buildDashboardTrainingPackAssignmentDetail(
         db,
-        request.dashboard!.viewer,
+        request.dashboard!,
         request.params.trainingPackId,
         request.params.assignmentId,
-        divisionFilter.appliedDivisionId
+        divisionFilter.appliedDivisionId,
+        located.org.id
       );
       if (!payload) {
         response.status(404).json({ error: "Training pack assignment not found." });
@@ -9884,7 +11017,7 @@ app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthR
       response.status(400).json({ error: divisionFilter.error });
       return;
     }
-    const payload = await buildDashboardUserReport(db, request.dashboard!.viewer, divisionFilter.appliedDivisionId);
+    const payload = await buildDashboardUserReport(db, request.dashboard!, divisionFilter.appliedDivisionId);
     response.json(payload);
   });
 });
@@ -9903,7 +11036,7 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
 
     const payload = await buildDashboardUserDetail(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       request.params.userId,
       divisionFilter.appliedDivisionId
     );
@@ -9915,6 +11048,1176 @@ app.get("/dashboard/users/:userId", requireDashboardAuth, async (request: Dashbo
     response.json(payload);
   });
 });
+
+app.get(
+  "/dashboard/admin/training-content-targets/users",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const targets = await trainingContentManagementService.listUserTargets({
+        context: resources.context,
+        references: resources.references,
+        query: getSingleQueryParam(request.query.q),
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        targets,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content-targets/managers",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const targets = await trainingContentManagementService.listManagerTargets({
+        context: resources.context,
+        references: resources.references,
+        query: getSingleQueryParam(request.query.q),
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        targets,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content-targets/focus-topics",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const focusTopics = await trainingContentManagementService.listFocusTopics({
+        context: resources.context,
+        references: resources.references,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        focusTopics,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.listContent({
+        context: resources.context,
+        references: resources.references,
+        filters: {
+          query: getSingleQueryParam(request.query.q),
+          categoryId: getSingleQueryParam(request.query.categoryId),
+          focusTopicId: getSingleQueryParam(request.query.focusTopicId),
+          contentType: getSingleQueryParam(request.query.contentType),
+          publicationState: getSingleQueryParam(request.query.status),
+          sort: getSingleQueryParam(request.query.sort),
+          page: getSingleQueryParam(request.query.page),
+          pageSize: getSingleQueryParam(request.query.pageSize),
+        },
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+        totalPages: Math.max(1, Math.ceil(result.total / result.pageSize)),
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.createContent({
+        context: resources.context,
+        references: resources.references,
+        input: request.body as CreateDashboardTrainingContentRequest,
+      });
+      response.status(201).json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content/categories",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.listCategories({
+        context: resources.context,
+        includeArchived: getSingleQueryParam(request.query.includeArchived),
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content/categories",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.createCategory({
+        context: resources.context,
+        input: request.body as CreateDashboardTrainingContentCategoryRequest,
+      });
+      response.status(201).json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.patch(
+  "/dashboard/admin/training-content/categories/:categoryId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.updateCategory({
+        context: resources.context,
+        categoryId: request.params.categoryId,
+        input: request.body as UpdateDashboardTrainingContentCategoryRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content/categories/:categoryId/archive",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.archiveCategory({
+        context: resources.context,
+        categoryId: request.params.categoryId,
+        input: request.body as ArchiveDashboardTrainingContentCategoryRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.put(
+  "/dashboard/admin/training-content/categories/reorder",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.reorderCategories({
+        context: resources.context,
+        input: request.body as ReorderDashboardTrainingContentCategoriesRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content/reorder",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.getContentOrder({
+        context: resources.context,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.put(
+  "/dashboard/admin/training-content/reorder",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const result = await trainingContentManagementService.reorderContent({
+        context: resources.context,
+        input: request.body as ReorderDashboardTrainingContentRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        ...result,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content/:contentId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.getContent({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.patch(
+  "/dashboard/admin/training-content/:contentId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.updateContent({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+        input: request.body as UpdateDashboardTrainingContentRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.put(
+  "/dashboard/admin/training-content/:contentId/assignments",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const item = await trainingContentManagementService.updateAssignments({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+        input: request.body as UpdateDashboardTrainingContentAssignmentsRequest,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        item,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+for (const action of ["publish", "unpublish", "archive"] as const) {
+  app.post(
+    `/dashboard/admin/training-content/:contentId/${action}`,
+    requireDashboardAuth,
+    async (request: DashboardAuthRequest, response: Response) => {
+      if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+        return;
+      }
+      const resources = await resolveTrainingContentManagementResources(request, response);
+      if (!resources) {
+        return;
+      }
+      try {
+        const item = await trainingContentManagementService.transitionContent({
+          context: resources.context,
+          references: resources.references,
+          contentId: request.params.contentId,
+          action,
+          input: request.body as DashboardTrainingContentLifecycleRequest,
+        });
+        response.json({
+          viewer: {
+            ...request.dashboard!.viewer,
+            capabilities: resources.context.capabilities,
+          },
+          org: { id: resources.org.id, name: resources.org.name },
+          generatedAt: nowIso(),
+          item,
+          fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+        });
+      } catch (error) {
+        respondWithTrainingContentManagementError(error, response);
+      }
+    }
+  );
+}
+
+app.post(
+  "/dashboard/admin/training-content/:contentId/assets/uploads",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const body = request.body as {
+      assetRole?: unknown;
+      originalFilename?: unknown;
+      declaredMimeType?: unknown;
+      declaredByteSize?: unknown;
+      replacementAssetId?: unknown;
+    };
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      const result = await trainingContentAssetService.initiateUpload({
+        context,
+        contentId: request.params.contentId,
+        assetRole: body?.assetRole,
+        originalFilename: body?.originalFilename,
+        declaredMimeType: body?.declaredMimeType,
+        declaredByteSize: body?.declaredByteSize,
+        replacementAssetId: body?.replacementAssetId,
+      });
+      response.status(201).json(result);
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content/:contentId/assets/:assetId/finalize",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      const result = await trainingContentAssetService.finalizeUpload({
+        context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      });
+      response.status(result.asset.uploadState === "processing" ? 202 : 200).json(result);
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content/:contentId/assets/:assetId",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      response.json(await trainingContentAssetService.getUploadStatus({
+        context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      }));
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/dashboard/admin/training-content/:contentId/assets/:assetId/access",
+  trainingContentStorageRateLimiter,
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) {
+      return;
+    }
+    const context = await resolveTrainingContentManagementContext(request, response);
+    if (!context) {
+      return;
+    }
+    try {
+      response.json(await trainingContentAssetService.createAdminPreviewAccess({
+        context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      }));
+    } catch (error) {
+      respondWithTrainingContentAssetError(error, response);
+    }
+  }
+);
+
+app.get("/dashboard/admin/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+    if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "viewOrganizationUsers", response)) {
+      return;
+    }
+
+    const users = db.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const visibleUsers = listVisibleOrganizationUsers({
+      users,
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      orgId: adminContext.org.id,
+    }).sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const rows = visibleUsers.map((user) => buildDashboardAdminUserRow({
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      capabilities: adminContext.capabilities,
+      user,
+      orgUsers: users,
+    }));
+
+    const payload: DashboardAdminUsersResponse = {
+      viewer: {
+        ...request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+      },
+      generatedAt: nowIso(),
+      org: {
+        id: adminContext.org.id,
+        name: adminContext.org.name,
+      },
+      users: rows,
+      managerOptions: adminContext.capabilities.assignUserManagers
+        ? buildDashboardAdminManagerOptions(users, adminContext.org.id)
+        : [],
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/admin/users/export", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabaseRead(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+    if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "viewOrganizationUsers", response)) {
+      return;
+    }
+
+    const orgUsers = db.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const visibleUsers = listVisibleOrganizationUsers({
+      users: orgUsers,
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      orgId: adminContext.org.id,
+    }).sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const rows = visibleUsers
+      .map((user) => ({
+        employeeId: user.employeeId ?? "",
+        firstName: getUserFirstName(user) ?? "",
+        lastName: getUserLastName(user) ?? "",
+        email: user.email,
+        role: ORG_USER_ROLE_LABELS[user.orgRole] ?? user.orgRole,
+        manager: (() => {
+          const managerUserId = normalizeManagerUserId(user.managerUserId);
+          const manager = managerUserId ? orgUsers.find((entry) => entry.id === managerUserId) ?? null : null;
+          return manager ? resolveStoredUserDisplayName(manager) : "";
+        })(),
+        status: user.status,
+      }));
+
+    const payload: DashboardAdminUsersExportResponse = {
+      generatedAt: nowIso(),
+      org: {
+        id: adminContext.org.id,
+        name: adminContext.org.name,
+      },
+      rows,
+    };
+    response.json(payload);
+  });
+});
+
+app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const body = request.body as DashboardAdminUpdateUserRequest;
+  const hasFirstNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "firstName");
+  const hasLastNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "lastName");
+  const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
+  const hasStatusPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "status");
+  const hasRolePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "orgRole");
+  const hasManagerPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "managerUserId");
+  if (!hasFirstNamePatch && !hasLastNamePatch && !hasEmployeeIdPatch && !hasStatusPatch && !hasRolePatch && !hasManagerPatch) {
+    response.status(400).json({ error: "Provide firstName, lastName, employeeId, status, orgRole, or managerUserId." });
+    return;
+  }
+
+  await withDatabase(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+
+    const orgUsers = db.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+    const target = orgUsers.find((user) => user.id === request.params.userId);
+    if (!target) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+    if (!canActorSeeOrganizationUser({
+      actor: request.dashboard!.user,
+      viewer: request.dashboard!.viewer,
+      target,
+    })) {
+      response.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    const beforeFirstName = getUserFirstName(target);
+    const beforeLastName = getUserLastName(target);
+    const beforeEmployeeId = target.employeeId ?? null;
+    const beforeStatus = target.status;
+    const beforeOrgRole = target.orgRole;
+    const beforeManagerUserId = normalizeManagerUserId(target.managerUserId);
+    const beforeDashboardAccessEnabled = target.dashboardAccessEnabled === true;
+    let nextFirstName = beforeFirstName;
+    let nextLastName = beforeLastName;
+    let nextEmployeeId = beforeEmployeeId;
+    let nextStatus = beforeStatus;
+    let nextOrgRole = beforeOrgRole;
+    let nextManagerUserId = beforeManagerUserId;
+    let nextDashboardAccessEnabled = beforeDashboardAccessEnabled;
+
+    if (hasFirstNamePatch || hasLastNamePatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editUserNames", response)) {
+        return;
+      }
+      if (!canDashboardAdminEditNames({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+      })) {
+        response.status(403).json({
+          error: "You cannot edit names for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      if (hasFirstNamePatch) {
+        const normalizedFirstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+        if (!normalizedFirstName.ok) {
+          response.status(400).json({ error: normalizedFirstName.error, code: normalizedFirstName.code });
+          return;
+        }
+        nextFirstName = normalizedFirstName.value;
+      }
+      if (hasLastNamePatch) {
+        const normalizedLastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+        if (!normalizedLastName.ok) {
+          response.status(400).json({ error: normalizedLastName.error, code: normalizedLastName.code });
+          return;
+        }
+        nextLastName = normalizedLastName.value;
+      }
+    }
+
+    if (hasEmployeeIdPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editEmployeeIds", response)) {
+        return;
+      }
+      if (!canDashboardAdminEditEmployeeId({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+      })) {
+        response.status(403).json({
+          error: "You cannot edit Employee ID for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      const normalizedEmployeeId = normalizeEmployeeIdInput(body.employeeId);
+      if (!normalizedEmployeeId.ok) {
+        response.status(400).json({ error: normalizedEmployeeId.error, code: normalizedEmployeeId.code });
+        return;
+      }
+      const employeeIdConflict = findEmployeeIdConflict({
+        users: db.users,
+        orgId: adminContext.org.id,
+        employeeId: normalizedEmployeeId.value,
+        exceptUserId: target.id,
+      });
+      if (employeeIdConflict) {
+        response.status(409).json({
+          error: "Employee ID is already assigned within this organization.",
+          code: employeeIdConflict.code,
+        });
+        return;
+      }
+      nextEmployeeId = normalizedEmployeeId.value;
+    }
+
+    if (hasRolePatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "manageUserRoles", response)) {
+        return;
+      }
+      const requestedOrgRole = body.orgRole;
+      if (typeof requestedOrgRole !== "string" || !isOrgUserRole(requestedOrgRole) || !canOrgAdminManageRole(requestedOrgRole)) {
+        response.status(400).json({ error: "Role can only be changed between user and user admin." });
+        return;
+      }
+      if (!canDashboardAdminChangeUserRole({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+      })) {
+        response.status(403).json({
+          error: "You cannot change role for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      nextOrgRole = requestedOrgRole;
+      if (nextOrgRole === "user_admin") {
+        nextManagerUserId = null;
+        nextDashboardAccessEnabled = true;
+      } else if (beforeOrgRole === "user_admin") {
+        nextManagerUserId = null;
+        nextDashboardAccessEnabled = false;
+      }
+    }
+
+    if (hasManagerPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "assignUserManagers", response)) {
+        return;
+      }
+      const requestedManagerUserId = normalizeManagerUserId(body.managerUserId);
+      const managerTarget: UserProfile = {
+        ...target,
+        orgRole: nextOrgRole,
+        managerUserId: requestedManagerUserId,
+      };
+      if (!canDashboardAdminAssignManager({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target: managerTarget,
+      })) {
+        response.status(403).json({
+          error: "You cannot assign a manager for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      const managerValidation = validateManagerAssignment({
+        orgUsers,
+        target: managerTarget,
+        managerUserId: requestedManagerUserId,
+      });
+      if (!managerValidation.ok) {
+        response.status(400).json({ error: managerValidation.error, code: managerValidation.code });
+        return;
+      }
+      nextManagerUserId = managerValidation.manager?.id ?? null;
+    }
+
+    if (hasStatusPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "manageRegularOrganizationUsers", response)) {
+        return;
+      }
+      if (!body.status || !isUserStatus(body.status)) {
+        response.status(400).json({ error: "Valid status is required." });
+        return;
+      }
+      nextStatus = body.status;
+      if (!canDashboardAdminChangeUserStatus({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        target,
+        nextStatus,
+        orgUsers,
+      })) {
+        response.status(403).json({
+          error: "You cannot change status for this user.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+    }
+
+    if (nextOrgRole !== "user") {
+      nextManagerUserId = null;
+    }
+
+    const now = nowIso();
+    const clearedAssignmentUserIds = new Set<string>();
+    const shouldClearManagerAssignments =
+      beforeOrgRole === "user_admin" && (nextOrgRole !== "user_admin" || nextStatus !== "active");
+    if (shouldClearManagerAssignments) {
+      clearAssignmentsForManager({
+        users: db.users,
+        managerUserId: target.id,
+        updatedAt: now,
+      }).forEach((userId) => clearedAssignmentUserIds.add(userId));
+    }
+
+    const shouldRevokeDashboardSessions =
+      nextStatus !== "active" ||
+      (beforeOrgRole === "user_admin" && nextOrgRole !== "user_admin") ||
+      (beforeDashboardAccessEnabled && !nextDashboardAccessEnabled);
+
+    target.firstName = nextFirstName;
+    target.lastName = nextLastName;
+    target.employeeId = nextEmployeeId;
+    target.orgRole = nextOrgRole;
+    target.managerUserId = nextManagerUserId;
+    target.dashboardAccessEnabled = nextDashboardAccessEnabled;
+    target.status = nextStatus;
+
+    if (hasStatusPatch) {
+      if (nextStatus !== "active") {
+        revokeMobileAccessForUser(db, target.id, "User access was disabled.");
+        db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
+      } else {
+        emitMobileUpdateForUser(db, target.id, "user");
+      }
+    }
+    if (shouldRevokeDashboardSessions) {
+      db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
+      queueDatabasePostCommitEffect(db, {
+        category: "security_cleanup",
+        description: `Revoke dashboard sessions for updated dashboard user ${target.id}.`,
+        run: async () => {
+          await revokeWebAuthSessionsForUserId(target.id);
+        }
+      });
+    }
+    emitMobileUpdateForUser(db, target.id, "user");
+    for (const userId of clearedAssignmentUserIds) {
+      emitMobileUpdateForUser(db, userId, "user");
+    }
+
+    target.updatedAt = now;
+    if (beforeFirstName !== (target.firstName ?? null) || beforeLastName !== (target.lastName ?? null)) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.name.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Updated organization user name.",
+        metadata: {
+          firstNameChanged: beforeFirstName !== (target.firstName ?? null),
+          lastNameChanged: beforeLastName !== (target.lastName ?? null),
+        }
+      });
+    }
+    if (beforeEmployeeId !== (target.employeeId ?? null)) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.employee_id.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Updated Employee ID for organization user.",
+        metadata: {
+          employeeIdChanged: true,
+          previousEmployeeIdPresent: Boolean(beforeEmployeeId),
+          newEmployeeIdPresent: Boolean(target.employeeId)
+        }
+      });
+    }
+    if (beforeOrgRole !== target.orgRole) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.role.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Changed organization user role.",
+        metadata: {
+          previousRole: beforeOrgRole,
+          nextRole: target.orgRole,
+          dashboardAccessRevoked: beforeDashboardAccessEnabled && target.dashboardAccessEnabled !== true,
+          clearedAssignedReportCount: clearedAssignmentUserIds.size,
+        }
+      });
+    }
+    if (beforeManagerUserId !== normalizeManagerUserId(target.managerUserId)) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: target.managerUserId ? "org_user.manager.assigned" : "org_user.manager.cleared",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: target.managerUserId ? "Assigned organization user manager." : "Cleared organization user manager.",
+        metadata: {
+          previousManagerPresent: Boolean(beforeManagerUserId),
+          nextManagerPresent: Boolean(target.managerUserId),
+        }
+      });
+    }
+    if (beforeStatus !== target.status) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: target.status === "active" ? "org_user.reactivated" : "org_user.deactivated",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: `${target.status === "active" ? "Reactivated" : "Deactivated"} ${target.email}.`,
+        metadata: {
+          previousStatus: beforeStatus,
+          nextStatus: target.status,
+        }
+      });
+    }
+    if (clearedAssignmentUserIds.size > 0) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.manager_assignments.cleared",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Cleared manager assignments for changed user admin.",
+        metadata: {
+          clearedAssignedReportCount: clearedAssignmentUserIds.size,
+          roleChanged: beforeOrgRole !== target.orgRole,
+          statusChanged: beforeStatus !== target.status,
+        }
+      });
+    }
+
+    const nextOrgUsers = db.users.filter((user) => user.accountType === "enterprise" && user.orgId === adminContext.org.id);
+    const payload: DashboardAdminUpdateUserResponse = {
+      ok: true,
+      user: buildDashboardAdminUserRow({
+        actor: request.dashboard!.user,
+        viewer: request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+        user: target,
+        orgUsers: nextOrgUsers,
+      }),
+    };
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/admin/access-requests", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withDatabase(async (db) => {
+    const adminContext = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response
+    );
+    if (!adminContext) {
+      return;
+    }
+    if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "approveRejectAccessRequests", response)) {
+      return;
+    }
+
+    expireOrgJoinRequests(db, new Date());
+    const requests = db.enterpriseJoinRequests
+      .filter((row) => row.orgId === adminContext.org.id)
+      .slice()
+      .sort((a, b) => {
+        if (a.status === "pending" && b.status !== "pending") {
+          return -1;
+        }
+        if (a.status !== "pending" && b.status === "pending") {
+          return 1;
+        }
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      })
+      .map((row) => buildDashboardAdminAccessRequestRow(db, adminContext.org, row));
+
+    const payload: DashboardAdminAccessRequestsResponse = {
+      viewer: {
+        ...request.dashboard!.viewer,
+        capabilities: adminContext.capabilities,
+      },
+      generatedAt: nowIso(),
+      org: {
+        id: adminContext.org.id,
+        name: adminContext.org.name,
+      },
+      requests,
+    };
+    response.json(payload);
+  });
+});
+
+app.patch(
+  "/dashboard/admin/access-requests/:requestId",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const body = request.body as DashboardAdminDecideAccessRequest;
+    if (body.action !== "approve" && body.action !== "reject") {
+      response.status(400).json({ error: "action must be approve or reject." });
+      return;
+    }
+
+    await withDatabase(async (db) => {
+      const adminContext = resolveDashboardAdminOrgContext(
+        db,
+        request.dashboard!,
+        getSingleQueryParam(request.query.orgId),
+        response
+      );
+      if (!adminContext) {
+        return;
+      }
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "approveRejectAccessRequests", response)) {
+        return;
+      }
+
+      expireOrgJoinRequests(db, new Date());
+      const decision = decideEnterpriseJoinRequest({
+        db,
+        actor: request.dashboard!.user,
+        org: adminContext.org,
+        requestId: request.params.requestId,
+        action: body.action,
+        reason: body.reason,
+        channel: "dashboard",
+      });
+      if (!decision.ok) {
+        response.status(decision.status).json({ error: decision.error });
+        return;
+      }
+
+      const payload: DashboardAdminDecideAccessRequestResponse = {
+        ok: true,
+        request: buildDashboardAdminAccessRequestRow(db, adminContext.org, decision.requestRecord),
+      };
+      response.json(payload);
+    });
+  }
+);
 
 app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
@@ -9935,7 +12238,7 @@ app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: 
     }
     const payload = await buildDashboardAttemptDetail(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       request.params.attemptId,
       divisionFilter.appliedDivisionId
     );
@@ -9959,13 +12262,16 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
       const orgs = listDashboardAccessibleOrgs(db, request.dashboard!.viewer);
       const organizationSummaries = [];
       for (const org of orgs) {
-        const users = await listDashboardPerformanceUserContexts(db, request.dashboard!.viewer, null, org.id);
+        const users = await listDashboardPerformanceUserContexts(db, request.dashboard!, null, org.id);
+        const visibleUserIds = new Set(users.map((user) => user.userId));
         const orgPayload = await buildDashboardPerformanceWorkspaceResponse({
           store: performancePlanStore,
           viewer: request.dashboard!.viewer,
           users,
-          usageSessions: listUsageSessions(db).filter((session) => session.orgId === org.id),
-          scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId === org.id),
+          usageSessions: listUsageSessions(db).filter((session) => session.orgId === org.id && visibleUserIds.has(session.userId)),
+          scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter(
+            (record) => record.orgId === org.id && visibleUserIds.has(record.userId)
+          ),
           now: new Date(),
           selectedOrg: { orgId: org.id, orgName: org.name },
           canManageUser: (userContext) => {
@@ -10013,16 +12319,21 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
     );
     const users = await listDashboardPerformanceUserContexts(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       divisionFilter.appliedDivisionId,
       requestedOrgId
     );
+    const visibleUserIds = new Set(users.map((user) => user.userId));
     const payload: DashboardPerformanceWorkspaceResponse = await buildDashboardPerformanceWorkspaceResponse({
       store: performancePlanStore,
       viewer: request.dashboard!.viewer,
       users,
-      usageSessions: listUsageSessions(db).filter((session) => session.orgId && orgIds.has(session.orgId)),
-      scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter((record) => record.orgId && orgIds.has(record.orgId)),
+      usageSessions: listUsageSessions(db).filter(
+        (session) => session.orgId && orgIds.has(session.orgId) && visibleUserIds.has(session.userId)
+      ),
+      scoreRecords: listScoreRecords(db, { conclusiveOnly: true }).filter(
+        (record) => record.orgId && orgIds.has(record.orgId) && visibleUserIds.has(record.userId)
+      ),
       now: new Date(),
       scopeMode: "organization",
       selectedOrg: requestedOrgId
@@ -10073,7 +12384,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     }
     if (!canDashboardViewerAccessPerformanceTarget(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       target,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10097,7 +12408,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     }
     const userContext = await getDashboardPerformanceUserContext(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       body.userId,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10165,7 +12476,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     }
     if (!canDashboardViewerAccessPerformanceTarget(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       target,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10189,7 +12500,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     }
     const userContext = await getDashboardPerformanceUserContext(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       body.userId,
       requestedOrgId,
       divisionFilter.appliedDivisionId
@@ -10279,7 +12590,14 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
-    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
@@ -10295,7 +12613,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
     }
     const userContext = await getDashboardPerformanceUserContext(
       db,
-      request.dashboard!.viewer,
+      request.dashboard!,
       loaded.plan.userId,
       loaded.plan.orgId,
       divisionFilter.appliedDivisionId
@@ -10384,6 +12702,14 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
+    const target = getUserById(db, loaded.plan.userId);
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
     const detail = await buildPerformancePlanDetailResponse({
       store: performancePlanStore,
       planId: loaded.plan.id,
@@ -10401,7 +12727,6 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
-    const target = getUserById(db, detail.plan.userId);
     const canCancel =
       detail.plan.status === "active" &&
       Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
@@ -10434,6 +12759,14 @@ app.get("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, as
     }
     const rowContext = getPerformancePlanRowContext(db, loaded.plan);
     if (!rowContext || (divisionFilter.appliedDivisionId && rowContext.divisionId !== divisionFilter.appliedDivisionId)) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    const target = getUserById(db, loaded.plan.userId);
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
@@ -10471,7 +12804,14 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
-    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
@@ -10543,7 +12883,14 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
       return;
     }
     const target = getUserById(db, loaded.plan.userId);
-    if (!target || !canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (
+      !target ||
+      !canDashboardViewerAccessPerformanceTarget(db, request.dashboard!, target, loaded.plan.orgId, divisionFilter.appliedDivisionId)
+    ) {
+      response.status(404).json({ error: "Performance goal not found." });
+      return;
+    }
+    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires org admin or user admin access.",
         code: "dashboard_scope_denied"
@@ -10604,6 +12951,65 @@ app.patch("/config", requireAdmin, async (request: Request, response: Response) 
 app.get("/orgs", requireAdmin, async (_request: Request, response: Response) => {
   await withDatabaseRead(async (db) => {
     response.json(db.orgs);
+  });
+});
+
+app.get("/orgs/:orgId/modules", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId.trim();
+  const orgExists = await withDatabaseRead(async (db) => db.orgs.some((entry) => entry.id === orgId));
+  if (!orgExists) {
+    response.status(404).json({ error: "Organization not found." });
+    return;
+  }
+
+  response.json(await buildOrgModuleEntitlementsResponse(orgModuleEntitlementStore, orgId));
+});
+
+app.patch("/orgs/:orgId/modules/training-content", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId.trim();
+  const body = request.body as { enabled?: unknown };
+  if (typeof body?.enabled !== "boolean") {
+    response.status(400).json({
+      error: "enabled must be a boolean.",
+      code: "module_entitlement_invalid",
+    });
+    return;
+  }
+
+  const orgExists = await withDatabaseRead(async (db) => db.orgs.some((entry) => entry.id === orgId));
+  if (!orgExists) {
+    response.status(404).json({ error: "Organization not found." });
+    return;
+  }
+
+  const changedAt = new Date();
+  const change = await orgModuleEntitlementStore.setOrgModuleEntitlement({
+    orgId,
+    moduleKey: "training_content",
+    enabled: body.enabled,
+    updatedByActorId: PLATFORM_ADMIN_ACTOR_ID,
+    updatedAt: changedAt,
+    auditEvent: {
+      id: `audit_${uuid()}`,
+      actorType: "platform_admin",
+      actorId: PLATFORM_ADMIN_ACTOR_ID,
+      action: "org_module_entitlement_changed",
+      orgId,
+      userId: null,
+      message: "Changed an organization module entitlement.",
+      metadata: {
+        orgId,
+        moduleKey: "training_content",
+        actorId: PLATFORM_ADMIN_ACTOR_ID,
+      },
+      createdAt: changedAt.toISOString(),
+    },
+  });
+
+  const modules = await buildOrgModuleEntitlementsResponse(orgModuleEntitlementStore, orgId);
+  response.json({
+    ...modules,
+    changed: change.changed,
   });
 });
 
@@ -12772,10 +15178,15 @@ app.post("/admin/settings/superusers", requireAdmin, async (request: Request, re
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      firstName: null,
+      lastName: null,
+      employeeId: null,
+      managerUserId: null,
       emailVerifiedAt: null,
       isPlatformAdmin: false,
       isSuperUser: true,
       dashboardAccessEnabled: false,
+      mobileProfileReonboardingRequired: false,
       accountType: "individual",
       tier: "free",
       status: "active",
@@ -12918,13 +15329,37 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       }
     }
 
+    const employeeIdResult =
+      body.accountType === "enterprise" ? normalizeEmployeeIdInput(body.employeeId) : { ok: true as const, value: null };
+    if (!employeeIdResult.ok) {
+      response.status(400).json({ error: employeeIdResult.error, code: employeeIdResult.code });
+      return;
+    }
+    const employeeIdConflict = findEmployeeIdConflict({
+      users: db.users,
+      orgId,
+      employeeId: employeeIdResult.value,
+    });
+    if (employeeIdConflict) {
+      response.status(409).json({
+        error: "Employee ID is already assigned within this organization.",
+        code: employeeIdConflict.code,
+      });
+      return;
+    }
+
     const now = nowIso();
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      firstName: null,
+      lastName: null,
+      employeeId: employeeIdResult.value,
+      managerUserId: null,
       emailVerifiedAt: now,
       isPlatformAdmin: body.isPlatformAdmin === true,
       dashboardAccessEnabled: body.accountType === "enterprise" && body.dashboardAccessEnabled === true,
+      mobileProfileReonboardingRequired: false,
       accountType: body.accountType,
       tier: body.tier,
       status: "active",
@@ -12951,6 +15386,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       message: `Created user ${user.email}.`,
       metadata: {
         email: user.email,
+        employeeIdPresent: Boolean(user.employeeId),
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         accountType: user.accountType,
         tier: user.tier,
@@ -12973,8 +15409,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     }
 
     const beforeDashboardViewer = resolveDashboardViewer(db, user);
+    const beforeEmployeeId = user.employeeId ?? null;
     const before = {
       email: user.email,
+      employeeIdPresent: Boolean(beforeEmployeeId),
       isPlatformAdmin: user.isPlatformAdmin === true,
       dashboardAccessEnabled: user.dashboardAccessEnabled === true,
       tier: user.tier,
@@ -13058,6 +15496,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     }
 
     let nextOrgId = patch.orgId !== undefined ? patch.orgId : user.orgId;
+    if (patch.employeeId !== undefined && patch.orgId !== undefined && patch.orgId !== user.orgId) {
+      response.status(400).json({ error: "Employee ID updates cannot change the user's organization." });
+      return;
+    }
     if (nextAccountType === "enterprise") {
       if (!nextOrgId) {
         response.status(400).json({ error: "Enterprise users require an organization." });
@@ -13073,8 +15515,34 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       nextOrgId = null;
     }
 
+    const employeeIdPatch = patch.employeeId !== undefined
+      ? normalizeEmployeeIdInput(patch.employeeId)
+      : { ok: true as const, value: user.employeeId ?? null };
+    if (!employeeIdPatch.ok) {
+      response.status(400).json({ error: employeeIdPatch.error, code: employeeIdPatch.code });
+      return;
+    }
+    if (nextAccountType !== "enterprise" && employeeIdPatch.value) {
+      response.status(400).json({ error: "Employee ID applies only to enterprise users." });
+      return;
+    }
+    const employeeIdConflict = findEmployeeIdConflict({
+      users: db.users,
+      orgId: nextOrgId,
+      employeeId: employeeIdPatch.value,
+      exceptUserId: user.id,
+    });
+    if (employeeIdConflict) {
+      response.status(409).json({
+        error: "Employee ID is already assigned within this organization.",
+        code: employeeIdConflict.code,
+      });
+      return;
+    }
+
     user.accountType = nextAccountType;
     user.orgId = nextOrgId;
+    user.employeeId = nextAccountType === "enterprise" ? employeeIdPatch.value : null;
 
     if (nextAccountType === "enterprise") {
       if (patch.orgRole !== undefined) {
@@ -13085,10 +15553,25 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     } else {
       user.orgRole = "user";
       user.divisionId = null;
+      user.managerUserId = null;
       user.dashboardAccessEnabled = false;
       user.dailySecondsCapOverride = null;
       user.allowDailyOverageThisCycle = false;
       user.dailyOverageExpiresAt = null;
+    }
+
+    if (user.accountType === "enterprise" && user.orgId) {
+      if (!canManagerAssignmentTargetBeManaged(user)) {
+        user.managerUserId = null;
+      } else {
+        const orgUsers = db.users.filter((entry) => entry.accountType === "enterprise" && entry.orgId === user.orgId);
+        const managerValidation = validateManagerAssignment({
+          orgUsers,
+          target: user,
+          managerUserId: normalizeManagerUserId(user.managerUserId),
+        });
+        user.managerUserId = managerValidation.ok ? managerValidation.manager?.id ?? null : null;
+      }
     }
 
     if (user.accountType === "enterprise" && user.orgId) {
@@ -13189,11 +15672,25 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
           dailyOverageExpiresAt: user.dailyOverageExpiresAt,
+          employeeIdPresent: Boolean(user.employeeId),
           timezone: user.timezone,
           deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
         }
       }
     });
+    if (beforeEmployeeId !== (user.employeeId ?? null)) {
+      appendPlatformAuditEvent(db, {
+        action: "user.employee_id.changed",
+        orgId: user.orgId,
+        userId: user.id,
+        message: "Updated Employee ID for user.",
+        metadata: {
+          employeeIdChanged: true,
+          previousEmployeeIdPresent: Boolean(beforeEmployeeId),
+          newEmployeeIdPresent: Boolean(user.employeeId)
+        }
+      });
+    }
     response.json(user);
   });
 });
@@ -13291,22 +15788,52 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
 app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, response: Response) => {
   const body = request.body as MobileOnboardRequest;
   const email = body.email?.trim().toLowerCase();
+  const firstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+  const lastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+  const joinCode = normalizeJoinCode(body.joinCode);
 
   if (!email || !isEmailLike(email)) {
     response.status(400).json({ error: "Valid email is required." });
     return;
   }
-
+  if (!firstName.ok) {
+    response.status(400).json({ error: firstName.error, code: firstName.code });
+    return;
+  }
+  if (!lastName.ok) {
+    response.status(400).json({ error: lastName.error, code: lastName.code });
+    return;
+  }
   const timezone = resolveTimeZone(body.timezone);
 
   await withDatabase(async (db) => {
+    const requestedOrg = joinCode ? findActiveOrgByJoinCode(db, joinCode) : null;
+    if (joinCode && !requestedOrg) {
+      response.status(404).json({ error: "Company code not found." });
+      return;
+    }
     const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
+      if (existing.status !== "active") {
+        response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
+        return;
+      }
+
       if (existing.accountType === "enterprise" && !isSuperUser(existing)) {
-        const org = getOrgById(db, existing.orgId);
-        if (!org || org.status !== "active") {
+        const existingOrg = getOrgById(db, existing.orgId);
+        if (!existingOrg || existingOrg.status !== "active") {
           response.status(403).json({ error: "Enterprise account is not active." });
+          return;
+        }
+
+        if (existing.mobileProfileReonboardingRequired === true && !joinCode) {
+          response.status(400).json({ error: "Company code is required to confirm your organization." });
+          return;
+        }
+
+        if (requestedOrg && existingOrg.id !== requestedOrg.id) {
+          response.status(403).json({ error: "Company code does not match your active organization." });
           return;
         }
       }
@@ -13317,12 +15844,33 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       const authToken = upsertMobileAuthToken(db, existing.id, issuedAt);
 
       const hadVerifiedEmail = Boolean(existing.emailVerifiedAt);
-      const shouldRequireVerification = REQUIRE_REVERIFY_ON_ONBOARD || !hadVerifiedEmail;
+      const shouldRequireVerification =
+        REQUIRE_REVERIFY_ON_ONBOARD || !hadVerifiedEmail || existing.mobileProfileReonboardingRequired === true;
       if (hadVerifiedEmail && REQUIRE_REVERIFY_ON_ONBOARD) {
         existing.emailVerifiedAt = null;
       }
 
       if (!shouldRequireVerification) {
+        const completion = joinCode
+          ? completeMobileCompanyProfile({
+              db,
+              user: existing,
+              firstName: firstName.value,
+              lastName: lastName.value,
+              joinCode,
+              now: new Date(issuedAt),
+            })
+          : completeMobileBasicProfile({
+              db,
+              user: existing,
+              firstName: firstName.value,
+              lastName: lastName.value,
+              now: new Date(issuedAt),
+            });
+        if (!completion.ok) {
+          response.status(completion.status).json({ error: completion.error });
+          return;
+        }
         const payload: MobileOnboardResponse = {
           user: existing,
           authToken,
@@ -13335,7 +15883,9 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
           userId: existing.id,
           message: `Mobile onboarding completed for ${existing.email}.`,
           metadata: {
-            verificationRequired: false
+            verificationRequired: false,
+            restoredExistingMember: completion.restoredExistingMember,
+            joinRequestCreated: isMobileCompanyProfileCompletion(completion) ? completion.createdRequest : false,
           }
         });
         response.json(payload);
@@ -13367,7 +15917,12 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
     const user: UserProfile = {
       id: `usr_${uuid()}`,
       email,
+      firstName: null,
+      lastName: null,
+      employeeId: null,
+      managerUserId: null,
       emailVerifiedAt: null,
+      mobileProfileReonboardingRequired: false,
       accountType: "individual",
       tier: "free",
       status: "active",
@@ -13393,7 +15948,8 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       userId: user.id,
       message: `Created user from mobile onboarding (${user.email}).`,
       metadata: {
-        verificationExpiresAt: verification.expiresAt
+        verificationExpiresAt: verification.expiresAt,
+        companyCodeValidated: Boolean(joinCode),
       }
     });
     const payload: MobileOnboardResponse = {
@@ -13428,12 +15984,20 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
 
-    if (user.emailVerifiedAt) {
+    if (user.status !== "active") {
+      response.status(403).json({ error: "This account has been deactivated." });
+      return;
+    }
+
+    if (user.emailVerifiedAt && user.mobileProfileReonboardingRequired !== true) {
       response.status(409).json({ error: "Email already verified." });
       return;
     }
@@ -13482,12 +16046,21 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
 
-    if (user.emailVerifiedAt) {
+    const needsCodeVerification = !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
+    const profileProvided =
+      body.firstName !== undefined ||
+      body.lastName !== undefined ||
+      body.joinCode !== undefined;
+
+    if (!needsCodeVerification && !profileProvided && hasCompleteUserName(user)) {
       const payload: MobileOnboardResponse = {
         user,
         authToken,
@@ -13499,45 +16072,126 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    const pending = db.emailVerifications
-      .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    const latest = pending[0];
-    if (!latest) {
-      response.status(400).json({ error: "No pending verification code. Please resend verification email." });
+    const firstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+    if (!firstName.ok) {
+      response.status(400).json({ error: firstName.error, code: firstName.code });
       return;
+    }
+    const lastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+    if (!lastName.ok) {
+      response.status(400).json({ error: lastName.error, code: lastName.code });
+      return;
+    }
+    const joinCode = normalizeJoinCode(body.joinCode);
+    const wasReonboarding = user.mobileProfileReonboardingRequired === true;
+
+    if (wasReonboarding && user.accountType === "enterprise" && !isSuperUser(user) && !joinCode) {
+      response.status(400).json({ error: "Company code is required to confirm your organization." });
+      return;
+    }
+
+    if (joinCode) {
+      const requestedOrg = findActiveOrgByJoinCode(db, joinCode);
+      if (!requestedOrg) {
+        response.status(404).json({ error: "Company code not found." });
+        return;
+      }
+      if (user.accountType === "enterprise" && !isSuperUser(user) && user.orgId !== requestedOrg.id) {
+        response.status(403).json({ error: "Company code does not match your active organization." });
+        return;
+      }
     }
 
     const now = new Date();
-    const expiresAtMs = new Date(latest.expiresAt).getTime();
-    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-      latest.consumedAt = now.toISOString();
-      response.status(400).json({ error: "Verification code expired. Please request a new code." });
-      return;
+    if (needsCodeVerification) {
+      const pending = db.emailVerifications
+        .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      const latest = pending[0];
+      if (!latest) {
+        response.status(400).json({ error: "No pending verification code. Please resend verification email." });
+        return;
+      }
+
+      const expiresAtMs = new Date(latest.expiresAt).getTime();
+      if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
+        latest.consumedAt = now.toISOString();
+        response.status(400).json({ error: "Verification code expired. Please request a new code." });
+        return;
+      }
+
+      const expectedHash = Buffer.from(latest.codeHash, "hex");
+      const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
+      if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
+        response.status(400).json({ error: "Invalid verification code." });
+        return;
+      }
+
+      const nowIsoValue = now.toISOString();
+      latest.consumedAt = nowIsoValue;
+      user.emailVerifiedAt = nowIsoValue;
+      user.updatedAt = nowIsoValue;
+      appendMobileAuditEvent(db, user, {
+        action: "mobile.email_verified",
+        userId: user.id,
+        message: `Email verified for ${user.email}.`
+      });
     }
 
-    const expectedHash = Buffer.from(latest.codeHash, "hex");
-    const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
-    if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
-      response.status(400).json({ error: "Invalid verification code." });
+    const completion = joinCode
+      ? completeMobileCompanyProfile({
+          db,
+          user,
+          firstName: firstName.value,
+          lastName: lastName.value,
+          joinCode,
+          now,
+        })
+      : completeMobileBasicProfile({
+          db,
+          user,
+          firstName: firstName.value,
+          lastName: lastName.value,
+          now,
+        });
+    if (!completion.ok) {
+      response.status(completion.status).json({ error: completion.error });
       return;
     }
-
-    const nowIsoValue = now.toISOString();
-    latest.consumedAt = nowIsoValue;
-    user.emailVerifiedAt = nowIsoValue;
-    user.updatedAt = nowIsoValue;
-    emitMobileUpdateForUser(db, user.id, "user");
     appendMobileAuditEvent(db, user, {
-      action: "mobile.email_verified",
+      action: wasReonboarding ? "mobile.profile_reonboarding_completed" : "mobile.profile_completed",
+      orgId: isMobileCompanyProfileCompletion(completion) ? completion.org.id : user.orgId,
       userId: user.id,
-      message: `Email verified for ${user.email}.`
+      message: wasReonboarding ? "Completed required mobile profile re-onboarding." : "Completed mobile profile setup.",
+      metadata: {
+        restoredExistingMember: completion.restoredExistingMember,
+        joinRequestCreated: isMobileCompanyProfileCompletion(completion) ? completion.createdRequest : false,
+        joinRequestReused: isMobileCompanyProfileCompletion(completion)
+          ? Boolean(completion.request && !completion.createdRequest)
+          : false,
+      }
     });
+    if (isMobileCompanyProfileCompletion(completion) && completion.request) {
+      appendMobileAuditEvent(db, user, {
+        action: completion.createdRequest ? "org_join.request_created" : "org_join.request_reused",
+        orgId: completion.org.id,
+        userId: user.id,
+        message: completion.createdRequest
+          ? `Submitted org join request for ${completion.org.name}.`
+          : `Existing org join request reused for ${completion.org.name}.`,
+        metadata: {
+          requestId: completion.request.id
+        }
+      });
+    }
 
+    const responseAuthToken = needsCodeVerification || wasReonboarding
+      ? upsertMobileAuthToken(db, user.id, now.toISOString())
+      : authToken;
     const payload: MobileOnboardResponse = {
       user,
-      authToken,
+      authToken: responseAuthToken,
       verificationRequired: false,
       verificationExpiresAt: null,
       domainMatch: buildDomainMatchForEmail(db, user.email)
@@ -13560,7 +16214,10 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
@@ -13569,6 +16226,87 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
     response.json(user);
   });
 });
+
+app.get("/mobile/users/:userId/modules", async (request: Request, response: Response) => {
+  try {
+    const result = await withMobileTrainingContentContext(request, response, (context) =>
+      trainingContentMobileService.getModules(context)
+    );
+    if (result) {
+      response.json(result);
+    }
+  } catch (error) {
+    respondWithTrainingContentMobileError(error, response);
+  }
+});
+
+app.get(
+  "/mobile/users/:userId/training-content/categories",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getCategories(context)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/mobile/users/:userId/training-content",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getLibrary(context)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/mobile/users/:userId/training-content/:contentId",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getDetail(context, request.params.contentId)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.post(
+  "/mobile/users/:userId/training-content/:contentId/asset-access",
+  trainingContentStorageRateLimiter,
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.createAssetAccess(
+          context,
+          request.params.contentId
+        )
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
 
 app.get("/mobile/users/:userId/superuser/orgs", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
@@ -13688,7 +16426,7 @@ app.get("/mobile/users/:userId/org-access-requests", async (request: Request, re
   });
 });
 
-app.post("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -13714,30 +16452,19 @@ app.post("/mobile/users/:userId/org-access-requests", async (request: Request, r
       return;
     }
 
+    if (user.status !== "active") {
+      response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
+      return;
+    }
+
     if (!user.emailVerifiedAt) {
       response.status(403).json({ error: "Verify your email before requesting enterprise access." });
       return;
     }
 
-    const emailDomain = extractEmailDomain(user.email);
-    if (!emailDomain) {
-      response.status(400).json({ error: "Email domain could not be determined from your profile." });
-      return;
-    }
-
-    const org = db.orgs.find(
-      (entry) => entry.status === "active" && normalizeJoinCode(entry.joinCode) === joinCode
-    );
+    const org = findActiveOrgByJoinCode(db, joinCode);
     if (!org) {
       response.status(404).json({ error: "Join code not found." });
-      return;
-    }
-
-    if (normalizeEmailDomain(org.emailDomain) !== normalizeEmailDomain(emailDomain)) {
-      response.status(400).json({
-        error:
-          "Join code does not match your email domain. Ask your org admin for the correct code for your domain."
-      });
       return;
     }
 
@@ -13745,72 +16472,32 @@ app.post("/mobile/users/:userId/org-access-requests", async (request: Request, r
       response.status(409).json({ error: "You are already a member of this organization." });
       return;
     }
-
-    expireOrgJoinRequests(db, new Date());
-    const existingPending = db.enterpriseJoinRequests.find(
-      (row) => row.userId === user.id && row.orgId === org.id && row.status === "pending"
-    );
-    if (existingPending) {
-      appendMobileAuditEvent(db, user, {
-        action: "org_join.request_reused",
-        orgId: org.id,
-        userId: user.id,
-        message: `Existing org join request reused for ${org.name}.`,
-        metadata: {
-          requestId: existingPending.id
-        }
-      });
-      response.json({
-        created: false,
-        request: {
-          id: existingPending.id,
-          status: existingPending.status,
-          orgId: existingPending.orgId,
-          orgName: org.name,
-          emailDomain: existingPending.emailDomain,
-          createdAt: existingPending.createdAt,
-          expiresAt: existingPending.expiresAt,
-          updatedAt: existingPending.updatedAt
-        }
-      });
+    if (user.accountType === "enterprise") {
+      response.status(403).json({ error: "Company code does not match your active organization." });
       return;
     }
 
-    const now = new Date();
-    const createdAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + ORG_JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-
-    const record: EnterpriseJoinRequestRecord = {
-      id: `jr_${uuid()}`,
-      userId: user.id,
-      email: user.email,
-      emailDomain,
-      orgId: org.id,
-      orgNameSnapshot: org.name,
-      joinCodeSnapshot: joinCode,
-      status: "pending",
-      createdAt,
-      expiresAt,
-      updatedAt: createdAt,
-      decidedAt: null,
-      decidedByUserId: null,
-      decisionReason: null
-    };
-
-    db.enterpriseJoinRequests.push(record);
-    emitMobileUpdateForOrg(db, org.id, "org");
+    const requestResult = createOrReusePendingOrgJoinRequest({
+      db,
+      user,
+      org,
+      now: new Date(),
+    });
+    const record = requestResult.request;
     appendMobileAuditEvent(db, user, {
-      action: "org_join.request_created",
+      action: requestResult.created ? "org_join.request_created" : "org_join.request_reused",
       orgId: org.id,
       userId: user.id,
-      message: `Submitted org join request for ${org.name}.`,
+      message: requestResult.created
+        ? `Submitted org join request for ${org.name}.`
+        : `Existing org join request reused for ${org.name}.`,
       metadata: {
         requestId: record.id
       }
     });
 
-    response.status(201).json({
-      created: true,
+    response.status(requestResult.created ? 201 : 200).json({
+      created: requestResult.created,
       request: {
         id: record.id,
         status: record.status,
@@ -13911,6 +16598,7 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
     response.status(400).json({ error: "action must be approve or reject." });
     return;
   }
+  const action = body.action;
 
   await withDatabase(async (db) => {
     const actor = getUserById(db, request.params.userId);
@@ -13934,93 +16622,40 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       return;
     }
 
+    const org = getOrgById(db, actor.orgId);
+    if (!org || org.status !== "active") {
+      response.status(404).json({ error: "Organization not found." });
+      return;
+    }
+
     expireOrgJoinRequests(db, new Date());
-    const requestRecord = db.enterpriseJoinRequests.find((row) => row.id === request.params.requestId);
-    if (!requestRecord || requestRecord.orgId !== actor.orgId) {
-      response.status(404).json({ error: "Join request not found." });
+    const decision = decideEnterpriseJoinRequest({
+      db,
+      actor,
+      org,
+      requestId: request.params.requestId,
+      action,
+      reason: body.reason,
+      channel: "mobile",
+    });
+    if (!decision.ok) {
+      response.status(decision.status).json({ error: decision.error });
       return;
-    }
-
-    if (requestRecord.status !== "pending") {
-      response.status(409).json({ error: `Join request is already ${requestRecord.status}.` });
-      return;
-    }
-
-    const targetUser = getUserById(db, requestRecord.userId);
-    if (!targetUser) {
-      requestRecord.status = "rejected";
-      requestRecord.updatedAt = nowIso();
-      requestRecord.decidedAt = requestRecord.updatedAt;
-      requestRecord.decidedByUserId = actor.id;
-      requestRecord.decisionReason = "Target user no longer exists.";
-      response.status(404).json({ error: "Target user not found." });
-      return;
-    }
-
-    const nowValue = nowIso();
-    if (body.action === "approve") {
-      targetUser.accountType = "enterprise";
-      targetUser.tier = "enterprise";
-      targetUser.orgId = actor.orgId;
-      targetUser.orgRole = "user";
-      targetUser.status = "active";
-      targetUser.updatedAt = nowValue;
-      const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
-        assignments: db.trainingPackAssignments ?? [],
-        userId: targetUser.id,
-        user: targetUser,
-        nowIso: nowValue,
-      });
-      requestRecord.status = "approved";
-      requestRecord.updatedAt = nowValue;
-      requestRecord.decidedAt = nowValue;
-      requestRecord.decidedByUserId = actor.id;
-      requestRecord.decisionReason = body.reason?.trim() || null;
-      emitMobileUpdateForUser(db, targetUser.id, "user");
-      emitMobileUpdateForOrg(db, actor.orgId, "org");
-      appendMobileAuditEvent(db, actor, {
-        action: "org_join.approved_by_org_admin",
-        orgId: actor.orgId,
-        userId: targetUser.id,
-        message: `Approved org join request for ${targetUser.email}.`,
-        metadata: {
-          requestId: requestRecord.id,
-          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
-        }
-      });
-    } else {
-      requestRecord.status = "rejected";
-      requestRecord.updatedAt = nowValue;
-      requestRecord.decidedAt = nowValue;
-      requestRecord.decidedByUserId = actor.id;
-      requestRecord.decisionReason = body.reason?.trim() || "Rejected by organization admin.";
-      emitMobileUpdateForUser(db, targetUser.id, "user");
-      emitMobileUpdateForOrg(db, actor.orgId, "org");
-      appendMobileAuditEvent(db, actor, {
-        action: "org_join.rejected_by_org_admin",
-        orgId: actor.orgId,
-        userId: targetUser.id,
-        message: `Rejected org join request for ${targetUser.email}.`,
-        metadata: {
-          requestId: requestRecord.id,
-          reason: requestRecord.decisionReason
-        }
-      });
     }
 
     response.json({
       ok: true,
       request: {
-        id: requestRecord.id,
-        status: requestRecord.status,
-        userId: requestRecord.userId,
-        email: requestRecord.email,
-        orgId: requestRecord.orgId,
-        createdAt: requestRecord.createdAt,
-        expiresAt: requestRecord.expiresAt,
-        updatedAt: requestRecord.updatedAt,
-        decidedAt: requestRecord.decidedAt,
-        decisionReason: requestRecord.decisionReason
+        id: decision.requestRecord.id,
+        status: decision.requestRecord.status,
+        userId: decision.requestRecord.userId,
+        email: decision.requestRecord.email,
+        orgId: decision.requestRecord.orgId,
+        createdAt: decision.requestRecord.createdAt,
+        expiresAt: decision.requestRecord.expiresAt,
+        updatedAt: decision.requestRecord.updatedAt,
+        decidedAt: decision.requestRecord.decidedAt,
+        decisionReason: decision.requestRecord.decisionReason
       }
     });
   });
@@ -16716,7 +19351,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       correlationId
     });
     const aiDetails = buildPersistedSimulationAiDetails({
-      requestedModel: OPENAI_SIMULATION_MODEL,
+      requestedModel: OPENAI_SCORING_MODEL,
       responseModel: completion.model,
       usage: completion.usage,
       latencyMs
@@ -17887,9 +20522,11 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
     }
     const effectiveOrgPerUserDailySecondsCap = resolveEffectiveOrgPerUserDailySecondsCap(org, new Date());
 
-    const users = db.users
+    const orgUsers = db.users
       .filter((user) => user.accountType === "enterprise" && user.orgId === org.id)
-      .sort((a, b) => a.email.localeCompare(b.email))
+      .sort((a, b) => a.email.localeCompare(b.email));
+    const visibleUsers = orgUsers
+      .filter((target) => canEnterpriseActorSeeOrganizationUser({ actor, target }))
       .map((user) => {
         const dailyOverageExpiresAt = user.dailyOverageExpiresAt;
         const allowDailyOverageThisCycle =
@@ -17901,6 +20538,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
         return {
           userId: user.id,
           email: user.email,
+          employeeId: user.employeeId ?? null,
           status: user.status,
           orgRole: user.orgRole,
           dailySecondsCapOverride: user.dailySecondsCapOverride,
@@ -17914,7 +20552,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
     response.json({
       generatedAt: nowIso(),
       org: { id: org.id, name: org.name },
-      users
+      users: visibleUsers
     });
   });
 });
@@ -17964,6 +20602,11 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       return;
     }
 
+    if (!canEnterpriseActorSeeOrganizationUser({ actor, target })) {
+      response.status(404).json({ error: "Target user not found in organization." });
+      return;
+    }
+
     const now = new Date();
     const periodEndAt = now.toISOString();
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -17992,6 +20635,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       user: {
         userId: target.id,
         email: target.email,
+        employeeId: target.employeeId ?? null,
         status: target.status,
         orgRole: target.orgRole,
         dailySecondsCapOverride: target.dailySecondsCapOverride,
@@ -18037,10 +20681,12 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
   const targetUserId = request.params.targetUserId;
   const body = request.body as {
     status?: UserStatus;
+    employeeId?: unknown;
     allowDailyOverageThisCycle?: unknown;
     dailySecondsCapOverride?: unknown;
   };
   const hasStatusPatch = body.status !== undefined;
+  const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
   const hasOveragePatch = typeof body.allowDailyOverageThisCycle === "boolean";
   const hasDailyCapOverridePatch = body.dailySecondsCapOverride !== undefined;
 
@@ -18066,9 +20712,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
-    if (!hasStatusPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
+    if (!hasStatusPatch && !hasEmployeeIdPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
       response.status(400).json({
-        error: "Provide at least one patch field: status, allowDailyOverageThisCycle, or dailySecondsCapOverride."
+        error: "Provide at least one patch field: status, employeeId, allowDailyOverageThisCycle, or dailySecondsCapOverride."
       });
       return;
     }
@@ -18085,39 +20731,96 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
+    if (!canEnterpriseActorSeeOrganizationUser({ actor, target })) {
+      response.status(404).json({ error: "Target user not found in organization." });
+      return;
+    }
+
     if (target.id === actor.id) {
       response.status(403).json({ error: "You cannot lock or unlock your own account." });
       return;
     }
 
-    if (actor.orgRole === "user_admin" && target.orgRole === "org_admin") {
-      response.status(403).json({ error: "User admins cannot modify org admins." });
+    const actorCanManageRegularTarget = canEnterpriseActorManageRegularUser({ actor, target });
+    if (actor.orgRole === "user_admin" && !actorCanManageRegularTarget) {
+      response.status(404).json({ error: "Target user not found in organization." });
       return;
     }
+
+    if (actor.orgRole === "user_admin" && (hasDailyCapOverridePatch || hasOveragePatch)) {
+      response.status(403).json({ error: "User admins cannot modify organization usage controls." });
+      return;
+    }
+
+    let nextStatus = target.status;
+    let nextEmployeeId = target.employeeId ?? null;
+    let nextDailySecondsCapOverride = target.dailySecondsCapOverride;
+    let nextAllowDailyOverageThisCycle = target.allowDailyOverageThisCycle;
+    let nextDailyOverageExpiresAt = target.dailyOverageExpiresAt;
 
     if (hasStatusPatch) {
       if (!body.status || !isUserStatus(body.status)) {
         response.status(400).json({ error: "Valid status is required." });
         return;
       }
-      target.status = body.status;
+      if (target.orgRole === "org_admin" && body.status === "disabled") {
+        const activeOrgAdminCount = db.users.filter(
+          (user) => user.accountType === "enterprise" && user.orgId === org.id && user.orgRole === "org_admin" && user.status === "active"
+        ).length;
+        if (activeOrgAdminCount <= 1) {
+          response.status(403).json({ error: "At least one active org admin is required." });
+          return;
+        }
+      }
+      nextStatus = body.status;
+    }
+
+    if (hasEmployeeIdPatch) {
+      if (actor.orgRole === "user_admin" && !actorCanManageRegularTarget) {
+        response.status(403).json({ error: "You cannot edit Employee ID for this user." });
+        return;
+      }
+      const normalizedEmployeeId = normalizeEmployeeIdInput(body.employeeId);
+      if (!normalizedEmployeeId.ok) {
+        response.status(400).json({ error: normalizedEmployeeId.error, code: normalizedEmployeeId.code });
+        return;
+      }
+      const employeeIdConflict = findEmployeeIdConflict({
+        users: db.users,
+        orgId: org.id,
+        employeeId: normalizedEmployeeId.value,
+        exceptUserId: target.id
+      });
+      if (employeeIdConflict) {
+        response.status(409).json({
+          error: "Employee ID is already assigned within this organization.",
+          code: employeeIdConflict.code,
+        });
+        return;
+      }
+      nextEmployeeId = normalizedEmployeeId.value;
     }
 
     if (hasDailyCapOverridePatch) {
-      target.dailySecondsCapOverride = normalizeOptionalSecondsCap(body.dailySecondsCapOverride);
+      nextDailySecondsCapOverride = normalizeOptionalSecondsCap(body.dailySecondsCapOverride);
     }
 
     if (hasOveragePatch) {
       const allowDailyOverageThisCycle = body.allowDailyOverageThisCycle === true;
-      target.allowDailyOverageThisCycle = allowDailyOverageThisCycle;
+      nextAllowDailyOverageThisCycle = allowDailyOverageThisCycle;
       if (allowDailyOverageThisCycle) {
         const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, new Date()), new Date());
-        target.dailyOverageExpiresAt = billing.nextRenewalAt;
+        nextDailyOverageExpiresAt = billing.nextRenewalAt;
       } else {
-        target.dailyOverageExpiresAt = null;
+        nextDailyOverageExpiresAt = null;
       }
     }
 
+    target.status = nextStatus;
+    target.employeeId = nextEmployeeId;
+    target.dailySecondsCapOverride = nextDailySecondsCapOverride;
+    target.allowDailyOverageThisCycle = nextAllowDailyOverageThisCycle;
+    target.dailyOverageExpiresAt = nextDailyOverageExpiresAt;
     target.updatedAt = nowIso();
     emitMobileUpdateForUser(db, target.id, "user");
     appendMobileAuditEvent(db, actor, {
@@ -18127,6 +20830,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       message: `Updated org-user controls for ${target.email}.`,
       metadata: {
         status: target.status,
+        employeeIdChanged: hasEmployeeIdPatch,
         dailySecondsCapOverride: target.dailySecondsCapOverride,
         allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
         dailyOverageExpiresAt: target.dailyOverageExpiresAt
@@ -18135,6 +20839,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     response.json({
       userId: target.id,
       email: target.email,
+      employeeId: target.employeeId ?? null,
       status: target.status,
       dailySecondsCapOverride: target.dailySecondsCapOverride,
       allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
@@ -19257,6 +21962,10 @@ export async function startApiServer(): Promise<void> {
       supportCaseStore,
       webAuthSessionStore,
       performancePlanStore,
+      userEmployeeIdClaimStore,
+      orgModuleEntitlementStore,
+      trainingContentStore,
+      trainingContentAssetStore,
       trainingPackStore
     },
     maintenance: {
@@ -19266,6 +21975,7 @@ export async function startApiServer(): Promise<void> {
       migrateLegacyScoreRecordsFromAppState,
       migrateLegacySupportCasesFromAppState,
       migrateLegacyWebAuthSessionsFromAppState,
+      migrateUserProfileAppStateNormalization,
       runStartupUsageIntegrityMaintenance
     }
   });
@@ -19275,6 +21985,17 @@ export async function startApiServer(): Promise<void> {
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
 
+  const trainingContentStorageStatus = await trainingContentStorageReadiness.refresh();
+  if (trainingContentStorageStatus.enabled && !trainingContentStorageStatus.available) {
+    logWarn("[training-content-storage] configured provider is currently unavailable.");
+  }
+  if (trainingContentStorageStatus.enabled) {
+    const trainingContentStorageReadinessInterval = setInterval(() => {
+      void trainingContentStorageReadiness.refresh();
+    }, 60_000);
+    trainingContentStorageReadinessInterval.unref();
+  }
+
   await refreshDatabaseReadiness();
   const readinessInterval = setInterval(() => {
     queueDatabaseReadinessRefresh();
@@ -19282,7 +22003,48 @@ export async function startApiServer(): Promise<void> {
   readinessInterval.unref();
 }
 
-export { app };
+export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) => Promise<TrainingPack[]>) | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
+  }
+  dashboardTrainingPackLoaderForTest = loader;
+}
+
+export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementStore): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setOrgModuleEntitlementStoreForTest is only available in test.");
+  }
+  orgModuleEntitlementStore = store;
+}
+
+export function setTrainingContentAssetServiceForTest(
+  service: TrainingContentAssetService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingContentAssetServiceForTest is only available in test.");
+  }
+  trainingContentAssetService = service ?? defaultTrainingContentAssetService;
+}
+
+export function setTrainingContentManagementServiceForTest(
+  service: TrainingContentManagementService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingContentManagementServiceForTest is only available in test.");
+  }
+  trainingContentManagementService = service ?? defaultTrainingContentManagementService;
+}
+
+export function setTrainingContentMobileServiceForTest(
+  service: TrainingContentMobileService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingContentMobileServiceForTest is only available in test.");
+  }
+  trainingContentMobileService = service ?? defaultTrainingContentMobileService;
+}
+
+export { app, createDefaultDatabase, ensureDatabaseShape };
 
 if (runtimeConfig.nodeEnv !== "test") {
   void startApiServer().catch((error: unknown) => {

@@ -123,7 +123,7 @@ export default async function AttemptDetailPage({
           </li>
           <li>
             Training pack: {attempt.trainingPackId ? (
-              <Link className="inline-link subtle" href={buildDashboardScopedTrainingPackHref(attempt.trainingPackId, divisionId)}>
+              <Link className="inline-link subtle" href={buildDashboardScopedTrainingPackHref(attempt.trainingPackId, divisionId, attempt.orgId)}>
                 {attempt.trainingPackTitle ?? attempt.trainingPackId}
               </Link>
             ) : "No pack link recorded"}

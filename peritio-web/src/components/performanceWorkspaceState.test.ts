@@ -90,8 +90,8 @@ test("Performance user selector prefers real display names, sorts by name, and s
 });
 
 test("Performance user selector falls back safely when a name is missing", () => {
-  assert.equal(buildPerformanceUserDisplayName(createUser({ displayName: "", email: "fallback@example.com" })), "fallback@example.com");
-  assert.equal(buildPerformanceUserDisplayName(createUser({ displayName: "", email: "" })), "Account user");
+  assert.equal(buildPerformanceUserDisplayName(createUser({ displayName: "", email: "fallback@example.com" })), "Not provided");
+  assert.equal(buildPerformanceUserDisplayName(createUser({ displayName: "", email: "" })), "Not provided");
 });
 
 test("Performance selected user resolution keeps unauthorized users excluded", () => {

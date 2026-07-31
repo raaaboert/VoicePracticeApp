@@ -40,6 +40,7 @@ let server: Server;
 let planStore: PerformancePlanStore;
 let dashboardToken: string;
 let dashboardViewerToken: string;
+let dashboardManagerToken: string;
 let platformDashboardToken: string;
 
 function hashMobileToken(token: string): string {
@@ -71,10 +72,15 @@ function buildUser(
   return {
     id,
     email,
+    firstName: overrides.firstName === undefined ? "Test" : overrides.firstName,
+    lastName: overrides.lastName === undefined ? "User" : overrides.lastName,
+    employeeId: null,
+    managerUserId: overrides.managerUserId ?? null,
     emailVerifiedAt: NOW,
     isPlatformAdmin: false,
     isSuperUser: false,
     dashboardAccessEnabled: false,
+    mobileProfileReonboardingRequired: overrides.mobileProfileReonboardingRequired ?? false,
     accountType: "enterprise",
     tier: "enterprise",
     status: "active",
@@ -180,14 +186,25 @@ function buildDatabase(): ApiDatabase {
       buildUser("user_expired_cancel", "expired-cancel@example.com"),
       buildUser("user_expired_late", "expired-late@example.com"),
       buildUser("user_expired_create", "expired-create@example.com"),
-      buildUser("user_manage", "manage@example.com", { displayName: "Morgan Manager" }),
-      buildUser("user_edit", "edit@example.com"),
-      buildUser("user_self_created_edit", "self-created-edit@example.com"),
+      buildUser("user_manage", "manage@example.com", {
+        firstName: "Morgan",
+        lastName: "Manager",
+        managerUserId: "dashboard_manager"
+      }),
+      buildUser("user_edit", "edit@example.com", {
+        managerUserId: "dashboard_manager"
+      }),
+      buildUser("user_self_created_edit", "self-created-edit@example.com", {
+        managerUserId: "dashboard_manager"
+      }),
       buildUser("user_started_edit", "started-edit@example.com"),
       buildUser("user_authorized_active", "authorized-active@example.com"),
       buildUser("user_concurrent_duplicate", "concurrent-duplicate@example.com"),
       buildUser("user_concurrent_distinct", "concurrent-distinct@example.com"),
       buildUser("user_platform_target", "platform-target@example.com"),
+      buildUser("user_other_manager_report", "other-manager-report@example.com", {
+        managerUserId: "dashboard_other_manager"
+      }),
       buildUser("user_inactive", "inactive@example.com", {
         status: "disabled"
       }),
@@ -196,6 +213,8 @@ function buildDatabase(): ApiDatabase {
         divisionId: "division_b"
       }),
       buildUser("dashboard_admin", "admin@example.com", {
+        firstName: "Olivia",
+        lastName: "Admin",
         dashboardAccessEnabled: true,
         orgRole: "org_admin"
       }),
@@ -203,7 +222,21 @@ function buildDatabase(): ApiDatabase {
         dashboardAccessEnabled: true,
         orgRole: "user"
       }),
+      buildUser("dashboard_manager", "manager@example.com", {
+        firstName: "Maya",
+        lastName: "Manager",
+        dashboardAccessEnabled: true,
+        orgRole: "user_admin"
+      }),
+      buildUser("dashboard_other_manager", "other-manager@example.com", {
+        firstName: "Other",
+        lastName: "Manager",
+        dashboardAccessEnabled: true,
+        orgRole: "user_admin"
+      }),
       buildUser("platform_admin", "platform-admin@peritio.ai", {
+        firstName: "Platform",
+        lastName: "Admin",
         accountType: "individual",
         orgId: null,
         divisionId: null,
@@ -521,6 +554,13 @@ async function seedStores(): Promise<void> {
     orgId: "org_1"
   });
   dashboardViewerToken = viewerIssued.token;
+  const dashboardManager = buildDatabase().users.find((user) => user.id === "dashboard_manager");
+  assert.ok(dashboardManager);
+  const managerIssued = webAuthService.issueSession(dashboardManager, 14 * 24 * 60, new Date(NOW), {
+    accessType: "customer_dashboard_user",
+    orgId: "org_1"
+  });
+  dashboardManagerToken = managerIssued.token;
   const platformUser = buildDatabase().users.find((user) => user.id === "platform_admin");
   assert.ok(platformUser);
   const platformIssued = webAuthService.issueSession(platformUser, 14 * 24 * 60, new Date(NOW), {
@@ -539,6 +579,7 @@ async function seedStores(): Promise<void> {
   await webAuthStore.initialize();
   await webAuthStore.saveSession(issued.record);
   await webAuthStore.saveSession(viewerIssued.record);
+  await webAuthStore.saveSession(managerIssued.record);
   await webAuthStore.saveSession(platformIssued.record);
 }
 
@@ -948,7 +989,7 @@ test("Performance goal Updates are scoped, sanitized, and read-only after termin
   );
   assert.equal(mobilePost.status, 201);
   assert.equal((mobilePost.body.update as { body?: unknown }).body, "I practiced the opening today.");
-  assert.equal((mobilePost.body.update as { authorDisplayName?: unknown }).authorDisplayName, "Account user");
+  assert.equal((mobilePost.body.update as { authorDisplayName?: unknown }).authorDisplayName, "Morgan Manager");
   assert.equal("authorActorId" in (mobilePost.body.update as Record<string, unknown>), false);
   assert.equal("authorActorType" in (mobilePost.body.update as Record<string, unknown>), false);
 
@@ -970,7 +1011,7 @@ test("Performance goal Updates are scoped, sanitized, and read-only after termin
     },
     dashboardViewerToken
   );
-  assert.equal(dashboardViewerPost.status, 403);
+  assert.equal(dashboardViewerPost.status, 404);
 
   const dashboardPost = await dashboardRequest(
     "/dashboard/performance/plans/perf_plan_updates/updates",
@@ -990,7 +1031,7 @@ test("Performance goal Updates are scoped, sanitized, and read-only after termin
     platformDashboardToken
   );
   assert.equal(platformPost.status, 201);
-  assert.equal((platformPost.body.update as { authorDisplayName?: unknown }).authorDisplayName, "Platform A.");
+  assert.equal((platformPost.body.update as { authorDisplayName?: unknown }).authorDisplayName, "Platform Admin");
 
   const emptyPost = await dashboardRequest(
     "/dashboard/performance/plans/perf_plan_updates/updates",
@@ -1062,6 +1103,54 @@ test("dashboard Performance workspace lists scoped users and Focus Topic candida
   assert.equal(managedUser.assignableFocusTopics?.some((topic) => topic.name === "Manager Coaching"), true);
   assert.equal(managedUser.assignableScenarios?.some((scenario) => scenario.scenarioId === "custom_1"), true);
   assert.equal(users.some((user) => user.userId === "user_inactive"), false);
+});
+
+test("dashboard Performance user-admins are scoped to self and direct reports", async () => {
+  const result = await dashboardRequest("/dashboard/performance", undefined, dashboardManagerToken);
+
+  assert.equal(result.status, 200);
+  const users = result.body.users as Array<{
+    userId?: string;
+    canManagePerformancePlans?: boolean;
+  }>;
+  assert.deepEqual(
+    users.map((user) => user.userId).sort(),
+    ["dashboard_manager", "user_edit", "user_manage", "user_self_created_edit"]
+  );
+  assert.equal(users.find((user) => user.userId === "user_manage")?.canManagePerformancePlans, true);
+  assert.equal(users.some((user) => user.userId === "user_started_edit"), false);
+  assert.equal(users.some((user) => user.userId === "user_other_manager_report"), false);
+  assert.equal(users.some((user) => user.userId === "dashboard_other_manager"), false);
+
+  const allowedPreview = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_edit" }))
+    },
+    dashboardManagerToken
+  );
+  assert.equal(allowedPreview.status, 200);
+
+  const unassignedPreview = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_started_edit" }))
+    },
+    dashboardManagerToken
+  );
+  assert.equal(unassignedPreview.status, 404);
+
+  const otherManagerReportPreview = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_other_manager_report" }))
+    },
+    dashboardManagerToken
+  );
+  assert.equal(otherManagerReportPreview.status, 404);
 });
 
 test("dashboard Performance super user sees a grouped portfolio instead of mixed plan rows", async () => {
@@ -1350,12 +1439,11 @@ test("dashboard Performance concurrent different creates both succeed for one us
   assert.equal(userPlans.filter((entry) => entry.plan.status === "active").length, 2);
 });
 
-test("dashboard Performance write routes require plan-management access", async () => {
+test("regular dashboard users cannot use Performance management routes", async () => {
   const workspace = await dashboardRequest("/dashboard/performance", undefined, dashboardViewerToken);
   assert.equal(workspace.status, 200);
   const users = workspace.body.users as Array<{ canManagePerformancePlans?: boolean }>;
-  assert.equal(users.length > 0, true);
-  assert.equal(users.every((user) => user.canManagePerformancePlans === false), true);
+  assert.deepEqual(users, []);
   const plans = workspace.body.plans as Array<{ canCancel?: boolean }>;
   assert.equal(plans.every((plan) => plan.canCancel === false), true);
   const editablePlans = workspace.body.plans as Array<{ canEdit?: boolean }>;
@@ -1369,8 +1457,7 @@ test("dashboard Performance write routes require plan-management access", async 
     },
     dashboardViewerToken
   );
-  assert.equal(preview.status, 403);
-  assert.equal(preview.body.code, "dashboard_scope_denied");
+  assert.equal(preview.status, 404);
 
   const created = await dashboardRequest(
     "/dashboard/performance/plans",
@@ -1380,8 +1467,7 @@ test("dashboard Performance write routes require plan-management access", async 
     },
     dashboardViewerToken
   );
-  assert.equal(created.status, 403);
-  assert.equal(created.body.code, "dashboard_scope_denied");
+  assert.equal(created.status, 404);
 
   const cancelled = await dashboardRequest(
     "/dashboard/performance/plans/perf_plan_expired_cancel/cancel",
@@ -1391,8 +1477,7 @@ test("dashboard Performance write routes require plan-management access", async 
     },
     dashboardViewerToken
   );
-  assert.equal(cancelled.status, 403);
-  assert.equal(cancelled.body.code, "dashboard_scope_denied");
+  assert.equal(cancelled.status, 404);
 
   const edited = await dashboardRequest(
     "/dashboard/performance/plans/perf_plan_current",
@@ -1402,8 +1487,7 @@ test("dashboard Performance write routes require plan-management access", async 
     },
     dashboardViewerToken
   );
-  assert.equal(edited.status, 403);
-  assert.equal(edited.body.code, "dashboard_scope_denied");
+  assert.equal(edited.status, 404);
 });
 
 test("dashboard Performance create finalizes an expired active plan before creating the next plan", async () => {

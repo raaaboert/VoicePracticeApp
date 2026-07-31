@@ -33,16 +33,24 @@ export function DashboardShell({
   const router = useRouter();
   const hasCrossAccountAccess = viewer.accessType === "super_user";
   const hasDemoDashAccess = viewer.accessType === "super_user" && viewer.isSuperUser === true;
+  const hasAdminAccess =
+    viewer.capabilities.viewOrganizationUsers || viewer.capabilities.approveRejectAccessRequests;
   const sessionLabel = hasCrossAccountAccess ? "Super User" : viewer.orgName ?? "Customer";
   const navItems = hasCrossAccountAccess
     ? [
         BASE_NAV_ITEMS[0],
         BASE_NAV_ITEMS[1],
+        ...(hasAdminAccess ? [{ href: "/app/admin", label: "Admin" }] : []),
         { href: "/app/customers", label: "Customers" },
         BASE_NAV_ITEMS[2],
         ...(hasDemoDashAccess ? [{ href: "/app/demo-dash", label: "Demo Dash" }] : []),
       ]
-    : BASE_NAV_ITEMS;
+    : [
+        BASE_NAV_ITEMS[0],
+        BASE_NAV_ITEMS[1],
+        ...(hasAdminAccess ? [{ href: "/app/admin", label: "Admin" }] : []),
+        BASE_NAV_ITEMS[2],
+      ];
 
   const signOut = async () => {
     await fetch("/api/auth/logout", { method: "POST" });

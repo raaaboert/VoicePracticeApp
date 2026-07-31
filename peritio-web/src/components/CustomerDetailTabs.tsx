@@ -21,10 +21,12 @@ function formatOrgRole(orgRole: string): string {
 
 export function CustomerDetailTabs({
   customerName,
+  customerOrgId,
   insights,
   divisionId,
 }: {
   customerName: string;
+  customerOrgId: string;
   insights: DashboardCustomerInsights;
   divisionId: string | null;
 }) {
@@ -105,7 +107,7 @@ export function CustomerDetailTabs({
                   <h3>
                     <Link
                       className="inline-link subtle"
-                      href={buildDashboardScopedTrainingPackHref(trainingPack.trainingPackId, divisionId)}
+                      href={buildDashboardScopedTrainingPackHref(trainingPack.trainingPackId, divisionId, customerOrgId)}
                     >
                       {trainingPack.title}
                     </Link>

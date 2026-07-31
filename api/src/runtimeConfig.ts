@@ -1,5 +1,9 @@
 import path from "node:path";
 import { loadOpenAiModelConfig, OpenAiModelConfig } from "./openaiModelConfig.js";
+import {
+  loadTrainingContentStorageConfig,
+  TrainingContentStorageConfig,
+} from "./trainingContentStorageConfig.js";
 
 export type StorageProvider = "file" | "postgres";
 export type AuthCodeDeliveryProvider = "log_only" | "resend";
@@ -39,6 +43,7 @@ export interface RuntimeConfig {
   supportTranscriptSecret: string;
   useModularPromptArchitecture: boolean;
   enableInternalDebugEndpoints: boolean;
+  trainingContentStorage: TrainingContentStorageConfig;
 }
 
 const PLACEHOLDER_VALUES = new Set([
@@ -311,6 +316,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const isProduction = nodeEnv === "production";
   const isProductionDeployment = deploymentEnvironment === "production";
   const hasOpenAiApiKey = Boolean(env.OPENAI_API_KEY?.trim());
+  const trainingContentStorage = loadTrainingContentStorageConfig(env, deploymentEnvironment);
 
   const port = toInt(env.PORT, 4100);
   if (!Number.isFinite(port) || port <= 0) {
@@ -330,6 +336,11 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   }
   if (isProductionDeployment && storageProvider !== "postgres") {
     throw new Error('STORAGE_PROVIDER must be "postgres" when PERITIO_ENV=production.');
+  }
+  if (trainingContentStorage.provider === "r2" && storageProvider !== "postgres") {
+    throw new Error(
+      'STORAGE_PROVIDER must be "postgres" when TRAINING_CONTENT_STORAGE_PROVIDER=r2.'
+    );
   }
   const pgPoolMax = parsePositiveInt("PG_POOL_MAX", env.PG_POOL_MAX, 5);
   const pgConnectTimeoutMs = parsePositiveInt("PG_CONNECT_TIMEOUT_MS", env.PG_CONNECT_TIMEOUT_MS, 8000);
@@ -485,5 +496,6 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     supportTranscriptSecret,
     useModularPromptArchitecture: toBoolean(env.USE_MODULAR_PROMPT_ARCHITECTURE, false),
     enableInternalDebugEndpoints: toBoolean(env.ENABLE_INTERNAL_DEBUG_ENDPOINTS, false),
+    trainingContentStorage,
   };
 }

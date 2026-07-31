@@ -8,6 +8,7 @@ import type { AiVoiceGender, AiVoiceProfile } from "../types";
 import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
 import type { PrefetchedRemoteSpeechChunk } from "./api";
 import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
+import { createPlaybackSession as createPlaybackSettlementSession } from "./ttsPlaybackSession";
 
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
@@ -716,20 +717,6 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       let audioLoadedAtMs = 0;
       let playbackStartedMarked = false;
       let lastStatusKey: string | null = null;
-      let playbackTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
-      let settled = false;
-      let resolvePlayback!: () => void;
-      let rejectPlayback!: (error: unknown) => void;
-      const playbackFinished = new Promise<void>((resolve, reject) => {
-        resolvePlayback = resolve;
-        rejectPlayback = reject;
-      });
-      const clearPlaybackTimeout = () => {
-        if (playbackTimeoutHandle) {
-          clearTimeout(playbackTimeoutHandle);
-          playbackTimeoutHandle = null;
-        }
-      };
       const clearStatusListener = () => {
         try {
           sound.setOnPlaybackStatusUpdate(null);
@@ -737,25 +724,30 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           // Ignore listener cleanup failures.
         }
       };
-      const settlePlayback = (kind: "resolve" | "reject", error?: unknown) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearPlaybackTimeout();
-        clearStatusListener();
-        if (kind === "resolve") {
-          resolvePlayback();
-        } else {
-          rejectPlayback(error);
-        }
-      };
+      const playbackSession = createPlaybackSettlementSession({
+        abortSignal: params.abortSignal,
+        clearStatusListener,
+        createCancellationError: () => new TtsPlaybackCancelledError(),
+        createTimeoutError: (timeoutMs) => (
+          new TtsPlaybackTimeoutError(`Remote TTS playback timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`)
+        ),
+        onTimeout: (timeoutMs) => {
+          logLifecycle({
+            phase: "playback_timeout",
+            sourceKind: sessionSourceKind,
+            bytes,
+            timeoutMs,
+            elapsedMs: Date.now() - requestStartedAtMs,
+          });
+          void stopRemoteTtsPlayback({ remoteTtsSoundRef, remoteTtsFileRef });
+        },
+      });
       const markPlaybackStarted = (startedAtMs: number) => {
-        if (playbackStartedMarked || settled) {
+        if (playbackStartedMarked || playbackSession.isSettled()) {
           return;
         }
         if (isCancelled() || remoteTtsSoundRef.current !== sound) {
-          settlePlayback("reject", new TtsPlaybackCancelledError());
+          playbackSession.settleFailed(new TtsPlaybackCancelledError());
           return;
         }
         playbackStartedMarked = true;
@@ -782,25 +774,11 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         params.onPlaybackStart?.({ source: params.source, mode: "remote", startedAtMs });
       };
       const startPlaybackTimeout = (timeoutMs: number) => {
-        clearPlaybackTimeout();
-        playbackTimeoutHandle = setTimeout(() => {
-          logLifecycle({
-            phase: "playback_timeout",
-            sourceKind: sessionSourceKind,
-            bytes,
-            timeoutMs,
-            elapsedMs: Date.now() - requestStartedAtMs,
-          });
-          settlePlayback(
-            "reject",
-            new TtsPlaybackTimeoutError(`Remote TTS playback timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`),
-          );
-          void stopRemoteTtsPlayback({ remoteTtsSoundRef, remoteTtsFileRef });
-        }, timeoutMs);
+        playbackSession.startPlaybackTimeout(timeoutMs);
       };
 
       sound.setOnPlaybackStatusUpdate((status) => {
-        if (settled) {
+        if (playbackSession.isSettled()) {
           return;
         }
         if (isCancelled() || remoteTtsSoundRef.current !== sound) {
@@ -810,7 +788,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             bytes,
             elapsedMs: Date.now() - requestStartedAtMs,
           });
-          settlePlayback("reject", new TtsPlaybackCancelledError());
+          playbackSession.settleFailed(new TtsPlaybackCancelledError());
           return;
         }
 
@@ -835,7 +813,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
               error: status.error,
               elapsedMs: Date.now() - requestStartedAtMs,
             });
-            settlePlayback("reject", new Error(status.error));
+            playbackSession.settleFailed(new Error(status.error));
           }
           return;
         }
@@ -874,7 +852,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
               durationMillis: status.durationMillis ?? null,
             },
           });
-          settlePlayback("resolve");
+          playbackSession.settleCompleted();
         }
       });
 
@@ -885,7 +863,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         },
         markPlaybackStarted,
         startPlaybackTimeout,
-        playbackFinished,
+        playbackFinished: playbackSession.playbackFinished,
       };
     };
 

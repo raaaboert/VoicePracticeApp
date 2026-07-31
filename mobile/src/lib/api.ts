@@ -30,6 +30,7 @@ import {
 } from "@voicepractice/shared";
 import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationEvaluationResult } from "../types";
+import { createMobileApiError } from "./apiError";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_TURN_HISTORY_MESSAGES = 24;
@@ -135,7 +136,7 @@ interface TimezoneResponse {
   items: string[];
 }
 
-interface RequestOptions {
+export interface RequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   headers?: Record<string, string>;
@@ -257,7 +258,7 @@ function normalizeSpeechPrefetchPayload(value: unknown): PrefetchedRemoteSpeechC
   };
 }
 
-async function requestJson<T>(
+export async function requestJson<T>(
   path: string,
   init?: RequestInit,
   authToken?: string,
@@ -318,16 +319,13 @@ async function requestJson<T>(
   }
 
   if (!response.ok) {
-    let message = `Request failed (${response.status})`;
+    let payload: { error?: unknown; code?: unknown } | null = null;
     try {
-      const payload = (await response.json()) as { error?: string };
-      if (payload.error) {
-        message = payload.error;
-      }
+      payload = (await response.json()) as { error?: unknown; code?: unknown };
     } catch {
-      // Fall back to status message.
+      // Fall back to a status-derived structured error.
     }
-    throw new Error(message);
+    throw createMobileApiError(response.status, payload);
   }
 
   return (await response.json()) as T;
@@ -510,6 +508,7 @@ export async function verifyMobileEmail(
   userId: string,
   code: string,
   authToken: string,
+  profile?: Pick<MobileVerifyEmailRequest, "firstName" | "lastName" | "joinCode">,
 ): Promise<{
   user: UserProfile;
   authToken: string;
@@ -517,7 +516,7 @@ export async function verifyMobileEmail(
   verificationExpiresAt: string | null;
   domainMatch: EnterpriseDomainMatch | null;
 }> {
-  const body: MobileVerifyEmailRequest = { userId, code };
+  const body: MobileVerifyEmailRequest = { userId, code, ...profile };
   return requestJson("/mobile/onboard/verify-email", {
     method: "POST",
     body: JSON.stringify(body),
@@ -1589,6 +1588,7 @@ export async function fetchOrgAdminUsers(
   users: Array<{
     userId: string;
     email: string;
+    employeeId: string | null;
     status: string;
     orgRole: string;
     dailySecondsCapOverride: number | null;
@@ -1675,6 +1675,7 @@ export async function fetchOrgAdminUserDetail(
   user: {
     userId: string;
     email: string;
+    employeeId: string | null;
     status: string;
     orgRole: string;
     dailySecondsCapOverride: number | null;
@@ -1712,12 +1713,14 @@ export async function setOrgAdminUserControls(
   authToken: string,
   patch: {
     status?: "active" | "disabled";
+    employeeId?: string | null;
     allowDailyOverageThisCycle?: boolean;
     dailySecondsCapOverride?: number | null;
   },
 ): Promise<{
   userId: string;
   email: string;
+  employeeId: string | null;
   status: string;
   allowDailyOverageThisCycle: boolean;
   dailySecondsCapOverride: number | null;

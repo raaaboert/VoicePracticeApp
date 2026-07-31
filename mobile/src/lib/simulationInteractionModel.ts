@@ -7,6 +7,22 @@ export interface SimulationStartProgress {
 
 export type TurnFinalizeTrigger = "submit";
 export type TurnRecordingSafetySignal = "long-pause" | "soft-limit" | "absolute-limit";
+export type SimulationLifecycleResumeIntent =
+  | {
+      kind: "replay_assistant";
+      assistantMessageId: string;
+      assistantText: string;
+      assistantMessageCommitted: boolean;
+    }
+  | {
+      kind: "restart_recording";
+    };
+export type SimulationPrimaryButtonRoute =
+  | "ignore"
+  | "submit_response"
+  | "resume_lifecycle"
+  | "restart_recording"
+  | "start_session";
 
 export interface PrimarySimulationAction {
   kind: "start" | "submit" | "busy";
@@ -75,6 +91,75 @@ export function getPrimarySimulationAction(params: {
     label: params.mode === "speaking" ? "AI Responding..." : "Processing...",
     disabled: true,
   };
+}
+
+export function getSimulationLifecycleResumeIntent(params: {
+  activeAssistantSpeech: {
+    messageId: string;
+    text: string;
+    committed: boolean;
+  } | null;
+}): SimulationLifecycleResumeIntent {
+  const activeAssistantText = params.activeAssistantSpeech?.text.trim() ?? "";
+  const assistantMessageId = params.activeAssistantSpeech?.messageId.trim() ?? "";
+  if (activeAssistantText && assistantMessageId) {
+    return {
+      kind: "replay_assistant",
+      assistantMessageId,
+      assistantText: activeAssistantText,
+      assistantMessageCommitted: Boolean(params.activeAssistantSpeech?.committed),
+    };
+  }
+
+  return {
+    kind: "restart_recording",
+  };
+}
+
+export function shouldCommitResumedAssistantResponse(params: {
+  intent: SimulationLifecycleResumeIntent;
+  committedMessageIds: readonly string[];
+}): boolean {
+  return (
+    params.intent.kind === "replay_assistant"
+    && !params.intent.assistantMessageCommitted
+    && !params.committedMessageIds.includes(params.intent.assistantMessageId)
+  );
+}
+
+export function getSimulationPrimaryButtonRoute(params: {
+  lifecycleResumeInProgress: boolean;
+  sessionActive: boolean;
+  mode: SimulationTurnMode;
+  lifecyclePauseActive: boolean;
+}): SimulationPrimaryButtonRoute {
+  if (params.lifecycleResumeInProgress) {
+    return "ignore";
+  }
+  if (!params.sessionActive) {
+    return "start_session";
+  }
+  if (params.mode === "recording") {
+    return "submit_response";
+  }
+  if (params.mode !== "idle") {
+    return "ignore";
+  }
+  return params.lifecyclePauseActive ? "resume_lifecycle" : "restart_recording";
+}
+
+export function shouldShowUserTurnInstruction(params: {
+  sessionActive: boolean;
+  mode: SimulationTurnMode;
+  lifecyclePauseActive: boolean;
+  isStartingTurn: boolean;
+}): boolean {
+  return (
+    params.sessionActive
+    && params.mode === "recording"
+    && !params.lifecyclePauseActive
+    && !params.isStartingTurn
+  );
 }
 
 export function getTurnRecordingSafetySignal(params: {

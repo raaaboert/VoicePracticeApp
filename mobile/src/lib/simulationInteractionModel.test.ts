@@ -2,8 +2,12 @@ import {
   createSimulationCorrelationId,
   createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
+  getSimulationLifecycleResumeIntent,
+  getSimulationPrimaryButtonRoute,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
+  shouldCommitResumedAssistantResponse,
+  shouldShowUserTurnInstruction,
 } from "./simulationInteractionModel";
 
 function assert(condition: boolean, message: string): void {
@@ -140,6 +144,129 @@ runTest("restarting a paused session disables duplicate resume taps while the mi
     },
     "reconnecting an active paused turn should prevent duplicate resume actions",
   );
+});
+
+runTest("an interrupted assistant turn replays the committed response instead of generating it again", () => {
+  assertDeepEqual(
+    getSimulationLifecycleResumeIntent({
+      activeAssistantSpeech: {
+        messageId: "assistant-message-1",
+        text: "This is the already-committed assistant response.",
+        committed: true,
+      },
+    }),
+    {
+      kind: "replay_assistant",
+      assistantMessageId: "assistant-message-1",
+      assistantText: "This is the already-committed assistant response.",
+      assistantMessageCommitted: true,
+    },
+    "assistant playback interruption should preserve a replay-only resume intent",
+  );
+});
+
+runTest("an interrupted user turn restarts recording without advancing the dialogue", () => {
+  assertDeepEqual(
+    getSimulationLifecycleResumeIntent({
+      activeAssistantSpeech: null,
+    }),
+    {
+      kind: "restart_recording",
+    },
+    "a pause outside assistant playback should safely restart the user recording turn",
+  );
+});
+
+runTest("interruption before playback commits the existing assistant response exactly once on resume", () => {
+  const intent = getSimulationLifecycleResumeIntent({
+    activeAssistantSpeech: {
+      messageId: "assistant-message-before-playback",
+      text: "Existing generated response.",
+      committed: false,
+    },
+  });
+  const committedMessageIds: string[] = [];
+
+  assert(
+    shouldCommitResumedAssistantResponse({ intent, committedMessageIds }),
+    "an uncommitted interrupted response should be committed before replay",
+  );
+  if (intent.kind === "replay_assistant") {
+    committedMessageIds.push(intent.assistantMessageId);
+  }
+  assert(
+    !shouldCommitResumedAssistantResponse({ intent, committedMessageIds }),
+    "the same response id must not be committed a second time",
+  );
+  assertDeepEqual(
+    committedMessageIds,
+    ["assistant-message-before-playback"],
+    "resume should preserve one transcript entry for the existing response",
+  );
+});
+
+runTest("interruption after playback start does not recommit the assistant response", () => {
+  const intent = getSimulationLifecycleResumeIntent({
+    activeAssistantSpeech: {
+      messageId: "assistant-message-after-playback",
+      text: "Already committed response.",
+      committed: true,
+    },
+  });
+
+  assert(
+    !shouldCommitResumedAssistantResponse({
+      intent,
+      committedMessageIds: ["assistant-message-after-playback"],
+    }),
+    "an already-committed response should be replay-only",
+  );
+});
+
+runTest("a rapid second Resume tap cannot route to recording after the first tap clears the pause", () => {
+  const firstTapRoute = getSimulationPrimaryButtonRoute({
+    lifecycleResumeInProgress: false,
+    sessionActive: true,
+    mode: "idle",
+    lifecyclePauseActive: true,
+  });
+  assert(firstTapRoute === "resume_lifecycle", "the first tap should claim lifecycle resume");
+
+  const secondTapRoute = getSimulationPrimaryButtonRoute({
+    lifecycleResumeInProgress: true,
+    sessionActive: true,
+    mode: "idle",
+    lifecyclePauseActive: false,
+  });
+  assert(
+    secondTapRoute === "ignore",
+    "the synchronous resume guard must block recording even after the pause reason is cleared",
+  );
+});
+
+runTest("the user-turn instruction appears only while actively recording", () => {
+  assert(
+    shouldShowUserTurnInstruction({
+      sessionActive: true,
+      mode: "recording",
+      lifecyclePauseActive: false,
+      isStartingTurn: false,
+    }),
+    "active recording should show the user-turn instruction",
+  );
+
+  for (const hiddenState of [
+    { sessionActive: true, mode: "speaking" as const, lifecyclePauseActive: false, isStartingTurn: false },
+    { sessionActive: true, mode: "thinking" as const, lifecyclePauseActive: false, isStartingTurn: false },
+    { sessionActive: true, mode: "recording" as const, lifecyclePauseActive: true, isStartingTurn: false },
+    { sessionActive: true, mode: "recording" as const, lifecyclePauseActive: false, isStartingTurn: true },
+    { sessionActive: false, mode: "recording" as const, lifecyclePauseActive: false, isStartingTurn: false },
+  ]) {
+    assert(
+      !shouldShowUserTurnInstruction(hiddenState),
+      `instruction should be hidden for ${JSON.stringify(hiddenState)}`,
+    );
+  }
 });
 
 runTest("long pause becomes a guidance signal instead of an auto-submit trigger", () => {

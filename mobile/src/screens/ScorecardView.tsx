@@ -1,6 +1,23 @@
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { DIFFICULTY_LABELS, PERSONA_LABELS } from "../data/prompts";
 import { buildScorecardViewModel } from "../lib/scorecardViewModel";
+import {
+  getSupportModalKeyboardDismissMode,
+  getSupportModalMaxHeight,
+  SUPPORT_MODAL_KEYBOARD_SHOULD_PERSIST_TAPS,
+} from "../lib/supportModalLayout";
 import { Difficulty, PersonaStyle, SimulationScorecard, SimulationScoringStatus } from "../types";
 import { useMemo, useState } from "react";
 
@@ -52,9 +69,11 @@ export function ScorecardView({
   const [supportBusy, setSupportBusy] = useState(false);
   const [supportError, setSupportError] = useState<string | null>(null);
   const [supportSuccess, setSupportSuccess] = useState<string | null>(null);
+  const { height: windowHeight } = useWindowDimensions();
 
   const canSubmitSupport = useMemo(() => supportMessage.trim().length > 0 && !supportBusy, [supportBusy, supportMessage]);
   const viewModel = buildScorecardViewModel({ scoringStatus, scorecard, error });
+  const supportModalMaxHeight = getSupportModalMaxHeight(windowHeight);
 
   return (
     <View style={styles.fill}>
@@ -212,9 +231,13 @@ export function ScorecardView({
       </View>
 
       <Modal transparent visible={supportOpen} animationType="fade" onRequestClose={() => setSupportOpen(false)}>
-        <View style={styles.modalRoot}>
+        <KeyboardAvoidingView
+          style={styles.modalKeyboardRoot}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
           <Pressable style={styles.modalBackdrop} onPress={() => setSupportOpen(false)} />
-          <View style={styles.modalCard}>
+          <SafeAreaView style={styles.modalRoot} pointerEvents="box-none">
+          <View style={[styles.modalCard, { maxHeight: supportModalMaxHeight }]}>
             <View style={styles.modalHeaderRow}>
               <Text style={styles.modalTitle}>Feedback / Support</Text>
               <Pressable
@@ -226,6 +249,12 @@ export function ScorecardView({
               </Pressable>
             </View>
 
+            <ScrollView
+              style={styles.modalBodyScroll}
+              contentContainerStyle={styles.modalBodyContent}
+              keyboardShouldPersistTaps={SUPPORT_MODAL_KEYBOARD_SHOULD_PERSIST_TAPS}
+              keyboardDismissMode={getSupportModalKeyboardDismissMode(Platform.OS)}
+            >
             <Text style={styles.body}>
               Describe what went wrong or what you disagree with. Be as specific as you can.
             </Text>
@@ -262,14 +291,14 @@ export function ScorecardView({
 
             <View style={styles.modalFooterRow}>
               <Pressable
-                style={[styles.secondaryButton, supportBusy ? styles.buttonDisabled : null]}
+                style={[styles.secondaryButton, styles.modalFooterButton, supportBusy ? styles.buttonDisabled : null]}
                 onPress={() => setSupportOpen(false)}
                 disabled={supportBusy}
               >
                 <Text style={styles.secondaryButtonText}>Cancel</Text>
               </Pressable>
               <Pressable
-                style={[styles.button, !canSubmitSupport ? styles.buttonDisabled : null]}
+                style={[styles.button, styles.modalFooterButton, !canSubmitSupport ? styles.buttonDisabled : null]}
                 disabled={!canSubmitSupport}
                 onPress={() => {
                   setSupportError(null);
@@ -296,8 +325,10 @@ export function ScorecardView({
                 <Text style={styles.buttonText}>{supportBusy ? "Submitting..." : "Submit"}</Text>
               </Pressable>
             </View>
+            </ScrollView>
           </View>
-        </View>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -443,10 +474,15 @@ const styles = StyleSheet.create({
   buttonDisabled: {
     opacity: 0.55,
   },
+  modalKeyboardRoot: {
+    flex: 1,
+  },
   modalRoot: {
     flex: 1,
-    justifyContent: "center",
+    justifyContent: "flex-start",
     paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 12,
   },
   modalBackdrop: {
     ...StyleSheet.absoluteFillObject,
@@ -457,14 +493,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     backgroundColor: "rgba(16, 26, 20, 0.97)",
-    padding: 14,
-    gap: 10,
+    overflow: "hidden",
   },
   modalHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(154, 174, 156, 0.2)",
   },
   modalTitle: {
     color: COLORS.text,
@@ -488,6 +528,17 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     justifyContent: "space-between",
+  },
+  modalFooterButton: {
+    flex: 1,
+  },
+  modalBodyScroll: {
+    flexShrink: 1,
+  },
+  modalBodyContent: {
+    padding: 14,
+    paddingBottom: 16,
+    gap: 10,
   },
   input: {
     borderRadius: 14,

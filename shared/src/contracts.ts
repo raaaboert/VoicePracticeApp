@@ -27,6 +27,526 @@ export const ORG_USER_ROLE_LABELS: Record<OrgUserRole, string> = {
   user: "User"
 };
 
+export const ORG_MODULE_KEYS = ["training_content"] as const;
+export type OrgModuleKey = (typeof ORG_MODULE_KEYS)[number];
+
+export interface OrgModuleEntitlementState {
+  moduleKey: OrgModuleKey;
+  enabled: boolean;
+  updatedByActorId: string | null;
+  updatedAt: string | null;
+}
+
+export interface OrgModuleEntitlementsResponse {
+  orgId: string;
+  modules: Record<OrgModuleKey, OrgModuleEntitlementState>;
+}
+
+export interface UpdateOrgModuleEntitlementRequest {
+  enabled: boolean;
+}
+
+export interface UpdateOrgModuleEntitlementResponse extends OrgModuleEntitlementsResponse {
+  changed: boolean;
+}
+
+export const ORGANIZATION_MODULE_DISABLED_CODE = "module_disabled" as const;
+
+export interface OrganizationModuleDisabledErrorResponse {
+  error: string;
+  code: typeof ORGANIZATION_MODULE_DISABLED_CODE;
+  moduleKey: OrgModuleKey;
+}
+
+export const TRAINING_CONTENT_TYPES = [
+  "native",
+  "external_url",
+  "video",
+  "audio",
+  "pdf",
+  "docx",
+  "image"
+] as const;
+export type TrainingContentType = (typeof TRAINING_CONTENT_TYPES)[number];
+
+export const TRAINING_CONTENT_PUBLICATION_STATES = ["draft", "published", "archived"] as const;
+export type TrainingContentPublicationState = (typeof TRAINING_CONTENT_PUBLICATION_STATES)[number];
+
+export const TRAINING_CONTENT_ASSIGNMENT_TYPES = [
+  "organization",
+  "user",
+  "manager",
+  "manager_team"
+] as const;
+export type TrainingContentAssignmentType = (typeof TRAINING_CONTENT_ASSIGNMENT_TYPES)[number];
+
+export const TRAINING_CONTENT_ASSET_ROLES = ["primary", "thumbnail", "inline"] as const;
+export type TrainingContentAssetRole = (typeof TRAINING_CONTENT_ASSET_ROLES)[number];
+
+export const TRAINING_CONTENT_ASSET_UPLOAD_STATES = [
+  "pending",
+  "uploaded",
+  "processing",
+  "ready",
+  "rejected",
+  "superseded",
+  "expired"
+] as const;
+export type TrainingContentAssetUploadState = (typeof TRAINING_CONTENT_ASSET_UPLOAD_STATES)[number];
+
+export const TRAINING_CONTENT_COMPLETION_STATES = ["not_started", "in_progress", "completed"] as const;
+export type TrainingContentCompletionState = (typeof TRAINING_CONTENT_COMPLETION_STATES)[number];
+
+export const TRAINING_CONTENT_COMPLETION_METHODS = ["manual", "media_threshold"] as const;
+export type TrainingContentCompletionMethod = (typeof TRAINING_CONTENT_COMPLETION_METHODS)[number];
+
+export interface TrainingContentItem {
+  id: string;
+  orgId: string;
+  categoryId: string;
+  title: string;
+  description: string;
+  focusTopicId: string | null;
+  focusTopicNameSnapshot: string | null;
+  contentType: TrainingContentType;
+  publicationState: TrainingContentPublicationState;
+  nativeBody: string | null;
+  externalUrl: string | null;
+  displayOrder: number;
+  contentVersion: number;
+  createdByActorId: string;
+  updatedByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  archivedAt: string | null;
+}
+
+export interface TrainingContentAsset {
+  id: string;
+  orgId: string;
+  contentId: string;
+  assetRole: TrainingContentAssetRole;
+  version: number;
+  uploadState: TrainingContentAssetUploadState;
+  originalFilename: string | null;
+  declaredMimeType: string | null;
+  detectedMimeType: string | null;
+  fileExtension: string | null;
+  byteSize: number | null;
+  checksumOrEtag: string | null;
+  uploadExpiresAt: string | null;
+  finalizedAt: string | null;
+  supersededAt: string | null;
+  createdByActorId: string;
+  createdAt: string;
+}
+
+export interface TrainingContentAssignment {
+  id: string;
+  orgId: string;
+  contentId: string;
+  assignmentType: TrainingContentAssignmentType;
+  subjectUserId: string | null;
+  createdByActorId: string;
+  createdAt: string;
+  revokedByActorId: string | null;
+  revokedAt: string | null;
+}
+
+export const TRAINING_CONTENT_LIST_SORTS = [
+  "library_order",
+  "updated_desc",
+  "title_asc"
+] as const;
+export type TrainingContentListSort = (typeof TRAINING_CONTENT_LIST_SORTS)[number];
+
+export interface TrainingContentCategory {
+  id: string;
+  orgId: string;
+  name: string;
+  description: string;
+  displayOrder: number;
+  isDefault: boolean;
+  createdByActorId: string;
+  updatedByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface MobileModuleAvailabilityResponse {
+  modules: {
+    trainingContent: {
+      enabled: boolean;
+    };
+  };
+}
+
+export interface MobileTrainingContentCategory {
+  id: string;
+  name: string;
+  description: string;
+  itemCount: number;
+  displayOrder: number;
+}
+
+export interface MobileTrainingContentCategoryReference {
+  id: string;
+  name: string;
+}
+
+export interface MobileTrainingContentSummary {
+  id: string;
+  contentType: TrainingContentType;
+  title: string;
+  description: string;
+  category: MobileTrainingContentCategoryReference;
+  relatedFocusTopic: string | null;
+}
+
+export interface MobileTrainingContentAssetMetadata {
+  filename: string | null;
+  mimeType: string | null;
+  fileExtension: string | null;
+  byteSize: number | null;
+}
+
+export interface MobileTrainingContentDetail extends MobileTrainingContentSummary {
+  nativeBody: string | null;
+  externalUrl: string | null;
+  asset: MobileTrainingContentAssetMetadata | null;
+  contentVersion: number;
+}
+
+export interface MobileTrainingContentLibraryResponse {
+  categories: MobileTrainingContentCategory[];
+  items: MobileTrainingContentSummary[];
+  truncated: boolean;
+}
+
+export interface MobileTrainingContentCategoriesResponse {
+  categories: MobileTrainingContentCategory[];
+}
+
+export interface MobileTrainingContentDetailResponse {
+  item: MobileTrainingContentDetail;
+}
+
+export interface MobileTrainingContentAssetAccessResponse {
+  access: {
+    url: string;
+    expiresAt: string;
+    requiredHeaders: Record<string, string>;
+  };
+}
+
+export interface TrainingContentFileLimitsBytes {
+  video: number;
+  audio: number;
+  pdf: number;
+  docx: number;
+  image: number;
+}
+
+export interface DashboardTrainingContentAsset {
+  id: string;
+  contentId: string;
+  assetRole: TrainingContentAssetRole;
+  version: number;
+  uploadState: TrainingContentAssetUploadState;
+  originalFilename: string | null;
+  declaredMimeType: string | null;
+  detectedMimeType: string | null;
+  fileExtension: string | null;
+  declaredByteSize: number | null;
+  byteSize: number | null;
+  uploadExpiresAt: string | null;
+  processingAttemptCount?: number;
+  processingNextAttemptAt?: string | null;
+  processingErrorCategory?: string | null;
+  rejectionReasonCategory?: string | null;
+  finalizedAt: string | null;
+  supersededAt: string | null;
+  replacementForAssetId: string | null;
+  isCurrent: boolean;
+  cleanupPending: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DashboardTrainingContentUploadInitiationRequest {
+  assetRole: TrainingContentAssetRole;
+  originalFilename: string;
+  declaredMimeType: string;
+  declaredByteSize: number;
+  replacementAssetId?: string | null;
+}
+
+export interface DashboardTrainingContentUploadInitiationResponse {
+  asset: DashboardTrainingContentAsset;
+  upload: {
+    url: string;
+    expiresAt: string;
+    method: "PUT";
+    requiredHeaders: Record<string, string>;
+  };
+}
+
+export interface DashboardTrainingContentAssetFinalizationResponse {
+  asset: DashboardTrainingContentAsset;
+  replacedAssetId: string | null;
+}
+
+export interface DashboardTrainingContentAssetAccessResponse {
+  access: {
+    url: string;
+    expiresAt: string;
+    requiredHeaders: Record<string, string>;
+  };
+}
+
+export interface DashboardTrainingContentAssignmentSummary {
+  availableToEveryone: boolean;
+  userCount: number;
+  managerCount: number;
+  managerTeamCount: number;
+  label: string;
+}
+
+export interface DashboardTrainingContentListItem {
+  id: string;
+  categoryId: string;
+  categoryName: string;
+  title: string;
+  description: string;
+  focusTopicId: string | null;
+  focusTopicName: string | null;
+  focusTopicAvailable: boolean;
+  contentType: TrainingContentType;
+  publicationState: TrainingContentPublicationState;
+  contentVersion: number;
+  currentAsset: DashboardTrainingContentAsset | null;
+  hasActiveVideoProcessing?: boolean;
+  assignmentSummary: DashboardTrainingContentAssignmentSummary;
+  updatedByActorId: string;
+  updatedByDisplayName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  archivedAt: string | null;
+}
+
+export interface DashboardTrainingContentTarget {
+  userId: string;
+  displayName: string;
+  email: string;
+  employeeId: string | null;
+  orgRole: OrgUserRole;
+  status: UserStatus;
+  available: boolean;
+}
+
+export interface DashboardTrainingContentAssignmentSelection {
+  availableToEveryone: boolean;
+  users: DashboardTrainingContentTarget[];
+  managers: DashboardTrainingContentTarget[];
+  managerTeams: DashboardTrainingContentTarget[];
+}
+
+export interface DashboardTrainingContentDetail extends DashboardTrainingContentListItem {
+  nativeBody: string | null;
+  externalUrl: string | null;
+  latestVideoUploadAsset?: DashboardTrainingContentAsset | null;
+  assignments: DashboardTrainingContentAssignmentSelection;
+}
+
+export interface DashboardTrainingContentOrganization {
+  id: string;
+  name: string;
+}
+
+export interface DashboardTrainingContentListResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  items: DashboardTrainingContentListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  fileLimitsBytes: TrainingContentFileLimitsBytes;
+}
+
+export interface DashboardTrainingContentDetailResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  item: DashboardTrainingContentDetail;
+  fileLimitsBytes: TrainingContentFileLimitsBytes;
+}
+
+export interface CreateDashboardTrainingContentRequest {
+  contentType: TrainingContentType;
+  categoryId?: string | null;
+  title: string;
+  description?: string;
+  focusTopicId?: string | null;
+  nativeBody?: string | null;
+  externalUrl?: string | null;
+}
+
+export interface UpdateDashboardTrainingContentRequest {
+  expectedUpdatedAt: string;
+  categoryId?: string;
+  title?: string;
+  description?: string;
+  focusTopicId?: string | null;
+  nativeBody?: string | null;
+  externalUrl?: string | null;
+}
+
+export interface UpdateDashboardTrainingContentAssignmentsRequest {
+  expectedUpdatedAt: string;
+  availableToEveryone: boolean;
+  userIds: string[];
+  managerIds: string[];
+  managerTeamIds: string[];
+}
+
+export interface DashboardTrainingContentLifecycleRequest {
+  expectedUpdatedAt: string;
+}
+
+export interface DashboardTrainingContentTargetsResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  targets: DashboardTrainingContentTarget[];
+}
+
+export interface DashboardTrainingContentFocusTopic {
+  id: string;
+  name: string;
+  status: OrgTrainingStatus;
+}
+
+export interface DashboardTrainingContentFocusTopicsResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  focusTopics: DashboardTrainingContentFocusTopic[];
+}
+
+export interface DashboardTrainingContentCategory {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  activeItemCount: number;
+  archivedItemCount: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface DashboardTrainingContentCategoriesResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  categories: DashboardTrainingContentCategory[];
+  orderRevision: string;
+}
+
+export interface CreateDashboardTrainingContentCategoryRequest {
+  name: string;
+  description?: string;
+}
+
+export interface UpdateDashboardTrainingContentCategoryRequest {
+  expectedUpdatedAt: string;
+  name?: string;
+  description?: string;
+}
+
+export interface ReorderDashboardTrainingContentCategoriesRequest {
+  expectedOrderRevision: string;
+  categoryIds: string[];
+}
+
+export interface ArchiveDashboardTrainingContentCategoryRequest {
+  expectedUpdatedAt: string;
+  destinationCategoryId: string;
+}
+
+export interface DashboardTrainingContentCategoryMutationResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  category: DashboardTrainingContentCategory;
+  movedItemCount?: number;
+  orderRevision: string;
+}
+
+export interface DashboardTrainingContentOrderItem {
+  id: string;
+  title: string;
+  categoryId: string;
+  publicationState: Exclude<TrainingContentPublicationState, "archived">;
+}
+
+export interface DashboardTrainingContentOrderGroup {
+  categoryId: string;
+  categoryName: string;
+  items: DashboardTrainingContentOrderItem[];
+}
+
+export interface DashboardTrainingContentOrderResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  groups: DashboardTrainingContentOrderGroup[];
+  orderRevision: string;
+}
+
+export interface ReorderDashboardTrainingContentRequest {
+  expectedOrderRevision: string;
+  categories: Array<{
+    categoryId: string;
+    contentIds: string[];
+  }>;
+}
+
+export interface TrainingContentScenarioLink {
+  id: string;
+  orgId: string;
+  contentId: string;
+  focusTopicId: string;
+  scenarioId: string;
+  createdByActorId: string;
+  createdAt: string;
+  removedByActorId: string | null;
+  removedAt: string | null;
+}
+
+export interface TrainingContentUsage {
+  orgId: string;
+  contentId: string;
+  userId: string;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  openCount: number;
+  activeSeconds: number;
+  completionState: TrainingContentCompletionState;
+  completionMethod: TrainingContentCompletionMethod | null;
+  completedAt: string | null;
+  completedContentVersion: number | null;
+  mediaPositionSeconds: number | null;
+  mediaDurationSeconds: number | null;
+  uniqueMediaSeconds: number | null;
+  updatedAt: string;
+}
+
 export const INDUSTRY_IDS = ["people_management", "sales", "medical"] as const;
 export type IndustryId = string;
 
@@ -221,11 +741,17 @@ export interface TrainingPack {
 export interface UserProfile {
   id: string;
   email: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  employeeId: string | null;
+  managerUserId?: string | null;
   emailVerifiedAt: string | null;
   isPlatformAdmin?: boolean;
   isSuperUser?: boolean;
   // Explicit customer-side dashboard authorization. This is separate from mobile/app org role.
   dashboardAccessEnabled?: boolean;
+  // Mobile-only forced profile completion. Dashboard auth keeps using emailVerifiedAt/session state.
+  mobileProfileReonboardingRequired?: boolean;
   accountType: AccountType;
   tier: TierId;
   status: UserStatus;
@@ -1060,6 +1586,19 @@ export interface DashboardViewer {
   isSuperUser: boolean;
   orgId: string | null;
   orgName: string | null;
+  orgRole: OrgUserRole | null;
+  capabilities: DashboardAdminCapabilities;
+}
+
+export interface DashboardAdminCapabilities {
+  viewOrganizationUsers: boolean;
+  manageRegularOrganizationUsers: boolean;
+  approveRejectAccessRequests: boolean;
+  editEmployeeIds: boolean;
+  editUserNames: boolean;
+  manageUserRoles: boolean;
+  assignUserManagers: boolean;
+  manageOrganizationContent: boolean;
 }
 
 export interface DashboardDivisionScopeOption {
@@ -1181,6 +1720,7 @@ export interface DashboardCustomerTrainingPackSummary {
 export interface DashboardCustomerUserPerformanceSummary {
   userId: string;
   email: string;
+  employeeId: string | null;
   status: UserStatus;
   orgRole: OrgUserRole;
   dashboardAccessEnabled: boolean;
@@ -1423,6 +1963,7 @@ export interface DashboardTrainingWorkspaceScenarioInsight {
 export interface DashboardTrainingWorkspaceUserRow {
   userId: string;
   email: string;
+  employeeId: string | null;
   orgId: string;
   orgName: string;
   status: UserStatus;
@@ -1502,6 +2043,7 @@ export interface DashboardTrainingPackAssignmentDetailResponse {
 export interface DashboardUserReportRow {
   userId: string;
   email: string;
+  employeeId: string | null;
   orgId: string | null;
   orgName: string | null;
   status: UserStatus;
@@ -1671,6 +2213,7 @@ export interface ChangeAdminPasswordRequest {
 
 export interface CreateUserRequest {
   email: string;
+  employeeId?: string | null;
   tier: TierId;
   accountType: AccountType;
   timezone: string;
@@ -1711,6 +2254,7 @@ export interface SuperUserOrgOptionsResponse {
 
 export interface UpdateUserRequest {
   email?: string;
+  employeeId?: string | null;
   tier?: TierId;
   status?: UserStatus;
   isPlatformAdmin?: boolean;
@@ -1806,7 +2350,13 @@ export interface UpdateOrgCustomScenarioRequest {
 export interface MobileOnboardRequest {
   email: string;
   timezone: string;
+  firstName: string;
+  lastName: string;
+  joinCode?: string;
 }
+
+export type LegacyMobileOnboardRequest = Pick<MobileOnboardRequest, "email" | "timezone"> &
+  Partial<Pick<MobileOnboardRequest, "firstName" | "lastName" | "joinCode">>;
 
 export interface MobileOnboardResponse {
   user: UserProfile;
@@ -1824,6 +2374,9 @@ export interface MobileUpdateSettingsRequest {
 export interface MobileVerifyEmailRequest {
   userId: string;
   code: string;
+  firstName?: string;
+  lastName?: string;
+  joinCode?: string;
 }
 
 export interface MobileResendVerificationRequest {
@@ -1832,6 +2385,118 @@ export interface MobileResendVerificationRequest {
 
 export interface MobileSubmitOrgJoinRequest {
   joinCode: string;
+}
+
+export interface DashboardAdminUserRow {
+  userId: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  displayName: string;
+  employeeId: string | null;
+  orgRole: OrgUserRole;
+  managerUserId: string | null;
+  managerDisplayName: string | null;
+  managerEmail: string | null;
+  assignedReportCount: number;
+  status: UserStatus;
+  dashboardAccessEnabled: boolean;
+  canEditEmployeeId: boolean;
+  canEditNames: boolean;
+  canChangeRole: boolean;
+  canAssignManager: boolean;
+  canDeactivate: boolean;
+  canReactivate: boolean;
+  isSelf: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DashboardAdminUsersResponse {
+  viewer: DashboardViewer;
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+  };
+  users: DashboardAdminUserRow[];
+  managerOptions: DashboardAdminManagerOption[];
+}
+
+export interface DashboardAdminManagerOption {
+  userId: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  displayName: string;
+}
+
+export interface DashboardAdminUpdateUserRequest {
+  firstName?: string;
+  lastName?: string;
+  employeeId?: string | null;
+  status?: UserStatus;
+  orgRole?: OrgUserRole;
+  managerUserId?: string | null;
+}
+
+export interface DashboardAdminUpdateUserResponse {
+  ok: true;
+  user: DashboardAdminUserRow;
+}
+
+export interface DashboardAdminUsersExportRow {
+  employeeId: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: string;
+  manager: string;
+  status: UserStatus;
+}
+
+export interface DashboardAdminUsersExportResponse {
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+  };
+  rows: DashboardAdminUsersExportRow[];
+}
+
+export interface DashboardAdminAccessRequestRow {
+  id: string;
+  status: OrgJoinRequestStatus;
+  userId: string;
+  displayName: string;
+  email: string;
+  orgId: string;
+  orgName: string;
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+}
+
+export interface DashboardAdminAccessRequestsResponse {
+  viewer: DashboardViewer;
+  generatedAt: string;
+  org: {
+    id: string;
+    name: string;
+  };
+  requests: DashboardAdminAccessRequestRow[];
+}
+
+export interface DashboardAdminDecideAccessRequest {
+  action: "approve" | "reject";
+  reason?: string;
+}
+
+export interface DashboardAdminDecideAccessRequestResponse {
+  ok: true;
+  request: DashboardAdminAccessRequestRow;
 }
 
 export interface RecordUsageSessionRequest {
@@ -1910,6 +2575,7 @@ export interface SimulationScoreCoachingArtifactInput {
 }
 
 export interface ApiDatabase {
+  appStateMigrations?: Record<string, string>;
   config: AppConfig;
   users: UserProfile[];
   orgs: EnterpriseOrg[];

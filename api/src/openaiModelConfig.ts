@@ -1,6 +1,7 @@
 export type OpenAiCompletionApiFamily = "chat_completions" | "responses";
 export type OpenAiReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type SimulationRoute = "opening" | "turn" | "score";
+export type LiveSimulationRoute = Exclude<SimulationRoute, "score">;
 
 export interface OpenAiCompletionModelConfig {
   model: string;
@@ -15,12 +16,22 @@ export interface OpenAiSimulationRouteConfig {
 export interface OpenAiSimulationModelConfig {
   model: string;
   apiFamily: OpenAiCompletionApiFamily;
-  routes: Record<SimulationRoute, OpenAiSimulationRouteConfig>;
+  routes: Record<LiveSimulationRoute, OpenAiSimulationRouteConfig>;
+}
+
+export interface OpenAiScoringModelConfig extends OpenAiCompletionModelConfig {
+  maxOutputTokens: number;
+}
+
+export interface OpenAiSimulationRequestConfig extends OpenAiSimulationRouteConfig {
+  model: string;
+  apiFamily: OpenAiCompletionApiFamily;
 }
 
 export interface OpenAiModelConfig {
   chat: OpenAiCompletionModelConfig;
   simulation: OpenAiSimulationModelConfig;
+  scoring: OpenAiScoringModelConfig;
   transcription: {
     model: string;
   };
@@ -50,7 +61,14 @@ const OPENAI_REASONING_EFFORTS = new Set<OpenAiReasoningEffort>([
 ]);
 
 // Preserve the currently deployed path while keeping the recommended simulation default explicit.
-const RESPONSES_SIMULATION_MODELS = new Set([DEFAULT_SIMULATION_MODEL, "gpt-5.2-chat-latest"]);
+const RESPONSES_SIMULATION_MODELS = new Set([
+  DEFAULT_SIMULATION_MODEL,
+  "gpt-5.2-chat-latest",
+  "gpt-5.6-sol",
+  "gpt-5.6",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+]);
 
 function parseApiFamily(
   envName: string,
@@ -149,8 +167,29 @@ function resolveSimulationMaxOutputTokens(params: {
 export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): OpenAiModelConfig {
   const chatModel = env.OPENAI_CHAT_MODEL?.trim() || DEFAULT_CHAT_MODEL;
   const simulationModel = env.OPENAI_SIMULATION_MODEL?.trim() || DEFAULT_SIMULATION_MODEL;
+  const scoringModel = env.OPENAI_SCORING_MODEL?.trim() || simulationModel;
   const legacySimulationMaxOutputTokens = parseLegacySimulationMaxOutputTokens(
     env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS
+  );
+  const simulationApiFamily = resolveSimulationApiFamily(env, simulationModel);
+  const sharedSimulationReasoningEffort = parseReasoningEffort(
+    "OPENAI_SIMULATION_REASONING_EFFORT",
+    env.OPENAI_SIMULATION_REASONING_EFFORT
+  );
+  const legacyOpeningReasoningEffort = resolveSimulationReasoningEffort(
+    "OPENAI_SIMULATION_OPENING_REASONING_EFFORT",
+    env.OPENAI_SIMULATION_OPENING_REASONING_EFFORT,
+    simulationModel
+  );
+  const legacyTurnReasoningEffort = resolveSimulationReasoningEffort(
+    "OPENAI_SIMULATION_TURN_REASONING_EFFORT",
+    env.OPENAI_SIMULATION_TURN_REASONING_EFFORT,
+    simulationModel
+  );
+  const legacyScoringReasoningEffort = resolveSimulationReasoningEffort(
+    "OPENAI_SIMULATION_SCORE_REASONING_EFFORT",
+    env.OPENAI_SIMULATION_SCORE_REASONING_EFFORT,
+    scoringModel
   );
 
   return {
@@ -161,7 +200,7 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
     },
     simulation: {
       model: simulationModel,
-      apiFamily: resolveSimulationApiFamily(env, simulationModel),
+      apiFamily: simulationApiFamily,
       routes: {
         opening: {
           maxOutputTokens: resolveSimulationMaxOutputTokens({
@@ -170,11 +209,7 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
             legacyValue: legacySimulationMaxOutputTokens,
             defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.opening,
           }),
-          reasoningEffort: resolveSimulationReasoningEffort(
-            "OPENAI_SIMULATION_OPENING_REASONING_EFFORT",
-            env.OPENAI_SIMULATION_OPENING_REASONING_EFFORT,
-            simulationModel
-          ),
+          reasoningEffort: sharedSimulationReasoningEffort ?? legacyOpeningReasoningEffort,
         },
         turn: {
           maxOutputTokens: resolveSimulationMaxOutputTokens({
@@ -183,26 +218,28 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
             legacyValue: legacySimulationMaxOutputTokens,
             defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.turn,
           }),
-          reasoningEffort: resolveSimulationReasoningEffort(
-            "OPENAI_SIMULATION_TURN_REASONING_EFFORT",
-            env.OPENAI_SIMULATION_TURN_REASONING_EFFORT,
-            simulationModel
-          ),
-        },
-        score: {
-          maxOutputTokens: resolveSimulationMaxOutputTokens({
-            envName: "OPENAI_SIMULATION_SCORE_MAX_OUTPUT_TOKENS",
-            routeValue: env.OPENAI_SIMULATION_SCORE_MAX_OUTPUT_TOKENS,
-            legacyValue: legacySimulationMaxOutputTokens,
-            defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.score,
-          }),
-          reasoningEffort: resolveSimulationReasoningEffort(
-            "OPENAI_SIMULATION_SCORE_REASONING_EFFORT",
-            env.OPENAI_SIMULATION_SCORE_REASONING_EFFORT,
-            simulationModel
-          ),
+          reasoningEffort: sharedSimulationReasoningEffort ?? legacyTurnReasoningEffort,
         },
       },
+    },
+    scoring: {
+      model: scoringModel,
+      apiFamily: parseApiFamily(
+        "OPENAI_SCORING_API_FAMILY",
+        env.OPENAI_SCORING_API_FAMILY,
+        simulationApiFamily
+      ),
+      maxOutputTokens: resolveSimulationMaxOutputTokens({
+        envName: "OPENAI_SIMULATION_SCORE_MAX_OUTPUT_TOKENS",
+        routeValue: env.OPENAI_SIMULATION_SCORE_MAX_OUTPUT_TOKENS,
+        legacyValue: legacySimulationMaxOutputTokens,
+        defaultValue: DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS.score,
+      }),
+      reasoningEffort: parseReasoningEffort(
+        "OPENAI_SCORING_REASONING_EFFORT",
+        env.OPENAI_SCORING_REASONING_EFFORT,
+        legacyScoringReasoningEffort
+      ),
     },
     transcription: {
       model: env.OPENAI_TRANSCRIPTION_MODEL?.trim() || DEFAULT_TRANSCRIPTION_MODEL,
@@ -211,4 +248,43 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
       model: env.OPENAI_TTS_MODEL?.trim() || DEFAULT_SPEECH_MODEL,
     },
   };
+}
+
+export function resolveSimulationRequestConfig(
+  config: OpenAiModelConfig,
+  route: SimulationRoute
+): OpenAiSimulationRequestConfig {
+  if (route === "score") {
+    return {
+      model: config.scoring.model,
+      apiFamily: config.scoring.apiFamily,
+      maxOutputTokens: config.scoring.maxOutputTokens,
+      reasoningEffort: config.scoring.reasoningEffort,
+    };
+  }
+
+  return {
+    model: config.simulation.model,
+    apiFamily: config.simulation.apiFamily,
+    maxOutputTokens: config.simulation.routes[route].maxOutputTokens,
+    reasoningEffort: config.simulation.routes[route].reasoningEffort,
+  };
+}
+
+export function buildOpenAiRoutingStartupLogLines(config: OpenAiModelConfig): [string, string] {
+  const opening = resolveSimulationRequestConfig(config, "opening");
+  const turn = resolveSimulationRequestConfig(config, "turn");
+  const score = resolveSimulationRequestConfig(config, "score");
+  const simulationReasoning = opening.reasoningEffort === turn.reasoningEffort
+    ? formatReasoningEffort(opening.reasoningEffort)
+    : `opening:${formatReasoningEffort(opening.reasoningEffort)},turn:${formatReasoningEffort(turn.reasoningEffort)}`;
+
+  return [
+    `[openai-routing] simulation model=${opening.model} api=${opening.apiFamily} reasoning=${simulationReasoning}`,
+    `[openai-routing] scoring model=${score.model} api=${score.apiFamily} reasoning=${formatReasoningEffort(score.reasoningEffort)}`,
+  ];
+}
+
+function formatReasoningEffort(value: OpenAiReasoningEffort | null): string {
+  return value ?? "default";
 }

@@ -40,6 +40,17 @@ function createDashboardViewer(): DashboardViewer {
     isSuperUser: true,
     orgId: null,
     orgName: null,
+    orgRole: null,
+    capabilities: {
+      viewOrganizationUsers: false,
+      manageRegularOrganizationUsers: false,
+      approveRejectAccessRequests: false,
+      editEmployeeIds: false,
+      editUserNames: false,
+      manageUserRoles: false,
+      assignUserManagers: false,
+      manageOrganizationContent: false,
+    },
   };
 }
 
@@ -49,6 +60,7 @@ function createUserReportRow(
   return {
     userId: overrides.userId ?? "user-1",
     email: overrides.email ?? "user-1@example.com",
+    employeeId: overrides.employeeId ?? null,
     orgId: overrides.orgId ?? "org-1",
     orgName: overrides.orgName ?? "Acme Co",
     status: overrides.status ?? "active",

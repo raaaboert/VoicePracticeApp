@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import { Audio, InterruptionModeIOS } from "expo-av";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import appManifest from "./app.json";
@@ -88,6 +89,14 @@ import {
   getMissingUsageRecordFields,
 } from "./src/lib/simulationDiagnostics";
 import {
+  buildMobileOnboardRequest,
+  buildMobileVerifyProfile,
+  canStartMobileUpdates,
+  isCompanyCodeRequiredForSetup,
+  resolveMobileSetupStep,
+  shouldShowOrgRequestPendingScreen,
+} from "./src/lib/onboardingState";
+import {
   speakWithRemoteTtsFallback,
   stopRemoteTtsPlayback as stopRemoteTtsPlaybackHelper,
   toRemoteTtsPreset,
@@ -114,6 +123,13 @@ import {
 import { ScorecardView } from "./src/screens/ScorecardView";
 import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
+import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
+import { fetchMobileModules } from "./src/trainingContent/api";
+import {
+  canRequestTrainingContentModule,
+  isTrainingContentModuleRemoval,
+  trainingContentErrorMessage,
+} from "./src/trainingContent/model";
 import {
   AiVoiceGender,
   AiVoiceProfile,
@@ -161,6 +177,7 @@ type Screen =
   | "simulation"
   | "scorecard"
   | "performance"
+  | "training_content"
   | "usage_dashboard"
   | "admin_home"
   | "admin_org_dashboard"
@@ -714,6 +731,9 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
   const [entitlements, setEntitlements] = useState<UserEntitlementsResponse | null>(null);
+  const [trainingContentEnabled, setTrainingContentEnabled] = useState(false);
+  const [trainingContentNotice, setTrainingContentNotice] = useState<string | null>(null);
+  const [isTrainingContentOpening, setIsTrainingContentOpening] = useState(false);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
@@ -732,6 +752,9 @@ export default function App() {
   const [selectedPersonaStyle, setSelectedPersonaStyle] = useState<PersonaStyle>("skeptical");
 
   const [onboardingEmail, setOnboardingEmail] = useState("");
+  const [onboardingFirstName, setOnboardingFirstName] = useState("");
+  const [onboardingLastName, setOnboardingLastName] = useState("");
+  const [onboardingCompanyCode, setOnboardingCompanyCode] = useState("");
   const [onboardingTimezone, setOnboardingTimezone] = useState(detectedTimezone);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [isOnboardingSaving, setIsOnboardingSaving] = useState(false);
@@ -741,7 +764,6 @@ export default function App() {
   const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
   const [verificationError, setVerificationError] = useState<string | null>(null);
   const [isVerificationSaving, setIsVerificationSaving] = useState(false);
-  const [domainMatch, setDomainMatch] = useState<{ orgId: string; orgName: string; emailDomain: string } | null>(null);
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [orgRequestNotice, setOrgRequestNotice] = useState<string | null>(null);
   const [orgRequestError, setOrgRequestError] = useState<string | null>(null);
@@ -801,6 +823,7 @@ export default function App() {
   const [adminError, setAdminError] = useState<string | null>(null);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
   const [adminMaxSimulationMinutesInput, setAdminMaxSimulationMinutesInput] = useState<string>("");
+  const [adminEmployeeIdInput, setAdminEmployeeIdInput] = useState<string>("");
   const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
@@ -1651,6 +1674,7 @@ export default function App() {
       try {
         const payload = await fetchOrgAdminUserDetail(user.id, targetUserId, mobileAuthToken, { days: 30 });
         setOrgAdminUserDetail(payload);
+        setAdminEmployeeIdInput(payload.user.employeeId ?? "");
       } catch (caught) {
         const message = getErrorMessage(caught, "Could not load user details.");
         setAdminError(message);
@@ -1712,6 +1736,10 @@ export default function App() {
         setAdminError("Admin access required.");
         return;
       }
+      if (user.orgRole === "user_admin") {
+        setAdminError("User admins cannot modify organization usage controls.");
+        return;
+      }
 
       setAdminLoading(true);
       setAdminError(null);
@@ -1733,6 +1761,48 @@ export default function App() {
       }
     },
     [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
+  );
+
+  const saveOrgUserEmployeeId = useCallback(
+    async (targetUserId: string) => {
+      if (!user || !mobileAuthToken) {
+        return;
+      }
+
+      const actorHasAdminAccess =
+        user.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin");
+      if (!actorHasAdminAccess) {
+        setAdminError("Admin access required.");
+        return;
+      }
+
+      setAdminLoading(true);
+      setAdminError(null);
+
+      try {
+        await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
+          employeeId: adminEmployeeIdInput,
+        });
+        await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
+      } catch (caught) {
+        const message = getErrorMessage(caught, "Could not update Employee ID.");
+        setAdminError(message);
+        void submitAutoErrorReport("admin_user_employee_id.update", caught, {
+          screen: "admin_user_detail",
+          details: { targetUserId },
+        });
+      } finally {
+        setAdminLoading(false);
+      }
+    },
+    [
+      adminEmployeeIdInput,
+      mobileAuthToken,
+      refreshOrgAdminUserDetail,
+      refreshOrgAdminUsers,
+      submitAutoErrorReport,
+      user,
+    ],
   );
 
   const saveOrgAdminSettings = useCallback(async () => {
@@ -1934,7 +2004,11 @@ export default function App() {
     [activeSuperUserOrgId, submitAutoErrorReport, superUserOrgReturnScreen],
   );
 
-  const resetSessionToOnboarding = useCallback(async (notice?: string) => {
+  const resetSessionToOnboarding = useCallback(async (
+    notice?: string,
+    options?: { preserveOnboardingValues?: boolean },
+  ) => {
+    const shouldPreserveOnboardingValues = options?.preserveOnboardingValues === true;
     await clearUserId();
     setActiveSuperUserOrgId(null);
     setActiveSuperUserOrgIdState(null);
@@ -1948,17 +2022,24 @@ export default function App() {
     setEntitlements(null);
     setMobileAuthToken(null);
     setPendingVerificationUserId(null);
+    setTrainingContentEnabled(false);
+    setTrainingContentNotice(null);
+    setIsTrainingContentOpening(false);
     setVerificationCode("");
     setVerificationExpiresAt(null);
     setVerificationNotice(null);
     setVerificationError(null);
-    setDomainMatch(null);
     setHasAuthenticatedScopedConfig(false);
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
     setOrgRequestError(null);
-    setOnboardingEmail("");
-    setOnboardingTimezone(detectedTimezone);
+    if (!shouldPreserveOnboardingValues) {
+      setOnboardingEmail("");
+      setOnboardingFirstName("");
+      setOnboardingLastName("");
+      setOnboardingCompanyCode("");
+      setOnboardingTimezone(detectedTimezone);
+    }
     setSettingsEmail("");
     setSettingsTimezone(detectedTimezone);
     setAppError(null);
@@ -2074,13 +2155,28 @@ export default function App() {
 
       setUser(userPayload);
       setOnboardingEmail(userPayload.email);
+      setOnboardingFirstName(userPayload.firstName ?? "");
+      setOnboardingLastName(userPayload.lastName ?? "");
       setOnboardingTimezone(userPayload.timezone);
       setSettingsEmail(userPayload.email);
       setSettingsTimezone(userPayload.timezone);
 
-      if (!userPayload.emailVerifiedAt) {
+      const setupStep = resolveMobileSetupStep(userPayload);
+      if (setupStep === "onboarding") {
+        setPendingVerificationUserId(null);
+        setVerificationCode("");
+        setVerificationExpiresAt(null);
+        setVerificationNotice(null);
+        setVerificationError(null);
+        setOnboardingError(null);
+        setScreen("onboarding");
+        return;
+      }
+
+      if (setupStep === "verify_email") {
         setPendingVerificationUserId(userPayload.id);
         setVerificationCode("");
+        setVerificationExpiresAt(null);
         setVerificationNotice("Check your inbox for a 6-digit code, then verify to continue.");
         setVerificationError(null);
         setScreen("verify_email");
@@ -2133,6 +2229,7 @@ export default function App() {
       const shouldResetSession =
         lower.includes("mobile token") ||
         lower.includes("invalid mobile token") ||
+        lower.includes("mobile profile update required") ||
         lower.includes("user not found") ||
         lower.includes("user doesn't exist");
       const shouldSelfHeal =
@@ -2144,7 +2241,9 @@ export default function App() {
           lower.includes("fetch failed"));
 
       if (shouldSelfHeal) {
-        await resetSessionToOnboarding("Session self-healed. Please sign in again.");
+        await resetSessionToOnboarding("We need you to sign in again to continue.", {
+          preserveOnboardingValues: true,
+        });
       } else {
         setAppError(message);
         void submitAutoErrorReport("app.initialize", caught, {
@@ -2179,7 +2278,7 @@ export default function App() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!user || !mobileAuthToken || user.isSuperUser) {
+    if (!user || !mobileAuthToken || !canStartMobileUpdates(user, screen)) {
       return;
     }
 
@@ -2242,7 +2341,9 @@ export default function App() {
             lower.includes("user doesn't exist");
 
           if (shouldResetSession) {
-            await resetSessionToOnboarding("Session reset after account update. Please sign in again.");
+            await resetSessionToOnboarding("We need you to sign in again to continue.", {
+              preserveOnboardingValues: true,
+            });
             return;
           }
 
@@ -2297,10 +2398,10 @@ export default function App() {
       longPollFirstFailureAtRef.current = null;
       longPollLastErrorRef.current = null;
     };
-  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user?.id, user?.isSuperUser]);
+  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user]);
 
   useEffect(() => {
-    if (!user || user.emailVerifiedAt) {
+    if (!user) {
       return;
     }
 
@@ -2308,11 +2409,25 @@ export default function App() {
       return;
     }
 
-    setPendingVerificationUserId(user.id);
-    setVerificationCode("");
-    setVerificationNotice("Verify your email to continue.");
-    setVerificationError(null);
-    setScreen("verify_email");
+    const setupStep = resolveMobileSetupStep(user);
+    if (setupStep === "onboarding") {
+      setPendingVerificationUserId(null);
+      setVerificationCode("");
+      setVerificationExpiresAt(null);
+      setVerificationNotice(null);
+      setVerificationError(null);
+      setOnboardingError(null);
+      setScreen("onboarding");
+      return;
+    }
+
+    if (setupStep === "verify_email") {
+      setPendingVerificationUserId(user.id);
+      setVerificationCode("");
+      setVerificationNotice("Verify your email to continue.");
+      setVerificationError(null);
+      setScreen("verify_email");
+    }
   }, [screen, user]);
 
   useEffect(() => {
@@ -2323,7 +2438,6 @@ export default function App() {
     if (screen === "domain_match" && user.accountType === "enterprise" && user.orgId) {
       setOrgRequestError(null);
       setOrgRequestNotice("Company membership approved. Your enterprise account is active. Dashboard access is enabled separately if your admin needs you in reporting.");
-      setDomainMatch(null);
       setOrgJoinCodeInput("");
       setScreen("home");
     }
@@ -2432,9 +2546,24 @@ export default function App() {
   const runOnboarding = async () => {
     setOnboardingError(null);
     const normalizedEmail = onboardingEmail.trim().toLowerCase();
+    const firstName = onboardingFirstName.trim();
+    const lastName = onboardingLastName.trim();
+    const companyCode = onboardingCompanyCode.trim();
 
     if (!isEmailLike(normalizedEmail)) {
       setOnboardingError("Please enter a valid email.");
+      return;
+    }
+    if (!firstName) {
+      setOnboardingError("Please enter your first name.");
+      return;
+    }
+    if (!lastName) {
+      setOnboardingError("Please enter your last name.");
+      return;
+    }
+    if (isCompanyCodeRequiredForSetup(user) && !companyCode) {
+      setOnboardingError("Enter the company code for your organization to confirm your profile.");
       return;
     }
 
@@ -2445,17 +2574,19 @@ export default function App() {
 
     setIsOnboardingSaving(true);
     try {
-      const onboarded = await onboardMobileUser({
+      const onboarded = await onboardMobileUser(buildMobileOnboardRequest({
         email: normalizedEmail,
+        firstName,
+        lastName,
+        companyCode,
         timezone: onboardingTimezone.trim(),
-      });
-      void Promise.allSettled([
+      }));
+      await Promise.all([
         saveUserId(onboarded.user.id),
         saveMobileAuthToken(onboarded.authToken),
       ]);
       setUser(onboarded.user);
       setMobileAuthToken(onboarded.authToken);
-      setDomainMatch(onboarded.domainMatch ?? null);
       setSettingsEmail(onboarded.user.email);
       setSettingsTimezone(onboarded.user.timezone);
 
@@ -2470,7 +2601,6 @@ export default function App() {
       }
 
       if (onboarded.user.isSuperUser) {
-        setDomainMatch(null);
         await openSuperUserOrgSelector(onboarded.user, onboarded.authToken, {
           preserveActiveContext: false,
         });
@@ -2486,7 +2616,8 @@ export default function App() {
       if (!scopedConfigLoaded) {
         return;
       }
-      if (onboarded.domainMatch && onboarded.user.accountType === "individual" && !onboarded.user.isSuperUser) {
+      if (shouldShowOrgRequestPendingScreen(companyCode, onboarded.user)) {
+        setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -2513,22 +2644,40 @@ export default function App() {
       setVerificationError("Enter the 6-digit email verification code (numbers only).");
       return;
     }
+    if (!onboardingFirstName.trim()) {
+      setVerificationError("Enter your first name before verifying.");
+      return;
+    }
+    if (!onboardingLastName.trim()) {
+      setVerificationError("Enter your last name before verifying.");
+      return;
+    }
+    if (isCompanyCodeRequiredForSetup(user) && !onboardingCompanyCode.trim()) {
+      setVerificationError("Enter the company code for your organization before verifying.");
+      return;
+    }
 
     setVerificationError(null);
     setVerificationNotice(null);
     setIsVerificationSaving(true);
     try {
-      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken);
+      const companyCode = onboardingCompanyCode.trim();
+      const payload = await verifyMobileEmail(pendingVerificationUserId, code, mobileAuthToken, buildMobileVerifyProfile({
+        firstName: onboardingFirstName.trim(),
+        lastName: onboardingLastName.trim(),
+        companyCode,
+      }));
       setUser(payload.user);
       setMobileAuthToken(payload.authToken);
-      void saveMobileAuthToken(payload.authToken);
-      setDomainMatch(payload.domainMatch ?? null);
+      await Promise.all([
+        saveUserId(payload.user.id),
+        saveMobileAuthToken(payload.authToken),
+      ]);
       setVerificationCode("");
       setPendingVerificationUserId(null);
       setVerificationExpiresAt(null);
       setVerificationNotice("Email verified.");
       if (payload.user.isSuperUser) {
-        setDomainMatch(null);
         await openSuperUserOrgSelector(payload.user, payload.authToken, {
           preserveActiveContext: false,
         });
@@ -2545,7 +2694,8 @@ export default function App() {
         return;
       }
 
-      if (payload.domainMatch && payload.user.accountType === "individual" && !payload.user.isSuperUser) {
+      if (shouldShowOrgRequestPendingScreen(companyCode, payload.user)) {
+        setOrgRequestNotice("Request submitted. Your org admin can approve company membership from the Admin section.");
         setScreen("domain_match");
       } else {
         setScreen("home");
@@ -2610,6 +2760,27 @@ export default function App() {
   const submitOrgDomainRequest = async () => {
     if (!user || !mobileAuthToken) {
       setOrgRequestError("Session expired. Please sign in again.");
+      return;
+    }
+
+    const setupStep = resolveMobileSetupStep(user);
+    if (setupStep !== "ready") {
+      setOnboardingEmail(user.email);
+      setOnboardingFirstName(user.firstName ?? "");
+      setOnboardingLastName(user.lastName ?? "");
+      setOnboardingTimezone(user.timezone);
+      setOrgRequestError(null);
+      setOrgRequestNotice(null);
+      setOnboardingError("First name, last name, and verified email are required before requesting organization access.");
+      if (setupStep === "verify_email") {
+        setPendingVerificationUserId(user.id);
+        setVerificationCode("");
+        setVerificationNotice("Verify your email to continue.");
+        setVerificationError(null);
+      } else {
+        setPendingVerificationUserId(null);
+      }
+      setScreen(setupStep);
       return;
     }
 
@@ -3369,6 +3540,110 @@ export default function App() {
   const isOrgAdmin = Boolean(user?.accountType === "enterprise" && user.orgRole === "org_admin");
 
   useEffect(() => {
+    let cancelled = false;
+    if (!user || !mobileAuthToken || !canRequestTrainingContentModule(user)) {
+      setTrainingContentEnabled(false);
+      setTrainingContentNotice(null);
+      setIsTrainingContentOpening(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (screen !== "home") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setTrainingContentEnabled(false);
+    void fetchMobileModules(user.id, mobileAuthToken)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setTrainingContentEnabled(response.modules.trainingContent.enabled);
+        if (response.modules.trainingContent.enabled) {
+          setTrainingContentNotice(null);
+        }
+      })
+      .catch((caught) => {
+        if (cancelled) {
+          return;
+        }
+        setTrainingContentEnabled(false);
+        if (isTrainingContentModuleRemoval(caught)) {
+          setTrainingContentNotice(null);
+          return;
+        }
+        setTrainingContentNotice(
+          trainingContentErrorMessage(
+            caught,
+            "Training Content availability could not be checked."
+          )
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    mobileAuthToken,
+    screen,
+    user?.accountType,
+    user?.emailVerifiedAt,
+    user?.firstName,
+    user?.id,
+    user?.lastName,
+    user?.mobileProfileReonboardingRequired,
+    user?.orgId,
+    user?.status,
+  ]);
+
+  const openTrainingContent = useCallback(async () => {
+    if (
+      !user
+      || !mobileAuthToken
+      || !canRequestTrainingContentModule(user)
+      || isTrainingContentOpening
+    ) {
+      return;
+    }
+    setIsTrainingContentOpening(true);
+    setTrainingContentNotice(null);
+    try {
+      const response = await fetchMobileModules(user.id, mobileAuthToken);
+      if (!response.modules.trainingContent.enabled) {
+        setTrainingContentEnabled(false);
+        setTrainingContentNotice("Training Content is no longer enabled.");
+        return;
+      }
+      setTrainingContentEnabled(true);
+      setScreen("training_content");
+    } catch (caught) {
+      if (isTrainingContentModuleRemoval(caught)) {
+        setTrainingContentEnabled(false);
+      }
+      setTrainingContentNotice(
+        trainingContentErrorMessage(
+          caught,
+          "Training Content could not be opened."
+        )
+      );
+    } finally {
+      setIsTrainingContentOpening(false);
+    }
+  }, [isTrainingContentOpening, mobileAuthToken, user]);
+
+  const returnFromTrainingContent = useCallback((message?: string) => {
+    setTrainingContentNotice(message ?? null);
+    setScreen("home");
+  }, []);
+
+  const handleTrainingContentAvailability = useCallback((enabled: boolean) => {
+    setTrainingContentEnabled(enabled);
+  }, []);
+
+  useEffect(() => {
     if (screen !== "scorecard" && lastTranscript) {
       setLastTranscript(null);
     }
@@ -3493,14 +3768,14 @@ export default function App() {
             {user?.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin") ? (
               <>
                 <View style={styles.menuSeparator} />
-                <Text style={styles.label}>Admin</Text>
+                <Text style={styles.label}>{isOrgAdmin ? "Admin" : "Team"}</Text>
                 <Pressable
                   style={styles.menuItemButton}
                   onPress={() => {
                     closeHomeMenu("admin_home");
                   }}
                 >
-                  <Text style={styles.menuItemText}>Admin</Text>
+                  <Text style={styles.menuItemText}>{isOrgAdmin ? "Admin" : "Direct Reports"}</Text>
                 </Pressable>
               </>
             ) : null}
@@ -3508,217 +3783,333 @@ export default function App() {
         </View>
       </Modal>
 
-      <LinearGradient
-        colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
-        start={{ x: 0.04, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={[styles.heroCard, useIosCompactHomeLayout ? styles.heroCardCompactHome : null]}
+      <ScrollView
+        style={styles.fill}
+        contentContainerStyle={styles.homeScrollContent}
+        showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.heroMarkFrame, useIosCompactHomeLayout ? styles.heroMarkFrameCompactHome : null]}>
-          <Image
-            source={APP_ICON_ART}
-            style={[styles.heroMarkImage, useIosCompactHomeLayout ? styles.heroMarkImageCompactHome : null]}
-            resizeMode="contain"
-          />
-        </View>
-        <Text style={styles.heroKicker} maxFontSizeMultiplier={1.1}>Peritio</Text>
-        <Text
-          style={[styles.heroTitle, useIosCompactHomeLayout ? styles.heroTitleCompactHome : null]}
-          maxFontSizeMultiplier={1.05}
+        <LinearGradient
+          colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
+          start={{ x: 0.04, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[styles.heroCard, useIosCompactHomeLayout ? styles.heroCardCompactHome : null]}
         >
-          Improve with precision.
-        </Text>
-        <Text
-          style={[styles.heroBody, useIosCompactHomeLayout ? styles.heroBodyCompactHome : null]}
-          maxFontSizeMultiplier={1.1}
-        >
-          Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
-        </Text>
-        <View style={[styles.heroMetaRow, useIosCompactHomeLayout ? styles.heroMetaRowCompactHome : null]}>
-          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Voice practice</Text>
+          <View style={[styles.heroMarkFrame, useIosCompactHomeLayout ? styles.heroMarkFrameCompactHome : null]}>
+            <Image
+              source={APP_ICON_ART}
+              style={[styles.heroMarkImage, useIosCompactHomeLayout ? styles.heroMarkImageCompactHome : null]}
+              resizeMode="contain"
+            />
           </View>
-          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scenario drills</Text>
-          </View>
-          <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-            <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scored feedback</Text>
-          </View>
-        </View>
-      </LinearGradient>
-
-      {!apiConfigured ? (
-        <View style={styles.warningCard}>
-          <Text style={styles.warningText}>
-            Remote AI is intentionally disabled in this build. Simulation and scoring run in local mode only.
+          <Text style={styles.heroKicker} maxFontSizeMultiplier={1.1}>Peritio</Text>
+          <Text
+            style={[styles.heroTitle, useIosCompactHomeLayout ? styles.heroTitleCompactHome : null]}
+            maxFontSizeMultiplier={1.05}
+          >
+            Improve with precision.
           </Text>
-        </View>
-      ) : null}
-
-      {entitlements?.lockReason ? (
-        <View style={styles.errorCard}>
-          <Text style={styles.errorText}>{entitlements.lockReason}</Text>
-        </View>
-      ) : null}
-
-      {user?.isSuperUser && activeSuperUserOrg ? (
-        <View style={styles.card}>
-          <Text style={styles.label}>Environment</Text>
-          <Text style={styles.title}>{activeSuperUserOrg.orgName}</Text>
-          <Text style={styles.body}>
-            Status: {activeSuperUserOrg.orgStatus === "active" ? "Active" : "Deactivated"}
+          <Text
+            style={[styles.heroBody, useIosCompactHomeLayout ? styles.heroBodyCompactHome : null]}
+            maxFontSizeMultiplier={1.1}
+          >
+            Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
           </Text>
-        </View>
-      ) : null}
-
-      <Pressable
-        style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
-        onPress={() => setScreen("setup")}
-      >
-        <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
-      </Pressable>
-
-      {activeSegment ? (
-        <View style={[styles.card, styles.segmentCard]}>
-          <View style={styles.segmentHeaderRow}>
-            <View style={styles.segmentHeaderCopy}>
-              <Text style={styles.segmentLabel}>Active role</Text>
-              <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+          <View style={[styles.heroMetaRow, useIosCompactHomeLayout ? styles.heroMetaRowCompactHome : null]}>
+            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Voice practice</Text>
             </View>
-            <View style={styles.segmentBadge}>
-              <Text style={styles.segmentBadgeText}>Ready</Text>
+            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scenario drills</Text>
+            </View>
+            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
+              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scored feedback</Text>
             </View>
           </View>
-          <Text style={styles.segmentSummary}>{activeSegment.summary}</Text>
-          <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
-        </View>
-      ) : null}
+        </LinearGradient>
+
+        {trainingContentNotice ? (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>{trainingContentNotice}</Text>
+          </View>
+        ) : null}
+
+        {!apiConfigured ? (
+          <View style={styles.warningCard}>
+            <Text style={styles.warningText}>
+              Remote AI is intentionally disabled in this build. Simulation and scoring run in local mode only.
+            </Text>
+          </View>
+        ) : null}
+
+        {entitlements?.lockReason ? (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>{entitlements.lockReason}</Text>
+          </View>
+        ) : null}
+
+        {user?.isSuperUser && activeSuperUserOrg ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>Environment</Text>
+            <Text style={styles.title}>{activeSuperUserOrg.orgName}</Text>
+            <Text style={styles.body}>
+              Status: {activeSuperUserOrg.orgStatus === "active" ? "Active" : "Deactivated"}
+            </Text>
+          </View>
+        ) : null}
+
+        <Pressable
+          style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
+          onPress={() => setScreen("setup")}
+        >
+          <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
+        </Pressable>
+
+        {activeSegment ? (
+          <View style={[styles.card, styles.segmentCard]}>
+            <View style={styles.segmentHeaderRow}>
+              <View style={styles.segmentHeaderCopy}>
+                <Text style={styles.segmentLabel}>Active role</Text>
+                <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
+              </View>
+              <View style={styles.segmentBadge}>
+                <Text style={styles.segmentBadgeText}>Ready</Text>
+              </View>
+            </View>
+            <Text style={styles.segmentSummary}>{activeSegment.summary}</Text>
+            <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
+          </View>
+        ) : null}
+
+        {trainingContentEnabled ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open Training Content"
+            style={[
+              styles.trainingModuleTile,
+              isTrainingContentOpening ? styles.disabled : null,
+            ]}
+            disabled={isTrainingContentOpening}
+            onPress={() => {
+              void openTrainingContent();
+            }}
+          >
+            <View style={styles.trainingModuleIconFrame}>
+              <MaterialCommunityIcons
+                name="bookshelf"
+                size={28}
+                color={APP_SURFACE_COLORS.goldMuted}
+              />
+            </View>
+            <View style={styles.trainingModuleCopy}>
+              <Text style={styles.trainingModuleTitle}>Training Content</Text>
+              <Text style={styles.trainingModuleBody}>
+                Review company resources and learning materials.
+              </Text>
+            </View>
+            {isTrainingContentOpening ? (
+              <ActivityIndicator size="small" color={theme.accent} />
+            ) : (
+              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
+            )}
+          </Pressable>
+        ) : null}
+      </ScrollView>
     </View>
   );
 
-  const renderOnboarding = () => (
-    <KeyboardAvoidingView
-      style={styles.fill}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={20}
-    >
-      <View style={styles.topRow}>
-        <View style={styles.spacer} />
-        <Text style={styles.topTitle}>First-Time Setup</Text>
-        <View style={styles.spacer} />
-      </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Create Your Local Profile</Text>
-          <Text style={styles.body}>
-            This stores your email and timezone for daily reset and monthly renewal timing.
-            {"\n"}
-            Autodetected timezone: {detectedTimezone}
-            {"\n"}
-            You can change timezone now, but future timezone changes apply on the next cycle reset.
-          </Text>
-          <TextInput
-            value={onboardingEmail}
-            onChangeText={setOnboardingEmail}
-            placeholder="Email address"
-            placeholderTextColor={theme.hint}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            style={styles.input}
-          />
-          <Text style={styles.hintText}>Timezone</Text>
-          <TimezoneDropdown
-            value={onboardingTimezone}
-            options={mergedTimezones}
-            onChange={setOnboardingTimezone}
-            placeholder="Select timezone"
-            styles={styles}
-          />
-          {onboardingTimezone !== detectedTimezone ? (
-            <Pressable style={styles.inlineActionButton} onPress={() => setOnboardingTimezone(detectedTimezone)}>
-              <Text style={styles.inlineActionButtonText}>Use detected timezone: {detectedTimezone}</Text>
-            </Pressable>
-          ) : null}
-          {onboardingError ? <Text style={styles.errorText}>{onboardingError}</Text> : null}
-        </View>
-      </ScrollView>
-      <Pressable
-        style={[styles.primaryButton, isOnboardingSaving ? styles.disabled : null]}
-        disabled={isOnboardingSaving}
-        onPress={() => {
-          void runOnboarding();
-        }}
-      >
-        <Text style={styles.primaryButtonText}>{isOnboardingSaving ? "Saving..." : "Continue"}</Text>
-      </Pressable>
-    </KeyboardAvoidingView>
-  );
+  const renderOnboarding = () => {
+    const requiresCompanyCode = isCompanyCodeRequiredForSetup(user);
+    const hasCompanyCode = onboardingCompanyCode.trim().length > 0;
+    const title = user ? "Confirm Your Profile" : "Set Up Your Profile";
+    const continueLabel = requiresCompanyCode
+      ? "Verify & Confirm Profile"
+      : hasCompanyCode
+        ? "Verify & Request Access"
+        : "Verify & Continue Free";
 
-  const renderVerifyEmail = () => (
-    <KeyboardAvoidingView
-      style={styles.fill}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={20}
-    >
-      <View style={styles.topRow}>
-        <View style={styles.spacer} />
-        <Text style={styles.topTitle}>Verify Email</Text>
-        <View style={styles.spacer} />
-      </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Enter Verification Code</Text>
-          <Text style={styles.body}>
-            We sent a 6-digit email code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
-            {"\n"}
-            This is not the org join code.
-            {"\n"}
-            {verificationExpiresAt
-              ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
-              : "Use resend if the code has expired."}
-          </Text>
-          <TextInput
-            value={verificationCode}
-            onChangeText={setVerificationCode}
-            placeholder="6-digit code"
-            placeholderTextColor={theme.hint}
-            keyboardType="number-pad"
-            maxLength={6}
-            style={styles.input}
-          />
-          {verificationNotice ? <Text style={styles.successText}>{verificationNotice}</Text> : null}
-          {verificationError ? <Text style={styles.errorText}>{verificationError}</Text> : null}
-          <Pressable
-            style={[styles.primaryButton, isVerificationSaving ? styles.disabled : null]}
-            disabled={isVerificationSaving}
-            onPress={() => {
-              void submitVerificationCode();
-            }}
-          >
-            <Text style={styles.primaryButtonText}>{isVerificationSaving ? "Verifying..." : "Verify & Continue"}</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.linkButton, isVerificationSaving ? styles.disabled : null]}
-            disabled={isVerificationSaving}
-            onPress={() => {
-              void resendVerificationCode();
-            }}
-          >
-            <Text style={styles.linkButtonText}>Resend Code</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.ghostButton, isVerificationSaving ? styles.disabled : null]}
-            disabled={isVerificationSaving}
-            onPress={() => {
-              void resetSessionToOnboarding();
-            }}
-          >
-            <Text style={styles.ghostButtonText}>Start Over</Text>
-          </Pressable>
+    return (
+      <KeyboardAvoidingView
+        style={styles.fill}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={20}
+      >
+        <View style={styles.topRow}>
+          <View style={styles.spacer} />
+          <Text style={styles.topTitle}>{user ? "Profile Confirmation" : "Profile Setup"}</Text>
+          <View style={styles.spacer} />
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
-  );
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
+          <View style={styles.card}>
+            <Text style={styles.title}>{title}</Text>
+            <Text style={styles.body}>
+              First name and last name are required. Company code is optional for free users; enter one to request
+              organization access after email verification. Organization access still requires admin approval.
+              {"\n"}
+              Autodetected timezone: {detectedTimezone}
+              {"\n"}
+              You can change timezone now, but future timezone changes apply on the next cycle reset.
+            </Text>
+            <TextInput
+              value={onboardingEmail}
+              onChangeText={setOnboardingEmail}
+              placeholder="Email address"
+              placeholderTextColor={theme.hint}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingFirstName}
+              onChangeText={setOnboardingFirstName}
+              placeholder="First name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingLastName}
+              onChangeText={setOnboardingLastName}
+              placeholder="Last name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingCompanyCode}
+              onChangeText={setOnboardingCompanyCode}
+              placeholder={requiresCompanyCode ? "Company code required" : "Company code (optional)"}
+              placeholderTextColor={theme.hint}
+              autoCapitalize="characters"
+              style={styles.input}
+            />
+            <Text style={styles.hintText}>Timezone</Text>
+            <TimezoneDropdown
+              value={onboardingTimezone}
+              options={mergedTimezones}
+              onChange={setOnboardingTimezone}
+              placeholder="Select timezone"
+              styles={styles}
+            />
+            {onboardingTimezone !== detectedTimezone ? (
+              <Pressable style={styles.inlineActionButton} onPress={() => setOnboardingTimezone(detectedTimezone)}>
+                <Text style={styles.inlineActionButtonText}>Use detected timezone: {detectedTimezone}</Text>
+              </Pressable>
+            ) : null}
+            {onboardingError ? <Text style={styles.errorText}>{onboardingError}</Text> : null}
+          </View>
+        </ScrollView>
+        <Pressable
+          style={[styles.primaryButton, isOnboardingSaving ? styles.disabled : null]}
+          disabled={isOnboardingSaving}
+          onPress={() => {
+            void runOnboarding();
+          }}
+        >
+          <Text style={styles.primaryButtonText}>{isOnboardingSaving ? "Saving..." : continueLabel}</Text>
+        </Pressable>
+      </KeyboardAvoidingView>
+    );
+  };
+
+  const renderVerifyEmail = () => {
+    const requiresCompanyCode = isCompanyCodeRequiredForSetup(user);
+
+    return (
+      <KeyboardAvoidingView
+        style={styles.fill}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={20}
+      >
+        <View style={styles.topRow}>
+          <View style={styles.spacer} />
+          <Text style={styles.topTitle}>Verify Email</Text>
+          <View style={styles.spacer} />
+        </View>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[styles.scrollContent, styles.verifyEmailScrollContent]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        >
+          <View style={styles.card}>
+            <Text style={styles.title}>Enter Verification Code</Text>
+            <Text style={styles.body}>
+              We sent a 6-digit email code to {onboardingEmail.trim().toLowerCase() || user?.email || "your email"}.
+              {"\n"}
+              First and last name are required. Company code is optional for free users and still requires admin approval
+              for organization access.
+              {"\n"}
+              {verificationExpiresAt
+                ? `Code expires: ${formatDateLabel(verificationExpiresAt)}`
+                : "Use resend if the code has expired."}
+            </Text>
+            <TextInput
+              value={onboardingFirstName}
+              onChangeText={setOnboardingFirstName}
+              placeholder="First name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingLastName}
+              onChangeText={setOnboardingLastName}
+              placeholder="Last name"
+              placeholderTextColor={theme.hint}
+              autoCapitalize="words"
+              style={styles.input}
+            />
+            <TextInput
+              value={onboardingCompanyCode}
+              onChangeText={setOnboardingCompanyCode}
+              placeholder={requiresCompanyCode ? "Company code required" : "Company code (optional)"}
+              placeholderTextColor={theme.hint}
+              autoCapitalize="characters"
+              style={styles.input}
+            />
+            <TextInput
+              value={verificationCode}
+              onChangeText={setVerificationCode}
+              placeholder="6-digit code"
+              placeholderTextColor={theme.hint}
+              keyboardType="number-pad"
+              maxLength={6}
+              style={styles.input}
+            />
+            {verificationNotice ? <Text style={styles.successText}>{verificationNotice}</Text> : null}
+            {verificationError ? <Text style={styles.errorText}>{verificationError}</Text> : null}
+            <Pressable
+              style={[styles.primaryButton, isVerificationSaving ? styles.disabled : null]}
+              disabled={isVerificationSaving}
+              onPress={() => {
+                void submitVerificationCode();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>{isVerificationSaving ? "Verifying..." : "Verify & Continue"}</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.linkButton, isVerificationSaving ? styles.disabled : null]}
+              disabled={isVerificationSaving}
+              onPress={() => {
+                void resendVerificationCode();
+              }}
+            >
+              <Text style={styles.linkButtonText}>Resend Code</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.ghostButton, isVerificationSaving ? styles.disabled : null]}
+              disabled={isVerificationSaving}
+              onPress={() => {
+                void resetSessionToOnboarding();
+              }}
+            >
+              <Text style={styles.ghostButtonText}>Start Over</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  };
 
   const renderDomainMatch = () => (
     <KeyboardAvoidingView
@@ -3730,19 +4121,16 @@ export default function App() {
         <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
           <Text style={styles.ghostButtonText}>Skip</Text>
         </Pressable>
-        <Text style={styles.topTitle}>Org Access</Text>
+        <Text style={styles.topTitle}>Company Access</Text>
         <View style={styles.spacer} />
       </View>
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         <View style={styles.card}>
-          <Text style={styles.title}>Organization Found</Text>
+          <Text style={styles.title}>Enter Company Code</Text>
           <Text style={styles.body}>
-            We found an enterprise account for {domainMatch?.emailDomain ?? "your domain"}:
-            {"\n"}
-            {domainMatch?.orgName ?? "Organization"}
-            {"\n\n"}
-            Enter the join code from your org admin to request company membership. Dashboard access, if you need it later,
-            is enabled separately by your admin.
+            Enter the company code from your organization admin to request membership. The code identifies the company,
+            but access is only granted after an administrator approves your request. Dashboard access, if you need it
+            later, is enabled separately by your admin.
           </Text>
           <TextInput
             value={orgJoinCodeInput}
@@ -3764,7 +4152,7 @@ export default function App() {
             <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Membership"}</Text>
           </Pressable>
           <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
-            <Text style={styles.ghostButtonText}>Skip and Continue Individual</Text>
+            <Text style={styles.ghostButtonText}>Continue Without Company</Text>
           </Pressable>
         </View>
       </ScrollView>
@@ -4091,9 +4479,8 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.title}>Enterprise Access</Text>
             <Text style={styles.body}>
-              If your company has an enterprise subscription for your email domain, enter the org join code to request
-              company membership. Requests expire after 7 days and can be resent. Dashboard access is enabled separately
-              if your admin needs you in reporting.
+              Enter the company code from your organization admin to request membership. Requests expire after 7 days and
+              can be resent. Dashboard access is enabled separately if your admin needs you in reporting.
             </Text>
             <TextInput
               value={orgJoinCodeInput}
@@ -4532,7 +4919,7 @@ export default function App() {
           <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
             <Text style={styles.ghostButtonText}>Back</Text>
           </Pressable>
-          <Text style={styles.topTitle}>Admin</Text>
+          <Text style={styles.topTitle}>{isOrgAdmin ? "Admin" : "Team"}</Text>
           <Pressable
             style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
             disabled={adminLoading}
@@ -4564,7 +4951,9 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.title}>Tools</Text>
             <Text style={styles.body}>
-              Review account performance and manage who can access the app.
+              {isOrgAdmin
+                ? "Review account performance and manage who can access the app."
+                : "Review your direct reports and manage eligible user access."}
             </Text>
             {isOrgAdmin ? (
               <>
@@ -4589,9 +4978,9 @@ export default function App() {
               </>
             ) : (
               <View style={styles.optionCard}>
-                <Text style={styles.optionTitle}>Limited Scope</Text>
+                <Text style={styles.optionTitle}>Direct Reports</Text>
                 <Text style={styles.body}>
-                  User Admins can lock/unlock users and review user-level activity. Contract and org-wide analytics are
+                  You can review yourself and directly assigned users. Membership requests and org-wide analytics are
                   restricted to Org Admins.
                 </Text>
               </View>
@@ -4604,7 +4993,7 @@ export default function App() {
                 setScreen("admin_user_list");
               }}
             >
-              <Text style={styles.menuItemText}>Manage Users</Text>
+              <Text style={styles.menuItemText}>{isOrgAdmin ? "Manage Users" : "Direct Reports"}</Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -5269,12 +5658,15 @@ export default function App() {
     const actorIsTarget = user.id === targetUserId;
     const actorIsUserAdmin = user.orgRole === "user_admin";
     const targetIsOrgAdmin = detail ? detail.user.orgRole === "org_admin" : false;
+    const targetIsRegularUser = detail ? detail.user.orgRole === "user" : false;
     const locked = detail ? detail.user.status !== "active" : false;
     const dailyOverageAllowed = detail ? detail.user.allowDailyOverageThisCycle === true : false;
     const roleLabel = detail
       ? (ORG_USER_ROLE_LABELS as unknown as Record<string, string>)[detail.user.orgRole] ?? detail.user.orgRole
       : "-";
     const accessControlsDisabled = actorIsTarget || (actorIsUserAdmin && targetIsOrgAdmin);
+    const employeeIdControlsDisabled = actorIsTarget || (actorIsUserAdmin && !targetIsRegularUser);
+    const canEditUsageControls = user.orgRole === "org_admin" && !accessControlsDisabled;
 
     const setLocked = (nextLocked: boolean) => {
       if (adminLoading) {
@@ -5329,6 +5721,7 @@ export default function App() {
                 <Text style={styles.title}>{detail.user.email}</Text>
                 <Text style={styles.body}>
                   Role: {roleLabel}{"\n"}
+                  Employee ID: {detail.user.employeeId || "-"}{"\n"}
                   Status: {detail.user.status === "disabled" ? "Locked" : "Active"}{"\n"}
                   Effective daily cap: {formatSecondsAsClock(detail.user.effectiveDailySecondsCap ?? 0)}{"\n"}
                   Overage: {dailyOverageAllowed ? "Allowed" : "Off"}
@@ -5365,47 +5758,77 @@ export default function App() {
                   <Text style={styles.body}>User Admins cannot lock or unlock Org Admins.</Text>
                 ) : null}
 
-                <Text style={styles.hintText}>Daily Overage</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-                  <Pressable
-                    style={[
-                      styles.timezoneChip,
-                      !dailyOverageAllowed ? styles.selectedChip : null,
-                      adminLoading ? styles.disabled : null,
-                    ]}
-                    disabled={adminLoading}
-                    onPress={() => {
-                      if (!dailyOverageAllowed) {
-                        return;
-                      }
-                      void setOrgUserDailyOverage(targetUserId, false);
-                    }}
-                  >
-                    <Text style={styles.chipText}>Off</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[
-                      styles.timezoneChip,
-                      dailyOverageAllowed ? styles.selectedChip : null,
-                      adminLoading ? styles.disabled : null,
-                    ]}
-                    disabled={adminLoading}
-                    onPress={() => {
-                      if (dailyOverageAllowed) {
-                        return;
-                      }
-                      void setOrgUserDailyOverage(targetUserId, true);
-                    }}
-                  >
-                    <Text style={styles.chipText}>Allow</Text>
-                  </Pressable>
-                </ScrollView>
-                {dailyOverageAllowed ? (
-                  <Text style={styles.body}>
-                    Overage currently allowed through {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
-                  </Text>
+                <Text style={styles.hintText}>Employee ID</Text>
+                <TextInput
+                  value={adminEmployeeIdInput}
+                  onChangeText={setAdminEmployeeIdInput}
+                  placeholder="Optional"
+                  placeholderTextColor={theme.hint}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  editable={!employeeIdControlsDisabled && !adminLoading}
+                  style={[styles.input, employeeIdControlsDisabled ? styles.disabled : null]}
+                />
+                <Pressable
+                  style={[styles.primaryButton, employeeIdControlsDisabled || adminLoading ? styles.disabled : null]}
+                  disabled={employeeIdControlsDisabled || adminLoading}
+                  onPress={() => void saveOrgUserEmployeeId(targetUserId)}
+                >
+                  <Text style={styles.primaryButtonText}>{adminLoading ? "Saving..." : "Save Employee ID"}</Text>
+                </Pressable>
+                {employeeIdControlsDisabled ? (
+                  <Text style={styles.body}>Employee ID editing is available for eligible managed users.</Text>
                 ) : (
-                  <Text style={styles.body}>Daily cap enforced for this user.</Text>
+                  <Text style={styles.body}>Blank saves as no Employee ID.</Text>
+                )}
+
+                {canEditUsageControls ? (
+                  <>
+                    <Text style={styles.hintText}>Daily Overage</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+                      <Pressable
+                        style={[
+                          styles.timezoneChip,
+                          !dailyOverageAllowed ? styles.selectedChip : null,
+                          adminLoading ? styles.disabled : null,
+                        ]}
+                        disabled={adminLoading}
+                        onPress={() => {
+                          if (!dailyOverageAllowed) {
+                            return;
+                          }
+                          void setOrgUserDailyOverage(targetUserId, false);
+                        }}
+                      >
+                        <Text style={styles.chipText}>Off</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.timezoneChip,
+                          dailyOverageAllowed ? styles.selectedChip : null,
+                          adminLoading ? styles.disabled : null,
+                        ]}
+                        disabled={adminLoading}
+                        onPress={() => {
+                          if (dailyOverageAllowed) {
+                            return;
+                          }
+                          void setOrgUserDailyOverage(targetUserId, true);
+                        }}
+                      >
+                        <Text style={styles.chipText}>Allow</Text>
+                      </Pressable>
+                    </ScrollView>
+                    {dailyOverageAllowed ? (
+                      <Text style={styles.body}>
+                        Overage currently allowed through {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
+                      </Text>
+                    ) : (
+                      <Text style={styles.body}>Daily cap enforced for this user.</Text>
+                    )}
+                  </>
+                ) : (
+                  <Text style={styles.body}>Daily usage controls are managed by Org Admins.</Text>
                 )}
               </View>
 
@@ -5566,6 +5989,18 @@ export default function App() {
       );
     }
 
+    if (screen === "training_content" && user && mobileAuthToken) {
+      return (
+        <TrainingContentScreen
+          userId={user.id}
+          authToken={mobileAuthToken}
+          colorScheme={colorScheme}
+          onBackToHome={returnFromTrainingContent}
+          onModuleAvailabilityChange={handleTrainingContentAvailability}
+        />
+      );
+    }
+
     if (screen === "performance" && user && mobileAuthToken) {
       return (
         <PerformanceScreen
@@ -5635,6 +6070,7 @@ function createStyles(theme: ThemeTokens) {
     safeArea: { flex: 1, paddingHorizontal: 16, paddingBottom: 12 },
     fill: { flex: 1 },
     homeFillCompact: { justifyContent: "flex-start" },
+    homeScrollContent: { paddingBottom: 18 },
     centered: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
     topRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
     homeTopRowCompact: { marginBottom: 8 },
@@ -5708,6 +6144,32 @@ function createStyles(theme: ThemeTokens) {
       paddingVertical: 4,
     },
     heroMetaText: { color: "rgba(248, 238, 217, 0.9)", fontSize: 12, fontWeight: "700", letterSpacing: 0.2 },
+    trainingModuleTile: {
+      minHeight: 92,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: theme.accent,
+      backgroundColor: theme.panel,
+      paddingHorizontal: 14,
+      paddingVertical: 13,
+      marginBottom: 14,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    trainingModuleIconFrame: {
+      width: 48,
+      height: 48,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: "rgba(181, 146, 76, 0.42)",
+      backgroundColor: APP_SURFACE_COLORS.sage,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    trainingModuleCopy: { flex: 1, gap: 4 },
+    trainingModuleTitle: { color: theme.text, fontSize: 18, lineHeight: 22, fontWeight: "800" },
+    trainingModuleBody: { color: theme.textMuted, fontSize: 13.5, lineHeight: 19 },
     segmentCard: {
       marginTop: 4,
       borderColor: theme.accent,
@@ -5743,6 +6205,7 @@ function createStyles(theme: ThemeTokens) {
     sectionTitle: { color: theme.text, fontSize: 19, fontWeight: "700", marginTop: 4, marginBottom: 10 },
     scroll: { flex: 1 },
     scrollContent: { paddingBottom: 24 },
+    verifyEmailScrollContent: { flexGrow: 1, paddingBottom: 48 },
     setupScrollContent: { paddingBottom: 14 },
     ghostButton: { minWidth: 84, height: 38, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.ghostButtonBg },
     ghostButtonText: { color: theme.text, fontSize: 14, fontWeight: "700" },

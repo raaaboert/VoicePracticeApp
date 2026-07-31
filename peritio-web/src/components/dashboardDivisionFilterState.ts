@@ -22,8 +22,16 @@ export function buildDashboardDivisionSearch(
   return query ? `?${query}` : "";
 }
 
-function buildDashboardScopedHref(pathname: string, divisionId: string | null): string {
-  return `${pathname}${buildDashboardDivisionSearch("", divisionId)}`;
+function buildDashboardScopedHref(pathname: string, divisionId: string | null, orgId?: string | null): string {
+  const params = new URLSearchParams();
+  if (divisionId && divisionId.trim()) {
+    params.set("divisionId", divisionId.trim());
+  }
+  if (orgId && orgId.trim()) {
+    params.set("orgId", orgId.trim());
+  }
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
 }
 
 export function buildDashboardScopedUserDetailHref(userId: string, divisionId: string | null): string {
@@ -36,19 +44,24 @@ export function buildDashboardScopedCustomerDetailHref(customerId: string, divis
   return buildDashboardScopedHref(`/app/customers/${encodedCustomerId}`, divisionId);
 }
 
-export function buildDashboardScopedTrainingPackHref(trainingPackId: string, divisionId: string | null): string {
+export function buildDashboardScopedTrainingPackHref(
+  trainingPackId: string,
+  divisionId: string | null,
+  orgId?: string | null
+): string {
   const encodedTrainingPackId = encodeURIComponent(trainingPackId);
-  return buildDashboardScopedHref(`/app/training/${encodedTrainingPackId}`, divisionId);
+  return buildDashboardScopedHref(`/app/training/${encodedTrainingPackId}`, divisionId, orgId);
 }
 
 export function buildDashboardScopedTrainingPackAssignmentHref(
   trainingPackId: string,
   assignmentId: string,
-  divisionId: string | null
+  divisionId: string | null,
+  orgId?: string | null
 ): string {
   const encodedTrainingPackId = encodeURIComponent(trainingPackId);
   const encodedAssignmentId = encodeURIComponent(assignmentId);
-  return buildDashboardScopedHref(`/app/training/${encodedTrainingPackId}/assignments/${encodedAssignmentId}`, divisionId);
+  return buildDashboardScopedHref(`/app/training/${encodedTrainingPackId}/assignments/${encodedAssignmentId}`, divisionId, orgId);
 }
 
 export function buildDashboardScopedAttemptDetailHref(attemptId: string, divisionId: string | null): string {

@@ -35,6 +35,9 @@ function fakeStartupMaintenance(calls: string[]) {
     async migrateLegacyWebAuthSessionsFromAppState(): Promise<void> {
       calls.push("migrateLegacyWebAuthSessionsFromAppState");
     },
+    async migrateUserProfileAppStateNormalization(): Promise<void> {
+      calls.push("migrateUserProfileAppStateNormalization");
+    },
     async runStartupUsageIntegrityMaintenance(): Promise<void> {
       calls.push("runStartupUsageIntegrityMaintenance");
     }
@@ -77,6 +80,10 @@ test("database startup initializes Performance tables through the normal extract
       supportCaseStore: fakeStore(calls, "supportCaseStore"),
       webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
       performancePlanStore,
+      userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
+      orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+      trainingContentStore: fakeStore(calls, "trainingContentStore"),
+      trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore"),
       trainingPackStore: fakeStore(calls, "trainingPackStore")
     },
     maintenance: fakeStartupMaintenance(calls)
@@ -97,6 +104,11 @@ test("database startup initializes Performance tables through the normal extract
     "webAuthSessionStore.initialize",
     "migrateLegacyWebAuthSessionsFromAppState",
     "performancePlanStore.initialize",
+    "userEmployeeIdClaimStore.initialize",
+    "orgModuleEntitlementStore.initialize",
+    "trainingContentStore.initialize",
+    "trainingContentAssetStore.initialize",
+    "migrateUserProfileAppStateNormalization",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
   ]);
@@ -120,10 +132,17 @@ test("database readiness refresh initializes the Performance store before loadin
       scoreRecordStore: fakeStore(calls, "scoreRecordStore"),
       supportCaseStore: fakeStore(calls, "supportCaseStore"),
       webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
-      performancePlanStore: fakeStore(calls, "performancePlanStore")
+      performancePlanStore: fakeStore(calls, "performancePlanStore"),
+      userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
+      orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+      trainingContentStore: fakeStore(calls, "trainingContentStore"),
+      trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
     },
     async loadDatabase(): Promise<void> {
       calls.push("loadDatabase");
+    },
+    async migrateUserProfileAppStateNormalization(): Promise<void> {
+      calls.push("migrateUserProfileAppStateNormalization");
     }
   });
 
@@ -136,6 +155,58 @@ test("database readiness refresh initializes the Performance store before loadin
     "supportCaseStore.initialize",
     "webAuthSessionStore.initialize",
     "performancePlanStore.initialize",
+    "userEmployeeIdClaimStore.initialize",
+    "orgModuleEntitlementStore.initialize",
+    "trainingContentStore.initialize",
+    "trainingContentAssetStore.initialize",
+    "migrateUserProfileAppStateNormalization",
     "loadDatabase"
+  ]);
+});
+
+test("database readiness fails before loading app state when user profile normalization fails", async () => {
+  const calls: string[] = [];
+
+  await assert.rejects(
+    initializeDatabaseStoresForReadiness({
+      stores: {
+        auditEventStore: fakeStore(calls, "auditEventStore"),
+        aiUsageEventStore: fakeStore(calls, "aiUsageEventStore"),
+        simulationSessionStore: fakeStore(calls, "simulationSessionStore"),
+        usageSessionStore: fakeStore(calls, "usageSessionStore"),
+        scoreRecordStore: fakeStore(calls, "scoreRecordStore"),
+        supportCaseStore: fakeStore(calls, "supportCaseStore"),
+        webAuthSessionStore: fakeStore(calls, "webAuthSessionStore"),
+        performancePlanStore: fakeStore(calls, "performancePlanStore"),
+        userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
+        orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+        trainingContentStore: fakeStore(calls, "trainingContentStore"),
+        trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
+      },
+      async migrateUserProfileAppStateNormalization(): Promise<void> {
+        calls.push("migrateUserProfileAppStateNormalization");
+        throw new Error("migration unavailable");
+      },
+      async loadDatabase(): Promise<void> {
+        calls.push("loadDatabase");
+      }
+    }),
+    /migration unavailable/
+  );
+
+  assert.deepEqual(calls, [
+    "auditEventStore.initialize",
+    "aiUsageEventStore.initialize",
+    "simulationSessionStore.initialize",
+    "usageSessionStore.initialize",
+    "scoreRecordStore.initialize",
+    "supportCaseStore.initialize",
+    "webAuthSessionStore.initialize",
+    "performancePlanStore.initialize",
+    "userEmployeeIdClaimStore.initialize",
+    "orgModuleEntitlementStore.initialize",
+    "trainingContentStore.initialize",
+    "trainingContentAssetStore.initialize",
+    "migrateUserProfileAppStateNormalization"
   ]);
 });

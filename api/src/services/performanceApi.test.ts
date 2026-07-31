@@ -182,8 +182,8 @@ test("performance dashboard user display names prefer real profile names and fal
     resolvePerformanceUserDisplayName({ email: "email@example.com", profile: { fullName: "Mary Jackson" } }),
     "Mary Jackson"
   );
-  assert.equal(resolvePerformanceUserDisplayName({ email: "email@example.com" }), "email@example.com");
-  assert.equal(resolvePerformanceUserDisplayName({ email: "" }), "Account user");
+  assert.equal(resolvePerformanceUserDisplayName({ email: "email@example.com" }), "Not provided");
+  assert.equal(resolvePerformanceUserDisplayName({ email: "" }), "Not provided");
 });
 
 function buildPlanInput() {

@@ -1,0 +1,34 @@
+FROM node:20.20.2-bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ffmpeg=7:5.1.9-0+deb12u1 \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY api/package.json ./api/package.json
+COPY shared/package.json ./shared/package.json
+COPY admin-web/package.json ./admin-web/package.json
+COPY mobile/package.json ./mobile/package.json
+COPY peritio-web/package.json ./peritio-web/package.json
+
+RUN npm ci \
+  --workspace @voicepractice/api \
+  --workspace @voicepractice/shared \
+  --include-workspace-root
+
+COPY api ./api
+COPY shared ./shared
+
+RUN npm run build --workspace shared \
+  && npm run build --workspace api
+
+ENV NODE_ENV=production
+ENV TRAINING_CONTENT_MEDIA_TOOL_VERSION_PREFIX=5.1.9
+
+USER node
+
+CMD ["node", "api/dist/videoProcessingWorker.js"]

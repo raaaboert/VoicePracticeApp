@@ -75,6 +75,9 @@ export default async function CustomerDetailPage({
             <Link className="inline-link" href={`/app/customers/${encodeURIComponent(customer.orgId)}/performance${divisionId ? `?divisionId=${encodeURIComponent(divisionId)}` : ""}`}>
               Performance
             </Link>
+            <Link className="inline-link" href={`/app/admin?orgId=${encodeURIComponent(customer.orgId)}`}>
+              Admin
+            </Link>
           </div>
         }
       />
@@ -105,7 +108,12 @@ export default async function CustomerDetailPage({
           </div>
 
           <div className="dashboard-proof-block">
-            <CustomerDetailTabs customerName={customer.orgName} insights={insights} divisionId={divisionId} />
+            <CustomerDetailTabs
+              customerName={customer.orgName}
+              customerOrgId={customer.orgId}
+              insights={insights}
+              divisionId={divisionId}
+            />
           </div>
 
           <div className="dashboard-proof-block">

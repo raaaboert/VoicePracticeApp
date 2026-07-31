@@ -141,7 +141,8 @@ export default async function UserDetailPage({
                             href={buildDashboardScopedTrainingPackAssignmentHref(
                               assignment.trainingPackId,
                               assignment.assignmentId,
-                              divisionId
+                              divisionId,
+                              user.orgId
                             )}
                           >
                             {assignment.trainingPackTitle}

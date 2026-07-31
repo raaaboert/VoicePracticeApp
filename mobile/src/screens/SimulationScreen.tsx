@@ -40,8 +40,13 @@ import {
   createSimulationCorrelationId,
   createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
+  getSimulationLifecycleResumeIntent,
+  getSimulationPrimaryButtonRoute,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
+  shouldCommitResumedAssistantResponse,
+  shouldShowUserTurnInstruction,
+  SimulationLifecycleResumeIntent,
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
 } from "../lib/simulationInteractionModel";
@@ -75,6 +80,7 @@ import {
   toRemoteTtsPreset,
 } from "../lib/ttsPlayback";
 import type { PreparedRemoteAudioSource, TtsPlaybackResult } from "../lib/ttsPlayback";
+import { runTtsChunkSequence } from "../lib/ttsChunkSequence";
 import { splitTextForRemoteTtsFastStart } from "../lib/ttsFastStart";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
@@ -92,6 +98,10 @@ interface SimulationScreenProps {
 }
 
 type OpeningLinePayload = Awaited<ReturnType<typeof createOpeningLine>>;
+type ActiveAssistantSpeech = {
+  message: DialogueMessage;
+  committed: boolean;
+};
 
 const SOFT_TURN_NOTICE_MS = 35000;
 const ABSOLUTE_TURN_NOTICE_MS = 60000;
@@ -400,6 +410,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const [actionDockHeight, setActionDockHeight] = useState(0);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isStartingTurn, setIsStartingTurn] = useState(false);
+  const [isResumingLifecyclePause, setIsResumingLifecyclePause] = useState(false);
   const [lifecyclePauseActive, setLifecyclePauseActive] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
@@ -500,6 +511,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const lifecyclePauseStartedAtRef = useRef<number | null>(null);
   const lifecyclePauseReasonRef = useRef<"background" | null>(null);
   const currentBackgroundedAtRef = useRef<number | null>(null);
+  const activeAssistantSpeechRef = useRef<ActiveAssistantSpeech | null>(null);
+  const lifecycleResumeIntentRef = useRef<SimulationLifecycleResumeIntent | null>(null);
+  const lifecycleResumeInProgressRef = useRef(false);
+  const activeTurnSettlementRef = useRef<Promise<void> | null>(null);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -917,8 +932,24 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     correlationId?: string,
     chunkIndex?: number,
     chunkCount?: number,
+    sequenceRequestGeneration?: number,
   ): Promise<TtsPlaybackResult> => {
-    const requestGeneration = ttsRequestGenerationRef.current;
+    const requestGeneration = sequenceRequestGeneration ?? ttsRequestGenerationRef.current;
+    if (
+      ttsRequestGenerationRef.current !== requestGeneration
+      || simulationClosedRef.current
+      || unmountedRef.current
+    ) {
+      return {
+        outcome: "tts_cancelled",
+        mode: "cancelled",
+        degraded: true,
+        timedOut: false,
+        reason: "sequence_cancelled",
+        chunkIndex,
+        chunkCount,
+      };
+    }
     const abortController = new AbortController();
     const priorController = remoteTtsAbortControllerRef.current;
     remoteTtsAbortControllerRef.current = abortController;
@@ -1107,107 +1138,110 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         }),
       );
     }
-    for (let index = 1; index < chunks.length; index += 1) {
-      startPrefetchForChunk(index);
-    }
-
     try {
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index];
-        let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
-        const preparedPromise = preparedChunkByIndex.get(index);
-        if (preparedPromise) {
-          preparedRemoteAudio = await preparedPromise;
-          if (preparedRemoteAudio) {
-            resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
-            logSimulationTiming({
-              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-              phase: "tts_chunk_prepared",
-              details: {
-                chunkIndex: index,
-                chunkCount: chunks.length,
-                sourceKind: preparedRemoteAudio.sourceKind,
-              },
-            });
-          }
-        }
-        const utteranceResult = await speakSingleUtterance(
-          chunk,
-          index === 0 ? assistantTextReceivedAtMs : Date.now(),
-          (startedAtMs) => {
-            if (index === 0) {
-              handlePlaybackStart();
-            }
-            const boundaryGapMs =
-              index > 0 && typeof previousChunkCompletedAtMs === "number"
-                ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
-                : null;
-            if (typeof boundaryGapMs === "number") {
+      await runTtsChunkSequence({
+        chunks,
+        runChunk: async (chunk, index) => {
+          let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
+          const preparedPromise = preparedChunkByIndex.get(index);
+          if (preparedPromise) {
+            preparedRemoteAudio = await preparedPromise;
+            if (preparedRemoteAudio) {
+              resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
               logSimulationTiming({
                 correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-                phase: "tts_chunk_boundary_gap",
+                phase: "tts_chunk_prepared",
+                details: {
+                  chunkIndex: index,
+                  chunkCount: chunks.length,
+                  sourceKind: preparedRemoteAudio.sourceKind,
+                },
+              });
+            }
+          }
+          const utteranceResult = await speakSingleUtterance(
+            chunk,
+            index === 0 ? assistantTextReceivedAtMs : Date.now(),
+            (startedAtMs) => {
+              if (index === 0) {
+                handlePlaybackStart();
+              }
+              const boundaryGapMs =
+                index > 0 && typeof previousChunkCompletedAtMs === "number"
+                  ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
+                  : null;
+              if (typeof boundaryGapMs === "number") {
+                logSimulationTiming({
+                  correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                  phase: "tts_chunk_boundary_gap",
+                  details: {
+                    chunkIndex: index,
+                    chunkCount: chunks.length,
+                    boundaryGapMs,
+                  },
+                });
+              }
+              logSimulationTiming({
+                correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                phase: "tts_chunk_playback_started",
                 details: {
                   chunkIndex: index,
                   chunkCount: chunks.length,
                   boundaryGapMs,
                 },
               });
-            }
-            logSimulationTiming({
-              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-              phase: "tts_chunk_playback_started",
-              details: {
-                chunkIndex: index,
-                chunkCount: chunks.length,
-                boundaryGapMs,
-              },
-            });
-          },
-          preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
-          preparedRemoteAudio,
-          correlationId,
-          index,
-          chunks.length,
-        );
-        recordSpeechResult(utteranceResult);
-        if (preparedRemoteAudio) {
-          resolvedPreparedChunkByIndex.delete(index);
-        }
-        if (index === 0) {
-          handlePlaybackStart();
-        }
-        previousChunkCompletedAtMs = Date.now();
-        logSimulationTiming({
-          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-          phase: utteranceResult.degraded
-            ? utteranceResult.timedOut
-              ? "tts_chunk_timeout_unblocked"
-              : "tts_chunk_degraded_complete"
-            : "tts_chunk_completed",
-          details: {
-            chunkIndex: index,
-            chunkCount: chunks.length,
-            outcome: utteranceResult.outcome,
-            mode: utteranceResult.mode,
-            degraded: utteranceResult.degraded,
-            timedOut: utteranceResult.timedOut,
-            reason: utteranceResult.reason,
-            sourceKind: utteranceResult.sourceKind ?? null,
-          },
-        });
-        logSimulationTiming({
-          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-          phase: "tts_chunk_playback_completed",
-          details: {
-            chunkIndex: index,
-            chunkCount: chunks.length,
-            outcome: utteranceResult.outcome,
-            mode: utteranceResult.mode,
-            degraded: utteranceResult.degraded,
-            timedOut: utteranceResult.timedOut,
-          },
-        });
-      }
+            },
+            preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
+            preparedRemoteAudio,
+            correlationId,
+            index,
+            chunks.length,
+            requestGeneration,
+          );
+          recordSpeechResult(utteranceResult);
+          if (preparedRemoteAudio) {
+            resolvedPreparedChunkByIndex.delete(index);
+          }
+          if (index === 0 && utteranceResult.outcome !== "tts_cancelled") {
+            handlePlaybackStart();
+          }
+          previousChunkCompletedAtMs = Date.now();
+          logSimulationTiming({
+            correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+            phase: utteranceResult.degraded
+              ? utteranceResult.timedOut
+                ? "tts_chunk_timeout_unblocked"
+                : "tts_chunk_degraded_complete"
+              : "tts_chunk_completed",
+            details: {
+              chunkIndex: index,
+              chunkCount: chunks.length,
+              outcome: utteranceResult.outcome,
+              mode: utteranceResult.mode,
+              degraded: utteranceResult.degraded,
+              timedOut: utteranceResult.timedOut,
+              reason: utteranceResult.reason,
+              sourceKind: utteranceResult.sourceKind ?? null,
+            },
+          });
+          logSimulationTiming({
+            correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+            phase: "tts_chunk_playback_completed",
+            details: {
+              chunkIndex: index,
+              chunkCount: chunks.length,
+              outcome: utteranceResult.outcome,
+              mode: utteranceResult.mode,
+              degraded: utteranceResult.degraded,
+              timedOut: utteranceResult.timedOut,
+            },
+          });
+          if (utteranceResult.outcome !== "tts_cancelled") {
+            startPrefetchForChunk(index + 1);
+          }
+          return utteranceResult;
+        },
+      });
       const finalResult: TtsPlaybackResult = aggregateSpeechResult ?? {
         outcome: "remote_tts_completed",
         mode: "remote",
@@ -1326,6 +1360,15 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       ?? createSimulationCorrelationId(config.simulationSessionId, "appstate-pause");
     const recordingActive = Boolean(recordingRef.current);
     const currentMode = modeRef.current;
+    lifecycleResumeIntentRef.current = getSimulationLifecycleResumeIntent({
+      activeAssistantSpeech: activeAssistantSpeechRef.current
+        ? {
+            messageId: activeAssistantSpeechRef.current.message.id,
+            text: activeAssistantSpeechRef.current.message.content,
+            committed: activeAssistantSpeechRef.current.committed,
+          }
+        : null,
+    });
 
     if (lifecyclePauseStartedAtRef.current === null) {
       lifecyclePauseStartedAtRef.current = nowMs;
@@ -1803,6 +1846,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
 
     processingRef.current = true;
+    let resolveActiveTurnSettlement: () => void = () => undefined;
+    const activeTurnSettlement = new Promise<void>((resolve) => {
+      resolveActiveTurnSettlement = resolve;
+    });
+    activeTurnSettlementRef.current = activeTurnSettlement;
     clearTurnMonitoring();
     setMode("thinking");
     setStatus("Finalizing your audio...");
@@ -2538,11 +2586,17 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             }
             await prepareIosPlaybackAudioMode(correlationId, "assistant_reply");
             throwIfSessionLifecycleInterrupted();
+            const activeAssistantSpeech: ActiveAssistantSpeech = {
+              message: assistantMessage,
+              committed: assistantMessageCommitted,
+            };
+            activeAssistantSpeechRef.current = activeAssistantSpeech;
             const speakPromise = speakAssistantResponse(
               reply,
               assistantTextReceivedAtMs,
               () => {
                 commitAssistantMessageIfNeeded();
+                activeAssistantSpeech.committed = assistantMessageCommitted;
                 setMode("speaking");
                 setStatus("AI is speaking...");
                 playbackStartedAtMs = Date.now();
@@ -2560,20 +2614,27 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             );
             let speechResult: TtsPlaybackResult;
             try {
-              speechResult = await speakPromise;
-            } catch (speechError) {
-              if (isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
-                commitAssistantMessageIfNeeded();
-                logSimulationTiming({
-                  correlationId,
-                  phase: "assistant_speech_failed",
-                  startedAtMs: effectiveSubmitStartedAtMs,
-                  details: {
-                    error: getErrorMessage(speechError, "Assistant speech failed."),
-                  },
-                });
+              try {
+                speechResult = await speakPromise;
+              } catch (speechError) {
+                if (isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
+                  commitAssistantMessageIfNeeded();
+                  activeAssistantSpeech.committed = assistantMessageCommitted;
+                  logSimulationTiming({
+                    correlationId,
+                    phase: "assistant_speech_failed",
+                    startedAtMs: effectiveSubmitStartedAtMs,
+                    details: {
+                      error: getErrorMessage(speechError, "Assistant speech failed."),
+                    },
+                  });
+                }
+                throw speechError;
               }
-              throw speechError;
+            } finally {
+              if (activeAssistantSpeechRef.current === activeAssistantSpeech) {
+                activeAssistantSpeechRef.current = null;
+              }
             }
             throwIfSessionLifecycleInterrupted();
             speakingCompletedAtMs = Date.now();
@@ -2695,6 +2756,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         void startListeningTurn();
       } else if (!unmountedRef.current) {
         setMode("idle");
+      }
+      resolveActiveTurnSettlement();
+      if (activeTurnSettlementRef.current === activeTurnSettlement) {
+        activeTurnSettlementRef.current = null;
       }
     }
   };
@@ -3125,7 +3190,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     setIsStartingSession(false);
     recordingStartInProgressRef.current = false;
     recordingPrepareInProgressRef.current = false;
+    lifecycleResumeInProgressRef.current = false;
+    lifecycleResumeIntentRef.current = null;
+    activeAssistantSpeechRef.current = null;
     setIsStartingTurn(false);
+    setIsResumingLifecyclePause(false);
     openingTtsInProgressRef.current = false;
     abortActiveTurnRequests();
     await cancelPendingTts(true);
@@ -3200,19 +3269,152 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
   }, [config, onSessionComplete]);
 
+  const resumeLifecyclePausedTurn = async () => {
+    if (
+      lifecycleResumeInProgressRef.current
+      || lifecyclePauseReasonRef.current !== "background"
+      || !sessionActiveRef.current
+      || simulationClosedRef.current
+      || unmountedRef.current
+    ) {
+      return;
+    }
+
+    lifecycleResumeInProgressRef.current = true;
+    setIsResumingLifecyclePause(true);
+    setError(null);
+    setStatus("Resuming turn...");
+
+    const resumeIntent = lifecycleResumeIntentRef.current ?? getSimulationLifecycleResumeIntent({
+      activeAssistantSpeech: activeAssistantSpeechRef.current
+        ? {
+            messageId: activeAssistantSpeechRef.current.message.id,
+            text: activeAssistantSpeechRef.current.message.content,
+            committed: activeAssistantSpeechRef.current.committed,
+          }
+        : null,
+    });
+    const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
+    const interruptedTurnSettlement = activeTurnSettlementRef.current;
+    clearLifecyclePause(Date.now());
+
+    try {
+      if (interruptedTurnSettlement) {
+        await interruptedTurnSettlement;
+      }
+      assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+      if (resumeIntent.kind === "replay_assistant") {
+        const correlationId = createSimulationCorrelationId(
+          config.simulationSessionId,
+          "resume-assistant-speech",
+        );
+        const assistantMessage: DialogueMessage = {
+          id: resumeIntent.assistantMessageId,
+          role: "assistant",
+          content: resumeIntent.assistantText,
+        };
+        if (shouldCommitResumedAssistantResponse({
+          intent: resumeIntent,
+          committedMessageIds: messagesRef.current.map((message) => message.id),
+        })) {
+          commitAssistantMessage({
+            message: assistantMessage,
+            correlationId,
+            phase: "assistant_message_committed_on_resume",
+          });
+        }
+        const assistantTextReceivedAtMs = Date.now();
+        setMode("thinking");
+        setStatus("Restarting the interrupted AI response...");
+        await prepareIosPlaybackAudioMode(correlationId, "resume_assistant_reply");
+        assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+        const activeAssistantSpeech: ActiveAssistantSpeech = {
+          message: assistantMessage,
+          committed: true,
+        };
+        activeAssistantSpeechRef.current = activeAssistantSpeech;
+        try {
+          await speakAssistantResponse(
+            resumeIntent.assistantText,
+            assistantTextReceivedAtMs,
+            () => {
+              if (!isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
+                return;
+              }
+              setMode("speaking");
+              setStatus("AI is speaking...");
+            },
+            correlationId,
+          );
+        } finally {
+          if (activeAssistantSpeechRef.current === activeAssistantSpeech) {
+            activeAssistantSpeechRef.current = null;
+          }
+        }
+        assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+      }
+
+      if (lifecycleResumeIntentRef.current === resumeIntent) {
+        lifecycleResumeIntentRef.current = null;
+      }
+      await startListeningTurn();
+    } catch (resumeError) {
+      if (
+        isSimulationLifecycleInterruptedError(resumeError)
+        || !isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
+      ) {
+        return;
+      }
+
+      logSimulationTiming({
+        correlationId: createSimulationCorrelationId(config.simulationSessionId, "resume-turn"),
+        phase: "simulation_lifecycle_resume_failed",
+        details: {
+          resumeKind: resumeIntent.kind,
+          message: getErrorMessage(resumeError, "Could not resume the interrupted turn."),
+        },
+      });
+      setError("The interrupted AI audio could not be replayed. Peritio is continuing with your response.");
+      if (lifecycleResumeIntentRef.current === resumeIntent) {
+        lifecycleResumeIntentRef.current = null;
+      }
+      await startListeningTurn();
+    } finally {
+      lifecycleResumeInProgressRef.current = false;
+      if (!unmountedRef.current) {
+        setIsResumingLifecyclePause(false);
+      }
+    }
+  };
+
   const onPrimaryButton = async () => {
+    const primaryButtonRoute = getSimulationPrimaryButtonRoute({
+      lifecycleResumeInProgress: lifecycleResumeInProgressRef.current,
+      sessionActive: sessionActiveRef.current,
+      mode,
+      lifecyclePauseActive: lifecyclePauseReasonRef.current === "background",
+    });
+    if (primaryButtonRoute === "ignore") {
+      return;
+    }
     if (isInitializing) {
       return;
     }
 
-    if (sessionActiveRef.current) {
-      if (mode === "recording") {
-        requestFinalizeTurn();
-      } else if (mode === "idle") {
-        setError(null);
-        setStatus("Reconnecting microphone...");
-        void startListeningTurn();
-      }
+    if (primaryButtonRoute === "submit_response") {
+      requestFinalizeTurn();
+      return;
+    }
+    if (primaryButtonRoute === "resume_lifecycle") {
+      void resumeLifecyclePausedTurn();
+      return;
+    }
+    if (primaryButtonRoute === "restart_recording") {
+      setError(null);
+      setStatus("Reconnecting microphone...");
+      void startListeningTurn();
       return;
     }
 
@@ -3352,6 +3554,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       recordingStartInProgressRef.current = false;
       recordingPrepareInProgressRef.current = false;
       setIsStartingTurn(false);
+      lifecycleResumeInProgressRef.current = false;
+      lifecycleResumeIntentRef.current = null;
+      activeAssistantSpeechRef.current = null;
+      activeTurnSettlementRef.current = null;
+      setIsResumingLifecyclePause(false);
       sessionLifecycleGenerationRef.current += 1;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
@@ -3424,6 +3631,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       turnLoopReadyRef.current = false;
       recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
+      lifecycleResumeInProgressRef.current = false;
+      lifecycleResumeIntentRef.current = null;
+      activeAssistantSpeechRef.current = null;
+      activeTurnSettlementRef.current = null;
       openingTtsInProgressRef.current = false;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
@@ -3534,7 +3745,13 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     isInitializing,
     mode,
     isStartingSession,
-    isStartingTurn,
+    isStartingTurn: isStartingTurn || isResumingLifecyclePause,
+  });
+  const showUserTurnInstruction = shouldShowUserTurnInstruction({
+    sessionActive,
+    mode,
+    lifecyclePauseActive,
+    isStartingTurn: isStartingTurn || isResumingLifecyclePause,
   });
   const endButtonDisabled = isInitializing || !sessionActive || sessionCompletionInProgressRef.current;
   const hintText = localTestMode
@@ -3862,6 +4079,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             },
           ]}
         >
+          {showUserTurnInstruction ? (
+            <Text style={styles.userTurnInstruction}>
+              Your turn — record your response, then submit when finished.
+            </Text>
+          ) : null}
           <Pressable
             style={[
               styles.primaryButton,
@@ -4496,6 +4718,13 @@ function createStyles(palette: SimulationPalette) {
       fontWeight: "800",
       fontSize: 16,
       letterSpacing: 0.2,
+    },
+    userTurnInstruction: {
+      color: palette.text,
+      fontSize: 14,
+      fontWeight: "700",
+      lineHeight: 19,
+      textAlign: "center",
     },
     busyButtonText: {
       color: palette.busyButtonText,

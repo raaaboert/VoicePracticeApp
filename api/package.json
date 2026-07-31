@@ -5,23 +5,33 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "dev:video-worker": "tsx watch src/videoProcessingWorker.ts",
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-sql.mjs",
     "start": "node dist/index.js",
+    "start:video-worker": "node dist/videoProcessingWorker.js",
     "seed:dashboard-local": "node ./scripts/seed-dashboard-local.mjs",
     "db:sanitize-bootstrap": "tsx ./scripts/sanitize-bootstrap.ts",
+    "force:mobile-reonboarding": "tsx ./scripts/force-mobile-reonboarding.ts",
+    "cleanup:training-content": "tsx ./scripts/cleanup-training-content-storage.ts",
+    "smoke:training-content-r2": "tsx ./scripts/smoke-training-content-r2.ts",
+    "test:postgres:training-content": "tsx --test src/storage/trainingContentPostgres.integration.test.ts",
     "reset:simulation-baseline": "tsx ./scripts/reset-simulation-baseline.ts",
     "reset:pretester-history": "tsx ./scripts/reset-pretester-history.ts --local-file",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "node ../scripts/run-tsx-tests.mjs src=.test.ts scripts=.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1097.0",
+    "@aws-sdk/s3-request-presigner": "^3.1097.0",
     "@voicepractice/shared": "file:../shared",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "express-async-errors": "^3.1.1",
+    "mdast-util-from-markdown": "^2.0.2",
     "multer": "^2.0.2",
     "pg": "^8.18.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
@@ -29,6 +39,7 @@
     "@types/multer": "^1.4.13",
     "@types/node": "^22.14.1",
     "@types/pg": "^8.16.0",
+    "@types/yauzl": "^3.4.0",
     "tsx": "^4.20.6",
     "typescript": "~5.9.2"
   }

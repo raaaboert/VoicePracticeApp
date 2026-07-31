@@ -1,4 +1,4 @@
-import { ApiDatabase, DashboardViewer, EnterpriseOrg, UserProfile } from "@voicepractice/shared";
+import { ApiDatabase, DashboardAdminCapabilities, DashboardViewer, EnterpriseOrg, OrgUserRole, UserProfile } from "@voicepractice/shared";
 
 export type DashboardAccessEligibilityReason =
   | "inactive_user"
@@ -13,6 +13,58 @@ export interface DashboardAccessEligibility {
   eligible: boolean;
   reason: DashboardAccessEligibilityReason;
   org: EnterpriseOrg | null;
+}
+
+export function buildDashboardAdminCapabilities(role: OrgUserRole | null, options?: { superUserOrgContext?: boolean }): DashboardAdminCapabilities {
+  if (options?.superUserOrgContext === true) {
+    return {
+      viewOrganizationUsers: true,
+      manageRegularOrganizationUsers: true,
+      approveRejectAccessRequests: true,
+      editEmployeeIds: true,
+      editUserNames: true,
+      manageUserRoles: true,
+      assignUserManagers: true,
+      manageOrganizationContent: true,
+    };
+  }
+
+  if (role === "org_admin") {
+    return {
+      viewOrganizationUsers: true,
+      manageRegularOrganizationUsers: true,
+      approveRejectAccessRequests: true,
+      editEmployeeIds: true,
+      editUserNames: true,
+      manageUserRoles: true,
+      assignUserManagers: true,
+      manageOrganizationContent: true,
+    };
+  }
+
+  if (role === "user_admin") {
+    return {
+      viewOrganizationUsers: true,
+      manageRegularOrganizationUsers: true,
+      approveRejectAccessRequests: false,
+      editEmployeeIds: true,
+      editUserNames: false,
+      manageUserRoles: false,
+      assignUserManagers: false,
+      manageOrganizationContent: false,
+    };
+  }
+
+  return {
+    viewOrganizationUsers: false,
+    manageRegularOrganizationUsers: false,
+    approveRejectAccessRequests: false,
+    editEmployeeIds: false,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
+    manageOrganizationContent: false,
+  };
 }
 
 // Durable dashboard authorization projection. Keep this even after authn is replaced.
@@ -101,5 +153,7 @@ export function resolveDashboardViewer(db: ApiDatabase, user: UserProfile): Dash
     isSuperUser: user.isSuperUser === true,
     orgId: eligibility.org?.id ?? null,
     orgName: eligibility.org?.name ?? null,
+    orgRole: user.isSuperUser === true ? null : user.orgRole,
+    capabilities: user.isSuperUser === true ? buildDashboardAdminCapabilities(null) : buildDashboardAdminCapabilities(user.orgRole),
   };
 }

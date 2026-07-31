@@ -4,6 +4,7 @@ import test from "node:test";
 import { ApiDatabase, UserProfile } from "@voicepractice/shared";
 
 import {
+  buildDashboardAdminCapabilities,
   canDashboardViewerAccessCustomerDirectory,
   canDashboardViewerAccessOrg,
   resolveDashboardAccessEligibility,
@@ -28,6 +29,7 @@ function createUser(overrides?: Partial<UserProfile>): UserProfile {
   return {
     id: "user_1",
     email: "user@example.com",
+    employeeId: null,
     emailVerifiedAt: "2026-03-30T00:00:00.000Z",
     isPlatformAdmin: false,
     isSuperUser: false,
@@ -66,6 +68,17 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
   assert.ok(viewer);
   assert.equal(viewer.accessType, "customer_dashboard_user");
   assert.equal("isPlatformAdmin" in viewer, false);
+  assert.equal(viewer.orgRole, "org_admin");
+  assert.deepEqual(viewer.capabilities, {
+    viewOrganizationUsers: true,
+    manageRegularOrganizationUsers: true,
+    approveRejectAccessRequests: true,
+    editEmployeeIds: true,
+    editUserNames: true,
+    manageUserRoles: true,
+    assignUserManagers: true,
+    manageOrganizationContent: true,
+  });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
@@ -93,6 +106,7 @@ test("mixed platform_admin plus tenant-valid user keeps tenant-scoped dashboard 
   assert.ok(viewer);
   assert.equal(viewer.accessType, "customer_dashboard_user");
   assert.equal("isPlatformAdmin" in viewer, false);
+  assert.equal(viewer.orgRole, "org_admin");
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
@@ -122,6 +136,17 @@ test("super users retain cross-account dashboard access", () => {
   assert.ok(viewer);
   assert.equal(viewer.accessType, "super_user");
   assert.equal("isPlatformAdmin" in viewer, false);
+  assert.equal(viewer.orgRole, null);
+  assert.deepEqual(viewer.capabilities, {
+    viewOrganizationUsers: false,
+    manageRegularOrganizationUsers: false,
+    approveRejectAccessRequests: false,
+    editEmployeeIds: false,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
+    manageOrganizationContent: false,
+  });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), true);
@@ -206,4 +231,39 @@ test("disabled enterprise user does not resolve a dashboard viewer", () => {
   assert.equal(eligibility.eligible, false);
   assert.equal(eligibility.reason, "inactive_user");
   assert.equal(viewer, null);
+});
+
+test("dashboard capability derivation distinguishes user admin, regular user, and explicit super-user org context", () => {
+  assert.deepEqual(buildDashboardAdminCapabilities("user_admin"), {
+    viewOrganizationUsers: true,
+    manageRegularOrganizationUsers: true,
+    approveRejectAccessRequests: false,
+    editEmployeeIds: true,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
+    manageOrganizationContent: false,
+  });
+
+  assert.deepEqual(buildDashboardAdminCapabilities("user"), {
+    viewOrganizationUsers: false,
+    manageRegularOrganizationUsers: false,
+    approveRejectAccessRequests: false,
+    editEmployeeIds: false,
+    editUserNames: false,
+    manageUserRoles: false,
+    assignUserManagers: false,
+    manageOrganizationContent: false,
+  });
+
+  assert.deepEqual(buildDashboardAdminCapabilities(null, { superUserOrgContext: true }), {
+    viewOrganizationUsers: true,
+    manageRegularOrganizationUsers: true,
+    approveRejectAccessRequests: true,
+    editEmployeeIds: true,
+    editUserNames: true,
+    manageUserRoles: true,
+    assignUserManagers: true,
+    manageOrganizationContent: true,
+  });
 });

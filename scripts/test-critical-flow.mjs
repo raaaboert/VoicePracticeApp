@@ -276,18 +276,22 @@ async function main() {
     }
 
     const onboardingEmail = "first.admin@criticalflow.example";
+    const onboardingFirstName = "Critical";
+    const onboardingLastName = "Flow";
     log("Onboarding first mobile user...");
     const onboard = await apiRequest(baseUrl, "/mobile/onboard", {
       method: "POST",
       body: {
         email: onboardingEmail,
+        firstName: onboardingFirstName,
+        lastName: onboardingLastName,
         timezone: "America/New_York",
       },
       expectedStatus: [200, 201],
     });
     const userId = String(onboard?.user?.id ?? "");
-    const mobileToken = String(onboard?.authToken ?? "");
-    if (!userId || !mobileToken) {
+    const interimMobileToken = String(onboard?.authToken ?? "");
+    if (!userId || !interimMobileToken) {
       throw new Error("Onboard response missing user id or auth token.");
     }
     if (!onboard?.verificationRequired) {
@@ -300,14 +304,20 @@ async function main() {
     log("Verifying email...");
     const verify = await apiRequest(baseUrl, "/mobile/onboard/verify-email", {
       method: "POST",
-      mobileToken,
+      mobileToken: interimMobileToken,
       body: {
         userId,
         code: verificationCode,
+        firstName: onboardingFirstName,
+        lastName: onboardingLastName,
       },
     });
     if (!verify?.user?.emailVerifiedAt) {
       throw new Error("Email verification did not set emailVerifiedAt.");
+    }
+    const mobileToken = String(verify?.authToken ?? "");
+    if (!mobileToken) {
+      throw new Error("Verify response missing mobile auth token.");
     }
 
     log("Submitting org join request...");

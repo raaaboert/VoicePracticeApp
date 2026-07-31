@@ -43,8 +43,16 @@ test("scoped drilldown href helpers preserve division filters across deeper navi
   assert.equal(buildDashboardScopedCustomerDetailHref("org_1", "division_a"), "/app/customers/org_1?divisionId=division_a");
   assert.equal(buildDashboardScopedTrainingPackHref("pack_1", "division_a"), "/app/training/pack_1?divisionId=division_a");
   assert.equal(
+    buildDashboardScopedTrainingPackHref("pack_1", "division_a", "org_1"),
+    "/app/training/pack_1?divisionId=division_a&orgId=org_1"
+  );
+  assert.equal(
     buildDashboardScopedTrainingPackAssignmentHref("pack_1", "assign_1", "division_a"),
     "/app/training/pack_1/assignments/assign_1?divisionId=division_a"
+  );
+  assert.equal(
+    buildDashboardScopedTrainingPackAssignmentHref("pack_1", "assign_1", null, "org_1"),
+    "/app/training/pack_1/assignments/assign_1?orgId=org_1"
   );
   assert.equal(buildDashboardScopedAttemptDetailHref("attempt_1", "division_a"), "/app/attempts/attempt_1?divisionId=division_a");
 });
@@ -65,6 +73,17 @@ test("canRenderDashboardWorkspaceDivisionFilter stays off for aggregate super-us
         isSuperUser: true,
         orgId: null,
         orgName: null,
+        orgRole: null,
+        capabilities: {
+          viewOrganizationUsers: false,
+          manageRegularOrganizationUsers: false,
+          approveRejectAccessRequests: false,
+          editEmployeeIds: false,
+          editUserNames: false,
+          manageUserRoles: false,
+          assignUserManagers: false,
+          manageOrganizationContent: false,
+        },
       },
       divisionScope: sampleScope,
     }),
@@ -80,6 +99,17 @@ test("canRenderDashboardWorkspaceDivisionFilter stays off for aggregate super-us
         isSuperUser: false,
         orgId: "org_1",
         orgName: "Org 1",
+        orgRole: "org_admin",
+        capabilities: {
+          viewOrganizationUsers: true,
+          manageRegularOrganizationUsers: true,
+          approveRejectAccessRequests: true,
+          editEmployeeIds: true,
+          editUserNames: true,
+          manageUserRoles: true,
+          assignUserManagers: true,
+          manageOrganizationContent: true,
+        },
       },
       divisionScope: sampleScope,
     }),

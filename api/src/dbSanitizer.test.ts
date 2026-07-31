@@ -43,6 +43,7 @@ function makeUser(overrides: Partial<UserProfile>): UserProfile {
   return {
     id: "usr_real",
     email: "learner@realco.com",
+    employeeId: null,
     emailVerifiedAt: NOW,
     isPlatformAdmin: false,
     isSuperUser: false,
