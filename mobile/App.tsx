@@ -86,6 +86,14 @@ import { createSimulationCorrelationId } from "./src/lib/simulationInteractionMo
 import { shouldBlockForMissingAuthenticatedScopedConfig } from "./src/lib/scopedConfigGuard";
 import { isOrganizationAccessRequiredError } from "./src/lib/apiError";
 import {
+  resolveHomeAdminDestination,
+  transitionAdminUserListLoad,
+} from "./src/lib/adminScreenFlow";
+import type {
+  AdminUserListLoadEvent,
+  AdminUserListLoadState,
+} from "./src/lib/adminScreenFlow";
+import {
   getLongPollFailureReportDecision,
   getMissingUsageRecordFields,
 } from "./src/lib/simulationDiagnostics";
@@ -714,6 +722,7 @@ export default function App() {
   const longPollFailureCountRef = useRef(0);
   const longPollFirstFailureAtRef = useRef<number | null>(null);
   const longPollLastErrorRef = useRef<string | null>(null);
+  const adminUserListLoadStateRef = useRef<AdminUserListLoadState>("outside");
   const hasInitializedRef = useRef(false);
   const startupVersionDiagnosticsLoggedRef = useRef(false);
   const sampleVoiceIdentifierRef = useRef<string | undefined>(undefined);
@@ -1579,6 +1588,17 @@ export default function App() {
     }
   }, [mobileAuthToken, submitAutoErrorReport, user]);
 
+  const handleAdminUserListLoadEvent = useCallback(
+    (event: AdminUserListLoadEvent) => {
+      const transition = transitionAdminUserListLoad(adminUserListLoadStateRef.current, event);
+      adminUserListLoadStateRef.current = transition.state;
+      if (transition.shouldLoad) {
+        void refreshOrgAdminUsers();
+      }
+    },
+    [refreshOrgAdminUsers],
+  );
+
   const refreshMyOrgAccessRequests = useCallback(async () => {
     if (!user || !mobileAuthToken) {
       return;
@@ -1870,13 +1890,15 @@ export default function App() {
     if (screen === "admin_home" && !orgAdminUsers) {
       void refreshOrgAdminUsers();
     }
+  }, [orgAdminUsers, refreshOrgAdminUsers, screen]);
 
+  useEffect(() => {
+    handleAdminUserListLoadEvent(screen === "admin_user_list" ? "enter" : "leave");
+  }, [handleAdminUserListLoadEvent, screen]);
+
+  useEffect(() => {
     if (screen === "admin_org_dashboard") {
       void refreshOrgAdminDashboard();
-    }
-
-    if (screen === "admin_user_list") {
-      void refreshOrgAdminUsers();
     }
 
     if (screen === "admin_org_requests") {
@@ -1891,12 +1913,10 @@ export default function App() {
       void refreshMyOrgAccessRequests();
     }
   }, [
-    orgAdminUsers,
     refreshMyOrgAccessRequests,
     refreshOrgAdminAccessRequests,
     refreshOrgAdminDashboard,
     refreshOrgAdminUserDetail,
-    refreshOrgAdminUsers,
     screen,
     selectedAdminUserId,
   ]);
@@ -3826,7 +3846,7 @@ export default function App() {
                 <Pressable
                   style={styles.menuItemButton}
                   onPress={() => {
-                    closeHomeMenu("admin_home");
+                    closeHomeMenu(resolveHomeAdminDestination(isOrgAdmin));
                   }}
                 >
                   <Text style={styles.menuItemText}>{isOrgAdmin ? "Admin" : "Direct Reports"}</Text>
@@ -5624,7 +5644,7 @@ export default function App() {
           <Pressable
             style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
             disabled={adminLoading}
-            onPress={() => void refreshOrgAdminUsers()}
+            onPress={() => handleAdminUserListLoadEvent("manual_refresh")}
           >
             <Text style={styles.ghostButtonText}>{adminLoading ? "Loading..." : "Refresh"}</Text>
           </Pressable>
