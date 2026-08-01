@@ -223,11 +223,11 @@ function normalizeSpeechPrefetchPayload(value: unknown): PrefetchedRemoteSpeechC
   const chunkCount =
     typeof payload.chunkCount === "number" && Number.isFinite(payload.chunkCount)
       ? Math.max(1, Math.floor(payload.chunkCount))
-      : 1;
+      : null;
   const firstChunkChars =
     typeof payload.firstChunkChars === "number" && Number.isFinite(payload.firstChunkChars)
       ? Math.max(0, Math.floor(payload.firstChunkChars))
-      : 0;
+      : null;
   const ttsLatencyMs =
     typeof payload.ttsLatencyMs === "number" && Number.isFinite(payload.ttsLatencyMs)
       ? Math.max(0, Math.floor(payload.ttsLatencyMs))
@@ -391,16 +391,13 @@ async function requestFormData<T>(
   }
 
   if (!response.ok) {
-    let message = `Request failed (${response.status})`;
+    let payload: { error?: unknown; code?: unknown } | null = null;
     try {
-      const payload = (await response.json()) as { error?: string };
-      if (payload.error) {
-        message = payload.error;
-      }
+      payload = (await response.json()) as { error?: unknown; code?: unknown };
     } catch {
-      // Fall back to status message.
+      // Fall back to a status-derived structured error.
     }
-    throw new Error(message);
+    throw createMobileApiError(response.status, payload);
   }
 
   return (await response.json()) as T;
@@ -1355,16 +1352,13 @@ export async function fetchAiTtsAudio(params: {
     });
 
     if (!response.ok) {
-      let message = `Request failed (${response.status})`;
+      let payload: { error?: unknown; code?: unknown } | null = null;
       try {
-        const payload = (await response.json()) as { error?: string };
-        if (payload.error) {
-          message = payload.error;
-        }
+        payload = (await response.json()) as { error?: unknown; code?: unknown };
       } catch {
-        // Fall back to status message.
+        // Fall back to a status-derived structured error.
       }
-      throw new Error(message);
+      throw createMobileApiError(response.status, payload);
     }
 
     const arrayBuffer = await response.arrayBuffer();

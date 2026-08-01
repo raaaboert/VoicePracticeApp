@@ -1568,6 +1568,7 @@ export interface UserEntitlementsResponse {
   usage: UsageSummary;
   canStartSimulation: boolean;
   lockReason: string | null;
+  lockCode?: "ORG_ACCESS_REQUIRED" | null;
 }
 
 export interface AdminLoginRequest {

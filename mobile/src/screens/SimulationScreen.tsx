@@ -4,6 +4,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import { ActivityIndicator, Alert, AppState, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import type { NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
@@ -22,6 +23,7 @@ import {
   startSimulationSession,
 } from "../lib/api";
 import type { PrefetchedRemoteSpeechChunk } from "../lib/api";
+import { isOrganizationAccessRequiredError } from "../lib/apiError";
 import {
   awaitSubmittedSimulationTurnReply,
   createOpeningLine,
@@ -80,8 +82,19 @@ import {
   toRemoteTtsPreset,
 } from "../lib/ttsPlayback";
 import type { PreparedRemoteAudioSource, TtsPlaybackResult } from "../lib/ttsPlayback";
-import { runTtsChunkSequence } from "../lib/ttsChunkSequence";
+import {
+  canTransitionToCaptureAfterTts,
+  isSuccessfulTtsChunkOutcome,
+  runTtsChunkSequence,
+  summarizeTtsChunkSequence,
+} from "../lib/ttsChunkSequence";
+import type { TtsChunkSequenceCompletion } from "../lib/ttsChunkSequence";
 import { splitTextForRemoteTtsFastStart } from "../lib/ttsFastStart";
+import { validateTtsPrefetchMetadata } from "../lib/ttsPrefetchValidation";
+import {
+  isTranscriptNearBottom,
+  shouldFollowTranscriptAfterMessage,
+} from "../lib/transcriptFollow";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
 interface SimulationScreenProps {
@@ -90,6 +103,7 @@ interface SimulationScreenProps {
   userId: string;
   authToken: string;
   onExit: (message?: string | null) => void;
+  onOrganizationAccessRequired: () => void;
   onSessionComplete: (
     history: DialogueMessage[],
     config: SimulationConfig,
@@ -392,11 +406,34 @@ class SimulationLifecycleInterruptedError extends Error {
   }
 }
 
+class AssistantSpeechIncompleteError extends Error {
+  constructor(
+    readonly responseText: string,
+    readonly completion: TtsChunkSequenceCompletion,
+    readonly failureReason: string,
+  ) {
+    super("AI voice playback stopped before the complete response finished.");
+    this.name = "AssistantSpeechIncompleteError";
+  }
+}
+
+function isAssistantSpeechIncompleteError(error: unknown): error is AssistantSpeechIncompleteError {
+  return error instanceof AssistantSpeechIncompleteError;
+}
+
 function isSimulationLifecycleInterruptedError(error: unknown): boolean {
   return error instanceof SimulationLifecycleInterruptedError;
 }
 
-export function SimulationScreen({ config, colorScheme, userId, authToken, onExit, onSessionComplete }: SimulationScreenProps) {
+export function SimulationScreen({
+  config,
+  colorScheme,
+  userId,
+  authToken,
+  onExit,
+  onOrganizationAccessRequired,
+  onSessionComplete,
+}: SimulationScreenProps) {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
@@ -461,6 +498,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const messagesRef = useRef<DialogueMessage[]>([]);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const transcriptNearBottomRef = useRef(true);
+  const transcriptAutoFollowRef = useRef(true);
   const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const appStateRef = useRef<SimulationAppStateStatus>(normalizeSimulationAppStateStatus(AppState.currentState));
   const sessionActiveRef = useRef(false);
@@ -509,7 +548,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const recordingSafetySignalRef = useRef<TurnRecordingSafetySignal | null>(null);
   const sessionLifecycleGenerationRef = useRef(0);
   const lifecyclePauseStartedAtRef = useRef<number | null>(null);
-  const lifecyclePauseReasonRef = useRef<"background" | null>(null);
+  const lifecyclePauseReasonRef = useRef<"background" | "tts_recovery" | null>(null);
   const currentBackgroundedAtRef = useRef<number | null>(null);
   const activeAssistantSpeechRef = useRef<ActiveAssistantSpeech | null>(null);
   const lifecycleResumeIntentRef = useRef<SimulationLifecycleResumeIntent | null>(null);
@@ -821,6 +860,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   ]);
 
   const appendMessage = (message: DialogueMessage) => {
+    transcriptAutoFollowRef.current = shouldFollowTranscriptAfterMessage(transcriptNearBottomRef.current);
     messagesRef.current = [...messagesRef.current, message];
     setMessages(messagesRef.current);
   };
@@ -844,6 +884,44 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       },
     });
     return committedAtMs;
+  };
+
+  const enterAssistantSpeechRecovery = (
+    speechError: AssistantSpeechIncompleteError,
+    correlationId: string,
+  ): boolean => {
+    const assistantMessage = [...messagesRef.current]
+      .reverse()
+      .find((message) => message.role === "assistant" && message.content === speechError.responseText);
+    if (!assistantMessage) {
+      return false;
+    }
+
+    lifecycleResumeIntentRef.current = {
+      kind: "replay_assistant",
+      assistantMessageId: assistantMessage.id,
+      assistantText: assistantMessage.content,
+      assistantMessageCommitted: true,
+    };
+    lifecyclePauseStartedAtRef.current = Date.now();
+    lifecyclePauseReasonRef.current = "tts_recovery";
+    setLifecyclePauseActive(true);
+    setMode("idle");
+    setError("AI voice playback stopped before the response finished.");
+    setStatus("Tap Retry AI Voice to replay the response, or end the session.");
+    logSimulationTiming({
+      correlationId,
+      phase: "assistant_speech_recovery_required",
+      details: {
+        failureReason: speechError.failureReason,
+        intendedChunkCount: speechError.completion.intendedChunkCount,
+        settledChunkCount: speechError.completion.settledChunkCount,
+        completedChunkCount: speechError.completion.completedChunkCount,
+        outcomes: speechError.completion.outcomes,
+        transitionToCapture: false,
+      },
+    });
+    return true;
   };
 
   const stopRemoteTtsPlayback = useCallback(async () => {
@@ -1061,6 +1139,14 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     const chunks = shouldUseFastStartRemoteTts ? splitTextForRemoteTtsFastStart(text) : [text];
     const requestGeneration = ttsRequestGenerationRef.current;
     const preset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
+    const prefetchValidation = prefetchedFirstChunk
+      ? validateTtsPrefetchMetadata(prefetchedFirstChunk, {
+          preset,
+          chunkCount: chunks.length,
+          firstChunkChars: chunks[0]?.length ?? 0,
+        })
+      : null;
+    const usablePrefetchedFirstChunk = prefetchValidation?.status === "mismatch" ? null : prefetchedFirstChunk;
     const preparedChunkByIndex = new Map<number, Promise<PreparedRemoteAudioSource | null>>();
     const resolvedPreparedChunkByIndex = new Map<number, PreparedRemoteAudioSource>();
     let playbackStartHandled = false;
@@ -1121,17 +1207,38 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         chunkChars: chunks.map((chunk) => chunk.length),
         fastStartEnabled: shouldUseFastStartRemoteTts,
         hasPrefetchedFirstChunk: Boolean(prefetchedFirstChunk),
+        usesPrefetchedFirstChunk: Boolean(usablePrefetchedFirstChunk),
+        prefetchValidationStatus: prefetchValidation?.status ?? "not_provided",
+        prefetchMismatchFields: prefetchValidation?.mismatchFields ?? [],
+        prefetchPreset: prefetchedFirstChunk?.preset ?? null,
+        prefetchServerChunkCount: prefetchedFirstChunk?.chunkCount ?? null,
+        prefetchFirstChunkChars: prefetchedFirstChunk?.firstChunkChars ?? null,
+        prefetchAudioBytes: prefetchedFirstChunk?.bytes.byteLength ?? null,
       },
     });
 
-    if (prefetchedFirstChunk) {
+    if (prefetchValidation?.status === "mismatch") {
+      logSimulationTiming({
+        correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, "tts-prefetch"),
+        phase: "tts_prefetch_rejected_mismatch",
+        details: {
+          mismatchFields: prefetchValidation.mismatchFields,
+          clientChunkCount: chunks.length,
+          clientFirstChunkChars: chunks[0]?.length ?? 0,
+          serverChunkCount: prefetchedFirstChunk?.chunkCount ?? null,
+          serverFirstChunkChars: prefetchedFirstChunk?.firstChunkChars ?? null,
+        },
+      });
+    }
+
+    if (usablePrefetchedFirstChunk) {
       preparedChunkByIndex.set(
         0,
         preparePrefetchedRemoteAudioSource({
           source: "simulation",
           preset,
           assistantTextReceivedAtMs,
-          prefetchedRemoteAudio: prefetchedFirstChunk,
+          prefetchedRemoteAudio: usablePrefetchedFirstChunk,
           correlationId,
           chunkIndex: 0,
           chunkCount: chunks.length,
@@ -1139,109 +1246,133 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       );
     }
     try {
-      await runTtsChunkSequence({
-        chunks,
-        runChunk: async (chunk, index) => {
-          let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
-          const preparedPromise = preparedChunkByIndex.get(index);
-          if (preparedPromise) {
-            preparedRemoteAudio = await preparedPromise;
-            if (preparedRemoteAudio) {
-              resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
-              logSimulationTiming({
-                correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-                phase: "tts_chunk_prepared",
-                details: {
-                  chunkIndex: index,
-                  chunkCount: chunks.length,
-                  sourceKind: preparedRemoteAudio.sourceKind,
-                },
-              });
-            }
-          }
-          const utteranceResult = await speakSingleUtterance(
-            chunk,
-            index === 0 ? assistantTextReceivedAtMs : Date.now(),
-            (startedAtMs) => {
-              if (index === 0) {
-                handlePlaybackStart();
-              }
-              const boundaryGapMs =
-                index > 0 && typeof previousChunkCompletedAtMs === "number"
-                  ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
-                  : null;
-              if (typeof boundaryGapMs === "number") {
+      const settledSpeechResults: TtsPlaybackResult[] = [];
+      let sequenceResults: TtsPlaybackResult[];
+      try {
+        sequenceResults = await runTtsChunkSequence({
+          chunks,
+          runChunk: async (chunk, index) => {
+            let preparedRemoteAudio: PreparedRemoteAudioSource | null = null;
+            const preparedPromise = preparedChunkByIndex.get(index);
+            if (preparedPromise) {
+              preparedRemoteAudio = await preparedPromise;
+              if (preparedRemoteAudio) {
+                resolvedPreparedChunkByIndex.set(index, preparedRemoteAudio);
                 logSimulationTiming({
                   correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-                  phase: "tts_chunk_boundary_gap",
+                  phase: "tts_chunk_prepared",
+                  details: {
+                    chunkIndex: index,
+                    chunkCount: chunks.length,
+                    sourceKind: preparedRemoteAudio.sourceKind,
+                  },
+                });
+              }
+            }
+            const utteranceResult = await speakSingleUtterance(
+              chunk,
+              index === 0 ? assistantTextReceivedAtMs : Date.now(),
+              (startedAtMs) => {
+                if (index === 0) {
+                  handlePlaybackStart();
+                }
+                const boundaryGapMs =
+                  index > 0 && typeof previousChunkCompletedAtMs === "number"
+                    ? Math.max(0, startedAtMs - previousChunkCompletedAtMs)
+                    : null;
+                if (typeof boundaryGapMs === "number") {
+                  logSimulationTiming({
+                    correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                    phase: "tts_chunk_boundary_gap",
+                    details: {
+                      chunkIndex: index,
+                      chunkCount: chunks.length,
+                      boundaryGapMs,
+                    },
+                  });
+                }
+                logSimulationTiming({
+                  correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+                  phase: "tts_chunk_playback_started",
                   details: {
                     chunkIndex: index,
                     chunkCount: chunks.length,
                     boundaryGapMs,
                   },
                 });
-              }
-              logSimulationTiming({
-                correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-                phase: "tts_chunk_playback_started",
-                details: {
-                  chunkIndex: index,
-                  chunkCount: chunks.length,
-                  boundaryGapMs,
-                },
-              });
-            },
-            preparedRemoteAudio?.audio ?? (index === 0 ? prefetchedFirstChunk ?? null : null),
-            preparedRemoteAudio,
-            correlationId,
-            index,
-            chunks.length,
-            requestGeneration,
-          );
-          recordSpeechResult(utteranceResult);
-          if (preparedRemoteAudio) {
-            resolvedPreparedChunkByIndex.delete(index);
-          }
-          if (index === 0 && utteranceResult.outcome !== "tts_cancelled") {
-            handlePlaybackStart();
-          }
-          previousChunkCompletedAtMs = Date.now();
-          logSimulationTiming({
-            correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-            phase: utteranceResult.degraded
-              ? utteranceResult.timedOut
-                ? "tts_chunk_timeout_unblocked"
-                : "tts_chunk_degraded_complete"
-              : "tts_chunk_completed",
-            details: {
-              chunkIndex: index,
-              chunkCount: chunks.length,
-              outcome: utteranceResult.outcome,
-              mode: utteranceResult.mode,
-              degraded: utteranceResult.degraded,
-              timedOut: utteranceResult.timedOut,
-              reason: utteranceResult.reason,
-              sourceKind: utteranceResult.sourceKind ?? null,
-            },
-          });
-          logSimulationTiming({
-            correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
-            phase: "tts_chunk_playback_completed",
-            details: {
-              chunkIndex: index,
-              chunkCount: chunks.length,
-              outcome: utteranceResult.outcome,
-              mode: utteranceResult.mode,
-              degraded: utteranceResult.degraded,
-              timedOut: utteranceResult.timedOut,
-            },
-          });
-          if (utteranceResult.outcome !== "tts_cancelled") {
-            startPrefetchForChunk(index + 1);
-          }
-          return utteranceResult;
-        },
-      });
+              },
+              preparedRemoteAudio?.audio ?? (index === 0 ? usablePrefetchedFirstChunk ?? null : null),
+              preparedRemoteAudio,
+              correlationId,
+              index,
+              chunks.length,
+              requestGeneration,
+            );
+            settledSpeechResults.push(utteranceResult);
+            recordSpeechResult(utteranceResult);
+            if (preparedRemoteAudio) {
+              resolvedPreparedChunkByIndex.delete(index);
+            }
+            if (index === 0 && utteranceResult.outcome !== "tts_cancelled") {
+              handlePlaybackStart();
+            }
+            previousChunkCompletedAtMs = Date.now();
+            logSimulationTiming({
+              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+              phase: utteranceResult.degraded
+                ? utteranceResult.timedOut
+                  ? "tts_chunk_timeout_incomplete"
+                  : "tts_chunk_degraded_incomplete"
+                : "tts_chunk_completed",
+              details: {
+                chunkIndex: index,
+                chunkCount: chunks.length,
+                outcome: utteranceResult.outcome,
+                mode: utteranceResult.mode,
+                degraded: utteranceResult.degraded,
+                timedOut: utteranceResult.timedOut,
+                reason: utteranceResult.reason,
+                sourceKind: utteranceResult.sourceKind ?? null,
+              },
+            });
+            logSimulationTiming({
+              correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
+              phase: "tts_chunk_playback_settled",
+              details: {
+                chunkIndex: index,
+                chunkCount: chunks.length,
+                outcome: utteranceResult.outcome,
+                mode: utteranceResult.mode,
+                degraded: utteranceResult.degraded,
+                timedOut: utteranceResult.timedOut,
+              },
+            });
+            if (isSuccessfulTtsChunkOutcome(utteranceResult.outcome)) {
+              startPrefetchForChunk(index + 1);
+            }
+            return utteranceResult;
+          },
+        });
+      } catch (speechError) {
+        if (isOrganizationAccessRequiredError(speechError)) {
+          throw speechError;
+        }
+        const completion = summarizeTtsChunkSequence(chunks.length, settledSpeechResults);
+        logSimulationTiming({
+          correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, "tts-incomplete"),
+          phase: "tts_pipeline_incomplete",
+          details: {
+            ...completion,
+            failureReason: getErrorMessage(speechError, "speech_chunk_failed"),
+          },
+        });
+        throw new AssistantSpeechIncompleteError(
+          text,
+          completion,
+          getErrorMessage(speechError, "speech_chunk_failed"),
+        );
+      }
+      const completion = summarizeTtsChunkSequence(chunks.length, sequenceResults);
       const finalResult: TtsPlaybackResult = aggregateSpeechResult ?? {
         outcome: "remote_tts_completed",
         mode: "remote",
@@ -1251,9 +1382,14 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       };
       logSimulationTiming({
         correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, "tts-complete"),
-        phase: finalResult.degraded ? "tts_pipeline_degraded" : "tts_pipeline_complete",
+        phase:
+          completion.status === "completed"
+            ? "tts_pipeline_complete"
+            : completion.status === "cancelled"
+              ? "tts_pipeline_cancelled"
+              : "tts_pipeline_incomplete",
         details: {
-          chunkCount: chunks.length,
+          ...completion,
           outcome: finalResult.outcome,
           mode: finalResult.mode,
           degraded: finalResult.degraded,
@@ -1262,6 +1398,12 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           sourceKind: finalResult.sourceKind ?? null,
         },
       });
+      if (completion.status === "cancelled") {
+        throw new SimulationLifecycleInterruptedError();
+      }
+      if (!canTransitionToCaptureAfterTts(completion)) {
+        throw new AssistantSpeechIncompleteError(text, completion, finalResult.reason);
+      }
       return finalResult;
     } finally {
       for (const [index, preparedChunk] of resolvedPreparedChunkByIndex) {
@@ -1856,6 +1998,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     setStatus("Finalizing your audio...");
     setError(null);
     let continueLoop = false;
+    let organizationAccessRequired = false;
+    let captureTransitionReason: "assistant_speech_completed" | "no_clear_speech" | "turn_error_recovery" | null = null;
     const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
     const turnNumber = messagesRef.current.filter((message) => message.role === "user").length + 1;
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
@@ -2254,6 +2398,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           if (assistantAwaitAbortControllerRef.current === unifiedAssistantAwaitAbortController) {
             assistantAwaitAbortControllerRef.current = null;
           }
+          if (isOrganizationAccessRequiredError(unifiedError)) {
+            throw unifiedError;
+          }
           const shouldFallbackToLegacy = shouldFallbackToLegacyUnifiedSubmit(unifiedError);
           if (shouldFallbackToLegacy) {
             logSimulationTiming({
@@ -2323,6 +2470,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             },
           });
         } catch (transcriptionError) {
+          if (isOrganizationAccessRequiredError(transcriptionError)) {
+            throw transcriptionError;
+          }
           transcriptionAttempted = true;
           transcriptionFailed = true;
           transcriptionErrorMessage = getErrorMessage(transcriptionError, "Transcription failed.");
@@ -2656,6 +2806,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
               },
             });
             commitAssistantMessageIfNeeded();
+            if (isSuccessfulTtsChunkOutcome(speechResult.outcome)) {
+              captureTransitionReason = "assistant_speech_completed";
+            }
             if (!turnSummaryLogged) {
               emitTurnSummary({
                 outcome: "playback_signal_missing",
@@ -2665,6 +2818,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         }
       } else {
         setStatus("No clear speech detected. Listening again...");
+        captureTransitionReason = "no_clear_speech";
         emitTurnSummary({
           outcome: "no_clear_speech",
         });
@@ -2672,11 +2826,36 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
 
       continueLoop = isForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
     } catch (turnError) {
-      const interruptedByLifecycle =
+      if (isOrganizationAccessRequiredError(turnError)) {
+        organizationAccessRequired = true;
+        continueLoop = false;
+        setError(null);
+        setStatus("Company access is required to continue with Peritio AI.");
+        logSimulationTiming({
+          correlationId,
+          phase: "turn_blocked_organization_access",
+          details: { transitionToCapture: false },
+        });
+      } else if (
+        isAssistantSpeechIncompleteError(turnError)
+        && enterAssistantSpeechRecovery(turnError, correlationId)
+      ) {
+        continueLoop = false;
+        void submitAutoErrorReport("simulation.tts_incomplete", turnError, {
+          simulationSessionId: config.simulationSessionId,
+          correlationId,
+          details: {
+            intendedChunkCount: turnError.completion.intendedChunkCount,
+            settledChunkCount: turnError.completion.settledChunkCount,
+            completedChunkCount: turnError.completion.completedChunkCount,
+            outcomes: turnError.completion.outcomes,
+            failureReason: turnError.failureReason,
+          },
+        });
+      } else if (
         isSimulationLifecycleInterruptedError(turnError)
-        || !isForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
-
-      if (interruptedByLifecycle) {
+        || !isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
+      ) {
         logSimulationTiming({
           correlationId,
           phase: "turn_finalize_cancelled_lifecycle",
@@ -2728,6 +2907,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
           outcome: "error",
           errorMessage: turnErrorMessage,
         });
+        captureTransitionReason = "turn_error_recovery";
         continueLoop = sessionActiveRef.current;
       }
     } finally {
@@ -2753,6 +2933,14 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       }
 
       if (continueLoop && !unmountedRef.current) {
+        logSimulationTiming({
+          correlationId,
+          phase: "turn_transition_to_capture",
+          details: {
+            reason: captureTransitionReason ?? "turn_processing_completed",
+            transitionToCapture: true,
+          },
+        });
         void startListeningTurn();
       } else if (!unmountedRef.current) {
         setMode("idle");
@@ -2761,6 +2949,9 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       if (activeTurnSettlementRef.current === activeTurnSettlement) {
         activeTurnSettlementRef.current = null;
       }
+    }
+    if (organizationAccessRequired && !unmountedRef.current) {
+      onOrganizationAccessRequired();
     }
   };
 
@@ -3144,6 +3335,11 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
         return;
       }
 
+      if (isOrganizationAccessRequiredError(startError)) {
+        onOrganizationAccessRequired();
+        return;
+      }
+
       if (!openingCompletedRef.current) {
         openingStartedRef.current = false;
       }
@@ -3272,7 +3468,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
   const resumeLifecyclePausedTurn = async () => {
     if (
       lifecycleResumeInProgressRef.current
-      || lifecyclePauseReasonRef.current !== "background"
+      || lifecyclePauseReasonRef.current === null
       || !sessionActiveRef.current
       || simulationClosedRef.current
       || unmountedRef.current
@@ -3281,9 +3477,10 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     }
 
     lifecycleResumeInProgressRef.current = true;
+    const resumeReason = lifecyclePauseReasonRef.current;
     setIsResumingLifecyclePause(true);
     setError(null);
-    setStatus("Resuming turn...");
+    setStatus(resumeReason === "tts_recovery" ? "Retrying AI voice..." : "Resuming turn...");
 
     const resumeIntent = lifecycleResumeIntentRef.current ?? getSimulationLifecycleResumeIntent({
       activeAssistantSpeech: activeAssistantSpeechRef.current
@@ -3361,6 +3558,19 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       }
       await startListeningTurn();
     } catch (resumeError) {
+      if (isOrganizationAccessRequiredError(resumeError)) {
+        onOrganizationAccessRequired();
+        return;
+      }
+      if (
+        isAssistantSpeechIncompleteError(resumeError)
+        && enterAssistantSpeechRecovery(
+          resumeError,
+          createSimulationCorrelationId(config.simulationSessionId, "resume-assistant-speech"),
+        )
+      ) {
+        return;
+      }
       if (
         isSimulationLifecycleInterruptedError(resumeError)
         || !isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
@@ -3394,7 +3604,7 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
       lifecycleResumeInProgress: lifecycleResumeInProgressRef.current,
       sessionActive: sessionActiveRef.current,
       mode,
-      lifecyclePauseActive: lifecyclePauseReasonRef.current === "background",
+      lifecyclePauseActive: lifecyclePauseReasonRef.current !== null,
     });
     if (primaryButtonRoute === "ignore") {
       return;
@@ -3530,6 +3740,8 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     const initialize = async () => {
       setIsInitializing(true);
       messagesRef.current = [];
+      transcriptNearBottomRef.current = true;
+      transcriptAutoFollowRef.current = true;
       sessionStartedAtRef.current = null;
       sessionTrainingPackIdRef.current = null;
       setMessages([]);
@@ -3728,25 +3940,19 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
     };
   }, [config.voiceGender]);
 
-  useEffect(() => {
-    if (messages.length === 0) {
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }, 40);
-
-    return () => clearTimeout(timeout);
-  }, [messages]);
-
-  const primaryAction = getPrimarySimulationAction({
+  const resolvedPrimaryAction = getPrimarySimulationAction({
     sessionActive,
     isInitializing,
     mode,
     isStartingSession,
     isStartingTurn: isStartingTurn || isResumingLifecyclePause,
   });
+  const primaryAction =
+    lifecyclePauseActive
+    && lifecyclePauseReasonRef.current === "tts_recovery"
+    && resolvedPrimaryAction.kind === "start"
+      ? { ...resolvedPrimaryAction, label: "Retry AI Voice" }
+      : resolvedPrimaryAction;
   const showUserTurnInstruction = shouldShowUserTurnInstruction({
     sessionActive,
     mode,
@@ -4008,6 +4214,23 @@ export function SimulationScreen({ config, colorScheme, userId, authToken, onExi
             style={styles.chatScroll}
             contentContainerStyle={[styles.chatContent, useCompactTranscript ? styles.chatContentCompact : null]}
             nestedScrollEnabled
+            scrollEventThrottle={16}
+            onScrollBeginDrag={() => {
+              transcriptAutoFollowRef.current = false;
+            }}
+            onScroll={(event: NativeSyntheticEvent<NativeScrollEvent>) => {
+              const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+              transcriptNearBottomRef.current = isTranscriptNearBottom({
+                contentHeight: contentSize.height,
+                viewportHeight: layoutMeasurement.height,
+                offsetY: contentOffset.y,
+              });
+            }}
+            onContentSizeChange={() => {
+              if (transcriptAutoFollowRef.current) {
+                scrollRef.current?.scrollToEnd({ animated: true });
+              }
+            }}
           >
             {messages.length === 0 ? (
               <View

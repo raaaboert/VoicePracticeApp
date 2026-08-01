@@ -7,6 +7,7 @@ import { getVoiceSpeechTuning, selectSpeechVoiceIdentifier } from "../data/prefe
 import type { AiVoiceGender, AiVoiceProfile } from "../types";
 import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
 import type { PrefetchedRemoteSpeechChunk } from "./api";
+import { isOrganizationAccessRequiredError } from "./apiError";
 import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
 import { createPlaybackSession as createPlaybackSettlementSession } from "./ttsPlaybackSession";
 
@@ -618,6 +619,8 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       params.preparedRemoteSource || params.prefetchedRemoteAudio ? "source_prepare" : "fetch";
     let deviceFallbackAttempted = false;
     let deviceFallbackSucceeded = false;
+    let lastPlaybackPositionMillis: number | null = null;
+    let lastPlaybackDurationMillis: number | null = null;
 
     const logLifecycle = (payload: {
       phase: string;
@@ -817,6 +820,9 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           }
           return;
         }
+
+        lastPlaybackPositionMillis = status.positionMillis;
+        lastPlaybackDurationMillis = status.durationMillis ?? null;
 
         const statusKey = `loaded:${status.isPlaying}:${status.isBuffering}:${status.didJustFinish}`;
         if (statusKey !== lastStatusKey) {
@@ -1178,6 +1184,9 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       });
       return await completeRemoteSuccess();
     } catch (error) {
+      if (isOrganizationAccessRequiredError(error)) {
+        throw error;
+      }
       if (error instanceof TtsPlaybackCancelledError || isCancelled()) {
         const cancellationState = params.describeCancellation?.() ?? {};
         const cancellationDetails = analyzeTtsCancellation({
@@ -1243,6 +1252,8 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         details: {
           stage: remoteStage,
           playbackStarted,
+          finalPositionMillis: lastPlaybackPositionMillis,
+          durationMillis: lastPlaybackDurationMillis,
         },
       });
       await stopRemoteTtsPlayback({ remoteTtsSoundRef, remoteTtsFileRef });

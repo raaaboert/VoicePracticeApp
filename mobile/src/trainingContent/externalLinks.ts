@@ -12,6 +12,8 @@ export function confirmAndOpenExternalLink(
   options: {
     allowMailto?: boolean;
     onError?: (message: string) => void;
+    confirmationTitle?: string;
+    confirmationMessage?: string;
   } = {}
 ): void {
   const safeUrl = sanitizeTrainingContentLink(rawUrl, options);
@@ -20,8 +22,8 @@ export function confirmAndOpenExternalLink(
     return;
   }
   Alert.alert(
-    "Open External Resource",
-    EXTERNAL_RESOURCE_CONFIRMATION,
+    options.confirmationTitle ?? "Open External Resource",
+    options.confirmationMessage ?? EXTERNAL_RESOURCE_CONFIRMATION,
     [
       { text: "Cancel", style: "cancel" },
       {

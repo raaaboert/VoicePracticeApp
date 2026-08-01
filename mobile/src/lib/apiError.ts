@@ -28,3 +28,7 @@ export function createMobileApiError(
       : null;
   return new MobileApiError(message, status, code);
 }
+
+export function isOrganizationAccessRequiredError(error: unknown): boolean {
+  return error instanceof MobileApiError && error.code === "ORG_ACCESS_REQUIRED";
+}
