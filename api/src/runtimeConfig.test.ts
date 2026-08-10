@@ -47,6 +47,66 @@ test("auth code delivery overrides default to null when unset", () => {
   assert.equal(config.mobileEmailVerificationDeliveryProvider, null);
 });
 
+test("app review authentication is disabled when both values are absent", () => {
+  const config = loadRuntimeConfig(makeEnv());
+
+  assert.equal(config.appReviewCredential, null);
+});
+
+test("app review authentication is disabled for every missing or blank partial configuration", () => {
+  const cases: NodeJS.ProcessEnv[] = [
+    { APP_REVIEW_EMAIL: "reviewer@example.test" },
+    { APP_REVIEW_CODE: "808080" },
+    { APP_REVIEW_EMAIL: "   ", APP_REVIEW_CODE: "808080" },
+    { APP_REVIEW_EMAIL: "reviewer@example.test", APP_REVIEW_CODE: "   " },
+  ];
+  const originalWarn = console.warn;
+  console.warn = () => undefined;
+  try {
+    for (const partial of cases) {
+      assert.equal(loadRuntimeConfig(makeEnv(partial)).appReviewCredential, null);
+    }
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("valid app review configuration is enabled with a trimmed lowercase email", () => {
+  const config = loadRuntimeConfig(makeEnv({
+    APP_REVIEW_EMAIL: "  Reviewer@Example.Test  ",
+    APP_REVIEW_CODE: " 808080 ",
+  }));
+
+  assert.deepEqual(config.appReviewCredential, {
+    email: "reviewer@example.test",
+    code: "808080",
+  });
+});
+
+test("malformed app review code fails closed with one sanitized warning", () => {
+  const configuredCode = "not-a-six-digit-code";
+  const configuredEmail = "reviewer@example.test";
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    const config = loadRuntimeConfig(makeEnv({
+      APP_REVIEW_EMAIL: configuredEmail,
+      APP_REVIEW_CODE: configuredCode,
+    }));
+    assert.equal(config.appReviewCredential, null);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /disabled due to invalid configuration/i);
+  assert.equal(warnings.join("\n").includes(configuredCode), false);
+  assert.equal(warnings.join("\n").includes(configuredEmail), false);
+});
+
 test("web auth resend override requires resend credentials even when default provider stays log_only", () => {
   assert.throws(
     () =>

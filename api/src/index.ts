@@ -215,6 +215,11 @@ import {
   ORG_ACCESS_REQUIRED_CODE,
   resolveMobilePaidAiOrganizationAccess,
 } from "./services/mobileAiAccessPolicy.js";
+import {
+  hashEmailVerificationCode,
+  normalizeEmailForExactMatch,
+  verifyLatestEmailVerification,
+} from "./services/emailVerification.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
 import {
@@ -440,6 +445,7 @@ const WEB_AUTH_TOKEN_SECRET = runtimeConfig.webAuthTokenSecret;
 const DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES = DASHBOARD_TRUSTED_SESSION_MINUTES;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
 const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
+const APP_REVIEW_CREDENTIAL = runtimeConfig.appReviewCredential;
 const OPENAI_MODEL_CONFIG = runtimeConfig.openAi;
 const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
 const OPENAI_SIMULATION_MODEL = OPENAI_MODEL_CONFIG.simulation.model;
@@ -3064,39 +3070,49 @@ function cleanupRateLimitStore(nowMs: number): void {
   }
 }
 
-function createRateLimiter(options: RateLimiterOptions) {
+function consumeRateLimit(
+  options: RateLimiterOptions,
+  request: Request,
+  response: Response,
+  selectorOverride?: string
+): boolean {
   const windowMs = Math.max(1_000, Math.floor(options.windowMs));
   const max = Math.max(1, Math.floor(options.max));
+  const nowMs = Date.now();
+  cleanupRateLimitStore(nowMs);
 
+  const selectorValue = selectorOverride || options.keySelector?.(request) || getClientIp(request);
+  const key = `${options.name}:${selectorValue || "unknown"}`;
+  const existing = rateLimitByKey.get(key);
+  const state =
+    existing && nowMs - existing.windowStartMs < windowMs
+      ? existing
+      : {
+          count: 0,
+          windowStartMs: nowMs
+        };
+
+  state.count += 1;
+  rateLimitByKey.set(key, state);
+
+  if (state.count > max) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
+    options.onLimitExceeded?.(request, retryAfterSeconds);
+    response.setHeader("Retry-After", String(retryAfterSeconds));
+    response.status(429).json({
+      error: "Too many requests. Please wait and retry."
+    });
+    return false;
+  }
+
+  return true;
+}
+
+function createRateLimiter(options: RateLimiterOptions) {
   return (request: Request, response: Response, next: NextFunction): void => {
-    const nowMs = Date.now();
-    cleanupRateLimitStore(nowMs);
-
-    const selectorValue = options.keySelector?.(request) || getClientIp(request);
-    const key = `${options.name}:${selectorValue || "unknown"}`;
-    const existing = rateLimitByKey.get(key);
-    const state =
-      existing && nowMs - existing.windowStartMs < windowMs
-        ? existing
-        : {
-            count: 0,
-            windowStartMs: nowMs
-          };
-
-    state.count += 1;
-    rateLimitByKey.set(key, state);
-
-    if (state.count > max) {
-      const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
-      options.onLimitExceeded?.(request, retryAfterSeconds);
-      response.setHeader("Retry-After", String(retryAfterSeconds));
-      response.status(429).json({
-        error: "Too many requests. Please wait and retry."
-      });
-      return;
+    if (consumeRateLimit(options, request, response)) {
+      next();
     }
-
-    next();
   };
 }
 
@@ -4816,10 +4832,6 @@ function respondWithTrainingContentMobileError(error: unknown, response: Respons
   response.status(mapped.status).json(mapped.body);
 }
 
-function hashVerificationCode(userId: string, email: string, code: string): string {
-  return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(`${userId}:${email}:${code}`).digest("hex");
-}
-
 function createVerificationCode(): string {
   const numeric = crypto.randomInt(0, 1_000_000);
   return String(numeric).padStart(6, "0");
@@ -4839,7 +4851,7 @@ async function issueEmailVerification(
   const nowIsoValue = now.toISOString();
   const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
   const code = createVerificationCode();
-  const codeHash = hashVerificationCode(user.id, user.email, code);
+  const codeHash = hashEmailVerificationCode(MOBILE_TOKEN_SECRET, user.id, user.email, code);
 
   const record: EmailVerificationRecord = {
     id: `ver_${uuid()}`,
@@ -4950,37 +4962,6 @@ function buildSimulationScoreCoachingArtifactFromScorecard(
     improvementAreas: scorecard.improvements,
     coachingPriority: scorecard.improvements[0] ?? null
   });
-}
-
-function verifyLatestEmailVerification(
-  db: ApiDatabase,
-  user: UserProfile,
-  code: string,
-  now: Date
-): "ok" | "missing" | "expired" | "invalid" {
-  const pending = db.emailVerifications
-    .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-  const latest = pending[0];
-  if (!latest) {
-    return "missing";
-  }
-
-  const expiresAtMs = new Date(latest.expiresAt).getTime();
-  if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-    latest.consumedAt = now.toISOString();
-    return "expired";
-  }
-
-  const expectedHash = Buffer.from(latest.codeHash, "hex");
-  const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
-  if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
-    return "invalid";
-  }
-
-  latest.consumedAt = now.toISOString();
-  return "ok";
 }
 
 function buildWebAuthSessionUser(user: UserProfile): WebAuthSessionResponse["session"] {
@@ -10322,6 +10303,12 @@ const mobileVerificationRateLimiter = createRateLimiter({
   }
 });
 
+const mobileReviewerVerificationRateLimitOptions: RateLimiterOptions = {
+  name: "mobile-reviewer-verify-email",
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+};
+
 const mobileOrgJoinRequestRateLimiter = createRateLimiter({
   name: "mobile-org-join-request",
   windowMs: 15 * 60 * 1000,
@@ -10721,7 +10708,13 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
 
       challengeType = "sign_in";
     } else {
-      const result = verifyLatestEmailVerification(db, user, code, now);
+      const result = verifyLatestEmailVerification({
+        db,
+        user,
+        code,
+        now,
+        codeSecret: MOBILE_TOKEN_SECRET,
+      });
       if (result === "missing") {
         response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
@@ -16018,6 +16011,14 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
+    if (
+      APP_REVIEW_CREDENTIAL
+      && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
+      && !consumeRateLimit(mobileReviewerVerificationRateLimitOptions, request, response, user.id)
+    ) {
+      return;
+    }
+
     if (!hasValidMobileTokenForUser(db, user.id, authToken, {
       allowReonboardingToken: true,
       allowIncompleteProfile: true,
@@ -16076,32 +16077,28 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
 
     const now = new Date();
     if (needsCodeVerification) {
-      const pending = db.emailVerifications
-        .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-      const latest = pending[0];
-      if (!latest) {
+      const verificationResult = verifyLatestEmailVerification({
+        db,
+        user,
+        code,
+        now,
+        codeSecret: MOBILE_TOKEN_SECRET,
+        appReviewCredential: APP_REVIEW_CREDENTIAL,
+      });
+      if (verificationResult === "missing") {
         response.status(400).json({ error: "No pending verification code. Please resend verification email." });
         return;
       }
-
-      const expiresAtMs = new Date(latest.expiresAt).getTime();
-      if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-        latest.consumedAt = now.toISOString();
+      if (verificationResult === "expired") {
         response.status(400).json({ error: "Verification code expired. Please request a new code." });
         return;
       }
-
-      const expectedHash = Buffer.from(latest.codeHash, "hex");
-      const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
-      if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
+      if (verificationResult === "invalid") {
         response.status(400).json({ error: "Invalid verification code." });
         return;
       }
 
       const nowIsoValue = now.toISOString();
-      latest.consumedAt = nowIsoValue;
       user.emailVerifiedAt = nowIsoValue;
       user.updatedAt = nowIsoValue;
       appendMobileAuditEvent(db, user, {
@@ -21984,6 +21981,14 @@ export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) =
     throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
   }
   dashboardTrainingPackLoaderForTest = loader;
+}
+
+export function clearRateLimitsForTest(): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("clearRateLimitsForTest is only available in test.");
+  }
+  rateLimitByKey.clear();
+  rateLimitCleanupCounter = 0;
 }
 
 export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementStore): void {
