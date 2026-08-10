@@ -187,7 +187,6 @@ export default function EnterpriseOrgPage() {
   const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
   const [savingOrgStatus, setSavingOrgStatus] = useState(false);
   const [savingTrainingContentModule, setSavingTrainingContentModule] = useState(false);
-  const [orgDomainInput, setOrgDomainInput] = useState("");
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [monthlyMinutesAllottedInput, setMonthlyMinutesAllottedInput] = useState("0");
   const [defaultPerUserDailyMinutesInput, setDefaultPerUserDailyMinutesInput] = useState("0");
@@ -231,7 +230,6 @@ export default function EnterpriseOrgPage() {
       setModuleEntitlements(moduleEntitlementsPayload);
       setConfig(configPayload);
       setIndustries(configPayload.industries ?? []);
-      setOrgDomainInput(payload.org.emailDomain ?? "");
       setOrgJoinCodeInput(payload.org.joinCode ?? "");
       setMonthlyMinutesAllottedInput(String(payload.org.monthlyMinutesAllotted ?? 0));
       setDefaultPerUserDailyMinutesInput(String(Math.max(0, Math.floor((payload.org.perUserDailySecondsCap ?? 0) / 60))));
@@ -662,12 +660,10 @@ export default function EnterpriseOrgPage() {
       const updated = await adminFetch<EnterpriseOrg>(`/orgs/${dashboard.org.id}`, {
         method: "PATCH",
         body: JSON.stringify({
-          emailDomain: orgDomainInput,
           joinCode: orgJoinCodeInput,
         }),
       });
       setDashboard((prev) => (prev ? { ...prev, org: updated } : prev));
-      setOrgDomainInput(updated.emailDomain ?? "");
       setOrgJoinCodeInput(updated.joinCode ?? "");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update org identity.");
@@ -1075,16 +1071,12 @@ export default function EnterpriseOrgPage() {
                     <div>
                       <h3 style={{ marginBottom: 6 }}>Identity, Industries & Enrollment</h3>
                       <p className="small">
-                        Domain controls, join code management, and industry activation for this enterprise account.
+                        Join code management and industry activation for this enterprise account.
                       </p>
                     </div>
                   </div>
                   <div className="enterprise-subsection">
                     <div className="enterprise-detail-grid">
-                      <div className="enterprise-detail-item">
-                        <label>Email Domain</label>
-                        <input value={orgDomainInput} onChange={(event) => setOrgDomainInput(event.target.value)} />
-                      </div>
                       <div className="enterprise-detail-item">
                         <label>Join Code</label>
                         <input value={orgJoinCodeInput} onChange={(event) => setOrgJoinCodeInput(event.target.value)} />
@@ -1138,7 +1130,7 @@ export default function EnterpriseOrgPage() {
                     </div>
                     <div className="form-actions">
                       <button className="primary" disabled={savingOrgIdentity} onClick={() => void saveOrgIdentity()}>
-                        {savingOrgIdentity ? "Saving..." : "Save Domain / Join Code"}
+                        {savingOrgIdentity ? "Saving..." : "Save Join Code"}
                       </button>
                     </div>
                   </div>

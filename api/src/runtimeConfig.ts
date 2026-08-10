@@ -4,6 +4,7 @@ import {
   loadTrainingContentStorageConfig,
   TrainingContentStorageConfig,
 } from "./trainingContentStorageConfig.js";
+import type { AppReviewCredential } from "./services/emailVerification.js";
 
 export type StorageProvider = "file" | "postgres";
 export type AuthCodeDeliveryProvider = "log_only" | "resend";
@@ -34,6 +35,7 @@ export interface RuntimeConfig {
   authCodeFromName: string;
   authCodeReplyTo: string | null;
   requireReverifyOnOnboard: boolean;
+  appReviewCredential: AppReviewCredential | null;
   openAi: OpenAiModelConfig;
   enableRemoteTts: boolean;
   openAiMaxDailyCallsPerUser: number | null;
@@ -107,6 +109,23 @@ function toBoolean(value: string | undefined, fallback: boolean): boolean {
   }
 
   throw new Error(`Expected boolean environment value, received "${value}".`);
+}
+
+function loadAppReviewCredential(env: NodeJS.ProcessEnv): AppReviewCredential | null {
+  const email = env.APP_REVIEW_EMAIL?.trim().toLowerCase() || "";
+  const code = env.APP_REVIEW_CODE?.trim() || "";
+
+  if (!email && !code) {
+    return null;
+  }
+
+  if (!email || !code || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !/^\d{6}$/.test(code)) {
+    // Deliberately omit both values: they are authentication configuration.
+    console.warn("[app-review-auth] Reviewer authentication is disabled due to invalid configuration.");
+    return null;
+  }
+
+  return { email, code };
 }
 
 function normalizeOrigin(value: string): string {
@@ -366,6 +385,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const authCodeFromEmail = env.AUTH_CODE_FROM_EMAIL?.trim() || null;
   const authCodeFromName = env.AUTH_CODE_FROM_NAME?.trim() || "Peritio";
   const authCodeReplyTo = env.AUTH_CODE_REPLY_TO?.trim() || null;
+  const appReviewCredential = loadAppReviewCredential(env);
   const mobileTokenSecret = env.MOBILE_TOKEN_SECRET?.trim() || adminTokenSecret;
   const supportTranscriptSecret =
     env.SUPPORT_TRANSCRIPT_SECRET?.trim() || env.ADMIN_TOKEN_SECRET?.trim() || "replace_me_for_production";
@@ -471,6 +491,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     authCodeFromName,
     authCodeReplyTo,
     requireReverifyOnOnboard: toBoolean(env.MOBILE_REVERIFY_ON_ONBOARD, isProduction),
+    appReviewCredential,
     openAi: loadOpenAiModelConfig(env),
     enableRemoteTts: toBoolean(env.ENABLE_REMOTE_TTS, false),
     openAiMaxDailyCallsPerUser: parseOptionalNonNegativeInt(

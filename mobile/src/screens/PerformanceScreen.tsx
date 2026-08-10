@@ -296,12 +296,48 @@ function PlanDetailModal({
   onClose: () => void;
   onUpdated: (detail: MobilePerformancePlanDetailResponse) => void;
 }) {
-  const [body, setBody] = useState("");
-  const [posting, setPosting] = useState(false);
-  const [postError, setPostError] = useState<string | null>(null);
   if (!detail) {
     return null;
   }
+
+  return (
+    <Modal
+      visible
+      animationType="slide"
+      presentationStyle="fullScreen"
+      onRequestClose={onClose}
+    >
+      <SafeAreaProvider style={styles.fill}>
+        <PlanDetailModalContent
+          detail={detail}
+          userId={userId}
+          authToken={authToken}
+          onClose={onClose}
+          onUpdated={onUpdated}
+        />
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+
+function PlanDetailModalContent({
+  detail,
+  userId,
+  authToken,
+  onClose,
+  onUpdated,
+}: {
+  detail: MobilePerformancePlanDetailResponse;
+  userId: string;
+  authToken: string;
+  onClose: () => void;
+  onUpdated: (detail: MobilePerformancePlanDetailResponse) => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const bottomInsetPadding = Math.max(insets.bottom, 12) + 24;
+  const [body, setBody] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [postError, setPostError] = useState<string | null>(null);
   const canPostUpdate = detail.plan.status === "active" && derivePerformancePlanPresentationStatus(detail.plan) !== "completed" && derivePerformancePlanPresentationStatus(detail.plan) !== "cancelled";
 
   const submitUpdate = async () => {
@@ -319,7 +355,7 @@ function PlanDetailModal({
   };
 
   return (
-    <Modal visible animationType="slide" onRequestClose={onClose}>
+    <View style={[styles.modalSafeArea, { paddingTop: insets.top }]}>
       <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <View style={styles.modalScreen}>
           <View style={styles.topRow}>
@@ -329,7 +365,11 @@ function PlanDetailModal({
             <Text style={styles.topTitle}>Goal Detail</Text>
             <View style={styles.headerSpacer} />
           </View>
-          <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={[styles.content, { paddingBottom: bottomInsetPadding }]}
+            keyboardShouldPersistTaps="handled"
+          >
             <PlanSummaryCard plan={detail.plan} progress={detail.progress} attribution={getMobilePlanAttribution(detail.plan, userId)} />
 
             {detail.insights.length > 0 ? (
@@ -386,7 +426,7 @@ function PlanDetailModal({
           </ScrollView>
         </View>
       </KeyboardAvoidingView>
-    </Modal>
+    </View>
   );
 }
 

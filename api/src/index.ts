@@ -76,7 +76,6 @@ import {
   Difficulty,
   EnterpriseOrg,
   EnterpriseJoinRequestRecord,
-  EnterpriseDomainMatch,
   EmailVerificationRecord,
   GenerateOrgCustomScenarioRequest,
   GenerateOrgCustomScenarioResponse,
@@ -216,6 +215,11 @@ import {
   ORG_ACCESS_REQUIRED_CODE,
   resolveMobilePaidAiOrganizationAccess,
 } from "./services/mobileAiAccessPolicy.js";
+import {
+  hashEmailVerificationCode,
+  normalizeEmailForExactMatch,
+  verifyLatestEmailVerification,
+} from "./services/emailVerification.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
 import {
@@ -441,6 +445,7 @@ const WEB_AUTH_TOKEN_SECRET = runtimeConfig.webAuthTokenSecret;
 const DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES = DASHBOARD_TRUSTED_SESSION_MINUTES;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
 const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
+const APP_REVIEW_CREDENTIAL = runtimeConfig.appReviewCredential;
 const OPENAI_MODEL_CONFIG = runtimeConfig.openAi;
 const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
 const OPENAI_SIMULATION_MODEL = OPENAI_MODEL_CONFIG.simulation.model;
@@ -3065,39 +3070,49 @@ function cleanupRateLimitStore(nowMs: number): void {
   }
 }
 
-function createRateLimiter(options: RateLimiterOptions) {
+function consumeRateLimit(
+  options: RateLimiterOptions,
+  request: Request,
+  response: Response,
+  selectorOverride?: string
+): boolean {
   const windowMs = Math.max(1_000, Math.floor(options.windowMs));
   const max = Math.max(1, Math.floor(options.max));
+  const nowMs = Date.now();
+  cleanupRateLimitStore(nowMs);
 
+  const selectorValue = selectorOverride || options.keySelector?.(request) || getClientIp(request);
+  const key = `${options.name}:${selectorValue || "unknown"}`;
+  const existing = rateLimitByKey.get(key);
+  const state =
+    existing && nowMs - existing.windowStartMs < windowMs
+      ? existing
+      : {
+          count: 0,
+          windowStartMs: nowMs
+        };
+
+  state.count += 1;
+  rateLimitByKey.set(key, state);
+
+  if (state.count > max) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
+    options.onLimitExceeded?.(request, retryAfterSeconds);
+    response.setHeader("Retry-After", String(retryAfterSeconds));
+    response.status(429).json({
+      error: "Too many requests. Please wait and retry."
+    });
+    return false;
+  }
+
+  return true;
+}
+
+function createRateLimiter(options: RateLimiterOptions) {
   return (request: Request, response: Response, next: NextFunction): void => {
-    const nowMs = Date.now();
-    cleanupRateLimitStore(nowMs);
-
-    const selectorValue = options.keySelector?.(request) || getClientIp(request);
-    const key = `${options.name}:${selectorValue || "unknown"}`;
-    const existing = rateLimitByKey.get(key);
-    const state =
-      existing && nowMs - existing.windowStartMs < windowMs
-        ? existing
-        : {
-            count: 0,
-            windowStartMs: nowMs
-          };
-
-    state.count += 1;
-    rateLimitByKey.set(key, state);
-
-    if (state.count > max) {
-      const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
-      options.onLimitExceeded?.(request, retryAfterSeconds);
-      response.setHeader("Retry-After", String(retryAfterSeconds));
-      response.status(429).json({
-        error: "Too many requests. Please wait and retry."
-      });
-      return;
+    if (consumeRateLimit(options, request, response)) {
+      next();
     }
-
-    next();
   };
 }
 
@@ -3258,7 +3273,6 @@ function ensureDemoEnterpriseData(db: {
     if (existing) {
       existing.contactName = demoOrg.contactName;
       existing.contactEmail = demoOrg.contactEmail;
-      existing.emailDomain = existing.emailDomain ?? extractEmailDomain(demoOrg.contactEmail);
       existing.joinCode =
         normalizeJoinCode(existing.joinCode) || normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH);
       existing.activeIndustries = normalizeIndustryIds(existing.activeIndustries, defaultIndustryIds, allowedIndustryIds);
@@ -3287,7 +3301,7 @@ function ensureDemoEnterpriseData(db: {
       status: "active",
       contactName: demoOrg.contactName,
       contactEmail: demoOrg.contactEmail,
-      emailDomain: extractEmailDomain(demoOrg.contactEmail),
+      emailDomain: null,
       joinCode: normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH),
       activeIndustries: normalizeIndustryIds(demoOrg.activeIndustries, defaultIndustryIds, allowedIndustryIds),
       dailySecondsQuota: db.config.enterprise.defaultOrgDailySecondsQuota,
@@ -3846,20 +3860,9 @@ function generateUniqueJoinCode(existingCodes: Set<string>, seed: string): strin
   return fallback;
 }
 
-function ensureOrgCodesAndDomains(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
+function ensureOrgJoinCodes(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
   const existingCodes = new Set<string>();
-  const seenDomains = new Set<string>();
   return orgs.map((org) => {
-    const requestedDomain = normalizeEmailDomain(org.emailDomain) ?? extractEmailDomain(org.contactEmail);
-    let domain: string | null = requestedDomain;
-    if (domain) {
-      if (seenDomains.has(domain)) {
-        // Domain conflicts are left for manual resolution; keep access matching disabled until fixed.
-        domain = null;
-      } else {
-        seenDomains.add(domain);
-      }
-    }
     const requestedCode = normalizeJoinCode(org.joinCode);
     const joinCode = requestedCode && !existingCodes.has(requestedCode)
       ? (existingCodes.add(requestedCode), requestedCode)
@@ -3867,7 +3870,6 @@ function ensureOrgCodesAndDomains(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
 
     return {
       ...org,
-      emailDomain: domain,
       joinCode
     };
   });
@@ -3970,7 +3972,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   const configuredIndustryIds = new Set(getConfiguredIndustryIds(config));
   const fallbackOrgIndustryIds = getConfiguredActiveIndustryIds(config);
 
-  const normalizedOrgs = ensureOrgCodesAndDomains(
+  const normalizedOrgs = ensureOrgJoinCodes(
     (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs)
       .map((org) => {
         const normalizedOrg = ensureOrgContractFields({
@@ -4830,35 +4832,14 @@ function respondWithTrainingContentMobileError(error: unknown, response: Respons
   response.status(mapped.status).json(mapped.body);
 }
 
-function hashVerificationCode(userId: string, email: string, code: string): string {
-  return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(`${userId}:${email}:${code}`).digest("hex");
-}
-
 function createVerificationCode(): string {
   const numeric = crypto.randomInt(0, 1_000_000);
   return String(numeric).padStart(6, "0");
 }
 
-function buildDomainMatchForEmail(db: ApiDatabase, email: string): EnterpriseDomainMatch | null {
-  const emailDomain = extractEmailDomain(email);
-  if (!emailDomain) {
-    return null;
-  }
-
-  const org = db.orgs.find(
-    (candidate) =>
-      candidate.status === "active" && normalizeEmailDomain(candidate.emailDomain) === normalizeEmailDomain(emailDomain)
-  );
-
-  if (!org) {
-    return null;
-  }
-
-  return {
-    orgId: org.id,
-    orgName: org.name,
-    emailDomain
-  };
+function buildDomainMatchForEmail(_db: ApiDatabase, _email: string): null {
+  // Deprecated compatibility field: organization discovery is company-code based.
+  return null;
 }
 
 async function issueEmailVerification(
@@ -4870,7 +4851,7 @@ async function issueEmailVerification(
   const nowIsoValue = now.toISOString();
   const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
   const code = createVerificationCode();
-  const codeHash = hashVerificationCode(user.id, user.email, code);
+  const codeHash = hashEmailVerificationCode(MOBILE_TOKEN_SECRET, user.id, user.email, code);
 
   const record: EmailVerificationRecord = {
     id: `ver_${uuid()}`,
@@ -4981,37 +4962,6 @@ function buildSimulationScoreCoachingArtifactFromScorecard(
     improvementAreas: scorecard.improvements,
     coachingPriority: scorecard.improvements[0] ?? null
   });
-}
-
-function verifyLatestEmailVerification(
-  db: ApiDatabase,
-  user: UserProfile,
-  code: string,
-  now: Date
-): "ok" | "missing" | "expired" | "invalid" {
-  const pending = db.emailVerifications
-    .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-  const latest = pending[0];
-  if (!latest) {
-    return "missing";
-  }
-
-  const expiresAtMs = new Date(latest.expiresAt).getTime();
-  if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-    latest.consumedAt = now.toISOString();
-    return "expired";
-  }
-
-  const expectedHash = Buffer.from(latest.codeHash, "hex");
-  const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
-  if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
-    return "invalid";
-  }
-
-  latest.consumedAt = now.toISOString();
-  return "ok";
 }
 
 function buildWebAuthSessionUser(user: UserProfile): WebAuthSessionResponse["session"] {
@@ -10353,6 +10303,12 @@ const mobileVerificationRateLimiter = createRateLimiter({
   }
 });
 
+const mobileReviewerVerificationRateLimitOptions: RateLimiterOptions = {
+  name: "mobile-reviewer-verify-email",
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+};
+
 const mobileOrgJoinRequestRateLimiter = createRateLimiter({
   name: "mobile-org-join-request",
   windowMs: 15 * 60 * 1000,
@@ -10752,7 +10708,13 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
 
       challengeType = "sign_in";
     } else {
-      const result = verifyLatestEmailVerification(db, user, code, now);
+      const result = verifyLatestEmailVerification({
+        db,
+        user,
+        code,
+        now,
+        codeSecret: MOBILE_TOKEN_SECRET,
+      });
       if (result === "missing") {
         response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
         return;
@@ -13063,7 +13025,6 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     name?: string;
     contactName?: string;
     contactEmail?: string;
-    emailDomain?: string;
     joinCode?: string;
     dailySecondsQuota?: number;
     perUserDailySecondsCap?: number;
@@ -13085,20 +13046,6 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     const contactEmail = normalizeContactEmail(body.contactEmail);
-    const emailDomain = normalizeEmailDomain(body.emailDomain) ?? extractEmailDomain(contactEmail);
-    if (!emailDomain) {
-      response.status(400).json({ error: "A valid email domain is required (e.g. company.com)." });
-      return;
-    }
-
-    const duplicateDomain = db.orgs.find(
-      (entry) => normalizeEmailDomain(entry.emailDomain) === emailDomain
-    );
-    if (duplicateDomain) {
-      response.status(409).json({ error: "That email domain is already assigned to another organization." });
-      return;
-    }
-
     const existingCodes = new Set(db.orgs.map((org) => normalizeJoinCode(org.joinCode)).filter(Boolean));
     const requestedJoinCode = normalizeJoinCode(body.joinCode);
     if (requestedJoinCode && existingCodes.has(requestedJoinCode)) {
@@ -13123,7 +13070,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       status: "active",
       contactName: normalizeContactName(body.contactName),
       contactEmail,
-      emailDomain,
+      emailDomain: null,
       joinCode,
       activeIndustries: normalizeIndustryIds(body.activeIndustries, fallbackIndustryIds, allowedIndustryIds),
       dailySecondsQuota,
@@ -13185,33 +13132,6 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
 
     if (typeof patch.contactEmail === "string") {
       org.contactEmail = normalizeContactEmail(patch.contactEmail);
-    }
-
-    if (typeof patch.emailDomain === "string") {
-      const nextDomain = normalizeEmailDomain(patch.emailDomain);
-      if (!nextDomain) {
-        response.status(400).json({ error: "Invalid email domain." });
-        return;
-      }
-
-      const duplicateDomain = db.orgs.find(
-        (entry) => entry.id !== org.id && normalizeEmailDomain(entry.emailDomain) === nextDomain
-      );
-      if (duplicateDomain) {
-        response.status(409).json({ error: "That email domain is already assigned to another organization." });
-        return;
-      }
-      org.emailDomain = nextDomain;
-    } else if (!normalizeEmailDomain(org.emailDomain)) {
-      const derivedDomain = extractEmailDomain(org.contactEmail);
-      const duplicateDomain = db.orgs.find(
-        (entry) => entry.id !== org.id && normalizeEmailDomain(entry.emailDomain) === normalizeEmailDomain(derivedDomain)
-      );
-      if (duplicateDomain) {
-        response.status(409).json({ error: "That email domain is already assigned to another organization." });
-        return;
-      }
-      org.emailDomain = derivedDomain;
     }
 
     if (typeof patch.joinCode === "string") {
@@ -16091,6 +16011,14 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
+    if (
+      APP_REVIEW_CREDENTIAL
+      && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
+      && !consumeRateLimit(mobileReviewerVerificationRateLimitOptions, request, response, user.id)
+    ) {
+      return;
+    }
+
     if (!hasValidMobileTokenForUser(db, user.id, authToken, {
       allowReonboardingToken: true,
       allowIncompleteProfile: true,
@@ -16149,32 +16077,28 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
 
     const now = new Date();
     if (needsCodeVerification) {
-      const pending = db.emailVerifications
-        .filter((entry) => entry.userId === user.id && entry.email === user.email && entry.consumedAt === null)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-      const latest = pending[0];
-      if (!latest) {
+      const verificationResult = verifyLatestEmailVerification({
+        db,
+        user,
+        code,
+        now,
+        codeSecret: MOBILE_TOKEN_SECRET,
+        appReviewCredential: APP_REVIEW_CREDENTIAL,
+      });
+      if (verificationResult === "missing") {
         response.status(400).json({ error: "No pending verification code. Please resend verification email." });
         return;
       }
-
-      const expiresAtMs = new Date(latest.expiresAt).getTime();
-      if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-        latest.consumedAt = now.toISOString();
+      if (verificationResult === "expired") {
         response.status(400).json({ error: "Verification code expired. Please request a new code." });
         return;
       }
-
-      const expectedHash = Buffer.from(latest.codeHash, "hex");
-      const providedHash = Buffer.from(hashVerificationCode(user.id, user.email, code), "hex");
-      if (expectedHash.length !== providedHash.length || !crypto.timingSafeEqual(expectedHash, providedHash)) {
+      if (verificationResult === "invalid") {
         response.status(400).json({ error: "Invalid verification code." });
         return;
       }
 
       const nowIsoValue = now.toISOString();
-      latest.consumedAt = nowIsoValue;
       user.emailVerifiedAt = nowIsoValue;
       user.updatedAt = nowIsoValue;
       appendMobileAuditEvent(db, user, {
@@ -22057,6 +21981,14 @@ export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) =
     throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
   }
   dashboardTrainingPackLoaderForTest = loader;
+}
+
+export function clearRateLimitsForTest(): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("clearRateLimitsForTest is only available in test.");
+  }
+  rateLimitByKey.clear();
+  rateLimitCleanupCounter = 0;
 }
 
 export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementStore): void {

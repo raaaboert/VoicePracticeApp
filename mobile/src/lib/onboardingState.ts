@@ -1,6 +1,25 @@
-import type { MobileOnboardRequest, MobileVerifyEmailRequest, UserProfile } from "@voicepractice/shared";
+import type {
+  MobileOnboardRequest,
+  MobileVerifyEmailRequest,
+  OrgJoinRequestStatus,
+  UserProfile,
+} from "@voicepractice/shared";
 
 export type MobileSetupStep = "onboarding" | "verify_email" | "ready";
+
+export interface MobileOrganizationAccessRequestSummary {
+  id: string;
+  orgId: string;
+  orgName: string;
+  status: OrgJoinRequestStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type MobileOrganizationAccessState =
+  | { kind: "approved_membership"; request: null }
+  | { kind: "pending_request"; request: MobileOrganizationAccessRequestSummary }
+  | { kind: "company_access"; request: null };
 
 export function hasRequiredMobileNames(user: Pick<UserProfile, "firstName" | "lastName"> | null | undefined): boolean {
   return Boolean(user?.firstName?.trim() && user?.lastName?.trim());
@@ -108,4 +127,29 @@ export function shouldShowCompanyAccessScreen(
   user: Pick<UserProfile, "accountType" | "orgId" | "isSuperUser" | "status"> | null | undefined,
 ): boolean {
   return Boolean(user && !hasApprovedMobileOrganizationAccess(user));
+}
+
+export function resolveMobileOrganizationAccessState(
+  user: Pick<UserProfile, "accountType" | "orgId" | "isSuperUser" | "status"> | null | undefined,
+  requests: readonly MobileOrganizationAccessRequestSummary[],
+): MobileOrganizationAccessState {
+  if (hasApprovedMobileOrganizationAccess(user)) {
+    return { kind: "approved_membership", request: null };
+  }
+
+  const pendingRequest = requests
+    .filter((request) => request.status === "pending")
+    .slice()
+    .sort((left, right) => {
+      const updatedOrder = right.updatedAt.localeCompare(left.updatedAt);
+      if (updatedOrder !== 0) {
+        return updatedOrder;
+      }
+      const createdOrder = right.createdAt.localeCompare(left.createdAt);
+      return createdOrder !== 0 ? createdOrder : right.id.localeCompare(left.id);
+    })[0];
+
+  return pendingRequest
+    ? { kind: "pending_request", request: pendingRequest }
+    : { kind: "company_access", request: null };
 }

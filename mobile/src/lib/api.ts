@@ -12,6 +12,7 @@ import {
   MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
   MobileVerifyEmailRequest,
+  OrgJoinRequestStatus,
   CreatePerformancePlanRequest,
   CreatePerformancePlanUpdateRequest,
   CreatePerformancePlanUpdateResponse,
@@ -511,6 +512,7 @@ export async function verifyMobileEmail(
   authToken: string;
   verificationRequired: boolean;
   verificationExpiresAt: string | null;
+  /** @deprecated Organization discovery is company-code based; this is always null. */
   domainMatch: EnterpriseDomainMatch | null;
 }> {
   const body: MobileVerifyEmailRequest = { userId, code, ...profile };
@@ -663,25 +665,27 @@ export async function postPerformancePlanUpdate(
   );
 }
 
+export interface MobileOrgAccessRequestSummary {
+  id: string;
+  status: OrgJoinRequestStatus;
+  email: string;
+  emailDomain: string;
+  orgId: string;
+  orgName: string;
+  joinCodeHint: string;
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+}
+
 export async function fetchMyOrgAccessRequests(
   userId: string,
   authToken: string,
 ): Promise<{
   generatedAt: string;
-  requests: Array<{
-    id: string;
-    status: string;
-    email: string;
-    emailDomain: string;
-    orgId: string;
-    orgName: string;
-    joinCodeHint: string;
-    createdAt: string;
-    expiresAt: string;
-    updatedAt: string;
-    decidedAt: string | null;
-    decisionReason: string | null;
-  }>;
+  requests: MobileOrgAccessRequestSummary[];
 }> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(userId)}/org-access-requests`,

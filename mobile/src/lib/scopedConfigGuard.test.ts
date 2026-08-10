@@ -20,6 +20,7 @@ runTest("marks protected authenticated screens as requiring scoped config", () =
   assert(requiresAuthenticatedScopedConfig("setup"), "setup should require scoped config");
   assert(requiresAuthenticatedScopedConfig("admin_home"), "admin home should require scoped config");
   assert(!requiresAuthenticatedScopedConfig("verify_email"), "verify email should stay outside the scoped-config guard");
+  assert(!requiresAuthenticatedScopedConfig("pending_approval"), "pending approval should stay outside the scoped-config guard");
 });
 
 runTest("blocks signed-in enterprise users from protected screens when scoped config is missing", () => {
@@ -47,6 +48,17 @@ runTest("allows verification and onboarding-adjacent screens to continue without
       hasScopedConfig: false,
     }),
     "verification should remain accessible while scoped config is still loading",
+  );
+  assert(
+    !shouldBlockForMissingAuthenticatedScopedConfig({
+      screen: "pending_approval",
+      hasUser: true,
+      hasMobileAuthToken: true,
+      isSuperUser: false,
+      hasActiveSuperUserOrg: false,
+      hasScopedConfig: false,
+    }),
+    "pending approval should remain accessible before organization-scoped config exists",
   );
 });
 

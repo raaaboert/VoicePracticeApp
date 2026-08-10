@@ -69,7 +69,7 @@ function ensureOrg(db, orgInput) {
       status: "active",
       contactName: orgInput.contactName,
       contactEmail: orgInput.contactEmail,
-      emailDomain: orgInput.emailDomain,
+      emailDomain: null,
       joinCode: randomJoinCode(),
       activeIndustries: orgInput.activeIndustries,
       dailySecondsQuota: 86400,
@@ -95,7 +95,6 @@ function ensureOrg(db, orgInput) {
   org.status = "active";
   org.contactName = orgInput.contactName;
   org.contactEmail = orgInput.contactEmail;
-  org.emailDomain = orgInput.emailDomain;
   org.activeIndustries = orgInput.activeIndustries;
   org.monthlyMinutesAllotted = orgInput.monthlyMinutesAllotted;
   org.renewalTotalUsd = orgInput.renewalTotalUsd;
@@ -223,7 +222,6 @@ const primaryOrg =
     name: "Rob's Company",
     contactName: "Rob",
     contactEmail: "rbdautel@gmail.com",
-    emailDomain: "robscompany.example",
     activeIndustries: ["people_management"],
     monthlyMinutesAllotted: 4000,
     renewalTotalUsd: 24000,
@@ -234,7 +232,6 @@ const secondaryOrg = ensureOrg(db, {
   name: "Summit Revenue Systems",
   contactName: "Summit Team",
   contactEmail: "ops@summitrevenue.example",
-  emailDomain: "summitrevenue.example",
   activeIndustries: ["sales"],
   monthlyMinutesAllotted: 3200,
   renewalTotalUsd: 18000,
