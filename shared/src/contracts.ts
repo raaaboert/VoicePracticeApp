@@ -2364,6 +2364,7 @@ export interface MobileOnboardResponse {
   authToken: string;
   verificationRequired: boolean;
   verificationExpiresAt: string | null;
+  /** @deprecated Organization discovery is company-code based; this is always null. */
   domainMatch: EnterpriseDomainMatch | null;
 }
 

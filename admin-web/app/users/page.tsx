@@ -53,11 +53,10 @@ export default function UsersPage() {
   const [creating, setCreating] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [deletingPersonalUserId, setDeletingPersonalUserId] = useState<string | null>(null);
-  const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string; emailDomain: string }>({
+  const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string }>({
     name: "",
     contactName: "",
     contactEmail: "",
-    emailDomain: "",
   });
 
   const enterpriseOrgsSorted = useMemo(() => [...orgs].sort((a, b) => a.name.localeCompare(b.name)), [orgs]);
@@ -132,12 +131,11 @@ export default function UsersPage() {
           name,
           contactName: orgForm.contactName,
           contactEmail: orgForm.contactEmail,
-          emailDomain: orgForm.emailDomain,
           activeIndustries: defaultIndustryId ? [defaultIndustryId] : undefined,
         }),
       });
 
-      setOrgForm({ name: "", contactName: "", contactEmail: "", emailDomain: "" });
+      setOrgForm({ name: "", contactName: "", contactEmail: "" });
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create enterprise account.");
@@ -263,14 +261,6 @@ export default function UsersPage() {
                 onChange={(event) => setOrgForm((prev) => ({ ...prev, contactEmail: event.target.value }))}
               />
             </div>
-            <div>
-              <label>Org Email Domain</label>
-              <input
-                value={orgForm.emailDomain}
-                onChange={(event) => setOrgForm((prev) => ({ ...prev, emailDomain: event.target.value }))}
-                placeholder="example.com"
-              />
-            </div>
           </form>
           <div className="form-actions">
             <div>
@@ -321,7 +311,6 @@ export default function UsersPage() {
                   <th>Next Renewal Date</th>
                   <th>Company Contact</th>
                   <th>Contact Email</th>
-                  <th>Domain</th>
                   <th>Join Code</th>
                   <th>Industries Active</th>
                 </tr>
@@ -329,7 +318,7 @@ export default function UsersPage() {
               <tbody>
                 {enterpriseOrgsSorted.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="small">
+                    <td colSpan={7} className="small">
                       No enterprise accounts yet.
                     </td>
                   </tr>
@@ -353,7 +342,6 @@ export default function UsersPage() {
                         <td>{formatDate(nextRenewalAt)}</td>
                         <td>{org.contactName}</td>
                         <td>{org.contactEmail}</td>
-                        <td>{org.emailDomain ?? "-"}</td>
                         <td>
                           <code>{org.joinCode}</code>
                         </td>

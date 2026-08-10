@@ -9,6 +9,7 @@ import appManifest from "./app.json";
 import {
   ActivityIndicator,
   Animated,
+  AppState,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -72,6 +73,7 @@ import {
   getApiBaseUrl,
   setActiveSuperUserOrgId,
 } from "./src/lib/api";
+import type { MobileOrgAccessRequestSummary } from "./src/lib/api";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
   buildInsufficientEvidenceMessage,
@@ -101,9 +103,10 @@ import {
   buildMobileOnboardRequest,
   buildMobileVerifyProfile,
   canStartMobileUpdates,
+  hasApprovedMobileOrganizationAccess,
   isCompanyCodeRequiredForSetup,
+  resolveMobileOrganizationAccessState,
   resolveMobileSetupStep,
-  shouldShowCompanyAccessScreen,
 } from "./src/lib/onboardingState";
 import {
   speakWithRemoteTtsFallback,
@@ -181,6 +184,7 @@ type Screen =
   | "onboarding"
   | "verify_email"
   | "domain_match"
+  | "pending_approval"
   | "scoped_config_error"
   | "superuser_org_select"
   | "setup"
@@ -731,6 +735,7 @@ export default function App() {
   const samplePlaybackRequestIdRef = useRef(0);
   const sampleAbortControllerRef = useRef<AbortController | null>(null);
   const sampleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const approvalTransitionRef = useRef(false);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [scopedConfigError, setScopedConfigError] = useState<string | null>(null);
@@ -779,16 +784,7 @@ export default function App() {
   const [orgRequestNotice, setOrgRequestNotice] = useState<string | null>(null);
   const [orgRequestError, setOrgRequestError] = useState<string | null>(null);
   const [isOrgRequestSaving, setIsOrgRequestSaving] = useState(false);
-  const [myOrgAccessRequests, setMyOrgAccessRequests] = useState<Array<{
-    id: string;
-    status: string;
-    orgName: string;
-    emailDomain: string;
-    createdAt: string;
-    expiresAt: string;
-    decidedAt: string | null;
-    decisionReason: string | null;
-  }>>([]);
+  const [myOrgAccessRequests, setMyOrgAccessRequests] = useState<MobileOrgAccessRequestSummary[]>([]);
   const [orgAccessRequestsLoading, setOrgAccessRequestsLoading] = useState(false);
 
   const [settingsEmail, setSettingsEmail] = useState("");
@@ -1599,32 +1595,30 @@ export default function App() {
     [refreshOrgAdminUsers],
   );
 
-  const refreshMyOrgAccessRequests = useCallback(async () => {
-    if (!user || !mobileAuthToken) {
-      return;
-    }
-
+  const loadMyOrgAccessRequestsForSession = useCallback(async (nextUser: UserProfile, authToken: string) => {
     setOrgAccessRequestsLoading(true);
     try {
-      const payload = await fetchMyOrgAccessRequests(user.id, mobileAuthToken);
-      setMyOrgAccessRequests(
-        (payload.requests ?? []).map((row) => ({
-          id: row.id,
-          status: row.status,
-          orgName: row.orgName,
-          emailDomain: row.emailDomain,
-          createdAt: row.createdAt,
-          expiresAt: row.expiresAt,
-          decidedAt: row.decidedAt,
-          decisionReason: row.decisionReason,
-        })),
-      );
-    } catch {
-      // Best-effort load for profile; keep existing rows.
+      const payload = await fetchMyOrgAccessRequests(nextUser.id, authToken);
+      const requests = payload.requests ?? [];
+      setMyOrgAccessRequests(requests);
+      return requests;
     } finally {
       setOrgAccessRequestsLoading(false);
     }
-  }, [mobileAuthToken, user]);
+  }, []);
+
+  const refreshMyOrgAccessRequests = useCallback(async () => {
+    if (!user || !mobileAuthToken) {
+      return null;
+    }
+
+    try {
+      return await loadMyOrgAccessRequestsForSession(user, mobileAuthToken);
+    } catch {
+      // Best-effort load for profile; keep existing rows.
+      return null;
+    }
+  }, [loadMyOrgAccessRequestsForSession, mobileAuthToken, user]);
 
   const refreshOrgAdminAccessRequests = useCallback(async () => {
     if (!user || !mobileAuthToken) {
@@ -2055,6 +2049,7 @@ export default function App() {
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
     setOrgRequestError(null);
+    setMyOrgAccessRequests([]);
     if (!shouldPreserveOnboardingValues) {
       setOnboardingEmail("");
       setOnboardingFirstName("");
@@ -2103,6 +2098,97 @@ export default function App() {
     },
     [submitAutoErrorReport],
   );
+
+  const activateApprovedMobileSession = useCallback(
+    async (nextUser: UserProfile, authToken: string, source: string): Promise<boolean> => {
+      const nextEntitlements = await fetchEntitlements(nextUser.id, authToken);
+      setUser(nextUser);
+      setEntitlements(nextEntitlements);
+      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(nextUser, authToken, {
+        source: `${source}.scoped_config`,
+        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
+      });
+      if (!scopedConfigLoaded) {
+        return false;
+      }
+
+      setOrgRequestError(null);
+      setOrgRequestNotice(null);
+      setOrgJoinCodeInput("");
+      setScreen("home");
+      return true;
+    },
+    [loadAuthenticatedScopedConfig],
+  );
+
+  const applyOrganizationAccessRoute = useCallback(
+    (nextUser: UserProfile, requests: readonly MobileOrgAccessRequestSummary[], submittedNotice?: string | null) => {
+      const accessState = resolveMobileOrganizationAccessState(nextUser, requests);
+      if (accessState.kind === "approved_membership") {
+        return accessState;
+      }
+
+      setEntitlements(null);
+      setHasAuthenticatedScopedConfig(false);
+      setOrgRequestError(null);
+      if (accessState.kind === "pending_request") {
+        setOrgRequestNotice(submittedNotice ?? null);
+        setScreen("pending_approval");
+      } else {
+        setOrgRequestNotice(null);
+        setScreen("domain_match");
+      }
+      return accessState;
+    },
+    [],
+  );
+
+  const resolveOrganizationAccessForSession = useCallback(
+    async (nextUser: UserProfile, authToken: string, submittedNotice?: string | null) => {
+      const requests = await loadMyOrgAccessRequestsForSession(nextUser, authToken);
+      return applyOrganizationAccessRoute(nextUser, requests, submittedNotice);
+    },
+    [applyOrganizationAccessRoute, loadMyOrgAccessRequestsForSession],
+  );
+
+  const refreshPendingApprovalStatus = useCallback(async () => {
+    if (!user || !mobileAuthToken || approvalTransitionRef.current) {
+      return;
+    }
+
+    setOrgAccessRequestsLoading(true);
+    setOrgRequestError(null);
+    try {
+      const nextUser = await fetchMobileUser(user.id, mobileAuthToken);
+      setUser(nextUser);
+      if (hasApprovedMobileOrganizationAccess(nextUser)) {
+        approvalTransitionRef.current = true;
+        try {
+          await activateApprovedMobileSession(nextUser, mobileAuthToken, "pending_approval.refresh");
+        } finally {
+          approvalTransitionRef.current = false;
+        }
+        return;
+      }
+
+      const requests = await loadMyOrgAccessRequestsForSession(nextUser, mobileAuthToken);
+      applyOrganizationAccessRoute(nextUser, requests);
+    } catch (caught) {
+      setOrgRequestError(getErrorMessage(caught, "Could not refresh your access request status."));
+      void submitAutoErrorReport("pending_approval.refresh", caught, {
+        screen: "pending_approval",
+      });
+    } finally {
+      setOrgAccessRequestsLoading(false);
+    }
+  }, [
+    activateApprovedMobileSession,
+    applyOrganizationAccessRoute,
+    loadMyOrgAccessRequestsForSession,
+    mobileAuthToken,
+    submitAutoErrorReport,
+    user,
+  ]);
 
   const initializeApp = useCallback(async () => {
     setIsBootLoading(true);
@@ -2235,24 +2321,12 @@ export default function App() {
         return;
       }
 
-      if (shouldShowCompanyAccessScreen(userPayload)) {
-        setEntitlements(null);
-        setOrgRequestError(null);
-        setOrgRequestNotice(null);
-        setScreen("domain_match");
+      if (!hasApprovedMobileOrganizationAccess(userPayload)) {
+        await resolveOrganizationAccessForSession(userPayload, storedMobileToken);
         return;
       }
 
-      const entitlementsPayload = await fetchEntitlements(storedUserId, storedMobileToken);
-      setEntitlements(entitlementsPayload);
-      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(userPayload, storedMobileToken, {
-        source: "app.initialize.scoped_config",
-        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
-      });
-      if (!scopedConfigLoaded) {
-        return;
-      }
-      setScreen("home");
+      await activateApprovedMobileSession(userPayload, storedMobileToken, "app.initialize");
     } catch (caught) {
       if (isOrganizationAccessRequiredError(caught) && hadStoredSession) {
         setEntitlements(null);
@@ -2297,8 +2371,9 @@ export default function App() {
   }, [
     activateSuperUserOrgContext,
     detectedTimezone,
-    loadAuthenticatedScopedConfig,
+    activateApprovedMobileSession,
     loadSuperUserOrgOptionsForSession,
+    resolveOrganizationAccessForSession,
     resetSessionToOnboarding,
     submitAutoErrorReport,
   ]);
@@ -2363,6 +2438,20 @@ export default function App() {
             }
             if (payload.config) {
               setConfig(payload.config);
+            }
+            if (screen === "pending_approval") {
+              const updatedUser = payload.user ?? user;
+              if (hasApprovedMobileOrganizationAccess(updatedUser) && !approvalTransitionRef.current) {
+                approvalTransitionRef.current = true;
+                try {
+                  await activateApprovedMobileSession(updatedUser, mobileAuthToken, "pending_approval.live_update");
+                } finally {
+                  approvalTransitionRef.current = false;
+                }
+              } else {
+                const requests = await loadMyOrgAccessRequestsForSession(updatedUser, mobileAuthToken);
+                applyOrganizationAccessRoute(updatedUser, requests);
+              }
             }
           }
         } catch (caught) {
@@ -2436,7 +2525,16 @@ export default function App() {
       longPollFirstFailureAtRef.current = null;
       longPollLastErrorRef.current = null;
     };
-  }, [mobileAuthToken, resetSessionToOnboarding, screen, submitAutoErrorReport, user]);
+  }, [
+    activateApprovedMobileSession,
+    applyOrganizationAccessRoute,
+    loadMyOrgAccessRequestsForSession,
+    mobileAuthToken,
+    resetSessionToOnboarding,
+    screen,
+    submitAutoErrorReport,
+    user,
+  ]);
 
   useEffect(() => {
     if (!user) {
@@ -2468,27 +2566,54 @@ export default function App() {
       return;
     }
 
-    if (shouldShowCompanyAccessScreen(user)) {
-      if (screen !== "domain_match") {
+    if (!hasApprovedMobileOrganizationAccess(user)) {
+      const accessState = resolveMobileOrganizationAccessState(user, myOrgAccessRequests);
+      if (accessState.kind === "pending_request" && screen !== "pending_approval") {
+        setOrgRequestError(null);
+        setScreen("pending_approval");
+      } else if (
+        accessState.kind === "company_access" &&
+        screen !== "domain_match" &&
+        screen !== "pending_approval"
+      ) {
         setOrgRequestError(null);
         setScreen("domain_match");
       }
       return;
     }
-  }, [screen, user]);
+  }, [myOrgAccessRequests, screen, user]);
 
   useEffect(() => {
     if (!user) {
       return;
     }
 
-    if (screen === "domain_match" && user.accountType === "enterprise" && user.orgId) {
-      setOrgRequestError(null);
-      setOrgRequestNotice("Company membership approved. Your enterprise account is active. Dashboard access is enabled separately if your admin needs you in reporting.");
-      setOrgJoinCodeInput("");
-      setScreen("home");
+    if (
+      (screen === "pending_approval" || screen === "domain_match") &&
+      hasApprovedMobileOrganizationAccess(user) &&
+      mobileAuthToken &&
+      !approvalTransitionRef.current
+    ) {
+      approvalTransitionRef.current = true;
+      void activateApprovedMobileSession(user, mobileAuthToken, "organization_access.approved")
+        .catch((caught) => {
+          setOrgRequestError(getErrorMessage(caught, "Could not activate your approved company access."));
+          void submitAutoErrorReport("organization_access.approved", caught, { screen });
+        })
+        .finally(() => {
+          approvalTransitionRef.current = false;
+        });
     }
-  }, [screen, user]);
+  }, [activateApprovedMobileSession, mobileAuthToken, screen, submitAutoErrorReport, user]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active" && screen === "pending_approval") {
+        void refreshPendingApprovalStatus();
+      }
+    });
+    return () => subscription.remove();
+  }, [refreshPendingApprovalStatus, screen]);
 
   useEffect(() => {
     if (superUserOrgOptions.length === 0) {
@@ -2654,28 +2779,16 @@ export default function App() {
         return;
       }
 
-      if (shouldShowCompanyAccessScreen(onboarded.user)) {
-        setEntitlements(null);
-        setOrgRequestError(null);
-        setOrgRequestNotice(
-          companyCode
-            ? "Request submitted. Your organization administrator can approve your membership."
-            : null,
+      if (!hasApprovedMobileOrganizationAccess(onboarded.user)) {
+        await resolveOrganizationAccessForSession(
+          onboarded.user,
+          onboarded.authToken,
+          companyCode ? "Your access request has been submitted." : null,
         );
-        setScreen("domain_match");
         return;
       }
 
-      const nextEntitlements = await fetchEntitlements(onboarded.user.id, onboarded.authToken);
-      setEntitlements(nextEntitlements);
-      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(onboarded.user, onboarded.authToken, {
-        source: "onboarding.scoped_config",
-        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
-      });
-      if (!scopedConfigLoaded) {
-        return;
-      }
-      setScreen("home");
+      await activateApprovedMobileSession(onboarded.user, onboarded.authToken, "onboarding");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not complete onboarding.");
       setOnboardingError(message);
@@ -2738,29 +2851,16 @@ export default function App() {
         return;
       }
 
-      if (shouldShowCompanyAccessScreen(payload.user)) {
-        setEntitlements(null);
-        setOrgRequestError(null);
-        setOrgRequestNotice(
-          companyCode
-            ? "Request submitted. Your organization administrator can approve your membership."
-            : null,
+      if (!hasApprovedMobileOrganizationAccess(payload.user)) {
+        await resolveOrganizationAccessForSession(
+          payload.user,
+          payload.authToken,
+          companyCode ? "Your access request has been submitted." : null,
         );
-        setScreen("domain_match");
         return;
       }
 
-      const nextEntitlements = await fetchEntitlements(payload.user.id, payload.authToken);
-      setEntitlements(nextEntitlements);
-      const scopedConfigLoaded = await loadAuthenticatedScopedConfig(payload.user, payload.authToken, {
-        source: "verification.scoped_config",
-        fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
-      });
-      if (!scopedConfigLoaded) {
-        return;
-      }
-
-      setScreen("home");
+      await activateApprovedMobileSession(payload.user, payload.authToken, "verification");
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not verify email.");
       setVerificationError(message);
@@ -2818,7 +2918,7 @@ export default function App() {
     }
   };
 
-  const submitOrgDomainRequest = async () => {
+  const submitOrgAccessRequestByCode = async () => {
     if (!user || !mobileAuthToken) {
       setOrgRequestError("Session expired. Please sign in again.");
       return;
@@ -2862,7 +2962,12 @@ export default function App() {
           : "Request already pending. Your org admin can review company membership from Admin.",
       );
       setOrgJoinCodeInput("");
-      await refreshMyOrgAccessRequests();
+      const requests = await loadMyOrgAccessRequestsForSession(user, mobileAuthToken);
+      applyOrganizationAccessRoute(
+        user,
+        requests,
+        payload.created ? "Your access request has been submitted." : "Your access request is already pending.",
+      );
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not submit org access request.");
       setOrgRequestError(message);
@@ -4229,7 +4334,7 @@ export default function App() {
             style={[styles.primaryButton, isOrgRequestSaving ? styles.disabled : null]}
             disabled={isOrgRequestSaving}
             onPress={() => {
-              void submitOrgDomainRequest();
+              void submitOrgAccessRequestByCode();
             }}
           >
             <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Membership"}</Text>
@@ -4253,6 +4358,54 @@ export default function App() {
       </ScrollView>
     </KeyboardAvoidingView>
   );
+
+  const renderPendingApproval = () => {
+    const accessState = resolveMobileOrganizationAccessState(user, myOrgAccessRequests);
+    const organizationName = accessState.kind === "pending_request" ? accessState.request.orgName : null;
+
+    return (
+      <View style={styles.fill}>
+        <View style={styles.topRow}>
+          <View style={styles.spacer} />
+          <Text style={styles.topTitle}>Pending Approval</Text>
+          <View style={styles.spacer} />
+        </View>
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+          <View style={styles.card}>
+            <Text style={styles.title}>Your access request has been submitted.</Text>
+            <Text style={styles.body}>
+              {organizationName
+                ? `An administrator from ${organizationName} needs to approve your request before you can continue.`
+                : "An organization administrator needs to approve your request before you can continue."}
+              {"\n\n"}
+              You do not need to submit another company code. Once approved, you will be able to access Peritio.
+            </Text>
+            {orgRequestNotice ? <Text style={styles.successText}>{orgRequestNotice}</Text> : null}
+            {orgRequestError ? <Text style={styles.errorText}>{orgRequestError}</Text> : null}
+            <Pressable
+              style={[styles.primaryButton, orgAccessRequestsLoading ? styles.disabled : null]}
+              disabled={orgAccessRequestsLoading}
+              onPress={() => {
+                void refreshPendingApprovalStatus();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>
+                {orgAccessRequestsLoading ? "Checking..." : "Check Status"}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={styles.ghostButton}
+              onPress={() => {
+                void resetSessionToOnboarding();
+              }}
+            >
+              <Text style={styles.ghostButtonText}>Sign Out</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  };
 
   const renderSuperUserOrgSelect = () => (
     <KeyboardAvoidingView
@@ -4589,7 +4742,7 @@ export default function App() {
               style={[styles.primaryButton, isOrgRequestSaving ? styles.disabled : null]}
               disabled={isOrgRequestSaving}
               onPress={() => {
-                void submitOrgDomainRequest();
+                void submitOrgAccessRequestByCode();
               }}
             >
               <Text style={styles.primaryButtonText}>{isOrgRequestSaving ? "Submitting..." : "Request Access"}</Text>
@@ -6036,6 +6189,10 @@ export default function App() {
 
     if (screen === "domain_match") {
       return renderDomainMatch();
+    }
+
+    if (screen === "pending_approval") {
+      return renderPendingApproval();
     }
 
     if (screen === "scoped_config_error") {

@@ -264,7 +264,6 @@ async function main() {
         name: "Critical Flow Org",
         contactName: "Critical Flow Owner",
         contactEmail: "owner@criticalflow.example",
-        emailDomain: "criticalflow.example",
         activeIndustries: ["people_management"],
       },
       expectedStatus: 201,

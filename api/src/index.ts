@@ -76,7 +76,6 @@ import {
   Difficulty,
   EnterpriseOrg,
   EnterpriseJoinRequestRecord,
-  EnterpriseDomainMatch,
   EmailVerificationRecord,
   GenerateOrgCustomScenarioRequest,
   GenerateOrgCustomScenarioResponse,
@@ -3258,7 +3257,6 @@ function ensureDemoEnterpriseData(db: {
     if (existing) {
       existing.contactName = demoOrg.contactName;
       existing.contactEmail = demoOrg.contactEmail;
-      existing.emailDomain = existing.emailDomain ?? extractEmailDomain(demoOrg.contactEmail);
       existing.joinCode =
         normalizeJoinCode(existing.joinCode) || normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH);
       existing.activeIndustries = normalizeIndustryIds(existing.activeIndustries, defaultIndustryIds, allowedIndustryIds);
@@ -3287,7 +3285,7 @@ function ensureDemoEnterpriseData(db: {
       status: "active",
       contactName: demoOrg.contactName,
       contactEmail: demoOrg.contactEmail,
-      emailDomain: extractEmailDomain(demoOrg.contactEmail),
+      emailDomain: null,
       joinCode: normalizeJoinCode(demoOrg.id).slice(0, ORG_JOIN_CODE_LENGTH),
       activeIndustries: normalizeIndustryIds(demoOrg.activeIndustries, defaultIndustryIds, allowedIndustryIds),
       dailySecondsQuota: db.config.enterprise.defaultOrgDailySecondsQuota,
@@ -3846,20 +3844,9 @@ function generateUniqueJoinCode(existingCodes: Set<string>, seed: string): strin
   return fallback;
 }
 
-function ensureOrgCodesAndDomains(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
+function ensureOrgJoinCodes(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
   const existingCodes = new Set<string>();
-  const seenDomains = new Set<string>();
   return orgs.map((org) => {
-    const requestedDomain = normalizeEmailDomain(org.emailDomain) ?? extractEmailDomain(org.contactEmail);
-    let domain: string | null = requestedDomain;
-    if (domain) {
-      if (seenDomains.has(domain)) {
-        // Domain conflicts are left for manual resolution; keep access matching disabled until fixed.
-        domain = null;
-      } else {
-        seenDomains.add(domain);
-      }
-    }
     const requestedCode = normalizeJoinCode(org.joinCode);
     const joinCode = requestedCode && !existingCodes.has(requestedCode)
       ? (existingCodes.add(requestedCode), requestedCode)
@@ -3867,7 +3854,6 @@ function ensureOrgCodesAndDomains(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
 
     return {
       ...org,
-      emailDomain: domain,
       joinCode
     };
   });
@@ -3970,7 +3956,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   const configuredIndustryIds = new Set(getConfiguredIndustryIds(config));
   const fallbackOrgIndustryIds = getConfiguredActiveIndustryIds(config);
 
-  const normalizedOrgs = ensureOrgCodesAndDomains(
+  const normalizedOrgs = ensureOrgJoinCodes(
     (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs)
       .map((org) => {
         const normalizedOrg = ensureOrgContractFields({
@@ -4839,26 +4825,9 @@ function createVerificationCode(): string {
   return String(numeric).padStart(6, "0");
 }
 
-function buildDomainMatchForEmail(db: ApiDatabase, email: string): EnterpriseDomainMatch | null {
-  const emailDomain = extractEmailDomain(email);
-  if (!emailDomain) {
-    return null;
-  }
-
-  const org = db.orgs.find(
-    (candidate) =>
-      candidate.status === "active" && normalizeEmailDomain(candidate.emailDomain) === normalizeEmailDomain(emailDomain)
-  );
-
-  if (!org) {
-    return null;
-  }
-
-  return {
-    orgId: org.id,
-    orgName: org.name,
-    emailDomain
-  };
+function buildDomainMatchForEmail(_db: ApiDatabase, _email: string): null {
+  // Deprecated compatibility field: organization discovery is company-code based.
+  return null;
 }
 
 async function issueEmailVerification(
@@ -13063,7 +13032,6 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     name?: string;
     contactName?: string;
     contactEmail?: string;
-    emailDomain?: string;
     joinCode?: string;
     dailySecondsQuota?: number;
     perUserDailySecondsCap?: number;
@@ -13085,20 +13053,6 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     const contactEmail = normalizeContactEmail(body.contactEmail);
-    const emailDomain = normalizeEmailDomain(body.emailDomain) ?? extractEmailDomain(contactEmail);
-    if (!emailDomain) {
-      response.status(400).json({ error: "A valid email domain is required (e.g. company.com)." });
-      return;
-    }
-
-    const duplicateDomain = db.orgs.find(
-      (entry) => normalizeEmailDomain(entry.emailDomain) === emailDomain
-    );
-    if (duplicateDomain) {
-      response.status(409).json({ error: "That email domain is already assigned to another organization." });
-      return;
-    }
-
     const existingCodes = new Set(db.orgs.map((org) => normalizeJoinCode(org.joinCode)).filter(Boolean));
     const requestedJoinCode = normalizeJoinCode(body.joinCode);
     if (requestedJoinCode && existingCodes.has(requestedJoinCode)) {
@@ -13123,7 +13077,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       status: "active",
       contactName: normalizeContactName(body.contactName),
       contactEmail,
-      emailDomain,
+      emailDomain: null,
       joinCode,
       activeIndustries: normalizeIndustryIds(body.activeIndustries, fallbackIndustryIds, allowedIndustryIds),
       dailySecondsQuota,
@@ -13185,33 +13139,6 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
 
     if (typeof patch.contactEmail === "string") {
       org.contactEmail = normalizeContactEmail(patch.contactEmail);
-    }
-
-    if (typeof patch.emailDomain === "string") {
-      const nextDomain = normalizeEmailDomain(patch.emailDomain);
-      if (!nextDomain) {
-        response.status(400).json({ error: "Invalid email domain." });
-        return;
-      }
-
-      const duplicateDomain = db.orgs.find(
-        (entry) => entry.id !== org.id && normalizeEmailDomain(entry.emailDomain) === nextDomain
-      );
-      if (duplicateDomain) {
-        response.status(409).json({ error: "That email domain is already assigned to another organization." });
-        return;
-      }
-      org.emailDomain = nextDomain;
-    } else if (!normalizeEmailDomain(org.emailDomain)) {
-      const derivedDomain = extractEmailDomain(org.contactEmail);
-      const duplicateDomain = db.orgs.find(
-        (entry) => entry.id !== org.id && normalizeEmailDomain(entry.emailDomain) === normalizeEmailDomain(derivedDomain)
-      );
-      if (duplicateDomain) {
-        response.status(409).json({ error: "That email domain is already assigned to another organization." });
-        return;
-      }
-      org.emailDomain = derivedDomain;
     }
 
     if (typeof patch.joinCode === "string") {

@@ -30,3 +30,22 @@ test("Performance create goal header is fixed outside the form ScrollView", () =
   assert.ok(scrollIndex < formIndex);
   assert.equal(performanceScreenSource.includes("styles.createModalCancelButton"), true);
 });
+
+test("Performance goal detail modal has a modal-local safe area and fixed header", () => {
+  const detailStart = performanceScreenSource.indexOf("function PlanDetailModal(");
+  const detailEnd = performanceScreenSource.indexOf("function PerformanceCreateForm(", detailStart);
+  const detailSource = performanceScreenSource.slice(detailStart, detailEnd);
+  const contentStart = detailSource.indexOf("function PlanDetailModalContent(");
+  const headerIndex = detailSource.indexOf("<View style={styles.topRow}>", contentStart);
+  const scrollIndex = detailSource.indexOf("<ScrollView", contentStart);
+
+  assert.notEqual(detailStart, -1);
+  assert.notEqual(detailEnd, -1);
+  assert.notEqual(contentStart, -1);
+  assert.equal(detailSource.includes('<SafeAreaProvider style={styles.fill}>'), true);
+  assert.equal(detailSource.includes('presentationStyle="fullScreen"'), true);
+  assert.equal(detailSource.includes("const insets = useSafeAreaInsets();"), true);
+  assert.equal(detailSource.includes("paddingTop: insets.top"), true);
+  assert.equal(detailSource.includes("paddingBottom: bottomInsetPadding"), true);
+  assert.ok(headerIndex < scrollIndex);
+});

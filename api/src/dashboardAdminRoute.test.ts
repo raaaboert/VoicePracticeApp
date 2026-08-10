@@ -44,6 +44,7 @@ let regularDashboardToken: string;
 let superToken: string;
 let adminToken: string | null = null;
 let setSimulationAiBudgetGraceForTest: (userId: string, expiresAtMs: number) => void;
+let ensureDatabaseShapeForTest: (raw: unknown) => ApiDatabase;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -902,6 +903,7 @@ before(async () => {
 
   const imported = await import("./index.js");
   setSimulationAiBudgetGraceForTest = imported.setSimulationAiBudgetGraceForTest;
+  ensureDatabaseShapeForTest = imported.ensureDatabaseShape;
   imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
     [
       buildTrainingPack("pack_scope", "org_1"),
@@ -1297,6 +1299,132 @@ before(async () => {
   const address = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
+
+async function verifyOrganizationDomainsAreRetired() {
+  const first = await adminRequest("/orgs", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Domainless One",
+      contactEmail: "owner@shared.example",
+      emailDomain: "legacy-input.example",
+    }),
+  });
+  assert.equal(first.status, 201);
+  assert.equal(first.body.emailDomain, null);
+
+  const second = await adminRequest("/orgs", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Domainless Two",
+      contactEmail: "other@shared.example",
+      emailDomain: "legacy-input.example",
+    }),
+  });
+  assert.equal(second.status, 201);
+  assert.equal(second.body.emailDomain, null);
+
+  const withoutContactEmail = await adminRequest("/orgs", {
+    method: "POST",
+    body: JSON.stringify({ name: "Domainless Without Contact" }),
+  });
+  assert.equal(withoutContactEmail.status, 201);
+  assert.equal(withoutContactEmail.body.emailDomain, null);
+  assert.equal(
+    new Set([first.body.joinCode, second.body.joinCode, withoutContactEmail.body.joinCode]).size,
+    3,
+  );
+
+  const firstId = String(first.body.id);
+  const contactUpdate = await adminRequest(`/orgs/${firstId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ contactEmail: "changed@shared.example" }),
+  });
+  assert.equal(contactUpdate.status, 200);
+  assert.equal(contactUpdate.body.emailDomain, null);
+
+  const ignoredLegacyPatch = await adminRequest("/orgs/org_1", {
+    method: "PATCH",
+    body: JSON.stringify({ emailDomain: "replacement.example" }),
+  });
+  assert.equal(ignoredLegacyPatch.status, 200);
+  assert.equal(ignoredLegacyPatch.body.emailDomain, "acme.example");
+
+  const raw = await readDb();
+  raw.orgs[0] = { ...raw.orgs[0], emailDomain: " Shared.EXAMPLE " };
+  raw.orgs[1] = { ...raw.orgs[1], emailDomain: " Shared.EXAMPLE " };
+  const normalized = ensureDatabaseShapeForTest(raw);
+  assert.equal(normalized.orgs[0]?.emailDomain, " Shared.EXAMPLE ");
+  assert.equal(normalized.orgs[1]?.emailDomain, " Shared.EXAMPLE ");
+}
+
+async function verifySameDomainUsersCanJoinDifferentOrganizations() {
+  const onboardAndVerify = async (email: string, joinCode: string) => {
+    const { result: onboarded, code } = await captureVerificationCode(() =>
+      publicRequest("/mobile/onboard", {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          firstName: "Same",
+          lastName: "Domain",
+          joinCode,
+          timezone: "America/Denver",
+        }),
+      }),
+    );
+    assert.equal(onboarded.status, 201);
+    assert.equal(onboarded.body.domainMatch, null);
+    const interimUser = onboarded.body.user as UserProfile;
+    const interimToken = String(onboarded.body.authToken);
+    const verified = await mobileRequest("/mobile/onboard/verify-email", interimToken, {
+      method: "POST",
+      body: JSON.stringify({
+        userId: interimUser.id,
+        code,
+        firstName: "Same",
+        lastName: "Domain",
+        joinCode,
+      }),
+    });
+    assert.equal(verified.status, 200);
+    assert.equal(verified.body.domainMatch, null);
+    return {
+      user: verified.body.user as UserProfile,
+      token: String(verified.body.authToken),
+    };
+  };
+
+  const first = await onboardAndVerify("same-domain-a@peritio.ai", "ACME2026");
+  const second = await onboardAndVerify("same-domain-b@peritio.ai", "OTHER2026");
+  const persistedRequests = await waitForPersistedJoinRequests(
+    (requests) => requests.some((row) => row.userId === first.user.id) && requests.some((row) => row.userId === second.user.id),
+  );
+  const firstRequest = persistedRequests.find((row) => row.userId === first.user.id);
+  const secondRequest = persistedRequests.find((row) => row.userId === second.user.id);
+  assert.equal(firstRequest?.orgId, "org_1");
+  assert.equal(secondRequest?.orgId, "org_2");
+  assert.equal(firstRequest?.status, "pending");
+  assert.equal(secondRequest?.status, "pending");
+
+  for (const request of [firstRequest, secondRequest]) {
+    assert.ok(request);
+    const approved = await adminRequest(`/org-join-requests/${request.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "approve" }),
+    });
+    assert.equal(approved.status, 200);
+  }
+
+  const firstApproved = await mobileRequest(`/mobile/users/${first.user.id}`, first.token);
+  const secondApproved = await mobileRequest(`/mobile/users/${second.user.id}`, second.token);
+  assert.equal(firstApproved.status, 200);
+  assert.equal(secondApproved.status, 200);
+  assert.equal(firstApproved.body.orgId, "org_1");
+  assert.equal(secondApproved.body.orgId, "org_2");
+  assert.equal(firstApproved.body.accountType, "enterprise");
+  assert.equal(secondApproved.body.accountType, "enterprise");
+  assert.equal((await mobileRequest(`/mobile/users/${first.user.id}/entitlements`, first.token)).status, 200);
+  assert.equal((await mobileRequest(`/mobile/users/${second.user.id}/entitlements`, second.token)).status, 200);
+}
 
 test("paid mobile AI requires approved organization access before quota grace or provider work", async () => {
   for (const [userId, token] of [
@@ -3067,3 +3195,13 @@ test("super users need explicit organization context and final active org-admin 
   });
   assert.equal(finalAdminDenied.status, 403);
 });
+
+test(
+  "organization domains are retired from creation, updates, and database normalization",
+  verifyOrganizationDomainsAreRetired,
+);
+
+test(
+  "same-domain users request and receive the organizations represented by different company codes",
+  verifySameDomainUsersCanJoinDifferentOrganizations,
+);

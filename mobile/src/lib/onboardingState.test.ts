@@ -10,6 +10,7 @@ import {
   hasApprovedMobileOrganizationAccess,
   hasCompleteMobileProfile,
   isCompanyCodeRequiredForSetup,
+  resolveMobileOrganizationAccessState,
   resolveMobileSetupStep,
   shouldShowCompanyAccessScreen,
 } from "./onboardingState";
@@ -89,9 +90,58 @@ test("mobile onboarding payloads omit blank company code and trim provided value
   );
 });
 
-test("verified individual and pending users remain in Company Access until enterprise approval", () => {
+test("organization access routing distinguishes approval, a pending request, and company access", () => {
   assert.equal(hasApprovedMobileOrganizationAccess(COMPLETE_USER), false);
   assert.equal(shouldShowCompanyAccessScreen(COMPLETE_USER), true);
+  assert.deepEqual(
+    resolveMobileOrganizationAccessState(COMPLETE_USER, [
+      {
+        id: "request_pending",
+        orgId: "org_1",
+        orgName: "Acme",
+        status: "pending",
+        createdAt: "2026-07-27T12:00:00.000Z",
+        updatedAt: "2026-07-27T12:00:00.000Z",
+      },
+    ]),
+    {
+      kind: "pending_request",
+      request: {
+        id: "request_pending",
+        orgId: "org_1",
+        orgName: "Acme",
+        status: "pending",
+        createdAt: "2026-07-27T12:00:00.000Z",
+        updatedAt: "2026-07-27T12:00:00.000Z",
+      },
+    },
+  );
+  assert.deepEqual(
+    resolveMobileOrganizationAccessState(COMPLETE_USER, [
+      {
+        id: "request_rejected",
+        orgId: "org_1",
+        orgName: "Acme",
+        status: "rejected",
+        createdAt: "2026-07-27T12:00:00.000Z",
+        updatedAt: "2026-07-28T12:00:00.000Z",
+      },
+    ]),
+    { kind: "company_access", request: null },
+  );
+  assert.deepEqual(
+    resolveMobileOrganizationAccessState(COMPLETE_USER, [
+      {
+        id: "request_expired",
+        orgId: "org_2",
+        orgName: "Other",
+        status: "expired",
+        createdAt: "2026-07-20T12:00:00.000Z",
+        updatedAt: "2026-07-29T12:00:00.000Z",
+      },
+    ]),
+    { kind: "company_access", request: null },
+  );
   assert.equal(
     shouldShowCompanyAccessScreen({
       ...COMPLETE_USER,
@@ -99,6 +149,14 @@ test("verified individual and pending users remain in Company Access until enter
       orgId: "org_1",
     } as UserProfile),
     false,
+  );
+  assert.equal(
+    resolveMobileOrganizationAccessState({
+      ...COMPLETE_USER,
+      accountType: "enterprise",
+      orgId: "org_1",
+    } as UserProfile, []).kind,
+    "approved_membership",
   );
   assert.equal(
     hasApprovedMobileOrganizationAccess({
