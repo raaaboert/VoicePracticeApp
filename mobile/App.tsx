@@ -2058,6 +2058,8 @@ export default function App() {
     setVerificationExpiresAt(null);
     setVerificationNotice(null);
     setVerificationError(null);
+    setIsOnboardingSaving(false);
+    setIsVerificationSaving(false);
     setHasAuthenticatedScopedConfig(false);
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
@@ -4163,6 +4165,7 @@ export default function App() {
 
     return (
       <KeyboardAvoidingView
+        key="onboarding-profile-screen"
         style={styles.fill}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={20}
@@ -4255,6 +4258,7 @@ export default function App() {
 
     return (
       <KeyboardAvoidingView
+        key="verify-email-screen"
         style={styles.fill}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={20}

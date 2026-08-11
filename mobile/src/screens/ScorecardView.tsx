@@ -479,7 +479,7 @@ const styles = StyleSheet.create({
   },
   modalRoot: {
     flex: 1,
-    justifyContent: "flex-start",
+    justifyContent: "center",
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 12,
@@ -489,6 +489,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(5, 10, 18, 0.76)",
   },
   modalCard: {
+    flex: 1,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
@@ -533,7 +534,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   modalBodyScroll: {
-    flexShrink: 1,
+    flex: 1,
   },
   modalBodyContent: {
     padding: 14,
