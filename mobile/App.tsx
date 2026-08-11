@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
-import { Audio, InterruptionModeIOS } from "expo-av";
+import { setAudioModeAsync } from "expo-audio";
+import type { AudioPlayer } from "expo-audio";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
@@ -737,7 +738,7 @@ export default function App() {
   const hasInitializedRef = useRef(false);
   const startupVersionDiagnosticsLoggedRef = useRef(false);
   const sampleVoiceIdentifierRef = useRef<string | undefined>(undefined);
-  const sampleRemoteTtsSoundRef = useRef<Audio.Sound | null>(null);
+  const sampleRemoteTtsSoundRef = useRef<AudioPlayer | null>(null);
   const sampleRemoteTtsFileRef = useRef<string | null>(null);
   const samplePlaybackRequestIdRef = useRef(0);
   const sampleAbortControllerRef = useRef<AbortController | null>(null);
@@ -973,11 +974,13 @@ export default function App() {
 
     logVoiceSampleEvent("ios_playback_audio_mode_prepare_start", { sampleRequestId, preset });
     try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+        interruptionMode: "duckOthers",
+        shouldRouteThroughEarpiece: false,
+        allowsBackgroundRecording: false,
       });
       logVoiceSampleEvent("ios_playback_audio_mode_prepare_success", { sampleRequestId, preset });
     } catch (audioModeError) {

@@ -1,25 +1,19 @@
-const ANDROID_OUTPUT_FORMAT_MPEG_4 = 2;
-const ANDROID_AUDIO_ENCODER_AAC = 3;
 const IOS_OUTPUT_FORMAT_MPEG4_AAC = "aac ";
 const IOS_AUDIO_QUALITY_MAX = 0x7f;
 
 export const SIMULATION_RECORDING_OPTIONS = {
   isMeteringEnabled: true,
+  extension: ".m4a",
+  sampleRate: 32_000,
+  numberOfChannels: 1,
+  bitRate: 64_000,
   android: {
-    extension: ".m4a",
-    outputFormat: ANDROID_OUTPUT_FORMAT_MPEG_4,
-    audioEncoder: ANDROID_AUDIO_ENCODER_AAC,
-    sampleRate: 32_000,
-    numberOfChannels: 1,
-    bitRate: 64_000,
+    outputFormat: "mpeg4" as const,
+    audioEncoder: "aac" as const,
   },
   ios: {
-    extension: ".m4a",
     outputFormat: IOS_OUTPUT_FORMAT_MPEG4_AAC,
     audioQuality: IOS_AUDIO_QUALITY_MAX,
-    sampleRate: 32_000,
-    numberOfChannels: 1,
-    bitRate: 64_000,
     linearPCMBitDepth: 16,
     linearPCMIsBigEndian: false,
     linearPCMIsFloat: false,
@@ -29,6 +23,16 @@ export const SIMULATION_RECORDING_OPTIONS = {
     bitsPerSecond: 128_000,
   },
 };
+
+export function getSimulationAudioRecorderOptions(platformOs: string) {
+  const { android, ios, web, ...commonOptions } = SIMULATION_RECORDING_OPTIONS;
+  const platformOptions = platformOs === "ios" ? ios : platformOs === "android" ? android : web;
+
+  return {
+    ...commonOptions,
+    ...platformOptions,
+  };
+}
 
 export function getSimulationTranscriptionMimeType(platformOs: string): string {
   return platformOs === "web" ? "audio/webm" : "audio/m4a";

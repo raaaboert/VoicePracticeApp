@@ -1,5 +1,6 @@
 import type { MutableRefObject } from "react";
-import { Audio } from "expo-av";
+import { createAudioPlayer } from "expo-audio";
+import type { AudioPlayer, AudioStatus } from "expo-audio";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import { Platform } from "react-native";
@@ -10,6 +11,10 @@ import type { PrefetchedRemoteSpeechChunk } from "./api";
 import { isOrganizationAccessRequiredError } from "./apiError";
 import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
 import { createPlaybackSession as createPlaybackSettlementSession } from "./ttsPlaybackSession";
+import {
+  getKnownPlaybackDurationMilliseconds,
+  playbackSecondsToMilliseconds,
+} from "./ttsPlaybackTime";
 
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
@@ -30,6 +35,7 @@ const TTS_AUDIO_LOAD_TIMEOUT_MS = 20_000;
 const REMOTE_TTS_PLAYBACK_RATE = 1.0;
 const ttsDiagnosticCounters = new Map<TtsDiagnosticEvent, number>();
 let inlineRemoteAudioPlaybackSupported: boolean | null = Platform.OS === "web" ? false : null;
+const remoteTtsStatusSubscriptions = new WeakMap<AudioPlayer, { remove(): void }>();
 
 interface SpeakWithTtsFallbackParams {
   source: TtsSource;
@@ -46,7 +52,7 @@ interface SpeakWithTtsFallbackParams {
   voiceGender: AiVoiceGender;
   voiceProfile: AiVoiceProfile;
   selectedVoiceIdentifierRef?: MutableRefObject<string | undefined>;
-  remoteTtsSoundRef?: MutableRefObject<Audio.Sound | null>;
+  remoteTtsSoundRef?: MutableRefObject<AudioPlayer | null>;
   remoteTtsFileRef?: MutableRefObject<string | null>;
   assistantTextReceivedAtMs?: number;
   prefetchedRemoteAudio?: PrefetchedRemoteSpeechChunk | null;
@@ -506,24 +512,26 @@ export async function releasePreparedRemoteAudioSource(prepared: PreparedRemoteA
 }
 
 export async function stopRemoteTtsPlayback(params: {
-  remoteTtsSoundRef: MutableRefObject<Audio.Sound | null>;
+  remoteTtsSoundRef: MutableRefObject<AudioPlayer | null>;
   remoteTtsFileRef: MutableRefObject<string | null>;
 }): Promise<void> {
   const sound = params.remoteTtsSoundRef.current;
   params.remoteTtsSoundRef.current = null;
   if (sound) {
+    const statusSubscription = remoteTtsStatusSubscriptions.get(sound);
+    remoteTtsStatusSubscriptions.delete(sound);
     try {
-      sound.setOnPlaybackStatusUpdate(null);
+      statusSubscription?.remove();
     } catch {
       // Ignore listener cleanup failures.
     }
     try {
-      await sound.stopAsync();
+      sound.pause();
     } catch {
       // Ignore stop failures.
     }
     try {
-      await sound.unloadAsync();
+      sound.remove();
     } catch {
       // Ignore unload failures.
     }
@@ -714,15 +722,26 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       });
     };
 
-    const createPlaybackSession = (sessionSourceKind: RemoteAudioSourceKind, bytes: number) => {
-      const sound = new Audio.Sound();
+    const createPlaybackSession = (
+      sessionSourceKind: RemoteAudioSourceKind,
+      bytes: number,
+      sourceUri: string,
+    ) => {
+      const sound = createAudioPlayer({ uri: sourceUri });
       remoteTtsSoundRef.current = sound;
       let audioLoadedAtMs = 0;
       let playbackStartedMarked = false;
+      let audioLoadSettled = false;
       let lastStatusKey: string | null = null;
+      let resolveAudioLoaded!: (status: AudioStatus) => void;
+      const audioLoaded = new Promise<AudioStatus>((resolve) => {
+        resolveAudioLoaded = resolve;
+      });
       const clearStatusListener = () => {
+        const statusSubscription = remoteTtsStatusSubscriptions.get(sound);
+        remoteTtsStatusSubscriptions.delete(sound);
         try {
-          sound.setOnPlaybackStatusUpdate(null);
+          statusSubscription?.remove();
         } catch {
           // Ignore listener cleanup failures.
         }
@@ -780,7 +799,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         playbackSession.startPlaybackTimeout(timeoutMs);
       };
 
-      sound.setOnPlaybackStatusUpdate((status) => {
+      const handlePlaybackStatus = (status: AudioStatus) => {
         if (playbackSession.isSettled()) {
           return;
         }
@@ -796,35 +815,29 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         }
 
         if (!status.isLoaded) {
-          const statusKey = `unloaded:${status.error ?? "none"}`;
+          const statusKey = "unloaded";
           if (statusKey !== lastStatusKey) {
             lastStatusKey = statusKey;
             logLifecycle({
               phase: "playback_status",
               sourceKind: sessionSourceKind,
               bytes,
-              error: status.error,
               elapsedMs: Date.now() - requestStartedAtMs,
               details: { loaded: false },
             });
           }
-          if (status.error) {
-            logLifecycle({
-              phase: "playback_error",
-              sourceKind: sessionSourceKind,
-              bytes,
-              error: status.error,
-              elapsedMs: Date.now() - requestStartedAtMs,
-            });
-            playbackSession.settleFailed(new Error(status.error));
-          }
           return;
         }
 
-        lastPlaybackPositionMillis = status.positionMillis;
-        lastPlaybackDurationMillis = status.durationMillis ?? null;
+        if (!audioLoadSettled) {
+          audioLoadSettled = true;
+          resolveAudioLoaded(status);
+        }
 
-        const statusKey = `loaded:${status.isPlaying}:${status.isBuffering}:${status.didJustFinish}`;
+        lastPlaybackPositionMillis = playbackSecondsToMilliseconds(status.currentTime);
+        lastPlaybackDurationMillis = getKnownPlaybackDurationMilliseconds(status.duration);
+
+        const statusKey = `loaded:${status.playing}:${status.isBuffering}:${status.didJustFinish}`;
         if (statusKey !== lastStatusKey) {
           lastStatusKey = statusKey;
           logLifecycle({
@@ -834,16 +847,16 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             elapsedMs: Date.now() - requestStartedAtMs,
             details: {
               loaded: true,
-              isPlaying: status.isPlaying,
+              isPlaying: status.playing,
               isBuffering: status.isBuffering,
               didJustFinish: status.didJustFinish,
-              positionMillis: status.positionMillis,
-              durationMillis: status.durationMillis ?? null,
+              positionMillis: lastPlaybackPositionMillis,
+              durationMillis: lastPlaybackDurationMillis,
             },
           });
         }
 
-        if (status.isPlaying) {
+        if (status.playing) {
           markPlaybackStarted(Date.now());
         }
 
@@ -854,16 +867,21 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
             bytes,
             elapsedMs: Date.now() - requestStartedAtMs,
             details: {
-              positionMillis: status.positionMillis,
-              durationMillis: status.durationMillis ?? null,
+              positionMillis: lastPlaybackPositionMillis,
+              durationMillis: lastPlaybackDurationMillis,
             },
           });
           playbackSession.settleCompleted();
         }
-      });
+      };
+
+      const statusSubscription = sound.addListener("playbackStatusUpdate", handlePlaybackStatus);
+      remoteTtsStatusSubscriptions.set(sound, statusSubscription);
+      handlePlaybackStatus(sound.currentStatus);
 
       return {
         sound,
+        audioLoaded,
         setAudioLoadedAtMs(value: number) {
           audioLoadedAtMs = value;
         },
@@ -886,7 +904,11 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       sourceKind = paramsForSource.sourceKind;
       remoteTtsFileRef.current = paramsForSource.cleanupFileUri ?? null;
       const bytes = paramsForSource.audio.bytes.byteLength;
-      const playbackSession = createPlaybackSession(paramsForSource.sourceKind, bytes);
+      const playbackSession = createPlaybackSession(
+        paramsForSource.sourceKind,
+        bytes,
+        paramsForSource.sourceUri,
+      );
       const sourcePreparedAtMs = Date.now();
       if (!paramsForSource.skipSourcePreparedLog) {
         logTtsTiming({
@@ -916,17 +938,10 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
 
       try {
         const loadStatus = await withTimeout({
-          promise: playbackSession.sound.loadAsync(
-            {
-              uri: paramsForSource.sourceUri,
-            },
-            {
-              shouldPlay: true,
-              rate: remotePlaybackRate,
-              shouldCorrectPitch: true,
-            },
-            false,
-          ),
+          promise: Promise.race([
+            playbackSession.audioLoaded,
+            playbackSession.playbackFinished.then(() => playbackSession.sound.currentStatus),
+          ]),
           timeoutMs: TTS_AUDIO_LOAD_TIMEOUT_MS,
           createTimeoutError: () => new TtsAudioLoadTimeoutError(),
           onTimeout: () => {
@@ -957,7 +972,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           chunkIndex: params.chunkIndex,
           chunkCount: params.chunkCount,
         });
-        const durationMs = loadStatus.isLoaded ? loadStatus.durationMillis ?? null : null;
+        const durationMs = getKnownPlaybackDurationMilliseconds(loadStatus.duration);
         const playbackTimeoutMs = resolveTtsPlaybackTimeoutMs({
           text: params.text,
           audioDurationMs: durationMs,
@@ -970,13 +985,16 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           elapsedMs: audioLoadedAtMs - requestStartedAtMs,
           details: {
             durationMillis: durationMs,
-            shouldPlay: loadStatus.isLoaded ? loadStatus.shouldPlay : null,
-            isPlaying: loadStatus.isLoaded ? loadStatus.isPlaying : null,
+            shouldPlay: true,
+            isPlaying: loadStatus.playing,
           },
         });
         remoteStage = "playback";
         playbackSession.startPlaybackTimeout(playbackTimeoutMs);
-        if (loadStatus.isLoaded && loadStatus.isPlaying) {
+        playbackSession.sound.shouldCorrectPitch = true;
+        playbackSession.sound.setPlaybackRate(remotePlaybackRate);
+        playbackSession.sound.play();
+        if (playbackSession.sound.currentStatus.playing) {
           playbackSession.markPlaybackStarted(audioLoadedAtMs);
         }
         await playbackSession.playbackFinished;

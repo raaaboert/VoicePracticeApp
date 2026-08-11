@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
+import {
+  AudioModule,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+} from "expo-audio";
+import type { AudioPlayer, AudioRecorder } from "expo-audio";
 import { LinearGradient } from "expo-linear-gradient";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
@@ -70,8 +75,8 @@ import {
 } from "../lib/simulationAudioGuard";
 import { buildNoTranscriptDiagnostics } from "../lib/simulationDiagnostics";
 import {
+  getSimulationAudioRecorderOptions,
   getSimulationTranscriptionMimeType,
-  SIMULATION_RECORDING_OPTIONS,
 } from "../lib/simulationRecordingProfile";
 import { buildSimulationTurnTimingSummary, SimulationTurnSummaryMode } from "../lib/simulationTimingSummary";
 import {
@@ -301,6 +306,17 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+async function stopAndReleaseRecorder(recorder: AudioRecorder): Promise<string | null> {
+  let recordingUri: string | null = null;
+  try {
+    await recorder.stop();
+    recordingUri = recorder.uri;
+    return recordingUri;
+  } finally {
+    recorder.release();
+  }
+}
+
 function isPlaceholderTranscriptError(error: unknown): boolean {
   if (error instanceof Error && error.message.trim()) {
     return error.message.toLowerCase().includes("no transcribed user text received");
@@ -496,7 +512,7 @@ export function SimulationScreen({
   const selectedVoiceIdentifierRef = useRef<string | undefined>(undefined);
   const modeRef = useRef<OrbMode>("thinking");
   const messagesRef = useRef<DialogueMessage[]>([]);
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingRef = useRef<AudioRecorder | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const transcriptNearBottomRef = useRef(true);
   const transcriptAutoFollowRef = useRef(true);
@@ -535,7 +551,7 @@ export function SimulationScreen({
   const sessionCompletionInProgressRef = useRef(false);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const localModeConfirmedRef = useRef(false);
-  const remoteTtsSoundRef = useRef<Audio.Sound | null>(null);
+  const remoteTtsSoundRef = useRef<AudioPlayer | null>(null);
   const remoteTtsFileRef = useRef<string | null>(null);
   const remoteTtsAbortControllerRef = useRef<AbortController | null>(null);
   const activeTurnAbortControllerRef = useRef<AbortController | null>(null);
@@ -1414,14 +1430,13 @@ export function SimulationScreen({
   };
 
   const setAudioMode = async (allowsRecording: boolean) => {
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: allowsRecording,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-      shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-      playThroughEarpieceAndroid: false,
+    await setAudioModeAsync({
+      allowsRecording,
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+      interruptionMode: "duckOthers",
+      shouldRouteThroughEarpiece: false,
+      allowsBackgroundRecording: false,
     });
   };
 
@@ -1460,7 +1475,7 @@ export function SimulationScreen({
       return true;
     }
 
-    const permission = await Audio.requestPermissionsAsync();
+    const permission = await requestRecordingPermissionsAsync();
     if (permission.granted) {
       micGrantedRef.current = true;
       return true;
@@ -1475,7 +1490,7 @@ export function SimulationScreen({
 
     if (recording) {
       try {
-        await recording.stopAndUnloadAsync();
+        await stopAndReleaseRecorder(recording);
       } catch {
         // Ignore stop errors from already-stopped recordings.
       }
@@ -1616,7 +1631,7 @@ export function SimulationScreen({
     }
 
     try {
-      const status = await recording.getStatusAsync();
+      const status = recording.getStatus();
       if (!status.isRecording) {
         const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
         clearTurnMonitoring();
@@ -1754,7 +1769,7 @@ export function SimulationScreen({
     }
 
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
-    let pendingRecording: Audio.Recording | null = null;
+    let pendingRecording: AudioRecorder | null = null;
     let recordingStartAttempted = false;
     recordingStartInProgressRef.current = true;
     setIsStartingTurn(true);
@@ -1829,10 +1844,12 @@ export function SimulationScreen({
         phase: "recording_prepare_start",
       });
 
-      const recording = new Audio.Recording();
+      const recording = new AudioModule.AudioRecorder(
+        getSimulationAudioRecorderOptions(Platform.OS),
+      );
       pendingRecording = recording;
       try {
-        await recording.prepareToRecordAsync(SIMULATION_RECORDING_OPTIONS);
+        await recording.prepareToRecordAsync();
         logSimulationTiming({
           correlationId: requestCorrelationId,
           phase: "recording_prepare_success",
@@ -1852,7 +1869,7 @@ export function SimulationScreen({
 
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
       recordingStartAttempted = true;
-      await recording.startAsync();
+      recording.record();
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
       if (Platform.OS === "ios") {
         logSimulationTiming({
@@ -1912,7 +1929,7 @@ export function SimulationScreen({
           },
         });
         try {
-          await pendingRecording.stopAndUnloadAsync();
+          await stopAndReleaseRecorder(pendingRecording);
         } catch {
           // Ignore cleanup errors for discarded lifecycle-interrupted recordings.
         }
@@ -2107,15 +2124,14 @@ export function SimulationScreen({
           turnLoopReady: turnLoopReadyRef.current,
         },
       });
-      await recording.stopAndUnloadAsync();
       recordingRef.current = null;
+      const audioUri = (await stopAndReleaseRecorder(recording)) ?? "";
       audioModeResetPromise = setAudioMode(false).catch(() => {
         // Ignore mode reset errors and allow the turn pipeline to continue.
       });
       recordingFinalizeCompletedAtMs = Date.now();
       throwIfSessionLifecycleInterrupted();
 
-      const audioUri = recording.getURI() ?? "";
       turnDurationMs = Math.max(0, Date.now() - turnStartedAtRef.current);
       turnDurationSeconds = Math.max(
         1,

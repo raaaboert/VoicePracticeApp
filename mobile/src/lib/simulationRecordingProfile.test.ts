@@ -1,4 +1,8 @@
-import { getSimulationTranscriptionMimeType, SIMULATION_RECORDING_OPTIONS } from "./simulationRecordingProfile";
+import {
+  getSimulationAudioRecorderOptions,
+  getSimulationTranscriptionMimeType,
+  SIMULATION_RECORDING_OPTIONS,
+} from "./simulationRecordingProfile";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -13,14 +17,20 @@ function runTest(name: string, fn: () => void): void {
 }
 
 runTest("uses speech-optimized native recording settings without changing the container format", () => {
-  assert(SIMULATION_RECORDING_OPTIONS.android.extension === ".m4a", "android should keep m4a recording");
-  assert(SIMULATION_RECORDING_OPTIONS.ios.extension === ".m4a", "ios should keep m4a recording");
-  assert(SIMULATION_RECORDING_OPTIONS.android.numberOfChannels === 1, "android should record mono audio");
-  assert(SIMULATION_RECORDING_OPTIONS.ios.numberOfChannels === 1, "ios should record mono audio");
-  assert(SIMULATION_RECORDING_OPTIONS.android.bitRate === 64_000, "android bitrate should be reduced for speech");
-  assert(SIMULATION_RECORDING_OPTIONS.ios.bitRate === 64_000, "ios bitrate should be reduced for speech");
-  assert(SIMULATION_RECORDING_OPTIONS.android.sampleRate === 32_000, "android sample rate should stay speech-safe");
-  assert(SIMULATION_RECORDING_OPTIONS.ios.sampleRate === 32_000, "ios sample rate should stay speech-safe");
+  assert(SIMULATION_RECORDING_OPTIONS.extension === ".m4a", "native recording should keep the m4a container");
+  assert(SIMULATION_RECORDING_OPTIONS.numberOfChannels === 1, "native recording should stay mono");
+  assert(SIMULATION_RECORDING_OPTIONS.bitRate === 64_000, "native bitrate should remain speech-optimized");
+  assert(SIMULATION_RECORDING_OPTIONS.sampleRate === 32_000, "native sample rate should stay speech-safe");
+  assert(SIMULATION_RECORDING_OPTIONS.isMeteringEnabled, "recording metering should remain enabled");
+  assert(SIMULATION_RECORDING_OPTIONS.android.outputFormat === "mpeg4", "android should use the mpeg4 format");
+  assert(SIMULATION_RECORDING_OPTIONS.android.audioEncoder === "aac", "android should use the aac encoder");
+
+  const androidOptions = getSimulationAudioRecorderOptions("android");
+  const iosOptions = getSimulationAudioRecorderOptions("ios");
+  assert(androidOptions.numberOfChannels === 1, "imperative android options should include common fields");
+  assert("audioEncoder" in androidOptions && androidOptions.audioEncoder === "aac", "android options should be flattened");
+  assert(iosOptions.bitRate === 64_000, "imperative ios options should include common fields");
+  assert("audioQuality" in iosOptions && iosOptions.audioQuality === 0x7f, "ios options should be flattened");
 });
 
 runTest("keeps transcription mime types aligned with the current platform transport", () => {
