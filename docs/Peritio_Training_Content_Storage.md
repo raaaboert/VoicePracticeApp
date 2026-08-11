@@ -209,7 +209,7 @@ the attempt count, next retry time, and allowlisted error category.
 ### Render Runtime
 
 The staging worker is declared in the repository `render.yaml` as a single-instance Docker
-background worker. `api/Dockerfile.video-worker` pins Node 20.20.2 and Debian FFmpeg/FFprobe
+background worker. `api/Dockerfile.video-worker` pins Node 24.18.0 and Debian FFmpeg/FFprobe
 5.1.9. Worker startup verifies both tool versions before claiming any work.
 
 The worker uses Render's ephemeral filesystem only as scratch space; PostgreSQL and private R2
