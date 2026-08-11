@@ -201,6 +201,12 @@ import {
 } from "./openaiModelConfig.js";
 import type { OpenAiCompletionApiFamily, SimulationRoute } from "./openaiModelConfig.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
+import {
+  authorizeSupportCaseOrigin,
+  decodeSupportCaseMessage,
+  encodeSupportCaseMessage,
+  normalizeSupportCaseOrigin,
+} from "./supportCaseOrigin.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
@@ -16642,6 +16648,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
     message?: unknown;
     includeTranscript?: unknown;
     transcript?: unknown;
+    source?: unknown;
   };
 
   const message = typeof body.message === "string" ? body.message.trim() : "";
@@ -16651,6 +16658,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
   }
 
   const includeTranscript = Boolean(body.includeTranscript);
+  const requestedSource = normalizeSupportCaseOrigin(body.source);
   const transcriptCandidate = body.transcript as
     | {
         text?: unknown;
@@ -16723,6 +16731,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       return;
     }
 
+    const source = authorizeSupportCaseOrigin(requestedSource, user);
     const now = nowIso();
     const record: SupportCaseRecord = {
       id: `case_${uuid()}`,
@@ -16731,7 +16740,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       orgId: user.orgId,
       segmentId: null,
       scenarioId: null,
-      message: message.slice(0, SUPPORT_MESSAGE_MAX_LENGTH),
+      message: encodeSupportCaseMessage(message, source).slice(0, SUPPORT_MESSAGE_MAX_LENGTH),
       transcriptEncrypted: includeTranscript ? encryptSupportTranscript(transcriptText) : null,
       transcriptExpiresAt: includeTranscript
         ? new Date(Date.now() + SUPPORT_TRANSCRIPT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()
@@ -16766,7 +16775,8 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       message: "Submitted support case.",
       metadata: {
         caseId: record.id,
-        includeTranscript
+        includeTranscript,
+        source
       }
     });
     response.status(201).json({
@@ -21517,6 +21527,7 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
       .map((entry) => {
         const user = userById.get(entry.userId);
         const org = entry.orgId ? orgById.get(entry.orgId) : undefined;
+        const presentation = decodeSupportCaseMessage(entry.message);
         return {
           id: entry.id,
           status: entry.status,
@@ -21528,7 +21539,8 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
           segmentLabel: entry.segmentId ? segmentLabelById.get(entry.segmentId) ?? entry.segmentId : null,
           scenarioId: entry.scenarioId,
           scenarioTitle: entry.scenarioId ? scenarioTitleById.get(entry.scenarioId) ?? entry.scenarioId : null,
-          message: entry.message,
+          message: presentation.message,
+          source: presentation.origin,
           transcript: {
             available: Boolean(entry.transcriptEncrypted),
             expiresAt: entry.transcriptExpiresAt,
@@ -21553,6 +21565,7 @@ app.get("/support/cases/:caseId", requireAdmin, async (request: Request, respons
   await withDatabaseRead(async (db) => {
     const user = getUserById(db, entry.userId);
     const org = getOrgById(db, entry.orgId);
+    const presentation = decodeSupportCaseMessage(entry.message);
 
     const transcriptText = entry.transcriptEncrypted ? decryptSupportTranscript(entry.transcriptEncrypted) : null;
 
@@ -21563,7 +21576,8 @@ app.get("/support/cases/:caseId", requireAdmin, async (request: Request, respons
       updatedAt: entry.updatedAt,
       org: org ? { id: org.id, name: org.name } : null,
       user: user ? { id: user.id, email: user.email } : { id: entry.userId, email: entry.userId },
-      message: entry.message,
+      message: presentation.message,
+      source: presentation.origin,
       transcript: {
         available: Boolean(entry.transcriptEncrypted),
         expiresAt: entry.transcriptExpiresAt,

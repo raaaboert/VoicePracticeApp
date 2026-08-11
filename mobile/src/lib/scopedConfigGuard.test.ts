@@ -19,6 +19,7 @@ runTest("marks protected authenticated screens as requiring scoped config", () =
   assert(requiresAuthenticatedScopedConfig("home"), "home should require scoped config");
   assert(requiresAuthenticatedScopedConfig("setup"), "setup should require scoped config");
   assert(requiresAuthenticatedScopedConfig("admin_home"), "admin home should require scoped config");
+  assert(requiresAuthenticatedScopedConfig("organization_plan"), "organization plan should require scoped config");
   assert(!requiresAuthenticatedScopedConfig("verify_email"), "verify email should stay outside the scoped-config guard");
   assert(!requiresAuthenticatedScopedConfig("pending_approval"), "pending approval should stay outside the scoped-config guard");
 });

@@ -5,6 +5,7 @@ import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../src/lib/api";
 import { useAdminMode } from "../../src/lib/adminMode";
+import { getSupportCaseSourceLabel } from "../../src/lib/supportCasePresentation";
 
 interface SupportCaseSummary {
   id: string;
@@ -16,6 +17,7 @@ interface SupportCaseSummary {
   segmentLabel: string | null;
   scenarioTitle: string | null;
   message: string;
+  source: string | null;
   transcript: { available: boolean; expiresAt: string | null; fileName: string | null };
   meta: Record<string, unknown> | null;
 }
@@ -33,12 +35,13 @@ interface SupportCaseDetail {
   org: { id: string; name: string } | null;
   user: { id: string; email: string };
   message: string;
+  source: string | null;
   transcript: { available: boolean; expiresAt: string | null; fileName: string | null; text: string | null };
   meta: Record<string, unknown> | null;
 }
 
 type SortDirection = "asc" | "desc";
-type SortKey = "createdAt" | "type" | "org" | "user" | "scenario" | "status" | "transcript" | "message";
+type SortKey = "createdAt" | "type" | "source" | "org" | "user" | "scenario" | "status" | "transcript" | "message";
 
 function isAutoErrorCase(message: string): boolean {
   return message.trim().toUpperCase().startsWith("[AUTO-ERROR]");
@@ -102,6 +105,10 @@ function compareText(a: string, b: string): number {
 function getSortText(row: SupportCaseSummary, key: SortKey): string {
   if (key === "type") {
     return isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback";
+  }
+
+  if (key === "source") {
+    return getSupportCaseSourceLabel(row.source) ?? "";
   }
 
   if (key === "org") {
@@ -255,6 +262,7 @@ export default function SupportPage() {
         "Created At",
         "Updated At",
         "Type",
+        "Source",
         "Status",
         "Org ID",
         "Org Name",
@@ -273,6 +281,7 @@ export default function SupportPage() {
         row.createdAt,
         row.updatedAt,
         isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback",
+        getSupportCaseSourceLabel(row.source) ?? "",
         row.status,
         row.org?.id ?? "",
         row.org?.name ?? "",
@@ -419,6 +428,7 @@ export default function SupportPage() {
               <tr>
                 <th>{renderSortButton("Created", "createdAt")}</th>
                 <th>{renderSortButton("Type", "type")}</th>
+                <th>{renderSortButton("Source", "source")}</th>
                 {isPersonalMode ? null : <th>{renderSortButton("Org", "org")}</th>}
                 <th>{renderSortButton("User", "user")}</th>
                 <th>{renderSortButton("Scenario", "scenario")}</th>
@@ -436,6 +446,7 @@ export default function SupportPage() {
                     <div className="small">{row.id}</div>
                   </td>
                   <td>{isAutoErrorCase(row.message) ? "Auto Error" : "User Feedback"}</td>
+                  <td>{getSupportCaseSourceLabel(row.source) ?? "-"}</td>
                   {isPersonalMode ? null : <td>{row.org?.name ?? "-"}</td>}
                   <td>
                     <div>{row.user.email}</div>
@@ -472,7 +483,7 @@ export default function SupportPage() {
               ))}
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={isPersonalMode ? 8 : 9} className="small">
+                  <td colSpan={isPersonalMode ? 9 : 10} className="small">
                     No cases yet.
                   </td>
                 </tr>
@@ -522,6 +533,7 @@ export default function SupportPage() {
               <>
                 <div className="small" style={{ marginTop: 8 }}>
                   Type: {isAutoErrorCase(selectedDetail.message) ? "Auto Error" : "User Feedback"}{"\n"}
+                  Source: {getSupportCaseSourceLabel(selectedDetail.source) ?? "-"}{"\n"}
                   Org: {selectedDetail.org?.name ?? "-"}{"\n"}
                   User: {selectedDetail.user.email}{"\n"}
                   Status: {selectedDetail.status}{"\n"}

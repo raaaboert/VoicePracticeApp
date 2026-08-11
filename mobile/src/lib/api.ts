@@ -1395,6 +1395,7 @@ export async function createSupportCase(params: {
   authToken: string;
   message: string;
   includeTranscript: boolean;
+  source?: "organization_plan";
   transcript?: { text: string; fileName: string; meta: Record<string, unknown> };
 }): Promise<{ caseId: string; transcriptRetainedUntil: string | null }> {
   return requestJsonWithRetry(
@@ -1404,6 +1405,7 @@ export async function createSupportCase(params: {
       body: JSON.stringify({
         message: params.message,
         includeTranscript: params.includeTranscript,
+        source: params.source,
         transcript: params.includeTranscript ? params.transcript : undefined,
       }),
     },
