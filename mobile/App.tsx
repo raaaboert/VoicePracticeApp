@@ -91,6 +91,13 @@ import {
   resolveHomeAdminDestination,
   transitionAdminUserListLoad,
 } from "./src/lib/adminScreenFlow";
+import {
+  buildOrganizationPlanDetails,
+  canAccessOrganizationPlan,
+  canSubmitOrganizationPlanSupport,
+  ORGANIZATION_PLAN_SCREEN,
+  resolveOrganizationPlanScreen,
+} from "./src/lib/organizationPlan";
 import type {
   AdminUserListLoadEvent,
   AdminUserListLoadState,
@@ -200,7 +207,7 @@ type Screen =
   | "admin_user_detail"
   | "settings"
   | "profile"
-  | "subscription";
+  | "organization_plan";
 
 interface ScorecardSupportDiagnostics {
   simulationSessionId: string | null;
@@ -792,6 +799,12 @@ export default function App() {
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [isSettingsSaving, setIsSettingsSaving] = useState(false);
+  const [organizationPlanSupportNotice, setOrganizationPlanSupportNotice] = useState<string | null>(null);
+  const [organizationPlanSupportError, setOrganizationPlanSupportError] = useState<string | null>(null);
+  const [organizationPlanSupportDraft, setOrganizationPlanSupportDraft] = useState("");
+  const [isOrganizationPlanSupportOpen, setIsOrganizationPlanSupportOpen] = useState(false);
+  const [isOrganizationPlanSupportSubmitting, setIsOrganizationPlanSupportSubmitting] = useState(false);
+  const organizationPlanSupportSubmittingRef = useRef(false);
 
   const [simulationConfig, setSimulationConfig] = useState<SimulationConfig | null>(null);
   const [lastCompletedConfig, setLastCompletedConfig] = useState<SimulationConfig | null>(null);
@@ -2045,6 +2058,8 @@ export default function App() {
     setVerificationExpiresAt(null);
     setVerificationNotice(null);
     setVerificationError(null);
+    setIsOnboardingSaving(false);
+    setIsVerificationSaving(false);
     setHasAuthenticatedScopedConfig(false);
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
@@ -3628,24 +3643,6 @@ export default function App() {
     });
   }, [lastTranscript, mobileAuthToken, scorecardDiagnostics, user]);
 
-  const currentTier = useMemo(() => {
-    if (!config || !user) {
-      return null;
-    }
-
-    return config.tiers.find((tier) => tier.id === user.tier) ?? null;
-  }, [config, user]);
-
-  const standardTiers = useMemo(
-    () => config?.tiers.filter((tier) => tier.id === "free" || tier.id === "pro" || tier.id === "pro_plus") ?? [],
-    [config],
-  );
-
-  const otherPlanTiers = useMemo(() => {
-    const filtered = standardTiers.filter((tier) => tier.id !== user?.tier);
-    return filtered.slice(0, 2);
-  }, [standardTiers, user?.tier]);
-
   const timeAllotmentUsage = useMemo(() => {
     const limits = entitlements?.limits;
     const usage = entitlements?.usage;
@@ -3717,6 +3714,63 @@ export default function App() {
     user?.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin"),
   );
   const isOrgAdmin = Boolean(user?.accountType === "enterprise" && user.orgRole === "org_admin");
+  const canViewOrganizationPlan = canAccessOrganizationPlan(user);
+  const organizationPlanDetails = useMemo(() => buildOrganizationPlanDetails(entitlements), [entitlements]);
+  const canSubmitOrganizationPlanSupportRequest = canSubmitOrganizationPlanSupport(
+    organizationPlanSupportDraft,
+    isOrganizationPlanSupportSubmitting,
+  );
+
+  const openOrganizationPlanSupport = useCallback(() => {
+    setOrganizationPlanSupportNotice(null);
+    setOrganizationPlanSupportError(null);
+    setIsOrganizationPlanSupportOpen(true);
+  }, []);
+
+  const cancelOrganizationPlanSupport = useCallback(() => {
+    if (organizationPlanSupportSubmittingRef.current) {
+      return;
+    }
+    setIsOrganizationPlanSupportOpen(false);
+    setOrganizationPlanSupportDraft("");
+    setOrganizationPlanSupportError(null);
+  }, []);
+
+  const requestOrganizationPlanSupport = useCallback(async () => {
+    if (
+      organizationPlanSupportSubmittingRef.current
+      || !canSubmitOrganizationPlanSupport(organizationPlanSupportDraft, false)
+    ) {
+      return;
+    }
+
+    setOrganizationPlanSupportNotice(null);
+    setOrganizationPlanSupportError(null);
+    if (!user || !mobileAuthToken || !canAccessOrganizationPlan(user)) {
+      setOrganizationPlanSupportError("Organization Plan support is unavailable for this account.");
+      return;
+    }
+
+    organizationPlanSupportSubmittingRef.current = true;
+    setIsOrganizationPlanSupportSubmitting(true);
+    try {
+      const result = await createSupportCase({
+        userId: user.id,
+        authToken: mobileAuthToken,
+        message: organizationPlanSupportDraft.trim(),
+        includeTranscript: false,
+        source: "organization_plan",
+      });
+      setOrganizationPlanSupportNotice(`Support request submitted. Case ID: ${result.caseId}.`);
+      setOrganizationPlanSupportDraft("");
+      setIsOrganizationPlanSupportOpen(false);
+    } catch (caught) {
+      setOrganizationPlanSupportError(getErrorMessage(caught, "Could not contact support."));
+    } finally {
+      organizationPlanSupportSubmittingRef.current = false;
+      setIsOrganizationPlanSupportSubmitting(false);
+    }
+  }, [mobileAuthToken, organizationPlanSupportDraft, user]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3879,7 +3933,6 @@ export default function App() {
                 <Text style={styles.menuCloseButtonText}>X</Text>
               </Pressable>
             </View>
-            <Text style={styles.menuBody}>Plan: {currentTier?.label ?? "Free"}</Text>
             {user?.isSuperUser && activeSuperUserOrg ? (
               <Text style={styles.menuBody}>
                 Environment: {activeSuperUserOrg.orgName} ({activeSuperUserOrg.orgStatus})
@@ -3935,14 +3988,18 @@ export default function App() {
             >
               <Text style={styles.menuItemText}>Profile</Text>
             </Pressable>
-            <Pressable
-              style={styles.menuItemButton}
-              onPress={() => {
-                closeHomeMenu("subscription");
-              }}
-            >
-              <Text style={styles.menuItemText}>Subscription Details</Text>
-            </Pressable>
+            {canViewOrganizationPlan ? (
+              <Pressable
+                style={styles.menuItemButton}
+                onPress={() => {
+                  setOrganizationPlanSupportNotice(null);
+                  setOrganizationPlanSupportError(null);
+                  closeHomeMenu(ORGANIZATION_PLAN_SCREEN);
+                }}
+              >
+                <Text style={styles.menuItemText}>Organization Plan</Text>
+              </Pressable>
+            ) : null}
 
             {user?.accountType === "enterprise" && (user.orgRole === "org_admin" || user.orgRole === "user_admin") ? (
               <>
@@ -4108,6 +4165,7 @@ export default function App() {
 
     return (
       <KeyboardAvoidingView
+        key="onboarding-profile-screen"
         style={styles.fill}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={20}
@@ -4200,6 +4258,7 @@ export default function App() {
 
     return (
       <KeyboardAvoidingView
+        key="verify-email-screen"
         style={styles.fill}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={20}
@@ -4897,58 +4956,120 @@ export default function App() {
     </View>
   );
 
-  const renderSubscription = () => (
+  const renderOrganizationPlan = () => (
     <View style={styles.fill}>
       <View style={styles.topRow}>
         <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
           <Text style={styles.ghostButtonText}>Back</Text>
         </Pressable>
-        <Text style={styles.topTitle}>Subscription Details</Text>
+        <Text style={styles.topTitle}>Organization Plan</Text>
         <View style={styles.spacer} />
       </View>
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         <View style={styles.card}>
-          <Text style={styles.label}>Your Plan</Text>
-          <Text style={styles.title}>{currentTier?.label ?? "Free"}</Text>
-          <Text style={styles.body}>{currentTier?.description ?? "Basic training access."}</Text>
-          <Text style={styles.body}>Price: ${(currentTier?.priceUsdMonthly ?? 0).toFixed(2)}/month</Text>
-          <Text style={styles.body}>
-            Daily simulation: {currentTier?.dailySecondsLimit === null
-              ? "Custom"
-              : `${secondsToWholeMinutes(currentTier?.dailySecondsLimit ?? 0)} minutes`}
-          </Text>
-          <Text style={styles.body}>Support included: {currentTier?.supportIncluded ? "Yes" : "No"}</Text>
-          <Text style={styles.body}>
-            Used this month: {secondsToWholeMinutes(entitlements?.usage?.billedSecondsThisMonth ?? 0)} min billed
-          </Text>
-          <Text style={styles.body}>
-            {timeAllotmentUsage.mode === "monthly_org"
-              ? `Org remaining this cycle: ${formatSecondsAsClock(timeAllotmentUsage.remainingSeconds ?? 0)}`
-              : `Daily remaining: ${entitlements?.usage?.dailySecondsRemaining === null
-                  ? "unlimited"
-                  : formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
-          </Text>
+          <Text style={styles.label}>YOUR PLAN</Text>
+          <Text style={styles.title}>{organizationPlanDetails.planName}</Text>
+          {organizationPlanDetails.status ? (
+            <Text style={styles.body}>Status: {organizationPlanDetails.status}</Text>
+          ) : null}
+          {organizationPlanDetails.usageThisCycle ? (
+            <Text style={styles.body}>Usage this cycle: {organizationPlanDetails.usageThisCycle}</Text>
+          ) : null}
+          {organizationPlanDetails.organizationAllocation ? (
+            <Text style={styles.body}>
+              Organization allocation: {organizationPlanDetails.organizationAllocation}
+            </Text>
+          ) : null}
+          {organizationPlanDetails.remainingThisCycle ? (
+            <Text style={styles.body}>Remaining this cycle: {organizationPlanDetails.remainingThisCycle}</Text>
+          ) : null}
+          {organizationPlanDetails.cycleResets ? (
+            <Text style={styles.body}>Cycle resets: {organizationPlanDetails.cycleResets}</Text>
+          ) : null}
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.label}>Other Plans</Text>
-          {otherPlanTiers.map((tier) => (
-            <View key={tier.id} style={styles.optionCard}>
-              <Text style={styles.optionTitle}>{tier.label} - ${tier.priceUsdMonthly.toFixed(2)}/month</Text>
-              <Text style={styles.body}>{tier.description}</Text>
-              <Text style={styles.body}>
-                Daily simulation: {tier.dailySecondsLimit === null
-                  ? "Custom"
-                  : `${secondsToWholeMinutes(tier.dailySecondsLimit)} minutes`}
-              </Text>
-              <Text style={styles.body}>Support included: {tier.supportIncluded ? "Yes" : "No"}</Text>
-            </View>
-          ))}
-          <Text style={styles.body}>
-            Enterprise option is also available for org-level controls, custom quotas, and team rollouts.
-          </Text>
+          <Text style={styles.label}>SUPPORT</Text>
+          <Text style={styles.body}>Need help with your organization or account?</Text>
+          <Pressable
+            style={styles.primaryButton}
+            onPress={openOrganizationPlanSupport}
+          >
+            <Text style={styles.primaryButtonText}>Contact Support</Text>
+          </Pressable>
+          {organizationPlanSupportNotice ? <Text style={styles.successText}>{organizationPlanSupportNotice}</Text> : null}
         </View>
       </ScrollView>
+
+      <Modal
+        transparent
+        visible={isOrganizationPlanSupportOpen}
+        animationType="fade"
+        onRequestClose={cancelOrganizationPlanSupport}
+      >
+        <KeyboardAvoidingView
+          style={styles.organizationPlanSupportModalKeyboardRoot}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          <Pressable
+            style={styles.dropdownModalBackdrop}
+            onPress={cancelOrganizationPlanSupport}
+            disabled={isOrganizationPlanSupportSubmitting}
+          />
+          <SafeAreaView style={styles.organizationPlanSupportModalRoot} pointerEvents="box-none">
+            <View style={styles.organizationPlanSupportModalCard}>
+              <Text style={styles.organizationPlanSupportModalTitle}>Contact Support</Text>
+              <Text style={styles.body}>Tell us how we can help with your organization or account.</Text>
+              <Text style={styles.organizationPlanSupportFieldLabel}>How can we help?</Text>
+              <TextInput
+                style={styles.organizationPlanSupportInput}
+                value={organizationPlanSupportDraft}
+                onChangeText={(value) => {
+                  setOrganizationPlanSupportDraft(value);
+                  setOrganizationPlanSupportError(null);
+                }}
+                editable={!isOrganizationPlanSupportSubmitting}
+                placeholder="Describe what you need help with..."
+                placeholderTextColor={theme.hint}
+                multiline
+                textAlignVertical="top"
+                autoFocus
+              />
+
+              {organizationPlanSupportError ? <Text style={styles.errorText}>{organizationPlanSupportError}</Text> : null}
+
+              <View style={styles.organizationPlanSupportModalActions}>
+                <Pressable
+                  style={[
+                    styles.ghostButton,
+                    styles.organizationPlanSupportModalAction,
+                    isOrganizationPlanSupportSubmitting ? styles.disabled : null,
+                  ]}
+                  onPress={cancelOrganizationPlanSupport}
+                  disabled={isOrganizationPlanSupportSubmitting}
+                >
+                  <Text style={styles.ghostButtonText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.primaryButton,
+                    styles.organizationPlanSupportModalAction,
+                    !canSubmitOrganizationPlanSupportRequest ? styles.disabled : null,
+                  ]}
+                  disabled={!canSubmitOrganizationPlanSupportRequest}
+                  onPress={() => {
+                    void requestOrganizationPlanSupport();
+                  }}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {isOrganizationPlanSupportSubmitting ? "Submitting..." : "Submit Request"}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 
@@ -6306,8 +6427,11 @@ export default function App() {
       return renderProfile();
     }
 
-    if (screen === "subscription") {
-      return renderSubscription();
+    if (screen === ORGANIZATION_PLAN_SCREEN) {
+      if (resolveOrganizationPlanScreen(screen, user) !== ORGANIZATION_PLAN_SCREEN) {
+        return renderHome();
+      }
+      return renderOrganizationPlan();
     }
 
     return renderHome();
@@ -6505,6 +6629,14 @@ function createStyles(theme: ThemeTokens) {
     dropdownOptionSelected: { borderColor: theme.accent, backgroundColor: theme.dropdownOptionSelectedBg },
     dropdownOptionText: { color: theme.text, fontSize: 13 },
     dropdownOptionTextSelected: { fontWeight: "700" },
+    organizationPlanSupportModalKeyboardRoot: { flex: 1 },
+    organizationPlanSupportModalRoot: { flex: 1, justifyContent: "center", paddingHorizontal: 18 },
+    organizationPlanSupportModalCard: { borderRadius: 16, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.dropdownModalCardBg, padding: 16, gap: 12 },
+    organizationPlanSupportModalTitle: { color: theme.text, fontSize: 20, fontWeight: "800" },
+    organizationPlanSupportFieldLabel: { color: theme.text, fontSize: 14, fontWeight: "700", marginTop: 2 },
+    organizationPlanSupportInput: { minHeight: 140, borderRadius: 12, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.inputBg, color: theme.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16 },
+    organizationPlanSupportModalActions: { flexDirection: "row", gap: 10, marginTop: 2 },
+    organizationPlanSupportModalAction: { flex: 1 },
     warningCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.warningBorder, backgroundColor: theme.warningBg, padding: 12, marginBottom: 12 },
     warningText: { color: theme.warningText, fontSize: 13.5, lineHeight: 19 },
     errorCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.errorCardBorder, backgroundColor: theme.errorCardBg, padding: 12, marginBottom: 12 },

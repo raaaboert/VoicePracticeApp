@@ -11,7 +11,7 @@ const AUTHENTICATED_SCOPED_CONFIG_SCREENS = new Set([
   "admin_user_detail",
   "settings",
   "profile",
-  "subscription",
+  "organization_plan",
 ]);
 
 export function requiresAuthenticatedScopedConfig(screen: string): boolean {

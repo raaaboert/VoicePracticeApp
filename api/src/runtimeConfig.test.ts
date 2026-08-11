@@ -174,6 +174,14 @@ test("production accepts strict postgres, resend, and unique-secret settings", (
   assert.equal(config.authCodeDeliveryProvider, "resend");
   assert.equal(config.webAuthCodeDeliveryProvider, "resend");
   assert.equal(config.mobileEmailVerificationDeliveryProvider, "resend");
+  assert.equal(config.requireReverifyOnOnboard, true);
+});
+
+test("staging and production cannot disable existing-user mobile re-verification", () => {
+  assert.throws(
+    () => loadRuntimeConfig(makeProductionEnv({ MOBILE_REVERIFY_ON_ONBOARD: "false" })),
+    /cannot be disabled in staging or production/
+  );
 });
 
 test("production refuses file storage", () => {

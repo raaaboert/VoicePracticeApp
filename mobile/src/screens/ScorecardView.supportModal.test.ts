@@ -27,6 +27,27 @@ test("Feedback / Support modal uses a keyboard-aware safe-area shell", () => {
   assert.equal(scorecardViewSource.includes('pointerEvents="box-none"'), true);
 });
 
+test("Feedback / Support modal has a stable bounded flex layout before input focus", () => {
+  const modalRootStyle = scorecardViewSource.slice(
+    scorecardViewSource.indexOf("modalRoot: {"),
+    scorecardViewSource.indexOf("modalBackdrop: {"),
+  );
+  const modalCardStyle = scorecardViewSource.slice(
+    scorecardViewSource.indexOf("modalCard: {"),
+    scorecardViewSource.indexOf("modalHeaderRow: {"),
+  );
+  const modalBodyScrollStyle = scorecardViewSource.slice(
+    scorecardViewSource.indexOf("modalBodyScroll: {"),
+    scorecardViewSource.indexOf("modalBodyContent: {"),
+  );
+
+  assert.equal(modalRootStyle.includes('justifyContent: "center"'), true);
+  assert.equal(modalCardStyle.includes("flex: 1"), true);
+  assert.equal(modalBodyScrollStyle.includes("flex: 1"), true);
+  assert.equal(modalBodyScrollStyle.includes("flexShrink"), false);
+  assert.equal(scorecardViewSource.includes("{ maxHeight: supportModalMaxHeight }"), true);
+});
+
 test("Feedback / Support header remains fixed outside the scrolling body", () => {
   const headerIndex = scorecardViewSource.indexOf("<View style={styles.modalHeaderRow}>");
   const titleIndex = scorecardViewSource.indexOf("Feedback / Support", headerIndex);

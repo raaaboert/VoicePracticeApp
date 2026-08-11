@@ -2,12 +2,16 @@ import { AiUsageEvent } from "@voicepractice/shared";
 
 import type {
   AiUsageBudgetSnapshot,
+  AiUsageBudgetLimits,
+  AiUsageBudgetReservationResult,
   AiUsageCurrentPeriodTotals,
   AiUsageEventQuery,
   AiUsageEventStore
 } from "../storage/aiUsageEventStore.js";
 
 export type {
+  AiUsageBudgetLimits,
+  AiUsageBudgetReservationResult,
   AiUsageBudgetSnapshot,
   AiUsageCurrentPeriodTotals,
   AiUsageEventQuery
@@ -34,6 +38,13 @@ function getUsageTokens(event: AiUsageEvent): number {
 
 export interface AiUsageEventAccess {
   append(event: AiUsageEvent): Promise<void>;
+  reserveBudget(params: {
+    event: AiUsageEvent;
+    userTimeZone: string;
+    limits: AiUsageBudgetLimits;
+    now: Date;
+  }): Promise<AiUsageBudgetReservationResult>;
+  deleteEvent(eventId: string): Promise<boolean>;
   deleteForUser(userId: string): Promise<number>;
   list(query?: AiUsageEventQuery): Promise<AiUsageEvent[]>;
   computeBudgetSnapshot(params: { userId: string; now: Date; userTimeZone: string }): Promise<AiUsageBudgetSnapshot>;
@@ -44,6 +55,12 @@ export function createAiUsageEventAccess(store: AiUsageEventStore): AiUsageEvent
   return {
     async append(event: AiUsageEvent): Promise<void> {
       await store.appendEvent(event);
+    },
+    async reserveBudget(params): Promise<AiUsageBudgetReservationResult> {
+      return await store.reserveBudget(params);
+    },
+    async deleteEvent(eventId: string): Promise<boolean> {
+      return await store.deleteEvent(eventId);
     },
     async deleteForUser(userId: string): Promise<number> {
       return await store.deleteEventsForUser(userId);

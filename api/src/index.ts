@@ -12,6 +12,7 @@ import {
   AuditEvent,
   ApiDatabase,
   AiUsageEvent,
+  AiUsageEventKind,
   AppConfig,
   DashboardAdminAccessRequestsResponse,
   DashboardAdminAccessRequestRow,
@@ -201,6 +202,12 @@ import {
 } from "./openaiModelConfig.js";
 import type { OpenAiCompletionApiFamily, SimulationRoute } from "./openaiModelConfig.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
+import {
+  authorizeSupportCaseOrigin,
+  decodeSupportCaseMessage,
+  encodeSupportCaseMessage,
+  normalizeSupportCaseOrigin,
+} from "./supportCaseOrigin.js";
 import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
@@ -218,6 +225,7 @@ import {
 import {
   hashEmailVerificationCode,
   normalizeEmailForExactMatch,
+  timingSafeEqualText,
   verifyLatestEmailVerification,
 } from "./services/emailVerification.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
@@ -444,7 +452,6 @@ const ADMIN_TOKEN_TTL_MINUTES = runtimeConfig.adminTokenTtlMinutes;
 const WEB_AUTH_TOKEN_SECRET = runtimeConfig.webAuthTokenSecret;
 const DASHBOARD_WEB_AUTH_SESSION_TTL_MINUTES = DASHBOARD_TRUSTED_SESSION_MINUTES;
 const MOBILE_TOKEN_SECRET = runtimeConfig.mobileTokenSecret;
-const REQUIRE_REVERIFY_ON_ONBOARD = runtimeConfig.requireReverifyOnOnboard;
 const APP_REVIEW_CREDENTIAL = runtimeConfig.appReviewCredential;
 const OPENAI_MODEL_CONFIG = runtimeConfig.openAi;
 const OPENAI_CHAT_MODEL = OPENAI_MODEL_CONFIG.chat.model;
@@ -870,7 +877,13 @@ async function requestSimulationCompletion(params: {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   temperature?: number;
   correlationId: string;
-}): Promise<{ completion: SimulationCompletionResult; latencyMs: number; apiPathUsed: SimulationApiPath }> {
+  budgetContext: AiProviderBudgetContext;
+}): Promise<{
+  completion: SimulationCompletionResult;
+  latencyMs: number;
+  apiPathUsed: SimulationApiPath;
+  usageEventId: string;
+}> {
   const requestStartedAt = Date.now();
   const routeConfig = resolveSimulationRequestConfig(OPENAI_MODEL_CONFIG, params.route);
   const requestedModel = routeConfig.model;
@@ -879,17 +892,27 @@ async function requestSimulationCompletion(params: {
   const messageCount = params.messages.length;
 
   try {
-    const completion = await requestCompletion({
-      apiFamily: routeConfig.apiFamily,
+    const budgetedCompletion = await invokeAiProviderWithBudget({
+      context: params.budgetContext,
+      kind: params.route,
       model: requestedModel,
-      messages: params.messages,
-      maxOutputTokens: routeConfig.maxOutputTokens,
-      reasoningEffort: routeConfig.reasoningEffort,
-      temperature: params.temperature,
-      timeoutMs: SIMULATION_MODEL_TIMEOUT_MS_BY_ROUTE[params.route],
-      route: params.route,
-      correlationId: params.correlationId,
+      promptVersion: AI_PROMPT_VERSION,
+      rubricVersion: params.route === "score" ? AI_RUBRIC_VERSION : null,
+      estimatedTokens: estimateCompletionReservationTokens(params.messages, routeConfig.maxOutputTokens),
+      invoke: async () => await requestCompletion({
+        apiFamily: routeConfig.apiFamily,
+        model: requestedModel,
+        messages: params.messages,
+        maxOutputTokens: routeConfig.maxOutputTokens,
+        reasoningEffort: routeConfig.reasoningEffort,
+        temperature: params.temperature,
+        timeoutMs: SIMULATION_MODEL_TIMEOUT_MS_BY_ROUTE[params.route],
+        route: params.route,
+        correlationId: params.correlationId,
+      }),
+      resolveUsage: (completion) => completion.usage,
     });
+    const completion = budgetedCompletion.value;
 
     const latencyMs = logSimulationAiMetrics({
       route: params.route,
@@ -904,7 +927,7 @@ async function requestSimulationCompletion(params: {
       completion
     });
 
-    return { completion, latencyMs, apiPathUsed };
+    return { completion, latencyMs, apiPathUsed, usageEventId: budgetedCompletion.usageEventId };
   } catch (error) {
     if (apiPathUsed === "responses") {
       const details =
@@ -1554,6 +1577,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
   correlationId: string;
   text: string;
   request: SimulationSpeechPrefetchRequest | null;
+  budgetContext: AiProviderBudgetContext;
 }): Promise<SimulationSpeechPrefetchPayload | null> {
   if (!ENABLE_REMOTE_TTS || !params.request) {
     return null;
@@ -1605,15 +1629,24 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
   });
 
   try {
-    const ttsResult = await requestSpeechSynthesis({
+    const budgetedTts = await invokeAiProviderWithBudget({
+      context: params.budgetContext,
+      kind: "tts",
       model: ttsConfig.model,
-      voice: ttsConfig.voice,
-      text: firstChunk,
-      format: ttsConfig.responseFormat,
-      speed: ttsConfig.speed,
-      instructions: ttsConfig.instructionsIncluded ? ttsConfig.instructions : undefined,
-      timeoutMs: SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS,
+      promptVersion: AI_PROMPT_VERSION,
+      rubricVersion: null,
+      estimatedTokens: 0,
+      invoke: async () => await requestSpeechSynthesis({
+        model: ttsConfig.model,
+        voice: ttsConfig.voice,
+        text: firstChunk,
+        format: ttsConfig.responseFormat,
+        speed: ttsConfig.speed,
+        instructions: ttsConfig.instructionsIncluded ? ttsConfig.instructions : undefined,
+        timeoutMs: SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS,
+      }),
     });
+    const ttsResult = budgetedTts.value;
     const completedAtMs = Date.now();
     const ttsLatencyMs = completedAtMs - startedAtMs;
     // eslint-disable-next-line no-console
@@ -1915,25 +1948,36 @@ async function transcribeSimulationAudioFile(params: {
   file: { buffer: Buffer; originalname: string; mimetype: string };
   route: "transcribe" | "submit-turn";
   correlationId: string;
-}): Promise<{ text: string; durationMs: number; mimeType: string; bytes: number }> {
+  budgetContext: AiProviderBudgetContext;
+}): Promise<{ text: string; durationMs: number; mimeType: string; bytes: number; usageEventId: string }> {
   const startedAtMs = Date.now();
   const mimeType = params.file.mimetype || "audio/m4a";
-  const text = await requestTranscription({
+  const budgetedTranscription = await invokeAiProviderWithBudget({
+    context: params.budgetContext,
+    kind: "transcribe",
     model: OPENAI_TRANSCRIPTION_MODEL,
-    audioBuffer: params.file.buffer,
-    fileName: params.file.originalname || "voice-input.m4a",
-    mimeType,
-    language: "en",
-    timeoutMs: SIMULATION_TRANSCRIPTION_TIMEOUT_MS,
-    route: params.route,
-    correlationId: params.correlationId,
+    promptVersion: AI_PROMPT_VERSION,
+    rubricVersion: null,
+    estimatedTokens: 0,
+    invoke: async () => await requestTranscription({
+      model: OPENAI_TRANSCRIPTION_MODEL,
+      audioBuffer: params.file.buffer,
+      fileName: params.file.originalname || "voice-input.m4a",
+      mimeType,
+      language: "en",
+      timeoutMs: SIMULATION_TRANSCRIPTION_TIMEOUT_MS,
+      route: params.route,
+      correlationId: params.correlationId,
+    }),
   });
+  const text = budgetedTranscription.value;
 
   return {
     text,
     durationMs: Math.max(0, Date.now() - startedAtMs),
     mimeType,
     bytes: params.file.buffer.byteLength,
+    usageEventId: budgetedTranscription.usageEventId,
   };
 }
 
@@ -1942,6 +1986,7 @@ async function generateSimulationTurnReply(params: {
   history: DialogueTurn[];
   runtime: SimulationRuntimeBundle;
   requestedSpeechPrefetch: SimulationSpeechPrefetchRequest | null;
+  budgetContext: AiProviderBudgetContext;
 }): Promise<{
   assistantText: string;
   completion: Awaited<ReturnType<typeof requestSimulationCompletion>>["completion"];
@@ -1949,6 +1994,7 @@ async function generateSimulationTurnReply(params: {
   historyChars: number;
   promptChars: number;
   speechPrefetch: SimulationSpeechPrefetchPayload | null;
+  usageEventId: string;
 }> {
   const temperature = params.runtime.difficulty === "hard" ? 0.55 : 0.75;
   const promptMessages = [
@@ -1957,11 +2003,12 @@ async function generateSimulationTurnReply(params: {
   ];
   const historyChars = params.history.reduce((total, message) => total + message.content.length, 0);
   const promptChars = params.runtime.systemPrompt.length + historyChars;
-  const { completion, latencyMs } = await requestSimulationCompletion({
+  const { completion, latencyMs, usageEventId } = await requestSimulationCompletion({
     route: "turn",
     messages: promptMessages,
     temperature,
     correlationId: params.correlationId,
+    budgetContext: params.budgetContext,
   });
   const assistantText = completion.text.trim();
   const speechPrefetchPromise = maybeBuildSimulationSpeechPrefetch({
@@ -1969,6 +2016,7 @@ async function generateSimulationTurnReply(params: {
     correlationId: params.correlationId,
     text: assistantText,
     request: params.requestedSpeechPrefetch,
+    budgetContext: params.budgetContext,
   });
   const speechPrefetch = await resolveSpeechPrefetchForAssistantPayload({
     route: "turn",
@@ -1983,6 +2031,7 @@ async function generateSimulationTurnReply(params: {
     historyChars,
     promptChars,
     speechPrefetch,
+    usageEventId,
   };
 }
 
@@ -3105,6 +3154,31 @@ function consumeRateLimit(
     return false;
   }
 
+  return true;
+}
+
+function rejectIfRateLimitAlreadyExhausted(
+  options: RateLimiterOptions,
+  request: Request,
+  response: Response
+): boolean {
+  const windowMs = Math.max(1_000, Math.floor(options.windowMs));
+  const max = Math.max(1, Math.floor(options.max));
+  const nowMs = Date.now();
+  cleanupRateLimitStore(nowMs);
+
+  const selectorValue = options.keySelector?.(request) || getClientIp(request);
+  const state = rateLimitByKey.get(`${options.name}:${selectorValue || "unknown"}`);
+  if (!state || nowMs - state.windowStartMs >= windowMs || state.count < max) {
+    return false;
+  }
+
+  const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
+  options.onLimitExceeded?.(request, retryAfterSeconds);
+  response.setHeader("Retry-After", String(retryAfterSeconds));
+  response.status(429).json({
+    error: "Too many requests. Please wait and retry."
+  });
   return true;
 }
 
@@ -4736,6 +4810,102 @@ function hashMobileToken(token: string): string {
 
 function createMobileAuthToken(): string {
   return crypto.randomBytes(32).toString("base64url");
+}
+
+const EXISTING_MOBILE_ONBOARDING_TOKEN_PREFIX = "mobile_onboarding_v1";
+
+interface ExistingMobileOnboardingTokenPayload {
+  purpose: "existing_mobile_onboarding";
+  version: 1;
+  userId: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  timezone: string;
+  joinCode: string | null;
+  expiresAt: string;
+}
+
+function createExistingMobileOnboardingToken(payload: ExistingMobileOnboardingTokenPayload): string {
+  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signedValue = `${EXISTING_MOBILE_ONBOARDING_TOKEN_PREFIX}.${encodedPayload}`;
+  const signature = crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(signedValue).digest("base64url");
+  return `${signedValue}.${signature}`;
+}
+
+function parseExistingMobileOnboardingToken(
+  token: string,
+  now: Date
+): ExistingMobileOnboardingTokenPayload | null {
+  const [prefix, encodedPayload, suppliedSignature, ...extra] = token.split(".");
+  if (
+    prefix !== EXISTING_MOBILE_ONBOARDING_TOKEN_PREFIX
+    || !encodedPayload
+    || !suppliedSignature
+    || extra.length > 0
+  ) {
+    return null;
+  }
+
+  const signedValue = `${prefix}.${encodedPayload}`;
+  const expectedSignature = crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(signedValue).digest("base64url");
+  if (!timingSafeEqualText(suppliedSignature, expectedSignature)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as Partial<ExistingMobileOnboardingTokenPayload>;
+    const expiresAtMs = typeof parsed.expiresAt === "string" ? new Date(parsed.expiresAt).getTime() : Number.NaN;
+    if (
+      parsed.purpose !== "existing_mobile_onboarding"
+      || parsed.version !== 1
+      || typeof parsed.userId !== "string"
+      || !parsed.userId.trim()
+      || typeof parsed.email !== "string"
+      || !isEmailLike(parsed.email)
+      || typeof parsed.firstName !== "string"
+      || !parsed.firstName.trim()
+      || typeof parsed.lastName !== "string"
+      || !parsed.lastName.trim()
+      || typeof parsed.timezone !== "string"
+      || !parsed.timezone.trim()
+      || (parsed.joinCode !== null && typeof parsed.joinCode !== "string")
+      || !Number.isFinite(expiresAtMs)
+      || expiresAtMs <= now.getTime()
+    ) {
+      return null;
+    }
+
+    return {
+      purpose: "existing_mobile_onboarding",
+      version: 1,
+      userId: parsed.userId.trim(),
+      email: parsed.email.trim().toLowerCase(),
+      firstName: parsed.firstName.trim(),
+      lastName: parsed.lastName.trim(),
+      timezone: parsed.timezone.trim(),
+      joinCode: typeof parsed.joinCode === "string" && parsed.joinCode.trim() ? parsed.joinCode.trim() : null,
+      expiresAt: new Date(expiresAtMs).toISOString()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isExistingMobileOnboardingTokenForUser(
+  token: string,
+  user: UserProfile,
+  now: Date
+): ExistingMobileOnboardingTokenPayload | null {
+  const payload = parseExistingMobileOnboardingToken(token, now);
+  if (
+    !payload
+    || payload.userId !== user.id
+    || payload.email !== user.email.trim().toLowerCase()
+  ) {
+    return null;
+  }
+  return payload;
 }
 
 function upsertMobileAuthToken(db: ApiDatabase, userId: string, issuedAtIso: string): string {
@@ -9497,53 +9667,181 @@ function isQuotaLockReason(lockReason: string | null | undefined): boolean {
   );
 }
 
+type AiBudgetSubject = Pick<UserProfile, "id" | "accountType" | "timezone">;
+
+interface AiProviderBudgetContext {
+  user: AiBudgetSubject;
+  orgId: string | null;
+  divisionId?: string | null;
+  segmentId?: string | null;
+  scenarioId?: string | null;
+  allowDuringActiveSimulation?: boolean;
+}
+
+interface AiProviderTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+class AiBudgetLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AiBudgetLimitError";
+  }
+}
+
+function getAiBudgetLimitMessage(
+  limitCode: "user_calls" | "user_tokens" | "global_calls" | "global_tokens"
+): string {
+  switch (limitCode) {
+    case "user_calls":
+      return "Daily AI request limit reached for this account.";
+    case "user_tokens":
+      return "Daily AI token limit reached for this account.";
+    case "global_calls":
+      return "Daily AI request limit reached for this environment.";
+    case "global_tokens":
+      return "Daily AI token limit reached for this environment.";
+  }
+}
+
+function resolveAiBudgetLimits(
+  user: AiBudgetSubject,
+  now: Date,
+  options?: { allowDuringActiveSimulation?: boolean }
+) {
+  const skipPerUserLimits =
+    user.accountType === "enterprise"
+    || (options?.allowDuringActiveSimulation === true && hasActiveSimulationAiBudgetGrace(user.id, now.getTime()));
+  return {
+    userCalls: skipPerUserLimits ? null : OPENAI_MAX_DAILY_CALLS_PER_USER,
+    userTokens: skipPerUserLimits ? null : OPENAI_MAX_DAILY_TOKENS_PER_USER,
+    globalCalls: OPENAI_MAX_DAILY_CALLS_GLOBAL,
+    globalTokens: OPENAI_MAX_DAILY_TOKENS_GLOBAL,
+  };
+}
+
+function estimateCompletionReservationTokens(
+  messages: Array<{ content: string }>,
+  maxOutputTokens: number
+): number {
+  const promptBytes = messages.reduce((total, message) => total + Buffer.byteLength(message.content, "utf8"), 0);
+  return Math.max(0, promptBytes + Math.max(0, Math.floor(maxOutputTokens)));
+}
+
+async function invokeAiProviderWithBudget<T>(params: {
+  context: AiProviderBudgetContext;
+  kind: AiUsageEventKind;
+  model: string;
+  promptVersion: string;
+  rubricVersion: string | null;
+  estimatedTokens: number;
+  invoke: () => Promise<T>;
+  resolveUsage?: (value: T) => AiProviderTokenUsage;
+}): Promise<{ value: T; usageEventId: string }> {
+  const now = new Date();
+  const usageEventId = `ai_${uuid()}`;
+  const reservationEvent: AiUsageEvent = {
+    id: usageEventId,
+    kind: params.kind,
+    userId: params.context.user.id,
+    orgId: params.context.orgId,
+    divisionId: params.context.divisionId ?? null,
+    segmentId: params.context.segmentId ?? null,
+    scenarioId: params.context.scenarioId ?? null,
+    model: params.model,
+    promptVersion: params.promptVersion,
+    rubricVersion: params.rubricVersion,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: Math.max(0, Math.floor(params.estimatedTokens)),
+    createdAt: now.toISOString(),
+  };
+  const reservation = await aiUsageEventAccess.reserveBudget({
+    event: reservationEvent,
+    userTimeZone: resolveTimeZone(params.context.user.timezone),
+    limits: resolveAiBudgetLimits(params.context.user, now, {
+      allowDuringActiveSimulation: params.context.allowDuringActiveSimulation,
+    }),
+    now,
+  });
+  if (!reservation.reserved) {
+    throw new AiBudgetLimitError(getAiBudgetLimitMessage(reservation.limitCode));
+  }
+
+  try {
+    const value = await params.invoke();
+    const usage = params.resolveUsage?.(value) ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    try {
+      await aiUsageEventAccess.append({
+        ...reservationEvent,
+        inputTokens: toUsageEventToken(usage.inputTokens),
+        outputTokens: toUsageEventToken(usage.outputTokens),
+        totalTokens: toUsageEventToken(usage.totalTokens),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logWarnThrottled(
+        "ai-budget:finalize",
+        `[ai-budget] failed to finalize provider reservation ${usageEventId}; conservative reservation retained: ${message}`
+      );
+    }
+    return { value, usageEventId };
+  } catch (error) {
+    try {
+      await aiUsageEventAccess.deleteEvent(usageEventId);
+    } catch (releaseError) {
+      const message = releaseError instanceof Error ? releaseError.message : String(releaseError);
+      logWarnThrottled(
+        "ai-budget:release",
+        `[ai-budget] failed to release provider reservation ${usageEventId}: ${message}`
+      );
+    }
+    throw error;
+  }
+}
+
 async function resolveAiBudgetLimitError(
   user: UserProfile,
   now: Date,
   options?: { allowDuringActiveSimulation?: boolean }
 ): Promise<string | null> {
-  if (user.accountType === "enterprise") {
-    return null;
-  }
-
-  if (options?.allowDuringActiveSimulation && hasActiveSimulationAiBudgetGrace(user.id, now.getTime())) {
-    return null;
-  }
-
   const budget = await aiUsageEventAccess.computeBudgetSnapshot({
     userId: user.id,
     now,
     userTimeZone: materializeUserTimezone(user, now)
   });
+  const limits = resolveAiBudgetLimits(user, now, options);
 
   if (
-    OPENAI_MAX_DAILY_CALLS_PER_USER !== null &&
-    OPENAI_MAX_DAILY_CALLS_PER_USER >= 0 &&
-    budget.userCallsToday >= OPENAI_MAX_DAILY_CALLS_PER_USER
+    limits.userCalls !== null &&
+    limits.userCalls >= 0 &&
+    budget.userCallsToday >= limits.userCalls
   ) {
     return "Daily AI request limit reached for this account.";
   }
 
   if (
-    OPENAI_MAX_DAILY_TOKENS_PER_USER !== null &&
-    OPENAI_MAX_DAILY_TOKENS_PER_USER >= 0 &&
-    budget.userTokensToday >= OPENAI_MAX_DAILY_TOKENS_PER_USER
+    limits.userTokens !== null &&
+    limits.userTokens >= 0 &&
+    budget.userTokensToday >= limits.userTokens
   ) {
     return "Daily AI token limit reached for this account.";
   }
 
   if (
-    OPENAI_MAX_DAILY_CALLS_GLOBAL !== null &&
-    OPENAI_MAX_DAILY_CALLS_GLOBAL >= 0 &&
-    budget.globalCallsToday >= OPENAI_MAX_DAILY_CALLS_GLOBAL
+    limits.globalCalls !== null &&
+    limits.globalCalls >= 0 &&
+    budget.globalCallsToday >= limits.globalCalls
   ) {
     return "Daily AI request limit reached for this environment.";
   }
 
   if (
-    OPENAI_MAX_DAILY_TOKENS_GLOBAL !== null &&
-    OPENAI_MAX_DAILY_TOKENS_GLOBAL >= 0 &&
-    budget.globalTokensToday >= OPENAI_MAX_DAILY_TOKENS_GLOBAL
+    limits.globalTokens !== null &&
+    limits.globalTokens >= 0 &&
+    budget.globalTokensToday >= limits.globalTokens
   ) {
     return "Daily AI token limit reached for this environment.";
   }
@@ -10264,9 +10562,62 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     // A 15s compressed audio clip should be well under this; keeps memory bounded.
-    fileSize: 12 * 1024 * 1024
+    // Busboy reports LIMIT_FILE_SIZE when bytes reach the configured value, so
+    // use max + 1 to retain an inclusive 12 MB application-level boundary.
+    fileSize: (12 * 1024 * 1024) + 1,
+    files: 1,
+    fields: 4,
+    parts: 5,
+    fieldNameSize: 100,
+    fieldSize: 1024 * 1024,
+    headerPairs: 100,
   }
 });
+
+const authenticatedMobileAiUserIds = new WeakMap<Request, string>();
+
+async function requireMobileAiAuthentication(
+  request: Request,
+  response: Response,
+  next: NextFunction
+): Promise<void> {
+  if (rejectIfRateLimitAlreadyExhausted(unauthenticatedAiRateLimitOptions, request, response)) {
+    return;
+  }
+
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    if (!consumeRateLimit(unauthenticatedAiRateLimitOptions, request, response)) {
+      return;
+    }
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const userId = request.params.userId?.trim();
+  if (!userId) {
+    if (!consumeRateLimit(unauthenticatedAiRateLimitOptions, request, response)) {
+      return;
+    }
+    response.status(401).json({ error: "Invalid mobile token." });
+    return;
+  }
+
+  const authenticatedUserId = await withDatabaseRead(async (db) => {
+    const user = getUserById(db, userId);
+    return user && hasValidMobileTokenForUser(db, user.id, authToken) ? user.id : null;
+  });
+  if (!authenticatedUserId) {
+    if (!consumeRateLimit(unauthenticatedAiRateLimitOptions, request, response)) {
+      return;
+    }
+    response.status(401).json({ error: "Invalid mobile token." });
+    return;
+  }
+
+  authenticatedMobileAiUserIds.set(request, authenticatedUserId);
+  next();
+}
 
 const authLoginRateLimiter = createRateLimiter({
   name: "auth-login",
@@ -10291,6 +10642,16 @@ const mobileOnboardRateLimiter = createRateLimiter({
   name: "mobile-onboard",
   windowMs: 15 * 60 * 1000,
   max: 30
+});
+
+const mobileOnboardAccountRateLimiter = createRateLimiter({
+  name: "mobile-onboard-account",
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keySelector: (request) => {
+    const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "unknown";
+    return crypto.createHash("sha256").update(email || "unknown").digest("hex");
+  }
 });
 
 const mobileVerificationRateLimiter = createRateLimiter({
@@ -10322,12 +10683,30 @@ const mobilePublicErrorReportRateLimiter = createRateLimiter({
   max: 30
 });
 
-const aiRouteRateLimiter = createRateLimiter({
-  name: "mobile-ai",
+const unauthenticatedAiRateLimitOptions: RateLimiterOptions = {
+  name: "mobile-ai-unauthenticated",
   windowMs: 15 * 60 * 1000,
   max: 120,
-  keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
-});
+  keySelector: (request) => getClientIp(request)
+};
+
+const authenticatedAiRateLimitOptions: RateLimiterOptions = {
+  name: "mobile-ai-authenticated",
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+};
+
+const aiRouteRateLimiter = (request: Request, response: Response, next: NextFunction): void => {
+  const authenticatedUserId = authenticatedMobileAiUserIds.get(request);
+  if (!authenticatedUserId) {
+    response.status(401).json({ error: "Invalid mobile token." });
+    return;
+  }
+
+  if (consumeRateLimit(authenticatedAiRateLimitOptions, request, response, authenticatedUserId)) {
+    next();
+  }
+};
 
 const trainingContentStorageRateLimiter = createRateLimiter({
   name: "training-content-storage",
@@ -14100,18 +14479,40 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
     "Avoid illegal/defamatory claims, guarantees, fabricated product specs, or compliance violations.",
     "If draft content is supplied, improve and adapt it rather than discarding useful details.",
   ].join(" ");
+  const customScenarioMaxOutputTokens = OPENAI_MODEL_CONFIG.scoring.maxOutputTokens;
 
   try {
-    const completion = await requestCompletion({
-      apiFamily: OPENAI_MODEL_CONFIG.chat.apiFamily,
+    const budgetedCompletion = await invokeAiProviderWithBudget({
+      context: {
+        user: {
+          id: "platform_admin",
+          accountType: "enterprise",
+          timezone: "UTC",
+        },
+        orgId: context.org.id,
+      },
+      kind: "custom_scenario",
       model: OPENAI_CHAT_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: promptPreview },
-      ],
-      temperature: 0.4,
-      reasoningEffort: OPENAI_MODEL_CONFIG.chat.reasoningEffort,
+      promptVersion: AI_PROMPT_VERSION,
+      rubricVersion: null,
+      estimatedTokens: estimateCompletionReservationTokens([
+        { content: systemPrompt },
+        { content: promptPreview },
+      ], customScenarioMaxOutputTokens),
+      invoke: async () => await requestCompletion({
+        apiFamily: OPENAI_MODEL_CONFIG.chat.apiFamily,
+        model: OPENAI_CHAT_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: promptPreview },
+        ],
+        maxOutputTokens: customScenarioMaxOutputTokens,
+        temperature: 0.4,
+        reasoningEffort: OPENAI_MODEL_CONFIG.chat.reasoningEffort,
+      }),
+      resolveUsage: (completion) => completion.usage,
     });
+    const completion = budgetedCompletion.value;
 
     const parsed = extractFirstJsonObject(completion.text);
     if (!parsed) {
@@ -14187,7 +14588,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
     response.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI request failed.";
-    response.status(503).json({ error: message });
+    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
   }
 });
 
@@ -15750,7 +16151,11 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
   });
 });
 
-app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, response: Response) => {
+app.post(
+  "/mobile/onboard",
+  mobileOnboardRateLimiter,
+  mobileOnboardAccountRateLimiter,
+  async (request: Request, response: Response) => {
   const body = request.body as MobileOnboardRequest;
   const email = body.email?.trim().toLowerCase();
   const firstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
@@ -15804,60 +16209,18 @@ app.post("/mobile/onboard", mobileOnboardRateLimiter, async (request: Request, r
       }
 
       const issuedAt = nowIso();
-      existing.timezone = timezone;
-      existing.updatedAt = issuedAt;
-      const authToken = upsertMobileAuthToken(db, existing.id, issuedAt);
-
-      const hadVerifiedEmail = Boolean(existing.emailVerifiedAt);
-      const shouldRequireVerification =
-        REQUIRE_REVERIFY_ON_ONBOARD || !hadVerifiedEmail || existing.mobileProfileReonboardingRequired === true;
-      if (hadVerifiedEmail && REQUIRE_REVERIFY_ON_ONBOARD) {
-        existing.emailVerifiedAt = null;
-      }
-
-      if (!shouldRequireVerification) {
-        const completion = joinCode
-          ? completeMobileCompanyProfile({
-              db,
-              user: existing,
-              firstName: firstName.value,
-              lastName: lastName.value,
-              joinCode,
-              now: new Date(issuedAt),
-            })
-          : completeMobileBasicProfile({
-              db,
-              user: existing,
-              firstName: firstName.value,
-              lastName: lastName.value,
-              now: new Date(issuedAt),
-            });
-        if (!completion.ok) {
-          response.status(completion.status).json({ error: completion.error });
-          return;
-        }
-        const payload: MobileOnboardResponse = {
-          user: existing,
-          authToken,
-          verificationRequired: false,
-          verificationExpiresAt: null,
-          domainMatch
-        };
-        appendMobileAuditEvent(db, existing, {
-          action: "mobile.onboard",
-          userId: existing.id,
-          message: `Mobile onboarding completed for ${existing.email}.`,
-          metadata: {
-            verificationRequired: false,
-            restoredExistingMember: completion.restoredExistingMember,
-            joinRequestCreated: isMobileCompanyProfileCompletion(completion) ? completion.createdRequest : false,
-          }
-        });
-        response.json(payload);
-        return;
-      }
-
       const verification = await issueEmailVerification(db, existing, new Date(issuedAt), "mobile");
+      const authToken = createExistingMobileOnboardingToken({
+        purpose: "existing_mobile_onboarding",
+        version: 1,
+        userId: existing.id,
+        email: existing.email.trim().toLowerCase(),
+        firstName: firstName.value,
+        lastName: lastName.value,
+        timezone,
+        joinCode,
+        expiresAt: verification.expiresAt
+      });
       const payload: MobileOnboardResponse = {
         user: existing,
         authToken,
@@ -15949,7 +16312,9 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+    const now = new Date();
+    const onboardingToken = isExistingMobileOnboardingTokenForUser(authToken, user, now);
+    if (!onboardingToken && !hasValidMobileTokenForUser(db, user.id, authToken, {
       allowReonboardingToken: true,
       allowIncompleteProfile: true,
     })) {
@@ -15962,12 +16327,12 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return;
     }
 
-    if (user.emailVerifiedAt && user.mobileProfileReonboardingRequired !== true) {
+    if (!onboardingToken && user.emailVerifiedAt && user.mobileProfileReonboardingRequired !== true) {
       response.status(409).json({ error: "Email already verified." });
       return;
     }
 
-    const verification = await issueEmailVerification(db, user, new Date(), "mobile");
+    const verification = await issueEmailVerification(db, user, now, "mobile");
     appendMobileAuditEvent(db, user, {
       action: "mobile.verification_resent",
       userId: user.id,
@@ -16019,7 +16384,9 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    if (!hasValidMobileTokenForUser(db, user.id, authToken, {
+    const now = new Date();
+    const onboardingToken = isExistingMobileOnboardingTokenForUser(authToken, user, now);
+    if (!onboardingToken && !hasValidMobileTokenForUser(db, user.id, authToken, {
       allowReonboardingToken: true,
       allowIncompleteProfile: true,
     })) {
@@ -16027,7 +16394,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    const needsCodeVerification = !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
+    const needsCodeVerification = Boolean(onboardingToken) || !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
     const profileProvided =
       body.firstName !== undefined ||
       body.lastName !== undefined ||
@@ -16045,17 +16412,17 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return;
     }
 
-    const firstName = normalizeRequiredUserNameInput(body.firstName, "firstName");
+    const firstName = normalizeRequiredUserNameInput(onboardingToken?.firstName ?? body.firstName, "firstName");
     if (!firstName.ok) {
       response.status(400).json({ error: firstName.error, code: firstName.code });
       return;
     }
-    const lastName = normalizeRequiredUserNameInput(body.lastName, "lastName");
+    const lastName = normalizeRequiredUserNameInput(onboardingToken?.lastName ?? body.lastName, "lastName");
     if (!lastName.ok) {
       response.status(400).json({ error: lastName.error, code: lastName.code });
       return;
     }
-    const joinCode = normalizeJoinCode(body.joinCode);
+    const joinCode = normalizeJoinCode(onboardingToken?.joinCode ?? body.joinCode);
     const wasReonboarding = user.mobileProfileReonboardingRequired === true;
 
     if (wasReonboarding && user.accountType === "enterprise" && !isSuperUser(user) && !joinCode) {
@@ -16075,7 +16442,6 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       }
     }
 
-    const now = new Date();
     if (needsCodeVerification) {
       const verificationResult = verifyLatestEmailVerification({
         db,
@@ -16106,6 +16472,11 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
         userId: user.id,
         message: `Email verified for ${user.email}.`
       });
+    }
+
+    if (onboardingToken) {
+      user.timezone = resolveTimeZone(onboardingToken.timezone);
+      user.updatedAt = now.toISOString();
     }
 
     const completion = joinCode
@@ -16642,6 +17013,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
     message?: unknown;
     includeTranscript?: unknown;
     transcript?: unknown;
+    source?: unknown;
   };
 
   const message = typeof body.message === "string" ? body.message.trim() : "";
@@ -16651,6 +17023,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
   }
 
   const includeTranscript = Boolean(body.includeTranscript);
+  const requestedSource = normalizeSupportCaseOrigin(body.source);
   const transcriptCandidate = body.transcript as
     | {
         text?: unknown;
@@ -16723,6 +17096,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       return;
     }
 
+    const source = authorizeSupportCaseOrigin(requestedSource, user);
     const now = nowIso();
     const record: SupportCaseRecord = {
       id: `case_${uuid()}`,
@@ -16731,7 +17105,7 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       orgId: user.orgId,
       segmentId: null,
       scenarioId: null,
-      message: message.slice(0, SUPPORT_MESSAGE_MAX_LENGTH),
+      message: encodeSupportCaseMessage(message, source).slice(0, SUPPORT_MESSAGE_MAX_LENGTH),
       transcriptEncrypted: includeTranscript ? encryptSupportTranscript(transcriptText) : null,
       transcriptExpiresAt: includeTranscript
         ? new Date(Date.now() + SUPPORT_TRANSCRIPT_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()
@@ -16766,7 +17140,8 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
       message: "Submitted support case.",
       metadata: {
         caseId: record.id,
-        includeTranscript
+        includeTranscript,
+        source
       }
     });
     response.status(201).json({
@@ -16877,10 +17252,6 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
       return;
     }
 
-    const now = new Date();
-    materializeUserTimezone(user, now);
-    let emailChanged = false;
-
     if (typeof patch.email === "string") {
       const email = patch.email.trim().toLowerCase();
       if (!isEmailLike(email)) {
@@ -16888,18 +17259,17 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
         return;
       }
 
-      const duplicate = db.users.find((candidate) => candidate.email.toLowerCase() === email && candidate.id !== user.id);
-      if (duplicate) {
-        response.status(409).json({ error: "Email already exists." });
+      if (email !== user.email.trim().toLowerCase()) {
+        response.status(409).json({
+          error: "Mobile email changes are temporarily unavailable. Contact support or an administrator.",
+          code: "mobile_email_change_disabled"
+        });
         return;
       }
-
-      if (email !== user.email) {
-        user.email = email;
-        user.emailVerifiedAt = null;
-        emailChanged = true;
-      }
     }
+
+    const now = new Date();
+    materializeUserTimezone(user, now);
 
     if (typeof patch.timezone === "string") {
       const timezone = resolveTimeZone(patch.timezone);
@@ -16910,15 +17280,12 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
     }
 
     user.updatedAt = now.toISOString();
-    if (emailChanged) {
-      await issueEmailVerification(db, user, now, "mobile");
-    }
     appendMobileAuditEvent(db, user, {
       action: "mobile.settings_updated",
       userId: user.id,
       message: `Updated profile settings for ${user.email}.`,
       metadata: {
-        emailChanged,
+        emailChanged: false,
         timezoneChanged: typeof patch.timezone === "string" && resolveTimeZone(patch.timezone) !== user.timezone
       }
     });
@@ -16970,7 +17337,12 @@ app.get("/mobile/users/:userId/entitlements", async (request: Request, response:
   });
 });
 
-app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.single("file"), async (request: Request, response: Response) => {
+app.post(
+  "/mobile/users/:userId/ai/transcribe",
+  requireMobileAiAuthentication,
+  aiRouteRateLimiter,
+  upload.single("file"),
+  async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -17052,6 +17424,11 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       file,
       route: "transcribe",
       correlationId,
+      budgetContext: {
+        user: context.user,
+        orgId: context.actingOrgId,
+        allowDuringActiveSimulation: true,
+      },
     });
     const text = transcription.text;
     // eslint-disable-next-line no-console
@@ -17100,7 +17477,7 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
           }
 
           const event: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: transcription.usageEventId,
             kind: "transcribe",
             userId: user.id,
             orgId: context.actingOrgId,
@@ -17135,11 +17512,16 @@ app.post("/mobile/users/:userId/ai/transcribe", aiRouteRateLimiter, upload.singl
       mimeType: file.mimetype || "audio/m4a",
       error: message,
     });
-    response.status(503).json({ error: message });
+    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
   }
 });
 
-app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.single("file"), async (request: Request, response: Response) => {
+app.post(
+  "/mobile/users/:userId/ai/submit-turn",
+  requireMobileAiAuthentication,
+  aiRouteRateLimiter,
+  upload.single("file"),
+  async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -17250,6 +17632,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
 
     return {
       userId: user.id,
+      user,
       actingOrgId: resolvedAccessContext.actingOrgId,
       isSuperUser: resolvedAccessContext.isSuperUser,
       maxSimulationMinutes: entitlements.limits.maxSimulationMinutes,
@@ -17306,6 +17689,11 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     file,
     route: "submit-turn",
     correlationId,
+    budgetContext: {
+      user: accessContext.user,
+      orgId: accessContext.actingOrgId,
+      allowDuringActiveSimulation: true,
+    },
   }).then(
     (transcription) => ({ ok: true as const, transcription }),
     (error: unknown) => ({ ok: false as const, error }),
@@ -17355,7 +17743,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
     }
 
     response.setHeader("X-Correlation-Id", correlationId);
-    response.status(503).json({ error: message });
+    response.status(transcriptionResult.error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
     return;
   }
 
@@ -17465,7 +17853,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
           }
 
           const event: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: transcription.usageEventId,
             kind: "transcribe",
             userId: user.id,
             orgId: accessContext.actingOrgId,
@@ -17499,6 +17887,14 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       history: turnHistory,
       runtime,
       requestedSpeechPrefetch,
+      budgetContext: {
+        user: accessContext.user,
+        orgId: accessContext.actingOrgId,
+        divisionId: runtime.divisionId,
+        segmentId: runtime.segment.id,
+        scenarioId: runtime.scenario.id,
+        allowDuringActiveSimulation: true,
+      },
     });
 
     const assistantPayload: PendingUnifiedSubmitTurnResult = {
@@ -17576,7 +17972,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
           });
 
           const transcribeEvent: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: transcription.usageEventId,
             kind: "transcribe",
             userId: user.id,
             orgId: accessContext.actingOrgId,
@@ -17593,7 +17989,7 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
           };
 
           const turnEvent: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: turnResult.usageEventId,
             kind: "turn",
             userId: user.id,
             orgId: accessContext.actingOrgId,
@@ -17695,11 +18091,11 @@ app.post("/mobile/users/:userId/ai/submit-turn", aiRouteRateLimiter, upload.sing
       historyCount: turnHistory.length,
       error: message,
     });
-    response.status(503).json({ error: message });
+    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
   }
 });
 
-app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRateLimiter, async (request: Request, response: Response) => {
+app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", requireMobileAiAuthentication, aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = request.headers.authorization?.replace("Bearer ", "").trim();
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -17815,7 +18211,7 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", aiRouteRate
   });
 });
 
-app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteRateLimiter, async (request: Request, response: Response) => {
   const userId = request.params.userId;
   const correlationId = resolveSimulationCorrelationId(request);
   const routeStartedAtMs = Date.now();
@@ -17966,7 +18362,11 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       return null;
     }
 
-    return { user, isSuperUser: accessContext.isSuperUser };
+    return {
+      user,
+      isSuperUser: accessContext.isSuperUser,
+      actingOrgId: accessContext.actingOrgId,
+    };
   });
 
   if (!context) {
@@ -18001,14 +18401,27 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
       stage: "start",
       startedAtMs: ttsCallStartedAtMs
     });
-    const ttsResult = await requestSpeechSynthesis({
+    const budgetedTts = await invokeAiProviderWithBudget({
+      context: {
+        user: context.user,
+        orgId: context.actingOrgId,
+        allowDuringActiveSimulation: true,
+      },
+      kind: "tts",
       model: ttsConfig.model,
-      voice: ttsConfig.voice,
-      text,
-      format: ttsConfig.responseFormat,
-      speed: ttsConfig.speed,
-      instructions: ttsConfig.instructionsIncluded ? ttsConfig.instructions : undefined,
+      promptVersion: AI_PROMPT_VERSION,
+      rubricVersion: null,
+      estimatedTokens: 0,
+      invoke: async () => await requestSpeechSynthesis({
+        model: ttsConfig.model,
+        voice: ttsConfig.voice,
+        text,
+        format: ttsConfig.responseFormat,
+        speed: ttsConfig.speed,
+        instructions: ttsConfig.instructionsIncluded ? ttsConfig.instructions : undefined,
+      }),
     });
+    const ttsResult = budgetedTts.value;
     const ttsCallEndedAtMs = Date.now();
     // eslint-disable-next-line no-console
     console.log("[tts-call]", {
@@ -18095,6 +18508,14 @@ app.post("/mobile/users/:userId/ai/tts", aiRouteRateLimiter, async (request: Req
         message,
         openaiStatus: error.statusCode,
         openaiMessage: error.errorMessage
+      });
+      return;
+    }
+
+    if (error instanceof AiBudgetLimitError) {
+      respondWithTtsError({
+        status: 429,
+        message
       });
       return;
     }
@@ -18420,7 +18841,7 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
   });
 });
 
-app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -18576,11 +18997,18 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       { role: "user" as const, content: context.runtime.openingPrompt }
     ];
     const promptChars = promptMessages.reduce((total, message) => total + message.content.length, 0);
-    const { completion, latencyMs } = await requestSimulationCompletion({
+    const { completion, latencyMs, usageEventId } = await requestSimulationCompletion({
       route: "opening",
       messages: promptMessages,
       temperature: 0.8,
-      correlationId
+      correlationId,
+      budgetContext: {
+        user: context.user,
+        orgId: context.actingOrgId,
+        divisionId: context.runtime.divisionId,
+        segmentId: context.runtime.segment.id,
+        scenarioId: context.runtime.scenario.id,
+      },
     });
     const assistantText = completion.text.trim();
     const speechPrefetchPromise = maybeBuildSimulationSpeechPrefetch({
@@ -18588,6 +19016,14 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       correlationId,
       text: assistantText,
       request: requestedSpeechPrefetch,
+      budgetContext: {
+        user: context.user,
+        orgId: context.actingOrgId,
+        divisionId: context.runtime.divisionId,
+        segmentId: context.runtime.segment.id,
+        scenarioId: context.runtime.scenario.id,
+        allowDuringActiveSimulation: true,
+      },
     });
     const speechPrefetch = await resolveSpeechPrefetchForAssistantPayload({
       route: "opening",
@@ -18660,7 +19096,7 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
           });
 
           const event: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: usageEventId,
             kind: "opening",
             userId: user.id,
             orgId: context.actingOrgId,
@@ -18716,11 +19152,11 @@ app.post("/mobile/users/:userId/ai/opening", aiRouteRateLimiter, async (request:
       elapsedMs: Date.now() - routeStartedAtMs,
       error: message,
     });
-    response.status(503).json({ error: message });
+    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
   }
 });
 
-app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -18925,6 +19361,14 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       history,
       runtime: context.runtime,
       requestedSpeechPrefetch,
+      budgetContext: {
+        user: context.user,
+        orgId: context.actingOrgId,
+        divisionId: context.runtime.divisionId,
+        segmentId: context.runtime.segment.id,
+        scenarioId: context.runtime.scenario.id,
+        allowDuringActiveSimulation: true,
+      },
     });
 
     response.setHeader("X-Correlation-Id", correlationId);
@@ -18983,7 +19427,7 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
           });
 
           const event: AiUsageEvent = {
-            id: `ai_${uuid()}`,
+            id: turnResult.usageEventId,
             kind: "turn",
             userId: user.id,
             orgId: context.actingOrgId,
@@ -19041,11 +19485,11 @@ app.post("/mobile/users/:userId/ai/turn", aiRouteRateLimiter, async (request: Re
       historyCount: history.length,
       error: message,
     });
-    response.status(503).json({ error: message });
+    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
   }
 });
 
-app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRouteRateLimiter, async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -19314,14 +19758,22 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
       });
 
     const transcript = formatDialogueForEvaluation(history);
-    const { completion, latencyMs } = await requestSimulationCompletion({
+    const { completion, latencyMs, usageEventId } = await requestSimulationCompletion({
       route: "score",
       messages: [
         { role: "system", content: evaluationPrompt },
         { role: "user", content: `Conversation transcript:\n${transcript}` }
       ],
       temperature: 0.2,
-      correlationId
+      correlationId,
+      budgetContext: {
+        user: context.user,
+        orgId: context.actingOrgId,
+        divisionId: context.divisionId,
+        segmentId: context.segment.id,
+        scenarioId: context.scenario.id,
+        allowDuringActiveSimulation: true,
+      },
     });
     const aiDetails = buildPersistedSimulationAiDetails({
       requestedModel: OPENAI_SCORING_MODEL,
@@ -19393,7 +19845,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
           syncTrainingPackAssignmentsForUserPack(db, context.actingOrgId, user.id, record.trainingPackId ?? null);
 
           const event: AiUsageEvent = {
-            id: recognizedSessionId ? `ai_score_${recognizedSessionId}` : `ai_${uuid()}`,
+            id: usageEventId,
             kind: "score",
             userId: user.id,
             orgId: context.actingOrgId,
@@ -19491,7 +19943,7 @@ app.post("/mobile/users/:userId/ai/score", aiRouteRateLimiter, async (request: R
           : "score_generation_failed",
       reason: message
     });
-    response.status(503).json({ error: message });
+    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
   }
 });
 
@@ -21517,6 +21969,7 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
       .map((entry) => {
         const user = userById.get(entry.userId);
         const org = entry.orgId ? orgById.get(entry.orgId) : undefined;
+        const presentation = decodeSupportCaseMessage(entry.message);
         return {
           id: entry.id,
           status: entry.status,
@@ -21528,7 +21981,8 @@ app.get("/support/cases", requireAdmin, async (_request: Request, response: Resp
           segmentLabel: entry.segmentId ? segmentLabelById.get(entry.segmentId) ?? entry.segmentId : null,
           scenarioId: entry.scenarioId,
           scenarioTitle: entry.scenarioId ? scenarioTitleById.get(entry.scenarioId) ?? entry.scenarioId : null,
-          message: entry.message,
+          message: presentation.message,
+          source: presentation.origin,
           transcript: {
             available: Boolean(entry.transcriptEncrypted),
             expiresAt: entry.transcriptExpiresAt,
@@ -21553,6 +22007,7 @@ app.get("/support/cases/:caseId", requireAdmin, async (request: Request, respons
   await withDatabaseRead(async (db) => {
     const user = getUserById(db, entry.userId);
     const org = getOrgById(db, entry.orgId);
+    const presentation = decodeSupportCaseMessage(entry.message);
 
     const transcriptText = entry.transcriptEncrypted ? decryptSupportTranscript(entry.transcriptEncrypted) : null;
 
@@ -21563,7 +22018,8 @@ app.get("/support/cases/:caseId", requireAdmin, async (request: Request, respons
       updatedAt: entry.updatedAt,
       org: org ? { id: org.id, name: org.name } : null,
       user: user ? { id: user.id, email: user.email } : { id: entry.userId, email: entry.userId },
-      message: entry.message,
+      message: presentation.message,
+      source: presentation.origin,
       transcript: {
         available: Boolean(entry.transcriptEncrypted),
         expiresAt: entry.transcriptExpiresAt,
@@ -21905,6 +22361,14 @@ function isJsonBodyParseError(error: unknown): boolean {
 }
 
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  if (error instanceof multer.MulterError) {
+    response.status(400).json({
+      error: "Multipart upload is invalid or exceeds the allowed limits.",
+      code: error.code
+    });
+    return;
+  }
+
   if (isJsonBodyParseError(error)) {
     response.status(400).json({ error: "Request body must be valid JSON." });
     return;
