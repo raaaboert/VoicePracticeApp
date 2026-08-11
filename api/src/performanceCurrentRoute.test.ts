@@ -540,30 +540,31 @@ async function seedStores(): Promise<void> {
     tokenSecret: WEB_AUTH_TOKEN_SECRET,
     codeSecret: WEB_AUTH_CODE_SECRET
   });
+  const sessionIssuedAt = new Date();
   const dashboardUser = buildDatabase().users.find((user) => user.id === "dashboard_admin");
   assert.ok(dashboardUser);
-  const issued = webAuthService.issueSession(dashboardUser, 14 * 24 * 60, new Date(NOW), {
+  const issued = webAuthService.issueSession(dashboardUser, 14 * 24 * 60, sessionIssuedAt, {
     accessType: "customer_dashboard_user",
     orgId: "org_1"
   });
   dashboardToken = issued.token;
   const dashboardViewer = buildDatabase().users.find((user) => user.id === "dashboard_viewer");
   assert.ok(dashboardViewer);
-  const viewerIssued = webAuthService.issueSession(dashboardViewer, 14 * 24 * 60, new Date(NOW), {
+  const viewerIssued = webAuthService.issueSession(dashboardViewer, 14 * 24 * 60, sessionIssuedAt, {
     accessType: "customer_dashboard_user",
     orgId: "org_1"
   });
   dashboardViewerToken = viewerIssued.token;
   const dashboardManager = buildDatabase().users.find((user) => user.id === "dashboard_manager");
   assert.ok(dashboardManager);
-  const managerIssued = webAuthService.issueSession(dashboardManager, 14 * 24 * 60, new Date(NOW), {
+  const managerIssued = webAuthService.issueSession(dashboardManager, 14 * 24 * 60, sessionIssuedAt, {
     accessType: "customer_dashboard_user",
     orgId: "org_1"
   });
   dashboardManagerToken = managerIssued.token;
   const platformUser = buildDatabase().users.find((user) => user.id === "platform_admin");
   assert.ok(platformUser);
-  const platformIssued = webAuthService.issueSession(platformUser, 14 * 24 * 60, new Date(NOW), {
+  const platformIssued = webAuthService.issueSession(platformUser, 14 * 24 * 60, sessionIssuedAt, {
     accessType: "super_user",
     orgId: null
   });

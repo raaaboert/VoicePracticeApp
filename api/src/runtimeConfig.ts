@@ -490,7 +490,16 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     authCodeFromEmail,
     authCodeFromName,
     authCodeReplyTo,
-    requireReverifyOnOnboard: toBoolean(env.MOBILE_REVERIFY_ON_ONBOARD, isProduction),
+    requireReverifyOnOnboard: (() => {
+      const requireReverification = toBoolean(
+        env.MOBILE_REVERIFY_ON_ONBOARD,
+        isProduction || deploymentEnvironment !== "development"
+      );
+      if (deploymentEnvironment !== "development" && !requireReverification) {
+        throw new Error("MOBILE_REVERIFY_ON_ONBOARD cannot be disabled in staging or production.");
+      }
+      return requireReverification;
+    })(),
     appReviewCredential,
     openAi: loadOpenAiModelConfig(env),
     enableRemoteTts: toBoolean(env.ENABLE_REMOTE_TTS, false),

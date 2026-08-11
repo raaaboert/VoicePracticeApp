@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { Server } from "node:http";
 import { AddressInfo } from "node:net";
@@ -17,6 +18,8 @@ const NOW = "2026-08-10T12:00:00.000Z";
 const REVIEWER_EMAIL = "reviewer@example.test";
 const REVIEWER_CODE = "808080";
 const ADMIN_PASSWORD = "reviewer-route-admin-password";
+const MOBILE_TOKEN_SECRET = "mobile_token_secret_for_reviewer_route_tests";
+const APPROVED_EXISTING_TOKEN = "approved_existing_mobile_token";
 
 let tempDir: string;
 let dbPath: string;
@@ -95,7 +98,14 @@ function buildDatabase(): ApiDatabase {
     orgStandardScenarioDivisionAssignments: [],
     trainingPackAssignments: [],
     usageSessions: [],
-    mobileAuthTokens: [],
+    mobileAuthTokens: [
+      {
+        userId: "approved_enterprise_user",
+        tokenHash: crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(APPROVED_EXISTING_TOKEN).digest("hex"),
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    ],
     emailVerifications: [],
     webAuthChallenges: [],
     enterpriseJoinRequests: [],
@@ -189,7 +199,7 @@ before(async () => {
   process.env.ADMIN_TOKEN_SECRET = "admin_token_secret_for_reviewer_route_tests";
   process.env.WEB_AUTH_TOKEN_SECRET = "web_auth_token_secret_for_reviewer_route_tests";
   process.env.WEB_AUTH_CODE_SECRET = "web_auth_code_secret_for_reviewer_route_tests";
-  process.env.MOBILE_TOKEN_SECRET = "mobile_token_secret_for_reviewer_route_tests";
+  process.env.MOBILE_TOKEN_SECRET = MOBILE_TOKEN_SECRET;
   process.env.SUPPORT_TRANSCRIPT_SECRET = "support_secret_for_reviewer_route_tests";
   process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
   process.env.MOBILE_REVERIFY_ON_ONBOARD = "true";
@@ -210,6 +220,7 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
+  await new Promise((resolve) => setTimeout(resolve, 50));
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -220,6 +231,71 @@ test("normal OTP establishes the baseline mobile verification response", async (
   const verified = await verify(onboarded.body.user.id, code, onboarded.body.authToken);
   assert.equal(verified.status, 200);
   normalResponseKeys = Object.keys(verified.body).sort();
+});
+
+test("hostile existing-user onboarding leaves durable account state and the current token unchanged until OTP succeeds", async () => {
+  const before = await readDb();
+  const beforeUser = before.users.find((entry) => entry.id === "approved_enterprise_user");
+  const beforeToken = before.mobileAuthTokens.find((entry) => entry.userId === "approved_enterprise_user");
+  assert.ok(beforeUser);
+  assert.ok(beforeToken);
+
+  const { result: onboarded, code } = await captureVerificationCode(() =>
+    apiRequest("/mobile/onboard", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "approved@example.test",
+        firstName: "Hostile",
+        lastName: "Mutation",
+        timezone: "America/New_York",
+        joinCode: "REVIEW20",
+      }),
+    })
+  );
+  assert.equal(onboarded.status, 200);
+  assert.equal(onboarded.body.verificationRequired, true);
+
+  const pending = await readDb();
+  const pendingUser = pending.users.find((entry) => entry.id === "approved_enterprise_user");
+  const pendingToken = pending.mobileAuthTokens.find((entry) => entry.userId === "approved_enterprise_user");
+  assert.equal(pendingUser?.emailVerifiedAt, beforeUser.emailVerifiedAt);
+  assert.equal(pendingUser?.timezone, beforeUser.timezone);
+  assert.equal(pendingUser?.firstName, beforeUser.firstName);
+  assert.equal(pendingUser?.lastName, beforeUser.lastName);
+  assert.equal(pendingUser?.updatedAt, beforeUser.updatedAt);
+  assert.equal(pendingToken?.tokenHash, beforeToken.tokenHash);
+
+  const currentTokenStillWorks = await apiRequest(
+    "/mobile/users/approved_enterprise_user/entitlements",
+    undefined,
+    APPROVED_EXISTING_TOKEN
+  );
+  assert.equal(currentTokenStillWorks.status, 200);
+
+  const verified = await verify(
+    "approved_enterprise_user",
+    code,
+    onboarded.body.authToken,
+    { joinCode: "REVIEW20" }
+  );
+  assert.equal(verified.status, 200);
+  assert.equal(verified.body.user.firstName, "Hostile");
+  assert.equal(verified.body.user.lastName, "Mutation");
+  assert.equal(verified.body.user.timezone, "America/New_York");
+  assert.notEqual(verified.body.authToken, onboarded.body.authToken);
+
+  const oldTokenDeniedAfterSuccess = await apiRequest(
+    "/mobile/users/approved_enterprise_user/entitlements",
+    undefined,
+    APPROVED_EXISTING_TOKEN
+  );
+  assert.equal(oldTokenDeniedAfterSuccess.status, 401);
+  const finalTokenWorks = await apiRequest(
+    "/mobile/users/approved_enterprise_user/entitlements",
+    undefined,
+    verified.body.authToken
+  );
+  assert.equal(finalTokenWorks.status, 200);
 });
 
 test("reviewer fixed code requires the correct interim token and follows the normal success path", async () => {
@@ -303,6 +379,51 @@ test("reviewer account can still use a newly generated normal OTP and reuses its
 
   const db = await readDb();
   assert.equal(db.enterpriseJoinRequests.filter((entry) => entry.userId === reviewerUserId).length, 1);
+});
+
+test("mobile settings reject changed email atomically while unchanged email still permits timezone updates", async () => {
+  const setup = await captureVerificationCode(() => onboard("settings-security@example.test"));
+  const settingsUserId = setup.result.body.user.id as string;
+  const settingsVerified = await verify(settingsUserId, setup.code, setup.result.body.authToken);
+  assert.equal(settingsVerified.status, 200);
+  const settingsToken = settingsVerified.body.authToken as string;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const before = await readDb();
+  const beforeUser = before.users.find((entry) => entry.id === settingsUserId);
+  const beforeVerificationCount = before.emailVerifications.length;
+  assert.ok(beforeUser);
+
+  const rejected = await apiRequest(`/mobile/users/${settingsUserId}/settings`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      email: "attacker-controlled@example.test",
+      timezone: "America/New_York",
+    }),
+  }, settingsToken);
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.code, "mobile_email_change_disabled");
+
+  const afterRejected = await readDb();
+  const unchangedUser = afterRejected.users.find((entry) => entry.id === settingsUserId);
+  assert.equal(unchangedUser?.email, beforeUser.email);
+  assert.equal(unchangedUser?.emailVerifiedAt, beforeUser.emailVerifiedAt);
+  assert.equal(unchangedUser?.pendingTimezone, beforeUser.pendingTimezone);
+  assert.equal(afterRejected.emailVerifications.length, beforeVerificationCount);
+  assert.equal(
+    afterRejected.emailVerifications.some((entry) => entry.email === "attacker-controlled@example.test"),
+    false
+  );
+
+  const allowed = await apiRequest(`/mobile/users/${settingsUserId}/settings`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      email: beforeUser.email,
+      timezone: "America/New_York",
+    }),
+  }, settingsToken);
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.body.email, beforeUser.email);
+  assert.equal(allowed.body.pendingTimezone, "America/New_York");
 });
 
 test("reviewer fixed code is isolated from dashboard and platform-admin authentication", async () => {

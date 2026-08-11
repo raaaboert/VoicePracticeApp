@@ -15,7 +15,16 @@ export const AI_USAGE_EVENT_RETENTION_DAYS = 3650;
 
 const AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS = 3;
 const AI_USAGE_EVENT_CURRENT_PERIOD_LOOKBACK_DAYS = 40;
-const AI_USAGE_EVENT_KIND_SET = new Set<AiUsageEventKind>(["opening", "turn", "score", "transcribe"]);
+const AI_USAGE_EVENT_KIND_SET = new Set<AiUsageEventKind>([
+  "opening",
+  "turn",
+  "score",
+  "transcribe",
+  "tts",
+  "custom_scenario",
+]);
+
+const AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY = 0x504149;
 
 export interface AiUsageBudgetSnapshot {
   userCallsToday: number;
@@ -23,6 +32,23 @@ export interface AiUsageBudgetSnapshot {
   globalCallsToday: number;
   globalTokensToday: number;
 }
+
+export interface AiUsageBudgetLimits {
+  userCalls: number | null;
+  userTokens: number | null;
+  globalCalls: number | null;
+  globalTokens: number | null;
+}
+
+export type AiUsageBudgetLimitCode =
+  | "user_calls"
+  | "user_tokens"
+  | "global_calls"
+  | "global_tokens";
+
+export type AiUsageBudgetReservationResult =
+  | { reserved: true }
+  | { reserved: false; limitCode: AiUsageBudgetLimitCode };
 
 export interface AiUsageCurrentPeriodTotals {
   tokensUsedToday: number;
@@ -45,6 +71,13 @@ export interface AiUsageEventStore {
     options?: { now?: Date }
   ): Promise<{ importedCount: number; prunedCount: number }>;
   appendEvent(event: AiUsageEvent, options?: { now?: Date }): Promise<void>;
+  reserveBudget(params: {
+    event: AiUsageEvent;
+    userTimeZone: string;
+    limits: AiUsageBudgetLimits;
+    now: Date;
+  }): Promise<AiUsageBudgetReservationResult>;
+  deleteEvent(eventId: string): Promise<boolean>;
   listEvents(query?: AiUsageEventQuery, options?: { now?: Date }): Promise<AiUsageEvent[]>;
   computeBudgetSnapshot(params: { userId: string; now: Date; userTimeZone: string }): Promise<AiUsageBudgetSnapshot>;
   computeCurrentPeriodTotals(params: { userId: string; now: Date; timeZone: string }): Promise<AiUsageCurrentPeriodTotals>;
@@ -305,6 +338,33 @@ function computeBudgetSnapshotFromEvents(
   };
 }
 
+export function resolveAiUsageBudgetLimit(
+  snapshot: AiUsageBudgetSnapshot,
+  limits: AiUsageBudgetLimits,
+  reservationTokens: number
+): AiUsageBudgetLimitCode | null {
+  const tokens = Math.max(0, clampNonNegativeInteger(reservationTokens, 0));
+  if (limits.userCalls !== null && snapshot.userCallsToday + 1 > limits.userCalls) {
+    return "user_calls";
+  }
+  if (
+    limits.userTokens !== null
+    && (snapshot.userTokensToday >= limits.userTokens || snapshot.userTokensToday + tokens > limits.userTokens)
+  ) {
+    return "user_tokens";
+  }
+  if (limits.globalCalls !== null && snapshot.globalCallsToday + 1 > limits.globalCalls) {
+    return "global_calls";
+  }
+  if (
+    limits.globalTokens !== null
+    && (snapshot.globalTokensToday >= limits.globalTokens || snapshot.globalTokensToday + tokens > limits.globalTokens)
+  ) {
+    return "global_tokens";
+  }
+  return null;
+}
+
 function computeCurrentPeriodTotalsFromEvents(
   events: readonly AiUsageEvent[],
   params: { userId: string; now: Date; timeZone: string }
@@ -403,6 +463,54 @@ class FileAiUsageEventStore implements AiUsageEventStore {
         now
       );
       await this.savePayload({ events: next.events });
+    });
+  }
+
+  async reserveBudget(params: {
+    event: AiUsageEvent;
+    userTimeZone: string;
+    limits: AiUsageBudgetLimits;
+    now: Date;
+  }): Promise<AiUsageBudgetReservationResult> {
+    const normalized = normalizeAiUsageEvent(params.event);
+    if (!normalized) {
+      throw new Error("AI usage budget reservation event is invalid.");
+    }
+
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload(params.now);
+      const snapshot = computeBudgetSnapshotFromEvents(payload.events, {
+        userId: normalized.userId,
+        now: params.now,
+        userTimeZone: params.userTimeZone,
+      });
+      const limitCode = resolveAiUsageBudgetLimit(snapshot, params.limits, normalized.totalTokens);
+      if (limitCode) {
+        return { reserved: false, limitCode };
+      }
+
+      const next = normalizeAiUsageEventCollection(
+        [...payload.events.filter((entry) => entry.id !== normalized.id), normalized],
+        params.now
+      );
+      await this.savePayload({ events: next.events });
+      return { reserved: true };
+    });
+  }
+
+  async deleteEvent(eventId: string): Promise<boolean> {
+    const normalizedEventId = eventId.trim();
+    if (!normalizedEventId) {
+      return false;
+    }
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload(new Date());
+      const next = payload.events.filter((entry) => entry.id !== normalizedEventId);
+      if (next.length === payload.events.length) {
+        return false;
+      }
+      await this.savePayload({ events: next });
+      return true;
     });
   }
 
@@ -607,6 +715,73 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
     } finally {
       client.release();
     }
+  }
+
+  async reserveBudget(params: {
+    event: AiUsageEvent;
+    userTimeZone: string;
+    limits: AiUsageBudgetLimits;
+    now: Date;
+  }): Promise<AiUsageBudgetReservationResult> {
+    const normalized = normalizeAiUsageEvent(params.event);
+    if (!normalized) {
+      throw new Error("AI usage budget reservation event is invalid.");
+    }
+
+    await this.ensureTable();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1::integer)", [AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY]);
+      const lookbackStart = new Date(
+        params.now.getTime() - AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+      );
+      const result = await client.query<AiUsageEventRow>(
+        `
+          SELECT
+            id, kind, user_id, org_id, division_id, segment_id, scenario_id,
+            model, prompt_version, rubric_version, input_tokens, output_tokens,
+            total_tokens, created_at
+          FROM ai_usage_events
+          WHERE created_at >= $1::timestamptz
+            AND created_at <= $2::timestamptz
+          ORDER BY created_at ASC, id ASC
+        `,
+        [lookbackStart.toISOString(), params.now.toISOString()]
+      );
+      const events = result.rows
+        .map((row) => mapAiUsageEventRow(row))
+        .filter((entry): entry is AiUsageEvent => entry !== null);
+      const snapshot = computeBudgetSnapshotFromEvents(events, {
+        userId: normalized.userId,
+        now: params.now,
+        userTimeZone: params.userTimeZone,
+      });
+      const limitCode = resolveAiUsageBudgetLimit(snapshot, params.limits, normalized.totalTokens);
+      if (limitCode) {
+        await client.query("ROLLBACK");
+        return { reserved: false, limitCode };
+      }
+
+      await upsertAiUsageEventRow(client, normalized);
+      await client.query("COMMIT");
+      return { reserved: true };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deleteEvent(eventId: string): Promise<boolean> {
+    const normalizedEventId = eventId.trim();
+    if (!normalizedEventId) {
+      return false;
+    }
+    await this.ensureTable();
+    const result = await this.pool.query("DELETE FROM ai_usage_events WHERE id = $1", [normalizedEventId]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   async listEvents(query: AiUsageEventQuery = {}, _options?: { now?: Date }): Promise<AiUsageEvent[]> {
@@ -831,6 +1006,14 @@ class UnsupportedAiUsageEventStore implements AiUsageEventStore {
   }
 
   async appendEvent(): Promise<void> {
+    throw new Error("AI usage event storage provider is not supported.");
+  }
+
+  async reserveBudget(): Promise<AiUsageBudgetReservationResult> {
+    throw new Error("AI usage event storage provider is not supported.");
+  }
+
+  async deleteEvent(): Promise<boolean> {
     throw new Error("AI usage event storage provider is not supported.");
   }
 

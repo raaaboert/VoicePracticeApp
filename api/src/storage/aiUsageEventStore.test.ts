@@ -170,3 +170,59 @@ test("file ai usage event store imports legacy events and prunes records beyond 
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("file ai usage event store atomically reserves the global provider budget and releases failed calls", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-ai-usage-store-"));
+  try {
+    const store = createAiUsageEventStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000
+    });
+    const now = new Date("2026-08-10T12:00:00.000Z");
+    await store.initialize({ now });
+    const limits = {
+      userCalls: null,
+      userTokens: null,
+      globalCalls: 1,
+      globalTokens: 100,
+    };
+
+    const reservations = await Promise.all([
+      store.reserveBudget({
+        event: createEvent({ id: "reservation_a", kind: "tts", totalTokens: 0, createdAt: now.toISOString() }),
+        userTimeZone: "America/Denver",
+        limits,
+        now,
+      }),
+      store.reserveBudget({
+        event: createEvent({ id: "reservation_b", kind: "tts", totalTokens: 0, createdAt: now.toISOString() }),
+        userTimeZone: "America/Denver",
+        limits,
+        now,
+      }),
+    ]);
+    assert.equal(reservations.filter((entry) => entry.reserved).length, 1);
+    assert.equal(
+      reservations.some((entry) => !entry.reserved && entry.limitCode === "global_calls"),
+      true
+    );
+
+    const reservedEvent = (await store.listEvents())[0];
+    assert.equal(reservedEvent?.kind, "tts");
+    assert.equal(await store.deleteEvent(reservedEvent!.id), true);
+
+    const retry = await store.reserveBudget({
+      event: createEvent({ id: "reservation_retry", kind: "tts", totalTokens: 0, createdAt: now.toISOString() }),
+      userTimeZone: "America/Denver",
+      limits,
+      now,
+    });
+    assert.deepEqual(retry, { reserved: true });
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
