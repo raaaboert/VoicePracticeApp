@@ -36,7 +36,7 @@ function createPlan(overrides?: Partial<PerformancePlan>): PerformancePlan {
     id: overrides?.id ?? "plan_1",
     orgId: overrides?.orgId ?? "org_1",
     userId: overrides?.userId ?? "user_1",
-    createdByActorType: "dashboard_user",
+    createdByActorType: "web_user",
     createdByActorId: "manager_1",
     createdAt: "2026-07-20T12:00:00.000Z",
     submittedAt: "2026-07-20T12:00:00.000Z",

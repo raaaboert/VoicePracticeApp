@@ -5,13 +5,13 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "test": "node ../scripts/run-tsx-tests.mjs src=.test.ts middleware.test.ts",
+    "test": "node ../scripts/run-tsx-tests.mjs src=.test.ts proxy.test.ts",
     "start": "next start"
   },
   "dependencies": {
     "@voicepractice/shared": "file:../shared",
     "lucide-react": "^0.468.0",
-    "next": "15.5.23",
+    "next": "16.3.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-markdown": "^10.1.0"

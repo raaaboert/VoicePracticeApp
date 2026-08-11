@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-// @ts-expect-error Workspace does not include react-dom type declarations.
 import { createPortal } from "react-dom";
 import { AdminTrainingPackAssignmentsResponse, AppConfig, TrainingPack } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";

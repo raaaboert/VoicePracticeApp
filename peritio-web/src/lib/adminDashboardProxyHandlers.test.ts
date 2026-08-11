@@ -20,12 +20,12 @@ process.env.PERITIO_APP_HOST = "app.peritio.ai";
 process.env.PERITIO_PUBLIC_HOST = "peritio.ai";
 
 function appRequest(pathname: string, init?: RequestInit): NextRequest {
+  const headers = new Headers(init?.headers);
+  headers.set("host", "app.peritio.ai");
   return new NextRequest(`https://app.peritio.ai${pathname}`, {
-    ...init,
-    headers: {
-      host: "app.peritio.ai",
-      ...(init?.headers ?? {}),
-    },
+    method: init?.method,
+    body: init?.body,
+    headers,
   });
 }
 

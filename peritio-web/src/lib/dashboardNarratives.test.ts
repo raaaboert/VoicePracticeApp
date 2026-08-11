@@ -273,6 +273,7 @@ test("customer narrative uses visible recent-practice users rather than account-
         {
           userId: "u-1",
           email: "engaged@example.com",
+          employeeId: null,
           status: "active",
           orgRole: "user",
           dashboardAccessEnabled: true,
@@ -285,6 +286,7 @@ test("customer narrative uses visible recent-practice users rather than account-
         {
           userId: "u-2",
           email: "idle@example.com",
+          employeeId: null,
           status: "active",
           orgRole: "user",
           dashboardAccessEnabled: true,
