@@ -132,7 +132,7 @@ test("non-PDF downloaded content fails safely and deletes the cache target", asy
 
   await assert.rejects(
     session.result,
-    (caught) =>
+    (caught: unknown) =>
       caught instanceof PdfTemporaryFileError &&
       caught.diagnosticCategory === "pdf_signature_invalid"
   );
@@ -157,7 +157,7 @@ test("PDF download size must match asset or response metadata when available", a
 
   await assert.rejects(
     assetSession.result,
-    (caught) =>
+    (caught: unknown) =>
       caught instanceof PdfTemporaryFileError &&
       caught.diagnosticCategory === "pdf_size_mismatch"
   );
@@ -181,7 +181,7 @@ test("PDF download size must match asset or response metadata when available", a
 
   await assert.rejects(
     responseSession.result,
-    (caught) =>
+    (caught: unknown) =>
       caught instanceof PdfTemporaryFileError &&
       caught.diagnosticCategory === "pdf_size_mismatch"
   );
@@ -217,7 +217,7 @@ test("missing and zero-byte local PDF results fail safely and delete the cache t
 
   await assert.rejects(
     session.result,
-    (caught) =>
+    (caught: unknown) =>
       caught instanceof PdfTemporaryFileError &&
       caught.diagnosticCategory === "pdf_local_file_missing"
   );
@@ -240,7 +240,7 @@ test("download failure and timeout cancel work and remove partial cache files", 
 
   await assert.rejects(
     failedSession.result,
-    (caught) =>
+    (caught: unknown) =>
       caught instanceof PdfTemporaryFileError &&
       caught.diagnosticCategory === "pdf_download_failed"
   );
@@ -290,7 +290,7 @@ test("explicit cancellation is idempotent and prevents a stale download commit",
   await session.cancel();
   await assert.rejects(
     session.result,
-    (caught) => caught instanceof PdfTemporaryFileError && caught.canceled
+    (caught: unknown) => caught instanceof PdfTemporaryFileError && caught.canceled
   );
   assert.equal(events.filter((event) => event === "cancel").length, 1);
   assert.ok(

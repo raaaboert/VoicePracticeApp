@@ -6,11 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/peritio-app-icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./peritio-source-splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#697364"
-    },
     "ios": {
       "bundleIdentifier": "com.peritio.practice",
       "icon": "./assets/peritio-app-icon.png",
@@ -45,6 +40,14 @@
     },
     "plugins": [
       "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./peritio-source-splash.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#697364"
+        }
+      ],
       "@config-plugins/react-native-blob-util",
       "@config-plugins/react-native-pdf",
       "./plugins/withReactNativePdfMonorepo",
