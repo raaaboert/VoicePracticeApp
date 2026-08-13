@@ -29,6 +29,12 @@ test("Performance create goal header is fixed outside the form ScrollView", () =
   assert.ok(headerIndex < scrollIndex);
   assert.ok(scrollIndex < formIndex);
   assert.equal(performanceScreenSource.includes("styles.createModalCancelButton"), true);
+  const createSource = performanceScreenSource.slice(scrollIndex, formIndex);
+  assert.match(createSource, /keyboardShouldPersistTaps="handled"/);
+  assert.match(
+    createSource,
+    /keyboardDismissMode=\{Platform\.OS === "ios" \? "interactive" : "none"\}/
+  );
 });
 
 test("Performance goal detail uses one padding-based keyboard shell and one scroll owner", () => {
@@ -56,7 +62,7 @@ test("Performance goal detail uses one padding-based keyboard shell and one scro
   assert.equal(detailSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'), false);
   assert.equal(detailSource.includes('<View style={styles.modalScreen}>'), false);
   assert.equal(
-    detailSource.includes('keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}'),
+    detailSource.includes('keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}'),
     true
   );
   assert.equal(detailSource.includes('keyboardShouldPersistTaps="handled"'), true);

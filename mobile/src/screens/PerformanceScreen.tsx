@@ -368,7 +368,7 @@ function PlanDetailModalContent({
           style={styles.scroll}
           contentContainerStyle={[styles.content, { paddingBottom: bottomInsetPadding }]}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
         >
             <PlanSummaryCard plan={detail.plan} progress={detail.progress} attribution={getMobilePlanAttribution(detail.plan, userId)} />
 
@@ -1134,6 +1134,7 @@ function PerformanceCreateGoalModalContent({
           style={styles.scroll}
           contentContainerStyle={[styles.createFormContent, { paddingBottom: bottomInsetPadding }]}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
         >
           <PerformanceCreateForm
             userId={userId}

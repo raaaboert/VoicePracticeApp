@@ -5,6 +5,7 @@ import type {
 } from "@voicepractice/shared";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -81,7 +82,7 @@ export function TrainingContentLibraryScreen(
         style={styles.fill}
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
         refreshControl={
           <RefreshControl refreshing={props.refreshing} onRefresh={props.onRefresh} />
         }

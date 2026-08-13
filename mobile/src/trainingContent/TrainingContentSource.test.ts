@@ -42,6 +42,11 @@ test("library navigation keeps search, category, detail, and empty states inside
   assert.match(library, /Search training content/);
   assert.match(library, /All Content/);
   assert.match(library, /TRAINING_CONTENT_EMPTY_MESSAGE/);
+  assert.match(library, /keyboardShouldPersistTaps="handled"/);
+  assert.match(
+    library,
+    /keyboardDismissMode=\{Platform\.OS === "ios" \? "interactive" : "none"\}/
+  );
   assert.match(category, /onOpenItem/);
   assert.doesNotMatch(detail, /RefreshControl|refreshControl|refreshing/);
   assert.match(library, /refreshControl/);

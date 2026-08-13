@@ -100,6 +100,7 @@ import {
   isTranscriptNearBottom,
   shouldFollowTranscriptAfterMessage,
 } from "../lib/transcriptFollow";
+import { normalizeTranscriptText } from "../lib/transcriptText";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
 interface SimulationScreenProps {
@@ -4284,7 +4285,7 @@ export function SimulationScreen({
                       message.role === "user" ? styles.userMessageText : styles.aiMessageText,
                     ]}
                   >
-                    {message.content}
+                    {normalizeTranscriptText(message.content)}
                   </Text>
                 </View>
               ))

@@ -685,7 +685,12 @@ function SearchableSelectionDropdown({
               autoCapitalize="none"
               autoCorrect={false}
             />
-            <ScrollView style={styles.dropdownOptionsScroll} contentContainerStyle={styles.dropdownOptionsContent}>
+            <ScrollView
+              style={styles.dropdownOptionsScroll}
+              contentContainerStyle={styles.dropdownOptionsContent}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+            >
               {filtered.length === 0 ? (
                 <Text style={styles.body}>(No matches.)</Text>
               ) : (
@@ -4245,7 +4250,7 @@ export default function App() {
           style={styles.scroll}
           contentContainerStyle={[styles.scrollContent, styles.companyCodeScrollContent]}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
         >
           <View style={styles.card}>
             <Text style={styles.title}>{title}</Text>
@@ -4338,7 +4343,7 @@ export default function App() {
           style={styles.scroll}
           contentContainerStyle={[styles.scrollContent, styles.verifyEmailScrollContent]}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
         >
           <View style={styles.card}>
             <Text style={styles.title}>Enter Verification Code</Text>
@@ -4435,7 +4440,7 @@ export default function App() {
         style={styles.scroll}
         contentContainerStyle={[styles.scrollContent, styles.companyCodeScrollContent]}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
       >
         <View style={styles.card}>
           <Text style={styles.title}>Enter Company Code</Text>
@@ -4551,7 +4556,12 @@ export default function App() {
         <Text style={styles.topTitle}>Select Environment</Text>
         <View style={styles.spacer} />
       </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+      >
         <View style={styles.card}>
           <Text style={styles.title}>Enterprise Account</Text>
           <Text style={styles.body}>
@@ -4763,7 +4773,12 @@ export default function App() {
         <Text style={styles.topTitle}>Profile</Text>
         <View style={styles.spacer} />
       </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+      >
         <View style={styles.card}>
           <Text style={styles.title}>Account</Text>
           <Text style={styles.body}>
@@ -5515,7 +5530,12 @@ export default function App() {
           </Pressable>
         </View>
 
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+        >
           {adminError ? (
             <View style={styles.errorCard}>
               <Text style={styles.errorText}>{adminError}</Text>
@@ -6103,7 +6123,12 @@ export default function App() {
           </Pressable>
         </View>
 
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+        >
           {adminError ? (
             <View style={styles.errorCard}>
               <Text style={styles.errorText}>{adminError}</Text>

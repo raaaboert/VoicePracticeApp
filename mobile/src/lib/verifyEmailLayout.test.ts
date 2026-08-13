@@ -24,7 +24,7 @@ test("Verify Email resizes and scrolls above Android and iOS keyboards", () => {
   assert.match(verifyEmailSource, /keyboardShouldPersistTaps="handled"/);
   assert.match(
     verifyEmailSource,
-    /keyboardDismissMode=\{Platform\.OS === "ios" \? "interactive" : "on-drag"\}/
+    /keyboardDismissMode=\{Platform\.OS === "ios" \? "interactive" : "none"\}/
   );
   assert.match(
     appSource,
