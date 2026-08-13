@@ -226,7 +226,9 @@ import {
   calculateFiniteDailyOverageUsage,
   resolveEnterpriseDailyQuota,
   resolveEnterpriseQuotaLockReason,
+  resolveFiniteDailyOverageGrantSnapshot,
   resolveStoredDailyOverageMode,
+  resolveTemporaryDailyOverageExpiration,
   resolveTemporaryDailyOverageWindow,
   TemporaryDailyOverageMode,
 } from "./services/temporaryDailyOverage.js";
@@ -9701,22 +9703,36 @@ function buildTemporaryDailyOverageGrant(params: {
   }
 
   const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(params.org, params.now), params.now);
-  const requestedExpiresAtMs = params.now.getTime() + Number(durationDays) * 24 * 60 * 60 * 1000;
-  const renewalAtMs = new Date(billing.nextRenewalAt).getTime();
-  const expiresAt = new Date(Math.min(requestedExpiresAtMs, renewalAtMs));
+  const expiresAt = resolveTemporaryDailyOverageExpiration({
+    now: params.now,
+    durationDays: Number(durationDays),
+    nextRenewalAt: billing.nextRenewalAt,
+  });
   const effectiveDailySecondsCap = Math.max(
     0,
     (params.user.dailySecondsCapOverride ?? resolveEffectiveOrgPerUserDailySecondsCap(params.org, params.now))
       + params.user.manualBonusSeconds,
   );
+  const finiteSnapshot = mode === "finite"
+    ? resolveFiniteDailyOverageGrantSnapshot({
+        allowed: params.user.allowDailyOverageThisCycle,
+        mode: params.user.dailyOverageMode,
+        expiresAt: params.user.dailyOverageExpiresAt,
+        startedAt: params.user.dailyOverageStartedAt,
+        baseDailySecondsCap: params.user.dailyOverageBaseSecondsCap,
+        extraSecondsGranted: params.user.dailyOverageExtraSecondsGranted,
+        now: params.now,
+        currentEffectiveDailySecondsCap: effectiveDailySecondsCap,
+      })
+    : null;
   return {
     ok: true,
     values: {
       allowDailyOverageThisCycle: true,
-      dailyOverageExpiresAt: expiresAt.toISOString(),
+      dailyOverageExpiresAt: expiresAt,
       dailyOverageMode: mode,
-      dailyOverageStartedAt: params.now.toISOString(),
-      dailyOverageBaseSecondsCap: mode === "finite" ? effectiveDailySecondsCap : null,
+      dailyOverageStartedAt: finiteSnapshot?.startedAt ?? params.now.toISOString(),
+      dailyOverageBaseSecondsCap: finiteSnapshot?.baseDailySecondsCap ?? null,
       dailyOverageExtraSecondsGranted: extraSecondsGranted,
     },
   };

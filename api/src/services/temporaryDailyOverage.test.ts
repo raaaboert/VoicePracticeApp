@@ -5,7 +5,10 @@ import {
   calculateFiniteDailyOverageUsage,
   resolveEnterpriseDailyQuota,
   resolveEnterpriseQuotaLockReason,
+  resolveFiniteDailyOverageGrantSnapshot,
+  resolveFiniteDailyOverageGrantSnapshotForEdit,
   resolveStoredDailyOverageMode,
+  resolveTemporaryDailyOverageExpiration,
   resolveTemporaryDailyOverageWindow,
 } from "./temporaryDailyOverage.js";
 
@@ -22,6 +25,84 @@ function session(id: string, endedAt: string, rawDurationSeconds: number): Usage
     createdAt: endedAt,
   };
 }
+
+const activeFiniteGrant = {
+  allowed: true,
+  mode: "finite",
+  expiresAt: "2026-08-17T12:00:00.000Z",
+  startedAt: "2026-08-13T12:00:00.000Z",
+  baseDailySecondsCap: 3_600,
+  extraSecondsGranted: 7_200,
+  now: new Date("2026-08-14T12:00:00.000Z"),
+};
+
+test("active finite edits preserve the original start and base-cap snapshot", () => {
+  assert.deepEqual(resolveFiniteDailyOverageGrantSnapshotForEdit(activeFiniteGrant), {
+    startedAt: "2026-08-13T12:00:00.000Z",
+    baseDailySecondsCap: 3_600,
+  });
+});
+
+test("finite edit totals retain previously consumed usage", () => {
+  const snapshot = resolveFiniteDailyOverageGrantSnapshotForEdit(activeFiniteGrant);
+  assert.ok(snapshot);
+  const usageSessions = [
+    session("normal", "2026-08-13T13:00:00.000Z", 3_600),
+    session("extra", "2026-08-13T14:10:00.000Z", 4_200),
+  ];
+  const calculateRemaining = (extraSecondsGranted: number) => calculateFiniteDailyOverageUsage({
+    sessions: usageSessions,
+    userId: "user_1",
+    timeZone: "UTC",
+    grantStartedAt: snapshot.startedAt,
+    effectiveEndAt: "2026-08-14T12:00:00.000Z",
+    baseDailySecondsCap: snapshot.baseDailySecondsCap,
+    extraSecondsGranted,
+  }).extraSecondsRemaining;
+
+  assert.equal(calculateRemaining(180 * 60), 110 * 60);
+  assert.equal(calculateRemaining(60 * 60), 0);
+});
+
+test("non-finite, disabled, expired, and invalid grants require a fresh finite snapshot", () => {
+  assert.equal(resolveFiniteDailyOverageGrantSnapshotForEdit({ ...activeFiniteGrant, mode: "unlimited" }), null);
+  assert.equal(resolveFiniteDailyOverageGrantSnapshotForEdit({ ...activeFiniteGrant, allowed: false }), null);
+  assert.equal(resolveFiniteDailyOverageGrantSnapshotForEdit({
+    ...activeFiniteGrant,
+    expiresAt: "2026-08-14T12:00:00.000Z",
+  }), null);
+  assert.equal(resolveFiniteDailyOverageGrantSnapshotForEdit({
+    ...activeFiniteGrant,
+    startedAt: null,
+  }), null);
+});
+
+test("unlimited, disabled, and expired grants create a fresh finite start and baseline", () => {
+  const expected = {
+    startedAt: activeFiniteGrant.now.toISOString(),
+    baseDailySecondsCap: 5_400,
+  };
+  for (const storedGrant of [
+    { ...activeFiniteGrant, mode: "unlimited" },
+    { ...activeFiniteGrant, allowed: false },
+    { ...activeFiniteGrant, expiresAt: activeFiniteGrant.now.toISOString() },
+  ]) {
+    assert.deepEqual(resolveFiniteDailyOverageGrantSnapshot({
+      ...storedGrant,
+      currentEffectiveDailySecondsCap: 5_400,
+    }), expected);
+  }
+});
+
+test("temporary overage expiration clamps a 10-day request to a renewal three days away", () => {
+  const now = new Date("2026-08-13T12:00:00.000Z");
+  const nextRenewalAt = "2026-08-16T12:00:00.000Z";
+  assert.equal(resolveTemporaryDailyOverageExpiration({
+    now,
+    durationDays: 10,
+    nextRenewalAt,
+  }), nextRenewalAt);
+});
 
 test("existing enabled overage records retain unlimited semantics", () => {
   assert.equal(resolveStoredDailyOverageMode({ allowed: true, mode: undefined }), "unlimited");

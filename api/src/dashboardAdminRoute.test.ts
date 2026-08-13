@@ -2392,7 +2392,37 @@ test("org admins manage tenant-bound daily defaults and temporary overage withou
   assert.equal(finiteGrant.body.dailySecondsCapOverride, 600);
   assert.equal(finiteGrant.body.dailyOverageMode, "finite");
   assert.equal(finiteGrant.body.dailyOverageExtraSecondsGranted, 7_200);
-  assert.ok(new Date(String(finiteGrant.body.dailyOverageExpiresAt)).getTime() <= renewalAtMs);
+  assert.equal(new Date(String(finiteGrant.body.dailyOverageExpiresAt)).getTime(), renewalAtMs);
+  const persistedFiniteGrant = await waitForPersistedUserState(
+    "learner",
+    (candidate) => Boolean(candidate?.dailyOverageStartedAt),
+  );
+  assert.ok(persistedFiniteGrant?.dailyOverageStartedAt);
+  assert.equal(persistedFiniteGrant?.dailyOverageBaseSecondsCap, 600);
+  const finiteGrantStartedAt = persistedFiniteGrant.dailyOverageStartedAt;
+  const finiteGrantBaseSecondsCap = persistedFiniteGrant.dailyOverageBaseSecondsCap;
+
+  const editedFiniteGrant = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        allowDailyOverageThisCycle: true,
+        dailyOverageDurationDays: 1,
+        dailyOverageMode: "finite",
+        dailyOverageExtraMinutes: 180,
+      }),
+    },
+  );
+  assert.equal(editedFiniteGrant.status, 200, JSON.stringify(editedFiniteGrant.body));
+  const editedFiniteUser = await waitForPersistedUserState(
+    "learner",
+    (candidate) => candidate?.dailyOverageExtraSecondsGranted === 10_800,
+  );
+  assert.equal(editedFiniteUser?.dailyOverageStartedAt, finiteGrantStartedAt);
+  assert.equal(editedFiniteUser?.dailyOverageBaseSecondsCap, finiteGrantBaseSecondsCap);
+  assert.equal(editedFiniteUser?.dailyOverageExtraSecondsGranted, 10_800);
 
   const finiteDetail = await mobileRequest(
     "/mobile/users/org_admin/admin/org/users/learner",
@@ -2404,18 +2434,21 @@ test("org admins manage tenant-bound daily defaults and temporary overage withou
     dailyOverageExtraSecondsRemaining: number;
   };
   assert.equal(finiteDetailUser.dailyOverageMode, "finite");
-  assert.equal(finiteDetailUser.dailyOverageExtraSecondsRemaining, 7_200);
+  assert.equal(finiteDetailUser.dailyOverageExtraSecondsRemaining, 10_800);
 
   const platformGrant = await adminRequest("/users/learner", {
     method: "PATCH",
     body: JSON.stringify({
       allowDailyOverageThisCycle: true,
-      dailyOverageDurationDays: 2,
+      dailyOverageDurationDays: 3650,
       dailyOverageMode: "unlimited",
     }),
   });
   assert.equal(platformGrant.status, 200);
   assert.equal(platformGrant.body.dailyOverageMode, "unlimited");
+  assert.equal(new Date(String(platformGrant.body.dailyOverageExpiresAt)).getTime(), renewalAtMs);
+  assert.equal(platformGrant.body.dailyOverageBaseSecondsCap, null);
+  assert.equal(platformGrant.body.dailyOverageExtraSecondsGranted, null);
 
   const useOrgDefaultAndDisable = await mobileRequest(
     "/mobile/users/org_admin/admin/org/users/learner",

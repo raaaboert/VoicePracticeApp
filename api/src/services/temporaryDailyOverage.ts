@@ -12,6 +12,69 @@ export interface FiniteDailyOverageUsage {
   extraSecondsRemaining: number;
 }
 
+export interface FiniteDailyOverageGrantSnapshot {
+  startedAt: string;
+  baseDailySecondsCap: number;
+}
+
+export function resolveFiniteDailyOverageGrantSnapshotForEdit(params: {
+  allowed: boolean;
+  mode: unknown;
+  expiresAt: unknown;
+  startedAt: unknown;
+  baseDailySecondsCap: unknown;
+  extraSecondsGranted: unknown;
+  now: Date;
+}): FiniteDailyOverageGrantSnapshot | null {
+  if (!params.allowed || params.mode !== "finite") {
+    return null;
+  }
+  const window = resolveTemporaryDailyOverageWindow({
+    allowed: true,
+    expiresAt: params.expiresAt,
+    now: params.now,
+  });
+  if (!window.active || typeof params.startedAt !== "string") {
+    return null;
+  }
+  const startedAt = new Date(params.startedAt);
+  const baseDailySecondsCap = Number(params.baseDailySecondsCap);
+  const extraSecondsGranted = Number(params.extraSecondsGranted);
+  if (
+    !Number.isFinite(startedAt.getTime()) ||
+    startedAt.getTime() > params.now.getTime() ||
+    !Number.isSafeInteger(baseDailySecondsCap) ||
+    baseDailySecondsCap < 0 ||
+    !Number.isSafeInteger(extraSecondsGranted) ||
+    extraSecondsGranted <= 0
+  ) {
+    return null;
+  }
+  return {
+    startedAt: startedAt.toISOString(),
+    baseDailySecondsCap,
+  };
+}
+
+export function resolveFiniteDailyOverageGrantSnapshot(params: Parameters<
+  typeof resolveFiniteDailyOverageGrantSnapshotForEdit
+>[0] & { currentEffectiveDailySecondsCap: number }): FiniteDailyOverageGrantSnapshot {
+  return resolveFiniteDailyOverageGrantSnapshotForEdit(params) ?? {
+    startedAt: params.now.toISOString(),
+    baseDailySecondsCap: Math.max(0, Math.floor(params.currentEffectiveDailySecondsCap)),
+  };
+}
+
+export function resolveTemporaryDailyOverageExpiration(params: {
+  now: Date;
+  durationDays: number;
+  nextRenewalAt: string;
+}): string {
+  const requestedExpiresAtMs = params.now.getTime() + params.durationDays * 24 * 60 * 60 * 1000;
+  const renewalAtMs = new Date(params.nextRenewalAt).getTime();
+  return new Date(Math.min(requestedExpiresAtMs, renewalAtMs)).toISOString();
+}
+
 export function resolveTemporaryDailyOverageWindow(params: {
   allowed: boolean;
   expiresAt: unknown;
