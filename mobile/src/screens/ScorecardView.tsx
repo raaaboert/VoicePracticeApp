@@ -7,7 +7,6 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  useWindowDimensions,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -15,7 +14,6 @@ import { DIFFICULTY_LABELS, PERSONA_LABELS } from "../data/prompts";
 import { buildScorecardViewModel } from "../lib/scorecardViewModel";
 import {
   getSupportModalKeyboardDismissMode,
-  getSupportModalMaxHeight,
   SUPPORT_MODAL_KEYBOARD_SHOULD_PERSIST_TAPS,
 } from "../lib/supportModalLayout";
 import { Difficulty, PersonaStyle, SimulationScorecard, SimulationScoringStatus } from "../types";
@@ -69,11 +67,9 @@ export function ScorecardView({
   const [supportBusy, setSupportBusy] = useState(false);
   const [supportError, setSupportError] = useState<string | null>(null);
   const [supportSuccess, setSupportSuccess] = useState<string | null>(null);
-  const { height: windowHeight } = useWindowDimensions();
 
   const canSubmitSupport = useMemo(() => supportMessage.trim().length > 0 && !supportBusy, [supportBusy, supportMessage]);
   const viewModel = buildScorecardViewModel({ scoringStatus, scorecard, error });
-  const supportModalMaxHeight = getSupportModalMaxHeight(windowHeight);
 
   return (
     <View style={styles.fill}>
@@ -233,11 +229,11 @@ export function ScorecardView({
       <Modal transparent visible={supportOpen} animationType="fade" onRequestClose={() => setSupportOpen(false)}>
         <KeyboardAvoidingView
           style={styles.modalKeyboardRoot}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          behavior="padding"
         >
           <Pressable style={styles.modalBackdrop} onPress={() => setSupportOpen(false)} />
           <SafeAreaView style={styles.modalRoot} pointerEvents="box-none">
-          <View style={[styles.modalCard, { maxHeight: supportModalMaxHeight }]}>
+          <View style={styles.modalCard}>
             <View style={styles.modalHeaderRow}>
               <Text style={styles.modalTitle}>Feedback / Support</Text>
               <Pressable
@@ -489,7 +485,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(5, 10, 18, 0.76)",
   },
   modalCard: {
-    flex: 1,
+    width: "100%",
+    maxHeight: "100%",
+    flexShrink: 1,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
@@ -508,6 +506,7 @@ const styles = StyleSheet.create({
     borderBottomColor: "rgba(154, 174, 156, 0.2)",
   },
   modalTitle: {
+    flex: 1,
     color: COLORS.text,
     fontSize: 16,
     fontWeight: "800",
@@ -534,7 +533,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   modalBodyScroll: {
-    flex: 1,
+    flexShrink: 1,
   },
   modalBodyContent: {
     padding: 14,

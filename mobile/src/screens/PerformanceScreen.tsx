@@ -356,21 +356,20 @@ function PlanDetailModalContent({
 
   return (
     <View style={[styles.modalSafeArea, { paddingTop: insets.top }]}>
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : "height"}>
-        <View style={styles.modalScreen}>
-          <View style={styles.topRow}>
-            <Pressable style={styles.backButton} onPress={onClose}>
-              <Text style={styles.backButtonText}>Close</Text>
-            </Pressable>
-            <Text style={styles.topTitle}>Goal Detail</Text>
-            <View style={styles.headerSpacer} />
-          </View>
-          <ScrollView
-            style={styles.scroll}
-            contentContainerStyle={[styles.content, { paddingBottom: bottomInsetPadding }]}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-          >
+      <KeyboardAvoidingView style={styles.modalScreen} behavior="padding">
+        <View style={styles.topRow}>
+          <Pressable style={styles.backButton} onPress={onClose}>
+            <Text style={styles.backButtonText}>Close</Text>
+          </Pressable>
+          <Text style={styles.topTitle}>Goal Detail</Text>
+          <View style={styles.headerSpacer} />
+        </View>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[styles.content, { paddingBottom: bottomInsetPadding }]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        >
             <PlanSummaryCard plan={detail.plan} progress={detail.progress} attribution={getMobilePlanAttribution(detail.plan, userId)} />
 
             {detail.insights.length > 0 ? (
@@ -423,9 +422,8 @@ function PlanDetailModalContent({
               )}
             </View>
 
-            <FinalResultBlock plan={detail.plan} />
-          </ScrollView>
-        </View>
+          <FinalResultBlock plan={detail.plan} />
+        </ScrollView>
       </KeyboardAvoidingView>
     </View>
   );

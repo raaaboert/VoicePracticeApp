@@ -9,7 +9,7 @@ const scorecardViewSource = readFileSync(
   "utf8"
 );
 
-test("Feedback / Support modal lets Android resize while preserving iOS keyboard avoidance", () => {
+test("Feedback / Support modal uses one padding-based keyboard shell on Android and iOS", () => {
   const modalIndex = scorecardViewSource.indexOf("<Modal transparent visible={supportOpen}");
   const keyboardIndex = scorecardViewSource.indexOf("<KeyboardAvoidingView", modalIndex);
   const safeAreaIndex = scorecardViewSource.indexOf("<SafeAreaView style={styles.modalRoot}", keyboardIndex);
@@ -22,13 +22,14 @@ test("Feedback / Support modal lets Android resize while preserving iOS keyboard
   assert.ok(modalIndex < keyboardIndex);
   assert.ok(keyboardIndex < safeAreaIndex);
   assert.ok(safeAreaIndex < cardIndex);
-  assert.equal(scorecardViewSource.includes('behavior={Platform.OS === "ios" ? "padding" : undefined}'), true);
+  assert.equal(scorecardViewSource.includes('behavior="padding"'), true);
   assert.equal(scorecardViewSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'), false);
-  assert.equal(scorecardViewSource.includes('{ maxHeight: supportModalMaxHeight }'), true);
+  assert.equal(scorecardViewSource.includes("supportModalMaxHeight"), false);
+  assert.equal(scorecardViewSource.includes("useWindowDimensions"), false);
   assert.equal(scorecardViewSource.includes('pointerEvents="box-none"'), true);
 });
 
-test("Feedback / Support modal has a stable bounded flex layout before input focus", () => {
+test("Feedback / Support modal is bounded by available space and shrinks into scrolling", () => {
   const modalRootStyle = scorecardViewSource.slice(
     scorecardViewSource.indexOf("modalRoot: {"),
     scorecardViewSource.indexOf("modalBackdrop: {"),
@@ -43,10 +44,11 @@ test("Feedback / Support modal has a stable bounded flex layout before input foc
   );
 
   assert.equal(modalRootStyle.includes('justifyContent: "center"'), true);
-  assert.equal(modalCardStyle.includes("flex: 1"), true);
-  assert.equal(modalBodyScrollStyle.includes("flex: 1"), true);
-  assert.equal(modalBodyScrollStyle.includes("flexShrink"), false);
-  assert.equal(scorecardViewSource.includes("{ maxHeight: supportModalMaxHeight }"), true);
+  assert.equal(modalCardStyle.includes('maxHeight: "100%"'), true);
+  assert.equal(modalCardStyle.includes("flexShrink: 1"), true);
+  assert.equal(modalCardStyle.includes("flex: 1"), false);
+  assert.equal(modalBodyScrollStyle.includes("flexShrink: 1"), true);
+  assert.equal(modalBodyScrollStyle.includes("flex: 1"), false);
 });
 
 test("Feedback / Support header remains fixed outside the scrolling body", () => {
@@ -54,18 +56,27 @@ test("Feedback / Support header remains fixed outside the scrolling body", () =>
   const titleIndex = scorecardViewSource.indexOf("Feedback / Support", headerIndex);
   const closeIndex = scorecardViewSource.indexOf("styles.modalCloseButton", titleIndex);
   const scrollIndex = scorecardViewSource.indexOf("<ScrollView", closeIndex);
+  const scrollEndIndex = scorecardViewSource.indexOf("</ScrollView>", scrollIndex);
   const bodyIndex = scorecardViewSource.indexOf("Describe what went wrong", scrollIndex);
+  const consentIndex = scorecardViewSource.indexOf("styles.consentRow", scrollIndex);
+  const footerIndex = scorecardViewSource.indexOf("styles.modalFooterRow", scrollIndex);
   const submitIndex = scorecardViewSource.indexOf("<Text style={styles.buttonText}>{supportBusy ? \"Submitting...\" : \"Submit\"}</Text>", scrollIndex);
 
   assert.notEqual(headerIndex, -1);
   assert.notEqual(titleIndex, -1);
   assert.notEqual(closeIndex, -1);
   assert.notEqual(scrollIndex, -1);
+  assert.notEqual(scrollEndIndex, -1);
   assert.notEqual(bodyIndex, -1);
+  assert.notEqual(consentIndex, -1);
+  assert.notEqual(footerIndex, -1);
   assert.notEqual(submitIndex, -1);
   assert.ok(headerIndex < scrollIndex);
   assert.ok(scrollIndex < bodyIndex);
-  assert.ok(scrollIndex < submitIndex);
+  assert.ok(bodyIndex < consentIndex);
+  assert.ok(consentIndex < footerIndex);
+  assert.ok(footerIndex < submitIndex);
+  assert.ok(submitIndex < scrollEndIndex);
 });
 
 test("Feedback / Support scroll view keeps checkbox and submit tappable with keyboard open", () => {

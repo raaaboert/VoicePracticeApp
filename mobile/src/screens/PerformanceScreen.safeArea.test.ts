@@ -31,13 +31,18 @@ test("Performance create goal header is fixed outside the form ScrollView", () =
   assert.equal(performanceScreenSource.includes("styles.createModalCancelButton"), true);
 });
 
-test("Performance goal detail modal has a modal-local safe area and fixed header", () => {
+test("Performance goal detail uses one padding-based keyboard shell and one scroll owner", () => {
   const detailStart = performanceScreenSource.indexOf("function PlanDetailModal(");
   const detailEnd = performanceScreenSource.indexOf("function PerformanceCreateForm(", detailStart);
   const detailSource = performanceScreenSource.slice(detailStart, detailEnd);
   const contentStart = detailSource.indexOf("function PlanDetailModalContent(");
+  const keyboardIndex = detailSource.indexOf('<KeyboardAvoidingView style={styles.modalScreen} behavior="padding">', contentStart);
   const headerIndex = detailSource.indexOf("<View style={styles.topRow}>", contentStart);
   const scrollIndex = detailSource.indexOf("<ScrollView", contentStart);
+  const scrollEndIndex = detailSource.indexOf("</ScrollView>", scrollIndex);
+  const inputIndex = detailSource.indexOf("styles.multilineInput", scrollIndex);
+  const postButtonIndex = detailSource.indexOf('"Post Update"', inputIndex);
+  const emptyUpdatesIndex = detailSource.indexOf("No updates yet.", postButtonIndex);
 
   assert.notEqual(detailStart, -1);
   assert.notEqual(detailEnd, -1);
@@ -47,14 +52,18 @@ test("Performance goal detail modal has a modal-local safe area and fixed header
   assert.equal(detailSource.includes("const insets = useSafeAreaInsets();"), true);
   assert.equal(detailSource.includes("paddingTop: insets.top"), true);
   assert.equal(detailSource.includes("paddingBottom: bottomInsetPadding"), true);
-  assert.equal(
-    detailSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'),
-    true
-  );
+  assert.notEqual(keyboardIndex, -1);
+  assert.equal(detailSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'), false);
+  assert.equal(detailSource.includes('<View style={styles.modalScreen}>'), false);
   assert.equal(
     detailSource.includes('keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}'),
     true
   );
   assert.equal(detailSource.includes('keyboardShouldPersistTaps="handled"'), true);
+  assert.ok(keyboardIndex < headerIndex);
   assert.ok(headerIndex < scrollIndex);
+  assert.ok(scrollIndex < inputIndex);
+  assert.ok(inputIndex < postButtonIndex);
+  assert.ok(postButtonIndex < emptyUpdatesIndex);
+  assert.ok(emptyUpdatesIndex < scrollEndIndex);
 });
