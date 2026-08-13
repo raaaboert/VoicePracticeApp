@@ -1,5 +1,12 @@
 import { redirect } from "next/navigation";
 
-export default function UsersPage() {
-  redirect("/app/dashboard?tab=users");
+import { buildLegacyDashboardRedirect } from "@/src/components/dashboardDivisionFilterState";
+
+export default async function UsersPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ divisionId?: string | string[] }>;
+}) {
+  const params = await searchParams;
+  redirect(buildLegacyDashboardRedirect("users", params.divisionId));
 }

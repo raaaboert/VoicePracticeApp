@@ -5,6 +5,7 @@ import type { DashboardDivisionScope } from "@voicepractice/shared";
 
 import {
   buildDashboardScopedAttemptDetailHref,
+  buildLegacyDashboardRedirect,
   buildDashboardScopedCustomerDetailHref,
   buildDashboardScopedTrainingPackAssignmentHref,
   buildDashboardScopedTrainingPackHref,
@@ -14,6 +15,19 @@ import {
   canRenderSingleScopeDivisionFilter,
   formatDashboardDivisionOptionLabel,
 } from "./dashboardDivisionFilterState";
+
+test("legacy users and training redirects preserve only a valid divisionId", () => {
+  assert.equal(
+    buildLegacyDashboardRedirect("users", "division_a"),
+    "/app/dashboard?tab=users&divisionId=division_a",
+  );
+  assert.equal(
+    buildLegacyDashboardRedirect("training", "division_a"),
+    "/app/dashboard?tab=training&divisionId=division_a",
+  );
+  assert.equal(buildLegacyDashboardRedirect("users", "  "), "/app/dashboard?tab=users");
+  assert.equal(buildLegacyDashboardRedirect("training", ["division_a"]), "/app/dashboard?tab=training");
+});
 
 const sampleScope: DashboardDivisionScope = {
   appliedDivisionId: null,

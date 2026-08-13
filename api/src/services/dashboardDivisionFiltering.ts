@@ -29,7 +29,12 @@ export function buildDashboardDivisionScope(params: {
   db: Pick<ApiDatabase, "orgDivisions" | "usageSessions" | "scoreRecords">;
   orgId: string;
   appliedDivisionId: string | null;
+  divisionsEnabled: boolean;
 }): DashboardDivisionScope | undefined {
+  if (!params.divisionsEnabled) {
+    return undefined;
+  }
+
   const historicalDivisionIds = new Set<string>();
   for (const session of params.db.usageSessions ?? []) {
     if (session.orgId === params.orgId && typeof session.divisionId === "string" && session.divisionId.trim()) {
@@ -62,7 +67,7 @@ export function buildDashboardDivisionScope(params: {
 }
 
 export function resolveDashboardDivisionFilter(params: {
-  db: Pick<ApiDatabase, "orgDivisions" | "usageSessions" | "scoreRecords">;
+  db: Pick<ApiDatabase, "orgs" | "orgDivisions" | "usageSessions" | "scoreRecords">;
   viewer: DashboardViewer;
   requestedDivisionId: unknown;
   explicitOrgId?: string | null;
@@ -93,6 +98,16 @@ export function resolveDashboardDivisionFilter(params: {
     };
   }
 
+  const divisionsEnabled = params.db.orgs.find((org) => org.id === scopedOrgId)?.divisionsEnabled === true;
+  if (!divisionsEnabled) {
+    return {
+      orgId: scopedOrgId,
+      appliedDivisionId: null,
+      divisionScope: undefined,
+      error: null,
+    };
+  }
+
   if (normalizedRequestedDivisionId) {
     const division = findOrgDivisionRecord(params.db, scopedOrgId, normalizedRequestedDivisionId);
     if (!division) {
@@ -103,6 +118,7 @@ export function resolveDashboardDivisionFilter(params: {
           db: params.db,
           orgId: scopedOrgId,
           appliedDivisionId: null,
+          divisionsEnabled,
         }),
         error: "divisionId must reference a division in this company.",
       };
@@ -117,6 +133,7 @@ export function resolveDashboardDivisionFilter(params: {
       db: params.db,
       orgId: scopedOrgId,
       appliedDivisionId,
+      divisionsEnabled,
     }),
     error: null,
   };

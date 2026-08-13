@@ -22,6 +22,17 @@ export function buildDashboardDivisionSearch(
   return query ? `?${query}` : "";
 }
 
+export function buildLegacyDashboardRedirect(
+  tab: "users" | "training",
+  divisionId: string | string[] | undefined,
+): string {
+  const params = new URLSearchParams({ tab });
+  if (typeof divisionId === "string" && divisionId.trim()) {
+    params.set("divisionId", divisionId.trim());
+  }
+  return `/app/dashboard?${params.toString()}`;
+}
+
 function buildDashboardScopedHref(pathname: string, divisionId: string | null, orgId?: string | null): string {
   const params = new URLSearchParams();
   if (divisionId && divisionId.trim()) {

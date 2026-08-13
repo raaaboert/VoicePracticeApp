@@ -68,8 +68,12 @@ function createScore(overrides?: Partial<SimulationScoreRecord>): SimulationScor
   };
 }
 
-function createDb(): Pick<ApiDatabase, "orgDivisions" | "usageSessions" | "scoreRecords"> {
+function createDb(): Pick<ApiDatabase, "orgs" | "orgDivisions" | "usageSessions" | "scoreRecords"> {
   return {
+    orgs: [
+      { id: "org_1", divisionsEnabled: true },
+      { id: "org_2", divisionsEnabled: true },
+    ] as ApiDatabase["orgs"],
     orgDivisions: [
       {
         id: "division_a",
@@ -155,6 +159,7 @@ test("buildDashboardDivisionScope includes deleted divisions when historical act
     db: createDb(),
     orgId: "org_1",
     appliedDivisionId: "division_deleted",
+    divisionsEnabled: true,
   });
 
   assert.ok(scope);
@@ -162,6 +167,27 @@ test("buildDashboardDivisionScope includes deleted divisions when historical act
     scope?.divisions.map((division: { id: string }) => division.id),
     ["division_a", "division_deleted"]
   );
+});
+
+test("dashboard division scope is unavailable and stale filters are ignored when divisions are disabled", () => {
+  const db = createDb();
+  db.orgs[0]!.divisionsEnabled = false;
+
+  assert.equal(buildDashboardDivisionScope({
+    db,
+    orgId: "org_1",
+    appliedDivisionId: null,
+    divisionsEnabled: false,
+  }), undefined);
+
+  const resolved = resolveDashboardDivisionFilter({
+    db,
+    viewer: createViewer(),
+    requestedDivisionId: "division_a",
+  });
+  assert.equal(resolved.error, null);
+  assert.equal(resolved.appliedDivisionId, null);
+  assert.equal(resolved.divisionScope, undefined);
 });
 
 test("resolveDashboardDivisionFilter rejects divisions from another org on single-org views", () => {

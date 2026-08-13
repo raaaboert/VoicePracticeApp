@@ -12793,6 +12793,10 @@ app.get("/dashboard/attempts/:attemptId", requireDashboardAuth, async (request: 
       response.status(404).json({ error: "Attempt detail not found." });
       return;
     }
+    if (!canDashboardViewerAccessOrg(request.dashboard!.viewer, attemptScore.orgId)) {
+      response.status(404).json({ error: "Attempt detail not found." });
+      return;
+    }
     const divisionFilter = resolveDashboardDivisionFilter({
       db,
       viewer: request.dashboard!.viewer,

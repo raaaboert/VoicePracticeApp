@@ -535,13 +535,14 @@ function buildDatabase(): ApiDatabase {
       }),
     ],
     orgs: [
-      buildOrg(),
+      buildOrg({ divisionsEnabled: true }),
       buildOrg({
         id: "org_2",
         name: "Other Trial",
         contactEmail: "admin@other.example",
         emailDomain: "other.example",
         joinCode: "OTHER2026",
+        divisionsEnabled: true,
       }),
       buildOrg({
         id: "org_disabled",
@@ -552,7 +553,35 @@ function buildDatabase(): ApiDatabase {
         joinCode: "DISABLED2026",
       }),
     ],
-    orgDivisions: [],
+    orgDivisions: [
+      {
+        id: "division_a",
+        orgId: "org_1",
+        name: "Division A",
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+        deletedAt: null,
+      },
+      {
+        id: "division_b",
+        orgId: "org_1",
+        name: "Division B",
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+        deletedAt: null,
+      },
+      {
+        id: "division_other_org",
+        orgId: "org_2",
+        name: "Other Division",
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+        deletedAt: null,
+      },
+    ],
     orgTrainings: [
       buildOrgTrainingRecord("training_scope", "org_1"),
       buildOrgTrainingRecord("training_other_org", "org_2", { name: "Other Org Training" }),
@@ -580,8 +609,15 @@ function buildDatabase(): ApiDatabase {
         startedAt: "2026-07-20T12:00:00.000Z",
       }),
       buildUsageSessionRecord("usage_direct", "learner", {
+        divisionId: "division_a",
         endedAt: "2026-07-21T12:05:00.000Z",
         startedAt: "2026-07-21T12:00:00.000Z",
+      }),
+      buildUsageSessionRecord("usage_direct_division_b_old", "learner", {
+        divisionId: "division_b",
+        trainingPackId: null,
+        endedAt: "2025-01-21T12:05:00.000Z",
+        startedAt: "2025-01-21T12:00:00.000Z",
       }),
       buildUsageSessionRecord("usage_unassigned", "unassigned_learner", {
         endedAt: "2026-07-22T12:05:00.000Z",
@@ -625,9 +661,17 @@ function buildDatabase(): ApiDatabase {
         overallScore: 80,
       }),
       buildScoreRecord("score_direct", "learner", {
+        divisionId: "division_a",
         endedAt: "2026-07-21T12:05:00.000Z",
         startedAt: "2026-07-21T12:00:00.000Z",
         overallScore: 90,
+      }),
+      buildScoreRecord("score_direct_division_b_old", "learner", {
+        divisionId: "division_b",
+        trainingPackId: null,
+        endedAt: "2025-01-21T12:05:00.000Z",
+        startedAt: "2025-01-21T12:00:00.000Z",
+        overallScore: 55,
       }),
       buildScoreRecord("score_unassigned", "unassigned_learner", {
         endedAt: "2026-07-22T12:05:00.000Z",
@@ -2253,6 +2297,47 @@ test("dashboard training drilldowns enforce manager scope", async () => {
     userAdminToken
   );
   assert.equal(hiddenAfterRestore.status, 404);
+});
+
+test("dashboard division route filtering stays tenant-bound and fails closed on mismatched attempts", async () => {
+  const userDetail = await dashboardRequest(
+    "/dashboard/users/learner?divisionId=division_a",
+    orgAdminToken,
+  );
+  assert.equal(userDetail.status, 200, JSON.stringify(userDetail.body));
+  assert.deepEqual(
+    (userDetail.body.attempts as Array<{ activityId: string }>).map((attempt) => attempt.activityId),
+    ["score_direct"],
+  );
+  assert.deepEqual(
+    (userDetail.body.assignments as Array<{ assignmentId: string }>).map((assignment) => assignment.assignmentId),
+    ["assign_direct"],
+  );
+  assert.equal(
+    (userDetail.body.divisionScope as { appliedDivisionId?: string }).appliedDivisionId,
+    "division_a",
+  );
+
+  const mismatchedAttempt = await dashboardRequest(
+    "/dashboard/attempts/score_direct?divisionId=division_b",
+    orgAdminToken,
+  );
+  assert.equal(mismatchedAttempt.status, 404);
+  assert.equal(mismatchedAttempt.body.error, "Attempt detail not found.");
+
+  const crossOrgDivision = await dashboardRequest(
+    "/dashboard/users?divisionId=division_other_org",
+    orgAdminToken,
+  );
+  assert.equal(crossOrgDivision.status, 400);
+  assert.equal(crossOrgDivision.body.error, "divisionId must reference a division in this company.");
+
+  const inaccessibleAttemptWithMismatchedDivision = await dashboardRequest(
+    "/dashboard/attempts/score_other_org?divisionId=division_a",
+    orgAdminToken,
+  );
+  assert.equal(inaccessibleAttemptWithMismatchedDivision.status, 404);
+  assert.equal(inaccessibleAttemptWithMismatchedDivision.body.error, "Attempt detail not found.");
 });
 
 test("mobile user-admin routes are scoped to self and direct reports", async () => {

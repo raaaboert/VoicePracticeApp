@@ -1,5 +1,12 @@
 import { redirect } from "next/navigation";
 
-export default function TrainingPage() {
-  redirect("/app/dashboard?tab=training");
+import { buildLegacyDashboardRedirect } from "@/src/components/dashboardDivisionFilterState";
+
+export default async function TrainingPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ divisionId?: string | string[] }>;
+}) {
+  const params = await searchParams;
+  redirect(buildLegacyDashboardRedirect("training", params.divisionId));
 }
