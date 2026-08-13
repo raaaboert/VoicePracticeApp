@@ -1,4 +1,5 @@
 export const PDF_DOWNLOAD_TIMEOUT_MS = 45_000;
+export const PDF_NATIVE_TEARDOWN_CLEANUP_DELAY_MS = 500;
 
 export type PdfFileDiagnosticCategory =
   | "pdf_download_failed"
@@ -147,6 +148,52 @@ export async function deleteManagedTemporaryPdf(
   return true;
 }
 
+type DeferredPdfCleanupScheduler = (
+  cleanup: () => Promise<void>,
+  delayMs: number
+) => void;
+
+const pendingDeferredPdfCleanupUris = new Set<string>();
+
+const defaultDeferredPdfCleanupScheduler: DeferredPdfCleanupScheduler = (
+  cleanup,
+  delayMs
+) => {
+  setTimeout(() => {
+    void cleanup();
+  }, delayMs);
+};
+
+export function deferManagedTemporaryPdfDeletion(
+  fileSystem: PdfTemporaryFileSystem,
+  uri: string | null,
+  schedule: DeferredPdfCleanupScheduler = defaultDeferredPdfCleanupScheduler,
+  delayMs = PDF_NATIVE_TEARDOWN_CLEANUP_DELAY_MS
+): boolean {
+  if (
+    !uri ||
+    !isManagedTemporaryPdfUri(uri, fileSystem.cacheDirectory) ||
+    pendingDeferredPdfCleanupUris.has(uri)
+  ) {
+    return false;
+  }
+
+  pendingDeferredPdfCleanupUris.add(uri);
+  try {
+    schedule(async () => {
+      try {
+        await deleteManagedTemporaryPdf(fileSystem, uri);
+      } finally {
+        pendingDeferredPdfCleanupUris.delete(uri);
+      }
+    }, Math.max(0, delayMs));
+  } catch (caught) {
+    pendingDeferredPdfCleanupUris.delete(uri);
+    throw caught;
+  }
+  return true;
+}
+
 export function startTemporaryPdfDownload(params: {
   fileSystem: PdfTemporaryFileSystem;
   url: string;
@@ -268,8 +315,15 @@ export async function refreshTemporaryPdf(params: {
   activeDownload: PdfTemporaryDownloadSession | null;
   localUri: string | null;
   requestFreshAccess: () => Promise<void>;
+  deleteLocalPdf?: (
+    fileSystem: PdfTemporaryFileSystem,
+    uri: string | null
+  ) => boolean | Promise<boolean>;
 }): Promise<void> {
   await params.activeDownload?.cancel();
-  await deleteManagedTemporaryPdf(params.fileSystem, params.localUri);
+  await (params.deleteLocalPdf ?? deleteManagedTemporaryPdf)(
+    params.fileSystem,
+    params.localUri
+  );
   await params.requestFreshAccess();
 }

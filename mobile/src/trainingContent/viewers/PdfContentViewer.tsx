@@ -22,7 +22,7 @@ import {
   resolvePdfNativeRenderSignal,
 } from "../nativeViewerLifecycle";
 import {
-  deleteManagedTemporaryPdf,
+  deferManagedTemporaryPdfDeletion,
   type PdfTemporaryDownloadSession,
   PdfTemporaryFileError,
   type PdfTemporaryFileSystem,
@@ -131,6 +131,9 @@ export function PdfContentViewer({
           await session.cancel();
           return;
         }
+        if (activeDownload.current === session) {
+          activeDownload.current = null;
+        }
         localUri.current = downloadedUri;
         resetNativeViewerLoadGuard(renderGuard.current);
         setViewerState({ stage: "rendering", localUri: downloadedUri });
@@ -152,7 +155,7 @@ export function PdfContentViewer({
             });
             const uriToDelete = localUri.current;
             localUri.current = null;
-            void deleteManagedTemporaryPdf(PDF_FILE_SYSTEM, uriToDelete);
+            deferManagedTemporaryPdfDeletion(PDF_FILE_SYSTEM, uriToDelete);
           }
         }, NATIVE_VIEWER_LOAD_TIMEOUT_MS);
       } catch (caught) {
@@ -186,7 +189,7 @@ export function PdfContentViewer({
       activeDownload.current = null;
       localUri.current = null;
       void sessionToCancel?.cancel();
-      void deleteManagedTemporaryPdf(PDF_FILE_SYSTEM, uriToDelete);
+      deferManagedTemporaryPdfDeletion(PDF_FILE_SYSTEM, uriToDelete);
     };
   }, [expectedByteSize, headers, url]);
 
@@ -205,6 +208,7 @@ export function PdfContentViewer({
       activeDownload: sessionToCancel,
       localUri: uriToDelete,
       requestFreshAccess: onAccessError,
+      deleteLocalPdf: deferManagedTemporaryPdfDeletion,
     });
   };
 
@@ -297,7 +301,7 @@ export function PdfContentViewer({
       });
       const uriToDelete = localUri.current;
       localUri.current = null;
-      void deleteManagedTemporaryPdf(PDF_FILE_SYSTEM, uriToDelete);
+      deferManagedTemporaryPdfDeletion(PDF_FILE_SYSTEM, uriToDelete);
     },
     [clearRenderTimeout]
   );

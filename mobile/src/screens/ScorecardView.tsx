@@ -233,7 +233,7 @@ export function ScorecardView({
       <Modal transparent visible={supportOpen} animationType="fade" onRequestClose={() => setSupportOpen(false)}>
         <KeyboardAvoidingView
           style={styles.modalKeyboardRoot}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <Pressable style={styles.modalBackdrop} onPress={() => setSupportOpen(false)} />
           <SafeAreaView style={styles.modalRoot} pointerEvents="box-none">

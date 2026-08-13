@@ -49,6 +49,13 @@ test("library navigation keeps search, category, detail, and empty states inside
   assert.doesNotMatch(`${library}${category}${detail}`, /Mark Complete|assignment details|publication state/i);
 });
 
+test("Training Content viewer Back remains an in-app route transition", () => {
+  const screen = source("./TrainingContentScreen.tsx");
+
+  assert.match(screen, /onBack=\{\(\) => setRoute\(route\.returnRoute\)\}/);
+  assert.doesNotMatch(screen, /BackHandler|exitApp/);
+});
+
 test("signed asset URLs stay in viewer memory and every uploaded type has a dedicated viewer", () => {
   const hook = source("./useTrainingContentAssetAccess.ts");
   const viewer = source("./TrainingContentViewer.tsx");
@@ -75,8 +82,11 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   assert.match(pdf, /expectedByteSize/);
   assert.match(pdf, /FileSystem\.cacheDirectory/);
   assert.match(pdf, /FileSystem\.readAsStringAsync/);
-  assert.match(pdf, /deleteManagedTemporaryPdf/);
+  assert.match(pdf, /deferManagedTemporaryPdfDeletion/);
   assert.match(pdf, /refreshTemporaryPdf/);
+  assert.match(pdf, /activeDownload\.current === session/);
+  assert.match(pdf, /activeDownload\.current = null/);
+  assert.match(pdf, /deleteLocalPdf: deferManagedTemporaryPdfDeletion/);
   assert.doesNotMatch(pdf, /source=\{\{\s*uri:\s*url/);
   assert.doesNotMatch(pdfTemporaryFile, /AsyncStorage|SecureStore|console\./);
   for (const stage of [

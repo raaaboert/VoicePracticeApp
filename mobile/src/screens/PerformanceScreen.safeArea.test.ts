@@ -47,5 +47,14 @@ test("Performance goal detail modal has a modal-local safe area and fixed header
   assert.equal(detailSource.includes("const insets = useSafeAreaInsets();"), true);
   assert.equal(detailSource.includes("paddingTop: insets.top"), true);
   assert.equal(detailSource.includes("paddingBottom: bottomInsetPadding"), true);
+  assert.equal(
+    detailSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'),
+    true
+  );
+  assert.equal(
+    detailSource.includes('keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}'),
+    true
+  );
+  assert.equal(detailSource.includes('keyboardShouldPersistTaps="handled"'), true);
   assert.ok(headerIndex < scrollIndex);
 });

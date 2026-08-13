@@ -9,7 +9,7 @@ const scorecardViewSource = readFileSync(
   "utf8"
 );
 
-test("Feedback / Support modal uses a keyboard-aware safe-area shell", () => {
+test("Feedback / Support modal lets Android resize while preserving iOS keyboard avoidance", () => {
   const modalIndex = scorecardViewSource.indexOf("<Modal transparent visible={supportOpen}");
   const keyboardIndex = scorecardViewSource.indexOf("<KeyboardAvoidingView", modalIndex);
   const safeAreaIndex = scorecardViewSource.indexOf("<SafeAreaView style={styles.modalRoot}", keyboardIndex);
@@ -22,7 +22,8 @@ test("Feedback / Support modal uses a keyboard-aware safe-area shell", () => {
   assert.ok(modalIndex < keyboardIndex);
   assert.ok(keyboardIndex < safeAreaIndex);
   assert.ok(safeAreaIndex < cardIndex);
-  assert.equal(scorecardViewSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'), true);
+  assert.equal(scorecardViewSource.includes('behavior={Platform.OS === "ios" ? "padding" : undefined}'), true);
+  assert.equal(scorecardViewSource.includes('behavior={Platform.OS === "ios" ? "padding" : "height"}'), false);
   assert.equal(scorecardViewSource.includes('{ maxHeight: supportModalMaxHeight }'), true);
   assert.equal(scorecardViewSource.includes('pointerEvents="box-none"'), true);
 });

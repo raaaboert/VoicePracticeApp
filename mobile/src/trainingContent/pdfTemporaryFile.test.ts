@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   createTemporaryPdfUri,
+  deferManagedTemporaryPdfDeletion,
   deleteManagedTemporaryPdf,
   hasPdfFileSignature,
+  PDF_NATIVE_TEARDOWN_CLEANUP_DELAY_MS,
   type PdfTemporaryFileSystem,
   PdfTemporaryFileError,
   refreshTemporaryPdf,
@@ -345,4 +347,43 @@ test("cleanup refuses to delete unrelated cache or permanent files", async () =>
     false
   );
   assert.deepEqual(events, []);
+});
+
+test("native teardown cleanup is deferred, bounded, and deduplicated per managed file", async () => {
+  const events: string[] = [];
+  const fileSystem = createFileSystem({ events });
+  const uri = "file:///app-cache/peritio-pdf-deferred-cleanup.pdf";
+  const scheduled: Array<{
+    cleanup: () => Promise<void>;
+    delayMs: number;
+  }> = [];
+  const schedule = (cleanup: () => Promise<void>, delayMs: number) => {
+    scheduled.push({ cleanup, delayMs });
+  };
+
+  assert.equal(
+    deferManagedTemporaryPdfDeletion(fileSystem, uri, schedule),
+    true
+  );
+  assert.equal(
+    deferManagedTemporaryPdfDeletion(fileSystem, uri, schedule),
+    false
+  );
+  assert.deepEqual(events, []);
+  assert.equal(scheduled.length, 1);
+  assert.equal(
+    scheduled[0]?.delayMs,
+    PDF_NATIVE_TEARDOWN_CLEANUP_DELAY_MS
+  );
+
+  await scheduled[0]?.cleanup();
+  assert.deepEqual(events, [`delete:${uri}`]);
+
+  assert.equal(
+    deferManagedTemporaryPdfDeletion(fileSystem, uri, schedule),
+    true
+  );
+  assert.equal(scheduled.length, 2);
+  await scheduled[1]?.cleanup();
+  assert.deepEqual(events, [`delete:${uri}`, `delete:${uri}`]);
 });

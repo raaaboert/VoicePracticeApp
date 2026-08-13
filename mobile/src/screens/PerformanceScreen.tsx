@@ -356,7 +356,7 @@ function PlanDetailModalContent({
 
   return (
     <View style={[styles.modalSafeArea, { paddingTop: insets.top }]}>
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : "height"}>
         <View style={styles.modalScreen}>
           <View style={styles.topRow}>
             <Pressable style={styles.backButton} onPress={onClose}>
@@ -369,6 +369,7 @@ function PlanDetailModalContent({
             style={styles.scroll}
             contentContainerStyle={[styles.content, { paddingBottom: bottomInsetPadding }]}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
           >
             <PlanSummaryCard plan={detail.plan} progress={detail.progress} attribution={getMobilePlanAttribution(detail.plan, userId)} />
 
