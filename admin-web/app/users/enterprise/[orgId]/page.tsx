@@ -37,6 +37,10 @@ interface OrgDashboardUserRow {
   effectiveDailySecondsCap: number;
   allowDailyOverageThisCycle: boolean;
   dailyOverageExpiresAt: string | null;
+  dailyOverageMode: "unlimited" | "finite" | null;
+  dailyOverageExtraSecondsGranted: number | null;
+  dailyOverageExtraSecondsConsumed: number | null;
+  dailyOverageExtraSecondsRemaining: number | null;
   rawSecondsThisPeriod: number;
   billedSecondsThisPeriod: number;
 }
@@ -192,6 +196,9 @@ export default function EnterpriseOrgPage() {
   const [defaultPerUserDailyMinutesInput, setDefaultPerUserDailyMinutesInput] = useState("0");
   const [deferPerUserDailyCapUntilNextCycle, setDeferPerUserDailyCapUntilNextCycle] = useState(false);
   const [perUserDailyMinutesInputByUserId, setPerUserDailyMinutesInputByUserId] = useState<Record<string, string>>({});
+  const [overageDurationDaysByUserId, setOverageDurationDaysByUserId] = useState<Record<string, string>>({});
+  const [overageModeByUserId, setOverageModeByUserId] = useState<Record<string, "unlimited" | "finite">>({});
+  const [overageExtraMinutesByUserId, setOverageExtraMinutesByUserId] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<EnterpriseOrgTabId>("companyDetails");
   const [userSearch, setUserSearch] = useState("");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -241,6 +248,22 @@ export default function EnterpriseOrgPage() {
             String(Math.max(0, Math.floor((row.dailySecondsCapOverride ?? payload.org.perUserDailySecondsCap ?? 0) / 60)))
           ])
         )
+      );
+      setOverageDurationDaysByUserId(
+        Object.fromEntries((payload.users ?? []).map((row) => {
+          const expiryMs = new Date(row.dailyOverageExpiresAt ?? "").getTime();
+          const days = Number.isFinite(expiryMs) ? Math.max(1, Math.ceil((expiryMs - Date.now()) / 86_400_000)) : 1;
+          return [row.userId, String(days)];
+        }))
+      );
+      setOverageModeByUserId(
+        Object.fromEntries((payload.users ?? []).map((row) => [row.userId, row.dailyOverageMode === "finite" ? "finite" : "unlimited"]))
+      );
+      setOverageExtraMinutesByUserId(
+        Object.fromEntries((payload.users ?? []).map((row) => [
+          row.userId,
+          row.dailyOverageExtraSecondsGranted === null ? "" : String(Math.floor(row.dailyOverageExtraSecondsGranted / 60)),
+        ]))
       );
       setJoinRequestsGeneratedAt(joinRequestsPayload.generatedAt);
       const scopedPendingJoinRequests = (joinRequestsPayload.rows ?? []).filter(
@@ -611,6 +634,17 @@ export default function EnterpriseOrgPage() {
   };
 
   const setUserDailyOverageAllowance = async (userId: string, allowDailyOverageThisCycle: boolean) => {
+    const durationDays = Number(overageDurationDaysByUserId[userId] ?? "");
+    const mode = overageModeByUserId[userId] ?? "unlimited";
+    const extraMinutes = Number(overageExtraMinutesByUserId[userId] ?? "");
+    if (allowDailyOverageThisCycle && (!Number.isSafeInteger(durationDays) || durationDays <= 0)) {
+      setError("Temporary overage duration must be a positive whole number of days.");
+      return;
+    }
+    if (allowDailyOverageThisCycle && mode === "finite" && (!Number.isSafeInteger(extraMinutes) || extraMinutes <= 0)) {
+      setError("Temporary overage extra minutes must be a positive integer total.");
+      return;
+    }
     setSavingUserOverageId(userId);
     setError(null);
     setSuccessMessage(null);
@@ -619,6 +653,13 @@ export default function EnterpriseOrgPage() {
         method: "PATCH",
         body: JSON.stringify({
           allowDailyOverageThisCycle,
+          ...(allowDailyOverageThisCycle
+            ? {
+                dailyOverageDurationDays: durationDays,
+                dailyOverageMode: mode,
+                ...(mode === "finite" ? { dailyOverageExtraMinutes: extraMinutes } : {}),
+              }
+            : {}),
         }),
       });
       setDashboard((prev) => {
@@ -636,11 +677,14 @@ export default function EnterpriseOrgPage() {
                     (updated.dailySecondsCapOverride ?? prev.org.perUserDailySecondsCap) + updated.manualBonusSeconds,
                   allowDailyOverageThisCycle: updated.allowDailyOverageThisCycle,
                   dailyOverageExpiresAt: updated.dailyOverageExpiresAt,
+                  dailyOverageMode: updated.dailyOverageMode ?? null,
+                  dailyOverageExtraSecondsGranted: updated.dailyOverageExtraSecondsGranted ?? null,
                 }
               : row
           ),
         };
       });
+      await load({ preserveSuccessMessage: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update user overage allowance.");
     } finally {
@@ -1471,24 +1515,53 @@ export default function EnterpriseOrgPage() {
                             </div>
                           </td>
                           <td>
-                            <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                            <label className="small">
+                              Duration (days)
                               <input
-                                type="checkbox"
-                                checked={user.allowDailyOverageThisCycle === true}
-                                disabled={
-                                  savingUserOverageId === user.userId ||
-                                  savingUserId === user.userId ||
-                                  deletingUserId === user.userId
-                                }
-                                onChange={(event) =>
-                                  void setUserDailyOverageAllowance(user.userId, event.target.checked)
-                                }
+                                type="number"
+                                min={1}
+                                value={overageDurationDaysByUserId[user.userId] ?? "1"}
+                                onChange={(event) => setOverageDurationDaysByUserId((prev) => ({ ...prev, [user.userId]: event.target.value }))}
                               />
-                              Allow
                             </label>
+                            <label className="small">
+                              Allowance
+                              <select
+                                value={overageModeByUserId[user.userId] ?? "unlimited"}
+                                onChange={(event) => setOverageModeByUserId((prev) => ({
+                                  ...prev,
+                                  [user.userId]: event.target.value === "finite" ? "finite" : "unlimited",
+                                }))}
+                              >
+                                <option value="unlimited">Unlimited within org</option>
+                                <option value="finite">Extra minutes total</option>
+                              </select>
+                            </label>
+                            {(overageModeByUserId[user.userId] ?? "unlimited") === "finite" ? (
+                              <label className="small">
+                                Total extra minutes
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={overageExtraMinutesByUserId[user.userId] ?? ""}
+                                  onChange={(event) => setOverageExtraMinutesByUserId((prev) => ({ ...prev, [user.userId]: event.target.value }))}
+                                />
+                              </label>
+                            ) : null}
+                            <div className="enterprise-actions-inline" style={{ marginTop: 4 }}>
+                              <button type="button" onClick={() => void setUserDailyOverageAllowance(user.userId, true)}>
+                                {savingUserOverageId === user.userId ? "Saving..." : "Allow"}
+                              </button>
+                              <button type="button" onClick={() => void setUserDailyOverageAllowance(user.userId, false)}>
+                                Off
+                              </button>
+                            </div>
                             {user.allowDailyOverageThisCycle && user.dailyOverageExpiresAt ? (
                               <div className="small" style={{ marginTop: 4 }}>
                                 Expires {formatDate(user.dailyOverageExpiresAt)}
+                                {user.dailyOverageMode === "finite"
+                                  ? ` · ${Math.floor((user.dailyOverageExtraSecondsRemaining ?? 0) / 60)} min remaining total`
+                                  : " · unlimited within organization limits"}
                               </div>
                             ) : null}
                           </td>

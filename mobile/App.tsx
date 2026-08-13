@@ -843,8 +843,14 @@ export default function App() {
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
-  const [adminMaxSimulationMinutesInput, setAdminMaxSimulationMinutesInput] = useState<string>("");
+  const [adminDefaultDailyMinutesInput, setAdminDefaultDailyMinutesInput] = useState<string>("");
   const [adminEmployeeIdInput, setAdminEmployeeIdInput] = useState<string>("");
+  const [adminUserDailyMode, setAdminUserDailyMode] = useState<"default" | "custom">("default");
+  const [adminUserDailyMinutesInput, setAdminUserDailyMinutesInput] = useState<string>("");
+  const [adminUserOverageAllowed, setAdminUserOverageAllowed] = useState(false);
+  const [adminUserOverageDurationDaysInput, setAdminUserOverageDurationDaysInput] = useState("1");
+  const [adminUserOverageMode, setAdminUserOverageMode] = useState<"unlimited" | "finite">("unlimited");
+  const [adminUserOverageExtraMinutesInput, setAdminUserOverageExtraMinutesInput] = useState("");
   const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
@@ -1558,7 +1564,9 @@ export default function App() {
         fetchOrgAdminAnalytics(user.id, mobileAuthToken, { days: adminRangeDays }),
       ]);
       setOrgAdminDashboard(dashboardPayload);
-      setAdminMaxSimulationMinutesInput(String(Math.max(1, dashboardPayload.org.maxSimulationMinutes ?? 1)));
+      setAdminDefaultDailyMinutesInput(
+        String(Math.max(0, Math.floor((dashboardPayload.org.perUserDailySecondsCap ?? 0) / 60))),
+      );
       setOrgAdminAnalytics(analyticsPayload);
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not load org admin dashboard.");
@@ -1707,6 +1715,24 @@ export default function App() {
         const payload = await fetchOrgAdminUserDetail(user.id, targetUserId, mobileAuthToken, { days: 30 });
         setOrgAdminUserDetail(payload);
         setAdminEmployeeIdInput(payload.user.employeeId ?? "");
+        setAdminUserDailyMode(payload.user.dailySecondsCapOverride === null ? "default" : "custom");
+        setAdminUserDailyMinutesInput(
+          payload.user.dailySecondsCapOverride === null
+            ? ""
+            : String(Math.max(0, Math.floor(payload.user.dailySecondsCapOverride / 60))),
+        );
+        setAdminUserOverageAllowed(payload.user.allowDailyOverageThisCycle === true);
+        setAdminUserOverageMode(payload.user.dailyOverageMode === "finite" ? "finite" : "unlimited");
+        setAdminUserOverageExtraMinutesInput(
+          payload.user.dailyOverageExtraSecondsGranted === null
+            ? ""
+            : String(Math.floor(payload.user.dailyOverageExtraSecondsGranted / 60)),
+        );
+        const expiresAtMs = new Date(payload.user.dailyOverageExpiresAt ?? "").getTime();
+        const remainingDays = Number.isFinite(expiresAtMs)
+          ? Math.max(1, Math.ceil((expiresAtMs - Date.now()) / (24 * 60 * 60 * 1000)))
+          : 1;
+        setAdminUserOverageDurationDaysInput(String(remainingDays));
       } catch (caught) {
         const message = getErrorMessage(caught, "Could not load user details.");
         setAdminError(message);
@@ -1756,8 +1782,8 @@ export default function App() {
     [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
   );
 
-  const setOrgUserDailyOverage = useCallback(
-    async (targetUserId: string, allowDailyOverageThisCycle: boolean) => {
+  const saveOrgUserUsageControls = useCallback(
+    async (targetUserId: string) => {
       if (!user || !mobileAuthToken) {
         return;
       }
@@ -1773,26 +1799,67 @@ export default function App() {
         return;
       }
 
+      const dailyMinutes = Number(adminUserDailyMinutesInput.trim());
+      if (adminUserDailyMode === "custom" && (!Number.isSafeInteger(dailyMinutes) || dailyMinutes < 0)) {
+        setAdminError("Custom daily minutes must be a non-negative integer.");
+        return;
+      }
+      const durationDays = Number(adminUserOverageDurationDaysInput.trim());
+      if (adminUserOverageAllowed && (!Number.isSafeInteger(durationDays) || durationDays <= 0)) {
+        setAdminError("Temporary overage duration must be a positive whole number of days.");
+        return;
+      }
+      const extraMinutes = Number(adminUserOverageExtraMinutesInput.trim());
+      if (
+        adminUserOverageAllowed &&
+        adminUserOverageMode === "finite" &&
+        (!Number.isSafeInteger(extraMinutes) || extraMinutes <= 0)
+      ) {
+        setAdminError("Total extra minutes must be a positive integer.");
+        return;
+      }
+
       setAdminLoading(true);
       setAdminError(null);
 
       try {
         await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
-          allowDailyOverageThisCycle,
+          dailySecondsCapOverride: adminUserDailyMode === "default" ? null : dailyMinutes * 60,
+          allowDailyOverageThisCycle: adminUserOverageAllowed,
+          ...(adminUserOverageAllowed
+            ? {
+                dailyOverageDurationDays: durationDays,
+                dailyOverageMode: adminUserOverageMode,
+                ...(adminUserOverageMode === "finite" ? { dailyOverageExtraMinutes: extraMinutes } : {}),
+              }
+            : {}),
         });
+        setAdminNotice("User usage controls saved.");
         await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
       } catch (caught) {
-        const message = getErrorMessage(caught, "Could not update user overage allowance.");
+        const message = getErrorMessage(caught, "Could not update user usage controls.");
         setAdminError(message);
-        void submitAutoErrorReport("admin_user_overage.update", caught, {
+        void submitAutoErrorReport("admin_user_usage_controls.update", caught, {
           screen: "admin_user_detail",
-          details: { targetUserId, allowDailyOverageThisCycle },
+          details: { targetUserId },
         });
       } finally {
         setAdminLoading(false);
       }
     },
-    [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
+    [
+      adminUserDailyMinutesInput,
+      adminUserDailyMode,
+      adminUserOverageAllowed,
+      adminUserOverageDurationDaysInput,
+      adminUserOverageExtraMinutesInput,
+      adminUserOverageMode,
+      mobileAuthToken,
+      refreshOrgAdminUserDetail,
+      refreshOrgAdminUsers,
+      submitAutoErrorReport,
+      user,
+    ],
   );
 
   const saveOrgUserEmployeeId = useCallback(
@@ -1848,37 +1915,33 @@ export default function App() {
       return;
     }
 
-    const parsedMinutes = Number(adminMaxSimulationMinutesInput.trim());
-    if (!Number.isFinite(parsedMinutes)) {
-      setAdminError("Enter a valid max session length in minutes.");
+    const parsedMinutes = Number(adminDefaultDailyMinutesInput.trim());
+    if (!Number.isSafeInteger(parsedMinutes) || parsedMinutes < 0) {
+      setAdminError("Default per-user daily minutes must be a non-negative integer.");
       return;
     }
 
-    const maxSimulationMinutes = Math.floor(parsedMinutes);
-    if (maxSimulationMinutes < 1 || maxSimulationMinutes > 240) {
-      setAdminError("Max session length must be between 1 and 240 minutes.");
-      return;
-    }
+    const perUserDailySecondsCap = parsedMinutes * 60;
 
     setAdminError(null);
     setAdminNotice(null);
     setIsSavingOrgAdminSettings(true);
     try {
-      const payload = await updateOrgAdminOrgSettings(user.id, mobileAuthToken, { maxSimulationMinutes });
-      setAdminMaxSimulationMinutesInput(String(payload.org.maxSimulationMinutes));
-      setAdminNotice(`Saved. Max simulation length is ${payload.org.maxSimulationMinutes} minute(s).`);
+      const payload = await updateOrgAdminOrgSettings(user.id, mobileAuthToken, { perUserDailySecondsCap });
+      setAdminDefaultDailyMinutesInput(String(Math.floor(payload.org.perUserDailySecondsCap / 60)));
+      setAdminNotice(`Saved. Default per-user daily limit is ${Math.floor(payload.org.perUserDailySecondsCap / 60)} minute(s).`);
       await refreshOrgAdminDashboard();
     } catch (caught) {
       const message = getErrorMessage(caught, "Could not save org settings.");
       setAdminError(message);
       void submitAutoErrorReport("admin_org_settings.save", caught, {
         screen: "admin_org_dashboard",
-        details: { maxSimulationMinutes },
+        details: { perUserDailySecondsCap },
       });
     } finally {
       setIsSavingOrgAdminSettings(false);
     }
-  }, [adminMaxSimulationMinutesInput, mobileAuthToken, refreshOrgAdminDashboard, submitAutoErrorReport, user]);
+  }, [adminDefaultDailyMinutesInput, mobileAuthToken, refreshOrgAdminDashboard, submitAutoErrorReport, user]);
 
   useEffect(() => {
     if (screen !== "home" && isHomeMenuMounted) {
@@ -4675,40 +4738,6 @@ export default function App() {
           </Pressable>
         ))}
 
-        <View style={styles.card}>
-          <Text style={styles.label}>Usage Check</Text>
-          {timeAllotmentUsage.mode === "monthly_org" ? (
-            <>
-              <Text style={styles.body}>
-                Resets at next renewal: {formatDateLabel(entitlements?.usage?.nextRenewalAt ?? null)}
-              </Text>
-              <Text style={styles.body}>
-                Remaining this cycle: {formatSecondsAsClock(timeAllotmentUsage.remainingSeconds ?? 0)}
-              </Text>
-              <Text style={styles.body}>
-                Org allotment used: {timeAllotmentUsage.usedPercent ?? 0}% (
-                {formatSecondsAsClock(timeAllotmentUsage.usedSeconds ?? 0)} /{" "}
-                {formatSecondsAsClock(timeAllotmentUsage.limitSeconds ?? 0)})
-              </Text>
-            </>
-          ) : (
-            <>
-              <Text style={styles.body}>{entitlements?.usage?.nextDailyResetLabel ?? "Daily reset unavailable."}</Text>
-              <Text style={styles.body}>
-                {entitlements?.usage?.dailySecondsRemaining === null
-                  ? "Daily remaining: unlimited"
-                  : `Daily remaining: ${formatSecondsAsClock(entitlements?.usage?.dailySecondsRemaining ?? 0)}`}
-              </Text>
-              <Text style={styles.body}>
-                {timeAllotmentUsage.usedPercent === null
-                  ? "Daily allotment used: unavailable"
-                  : `Daily allotment used: ${timeAllotmentUsage.usedPercent}% (${formatSecondsAsClock(
-                      timeAllotmentUsage.usedSeconds ?? 0
-                    )} / ${formatSecondsAsClock(timeAllotmentUsage.limitSeconds ?? 0)})`}
-              </Text>
-            </>
-          )}
-        </View>
       </ScrollView>
 
       <View style={styles.bottomActionRegion}>
@@ -5557,16 +5586,16 @@ export default function App() {
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.title}>Simulation Controls</Text>
+            <Text style={styles.title}>Default Per-User Daily Minutes</Text>
             <Text style={styles.body}>
-              Set the max session length for every simulation run in your organization.
+              This default applies to organization users who do not have an individual daily override.
             </Text>
-            <Text style={styles.hintText}>Max session length (minutes)</Text>
+            <Text style={styles.hintText}>Daily minutes</Text>
             <TextInput
-              value={adminMaxSimulationMinutesInput}
-              onChangeText={setAdminMaxSimulationMinutesInput}
+              value={adminDefaultDailyMinutesInput}
+              onChangeText={setAdminDefaultDailyMinutesInput}
               keyboardType="numeric"
-              placeholder="20"
+              placeholder="60"
               placeholderTextColor={theme.hint}
               style={styles.input}
             />
@@ -5578,7 +5607,7 @@ export default function App() {
               }}
             >
               <Text style={styles.primaryButtonText}>
-                {isSavingOrgAdminSettings ? "Saving..." : "Save Simulation Settings"}
+                {isSavingOrgAdminSettings ? "Saving..." : "Save Daily Default"}
               </Text>
             </Pressable>
           </View>
@@ -6156,48 +6185,117 @@ export default function App() {
 
                 {canEditUsageControls ? (
                   <>
-                    <Text style={styles.hintText}>Daily Overage</Text>
+                    <Text style={styles.hintText}>Daily Allotment</Text>
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
                       <Pressable
                         style={[
                           styles.timezoneChip,
-                          !dailyOverageAllowed ? styles.selectedChip : null,
+                          adminUserDailyMode === "default" ? styles.selectedChip : null,
                           adminLoading ? styles.disabled : null,
                         ]}
                         disabled={adminLoading}
-                        onPress={() => {
-                          if (!dailyOverageAllowed) {
-                            return;
-                          }
-                          void setOrgUserDailyOverage(targetUserId, false);
-                        }}
+                        onPress={() => setAdminUserDailyMode("default")}
                       >
-                        <Text style={styles.chipText}>Off</Text>
+                        <Text style={styles.chipText}>Use Organization Default</Text>
                       </Pressable>
                       <Pressable
                         style={[
                           styles.timezoneChip,
-                          dailyOverageAllowed ? styles.selectedChip : null,
+                          adminUserDailyMode === "custom" ? styles.selectedChip : null,
                           adminLoading ? styles.disabled : null,
                         ]}
                         disabled={adminLoading}
-                        onPress={() => {
-                          if (dailyOverageAllowed) {
-                            return;
-                          }
-                          void setOrgUserDailyOverage(targetUserId, true);
-                        }}
+                        onPress={() => setAdminUserDailyMode("custom")}
+                      >
+                        <Text style={styles.chipText}>Custom Daily Minutes</Text>
+                      </Pressable>
+                    </ScrollView>
+                    {adminUserDailyMode === "custom" ? (
+                      <TextInput
+                        value={adminUserDailyMinutesInput}
+                        onChangeText={setAdminUserDailyMinutesInput}
+                        keyboardType="numeric"
+                        placeholder="60"
+                        placeholderTextColor={theme.hint}
+                        editable={!adminLoading}
+                        style={styles.input}
+                      />
+                    ) : null}
+
+                    <Text style={styles.hintText}>Temporary Overage</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+                      <Pressable
+                        style={[styles.timezoneChip, !adminUserOverageAllowed ? styles.selectedChip : null]}
+                        disabled={adminLoading}
+                        onPress={() => setAdminUserOverageAllowed(false)}
+                      >
+                        <Text style={styles.chipText}>Off</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.timezoneChip, adminUserOverageAllowed ? styles.selectedChip : null]}
+                        disabled={adminLoading}
+                        onPress={() => setAdminUserOverageAllowed(true)}
                       >
                         <Text style={styles.chipText}>Allow</Text>
                       </Pressable>
                     </ScrollView>
+                    {adminUserOverageAllowed ? (
+                      <>
+                        <Text style={styles.hintText}>Duration (days)</Text>
+                        <TextInput
+                          value={adminUserOverageDurationDaysInput}
+                          onChangeText={setAdminUserOverageDurationDaysInput}
+                          keyboardType="numeric"
+                          placeholder="4"
+                          placeholderTextColor={theme.hint}
+                          editable={!adminLoading}
+                          style={styles.input}
+                        />
+                        <Text style={styles.hintText}>Allowance</Text>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+                          <Pressable
+                            style={[styles.timezoneChip, adminUserOverageMode === "unlimited" ? styles.selectedChip : null]}
+                            onPress={() => setAdminUserOverageMode("unlimited")}
+                          >
+                            <Text style={styles.chipText}>Unlimited Within Organization</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[styles.timezoneChip, adminUserOverageMode === "finite" ? styles.selectedChip : null]}
+                            onPress={() => setAdminUserOverageMode("finite")}
+                          >
+                            <Text style={styles.chipText}>Extra Minutes Total</Text>
+                          </Pressable>
+                        </ScrollView>
+                        {adminUserOverageMode === "finite" ? (
+                          <TextInput
+                            value={adminUserOverageExtraMinutesInput}
+                            onChangeText={setAdminUserOverageExtraMinutesInput}
+                            keyboardType="numeric"
+                            placeholder="120 total minutes"
+                            placeholderTextColor={theme.hint}
+                            editable={!adminLoading}
+                            style={styles.input}
+                          />
+                        ) : null}
+                      </>
+                    ) : null}
                     {dailyOverageAllowed ? (
                       <Text style={styles.body}>
-                        Overage currently allowed through {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
+                        Effective expiration: {formatDateLabel(detail.user.dailyOverageExpiresAt ?? null)}.
+                        {detail.user.dailyOverageMode === "finite"
+                          ? ` Remaining extra pool: ${secondsToWholeMinutes(detail.user.dailyOverageExtraSecondsRemaining ?? 0)} total minute(s).`
+                          : " Unlimited within organization limits."}
                       </Text>
                     ) : (
                       <Text style={styles.body}>Daily cap enforced for this user.</Text>
                     )}
+                    <Pressable
+                      style={[styles.primaryButton, adminLoading ? styles.disabled : null]}
+                      disabled={adminLoading}
+                      onPress={() => void saveOrgUserUsageControls(targetUserId)}
+                    >
+                      <Text style={styles.primaryButtonText}>{adminLoading ? "Saving..." : "Save Usage Controls"}</Text>
+                    </Pressable>
                   </>
                 ) : (
                   <Text style={styles.body}>Daily usage controls are managed by Org Admins.</Text>

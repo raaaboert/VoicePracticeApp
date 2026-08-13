@@ -2329,6 +2329,113 @@ test("mobile user-admin routes are scoped to self and direct reports", async () 
   assert.equal(crossTenantWrite.status, 404);
 });
 
+test("org admins manage tenant-bound daily defaults and temporary overage without contract authority", async () => {
+  const initialDashboard = await mobileRequest("/mobile/users/org_admin/admin/org/dashboard", "token_org_admin");
+  assert.equal(initialDashboard.status, 200);
+  const initialDashboardBody = initialDashboard.body as {
+    org: { monthlyMinutesAllotted: number; perUserDailySecondsCap: number };
+    billingPeriod: { nextRenewalAt: string };
+  };
+  const originalMonthlyMinutes = Number(initialDashboardBody.org.monthlyMinutesAllotted);
+  const originalDefaultSeconds = Number(initialDashboardBody.org.perUserDailySecondsCap);
+  const renewalAtMs = new Date(initialDashboardBody.billingPeriod.nextRenewalAt).getTime();
+
+  const forbiddenContractChange = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/settings",
+    "token_org_admin",
+    { method: "PATCH", body: JSON.stringify({ monthlyMinutesAllotted: 1 }) },
+  );
+  assert.equal(forbiddenContractChange.status, 403);
+  const afterForbidden = await mobileRequest("/mobile/users/org_admin/admin/org/dashboard", "token_org_admin");
+  assert.equal(
+    Number((afterForbidden.body.org as { monthlyMinutesAllotted: number }).monthlyMinutesAllotted),
+    originalMonthlyMinutes,
+  );
+
+  const dailyDefault = await mobileRequest("/mobile/users/org_admin/admin/org/settings", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ perUserDailySecondsCap: 2_400 }),
+  });
+  assert.equal(dailyDefault.status, 200, JSON.stringify(dailyDefault.body));
+  assert.equal((dailyDefault.body.org as { perUserDailySecondsCap: number }).perUserDailySecondsCap, 2_400);
+
+  const malformedGrant = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        allowDailyOverageThisCycle: true,
+        dailyOverageDurationDays: 0,
+        dailyOverageMode: "finite",
+        dailyOverageExtraMinutes: 20,
+      }),
+    },
+  );
+  assert.equal(malformedGrant.status, 400);
+
+  const finiteGrant = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        dailySecondsCapOverride: 600,
+        allowDailyOverageThisCycle: true,
+        dailyOverageDurationDays: 3650,
+        dailyOverageMode: "finite",
+        dailyOverageExtraMinutes: 120,
+      }),
+    },
+  );
+  assert.equal(finiteGrant.status, 200, JSON.stringify(finiteGrant.body));
+  assert.equal(finiteGrant.body.dailySecondsCapOverride, 600);
+  assert.equal(finiteGrant.body.dailyOverageMode, "finite");
+  assert.equal(finiteGrant.body.dailyOverageExtraSecondsGranted, 7_200);
+  assert.ok(new Date(String(finiteGrant.body.dailyOverageExpiresAt)).getTime() <= renewalAtMs);
+
+  const finiteDetail = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin",
+  );
+  assert.equal(finiteDetail.status, 200);
+  const finiteDetailUser = finiteDetail.body.user as {
+    dailyOverageMode: string;
+    dailyOverageExtraSecondsRemaining: number;
+  };
+  assert.equal(finiteDetailUser.dailyOverageMode, "finite");
+  assert.equal(finiteDetailUser.dailyOverageExtraSecondsRemaining, 7_200);
+
+  const platformGrant = await adminRequest("/users/learner", {
+    method: "PATCH",
+    body: JSON.stringify({
+      allowDailyOverageThisCycle: true,
+      dailyOverageDurationDays: 2,
+      dailyOverageMode: "unlimited",
+    }),
+  });
+  assert.equal(platformGrant.status, 200);
+  assert.equal(platformGrant.body.dailyOverageMode, "unlimited");
+
+  const useOrgDefaultAndDisable = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ dailySecondsCapOverride: null, allowDailyOverageThisCycle: false }),
+    },
+  );
+  assert.equal(useOrgDefaultAndDisable.status, 200);
+  assert.equal(useOrgDefaultAndDisable.body.dailySecondsCapOverride, null);
+  assert.equal(useOrgDefaultAndDisable.body.allowDailyOverageThisCycle, false);
+
+  const restoreDefault = await mobileRequest("/mobile/users/org_admin/admin/org/settings", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ perUserDailySecondsCap: originalDefaultSeconds }),
+  });
+  assert.equal(restoreDefault.status, 200);
+});
+
 test("mobile admin user patching is atomic across combined status and Employee ID updates", async () => {
   const conflict = await mobileRequest("/mobile/users/org_admin/admin/org/users/learner_atomic", "token_org_admin", {
     method: "PATCH",

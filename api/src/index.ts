@@ -223,6 +223,14 @@ import {
   resolveMobilePaidAiOrganizationAccess,
 } from "./services/mobileAiAccessPolicy.js";
 import {
+  calculateFiniteDailyOverageUsage,
+  resolveEnterpriseDailyQuota,
+  resolveEnterpriseQuotaLockReason,
+  resolveStoredDailyOverageMode,
+  resolveTemporaryDailyOverageWindow,
+  TemporaryDailyOverageMode,
+} from "./services/temporaryDailyOverage.js";
+import {
   hashEmailVerificationCode,
   normalizeEmailForExactMatch,
   timingSafeEqualText,
@@ -3417,6 +3425,13 @@ function ensureDemoEnterpriseData(db: {
       existingUser.dailySecondsCapOverride = normalizeOptionalSecondsCap(existingUser.dailySecondsCapOverride);
       existingUser.allowDailyOverageThisCycle = existingUser.allowDailyOverageThisCycle === true;
       existingUser.dailyOverageExpiresAt = normalizeOptionalIsoDate(existingUser.dailyOverageExpiresAt);
+      existingUser.dailyOverageMode = resolveStoredDailyOverageMode({
+        allowed: existingUser.allowDailyOverageThisCycle,
+        mode: existingUser.dailyOverageMode,
+      });
+      existingUser.dailyOverageStartedAt = normalizeOptionalIsoDate(existingUser.dailyOverageStartedAt);
+      existingUser.dailyOverageBaseSecondsCap = normalizeOptionalSecondsCap(existingUser.dailyOverageBaseSecondsCap);
+      existingUser.dailyOverageExtraSecondsGranted = normalizeOptionalSecondsCap(existingUser.dailyOverageExtraSecondsGranted);
       existingUser.updatedAt = existingUser.updatedAt || now;
       continue;
     }
@@ -3442,6 +3457,10 @@ function ensureDemoEnterpriseData(db: {
       dailySecondsCapOverride: null,
       allowDailyOverageThisCycle: false,
       dailyOverageExpiresAt: null,
+      dailyOverageMode: null,
+      dailyOverageStartedAt: null,
+      dailyOverageBaseSecondsCap: null,
+      dailyOverageExtraSecondsGranted: null,
       mobileProfileReonboardingRequired: false,
       createdAt: now,
       updatedAt: now
@@ -4118,6 +4137,13 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       dailySecondsCapOverride: normalizeOptionalSecondsCap(candidateUser.dailySecondsCapOverride),
       allowDailyOverageThisCycle: candidateUser.allowDailyOverageThisCycle === true,
       dailyOverageExpiresAt: normalizeOptionalIsoDate(candidateUser.dailyOverageExpiresAt),
+      dailyOverageMode: resolveStoredDailyOverageMode({
+        allowed: candidateUser.allowDailyOverageThisCycle === true,
+        mode: candidateUser.dailyOverageMode,
+      }),
+      dailyOverageStartedAt: normalizeOptionalIsoDate(candidateUser.dailyOverageStartedAt),
+      dailyOverageBaseSecondsCap: normalizeOptionalSecondsCap(candidateUser.dailyOverageBaseSecondsCap),
+      dailyOverageExtraSecondsGranted: normalizeOptionalSecondsCap(candidateUser.dailyOverageExtraSecondsGranted),
       divisionId:
         candidateUser.accountType === "enterprise" &&
         typeof candidateUser.orgId === "string" &&
@@ -9387,6 +9413,10 @@ function computeEntitlements(
   let orgRemainingSecondsThisPeriod: number | null = null;
   let orgUsagePercentThisPeriod: number | null = null;
   let userDailyOverageAllowed = false;
+  let userDailyOverageMode: TemporaryDailyOverageMode | null = null;
+  let userDailyOverageExtraSecondsGranted: number | null = null;
+  let userDailyOverageExtraSecondsConsumed: number | null = null;
+  let userDailyOverageExtraSecondsRemaining: number | null = null;
   let nextRenewalAt = computeNextRenewalAt(user.planAnchorAt, now);
   let lockReason: string | null = null;
   let lockCode: UserEntitlementsResponse["lockCode"] = null;
@@ -9445,25 +9475,24 @@ function computeEntitlements(
       orgUsagePercentThisPeriod = orgUsage.usagePercent;
       nextRenewalAt = orgUsage.nextRenewalAt;
 
-      const dailyOverageAllowance = resolveUserDailyOverageAllowance(user, now);
+      const dailyOverageAllowance = resolveUserDailyOverageAllowance(db, user, now);
       userDailyOverageAllowed = dailyOverageAllowance.active;
-      const userDailyLockReason = "User daily time allotment reached.";
-      const orgMonthlyLockReason = "Organization monthly allotment reached.";
-      let userDailyCapExceeded = false;
-
-      if (!userDailyOverageAllowed) {
-        const perUserRemaining = Math.max(0, perUserDailySecondsCap - usage.billedSecondsToday);
-        dailySecondsRemaining = perUserRemaining;
-        if (perUserRemaining <= 0) {
-          userDailyCapExceeded = true;
-        }
-      } else {
-        dailySecondsRemaining = null;
-      }
-
-      const orgMonthlyCapExceeded = orgUsage.remainingSeconds <= 0;
-      if (userDailyCapExceeded || orgMonthlyCapExceeded) {
-        const quotaLockReason = orgMonthlyCapExceeded ? orgMonthlyLockReason : userDailyLockReason;
+      userDailyOverageMode = dailyOverageAllowance.mode;
+      userDailyOverageExtraSecondsGranted = dailyOverageAllowance.extraSecondsGranted;
+      userDailyOverageExtraSecondsConsumed = dailyOverageAllowance.extraSecondsConsumed;
+      userDailyOverageExtraSecondsRemaining = dailyOverageAllowance.extraSecondsRemaining;
+      const dailyQuota = resolveEnterpriseDailyQuota({
+        billedSecondsToday: usage.billedSecondsToday,
+        effectiveDailySecondsCap: perUserDailySecondsCap,
+        overageMode: userDailyOverageAllowed ? userDailyOverageMode : null,
+        finiteExtraSecondsRemaining: userDailyOverageExtraSecondsRemaining,
+      });
+      dailySecondsRemaining = dailyQuota.remainingSeconds;
+      const quotaLockReason = resolveEnterpriseQuotaLockReason({
+        dailyCapExceeded: dailyQuota.exceeded,
+        orgMonthlySecondsRemaining: orgUsage.remainingSeconds,
+      });
+      if (quotaLockReason) {
         const nowMs = now.getTime();
         const allowGrace =
           options?.allowDuringActiveSimulation === true && hasActiveSimulationAiBudgetGrace(user.id, nowMs);
@@ -9532,6 +9561,10 @@ function computeEntitlements(
       orgUsagePercentThisPeriod,
       userDailyCapSeconds: perUserDailySecondsCap,
       userDailyOverageAllowed,
+      userDailyOverageMode,
+      userDailyOverageExtraSecondsGranted,
+      userDailyOverageExtraSecondsConsumed,
+      userDailyOverageExtraSecondsRemaining,
       timezoneUsed: timezone,
       nextDailyResetLabel: humanDailyResetLabel(timezone),
       nextRenewalAt
@@ -9609,22 +9642,154 @@ function resolveEffectiveOrgPerUserDailySecondsCap(org: EnterpriseOrg, now: Date
   return clampNonNegativeInteger(org.perUserDailySecondsCap, 0);
 }
 
-function resolveUserDailyOverageAllowance(user: UserProfile, now: Date): {
+function clearUserDailyOverage(user: UserProfile): void {
+  user.allowDailyOverageThisCycle = false;
+  user.dailyOverageExpiresAt = null;
+  user.dailyOverageMode = null;
+  user.dailyOverageStartedAt = null;
+  user.dailyOverageBaseSecondsCap = null;
+  user.dailyOverageExtraSecondsGranted = null;
+}
+
+type TemporaryDailyOveragePatch = {
+  allowDailyOverageThisCycle?: unknown;
+  dailyOverageMode?: unknown;
+  dailyOverageDurationDays?: unknown;
+  dailyOverageExtraMinutes?: unknown;
+};
+
+function buildTemporaryDailyOverageGrant(params: {
+  patch: TemporaryDailyOveragePatch;
+  user: UserProfile;
+  org: EnterpriseOrg;
+  now: Date;
+}):
+  | { ok: true; values: Pick<UserProfile,
+      "allowDailyOverageThisCycle" | "dailyOverageExpiresAt" | "dailyOverageMode" |
+      "dailyOverageStartedAt" | "dailyOverageBaseSecondsCap" | "dailyOverageExtraSecondsGranted"> }
+  | { ok: false; error: string } {
+  if (params.patch.allowDailyOverageThisCycle !== true) {
+    return {
+      ok: true,
+      values: {
+        allowDailyOverageThisCycle: false,
+        dailyOverageExpiresAt: null,
+        dailyOverageMode: null,
+        dailyOverageStartedAt: null,
+        dailyOverageBaseSecondsCap: null,
+        dailyOverageExtraSecondsGranted: null,
+      },
+    };
+  }
+
+  const durationDays = params.patch.dailyOverageDurationDays;
+  if (!Number.isInteger(durationDays) || Number(durationDays) <= 0 || Number(durationDays) > 3650) {
+    return { ok: false, error: "Temporary overage duration must be an integer from 1 to 3650 days." };
+  }
+  const mode = params.patch.dailyOverageMode;
+  if (mode !== "unlimited" && mode !== "finite") {
+    return { ok: false, error: "Temporary overage mode must be unlimited or finite." };
+  }
+
+  let extraSecondsGranted: number | null = null;
+  if (mode === "finite") {
+    const extraMinutes = params.patch.dailyOverageExtraMinutes;
+    if (!Number.isInteger(extraMinutes) || Number(extraMinutes) <= 0 || Number(extraMinutes) > 1_000_000) {
+      return { ok: false, error: "Temporary extra minutes must be an integer from 1 to 1000000." };
+    }
+    extraSecondsGranted = Number(extraMinutes) * 60;
+  }
+
+  const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(params.org, params.now), params.now);
+  const requestedExpiresAtMs = params.now.getTime() + Number(durationDays) * 24 * 60 * 60 * 1000;
+  const renewalAtMs = new Date(billing.nextRenewalAt).getTime();
+  const expiresAt = new Date(Math.min(requestedExpiresAtMs, renewalAtMs));
+  const effectiveDailySecondsCap = Math.max(
+    0,
+    (params.user.dailySecondsCapOverride ?? resolveEffectiveOrgPerUserDailySecondsCap(params.org, params.now))
+      + params.user.manualBonusSeconds,
+  );
+  return {
+    ok: true,
+    values: {
+      allowDailyOverageThisCycle: true,
+      dailyOverageExpiresAt: expiresAt.toISOString(),
+      dailyOverageMode: mode,
+      dailyOverageStartedAt: params.now.toISOString(),
+      dailyOverageBaseSecondsCap: mode === "finite" ? effectiveDailySecondsCap : null,
+      dailyOverageExtraSecondsGranted: extraSecondsGranted,
+    },
+  };
+}
+
+function resolveUserDailyOverageAllowance(db: ApiDatabase, user: UserProfile, now: Date): {
   active: boolean;
   expiresAt: string | null;
+  mode: TemporaryDailyOverageMode | null;
+  extraSecondsGranted: number | null;
+  extraSecondsConsumed: number | null;
+  extraSecondsRemaining: number | null;
 } {
-  if (!user.allowDailyOverageThisCycle) {
-    return { active: false, expiresAt: null };
+  const window = resolveTemporaryDailyOverageWindow({
+    allowed: user.allowDailyOverageThisCycle,
+    expiresAt: user.dailyOverageExpiresAt,
+    now,
+  });
+  if (!window.active || !window.expiresAt) {
+    clearUserDailyOverage(user);
+    return {
+      active: false,
+      expiresAt: null,
+      mode: null,
+      extraSecondsGranted: null,
+      extraSecondsConsumed: null,
+      extraSecondsRemaining: null,
+    };
+  }
+  const expiresAt = new Date(window.expiresAt);
+
+  const mode = resolveStoredDailyOverageMode({ allowed: true, mode: user.dailyOverageMode });
+  if (mode !== "finite") {
+    return {
+      active: true,
+      expiresAt: expiresAt.toISOString(),
+      mode: "unlimited",
+      extraSecondsGranted: null,
+      extraSecondsConsumed: null,
+      extraSecondsRemaining: null,
+    };
   }
 
-  const expiresAt = parseIsoDateOrNull(user.dailyOverageExpiresAt);
-  if (!expiresAt || expiresAt.getTime() <= now.getTime()) {
-    user.allowDailyOverageThisCycle = false;
-    user.dailyOverageExpiresAt = null;
-    return { active: false, expiresAt: null };
+  const startedAt = parseIsoDateOrNull(user.dailyOverageStartedAt);
+  const baseDailySecondsCap = normalizeOptionalSecondsCap(user.dailyOverageBaseSecondsCap);
+  const extraSecondsGranted = normalizeOptionalSecondsCap(user.dailyOverageExtraSecondsGranted);
+  if (!startedAt || startedAt.getTime() >= expiresAt.getTime() || baseDailySecondsCap === null || !extraSecondsGranted) {
+    clearUserDailyOverage(user);
+    return {
+      active: false,
+      expiresAt: null,
+      mode: null,
+      extraSecondsGranted: null,
+      extraSecondsConsumed: null,
+      extraSecondsRemaining: null,
+    };
   }
 
-  return { active: true, expiresAt: expiresAt.toISOString() };
+  const finiteUsage = calculateFiniteDailyOverageUsage({
+    sessions: listUsageSessions(db, { userId: user.id }),
+    userId: user.id,
+    timeZone: materializeUserTimezone(user, now),
+    grantStartedAt: startedAt.toISOString(),
+    effectiveEndAt: now.toISOString(),
+    baseDailySecondsCap,
+    extraSecondsGranted,
+  });
+  return {
+    active: true,
+    expiresAt: expiresAt.toISOString(),
+    mode,
+    ...finiteUsage,
+  };
 }
 
 function resolveOrgUsageForCurrentBillingCycle(
@@ -15333,13 +15498,7 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
         0
       );
 
-      const dailyOverageExpiresAt = user.dailyOverageExpiresAt;
-      const allowDailyOverageThisCycle =
-        user.allowDailyOverageThisCycle === true &&
-        (() => {
-          const parsed = parseIsoDateOrNull(dailyOverageExpiresAt);
-          return parsed ? parsed.getTime() > now.getTime() : false;
-        })();
+      const dailyOverage = resolveUserDailyOverageAllowance(db, user, now);
 
       return {
         userId: user.id,
@@ -15351,8 +15510,12 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
         dailySecondsCapOverride: user.dailySecondsCapOverride,
         effectiveDailySecondsCap:
           (user.dailySecondsCapOverride ?? effectiveOrgPerUserDailySecondsCap) + user.manualBonusSeconds,
-        allowDailyOverageThisCycle,
-        dailyOverageExpiresAt: allowDailyOverageThisCycle ? dailyOverageExpiresAt : null,
+        allowDailyOverageThisCycle: dailyOverage.active,
+        dailyOverageExpiresAt: dailyOverage.expiresAt,
+        dailyOverageMode: dailyOverage.mode,
+        dailyOverageExtraSecondsGranted: dailyOverage.extraSecondsGranted,
+        dailyOverageExtraSecondsConsumed: dailyOverage.extraSecondsConsumed,
+        dailyOverageExtraSecondsRemaining: dailyOverage.extraSecondsRemaining,
         rawSecondsThisPeriod,
         billedSecondsThisPeriod
       };
@@ -15791,6 +15954,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       dailySecondsCapOverride: user.dailySecondsCapOverride,
       allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
       dailyOverageExpiresAt: user.dailyOverageExpiresAt,
+      dailyOverageMode: user.dailyOverageMode ?? null,
+      dailyOverageStartedAt: user.dailyOverageStartedAt ?? null,
+      dailyOverageBaseSecondsCap: user.dailyOverageBaseSecondsCap ?? null,
+      dailyOverageExtraSecondsGranted: user.dailyOverageExtraSecondsGranted ?? null,
       timezone: user.timezone
     };
     const now = new Date();
@@ -15924,6 +16091,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       user.dailySecondsCapOverride = null;
       user.allowDailyOverageThisCycle = false;
       user.dailyOverageExpiresAt = null;
+      user.dailyOverageMode = null;
+      user.dailyOverageStartedAt = null;
+      user.dailyOverageBaseSecondsCap = null;
+      user.dailyOverageExtraSecondsGranted = null;
     }
 
     if (user.accountType === "enterprise" && user.orgId) {
@@ -15958,6 +16129,13 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     }
 
     if (patch.dailySecondsCapOverride !== undefined) {
+      if (
+        patch.dailySecondsCapOverride !== null &&
+        (!Number.isSafeInteger(patch.dailySecondsCapOverride) || Number(patch.dailySecondsCapOverride) < 0)
+      ) {
+        response.status(400).json({ error: "Daily seconds override must be null or a non-negative integer." });
+        return;
+      }
       user.dailySecondsCapOverride = normalizeOptionalSecondsCap(patch.dailySecondsCapOverride);
     }
 
@@ -15967,19 +16145,17 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
         return;
       }
 
-      const allowDailyOverageThisCycle = patch.allowDailyOverageThisCycle === true;
-      user.allowDailyOverageThisCycle = allowDailyOverageThisCycle;
-      if (allowDailyOverageThisCycle) {
-        const org = getOrgById(db, user.orgId);
-        if (!org || org.status !== "active") {
-          response.status(400).json({ error: "Enterprise users must belong to an active organization." });
-          return;
-        }
-        const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, now), now);
-        user.dailyOverageExpiresAt = billing.nextRenewalAt;
-      } else {
-        user.dailyOverageExpiresAt = null;
+      const org = getOrgById(db, user.orgId);
+      if (!org || org.status !== "active") {
+        response.status(400).json({ error: "Enterprise users must belong to an active organization." });
+        return;
       }
+      const grant = buildTemporaryDailyOverageGrant({ patch, user, org, now });
+      if (!grant.ok) {
+        response.status(400).json({ error: grant.error });
+        return;
+      }
+      Object.assign(user, grant.values);
     }
 
     if (typeof patch.timezone === "string") {
@@ -16038,6 +16214,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           allowDailyOverageThisCycle: user.allowDailyOverageThisCycle,
           dailyOverageExpiresAt: user.dailyOverageExpiresAt,
+          dailyOverageMode: user.dailyOverageMode ?? null,
+          dailyOverageStartedAt: user.dailyOverageStartedAt ?? null,
+          dailyOverageBaseSecondsCap: user.dailyOverageBaseSecondsCap ?? null,
+          dailyOverageExtraSecondsGranted: user.dailyOverageExtraSecondsGranted ?? null,
           employeeIdPresent: Boolean(user.employeeId),
           timezone: user.timezone,
           deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
@@ -20805,15 +20985,19 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
   const applyPerUserDailySecondsCapNextCycle = body.applyPerUserDailySecondsCapNextCycle === true;
   const clearPendingPerUserDailySecondsCap = body.clearPendingPerUserDailySecondsCap === true;
 
+  if (body.maxSimulationMinutes !== undefined || body.monthlyMinutesAllotted !== undefined) {
+    response.status(403).json({
+      error: "Organization administrators can only change the default per-user daily minutes.",
+    });
+    return;
+  }
+
   if (
-    body.maxSimulationMinutes === undefined &&
-    body.monthlyMinutesAllotted === undefined &&
     body.perUserDailySecondsCap === undefined &&
     !clearPendingPerUserDailySecondsCap
   ) {
     response.status(400).json({
-      error:
-        "At least one setting is required: maxSimulationMinutes, monthlyMinutesAllotted, perUserDailySecondsCap."
+      error: "Default per-user daily minutes are required."
     });
     return;
   }
@@ -20846,18 +21030,11 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       return;
     }
 
-    if (body.maxSimulationMinutes !== undefined) {
-      org.maxSimulationMinutes = normalizeMaxSimulationMinutes(body.maxSimulationMinutes, org.maxSimulationMinutes);
-    }
-
-    if (body.monthlyMinutesAllotted !== undefined) {
-      org.monthlyMinutesAllotted = normalizeMonthlyMinutesAllotted(
-        body.monthlyMinutesAllotted,
-        org.monthlyMinutesAllotted
-      );
-    }
-
     if (body.perUserDailySecondsCap !== undefined) {
+      if (!Number.isSafeInteger(body.perUserDailySecondsCap) || Number(body.perUserDailySecondsCap) < 0) {
+        response.status(400).json({ error: "Default per-user daily seconds must be a non-negative integer." });
+        return;
+      }
       const nextPerUserDailySecondsCap = clampNonNegativeInteger(
         body.perUserDailySecondsCap,
         org.perUserDailySecondsCap
@@ -20886,8 +21063,6 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       orgId: org.id,
       message: `Updated org settings for ${org.name}.`,
       metadata: {
-        maxSimulationMinutes: org.maxSimulationMinutes,
-        monthlyMinutesAllotted: org.monthlyMinutesAllotted,
         perUserDailySecondsCap: org.perUserDailySecondsCap,
         pendingPerUserDailySecondsCap: org.pendingPerUserDailySecondsCap,
         pendingPerUserDailySecondsCapEffectiveAt: org.pendingPerUserDailySecondsCapEffectiveAt
@@ -20898,8 +21073,6 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       ok: true,
       org: {
         id: org.id,
-        maxSimulationMinutes: org.maxSimulationMinutes,
-        monthlyMinutesAllotted: org.monthlyMinutesAllotted,
         perUserDailySecondsCap: org.perUserDailySecondsCap,
         pendingPerUserDailySecondsCap: org.pendingPerUserDailySecondsCap,
         pendingPerUserDailySecondsCapEffectiveAt: org.pendingPerUserDailySecondsCapEffectiveAt,
@@ -20953,13 +21126,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
     const visibleUsers = orgUsers
       .filter((target) => canEnterpriseActorSeeOrganizationUser({ actor, target }))
       .map((user) => {
-        const dailyOverageExpiresAt = user.dailyOverageExpiresAt;
-        const allowDailyOverageThisCycle =
-          user.allowDailyOverageThisCycle === true &&
-          (() => {
-            const parsed = parseIsoDateOrNull(dailyOverageExpiresAt);
-            return parsed ? parsed.getTime() > Date.now() : false;
-          })();
+        const dailyOverage = resolveUserDailyOverageAllowance(db, user, new Date());
         return {
           userId: user.id,
           email: user.email,
@@ -20969,8 +21136,12 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
           dailySecondsCapOverride: user.dailySecondsCapOverride,
           effectiveDailySecondsCap:
             (user.dailySecondsCapOverride ?? effectiveOrgPerUserDailySecondsCap) + user.manualBonusSeconds,
-          allowDailyOverageThisCycle,
-          dailyOverageExpiresAt: allowDailyOverageThisCycle ? dailyOverageExpiresAt : null
+          allowDailyOverageThisCycle: dailyOverage.active,
+          dailyOverageExpiresAt: dailyOverage.expiresAt,
+          dailyOverageMode: dailyOverage.mode,
+          dailyOverageExtraSecondsGranted: dailyOverage.extraSecondsGranted,
+          dailyOverageExtraSecondsConsumed: dailyOverage.extraSecondsConsumed,
+          dailyOverageExtraSecondsRemaining: dailyOverage.extraSecondsRemaining,
         };
       });
 
@@ -21046,13 +21217,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
     const scores = activityWindow.scoreRecords;
     const billedSeconds = usageSessionAccess.sumBilledSeconds(sessions);
     const avgOverallScore = scoreRecordAccess.computeAverageOverallScore(scores);
-    const dailyOverageExpiresAt = target.dailyOverageExpiresAt;
-    const allowDailyOverageThisCycle =
-      target.allowDailyOverageThisCycle === true &&
-      (() => {
-        const parsed = parseIsoDateOrNull(dailyOverageExpiresAt);
-        return parsed ? parsed.getTime() > now.getTime() : false;
-      })();
+    const dailyOverage = resolveUserDailyOverageAllowance(db, target, now);
 
     response.json({
       generatedAt: now.toISOString(),
@@ -21067,8 +21232,12 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
         effectiveDailySecondsCap:
           (target.dailySecondsCapOverride ?? resolveEffectiveOrgPerUserDailySecondsCap(org, now)) +
           target.manualBonusSeconds,
-        allowDailyOverageThisCycle,
-        dailyOverageExpiresAt: allowDailyOverageThisCycle ? dailyOverageExpiresAt : null
+        allowDailyOverageThisCycle: dailyOverage.active,
+        dailyOverageExpiresAt: dailyOverage.expiresAt,
+        dailyOverageMode: dailyOverage.mode,
+        dailyOverageExtraSecondsGranted: dailyOverage.extraSecondsGranted,
+        dailyOverageExtraSecondsConsumed: dailyOverage.extraSecondsConsumed,
+        dailyOverageExtraSecondsRemaining: dailyOverage.extraSecondsRemaining,
       },
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
       usage: {
@@ -21109,6 +21278,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     employeeId?: unknown;
     allowDailyOverageThisCycle?: unknown;
     dailySecondsCapOverride?: unknown;
+    dailyOverageMode?: unknown;
+    dailyOverageDurationDays?: unknown;
+    dailyOverageExtraMinutes?: unknown;
   };
   const hasStatusPatch = body.status !== undefined;
   const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
@@ -21182,6 +21354,10 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     let nextDailySecondsCapOverride = target.dailySecondsCapOverride;
     let nextAllowDailyOverageThisCycle = target.allowDailyOverageThisCycle;
     let nextDailyOverageExpiresAt = target.dailyOverageExpiresAt;
+    let nextDailyOverageMode = target.dailyOverageMode ?? null;
+    let nextDailyOverageStartedAt = target.dailyOverageStartedAt ?? null;
+    let nextDailyOverageBaseSecondsCap = target.dailyOverageBaseSecondsCap ?? null;
+    let nextDailyOverageExtraSecondsGranted = target.dailyOverageExtraSecondsGranted ?? null;
 
     if (hasStatusPatch) {
       if (!body.status || !isUserStatus(body.status)) {
@@ -21227,18 +21403,34 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     }
 
     if (hasDailyCapOverridePatch) {
+      if (
+        body.dailySecondsCapOverride !== null &&
+        (!Number.isSafeInteger(body.dailySecondsCapOverride) || Number(body.dailySecondsCapOverride) < 0)
+      ) {
+        response.status(400).json({ error: "Daily seconds override must be null or a non-negative integer." });
+        return;
+      }
       nextDailySecondsCapOverride = normalizeOptionalSecondsCap(body.dailySecondsCapOverride);
     }
 
     if (hasOveragePatch) {
-      const allowDailyOverageThisCycle = body.allowDailyOverageThisCycle === true;
-      nextAllowDailyOverageThisCycle = allowDailyOverageThisCycle;
-      if (allowDailyOverageThisCycle) {
-        const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(org, new Date()), new Date());
-        nextDailyOverageExpiresAt = billing.nextRenewalAt;
-      } else {
-        nextDailyOverageExpiresAt = null;
+      const now = new Date();
+      const grant = buildTemporaryDailyOverageGrant({
+        patch: body,
+        user: { ...target, dailySecondsCapOverride: nextDailySecondsCapOverride },
+        org,
+        now,
+      });
+      if (!grant.ok) {
+        response.status(400).json({ error: grant.error });
+        return;
       }
+      nextAllowDailyOverageThisCycle = grant.values.allowDailyOverageThisCycle;
+      nextDailyOverageExpiresAt = grant.values.dailyOverageExpiresAt;
+      nextDailyOverageMode = grant.values.dailyOverageMode ?? null;
+      nextDailyOverageStartedAt = grant.values.dailyOverageStartedAt ?? null;
+      nextDailyOverageBaseSecondsCap = grant.values.dailyOverageBaseSecondsCap ?? null;
+      nextDailyOverageExtraSecondsGranted = grant.values.dailyOverageExtraSecondsGranted ?? null;
     }
 
     target.status = nextStatus;
@@ -21246,6 +21438,10 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     target.dailySecondsCapOverride = nextDailySecondsCapOverride;
     target.allowDailyOverageThisCycle = nextAllowDailyOverageThisCycle;
     target.dailyOverageExpiresAt = nextDailyOverageExpiresAt;
+    target.dailyOverageMode = nextDailyOverageMode;
+    target.dailyOverageStartedAt = nextDailyOverageStartedAt;
+    target.dailyOverageBaseSecondsCap = nextDailyOverageBaseSecondsCap;
+    target.dailyOverageExtraSecondsGranted = nextDailyOverageExtraSecondsGranted;
     target.updatedAt = nowIso();
     emitMobileUpdateForUser(db, target.id, "user");
     appendMobileAuditEvent(db, actor, {
@@ -21258,7 +21454,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
         employeeIdChanged: hasEmployeeIdPatch,
         dailySecondsCapOverride: target.dailySecondsCapOverride,
         allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
-        dailyOverageExpiresAt: target.dailyOverageExpiresAt
+        dailyOverageExpiresAt: target.dailyOverageExpiresAt,
+        dailyOverageMode: target.dailyOverageMode ?? null,
+        dailyOverageExtraSecondsGranted: target.dailyOverageExtraSecondsGranted ?? null,
       }
     });
     response.json({
@@ -21268,7 +21466,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       status: target.status,
       dailySecondsCapOverride: target.dailySecondsCapOverride,
       allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
-      dailyOverageExpiresAt: target.dailyOverageExpiresAt
+      dailyOverageExpiresAt: target.dailyOverageExpiresAt,
+      dailyOverageMode: target.dailyOverageMode ?? null,
+      dailyOverageExtraSecondsGranted: target.dailyOverageExtraSecondsGranted ?? null,
     });
   });
 });

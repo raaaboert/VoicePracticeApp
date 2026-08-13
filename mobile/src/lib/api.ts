@@ -1538,8 +1538,6 @@ export async function updateOrgAdminOrgSettings(
   userId: string,
   authToken: string,
   patch: {
-    maxSimulationMinutes?: number;
-    monthlyMinutesAllotted?: number;
     perUserDailySecondsCap?: number;
     applyPerUserDailySecondsCapNextCycle?: boolean;
     clearPendingPerUserDailySecondsCap?: boolean;
@@ -1548,8 +1546,6 @@ export async function updateOrgAdminOrgSettings(
   ok: boolean;
   org: {
     id: string;
-    maxSimulationMinutes: number;
-    monthlyMinutesAllotted: number;
     perUserDailySecondsCap: number;
     pendingPerUserDailySecondsCap: number | null;
     pendingPerUserDailySecondsCapEffectiveAt: string | null;
@@ -1582,6 +1578,10 @@ export async function fetchOrgAdminUsers(
     effectiveDailySecondsCap: number;
     allowDailyOverageThisCycle: boolean;
     dailyOverageExpiresAt: string | null;
+    dailyOverageMode: "unlimited" | "finite" | null;
+    dailyOverageExtraSecondsGranted: number | null;
+    dailyOverageExtraSecondsConsumed: number | null;
+    dailyOverageExtraSecondsRemaining: number | null;
   }>;
 }> {
   return requestJson(
@@ -1669,6 +1669,10 @@ export async function fetchOrgAdminUserDetail(
     effectiveDailySecondsCap: number;
     allowDailyOverageThisCycle: boolean;
     dailyOverageExpiresAt: string | null;
+    dailyOverageMode: "unlimited" | "finite" | null;
+    dailyOverageExtraSecondsGranted: number | null;
+    dailyOverageExtraSecondsConsumed: number | null;
+    dailyOverageExtraSecondsRemaining: number | null;
   };
   period: { startAt: string; endAt: string; days: number };
   usage: { sessions: number; billedSeconds: number };
@@ -1703,6 +1707,9 @@ export async function setOrgAdminUserControls(
     employeeId?: string | null;
     allowDailyOverageThisCycle?: boolean;
     dailySecondsCapOverride?: number | null;
+    dailyOverageMode?: "unlimited" | "finite";
+    dailyOverageDurationDays?: number;
+    dailyOverageExtraMinutes?: number;
   },
 ): Promise<{
   userId: string;
@@ -1712,6 +1719,8 @@ export async function setOrgAdminUserControls(
   allowDailyOverageThisCycle: boolean;
   dailySecondsCapOverride: number | null;
   dailyOverageExpiresAt: string | null;
+  dailyOverageMode: "unlimited" | "finite" | null;
+  dailyOverageExtraSecondsGranted: number | null;
 }> {
   return requestJson(
     `/mobile/users/${encodeURIComponent(userId)}/admin/org/users/${encodeURIComponent(targetUserId)}`,

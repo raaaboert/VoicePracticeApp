@@ -766,6 +766,10 @@ export interface UserProfile {
   dailySecondsCapOverride: number | null;
   allowDailyOverageThisCycle: boolean;
   dailyOverageExpiresAt: string | null;
+  dailyOverageMode?: "unlimited" | "finite" | null;
+  dailyOverageStartedAt?: string | null;
+  dailyOverageBaseSecondsCap?: number | null;
+  dailyOverageExtraSecondsGranted?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1540,6 +1544,10 @@ export interface UsageSummary {
   orgUsagePercentThisPeriod?: number | null;
   userDailyCapSeconds?: number | null;
   userDailyOverageAllowed?: boolean;
+  userDailyOverageMode?: "unlimited" | "finite" | null;
+  userDailyOverageExtraSecondsGranted?: number | null;
+  userDailyOverageExtraSecondsConsumed?: number | null;
+  userDailyOverageExtraSecondsRemaining?: number | null;
   dayKey: string;
   monthKey: string;
   timezoneUsed: string;
@@ -2268,6 +2276,9 @@ export interface UpdateUserRequest {
   manualBonusSeconds?: number;
   dailySecondsCapOverride?: number | null;
   allowDailyOverageThisCycle?: boolean;
+  dailyOverageMode?: "unlimited" | "finite";
+  dailyOverageDurationDays?: number;
+  dailyOverageExtraMinutes?: number;
 }
 
 export interface UpdateConfigRequest {
