@@ -10,7 +10,11 @@ import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
 import type { PrefetchedRemoteSpeechChunk } from "./api";
 import { isOrganizationAccessRequiredError } from "./apiError";
 import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
-import { createPlaybackSession as createPlaybackSettlementSession } from "./ttsPlaybackSession";
+import {
+  advanceTtsPlaybackStatus,
+  createPlaybackSession as createPlaybackSettlementSession,
+  INITIAL_TTS_PLAYBACK_STATUS_STATE,
+} from "./ttsPlaybackSession";
 import {
   getKnownPlaybackDurationMilliseconds,
   playbackSecondsToMilliseconds,
@@ -679,6 +683,9 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     };
 
     const completeRemoteSuccess = async (): Promise<TtsPlaybackResult> => {
+      if (!playbackStarted) {
+        throw new TtsPlaybackTimeoutError("Remote TTS completed without playback-start evidence.");
+      }
       logTtsDiagnosticCounter("remote_tts_success", {
         source: params.source,
         preset: params.preset,
@@ -732,6 +739,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       let audioLoadedAtMs = 0;
       let playbackStartedMarked = false;
       let audioLoadSettled = false;
+      let playbackStatusState = INITIAL_TTS_PLAYBACK_STATUS_STATE;
       let lastStatusKey: string | null = null;
       let resolveAudioLoaded!: (status: AudioStatus) => void;
       const audioLoaded = new Promise<AudioStatus>((resolve) => {
@@ -829,7 +837,10 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           return;
         }
 
-        if (!audioLoadSettled) {
+        const previousPlaybackStatusState = playbackStatusState;
+        playbackStatusState = advanceTtsPlaybackStatus(playbackStatusState, status);
+
+        if (!audioLoadSettled && playbackStatusState.audioLoaded) {
           audioLoadSettled = true;
           resolveAudioLoaded(status);
         }
@@ -856,7 +867,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           });
         }
 
-        if (status.playing) {
+        if (!previousPlaybackStatusState.playbackStarted && playbackStatusState.playbackStarted) {
           markPlaybackStarted(Date.now());
         }
 
@@ -871,13 +882,21 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
               durationMillis: lastPlaybackDurationMillis,
             },
           });
-          playbackSession.settleCompleted();
+          if (playbackStatusState.playbackCompleted) {
+            playbackSession.settleCompleted();
+          } else {
+            logLifecycle({
+              phase: "premature_finish_ignored",
+              sourceKind: sessionSourceKind,
+              bytes,
+              elapsedMs: Date.now() - requestStartedAtMs,
+            });
+          }
         }
       };
 
       const statusSubscription = sound.addListener("playbackStatusUpdate", handlePlaybackStatus);
       remoteTtsStatusSubscriptions.set(sound, statusSubscription);
-      handlePlaybackStatus(sound.currentStatus);
 
       return {
         sound,
@@ -938,10 +957,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
 
       try {
         const loadStatus = await withTimeout({
-          promise: Promise.race([
-            playbackSession.audioLoaded,
-            playbackSession.playbackFinished.then(() => playbackSession.sound.currentStatus),
-          ]),
+          promise: playbackSession.audioLoaded,
           timeoutMs: TTS_AUDIO_LOAD_TIMEOUT_MS,
           createTimeoutError: () => new TtsAudioLoadTimeoutError(),
           onTimeout: () => {
@@ -994,9 +1010,6 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         playbackSession.sound.shouldCorrectPitch = true;
         playbackSession.sound.setPlaybackRate(remotePlaybackRate);
         playbackSession.sound.play();
-        if (playbackSession.sound.currentStatus.playing) {
-          playbackSession.markPlaybackStarted(audioLoadedAtMs);
-        }
         await playbackSession.playbackFinished;
         logLifecycle({
           phase: "playback_completed",

@@ -1,5 +1,6 @@
 export interface TtsChunkSequenceResult {
   outcome: string;
+  playbackStarted?: boolean;
 }
 
 export type TtsChunkSequenceCompletionStatus = "completed" | "cancelled" | "incomplete";
@@ -12,8 +13,11 @@ export interface TtsChunkSequenceCompletion {
   outcomes: string[];
 }
 
-export function isSuccessfulTtsChunkOutcome(outcome: string): boolean {
-  return outcome === "remote_tts_completed" || outcome === "fallback_tts_completed";
+export function isSuccessfulTtsChunkResult(result: TtsChunkSequenceResult): boolean {
+  return (
+    (result.outcome === "remote_tts_completed" || result.outcome === "fallback_tts_completed")
+    && result.playbackStarted === true
+  );
 }
 
 export function summarizeTtsChunkSequence(
@@ -22,7 +26,7 @@ export function summarizeTtsChunkSequence(
 ): TtsChunkSequenceCompletion {
   const safeIntendedCount = Math.max(0, Math.floor(intendedChunkCount));
   const outcomes = results.map((result) => result.outcome);
-  const completedChunkCount = outcomes.filter(isSuccessfulTtsChunkOutcome).length;
+  const completedChunkCount = results.filter(isSuccessfulTtsChunkResult).length;
   const cancelled = outcomes.includes("tts_cancelled");
   const completed =
     safeIntendedCount > 0
@@ -51,7 +55,7 @@ export async function runTtsChunkSequence<TChunk, TResult extends TtsChunkSequen
   for (let index = 0; index < params.chunks.length; index += 1) {
     const result = await params.runChunk(params.chunks[index], index, params.chunks.length);
     results.push(result);
-    if (result.outcome === "tts_cancelled" || !isSuccessfulTtsChunkOutcome(result.outcome)) {
+    if (result.outcome === "tts_cancelled" || !isSuccessfulTtsChunkResult(result)) {
       break;
     }
   }

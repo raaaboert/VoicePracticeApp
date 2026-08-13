@@ -1,5 +1,37 @@
 import { subscribeToAbort } from "./abortSignal";
 
+export interface TtsPlaybackStatusSnapshot {
+  isLoaded: boolean;
+  playing: boolean;
+  didJustFinish: boolean;
+}
+
+export interface TtsPlaybackStatusState {
+  audioLoaded: boolean;
+  playbackStarted: boolean;
+  playbackCompleted: boolean;
+}
+
+export const INITIAL_TTS_PLAYBACK_STATUS_STATE: TtsPlaybackStatusState = {
+  audioLoaded: false,
+  playbackStarted: false,
+  playbackCompleted: false,
+};
+
+export function advanceTtsPlaybackStatus(
+  state: TtsPlaybackStatusState,
+  status: TtsPlaybackStatusSnapshot,
+): TtsPlaybackStatusState {
+  const audioLoaded = state.audioLoaded || status.isLoaded;
+  const playbackStarted = state.playbackStarted || (status.isLoaded && status.playing);
+  return {
+    audioLoaded,
+    playbackStarted,
+    playbackCompleted:
+      state.playbackCompleted || (status.isLoaded && state.playbackStarted && status.didJustFinish),
+  };
+}
+
 export interface TtsPlaybackSession {
   playbackFinished: Promise<void>;
   isSettled(): boolean;

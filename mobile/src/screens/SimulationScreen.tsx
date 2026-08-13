@@ -89,7 +89,7 @@ import {
 import type { PreparedRemoteAudioSource, TtsPlaybackResult } from "../lib/ttsPlayback";
 import {
   canTransitionToCaptureAfterTts,
-  isSuccessfulTtsChunkOutcome,
+  isSuccessfulTtsChunkResult,
   runTtsChunkSequence,
   summarizeTtsChunkSequence,
 } from "../lib/ttsChunkSequence";
@@ -1329,9 +1329,6 @@ export function SimulationScreen({
             if (preparedRemoteAudio) {
               resolvedPreparedChunkByIndex.delete(index);
             }
-            if (index === 0 && utteranceResult.outcome !== "tts_cancelled") {
-              handlePlaybackStart();
-            }
             previousChunkCompletedAtMs = Date.now();
             logSimulationTiming({
               correlationId: correlationId ?? createSimulationCorrelationId(config.simulationSessionId, `chunk-${index + 1}`),
@@ -1363,7 +1360,7 @@ export function SimulationScreen({
                 timedOut: utteranceResult.timedOut,
               },
             });
-            if (isSuccessfulTtsChunkOutcome(utteranceResult.outcome)) {
+            if (isSuccessfulTtsChunkResult(utteranceResult)) {
               startPrefetchForChunk(index + 1);
             }
             return utteranceResult;
@@ -2822,7 +2819,7 @@ export function SimulationScreen({
               },
             });
             commitAssistantMessageIfNeeded();
-            if (isSuccessfulTtsChunkOutcome(speechResult.outcome)) {
+            if (isSuccessfulTtsChunkResult(speechResult)) {
               captureTransitionReason = "assistant_speech_completed";
             }
             if (!turnSummaryLogged) {

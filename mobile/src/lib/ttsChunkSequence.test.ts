@@ -16,24 +16,25 @@ test("multi-chunk assistant speech stops immediately when the active chunk is ca
       await Promise.resolve();
       return {
         outcome: index === 0 ? "tts_cancelled" : "remote_tts_completed",
+        playbackStarted: index !== 0,
       };
     },
   });
 
   assert.deepEqual(requestedChunks, [1], "chunks 2 and 3 must never be requested after chunk 1 cancellation");
-  assert.deepEqual(results, [{ outcome: "tts_cancelled" }]);
+  assert.deepEqual(results, [{ outcome: "tts_cancelled", playbackStarted: false }]);
   assert.ok(Date.now() - sequenceStartedAtMs < 500, "the cancelled aggregate sequence should settle promptly");
 });
 
 test("all intended speech chunks must genuinely complete before the response is complete", () => {
   const completed = summarizeTtsChunkSequence(2, [
-    { outcome: "remote_tts_completed" },
-    { outcome: "fallback_tts_completed" },
+    { outcome: "remote_tts_completed", playbackStarted: true },
+    { outcome: "fallback_tts_completed", playbackStarted: true },
   ]);
   assert.equal(completed.status, "completed");
   assert.equal(canTransitionToCaptureAfterTts(completed), true);
   assert.equal(
-    summarizeTtsChunkSequence(2, [{ outcome: "remote_tts_completed" }]).status,
+    summarizeTtsChunkSequence(2, [{ outcome: "remote_tts_completed", playbackStarted: true }]).status,
     "incomplete",
   );
   const startedThenFailed = summarizeTtsChunkSequence(1, [
@@ -53,6 +54,16 @@ test("all intended speech chunks must genuinely complete before the response is 
   );
 });
 
+test("completed outcome without playback-start evidence cannot transition to capture", () => {
+  const completion = summarizeTtsChunkSequence(1, [
+    { outcome: "remote_tts_completed", playbackStarted: false },
+  ]);
+
+  assert.equal(completion.status, "incomplete");
+  assert.equal(completion.completedChunkCount, 0);
+  assert.equal(canTransitionToCaptureAfterTts(completion), false);
+});
+
 test("started-then-failed playback stops the sequence before another chunk is requested", async () => {
   const requestedChunks: number[] = [];
   const results = await runTtsChunkSequence({
@@ -61,6 +72,7 @@ test("started-then-failed playback stops the sequence before another chunk is re
       requestedChunks.push(index + 1);
       return {
         outcome: index === 0 ? "remote_started_then_failed_unblocked" : "remote_tts_completed",
+        playbackStarted: true,
       };
     },
   });
