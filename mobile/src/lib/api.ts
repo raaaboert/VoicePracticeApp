@@ -29,6 +29,7 @@ import {
   UserEntitlementsResponse,
   UserProfile,
 } from "@voicepractice/shared";
+import { File } from "expo-file-system";
 import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationEvaluationResult } from "../types";
 import { createMobileApiError } from "./apiError";
@@ -791,14 +792,7 @@ export async function transcribeAudioViaApi(params: {
         : new Blob([originalBlob], { type: resolvedMimeType });
     formData.append("file", blob, "voice-input.webm");
   } else {
-    formData.append(
-      "file",
-      {
-        uri: params.audioUri,
-        name: "voice-input.m4a",
-        type: resolvedMimeType,
-      } as any,
-    );
+    formData.append("file", new File(params.audioUri) as any);
   }
 
   const payload = await requestFormData<{ text: string }>(
@@ -946,14 +940,7 @@ export async function submitSimulationTurnViaApi(params: {
         : new Blob([originalBlob], { type: resolvedMimeType });
     formData.append("file", blob, "voice-input.webm");
   } else {
-    formData.append(
-      "file",
-      {
-        uri: params.audioUri,
-        name: "voice-input.m4a",
-        type: resolvedMimeType,
-      } as any,
-    );
+    formData.append("file", new File(params.audioUri) as any);
   }
 
   formData.append(
