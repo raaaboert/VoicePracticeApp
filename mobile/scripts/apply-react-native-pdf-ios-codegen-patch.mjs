@@ -1,17 +1,15 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const EXPECTED_VERSION = "6.7.7";
 const COMPONENT_NAME = "RNPDFPdfView";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const packageJsonPath = resolve(
-  scriptDirectory,
-  "..",
-  "node_modules",
-  "react-native-pdf",
-  "package.json"
-);
+const require = createRequire(import.meta.url);
+const packageJsonPath = require.resolve("react-native-pdf/package.json", {
+  paths: [resolve(scriptDirectory, "..")],
+});
 
 function fail(message) {
   throw new Error(`[react-native-pdf-ios-codegen-patch] ${message}`);

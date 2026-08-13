@@ -43,7 +43,7 @@ test("video layout rejects invalid dimensions and retains the fallback", () => {
   }
 });
 
-test("installed Expo Video 3.0.16 uses its stock iOS naturalSize metadata", () => {
+test("installed Expo Video 55.0.19 uses its stock iOS naturalSize metadata", () => {
   const sourceDirectory = dirname(fileURLToPath(import.meta.url));
   const require = createRequire(import.meta.url);
   const packageJsonPath = require.resolve("expo-video/package.json", {
@@ -58,10 +58,10 @@ test("installed Expo Video 3.0.16 uses its stock iOS naturalSize metadata", () =
     readFileSync(resolve(sourceDirectory, "..", "..", "package.json"), "utf8")
   );
 
-  assert.equal(packageJson.version, "3.0.16");
+  assert.equal(packageJson.version, "55.0.19");
   assert.match(
     tracksSource,
-    /if let cgSize = try\? await assetTrack\.load\(\.naturalSize\) \{\s*size = VideoSize\.from\(cgSize\)\s*\}/
+    /if let cgSize = try\? await assetTrack\.load\(\.naturalSize\),\s*cgSize\.width\.isFinite,\s*cgSize\.height\.isFinite \{\s*size = VideoSize\.from\(cgSize\)\s*\}/
   );
   assert.doesNotMatch(
     tracksSource,
