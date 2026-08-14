@@ -73,8 +73,22 @@ export function getAiVoiceOption(profile: AiVoiceProfile): (typeof AI_VOICE_OPTI
   return AI_VOICE_MAP[profile] ?? AI_VOICE_MAP.balanced;
 }
 
-function containsAny(value: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => value.includes(pattern));
+function normalizeVoiceMetadata(value: string): string {
+  const normalized = value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+  return normalized ? ` ${normalized} ` : "";
+}
+
+function containsAnyVoiceHint(value: string, patterns: string[]): boolean {
+  const normalizedValue = normalizeVoiceMetadata(value);
+  return patterns.some((pattern) => {
+    const normalizedPattern = normalizeVoiceMetadata(pattern).trim();
+    return normalizedPattern.length > 0 && normalizedValue.includes(` ${normalizedPattern} `);
+  });
 }
 
 const MALE_HINTS = [
@@ -136,21 +150,22 @@ export function selectSpeechVoiceIdentifier(
   const englishVoices = voices.filter((voice) => voice.language?.toLowerCase().startsWith("en"));
   const candidates = englishVoices.length > 0 ? englishVoices : voices;
   const hints = gender === "male" ? MALE_HINTS : FEMALE_HINTS;
+  const oppositeGenderHints = gender === "male" ? FEMALE_HINTS : MALE_HINTS;
 
   const preferred = candidates.find((voice) => {
     const searchable = `${voice.identifier ?? ""} ${voice.name ?? ""}`.toLowerCase();
-    return containsAny(searchable, hints);
+    return Boolean(voice.identifier) && containsAnyVoiceHint(searchable, hints);
   });
 
   if (preferred?.identifier) {
     return preferred.identifier;
   }
 
-  if (gender === "male" && candidates.length > 1) {
-    return candidates[candidates.length - 1]?.identifier ?? candidates[0]?.identifier;
-  }
-
-  return candidates[0]?.identifier;
+  const neutralFallback = candidates.find((voice) => {
+    const searchable = `${voice.identifier ?? ""} ${voice.name ?? ""}`.toLowerCase();
+    return Boolean(voice.identifier) && !containsAnyVoiceHint(searchable, oppositeGenderHints);
+  });
+  return neutralFallback?.identifier;
 }
 
 function clamp(value: number, min: number, max: number): number {

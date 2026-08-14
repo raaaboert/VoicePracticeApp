@@ -21,6 +21,26 @@ test("remote playback is event-driven and the load gate waits only for audioLoad
   );
 });
 
+test("remote TTS keeps provider pacing authoritative and configures playback before play", () => {
+  assert.match(playbackSource, /const REMOTE_TTS_PLAYBACK_RATE = 1\.0;/);
+  const rateConfiguration = playbackSource.indexOf(
+    "playbackSession.sound.setPlaybackRate(remotePlaybackRate);",
+  );
+  const playbackStart = playbackSource.indexOf("playbackSession.sound.play();", rateConfiguration);
+
+  assert.ok(rateConfiguration >= 0, "remote playback rate configuration is missing");
+  assert.ok(playbackStart > rateConfiguration, "remote playback must be configured before play()");
+});
+
+test("remote playback cleanup and fallback isolation guards remain intact", () => {
+  assert.match(playbackSource, /sound\.pause\(\);[\s\S]*?sound\.remove\(\);/);
+  assert.match(
+    playbackSource,
+    /if \(playbackStarted\) \{[\s\S]*?fallbackAttempted: false,[\s\S]*?outcome: "remote_started_then_failed_unblocked"/,
+  );
+  assert.match(playbackSource, /return await completeRemoteSuccess\(\);/);
+});
+
 test("premature cold finish status cannot complete playback before it starts", () => {
   const state = advanceTtsPlaybackStatus(INITIAL_TTS_PLAYBACK_STATUS_STATE, {
     isLoaded: true,
