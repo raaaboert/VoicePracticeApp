@@ -134,6 +134,7 @@ class FakeBackupStorage implements TrainingContentBackupObjectStorage {
   readonly copies: Array<{ sourceBucket: string; sourceKey: string; destinationKey: string }> = [];
   results: TrainingContentBackupCopyResult[] = [];
   fail = false;
+  failure: unknown = null;
   readonly failOnCopies = new Set<number>();
 
   async copyFromSource(params: {
@@ -143,7 +144,7 @@ class FakeBackupStorage implements TrainingContentBackupObjectStorage {
   }): Promise<TrainingContentBackupCopyResult> {
     this.copies.push(params);
     if (this.fail || this.failOnCopies.has(this.copies.length)) {
-      throw new Error("provider_failure");
+      throw this.failure ?? new Error("provider_failure");
     }
     return this.results.shift() ?? "copied";
   }
@@ -215,6 +216,53 @@ test("backup failures are absorbed, counted separately, and leave ready state un
   assert.equal(asset.backedUpAt, null);
   assert.equal(asset.backupAttemptCount, 1);
   assert.equal(harness.logs.some((line) => line.includes("provider_failure")), true);
+});
+
+test("provider failures expose sanitized S3 diagnostics without storage or credential leakage", async () => {
+  const asset = readyAsset(
+    "asset_1",
+    "objects/org-sensitive/content/primary/1/private-finalization-nonce",
+    { originalFilename: "customer-plan.pdf" }
+  );
+  const harness = serviceHarness([asset]);
+  const providerMessage = [
+    "Invalid Argument: copy source bucket name error",
+    ENABLED_CONFIG.r2!.bucket,
+    asset.finalObjectKey,
+    asset.originalFilename,
+    ENABLED_CONFIG.backup.r2!.endpoint,
+    ENABLED_CONFIG.backup.r2!.accessKeyId,
+    ENABLED_CONFIG.backup.r2!.secretAccessKey,
+  ].join(" | ");
+  harness.storage.fail = true;
+  harness.storage.failure = Object.assign(new Error(providerMessage), {
+    name: "InvalidArgument",
+    Code: "InvalidArgument",
+    Message: providerMessage,
+    $metadata: {
+      httpStatusCode: 400,
+      requestId: "cf-request-123",
+    },
+  });
+
+  assert.equal(await harness.service.backupFinalizedAsset(asset), "failed");
+  const warning = harness.logs.at(-1) ?? "";
+  assert.match(warning, /category=provider_http_400/);
+  assert.match(warning, /providerCode=invalidargument/);
+  assert.match(warning, /providerMessage="Invalid Argument: copy source bucket name error/);
+  assert.match(warning, /requestId=cf-request-123/);
+  for (const sensitiveValue of [
+    ENABLED_CONFIG.r2!.bucket,
+    asset.finalObjectKey!,
+    asset.originalFilename,
+    ENABLED_CONFIG.backup.r2!.endpoint,
+    ENABLED_CONFIG.backup.r2!.accessKeyId,
+    ENABLED_CONFIG.backup.r2!.secretAccessKey,
+  ].filter((value): value is string => typeof value === "string")) {
+    assert.equal(warning.includes(sensitiveValue), false);
+  }
+  assert.doesNotMatch(warning, /https?:\/\//i);
+  assert.doesNotMatch(warning, /objects\//i);
 });
 
 test("disabled backup performs no network or durable backup calls", async () => {

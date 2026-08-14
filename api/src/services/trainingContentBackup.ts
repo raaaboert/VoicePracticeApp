@@ -86,8 +86,20 @@ export class DefaultTrainingContentBackupService implements TrainingContentBacku
       } catch {
         // The ready asset remains usable even if recording the retry state also fails.
       }
+      const diagnostics = describeBackupError(error, [
+        asset.finalObjectKey,
+        asset.originalFilename,
+        this.dependencies.config.r2?.bucket,
+        this.dependencies.config.r2?.endpoint,
+        this.dependencies.config.r2?.accessKeyId,
+        this.dependencies.config.r2?.secretAccessKey,
+        this.dependencies.config.backup.r2?.bucket,
+        this.dependencies.config.backup.r2?.endpoint,
+        this.dependencies.config.backup.r2?.accessKeyId,
+        this.dependencies.config.backup.r2?.secretAccessKey,
+      ]);
       this.logger.warn(
-        `[training-content-backup] outcome=failed assetId=${asset.id} orgId=${asset.orgId} category=${categorizeBackupError(error)} attemptCount=${attemptCount}`
+        `[training-content-backup] outcome=failed assetId=${asset.id} orgId=${asset.orgId} category=${diagnostics.category}${formatProviderDiagnostics(diagnostics)} attemptCount=${attemptCount}`
       );
       return "failed";
     }
@@ -134,6 +146,45 @@ export async function backupFinalizedAssetBestEffort(
   }
 }
 
+interface BackupErrorDiagnostics {
+  category: string;
+  providerCode: string | null;
+  providerMessage: string | null;
+  requestId: string | null;
+}
+
+function describeBackupError(
+  error: unknown,
+  sensitiveValues: Array<string | null | undefined>
+): BackupErrorDiagnostics {
+  const candidate = error as {
+    name?: unknown;
+    message?: unknown;
+    Code?: unknown;
+    Message?: unknown;
+    RequestId?: unknown;
+    $metadata?: { httpStatusCode?: unknown; requestId?: unknown };
+  } | null;
+  const status = candidate?.$metadata?.httpStatusCode;
+  const providerCode = normalizeDiagnosticToken(candidate?.Code)
+    ?? (status !== undefined ? normalizeDiagnosticToken(candidate?.name) : null);
+  const requestId = normalizeDiagnosticToken(
+    candidate?.$metadata?.requestId ?? candidate?.RequestId,
+    false
+  );
+  const hasProviderDiagnostics = typeof status === "number"
+    || providerCode !== null
+    || requestId !== null;
+  return {
+    category: categorizeBackupError(error),
+    providerCode,
+    providerMessage: hasProviderDiagnostics
+      ? sanitizeProviderMessage(candidate?.Message ?? candidate?.message, sensitiveValues)
+      : null,
+    requestId,
+  };
+}
+
 function categorizeBackupError(error: unknown): string {
   if (error instanceof Error && /^[a-z0-9_]{1,80}$/i.test(error.message)) {
     return error.message.toLowerCase();
@@ -146,6 +197,70 @@ function categorizeBackupError(error: unknown): string {
     return candidate.name.toLowerCase();
   }
   return "provider_error";
+}
+
+function normalizeDiagnosticToken(value: unknown, lowercase = true): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  if (!/^[a-z0-9._:-]{1,160}$/i.test(normalized)) {
+    return null;
+  }
+  return lowercase ? normalized.toLowerCase() : normalized;
+}
+
+function sanitizeProviderMessage(
+  value: unknown,
+  sensitiveValues: Array<string | null | undefined>
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  let sanitized = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!sanitized) {
+    return null;
+  }
+  const redactions = new Set<string>();
+  for (const candidate of sensitiveValues) {
+    if (!candidate) {
+      continue;
+    }
+    redactions.add(candidate);
+    redactions.add(encodeURIComponent(candidate));
+    redactions.add(candidate.split("/").map(encodeURIComponent).join("/"));
+  }
+  for (const redaction of [...redactions].sort((left, right) => right.length - left.length)) {
+    if (redaction.length < 3) {
+      continue;
+    }
+    sanitized = sanitized.replace(new RegExp(escapeRegExp(redaction), "gi"), "[redacted]");
+  }
+  sanitized = sanitized
+    .replace(/https?:\/\/[^\s"']+/gi, "[redacted-url]")
+    .replace(/(?:%2f|[\\/])[^\s"',;]*/gi, "[redacted-path]")
+    .replace(/[^\x20-\x7e]/g, "?")
+    .slice(0, 240)
+    .trim();
+  return sanitized || null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function formatProviderDiagnostics(diagnostics: BackupErrorDiagnostics): string {
+  const fields: string[] = [];
+  if (diagnostics.providerCode) {
+    fields.push(`providerCode=${diagnostics.providerCode}`);
+  }
+  if (diagnostics.providerMessage) {
+    fields.push(`providerMessage=${JSON.stringify(diagnostics.providerMessage)}`);
+  }
+  if (diagnostics.requestId) {
+    fields.push(`requestId=${diagnostics.requestId}`);
+  }
+  return fields.length ? ` ${fields.join(" ")}` : "";
 }
 
 export function createTrainingContentBackupService(
