@@ -2,6 +2,8 @@ export const SIMULATION_AUDIO_GUARD_MIN_DURATION_MS = 500;
 export const SIMULATION_AUDIO_GUARD_MIN_BYTES = 1_500;
 
 export type SimulationAudioGuardRejectReason = "missing_file" | "too_small" | "too_short";
+export type SimulationCaptureFailureReason = SimulationAudioGuardRejectReason | "no_usable_transcript";
+export type SimulationTranscriptionTrigger = "submit" | "automatic";
 
 export type SimulationAudioGuardResult =
   | {
@@ -13,6 +15,36 @@ export type SimulationAudioGuardResult =
       reason: SimulationAudioGuardRejectReason;
       metadataUnavailable: boolean;
     };
+
+export function shouldAttemptSimulationTranscription(params: {
+  trigger: SimulationTranscriptionTrigger;
+  meteringSeen: boolean;
+  detectedVoice: boolean;
+  heardVoice: boolean;
+  turnDurationSeconds: number;
+}): boolean {
+  if (params.trigger === "submit") {
+    return true;
+  }
+
+  return (
+    params.detectedVoice
+    || params.heardVoice
+    || (!params.meteringSeen && params.turnDurationSeconds >= 3)
+  );
+}
+
+export function getSimulationCaptureFailureStatus(
+  reason: SimulationCaptureFailureReason,
+): string {
+  switch (reason) {
+    case "missing_file":
+    case "too_small":
+    case "too_short":
+    case "no_usable_transcript":
+      return "We received your response, but didn't hear clear speech. Check your microphone and try again.";
+  }
+}
 
 export function validateSimulationAudioForUpload(params: {
   audioUri?: string | null;

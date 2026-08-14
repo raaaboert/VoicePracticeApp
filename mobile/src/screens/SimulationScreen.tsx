@@ -69,10 +69,13 @@ import {
   SimulationAppStateStatus,
 } from "../lib/simulationAppStateLifecycle";
 import {
+  getSimulationCaptureFailureStatus,
   SIMULATION_AUDIO_GUARD_MIN_BYTES,
   SIMULATION_AUDIO_GUARD_MIN_DURATION_MS,
+  shouldAttemptSimulationTranscription,
   validateSimulationAudioForUpload,
 } from "../lib/simulationAudioGuard";
+import type { SimulationCaptureFailureReason } from "../lib/simulationAudioGuard";
 import { buildNoTranscriptDiagnostics } from "../lib/simulationDiagnostics";
 import {
   getSimulationAudioRecorderOptions,
@@ -1711,7 +1714,7 @@ export function SimulationScreen({
     }
   };
 
-  const startListeningTurn = async () => {
+  const startListeningTurn = async (statusAfterStart?: string) => {
     const requestCorrelationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
     const turnNumber = messagesRef.current.filter((message) => message.role === "user").length + 1;
     logSimulationTiming({
@@ -1891,7 +1894,7 @@ export function SimulationScreen({
       recordingSafetySignalRef.current = null;
 
       setMode("recording");
-      setStatus("Listening... Tap Submit Response when you're done.");
+      setStatus(statusAfterStart ?? "Listening... Tap Submit Response when you're done.");
       logSimulationTiming({
         correlationId: turnCorrelationId,
         phase: "turn_recording_started",
@@ -2015,6 +2018,8 @@ export function SimulationScreen({
     let continueLoop = false;
     let organizationAccessRequired = false;
     let captureTransitionReason: "assistant_speech_completed" | "no_clear_speech" | "turn_error_recovery" | null = null;
+    let captureFailureReason: SimulationCaptureFailureReason | null = null;
+    let captureRetryStatus: string | undefined;
     const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
     const turnNumber = messagesRef.current.filter((message) => message.role === "user").length + 1;
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
@@ -2168,10 +2173,13 @@ export function SimulationScreen({
       });
       const inferredVoiceWithoutMeter =
         !meteringSeenRef.current && (turnDurationSeconds >= 3 || finalizeTrigger === "submit");
-      const shouldAttemptTranscription =
-        detectedVoiceRef.current ||
-        heardVoiceRef.current ||
-        inferredVoiceWithoutMeter;
+      const shouldAttemptTranscription = shouldAttemptSimulationTranscription({
+        trigger: finalizeTrigger,
+        meteringSeen: meteringSeenRef.current,
+        detectedVoice: detectedVoiceRef.current,
+        heardVoice: heardVoiceRef.current,
+        turnDurationSeconds,
+      });
       let shouldUploadAudioForTranscription = shouldAttemptTranscription;
       if (shouldAttemptTranscription) {
         await measureRecordingPayload();
@@ -2221,6 +2229,7 @@ export function SimulationScreen({
           });
         } else {
           shouldUploadAudioForTranscription = false;
+          captureFailureReason = audioGuardResult.reason;
           const rejectionPhase =
             audioGuardResult.reason === "missing_file"
               ? "audio_guard_rejected_missing_file"
@@ -2831,7 +2840,9 @@ export function SimulationScreen({
           }
         }
       } else {
-        setStatus("No clear speech detected. Listening again...");
+        captureFailureReason ??= "no_usable_transcript";
+        captureRetryStatus = getSimulationCaptureFailureStatus(captureFailureReason);
+        setStatus(captureRetryStatus);
         captureTransitionReason = "no_clear_speech";
         emitTurnSummary({
           outcome: "no_clear_speech",
@@ -2955,7 +2966,7 @@ export function SimulationScreen({
             transitionToCapture: true,
           },
         });
-        void startListeningTurn();
+        void startListeningTurn(captureRetryStatus);
       } else if (!unmountedRef.current) {
         setMode("idle");
       }
