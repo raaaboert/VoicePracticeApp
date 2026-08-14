@@ -47,12 +47,14 @@ import {
   createSimulationCorrelationId,
   createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
+  getSimulationActionDockFeedback,
   getSimulationLifecycleResumeIntent,
   getSimulationPrimaryButtonRoute,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
   shouldCommitResumedAssistantResponse,
   shouldShowUserTurnInstruction,
+  SIMULATION_FINALIZE_RETRY_STATUS,
   SimulationLifecycleResumeIntent,
   TurnRecordingSafetySignal,
   TurnFinalizeTrigger,
@@ -460,6 +462,7 @@ export function SimulationScreen({
   const [mode, setMode] = useState<OrbMode>("thinking");
   const [status, setStatus] = useState("Preparing scenario...");
   const [error, setError] = useState<string | null>(null);
+  const [actionDockRetryFeedback, setActionDockRetryFeedback] = useState<string | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [useLocalMockMode, setUseLocalMockMode] = useState(false);
@@ -1895,6 +1898,7 @@ export function SimulationScreen({
 
       setMode("recording");
       setStatus(statusAfterStart ?? "Listening... Tap Submit Response when you're done.");
+      setActionDockRetryFeedback(statusAfterStart ?? null);
       logSimulationTiming({
         correlationId: turnCorrelationId,
         phase: "turn_recording_started",
@@ -2015,6 +2019,7 @@ export function SimulationScreen({
     setMode("thinking");
     setStatus("Finalizing your audio...");
     setError(null);
+    setActionDockRetryFeedback(null);
     let continueLoop = false;
     let organizationAccessRequired = false;
     let captureTransitionReason: "assistant_speech_completed" | "no_clear_speech" | "turn_error_recovery" | null = null;
@@ -2843,6 +2848,7 @@ export function SimulationScreen({
         captureFailureReason ??= "no_usable_transcript";
         captureRetryStatus = getSimulationCaptureFailureStatus(captureFailureReason);
         setStatus(captureRetryStatus);
+        setActionDockRetryFeedback(captureRetryStatus);
         captureTransitionReason = "no_clear_speech";
         emitTurnSummary({
           outcome: "no_clear_speech",
@@ -2897,6 +2903,8 @@ export function SimulationScreen({
       } else {
         const turnErrorMessage = getErrorMessage(turnError, "Could not process voice response.");
         setError(turnErrorMessage);
+        captureRetryStatus = SIMULATION_FINALIZE_RETRY_STATUS;
+        setActionDockRetryFeedback(captureRetryStatus);
         if (isPlaceholderTranscriptError(turnError)) {
           setStatus("Transcription missing. Please verify REMOTE mode.");
         }
@@ -3984,6 +3992,12 @@ export function SimulationScreen({
     lifecyclePauseActive,
     isStartingTurn: isStartingTurn || isResumingLifecyclePause,
   });
+  const actionDockFeedback = getSimulationActionDockFeedback({
+    sessionActive,
+    mode,
+    lifecyclePauseActive,
+    retryFeedback: actionDockRetryFeedback,
+  });
   const endButtonDisabled = isInitializing || !sessionActive || sessionCompletionInProgressRef.current;
   const hintText = localTestMode
     ? "Local test mode: replies are mocked. Tap Submit Response when you finish speaking."
@@ -4327,7 +4341,18 @@ export function SimulationScreen({
             },
           ]}
         >
-          {showUserTurnInstruction ? (
+          {actionDockFeedback ? (
+            <View
+              style={[
+                styles.actionDockFeedback,
+                compactVerticalLayout ? styles.actionDockFeedbackCompact : null,
+              ]}
+            >
+              <Text accessibilityRole="alert" style={styles.actionDockFeedbackText}>
+                {actionDockFeedback}
+              </Text>
+            </View>
+          ) : showUserTurnInstruction ? (
             <Text style={styles.userTurnInstruction}>
               Your turn — record your response, then submit when finished.
             </Text>
@@ -4972,6 +4997,24 @@ function createStyles(palette: SimulationPalette) {
       fontSize: 14,
       fontWeight: "700",
       lineHeight: 19,
+      textAlign: "center",
+    },
+    actionDockFeedback: {
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: "rgba(255, 124, 124, 0.55)",
+      backgroundColor: "rgba(255, 84, 84, 0.10)",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    actionDockFeedbackCompact: {
+      paddingVertical: 6,
+    },
+    actionDockFeedbackText: {
+      color: palette.danger,
+      fontSize: 13,
+      fontWeight: "700",
+      lineHeight: 18,
       textAlign: "center",
     },
     busyButtonText: {

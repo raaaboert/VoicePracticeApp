@@ -7,6 +7,7 @@ export interface SimulationStartProgress {
 
 export type TurnFinalizeTrigger = "submit";
 export type TurnRecordingSafetySignal = "long-pause" | "soft-limit" | "absolute-limit";
+export const SIMULATION_FINALIZE_RETRY_STATUS = "We couldn't process that response. Please try again.";
 export type SimulationLifecycleResumeIntent =
   | {
       kind: "replay_assistant";
@@ -160,6 +161,24 @@ export function shouldShowUserTurnInstruction(params: {
     && !params.lifecyclePauseActive
     && !params.isStartingTurn
   );
+}
+
+export function getSimulationActionDockFeedback(params: {
+  sessionActive: boolean;
+  mode: SimulationTurnMode;
+  lifecyclePauseActive: boolean;
+  retryFeedback: string | null;
+}): string | null {
+  if (
+    !params.sessionActive
+    || params.lifecyclePauseActive
+    || (params.mode !== "thinking" && params.mode !== "recording")
+  ) {
+    return null;
+  }
+
+  const feedback = params.retryFeedback?.trim() ?? "";
+  return feedback || null;
 }
 
 export function getTurnRecordingSafetySignal(params: {

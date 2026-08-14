@@ -2,12 +2,14 @@ import {
   createSimulationCorrelationId,
   createSimulationTurnCorrelationId,
   getPrimarySimulationAction,
+  getSimulationActionDockFeedback,
   getSimulationLifecycleResumeIntent,
   getSimulationPrimaryButtonRoute,
   getSimulationStartPlan,
   getTurnRecordingSafetySignal,
   shouldCommitResumedAssistantResponse,
   shouldShowUserTurnInstruction,
+  SIMULATION_FINALIZE_RETRY_STATUS,
 } from "./simulationInteractionModel";
 
 function assert(condition: boolean, message: string): void {
@@ -267,6 +269,71 @@ runTest("the user-turn instruction appears only while actively recording", () =>
       `instruction should be hidden for ${JSON.stringify(hiddenState)}`,
     );
   }
+});
+
+runTest("fixed action feedback remains available for compact and noncompact recording layouts", () => {
+  const retryFeedback = "We received your response, but didn't hear clear speech. Check your microphone and try again.";
+
+  for (const compactLayout of [true, false]) {
+    const feedback = getSimulationActionDockFeedback({
+      sessionActive: true,
+      mode: "recording",
+      lifecyclePauseActive: false,
+      retryFeedback,
+    });
+
+    assert(
+      feedback === retryFeedback,
+      `${compactLayout ? "compact phone" : "noncompact/tablet"} layout should expose the same fixed-dock feedback`,
+    );
+  }
+});
+
+runTest("generic finalize failures use safe fixed-dock retry copy", () => {
+  assert(SIMULATION_FINALIZE_RETRY_STATUS.includes("try again"), "generic retry copy should be actionable");
+  assert(
+    !/exception|stack|STT|URI|VAD/i.test(SIMULATION_FINALIZE_RETRY_STATUS),
+    "generic retry copy should not expose technical details",
+  );
+  assert(
+    getSimulationActionDockFeedback({
+      sessionActive: true,
+      mode: "thinking",
+      lifecyclePauseActive: false,
+      retryFeedback: SIMULATION_FINALIZE_RETRY_STATUS,
+    }) === SIMULATION_FINALIZE_RETRY_STATUS,
+    "generic retry feedback should be visible before recording restarts",
+  );
+});
+
+runTest("successful or irrelevant states do not retain fixed action feedback", () => {
+  assert(
+    getSimulationActionDockFeedback({
+      sessionActive: true,
+      mode: "recording",
+      lifecyclePauseActive: false,
+      retryFeedback: null,
+    }) === null,
+    "cleared feedback should stay hidden after a new submission starts",
+  );
+  assert(
+    getSimulationActionDockFeedback({
+      sessionActive: true,
+      mode: "idle",
+      lifecyclePauseActive: false,
+      retryFeedback: SIMULATION_FINALIZE_RETRY_STATUS,
+    }) === null,
+    "recording interruption and other idle recovery states should retain their dedicated UI",
+  );
+  assert(
+    getSimulationActionDockFeedback({
+      sessionActive: true,
+      mode: "recording",
+      lifecyclePauseActive: true,
+      retryFeedback: SIMULATION_FINALIZE_RETRY_STATUS,
+    }) === null,
+    "lifecycle pause UI should not be mislabeled as a finalize failure",
+  );
 });
 
 runTest("long pause becomes a guidance signal instead of an auto-submit trigger", () => {
