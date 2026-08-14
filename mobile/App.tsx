@@ -749,6 +749,7 @@ export default function App() {
   const sampleAbortControllerRef = useRef<AbortController | null>(null);
   const sampleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalTransitionRef = useRef(false);
+  const identityScopedRequestGenerationRef = useRef(0);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [scopedConfigError, setScopedConfigError] = useState<string | null>(null);
@@ -857,6 +858,65 @@ export default function App() {
   const [adminUserOverageMode, setAdminUserOverageMode] = useState<"unlimited" | "finite">("unlimited");
   const [adminUserOverageExtraMinutesInput, setAdminUserOverageExtraMinutesInput] = useState("");
   const [isSavingOrgAdminSettings, setIsSavingOrgAdminSettings] = useState(false);
+
+  const invalidateIdentityScopedState = useCallback(() => {
+    identityScopedRequestGenerationRef.current += 1;
+    adminUserListLoadStateRef.current = "outside";
+
+    setConfig(null);
+    setHasAuthenticatedScopedConfig(false);
+    setEntitlements(null);
+    setTrainingContentEnabled(false);
+    setTrainingContentNotice(null);
+    setIsTrainingContentOpening(false);
+    setMyOrgAccessRequests([]);
+    setOrgAccessRequestsLoading(false);
+    setIsOrgRequestSaving(false);
+
+    setSimulationConfig(null);
+    setLastCompletedConfig(null);
+    setScorecard(null);
+    setScorecardError(null);
+    setScorecardStatus("score_unavailable");
+    setScorecardDiagnostics(null);
+    setLastTranscript(null);
+    setSetupError(null);
+
+    setDashboardSegmentId("");
+    setScoreSummary(null);
+    setDashboardError(null);
+    setDashboardLoading(false);
+
+    setOrgAdminDashboard(null);
+    setOrgAdminAnalytics(null);
+    setOrgAdminUsers(null);
+    setOrgAdminAccessRequests(null);
+    setSelectedAdminUserId("");
+    setOrgAdminUserDetail(null);
+    setAdminLoading(false);
+    setAdminError(null);
+    setAdminNotice(null);
+    setAdminDefaultDailyMinutesInput("");
+    setAdminEmployeeIdInput("");
+    setAdminUserDailyMode("default");
+    setAdminUserDailyMinutesInput("");
+    setAdminUserOverageAllowed(false);
+    setAdminUserOverageDurationDaysInput("1");
+    setAdminUserOverageMode("unlimited");
+    setAdminUserOverageExtraMinutesInput("");
+    setIsSavingOrgAdminSettings(false);
+
+    setSettingsNotice(null);
+    setSettingsError(null);
+    setIsSettingsSaving(false);
+
+    organizationPlanSupportSubmittingRef.current = false;
+    setOrganizationPlanSupportNotice(null);
+    setOrganizationPlanSupportError(null);
+    setOrganizationPlanSupportDraft("");
+    setIsOrganizationPlanSupportOpen(false);
+    setIsOrganizationPlanSupportSubmitting(false);
+  }, []);
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
   const remoteTtsEnabled = useMemo(() => {
@@ -1525,6 +1585,7 @@ export default function App() {
       return;
     }
 
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setDashboardLoading(true);
     setDashboardError(null);
 
@@ -1533,8 +1594,14 @@ export default function App() {
         days: dashboardDays,
         segmentId: dashboardSegmentId.trim() ? dashboardSegmentId.trim() : undefined,
       });
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setScoreSummary(payload);
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       const message = getErrorMessage(caught, "Could not load dashboard stats.");
       setDashboardError(message);
       void submitAutoErrorReport("usage_dashboard.refresh", caught, {
@@ -1545,7 +1612,9 @@ export default function App() {
         },
       });
     } finally {
-      setDashboardLoading(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setDashboardLoading(false);
+      }
     }
   }, [dashboardDays, dashboardSegmentId, mobileAuthToken, submitAutoErrorReport, user]);
 
@@ -1560,6 +1629,7 @@ export default function App() {
       return;
     }
 
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setAdminLoading(true);
     setAdminError(null);
 
@@ -1568,12 +1638,18 @@ export default function App() {
         fetchOrgAdminDashboard(user.id, mobileAuthToken),
         fetchOrgAdminAnalytics(user.id, mobileAuthToken, { days: adminRangeDays }),
       ]);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setOrgAdminDashboard(dashboardPayload);
       setAdminDefaultDailyMinutesInput(
         String(Math.max(0, Math.floor((dashboardPayload.org.perUserDailySecondsCap ?? 0) / 60))),
       );
       setOrgAdminAnalytics(analyticsPayload);
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       const message = getErrorMessage(caught, "Could not load org admin dashboard.");
       setAdminError(message);
       void submitAutoErrorReport("admin_org_dashboard.refresh", caught, {
@@ -1581,7 +1657,9 @@ export default function App() {
         details: { days: adminRangeDays },
       });
     } finally {
-      setAdminLoading(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setAdminLoading(false);
+      }
     }
   }, [adminRangeDays, mobileAuthToken, submitAutoErrorReport, user]);
 
@@ -1596,20 +1674,29 @@ export default function App() {
       return;
     }
 
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setAdminLoading(true);
     setAdminError(null);
 
     try {
       const payload = await fetchOrgAdminUsers(user.id, mobileAuthToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setOrgAdminUsers(payload);
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       const message = getErrorMessage(caught, "Could not load organization users.");
       setAdminError(message);
       void submitAutoErrorReport("admin_users.refresh", caught, {
         screen: "admin_user_list",
       });
     } finally {
-      setAdminLoading(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setAdminLoading(false);
+      }
     }
   }, [mobileAuthToken, submitAutoErrorReport, user]);
 
@@ -1625,14 +1712,20 @@ export default function App() {
   );
 
   const loadMyOrgAccessRequestsForSession = useCallback(async (nextUser: UserProfile, authToken: string) => {
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setOrgAccessRequestsLoading(true);
     try {
       const payload = await fetchMyOrgAccessRequests(nextUser.id, authToken);
       const requests = payload.requests ?? [];
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return [];
+      }
       setMyOrgAccessRequests(requests);
       return requests;
     } finally {
-      setOrgAccessRequestsLoading(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setOrgAccessRequestsLoading(false);
+      }
     }
   }, []);
 
@@ -1659,19 +1752,28 @@ export default function App() {
       return;
     }
 
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setAdminLoading(true);
     setAdminError(null);
     try {
       const payload = await fetchOrgAdminAccessRequests(user.id, mobileAuthToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setOrgAdminAccessRequests(payload);
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       const message = getErrorMessage(caught, "Could not load membership requests.");
       setAdminError(message);
       void submitAutoErrorReport("admin_access_requests.refresh", caught, {
         screen: "admin_org_requests",
       });
     } finally {
-      setAdminLoading(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setAdminLoading(false);
+      }
     }
   }, [mobileAuthToken, submitAutoErrorReport, user]);
 
@@ -1681,12 +1783,19 @@ export default function App() {
         return;
       }
 
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       setAdminLoading(true);
       setAdminError(null);
       try {
         await decideOrgAdminAccessRequest(user.id, requestId, action, mobileAuthToken);
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         await Promise.all([refreshOrgAdminAccessRequests(), refreshOrgAdminUsers()]);
       } catch (caught) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         const message = getErrorMessage(caught, "Could not update request status.");
         setAdminError(message);
         void submitAutoErrorReport("admin_access_requests.decide", caught, {
@@ -1694,7 +1803,9 @@ export default function App() {
           details: { requestId, action },
         });
       } finally {
-        setAdminLoading(false);
+        if (requestGeneration === identityScopedRequestGenerationRef.current) {
+          setAdminLoading(false);
+        }
       }
     },
     [mobileAuthToken, refreshOrgAdminAccessRequests, refreshOrgAdminUsers, submitAutoErrorReport, user],
@@ -1713,11 +1824,15 @@ export default function App() {
         return;
       }
 
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       setAdminLoading(true);
       setAdminError(null);
 
       try {
         const payload = await fetchOrgAdminUserDetail(user.id, targetUserId, mobileAuthToken, { days: 30 });
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         setOrgAdminUserDetail(payload);
         setAdminEmployeeIdInput(payload.user.employeeId ?? "");
         setAdminUserDailyMode(payload.user.dailySecondsCapOverride === null ? "default" : "custom");
@@ -1739,6 +1854,9 @@ export default function App() {
           : 1;
         setAdminUserOverageDurationDaysInput(String(remainingDays));
       } catch (caught) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         const message = getErrorMessage(caught, "Could not load user details.");
         setAdminError(message);
         void submitAutoErrorReport("admin_user_detail.refresh", caught, {
@@ -1746,7 +1864,9 @@ export default function App() {
           details: { targetUserId },
         });
       } finally {
-        setAdminLoading(false);
+        if (requestGeneration === identityScopedRequestGenerationRef.current) {
+          setAdminLoading(false);
+        }
       }
     },
     [mobileAuthToken, submitAutoErrorReport, user],
@@ -1765,6 +1885,7 @@ export default function App() {
         return;
       }
 
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       setAdminLoading(true);
       setAdminError(null);
 
@@ -1772,8 +1893,14 @@ export default function App() {
         await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
           status: locked ? "disabled" : "active",
         });
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
       } catch (caught) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         const message = getErrorMessage(caught, "Could not update user status.");
         setAdminError(message);
         void submitAutoErrorReport("admin_user_status.update", caught, {
@@ -1781,7 +1908,9 @@ export default function App() {
           details: { targetUserId, locked },
         });
       } finally {
-        setAdminLoading(false);
+        if (requestGeneration === identityScopedRequestGenerationRef.current) {
+          setAdminLoading(false);
+        }
       }
     },
     [mobileAuthToken, refreshOrgAdminUserDetail, refreshOrgAdminUsers, submitAutoErrorReport, user],
@@ -1824,6 +1953,7 @@ export default function App() {
         return;
       }
 
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       setAdminLoading(true);
       setAdminError(null);
 
@@ -1839,9 +1969,15 @@ export default function App() {
               }
             : {}),
         });
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         setAdminNotice("User usage controls saved.");
         await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
       } catch (caught) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         const message = getErrorMessage(caught, "Could not update user usage controls.");
         setAdminError(message);
         void submitAutoErrorReport("admin_user_usage_controls.update", caught, {
@@ -1849,7 +1985,9 @@ export default function App() {
           details: { targetUserId },
         });
       } finally {
-        setAdminLoading(false);
+        if (requestGeneration === identityScopedRequestGenerationRef.current) {
+          setAdminLoading(false);
+        }
       }
     },
     [
@@ -1880,6 +2018,7 @@ export default function App() {
         return;
       }
 
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       setAdminLoading(true);
       setAdminError(null);
 
@@ -1887,8 +2026,14 @@ export default function App() {
         await setOrgAdminUserControls(user.id, targetUserId, mobileAuthToken, {
           employeeId: adminEmployeeIdInput,
         });
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         await Promise.all([refreshOrgAdminUsers(), refreshOrgAdminUserDetail(targetUserId)]);
       } catch (caught) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return;
+        }
         const message = getErrorMessage(caught, "Could not update Employee ID.");
         setAdminError(message);
         void submitAutoErrorReport("admin_user_employee_id.update", caught, {
@@ -1896,7 +2041,9 @@ export default function App() {
           details: { targetUserId },
         });
       } finally {
-        setAdminLoading(false);
+        if (requestGeneration === identityScopedRequestGenerationRef.current) {
+          setAdminLoading(false);
+        }
       }
     },
     [
@@ -1927,16 +2074,23 @@ export default function App() {
     }
 
     const perUserDailySecondsCap = parsedMinutes * 60;
+    const requestGeneration = identityScopedRequestGenerationRef.current;
 
     setAdminError(null);
     setAdminNotice(null);
     setIsSavingOrgAdminSettings(true);
     try {
       const payload = await updateOrgAdminOrgSettings(user.id, mobileAuthToken, { perUserDailySecondsCap });
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setAdminDefaultDailyMinutesInput(String(Math.floor(payload.org.perUserDailySecondsCap / 60)));
       setAdminNotice(`Saved. Default per-user daily limit is ${Math.floor(payload.org.perUserDailySecondsCap / 60)} minute(s).`);
       await refreshOrgAdminDashboard();
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       const message = getErrorMessage(caught, "Could not save org settings.");
       setAdminError(message);
       void submitAutoErrorReport("admin_org_settings.save", caught, {
@@ -1944,7 +2098,9 @@ export default function App() {
         details: { perUserDailySecondsCap },
       });
     } finally {
-      setIsSavingOrgAdminSettings(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setIsSavingOrgAdminSettings(false);
+      }
     }
   }, [adminDefaultDailyMinutesInput, mobileAuthToken, refreshOrgAdminDashboard, submitAutoErrorReport, user]);
 
@@ -2066,6 +2222,8 @@ export default function App() {
       }
 
       const previousActiveOrgId = activeSuperUserOrgId;
+      invalidateIdentityScopedState();
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       setIsSuperUserOrgLoading(true);
       setSuperUserOrgError(null);
 
@@ -2075,7 +2233,13 @@ export default function App() {
           fetchEntitlements(nextUser.id, authToken),
           fetchMobileConfig(nextUser.id, authToken),
         ]);
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return false;
+        }
         await saveSuperUserActiveOrgId(trimmedOrgId);
+        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+          return false;
+        }
         setActiveSuperUserOrgIdState(trimmedOrgId);
         setSelectedSuperUserOrgId(trimmedOrgId);
         setEntitlements(nextEntitlements);
@@ -2101,7 +2265,7 @@ export default function App() {
         setIsSuperUserOrgLoading(false);
       }
     },
-    [activeSuperUserOrgId, submitAutoErrorReport, superUserOrgReturnScreen],
+    [activeSuperUserOrgId, invalidateIdentityScopedState, submitAutoErrorReport, superUserOrgReturnScreen],
   );
 
   const resetSessionToOnboarding = useCallback(async (
@@ -2109,6 +2273,11 @@ export default function App() {
     options?: { preserveOnboardingValues?: boolean },
   ) => {
     const shouldPreserveOnboardingValues = options?.preserveOnboardingValues === true;
+    invalidateIdentityScopedState();
+    approvalTransitionRef.current = false;
+    setUser(null);
+    setMobileAuthToken(null);
+    setHasAuthenticatedScopedConfig(false);
     await clearUserId();
     setActiveSuperUserOrgId(null);
     setActiveSuperUserOrgIdState(null);
@@ -2118,24 +2287,16 @@ export default function App() {
     setSuperUserOrgError(null);
     setSuperUserOrgNotice(null);
     setSuperUserOrgReturnScreen(null);
-    setUser(null);
-    setEntitlements(null);
-    setMobileAuthToken(null);
     setPendingVerificationUserId(null);
-    setTrainingContentEnabled(false);
-    setTrainingContentNotice(null);
-    setIsTrainingContentOpening(false);
     setVerificationCode("");
     setVerificationExpiresAt(null);
     setVerificationNotice(null);
     setVerificationError(null);
     setIsOnboardingSaving(false);
     setIsVerificationSaving(false);
-    setHasAuthenticatedScopedConfig(false);
     setOrgJoinCodeInput("");
     setOrgRequestNotice(null);
     setOrgRequestError(null);
-    setMyOrgAccessRequests([]);
     if (!shouldPreserveOnboardingValues) {
       setOnboardingEmail("");
       setOnboardingFirstName("");
@@ -2149,7 +2310,7 @@ export default function App() {
     setScopedConfigError(null);
     setOnboardingError(notice ?? null);
     setScreen("onboarding");
-  }, [detectedTimezone]);
+  }, [detectedTimezone, invalidateIdentityScopedState]);
 
   const loadAuthenticatedScopedConfig = useCallback(
     async (
@@ -2158,15 +2319,28 @@ export default function App() {
       options?: {
         source: string;
         fallbackMessage: string;
+        requestGeneration?: number;
       },
     ): Promise<boolean> => {
       try {
         const scopedConfig = await fetchMobileConfig(nextUser.id, authToken);
+        if (
+          options?.requestGeneration !== undefined
+          && options.requestGeneration !== identityScopedRequestGenerationRef.current
+        ) {
+          return false;
+        }
         setConfig(scopedConfig);
         setHasAuthenticatedScopedConfig(true);
         setScopedConfigError(null);
         return true;
       } catch (caught) {
+        if (
+          options?.requestGeneration !== undefined
+          && options.requestGeneration !== identityScopedRequestGenerationRef.current
+        ) {
+          return false;
+        }
         const message = getErrorMessage(caught, options?.fallbackMessage ?? "Could not load your company configuration.");
         setHasAuthenticatedScopedConfig(false);
         setScopedConfigError(message);
@@ -2187,12 +2361,18 @@ export default function App() {
 
   const activateApprovedMobileSession = useCallback(
     async (nextUser: UserProfile, authToken: string, source: string): Promise<boolean> => {
+      invalidateIdentityScopedState();
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       const nextEntitlements = await fetchEntitlements(nextUser.id, authToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return false;
+      }
       setUser(nextUser);
       setEntitlements(nextEntitlements);
       const scopedConfigLoaded = await loadAuthenticatedScopedConfig(nextUser, authToken, {
         source: `${source}.scoped_config`,
         fallbackMessage: "Could not load your company configuration. Peritio is blocking generic content until the scoped configuration is available.",
+        requestGeneration,
       });
       if (!scopedConfigLoaded) {
         return false;
@@ -2204,7 +2384,7 @@ export default function App() {
       setScreen("home");
       return true;
     },
-    [loadAuthenticatedScopedConfig],
+    [invalidateIdentityScopedState, loadAuthenticatedScopedConfig],
   );
 
   const applyOrganizationAccessRoute = useCallback(
@@ -2231,7 +2411,11 @@ export default function App() {
 
   const resolveOrganizationAccessForSession = useCallback(
     async (nextUser: UserProfile, authToken: string, submittedNotice?: string | null) => {
+      const requestGeneration = identityScopedRequestGenerationRef.current;
       const requests = await loadMyOrgAccessRequestsForSession(nextUser, authToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return resolveMobileOrganizationAccessState(nextUser, requests);
+      }
       return applyOrganizationAccessRoute(nextUser, requests, submittedNotice);
     },
     [applyOrganizationAccessRoute, loadMyOrgAccessRequestsForSession],
@@ -2242,10 +2426,14 @@ export default function App() {
       return;
     }
 
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setOrgAccessRequestsLoading(true);
     setOrgRequestError(null);
     try {
       const nextUser = await fetchMobileUser(user.id, mobileAuthToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setUser(nextUser);
       if (hasApprovedMobileOrganizationAccess(nextUser)) {
         approvalTransitionRef.current = true;
@@ -2258,14 +2446,22 @@ export default function App() {
       }
 
       const requests = await loadMyOrgAccessRequestsForSession(nextUser, mobileAuthToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       applyOrganizationAccessRoute(nextUser, requests);
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setOrgRequestError(getErrorMessage(caught, "Could not refresh your access request status."));
       void submitAutoErrorReport("pending_approval.refresh", caught, {
         screen: "pending_approval",
       });
     } finally {
-      setOrgAccessRequestsLoading(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setOrgAccessRequestsLoading(false);
+      }
     }
   }, [
     activateApprovedMobileSession,
@@ -3039,9 +3235,13 @@ export default function App() {
 
     setOrgRequestError(null);
     setOrgRequestNotice(null);
+    const requestGeneration = identityScopedRequestGenerationRef.current;
     setIsOrgRequestSaving(true);
     try {
       const payload = await submitOrgAccessRequest(user.id, joinCode, mobileAuthToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       setOrgRequestNotice(
         payload.created
           ? "Request submitted. Your org admin can approve company membership from the Admin section."
@@ -3049,19 +3249,27 @@ export default function App() {
       );
       setOrgJoinCodeInput("");
       const requests = await loadMyOrgAccessRequestsForSession(user, mobileAuthToken);
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       applyOrganizationAccessRoute(
         user,
         requests,
         payload.created ? "Your access request has been submitted." : "Your access request is already pending.",
       );
     } catch (caught) {
+      if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        return;
+      }
       const message = getErrorMessage(caught, "Could not submit org access request.");
       setOrgRequestError(message);
       void submitAutoErrorReport("org_access_request.submit", caught, {
         screen: "domain_match",
       });
     } finally {
-      setIsOrgRequestSaving(false);
+      if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        setIsOrgRequestSaving(false);
+      }
     }
   };
 
@@ -5325,7 +5533,10 @@ export default function App() {
     }
 
     const orgName =
-      orgAdminUsers?.org?.name ?? orgAdminDashboard?.org?.name ?? orgAdminUserDetail?.org?.name ?? "Your organization";
+      orgAdminUsers?.org?.name
+      ?? orgAdminDashboard?.org?.name
+      ?? orgAdminUserDetail?.org?.name
+      ?? "Loading organization...";
     const roleLabel =
       (ORG_USER_ROLE_LABELS as unknown as Record<string, string>)[user.orgRole] ?? user.orgRole ?? "user";
 
@@ -5864,24 +6075,34 @@ export default function App() {
                       Requested: {formatDateLabel(row.createdAt)}{"\n"}
                       Expires: {formatDateLabel(row.expiresAt)}
                     </Text>
-                    <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
+                    <View style={styles.orgAccessRequestActions}>
                       <Pressable
-                        style={[styles.primaryButton, adminLoading ? styles.disabled : null]}
+                        style={[
+                          styles.primaryButton,
+                          styles.orgAccessRequestAction,
+                          adminLoading ? styles.disabled : null,
+                        ]}
                         disabled={adminLoading}
                         onPress={() => {
                           void decideOrgAccessRequest(row.id, "approve");
                         }}
                       >
-                        <Text style={styles.primaryButtonText}>Approve Membership</Text>
+                        <Text style={[styles.primaryButtonText, styles.orgAccessRequestActionText]}>
+                          Approve Membership
+                        </Text>
                       </Pressable>
                       <Pressable
-                        style={[styles.ghostButton, adminLoading ? styles.disabled : null]}
+                        style={[
+                          styles.ghostButton,
+                          styles.orgAccessRequestAction,
+                          adminLoading ? styles.disabled : null,
+                        ]}
                         disabled={adminLoading}
                         onPress={() => {
                           void decideOrgAccessRequest(row.id, "reject");
                         }}
                       >
-                        <Text style={styles.ghostButtonText}>Reject</Text>
+                        <Text style={[styles.ghostButtonText, styles.orgAccessRequestActionText]}>Reject</Text>
                       </Pressable>
                     </View>
                   </View>
@@ -6822,6 +7043,9 @@ function createStyles(theme: ThemeTokens) {
     primaryButton: { minHeight: 52, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },
     bottomPrimaryButton: { minHeight: 54 },
     primaryButtonText: { color: theme.primaryButtonText, fontSize: 16, fontWeight: "800" },
+    orgAccessRequestActions: { flexDirection: "row", gap: 10, marginTop: 8 },
+    orgAccessRequestAction: { flex: 1, height: 52, minHeight: 52, borderRadius: 14, paddingHorizontal: 12 },
+    orgAccessRequestActionText: { fontSize: 14, lineHeight: 18, textAlign: "center" },
     disabled: { opacity: 0.55 },
     chipRow: { gap: 8, paddingVertical: 8 },
     timezoneChip: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.dropdownOptionBg },
