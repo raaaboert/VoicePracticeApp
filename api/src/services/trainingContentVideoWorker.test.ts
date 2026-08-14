@@ -25,6 +25,7 @@ import {
   TrainingContentVideoWorkerConfig,
   TrainingContentVideoWorkerPollError,
 } from "./trainingContentVideoWorker.js";
+import type { TrainingContentBackupService } from "./trainingContentBackup.js";
 
 const NOW = new Date("2026-07-30T12:00:00.000Z");
 const SOURCE_BYTES = Buffer.from("synthetic-mp4-bytes", "ascii");
@@ -55,6 +56,8 @@ function asset(overrides: Partial<TrainingContentAssetRecord> = {}): TrainingCon
     processingLeaseExpiresAt: null,
     processingNextAttemptAt: null,
     processingErrorCategory: null,
+    backedUpAt: null,
+    backupAttemptCount: 0,
     replacementForAssetId: null,
     isCurrent: false,
     cleanupPending: false,
@@ -312,6 +315,31 @@ test("mismatched video is losslessly remuxed, revalidated with audio retained, t
   });
 });
 
+test("a post-ready backup exception cannot reject video or consume a processing retry", async () => {
+  await withWorker(async ({ root, store, storage }) => {
+    const result = await runWorker(
+      root,
+      store,
+      storage,
+      new FakeMediaProcessor(false),
+      {
+        async backupFinalizedAsset() {
+          throw new Error("synthetic backup failure");
+        },
+        async reconcilePendingBackups() {
+          throw new Error("not used");
+        },
+      }
+    );
+
+    assert.equal(result, "ready_bypassed");
+    assert.equal(store.current.uploadState, "ready");
+    assert.equal(store.current.processingAttemptCount, 1);
+    assert.equal(store.failureCount, 0);
+    assert.equal(store.current.rejectionReasonCategory, null);
+  });
+});
+
 test("FFmpeg failure and corrupt output never publish an immutable object", async () => {
   for (const mode of ["ffmpeg", "corrupt"] as const) {
     await withWorker(async ({ root, store, storage }) => {
@@ -413,12 +441,14 @@ async function runWorker(
   root: string,
   store: FakeAssetStore,
   storage: FakeObjectStorage,
-  media: FakeMediaProcessor
+  media: FakeMediaProcessor,
+  backup?: TrainingContentBackupService
 ) {
   return processNextTrainingContentVideo({
     config: WORKER_CONFIG,
     assetStore: store as unknown as TrainingContentAssetStore,
     objectStorage: storage as unknown as TrainingContentObjectStorage,
+    backup,
     mediaProcessor: media,
     temporaryRoot: root,
     now: () => NOW,

@@ -29,6 +29,10 @@ import {
 import type {
   TrainingContentStorageReadinessService,
 } from "./trainingContentStorageReadiness.js";
+import {
+  backupFinalizedAssetBestEffort,
+  type TrainingContentBackupService,
+} from "./trainingContentBackup.js";
 
 export interface TrainingContentManagementRequestContext {
   orgId: string;
@@ -135,6 +139,7 @@ interface TrainingContentAssetServiceParams {
   entitlementStore: OrgModuleEntitlementStore;
   objectStorage: TrainingContentObjectStorage;
   readiness: TrainingContentStorageReadinessService;
+  backup?: TrainingContentBackupService;
 }
 
 const ASSET_ROLES = new Set<TrainingContentAssetRole>(["primary", "thumbnail", "inline"]);
@@ -511,6 +516,7 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
       actor: buildActor(params.context),
       now,
     });
+    await backupFinalizedAssetBestEffort(this.dependencies.backup, completed.asset);
     await this.tryDeleteTemporaryObject(completed.asset, now);
     const refreshed = await this.dependencies.assetStore.getAssetForOrg(
       completed.asset.orgId,

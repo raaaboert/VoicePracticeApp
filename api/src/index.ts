@@ -251,6 +251,7 @@ import {
   TrainingContentAssetStore,
 } from "./storage/trainingContentAssetStore.js";
 import { createTrainingContentObjectStorage } from "./storage/trainingContentObjectStorage.js";
+import { createTrainingContentBackupStorage } from "./storage/trainingContentBackupStorage.js";
 import { buildOrgModuleEntitlementsResponse } from "./services/organizationModules.js";
 import {
   createTrainingContentAssetService,
@@ -259,6 +260,7 @@ import {
   TrainingContentManagementRequestContext,
 } from "./services/trainingContentAssetService.js";
 import { TrainingContentStorageReadinessService } from "./services/trainingContentStorageReadiness.js";
+import { createTrainingContentBackupService } from "./services/trainingContentBackup.js";
 import {
   createTrainingContentManagementService,
   mapTrainingContentManagementServiceError,
@@ -645,6 +647,14 @@ const trainingContentAssetStore: TrainingContentAssetStore = createTrainingConte
 const trainingContentObjectStorage = createTrainingContentObjectStorage(
   runtimeConfig.trainingContentStorage
 );
+const trainingContentBackupStorage = createTrainingContentBackupStorage(
+  runtimeConfig.trainingContentStorage
+);
+const trainingContentBackup = createTrainingContentBackupService({
+  config: runtimeConfig.trainingContentStorage,
+  assetStore: trainingContentAssetStore,
+  backupStorage: trainingContentBackupStorage,
+});
 const trainingContentStorageReadiness = new TrainingContentStorageReadinessService(
   runtimeConfig.trainingContentStorage,
   trainingContentObjectStorage
@@ -655,6 +665,7 @@ const defaultTrainingContentAssetService = createTrainingContentAssetService({
   entitlementStore: orgModuleEntitlementStore,
   objectStorage: trainingContentObjectStorage,
   readiness: trainingContentStorageReadiness,
+  backup: trainingContentBackup,
 });
 let trainingContentAssetService: TrainingContentAssetService = defaultTrainingContentAssetService;
 const defaultTrainingContentManagementService = createTrainingContentManagementService({

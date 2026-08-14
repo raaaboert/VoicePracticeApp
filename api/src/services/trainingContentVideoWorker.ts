@@ -16,6 +16,10 @@ import {
   TrainingContentVideoProcessingError,
   validateTrainingContentVideoCandidate,
 } from "./trainingContentVideoMedia.js";
+import {
+  backupFinalizedAssetBestEffort,
+  type TrainingContentBackupService,
+} from "./trainingContentBackup.js";
 
 export interface TrainingContentVideoWorkerConfig {
   maximumInputBytes: number;
@@ -52,6 +56,7 @@ interface TrainingContentVideoWorkerDependencies {
   assetStore: TrainingContentAssetStore;
   objectStorage: TrainingContentObjectStorage;
   mediaProcessor: TrainingContentVideoMediaProcessor;
+  backup?: TrainingContentBackupService;
   temporaryRoot?: string;
   now?: () => Date;
   shutdownSignal?: AbortSignal;
@@ -222,6 +227,7 @@ export async function processNextTrainingContentVideo(
       actor: SYSTEM_ACTOR,
       now: dependencies.now?.() ?? new Date(),
     });
+    await backupFinalizedAssetBestEffort(dependencies.backup, completed.asset);
     await cleanupTemporaryObjectBestEffort({
       assetStore: dependencies.assetStore,
       objectStorage: dependencies.objectStorage,

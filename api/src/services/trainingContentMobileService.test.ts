@@ -271,6 +271,10 @@ const storageConfig: TrainingContentStorageConfig = {
   finalizationLeaseSeconds: 300,
   orphanGracePeriodSeconds: 3600,
   supersededRetentionDays: 30,
+  backup: {
+    enabled: false,
+    r2: null,
+  },
 };
 
 function setup(users = [buildUser("learner")]) {

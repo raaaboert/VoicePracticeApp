@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   loadTrainingContentStorageConfig,
+  TRAINING_CONTENT_BACKUP_BUCKETS,
   TRAINING_CONTENT_STORAGE_BUCKETS,
 } from "./trainingContentStorageConfig.js";
 
@@ -26,6 +27,52 @@ test("Training Content storage remains disabled when no provider is configured",
   assert.equal(config.uploadUrlTtlSeconds, 600);
   assert.equal(config.downloadUrlTtlSeconds, 300);
   assert.equal(config.mediaAccessUrlTtlSeconds, 3600);
+  assert.deepEqual(config.backup, { enabled: false, r2: null });
+});
+
+test("Training Content backup is disabled by default and requires no backup credentials", () => {
+  const config = loadTrainingContentStorageConfig(stagingR2Env(), "staging");
+  assert.deepEqual(config.backup, { enabled: false, r2: null });
+});
+
+test("Training Content backup configuration locks backup buckets to the deployment lane", () => {
+  const staging = loadTrainingContentStorageConfig(stagingR2Env({
+    TRAINING_CONTENT_BACKUP_ENABLED: "true",
+    TRAINING_CONTENT_BACKUP_R2_BUCKET: TRAINING_CONTENT_BACKUP_BUCKETS.staging,
+    TRAINING_CONTENT_BACKUP_R2_ACCESS_KEY_ID: "backup-access",
+    TRAINING_CONTENT_BACKUP_R2_SECRET_ACCESS_KEY: "backup-secret",
+  }), "staging");
+  assert.equal(staging.backup.r2?.bucket, TRAINING_CONTENT_BACKUP_BUCKETS.staging);
+  assert.equal(staging.backup.r2?.accountId, staging.r2?.accountId);
+  assert.equal(staging.backup.r2?.endpoint, staging.r2?.endpoint);
+
+  assert.throws(
+    () => loadTrainingContentStorageConfig(stagingR2Env({
+      TRAINING_CONTENT_BACKUP_ENABLED: "true",
+      TRAINING_CONTENT_BACKUP_R2_BUCKET: TRAINING_CONTENT_BACKUP_BUCKETS.production,
+      TRAINING_CONTENT_BACKUP_R2_ACCESS_KEY_ID: "backup-access",
+      TRAINING_CONTENT_BACKUP_R2_SECRET_ACCESS_KEY: "backup-secret",
+    }), "staging"),
+    /Staging Training Content backup must use bucket/
+  );
+  assert.throws(
+    () => loadTrainingContentStorageConfig(stagingR2Env({
+      TRAINING_CONTENT_BACKUP_ENABLED: "true",
+      TRAINING_CONTENT_BACKUP_R2_BUCKET: TRAINING_CONTENT_BACKUP_BUCKETS.staging,
+    }), "staging"),
+    /TRAINING_CONTENT_BACKUP_R2_ACCESS_KEY_ID is required/
+  );
+});
+
+test("ordinary Training Content storage rejects protected backup bucket names", () => {
+  for (const bucket of Object.values(TRAINING_CONTENT_BACKUP_BUCKETS)) {
+    assert.throws(
+      () => loadTrainingContentStorageConfig(stagingR2Env({
+        TRAINING_CONTENT_R2_BUCKET: bucket,
+      }), "staging"),
+      /backup bucket cannot be used as ordinary live storage/
+    );
+  }
 });
 
 test("Training Content R2 configuration locks staging and production lanes", () => {

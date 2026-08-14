@@ -63,6 +63,8 @@ export interface TrainingContentAssetRecord {
   processingLeaseExpiresAt: string | null;
   processingNextAttemptAt: string | null;
   processingErrorCategory: string | null;
+  backedUpAt: string | null;
+  backupAttemptCount: number;
   replacementForAssetId: string | null;
   isCurrent: boolean;
   cleanupPending: boolean;
@@ -196,6 +198,10 @@ export interface TrainingContentAssetStore {
     actor: TrainingContentAuditActor;
     now?: Date;
   }): Promise<{ asset: TrainingContentAssetRecord; replacedAsset: TrainingContentAssetRecord | null }>;
+  markAssetBackedUp(assetId: string, backedUpAt: Date): Promise<TrainingContentAssetRecord>;
+  recordBackupFailure(assetId: string, now?: Date): Promise<TrainingContentAssetRecord>;
+  listAssetsPendingBackup(limit: number): Promise<TrainingContentAssetRecord[]>;
+  countAssetsPendingBackup(): Promise<number>;
   clearTemporaryObject(params: {
     orgId: string;
     assetId: string;
@@ -280,6 +286,8 @@ interface AssetRow {
   processing_lease_expires_at: string | Date | null;
   processing_next_attempt_at: string | Date | null;
   processing_error_category: string | null;
+  backed_up_at: string | Date | null;
+  backup_attempt_count: string | number;
   replacement_for_asset_id: string | null;
   is_current: boolean;
   cleanup_pending: boolean;
@@ -317,6 +325,8 @@ const ASSET_COLUMNS = `
   processing_lease_expires_at,
   processing_next_attempt_at,
   processing_error_category,
+  backed_up_at,
+  backup_attempt_count,
   replacement_for_asset_id,
   is_current,
   cleanup_pending,
@@ -372,6 +382,22 @@ class UnavailableTrainingContentAssetStore implements TrainingContentAssetStore 
     asset: TrainingContentAssetRecord;
     replacedAsset: TrainingContentAssetRecord | null;
   }> {
+    return this.unavailable();
+  }
+
+  async markAssetBackedUp(): Promise<TrainingContentAssetRecord> {
+    return this.unavailable();
+  }
+
+  async recordBackupFailure(): Promise<TrainingContentAssetRecord> {
+    return this.unavailable();
+  }
+
+  async listAssetsPendingBackup(): Promise<TrainingContentAssetRecord[]> {
+    return this.unavailable();
+  }
+
+  async countAssetsPendingBackup(): Promise<number> {
     return this.unavailable();
   }
 
@@ -1356,6 +1382,91 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     }
   }
 
+  async markAssetBackedUp(
+    assetId: string,
+    backedUpAt: Date
+  ): Promise<TrainingContentAssetRecord> {
+    await this.initialize();
+    const result = await this.pool.query<AssetRow>(
+      `
+        UPDATE org_content_assets
+        SET backed_up_at = COALESCE(backed_up_at, $2),
+            updated_at = CASE WHEN backed_up_at IS NULL THEN $2 ELSE updated_at END
+        WHERE id = $1
+          AND upload_state = 'ready'
+          AND final_object_key IS NOT NULL
+        RETURNING ${ASSET_COLUMNS}
+      `,
+      [requiredId(assetId, "Asset id"), backedUpAt]
+    );
+    if (!result.rows[0]) {
+      throw new TrainingContentAssetStoreError(
+        "Only ready Training Content assets can be marked as backed up.",
+        "asset_state_conflict"
+      );
+    }
+    return mapAssetRow(result.rows[0]);
+  }
+
+  async recordBackupFailure(
+    assetId: string,
+    now: Date = new Date()
+  ): Promise<TrainingContentAssetRecord> {
+    await this.initialize();
+    const result = await this.pool.query<AssetRow>(
+      `
+        UPDATE org_content_assets
+        SET backup_attempt_count = backup_attempt_count + 1,
+            updated_at = $2
+        WHERE id = $1
+          AND upload_state = 'ready'
+          AND backed_up_at IS NULL
+          AND final_object_key IS NOT NULL
+        RETURNING ${ASSET_COLUMNS}
+      `,
+      [requiredId(assetId, "Asset id"), now]
+    );
+    if (!result.rows[0]) {
+      throw new TrainingContentAssetStoreError(
+        "Only ready unbacked Training Content assets can record a backup failure.",
+        "asset_state_conflict"
+      );
+    }
+    return mapAssetRow(result.rows[0]);
+  }
+
+  async listAssetsPendingBackup(limit: number): Promise<TrainingContentAssetRecord[]> {
+    await this.initialize();
+    const boundedLimit = Math.max(1, Math.min(1000, requirePositiveInteger(limit, "Backup limit")));
+    const result = await this.pool.query<AssetRow>(
+      `
+        SELECT ${ASSET_COLUMNS}
+        FROM org_content_assets
+        WHERE upload_state = 'ready'
+          AND backed_up_at IS NULL
+          AND final_object_key IS NOT NULL
+        ORDER BY updated_at ASC, id ASC
+        LIMIT $1
+      `,
+      [boundedLimit]
+    );
+    return result.rows.map(mapAssetRow);
+  }
+
+  async countAssetsPendingBackup(): Promise<number> {
+    await this.initialize();
+    const result = await this.pool.query<{ pending_count: string | number }>(
+      `
+        SELECT COUNT(*) AS pending_count
+        FROM org_content_assets
+        WHERE upload_state = 'ready'
+          AND backed_up_at IS NULL
+          AND final_object_key IS NOT NULL
+      `
+    );
+    return parseDatabaseInteger(result.rows[0]?.pending_count ?? 0, "Pending backup count");
+  }
+
   async clearTemporaryObject(params: {
     orgId: string;
     assetId: string;
@@ -1783,6 +1894,11 @@ function mapAssetRow(row: AssetRow): TrainingContentAssetRecord {
     processingLeaseExpiresAt: optionalIso(row.processing_lease_expires_at),
     processingNextAttemptAt: optionalIso(row.processing_next_attempt_at),
     processingErrorCategory: row.processing_error_category,
+    backedUpAt: optionalIso(row.backed_up_at),
+    backupAttemptCount: parseDatabaseInteger(
+      row.backup_attempt_count,
+      "Backup attempt count"
+    ),
     replacementForAssetId: row.replacement_for_asset_id,
     isCurrent: row.is_current === true,
     cleanupPending: row.cleanup_pending === true,

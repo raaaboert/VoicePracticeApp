@@ -98,7 +98,7 @@ test(
       await client.query(`CREATE SCHEMA ${quotedSchema}`);
       await client.query(`SET search_path TO ${quotedSchema}`);
       const migrations = await loadTrainingContentMigrationSql();
-      assert.equal(migrations.length, 3);
+      assert.equal(migrations.length, 5);
       await runMigrations(client, migrations.slice(0, 2));
       const contentId = randomUUID();
       await client.query(

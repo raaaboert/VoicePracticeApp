@@ -60,6 +60,7 @@ export function classifyTrainingContentVideoWorkerFailure(
     if (
       message.includes("TRAINING_CONTENT_STORAGE_PROVIDER")
       || message.includes("TRAINING_CONTENT_R2_")
+      || message.includes("TRAINING_CONTENT_BACKUP_")
       || message.includes("R2 object storage")
     ) {
       return "r2_config_invalid";

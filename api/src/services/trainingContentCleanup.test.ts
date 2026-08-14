@@ -40,6 +40,8 @@ function asset(
     processingLeaseExpiresAt: null,
     processingNextAttemptAt: null,
     processingErrorCategory: null,
+    backedUpAt: null,
+    backupAttemptCount: 0,
     replacementForAssetId: null,
     isCurrent: false,
     cleanupPending: false,

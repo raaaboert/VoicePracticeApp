@@ -128,6 +128,13 @@ test("worker fatal diagnostics expose only a safe stage category", () => {
   assert.equal(
     classifyTrainingContentVideoWorkerFailure(
       "config",
+      new Error("TRAINING_CONTENT_BACKUP_R2_BUCKET is required.")
+    ),
+    "r2_config_invalid"
+  );
+  assert.equal(
+    classifyTrainingContentVideoWorkerFailure(
+      "config",
       new Error("TRAINING_CONTENT_R2_ENVIRONMENT must match PERITIO_ENV.")
     ),
     "environment_lane_mismatch"

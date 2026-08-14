@@ -30,10 +30,16 @@ export interface TrainingContentStorageConfig {
   finalizationLeaseSeconds: number;
   orphanGracePeriodSeconds: number;
   supersededRetentionDays: number;
+  backup: {
+    enabled: boolean;
+    r2: TrainingContentR2Config | null;
+  };
 }
 
 const STAGING_BUCKET = "peritio-training-content-staging";
 const PRODUCTION_BUCKET = "peritio-training-content-production";
+const STAGING_BACKUP_BUCKET = "peritio-training-content-backup-staging";
+const PRODUCTION_BACKUP_BUCKET = "peritio-training-content-backup-production";
 
 const HARD_FILE_SIZE_LIMITS: TrainingContentFileSizeLimits = {
   video: 500 * 1024 * 1024,
@@ -92,6 +98,25 @@ function requireValue(env: NodeJS.ProcessEnv, envName: string): string {
   return value;
 }
 
+function requireBackupValue(env: NodeJS.ProcessEnv, envName: string): string {
+  const value = env[envName]?.trim();
+  if (!value) {
+    throw new Error(`${envName} is required when TRAINING_CONTENT_BACKUP_ENABLED=true.`);
+  }
+  return value;
+}
+
+function parseBackupEnabled(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "false") {
+    return false;
+  }
+  if (normalized === "true") {
+    return true;
+  }
+  throw new Error('TRAINING_CONTENT_BACKUP_ENABLED must be either "true" or "false".');
+}
+
 function parseR2Environment(value: string): TrainingContentStorageEnvironment {
   const normalized = value.trim().toLowerCase();
   if (normalized === "development" || normalized === "staging" || normalized === "production") {
@@ -133,6 +158,9 @@ function assertStorageLane(params: {
   r2Environment: TrainingContentStorageEnvironment;
   bucket: string;
 }): void {
+  if (params.bucket === STAGING_BACKUP_BUCKET || params.bucket === PRODUCTION_BACKUP_BUCKET) {
+    throw new Error("A Training Content backup bucket cannot be used as ordinary live storage.");
+  }
   if (params.r2Environment !== params.deploymentEnvironment) {
     throw new Error(
       "TRAINING_CONTENT_R2_ENVIRONMENT must match PERITIO_ENV for the current deployment."
@@ -150,6 +178,24 @@ function assertStorageLane(params: {
     && (params.bucket === STAGING_BUCKET || params.bucket === PRODUCTION_BUCKET)
   ) {
     throw new Error("Development Training Content storage cannot use a staging or production bucket.");
+  }
+}
+
+function assertBackupStorageLane(params: {
+  deploymentEnvironment: TrainingContentStorageEnvironment;
+  bucket: string;
+}): void {
+  if (params.deploymentEnvironment === "staging" && params.bucket !== STAGING_BACKUP_BUCKET) {
+    throw new Error(`Staging Training Content backup must use bucket "${STAGING_BACKUP_BUCKET}".`);
+  }
+  if (params.deploymentEnvironment === "production" && params.bucket !== PRODUCTION_BACKUP_BUCKET) {
+    throw new Error(`Production Training Content backup must use bucket "${PRODUCTION_BACKUP_BUCKET}".`);
+  }
+  if (
+    params.deploymentEnvironment === "development"
+    && (params.bucket === STAGING_BACKUP_BUCKET || params.bucket === PRODUCTION_BACKUP_BUCKET)
+  ) {
+    throw new Error("Development Training Content backup cannot use a staging or production bucket.");
   }
 }
 
@@ -193,6 +239,27 @@ export function loadTrainingContentStorageConfig(
       accessKeyId: requireValue(env, "TRAINING_CONTENT_R2_ACCESS_KEY_ID"),
       secretAccessKey: requireValue(env, "TRAINING_CONTENT_R2_SECRET_ACCESS_KEY"),
       endpoint: validateR2Endpoint(accountId, requireValue(env, "TRAINING_CONTENT_R2_ENDPOINT")),
+    };
+  }
+
+  const backupEnabled = parseBackupEnabled(env.TRAINING_CONTENT_BACKUP_ENABLED);
+  let backupR2: TrainingContentR2Config | null = null;
+  if (backupEnabled) {
+    if (provider !== "r2" || !r2) {
+      throw new Error("Training Content backup requires configured live R2 storage.");
+    }
+    const bucket = requireBackupValue(env, "TRAINING_CONTENT_BACKUP_R2_BUCKET");
+    assertBackupStorageLane({ deploymentEnvironment, bucket });
+    if (bucket === r2.bucket) {
+      throw new Error("Training Content live and backup buckets must be different.");
+    }
+    backupR2 = {
+      environment: deploymentEnvironment,
+      accountId: r2.accountId,
+      bucket,
+      accessKeyId: requireBackupValue(env, "TRAINING_CONTENT_BACKUP_R2_ACCESS_KEY_ID"),
+      secretAccessKey: requireBackupValue(env, "TRAINING_CONTENT_BACKUP_R2_SECRET_ACCESS_KEY"),
+      endpoint: r2.endpoint,
     };
   }
 
@@ -255,12 +322,21 @@ export function loadTrainingContentStorageConfig(
       minimum: 1,
       maximum: 365,
     }),
+    backup: {
+      enabled: backupEnabled,
+      r2: backupR2,
+    },
   };
 }
 
 export const TRAINING_CONTENT_STORAGE_BUCKETS = {
   staging: STAGING_BUCKET,
   production: PRODUCTION_BUCKET,
+} as const;
+
+export const TRAINING_CONTENT_BACKUP_BUCKETS = {
+  staging: STAGING_BACKUP_BUCKET,
+  production: PRODUCTION_BACKUP_BUCKET,
 } as const;
 
 export const TRAINING_CONTENT_HARD_FILE_SIZE_LIMITS = HARD_FILE_SIZE_LIMITS;

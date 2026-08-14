@@ -10,6 +10,7 @@ import {
   TrainingContentAssetServiceError,
 } from "./trainingContentAssetService.js";
 import { TrainingContentStorageReadinessService } from "./trainingContentStorageReadiness.js";
+import type { TrainingContentBackupService } from "./trainingContentBackup.js";
 import type {
   CreatePendingTrainingContentAssetInput,
   TrainingContentAssetCleanupCandidate,
@@ -142,6 +143,8 @@ class FakeAssetStore implements TrainingContentAssetStore {
       processingLeaseExpiresAt: null,
       processingNextAttemptAt: null,
       processingErrorCategory: null,
+      backedUpAt: null,
+      backupAttemptCount: 0,
       replacementForAssetId: input.replacementAssetId,
       isCurrent: false,
       cleanupPending: false,
@@ -298,6 +301,29 @@ class FakeAssetStore implements TrainingContentAssetStore {
       });
     }
     return { asset: clone(asset), replacedAsset };
+  }
+
+  async markAssetBackedUp(assetId: string, backedUpAt: Date) {
+    const asset = this.requireAsset(assetId);
+    asset.backedUpAt ??= backedUpAt.toISOString();
+    return clone(asset);
+  }
+
+  async recordBackupFailure(assetId: string) {
+    const asset = this.requireAsset(assetId);
+    asset.backupAttemptCount += 1;
+    return clone(asset);
+  }
+
+  async listAssetsPendingBackup(limit: number) {
+    return [...this.assets.values()]
+      .filter((asset) => asset.uploadState === "ready" && !asset.backedUpAt && asset.finalObjectKey)
+      .slice(0, limit)
+      .map(clone);
+  }
+
+  async countAssetsPendingBackup() {
+    return (await this.listAssetsPendingBackup(Number.MAX_SAFE_INTEGER)).length;
   }
 
   async clearTemporaryObject(params: any) {
@@ -463,7 +489,11 @@ class FakeObjectStorage implements TrainingContentObjectStorage {
   }
 }
 
-function buildHarness(params: { enabled?: boolean; content?: TrainingContentItem } = {}) {
+function buildHarness(params: {
+  enabled?: boolean;
+  content?: TrainingContentItem;
+  backup?: TrainingContentBackupService;
+} = {}) {
   const config = loadTrainingContentStorageConfig({
     TRAINING_CONTENT_STORAGE_PROVIDER: "r2",
     TRAINING_CONTENT_R2_ENVIRONMENT: "staging",
@@ -498,6 +528,7 @@ function buildHarness(params: { enabled?: boolean; content?: TrainingContentItem
     entitlementStore: entitlement as any,
     objectStorage,
     readiness,
+    backup: params.backup,
   });
   return { config, assetStore, objectStorage, entitlement, service };
 }
@@ -624,7 +655,21 @@ test("upload initiation rejects cross-organization content and declared policy v
 });
 
 test("finalization validates both temporary and final objects and commits ready state atomically", async () => {
-  const harness = buildHarness();
+  const backupCalls: Array<{ uploadState: string; finalObjectKey: string | null }> = [];
+  const harness = buildHarness({
+    backup: {
+      async backupFinalizedAsset(asset) {
+        backupCalls.push({
+          uploadState: asset.uploadState,
+          finalObjectKey: asset.finalObjectKey,
+        });
+        return "copied";
+      },
+      async reconcilePendingBackups() {
+        throw new Error("not used");
+      },
+    },
+  });
   const initiated = await initiatePdf(harness);
   putInitiatedUpload(harness, initiated.asset.id);
   const finalized = await harness.service.finalizeUpload({
@@ -638,6 +683,10 @@ test("finalization validates both temporary and final objects and commits ready 
   assert.equal(finalized.asset.cleanupPending, false);
   assert.equal(finalized.asset.byteSize, PDF_BYTES.byteLength);
   assert.equal(harness.objectStorage.copyCount, 1);
+  assert.deepEqual(backupCalls, [{
+    uploadState: "ready",
+    finalObjectKey: harness.assetStore.assets.get(initiated.asset.id)?.finalObjectKey ?? null,
+  }]);
   assert.equal(
     [...harness.objectStorage.objects.keys()].some((key) => key.startsWith("tmp/")),
     false
@@ -681,6 +730,31 @@ test("video finalization queues durable processing without copying or publishing
   });
   assert.equal(status.asset.uploadState, "processing");
   assert.equal(status.asset.processingAttemptCount, 0);
+});
+
+test("a post-ready backup exception cannot fail non-video finalization", async () => {
+  const harness = buildHarness({
+    backup: {
+      async backupFinalizedAsset() {
+        throw new Error("synthetic backup failure");
+      },
+      async reconcilePendingBackups() {
+        throw new Error("not used");
+      },
+    },
+  });
+  const initiated = await initiatePdf(harness);
+  putInitiatedUpload(harness, initiated.asset.id);
+
+  const finalized = await harness.service.finalizeUpload({
+    context: ORG_ADMIN_CONTEXT,
+    contentId: buildContent().id,
+    assetId: initiated.asset.id,
+    now: NOW,
+  });
+
+  assert.equal(finalized.asset.uploadState, "ready");
+  assert.equal(finalized.asset.isCurrent, true);
 });
 
 test("actual size, MIME, and magic-byte mismatches reject the upload without serving it", async () => {

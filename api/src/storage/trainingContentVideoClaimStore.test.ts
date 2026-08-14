@@ -28,6 +28,8 @@ const ASSET_ROW = {
   processing_lease_expires_at: new Date("2026-07-30T12:30:00.000Z"),
   processing_next_attempt_at: null,
   processing_error_category: null,
+  backed_up_at: null,
+  backup_attempt_count: 0,
   replacement_for_asset_id: null,
   is_current: false,
   cleanup_pending: false,

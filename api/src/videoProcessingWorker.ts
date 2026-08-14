@@ -8,6 +8,8 @@ import {
 } from "./services/trainingContentVideoWorker.js";
 import { createTrainingContentAssetStore } from "./storage/trainingContentAssetStore.js";
 import { createTrainingContentObjectStorage } from "./storage/trainingContentObjectStorage.js";
+import { createTrainingContentBackupStorage } from "./storage/trainingContentBackupStorage.js";
+import { createTrainingContentBackupService } from "./services/trainingContentBackup.js";
 import {
   classifyTrainingContentVideoWorkerFailure,
   loadTrainingContentVideoWorkerConfig,
@@ -31,6 +33,12 @@ async function run(): Promise<void> {
     pgIdleTimeoutMs: config.pgIdleTimeoutMs,
   });
   const objectStorage = createTrainingContentObjectStorage(config.storage);
+  const backupStorage = createTrainingContentBackupStorage(config.storage);
+  const backup = createTrainingContentBackupService({
+    config: config.storage,
+    assetStore,
+    backupStorage,
+  });
   const mediaProcessor = new FfmpegTrainingContentVideoMediaProcessor({
     ffmpegPath: config.ffmpegPath,
     ffprobePath: config.ffprobePath,
@@ -55,6 +63,7 @@ async function run(): Promise<void> {
       config: config.worker,
       assetStore,
       objectStorage,
+      backup,
       mediaProcessor,
       shutdownSignal: shutdown.signal,
     });
