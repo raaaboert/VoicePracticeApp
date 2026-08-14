@@ -66,6 +66,7 @@ export function classifyRequestHost(host: string | null | undefined): RequestHos
 export function isSystemPath(pathname: string): boolean {
   return (
     pathname.startsWith("/_next/")
+    || pathname.startsWith("/brand/")
     || pathname === "/favicon.ico"
     || pathname === "/robots.txt"
     || pathname === "/sitemap.xml"

@@ -19,6 +19,18 @@ function publicHostRequest(pathname: string): NextRequest {
   });
 }
 
+test("middleware serves dashboard brand assets directly on both configured hosts", () => {
+  for (const request of [
+    appHostRequest("/brand/peritio-mark.jpg"),
+    publicHostRequest("/brand/peritio-mark.jpg"),
+  ]) {
+    const response = proxy(request);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-middleware-next"), "1");
+    assert.equal(response.headers.get("location"), null);
+  }
+});
+
 test("middleware allows dashboard admin API calls on the app host", () => {
   const response = proxy(appHostRequest("/api/admin/users?export=csv"));
 

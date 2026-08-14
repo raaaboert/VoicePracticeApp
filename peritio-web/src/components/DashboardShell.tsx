@@ -64,7 +64,7 @@ export function DashboardShell({
       <aside className="app-sidebar">
         <div className="brand-block">
           <div className="brand-mark">
-            <img src="/peritio-logo-061526.png" alt="" className="brand-mark-image" aria-hidden="true" />
+            <img src="/brand/peritio-mark.jpg" alt="" className="brand-mark-image" aria-hidden="true" />
           </div>
           <div>
             <p className="eyebrow">Peritio</p>
