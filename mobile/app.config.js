@@ -14,7 +14,7 @@ const APP_VARIANTS = {
   production: {
     name: "Peritio",
     iosBundleIdentifier: "com.peritio.practice",
-    androidPackage: "com.anonymous.VoicePracticeApp",
+    androidPackage: "com.peritio.practice",
   },
 };
 

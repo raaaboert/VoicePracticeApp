@@ -6087,7 +6087,11 @@ export default function App() {
                           void decideOrgAccessRequest(row.id, "approve");
                         }}
                       >
-                        <Text style={[styles.primaryButtonText, styles.orgAccessRequestActionText]}>
+                        <Text
+                          style={[styles.primaryButtonText, styles.orgAccessRequestActionText]}
+                          maxFontSizeMultiplier={1.2}
+                          numberOfLines={2}
+                        >
                           Approve Membership
                         </Text>
                       </Pressable>
@@ -6102,7 +6106,13 @@ export default function App() {
                           void decideOrgAccessRequest(row.id, "reject");
                         }}
                       >
-                        <Text style={[styles.ghostButtonText, styles.orgAccessRequestActionText]}>Reject</Text>
+                        <Text
+                          style={[styles.ghostButtonText, styles.orgAccessRequestActionText]}
+                          maxFontSizeMultiplier={1.2}
+                          numberOfLines={2}
+                        >
+                          Reject
+                        </Text>
                       </Pressable>
                     </View>
                   </View>

@@ -28,7 +28,7 @@
         "MODIFY_AUDIO_SETTINGS",
         "INTERNET"
       ],
-      "package": "com.anonymous.VoicePracticeApp"
+      "package": "com.peritio.practice"
     },
     "web": {
       "favicon": "./peritio-source-icon.png"
