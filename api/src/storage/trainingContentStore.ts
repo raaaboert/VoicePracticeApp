@@ -209,6 +209,10 @@ export interface TrainingContentStore {
     input: ReplaceTrainingContentAssignmentsInput
   ): Promise<TrainingContentManagementDetail>;
   transitionContent(input: TransitionTrainingContentInput): Promise<TrainingContentManagementDetail>;
+  deleteUserAssignmentsAndDeidentifyRecords(
+    userId: string,
+    replacementUserId: string
+  ): Promise<{ deletedAssignments: number; deidentifiedUsageSessions: number; deidentifiedActorReferences: number }>;
 }
 
 interface CreateTrainingContentStoreParams {
@@ -452,6 +456,14 @@ class NullTrainingContentStore implements TrainingContentStore {
     return this.unavailable();
   }
 
+  async deleteUserAssignmentsAndDeidentifyRecords(): Promise<{
+    deletedAssignments: number;
+    deidentifiedUsageSessions: number;
+    deidentifiedActorReferences: number;
+  }> {
+    return { deletedAssignments: 0, deidentifiedUsageSessions: 0, deidentifiedActorReferences: 0 };
+  }
+
   private unavailable<T>(): T {
     throw new Error("Training Content management requires PostgreSQL storage.");
   }
@@ -482,6 +494,99 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       this.ensureSchemaPromise = initializeTrainingContentSchema(this.pool);
     }
     await this.ensureSchemaPromise;
+  }
+
+  async deleteUserAssignmentsAndDeidentifyRecords(
+    userId: string,
+    replacementUserId: string
+  ): Promise<{ deletedAssignments: number; deidentifiedUsageSessions: number; deidentifiedActorReferences: number }> {
+    await this.initialize();
+    const normalizedUserId = requiredId(userId, "User id");
+    const normalizedReplacementUserId = requiredId(replacementUserId, "Replacement user id");
+    if (normalizedUserId === normalizedReplacementUserId) {
+      return { deletedAssignments: 0, deidentifiedUsageSessions: 0, deidentifiedActorReferences: 0 };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const assignments = await client.query(
+        "DELETE FROM org_content_assignments WHERE subject_user_id = $1",
+        [normalizedUserId]
+      );
+      await client.query(
+        `
+          INSERT INTO org_content_usage (
+            org_id, content_id, user_id, first_opened_at, last_opened_at, open_count,
+            active_seconds, completion_state, completion_method, completed_at,
+            completed_content_version, media_position_seconds, media_duration_seconds,
+            unique_media_seconds, media_coverage, updated_at
+          )
+          SELECT
+            org_id, content_id, $2, first_opened_at, last_opened_at, open_count,
+            active_seconds, completion_state, completion_method, completed_at,
+            completed_content_version, media_position_seconds, media_duration_seconds,
+            unique_media_seconds, '[]'::jsonb, updated_at
+          FROM org_content_usage
+          WHERE user_id = $1
+          ON CONFLICT (org_id, content_id, user_id) DO UPDATE SET
+            first_opened_at = CASE
+              WHEN org_content_usage.first_opened_at IS NULL THEN EXCLUDED.first_opened_at
+              WHEN EXCLUDED.first_opened_at IS NULL THEN org_content_usage.first_opened_at
+              ELSE LEAST(org_content_usage.first_opened_at, EXCLUDED.first_opened_at)
+            END,
+            last_opened_at = CASE
+              WHEN org_content_usage.last_opened_at IS NULL THEN EXCLUDED.last_opened_at
+              WHEN EXCLUDED.last_opened_at IS NULL THEN org_content_usage.last_opened_at
+              ELSE GREATEST(org_content_usage.last_opened_at, EXCLUDED.last_opened_at)
+            END,
+            open_count = org_content_usage.open_count + EXCLUDED.open_count,
+            active_seconds = org_content_usage.active_seconds + EXCLUDED.active_seconds,
+            completion_state = CASE
+              WHEN org_content_usage.completion_state = 'completed' OR EXCLUDED.completion_state = 'completed' THEN 'completed'
+              WHEN org_content_usage.completion_state = 'in_progress' OR EXCLUDED.completion_state = 'in_progress' THEN 'in_progress'
+              ELSE 'not_started'
+            END,
+            completion_method = COALESCE(org_content_usage.completion_method, EXCLUDED.completion_method),
+            completed_at = GREATEST(org_content_usage.completed_at, EXCLUDED.completed_at),
+            completed_content_version = GREATEST(org_content_usage.completed_content_version, EXCLUDED.completed_content_version),
+            media_position_seconds = GREATEST(org_content_usage.media_position_seconds, EXCLUDED.media_position_seconds),
+            media_duration_seconds = GREATEST(org_content_usage.media_duration_seconds, EXCLUDED.media_duration_seconds),
+            unique_media_seconds = GREATEST(org_content_usage.unique_media_seconds, EXCLUDED.unique_media_seconds),
+            media_coverage = '[]'::jsonb,
+            updated_at = GREATEST(org_content_usage.updated_at, EXCLUDED.updated_at)
+        `,
+        [normalizedUserId, normalizedReplacementUserId]
+      );
+      await client.query("DELETE FROM org_content_usage WHERE user_id = $1", [normalizedUserId]);
+      const usageSessions = await client.query(
+        "UPDATE org_content_usage_sessions SET user_id = $2 WHERE user_id = $1",
+        [normalizedUserId, normalizedReplacementUserId]
+      );
+
+      let deidentifiedActorReferences = 0;
+      for (const statement of [
+        "UPDATE org_content_items SET created_by_actor_id = CASE WHEN created_by_actor_id = $1 THEN $2 ELSE created_by_actor_id END, updated_by_actor_id = CASE WHEN updated_by_actor_id = $1 THEN $2 ELSE updated_by_actor_id END WHERE created_by_actor_id = $1 OR updated_by_actor_id = $1",
+        "UPDATE org_content_categories SET created_by_actor_id = CASE WHEN created_by_actor_id = $1 THEN $2 ELSE created_by_actor_id END, updated_by_actor_id = CASE WHEN updated_by_actor_id = $1 THEN $2 ELSE updated_by_actor_id END WHERE created_by_actor_id = $1 OR updated_by_actor_id = $1",
+        "UPDATE org_content_assets SET created_by_actor_id = $2 WHERE created_by_actor_id = $1",
+        "UPDATE org_content_assignments SET created_by_actor_id = CASE WHEN created_by_actor_id = $1 THEN $2 ELSE created_by_actor_id END, revoked_by_actor_id = CASE WHEN revoked_by_actor_id = $1 THEN $2 ELSE revoked_by_actor_id END WHERE created_by_actor_id = $1 OR revoked_by_actor_id = $1",
+        "UPDATE org_content_scenario_links SET created_by_actor_id = CASE WHEN created_by_actor_id = $1 THEN $2 ELSE created_by_actor_id END, removed_by_actor_id = CASE WHEN removed_by_actor_id = $1 THEN $2 ELSE removed_by_actor_id END WHERE created_by_actor_id = $1 OR removed_by_actor_id = $1",
+      ]) {
+        const result = await client.query(statement, [normalizedUserId, normalizedReplacementUserId]);
+        deidentifiedActorReferences += result.rowCount ?? 0;
+      }
+      await client.query("COMMIT");
+      return {
+        deletedAssignments: assignments.rowCount ?? 0,
+        deidentifiedUsageSessions: usageSessions.rowCount ?? 0,
+        deidentifiedActorReferences,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listContentItemsForOrg(orgId: string): Promise<TrainingContentItem[]> {

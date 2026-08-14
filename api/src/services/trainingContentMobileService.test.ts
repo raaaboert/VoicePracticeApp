@@ -183,6 +183,9 @@ class FakeStore implements TrainingContentStore {
   async updateContent(): Promise<never> { throw new Error("not used"); }
   async replaceAssignments(): Promise<never> { throw new Error("not used"); }
   async transitionContent(): Promise<never> { throw new Error("not used"); }
+  async deleteUserAssignmentsAndDeidentifyRecords() {
+    return { deletedAssignments: 0, deidentifiedUsageSessions: 0, deidentifiedActorReferences: 0 };
+  }
 }
 
 class FakeEntitlementStore implements OrgModuleEntitlementStore {
@@ -204,6 +207,9 @@ class FakeEntitlementStore implements OrgModuleEntitlementStore {
   }
   async setOrgModuleEntitlement(): Promise<never> {
     throw new Error("not used");
+  }
+  async deidentifyActor(): Promise<number> {
+    return 0;
   }
 }
 

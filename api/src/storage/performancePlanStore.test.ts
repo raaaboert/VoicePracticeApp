@@ -232,6 +232,39 @@ test("performance plan store creates and reads a plan with scope and audit rows"
   });
 });
 
+test("performance plan account cleanup deletes the user's plans and de-identifies their actor references", async () => {
+  await withTempStore(async (store) => {
+    await store.createPlan({
+      plan: buildPlan({ id: "plan_delete", userId: "user_1" }),
+      scopeItems: [buildScopeItem({ id: "scope_delete", planId: "plan_delete", userId: "user_1" })],
+      auditEvents: [buildAuditEvent({ id: "audit_delete", planId: "plan_delete", userId: "user_1" })]
+    });
+    await store.createPlan({
+      plan: buildPlan({ id: "plan_keep", userId: "user_2", createdByActorId: "user_1" }),
+      scopeItems: [buildScopeItem({ id: "scope_keep", planId: "plan_keep", userId: "user_2" })],
+      auditEvents: [buildAuditEvent({ id: "audit_keep", planId: "plan_keep", userId: "user_2", actorId: "user_1" })]
+    });
+    await store.appendPlanUpdate({
+      update: {
+        id: "update_keep",
+        planId: "plan_keep",
+        orgId: "org_1",
+        userId: "user_2",
+        authorActorType: "web_user",
+        authorActorId: "user_1",
+        body: "Retained plan update",
+        createdAt: NOW
+      }
+    });
+
+    assert.equal(await store.deletePlansForUser("user_1", "deleted_user"), 1);
+    assert.equal(await store.getPlanById("plan_delete"), null);
+    assert.equal((await store.getPlanById("plan_keep"))?.plan.createdByActorId, "deleted_user");
+    assert.deepEqual(await store.listAuditEvents("plan_keep"), []);
+    assert.deepEqual(await store.listPlanUpdates("plan_keep"), []);
+  });
+});
+
 test("performance plan store appends ordered updates and retains them after cancellation", async () => {
   await withTempStore(async (store) => {
     await store.createPlan({

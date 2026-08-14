@@ -82,6 +82,7 @@ export interface AiUsageEventStore {
   computeBudgetSnapshot(params: { userId: string; now: Date; userTimeZone: string }): Promise<AiUsageBudgetSnapshot>;
   computeCurrentPeriodTotals(params: { userId: string; now: Date; timeZone: string }): Promise<AiUsageCurrentPeriodTotals>;
   deleteEventsForUser(userId: string): Promise<number>;
+  deidentifyEventsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 interface CreateAiUsageEventStoreParams {
@@ -566,6 +567,27 @@ class FileAiUsageEventStore implements AiUsageEventStore {
     });
   }
 
+  async deidentifyEventsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = userId.trim();
+    const normalizedReplacementUserId = replacementUserId.trim();
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload(new Date());
+      const matchedCount = payload.events.filter((entry) => entry.userId === normalizedUserId).length;
+      if (matchedCount > 0) {
+        await this.savePayload({
+          events: payload.events.map((entry) => (
+            entry.userId === normalizedUserId ? { ...entry, userId: normalizedReplacementUserId } : entry
+          ))
+        });
+      }
+      return matchedCount;
+    });
+  }
+
   private async loadPayload(now: Date): Promise<AiUsageEventFilePayload> {
     await ensureParentDirectory(this.filePath);
 
@@ -878,6 +900,21 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
     return result.rowCount ?? result.rows.length;
   }
 
+  async deidentifyEventsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = userId.trim();
+    const normalizedReplacementUserId = replacementUserId.trim();
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    await this.ensureTable();
+    const result = await this.pool.query<{ id: string }>(
+      "UPDATE ai_usage_events SET user_id = $2 WHERE user_id = $1 RETURNING id",
+      [normalizedUserId, normalizedReplacementUserId]
+    );
+    return result.rowCount ?? result.rows.length;
+  }
+
   private async ensureTable(): Promise<void> {
     if (!this.ensureTablePromise) {
       this.ensureTablePromise = this.pool
@@ -1030,6 +1067,10 @@ class UnsupportedAiUsageEventStore implements AiUsageEventStore {
   }
 
   async deleteEventsForUser(): Promise<number> {
+    throw new Error("AI usage event storage provider is not supported.");
+  }
+
+  async deidentifyEventsForUser(): Promise<number> {
     throw new Error("AI usage event storage provider is not supported.");
   }
 }

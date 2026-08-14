@@ -258,3 +258,38 @@ test("concurrent entitlement writes serialize to a coherent final state with mat
   assert.equal((await store.getOrgModuleEntitlement("org_concurrent", "training_content")).enabled, false);
   assert.equal(fake.auditEvents.length, 2);
 });
+
+test("organization module actor identity can be replaced without changing entitlement state", async () => {
+  const queries: Array<{ text: string; values?: readonly unknown[] }> = [];
+  const queryPool = {
+    async query(text: string, values?: readonly unknown[]) {
+      queries.push({ text, values });
+      if (text.includes("UPDATE org_module_entitlements SET updated_by_actor_id")) {
+        return { rows: [], rowCount: 2 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    async connect() {
+      return {
+        async query() {
+          return { rows: [], rowCount: 0 };
+        },
+        release() {
+          // No-op for schema initialization.
+        },
+      };
+    },
+  };
+  const store = createOrgModuleEntitlementStore({
+    provider: "postgres",
+    databaseUrl: "postgres://example.invalid/peritio",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: queryPool as any,
+  });
+
+  assert.equal(await store.deidentifyActor("user_a", "deleted_user"), 2);
+  const update = queries.find((query) => query.text.includes("UPDATE org_module_entitlements SET updated_by_actor_id"));
+  assert.deepEqual(update?.values, ["user_a", "deleted_user"]);
+});

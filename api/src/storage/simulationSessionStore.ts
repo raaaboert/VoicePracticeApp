@@ -28,6 +28,7 @@ export interface SimulationSessionStore {
   markUsageRecorded(params: SimulationSessionFinalizeParams): Promise<SimulationSessionRecord | null>;
   pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number>;
   deleteSessionsForUser(userId: string): Promise<number>;
+  deidentifySessionsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 interface CreateSimulationSessionStoreParams {
@@ -269,6 +270,7 @@ abstract class BaseSimulationSessionStore implements SimulationSessionStore {
   abstract markUsageRecorded(params: SimulationSessionFinalizeParams): Promise<SimulationSessionRecord | null>;
   abstract pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number>;
   abstract deleteSessionsForUser(userId: string): Promise<number>;
+  abstract deidentifySessionsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 class FileSimulationSessionStore extends BaseSimulationSessionStore {
@@ -402,6 +404,28 @@ class FileSimulationSessionStore extends BaseSimulationSessionStore {
         await this.savePayload({ records: nextRecords });
       }
       return deletedCount;
+    });
+  }
+
+  async deidentifySessionsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = normalizeNullableString(userId);
+    const normalizedReplacementUserId = normalizeNullableString(replacementUserId);
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      const matchedCount = payload.records.filter((entry) => entry.userId === normalizedUserId).length;
+      if (matchedCount > 0) {
+        await this.savePayload({
+          records: payload.records.map((entry) => (
+            entry.userId === normalizedUserId ? { ...entry, userId: normalizedReplacementUserId } : entry
+          ))
+        });
+      }
+      return matchedCount;
     });
   }
 
@@ -694,6 +718,21 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
     return result.rowCount ?? result.rows.length;
   }
 
+  async deidentifySessionsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = normalizeNullableString(userId);
+    const normalizedReplacementUserId = normalizeNullableString(replacementUserId);
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    await this.ensureTable();
+    const result = await this.pool.query<{ simulation_session_id: string }>(
+      "UPDATE simulation_sessions SET user_id = $2 WHERE user_id = $1 RETURNING simulation_session_id",
+      [normalizedUserId, normalizedReplacementUserId]
+    );
+    return result.rowCount ?? result.rows.length;
+  }
+
   async pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number> {
     const cutoffIso = normalizeIsoString(cutoff);
     if (!cutoffIso) {
@@ -780,6 +819,10 @@ class UnsupportedSimulationSessionStore extends BaseSimulationSessionStore {
   }
 
   async deleteSessionsForUser(): Promise<number> {
+    throw new Error("Simulation session storage provider is not supported.");
+  }
+
+  async deidentifySessionsForUser(): Promise<number> {
     throw new Error("Simulation session storage provider is not supported.");
   }
 }

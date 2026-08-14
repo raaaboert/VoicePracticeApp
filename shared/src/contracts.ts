@@ -2281,6 +2281,13 @@ export interface UpdateUserRequest {
   dailyOverageExtraMinutes?: number;
 }
 
+export interface AccountDeletionReceipt {
+  tokenHash: string;
+  userIdHash: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface UpdateConfigRequest {
   activeSegmentId?: string;
   defaultDifficulty?: Difficulty;
@@ -2609,6 +2616,7 @@ export interface ApiDatabase {
   // Legacy compatibility field; extracted support-case storage is authoritative.
   supportCases?: SupportCaseRecord[];
   mobileAuthTokens: MobileAuthRecord[];
+  accountDeletionReceipts?: AccountDeletionReceipt[];
   emailVerifications: EmailVerificationRecord[];
   webAuthChallenges: WebAuthChallengeRecord[];
   // Legacy compatibility field; extracted web-auth session storage is authoritative.

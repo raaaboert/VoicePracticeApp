@@ -32,6 +32,7 @@ export interface UsageSessionStore {
   getRecordById(sessionId: string): UsageSessionRecord | null;
   listRecords(query?: UsageSessionQuery): UsageSessionRecord[];
   deleteRecordsForUser(userId: string): Promise<number>;
+  deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 interface CreateUsageSessionStoreParams {
@@ -311,6 +312,7 @@ abstract class BaseUsageSessionStore implements UsageSessionStore {
   abstract importLegacyRecords(records: UsageSessionRecord[]): Promise<{ importedCount: number }>;
   abstract appendRecord(record: UsageSessionRecord): Promise<UsageSessionAppendResult>;
   abstract deleteRecordsForUser(userId: string): Promise<number>;
+  abstract deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 class FileUsageSessionStore extends BaseUsageSessionStore {
@@ -402,6 +404,27 @@ class FileUsageSessionStore extends BaseUsageSessionStore {
         this.setSnapshot(next);
       }
       return deletedCount;
+    });
+  }
+
+  async deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = userId.trim();
+    const normalizedReplacementUserId = replacementUserId.trim();
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const matchedCount = this.records.filter((record) => record.userId === normalizedUserId).length;
+      if (matchedCount > 0) {
+        const next = this.records.map((record) => (
+          record.userId === normalizedUserId ? { ...record, userId: normalizedReplacementUserId } : record
+        ));
+        await this.savePayload({ records: next });
+        this.setSnapshot(next);
+      }
+      return matchedCount;
     });
   }
 
@@ -641,6 +664,29 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
     });
   }
 
+  async deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = userId.trim();
+    const normalizedReplacementUserId = replacementUserId.trim();
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const result = await this.pool.query<{ id: string }>(
+        "UPDATE usage_sessions SET user_id = $2 WHERE user_id = $1 RETURNING id",
+        [normalizedUserId, normalizedReplacementUserId]
+      );
+      const updatedCount = result.rowCount ?? result.rows.length;
+      if (updatedCount > 0) {
+        this.setSnapshot(this.records.map((record) => (
+          record.userId === normalizedUserId ? { ...record, userId: normalizedReplacementUserId } : record
+        )));
+      }
+      return updatedCount;
+    });
+  }
+
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) {
       return;
@@ -807,6 +853,10 @@ class UnsupportedUsageSessionStore extends BaseUsageSessionStore {
   }
 
   async deleteRecordsForUser(): Promise<number> {
+    throw new Error("Usage session storage provider is not supported.");
+  }
+
+  async deidentifyRecordsForUser(): Promise<number> {
     throw new Error("Usage session storage provider is not supported.");
   }
 }

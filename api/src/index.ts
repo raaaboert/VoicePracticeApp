@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid";
 import multer from "multer";
 import {
   ACCOUNT_TYPES,
+  AccountDeletionReceipt,
   AUDIT_ACTOR_TYPES,
   AuditActorType,
   AuditEvent,
@@ -566,6 +567,7 @@ const trainingPackStore = createTrainingPackStore({
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
 let dashboardTrainingPackLoaderForTest: ((orgId: string) => Promise<TrainingPack[]>) | null = null;
+let mobileAccountDeletionFailureForTest: Error | null = null;
 let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitlementStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
@@ -3234,6 +3236,7 @@ function createDefaultDatabase(): ApiDatabase {
     // dedicated store takes authority, but the in-memory shape stays stable for shared helpers.
     usageSessions: [],
     mobileAuthTokens: [],
+    accountDeletionReceipts: [],
     emailVerifications: [],
     webAuthChallenges: [],
     enterpriseJoinRequests: [],
@@ -4160,6 +4163,19 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       : undefined,
     mobileAuthTokens:
       Array.isArray(candidate.mobileAuthTokens) ? candidate.mobileAuthTokens : fallback.mobileAuthTokens,
+    accountDeletionReceipts: Array.isArray(candidate.accountDeletionReceipts)
+      ? candidate.accountDeletionReceipts.filter((entry): entry is AccountDeletionReceipt => (
+          Boolean(entry)
+          && typeof entry.tokenHash === "string"
+          && entry.tokenHash.length === 64
+          && typeof entry.userIdHash === "string"
+          && entry.userIdHash.length === 64
+          && typeof entry.createdAt === "string"
+          && Number.isFinite(new Date(entry.createdAt).getTime())
+          && typeof entry.expiresAt === "string"
+          && Number.isFinite(new Date(entry.expiresAt).getTime())
+        ))
+      : [],
     emailVerifications: Array.isArray(candidate.emailVerifications)
       ? candidate.emailVerifications
       : fallback.emailVerifications,
@@ -4263,10 +4279,10 @@ function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
 }
 
 async function saveDatabase(db: ApiDatabase): Promise<void> {
-  databaseCache = db;
   const storage = getOrCreateDatabaseStorage();
   await userEmployeeIdClaimStore.syncFromUsers(db.users);
   await storage.save(buildPersistedDatabaseSnapshot(db));
+  databaseCache = db;
 }
 
 async function migrateUserProfileAppStateNormalization(): Promise<void> {
@@ -4763,6 +4779,61 @@ function getIncomingWebAuthToken(request: Request): string | null {
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
+}
+
+async function withIsolatedDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  const completed = await withDatabaseLock(async () => {
+    const db = structuredClone(await loadDatabase());
+    try {
+      const result = await handler(db);
+      const pendingAuditEvents = drainPendingAuditEvents(db);
+      if (pendingAuditEvents.length > 0) {
+        await auditEventStore.appendEvents(pendingAuditEvents, { maxRecords: MAX_AUDIT_EVENTS });
+      }
+      await saveDatabase(db);
+      return { result, postCommitEffects: pendingPostCommitEffectsByDb.drain(db) };
+    } catch (error) {
+      drainPendingAuditEvents(db);
+      pendingPostCommitEffectsByDb.discard(db);
+      throw error;
+    }
+  });
+
+  await runDatabasePostCommitEffects(completed.postCommitEffects);
+  return completed.result;
+}
+
+const DEIDENTIFIED_ACCOUNT_USER_ID = "deleted_user";
+const ACCOUNT_DELETION_RECEIPT_TTL_MS = 24 * 60 * 60 * 1_000;
+
+function hashDeletedAccountUserId(userId: string): string {
+  return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(`deleted-account:${userId}`).digest("hex");
+}
+
+function hasMatchingAccountDeletionReceipt(
+  db: ApiDatabase,
+  token: string,
+  userId: string,
+  now: Date
+): boolean {
+  const tokenHash = hashMobileToken(token);
+  const userIdHash = hashDeletedAccountUserId(userId);
+  return (db.accountDeletionReceipts ?? []).some((receipt) => (
+    receipt.tokenHash === tokenHash
+    && receipt.userIdHash === userIdHash
+    && new Date(receipt.expiresAt).getTime() > now.getTime()
+  ));
+}
+
+function findAuthenticatedMobileUserId(db: ApiDatabase, token: string): string | null {
+  const actualBuffer = Buffer.from(hashMobileToken(token), "hex");
+  for (const record of db.mobileAuthTokens) {
+    const expectedBuffer = Buffer.from(record.tokenHash, "hex");
+    if (expectedBuffer.length === actualBuffer.length && crypto.timingSafeEqual(expectedBuffer, actualBuffer)) {
+      return record.userId;
+    }
+  }
+  return null;
 }
 
 function createMobileAuthToken(): string {
@@ -16696,6 +16767,186 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
   });
 });
 
+app.delete("/mobile/users/:userId", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  const requestedUserId = (request.params.userId ?? "").trim();
+  const outcome = await withIsolatedDatabaseWrite(async (db) => {
+    const now = new Date();
+    const authenticatedUserId = findAuthenticatedMobileUserId(db, authToken);
+    if (!authenticatedUserId) {
+      if (hasMatchingAccountDeletionReceipt(db, authToken, requestedUserId, now)) {
+        return { status: 200, body: { deleted: true, alreadyDeleted: true } } as const;
+      }
+      return { status: 401, body: { error: "Invalid mobile token." } } as const;
+    }
+    if (authenticatedUserId !== requestedUserId) {
+      return { status: 403, body: { error: "You can only delete your own account." } } as const;
+    }
+
+    const user = getUserById(db, requestedUserId);
+    if (!user || !hasValidMobileTokenForUser(db, requestedUserId, authToken, {
+      allowReonboardingToken: true,
+      allowIncompleteProfile: true,
+    })) {
+      return { status: 401, body: { error: "Invalid mobile token." } } as const;
+    }
+    if (mobileAccountDeletionFailureForTest) {
+      throw mobileAccountDeletionFailureForTest;
+    }
+
+    const tokenHashes = db.mobileAuthTokens
+      .filter((record) => record.userId === user.id)
+      .map((record) => record.tokenHash);
+    const userIdHash = hashDeletedAccountUserId(user.id);
+    const createdAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + ACCOUNT_DELETION_RECEIPT_TTL_MS).toISOString();
+
+    const deidentifiedUsageSessions = await usageSessionStore.deidentifyRecordsForUser(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const deidentifiedSimulationSessions = await simulationSessionStore.deidentifySessionsForUser(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const deidentifiedScoreRecords = await scoreRecordStore.deidentifyRecordsForUser(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const deidentifiedAiUsageEvents = await aiUsageEventStore.deidentifyEventsForUser(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const deletedSupportCases = await supportCaseStore.deleteCasesForUser(user.id);
+    const deletedPerformancePlans = await performancePlanStore.deletePlansForUser(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const trainingContentIdentityCleanup = await trainingContentStore.deleteUserAssignmentsAndDeidentifyRecords(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const deidentifiedModuleEntitlements = await orgModuleEntitlementStore.deidentifyActor(
+      user.id,
+      DEIDENTIFIED_ACCOUNT_USER_ID
+    );
+    const deletedAuditEvents = await auditEventStore.deleteEventsForUser(user.id);
+    await revokeWebAuthSessionsForUserId(user.id);
+
+    db.users = db.users
+      .filter((entry) => entry.id !== user.id)
+      .map((entry) => entry.managerUserId === user.id
+        ? { ...entry, managerUserId: null, updatedAt: createdAt }
+        : entry);
+    db.orgs = db.orgs.map((org) => ({
+      ...org,
+      customScenarios: (org.customScenarios ?? []).map((scenario) => (
+        scenario.createdBy === user.id
+          ? { ...scenario, createdBy: DEIDENTIFIED_ACCOUNT_USER_ID }
+          : scenario
+      )),
+    }));
+    db.trainingPackAssignments = (db.trainingPackAssignments ?? [])
+      .filter((assignment) => assignment.userId !== user.id)
+      .map((assignment) => assignment.assignedByUserId === user.id
+        ? { ...assignment, assignedByUserId: null, updatedAt: createdAt }
+        : assignment);
+    db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
+    db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
+    db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
+    if (db.webAuthSessions) {
+      db.webAuthSessions = db.webAuthSessions.filter((record) => record.userId !== user.id);
+    }
+    db.enterpriseJoinRequests = db.enterpriseJoinRequests
+      .filter((record) => record.userId !== user.id)
+      .map((record) => record.decidedByUserId === user.id
+        ? { ...record, decidedByUserId: null, decisionReason: null }
+        : record);
+    if (db.supportCases) {
+      db.supportCases = db.supportCases.filter((record) => record.userId !== user.id);
+    }
+    if (db.auditEvents) {
+      db.auditEvents = db.auditEvents.filter((event) => event.userId !== user.id && event.actorId !== user.id);
+    }
+    if (db.usageSessions) {
+      db.usageSessions = db.usageSessions.map((record) => record.userId === user.id
+        ? { ...record, userId: DEIDENTIFIED_ACCOUNT_USER_ID }
+        : record);
+    }
+    if (db.scoreRecords) {
+      db.scoreRecords = db.scoreRecords.map((record) => record.userId === user.id
+        ? {
+            ...record,
+            userId: DEIDENTIFIED_ACCOUNT_USER_ID,
+            summary: undefined,
+            coachingArtifact: null,
+            normalizedCoachingThemes: null,
+          }
+        : record);
+    }
+    if (db.aiUsageEvents) {
+      db.aiUsageEvents = db.aiUsageEvents.map((event) => event.userId === user.id
+        ? { ...event, userId: DEIDENTIFIED_ACCOUNT_USER_ID }
+        : event);
+    }
+    db.accountDeletionReceipts = [
+      ...(db.accountDeletionReceipts ?? []).filter((receipt) => new Date(receipt.expiresAt).getTime() > now.getTime()),
+      ...tokenHashes.map((tokenHash): AccountDeletionReceipt => ({ tokenHash, userIdHash, createdAt, expiresAt })),
+    ];
+
+    appendAuditEvent(db, {
+      actorType: "system",
+      actorId: null,
+      action: "mobile.account_deleted",
+      orgId: user.orgId,
+      userId: null,
+      message: "A mobile user account was self-deleted.",
+      metadata: {
+        deidentifiedUsageSessions,
+        deidentifiedSimulationSessions,
+        deidentifiedScoreRecords,
+        deidentifiedAiUsageEvents,
+        deletedSupportCases,
+        deletedPerformancePlans,
+        trainingContentIdentityCleanup,
+        deidentifiedModuleEntitlements,
+        deletedAuditEvents,
+      },
+    });
+
+    return { status: 200, body: { deleted: true, alreadyDeleted: false }, deletedUserId: user.id } as const;
+  });
+
+  if ("deletedUserId" in outcome && outcome.deletedUserId) {
+    const deletedUserId = outcome.deletedUserId;
+    const waiters = mobileUpdateWaitersByUserId.get(deletedUserId);
+    if (waiters) {
+      for (const waiter of Array.from(waiters)) {
+        if (!waiter.resolved) {
+          waiter.resolved = true;
+          clearTimeout(waiter.timeoutHandle);
+          try {
+            waiter.response.status(410).json({ error: "User account deleted." });
+          } catch {
+            // Ignore disconnected clients.
+          }
+        }
+      }
+    }
+    mobileUpdateWaitersByUserId.delete(deletedUserId);
+    mobileUpdatePayloadByUserId.delete(deletedUserId);
+    mobileUpdateCursorByUserId.delete(deletedUserId);
+    mobileUpdateReasonByUserId.delete(deletedUserId);
+  }
+
+  response.status(outcome.status).json(outcome.body);
+});
+
 app.get("/mobile/users/:userId/modules", async (request: Request, response: Response) => {
   try {
     const result = await withMobileTrainingContentContext(request, response, (context) =>
@@ -22398,6 +22649,7 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
     }
 
     const topUsers = Array.from(scoresByUserId.entries())
+      .filter(([userId]) => userId !== DEIDENTIFIED_ACCOUNT_USER_ID)
       .map(([userId, scores]) => {
         const user = userById.get(userId);
         const org = user?.orgId ? orgById.get(user.orgId) : null;
@@ -22599,6 +22851,13 @@ export function clearRateLimitsForTest(): void {
   }
   rateLimitByKey.clear();
   rateLimitCleanupCounter = 0;
+}
+
+export function setMobileAccountDeletionFailureForTest(error: Error | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setMobileAccountDeletionFailureForTest is only available in test.");
+  }
+  mobileAccountDeletionFailureForTest = error;
 }
 
 export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementStore): void {

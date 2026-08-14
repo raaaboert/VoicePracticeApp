@@ -124,6 +124,62 @@ test("Training Content store initializes once and scopes every content read by o
   );
 });
 
+test("Training Content account cleanup deletes direct assignments and de-identifies retained usage and actor references", async () => {
+  const queries: Array<{ text: string; values?: readonly unknown[] }> = [];
+  const client = {
+    async query(text: string, values?: readonly unknown[]) {
+      queries.push({ text, values });
+      if (text.includes("DELETE FROM org_content_assignments WHERE subject_user_id")) {
+        return { rows: [], rowCount: 2 };
+      }
+      if (text.includes("UPDATE org_content_usage_sessions SET user_id")) {
+        return { rows: [], rowCount: 3 };
+      }
+      if (text.startsWith("UPDATE org_content_") || text.includes("UPDATE org_content_")) {
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {
+      // No-op for deterministic query pool.
+    },
+  };
+  const queryPool = {
+    async query(text: string, values?: readonly unknown[]) {
+      queries.push({ text, values });
+      return { rows: [], rowCount: 0 };
+    },
+    async connect() {
+      return client;
+    },
+  };
+  const store = createTrainingContentStore({
+    provider: "postgres",
+    databaseUrl: "postgres://example.invalid/peritio",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: queryPool as any,
+  });
+
+  const result = await store.deleteUserAssignmentsAndDeidentifyRecords("user_a", "deleted_user");
+
+  assert.deepEqual(result, {
+    deletedAssignments: 2,
+    deidentifiedUsageSessions: 3,
+    deidentifiedActorReferences: 5,
+  });
+  assert.ok(queries.some((query) => query.text.includes("ON CONFLICT (org_id, content_id, user_id) DO UPDATE")));
+  assert.ok(queries.some((query) => query.text.includes("DELETE FROM org_content_usage WHERE user_id = $1")));
+  assert.ok(queries.some((query) => query.text.includes("UPDATE org_content_categories")));
+  assert.ok(queries.some((query) => query.text.includes("UPDATE org_content_scenario_links")));
+  for (const query of queries.filter((entry) => entry.values?.length === 2)) {
+    if (query.text.includes("org_content_")) {
+      assert.deepEqual(query.values, ["user_a", "deleted_user"]);
+    }
+  }
+});
+
 test("Training Content detail exposes a newer active video replacement for editor restoration", async () => {
   const currentAsset = {
     id: "1d8ac3f7-7596-4c64-83f3-3a38f2118fc2",

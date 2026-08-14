@@ -9,6 +9,7 @@ import * as Speech from "expo-speech";
 import appManifest from "./app.json";
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   AppState,
   Image,
@@ -62,6 +63,7 @@ import {
   resendMobileVerificationEmail,
   createPublicSupportErrorCase,
   createSupportCase,
+  deleteMobileAccount,
   recoverPersistedAiScore,
   recordUsageSession,
   submitOrgAccessRequest,
@@ -145,6 +147,11 @@ import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
 import { confirmAndOpenExternalLink } from "./src/trainingContent/externalLinks";
+import {
+  clearAiProcessingConsent,
+  hasAiProcessingConsent,
+  recordAiProcessingConsent,
+} from "./src/lib/aiProcessingConsent";
 import { fetchMobileModules } from "./src/trainingContent/api";
 import {
   canRequestTrainingContentModule,
@@ -806,6 +813,8 @@ export default function App() {
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [isSettingsSaving, setIsSettingsSaving] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const aiConsentPromptPendingRef = useRef(false);
   const [organizationPlanSupportNotice, setOrganizationPlanSupportNotice] = useState<string | null>(null);
   const [organizationPlanSupportError, setOrganizationPlanSupportError] = useState<string | null>(null);
   const [organizationPlanSupportDraft, setOrganizationPlanSupportDraft] = useState("");
@@ -2272,6 +2281,7 @@ export default function App() {
     notice?: string,
     options?: { preserveOnboardingValues?: boolean },
   ) => {
+    const currentUserId = user?.id ?? null;
     const shouldPreserveOnboardingValues = options?.preserveOnboardingValues === true;
     invalidateIdentityScopedState();
     approvalTransitionRef.current = false;
@@ -2279,6 +2289,13 @@ export default function App() {
     setMobileAuthToken(null);
     setHasAuthenticatedScopedConfig(false);
     await clearUserId();
+    if (currentUserId) {
+      try {
+        await clearAiProcessingConsent(currentUserId);
+      } catch {
+        // Local reset still proceeds if consent storage is temporarily unavailable.
+      }
+    }
     setActiveSuperUserOrgId(null);
     setActiveSuperUserOrgIdState(null);
     setSuperUserOrgOptions([]);
@@ -2310,7 +2327,7 @@ export default function App() {
     setScopedConfigError(null);
     setOnboardingError(notice ?? null);
     setScreen("onboarding");
-  }, [detectedTimezone, invalidateIdentityScopedState]);
+  }, [detectedTimezone, invalidateIdentityScopedState, user?.id]);
 
   const loadAuthenticatedScopedConfig = useCallback(
     async (
@@ -3478,6 +3495,102 @@ export default function App() {
     }
   };
 
+  const requestAiProcessingConsent = async (userId: string): Promise<boolean> => {
+    if (await hasAiProcessingConsent(userId)) {
+      return true;
+    }
+    if (aiConsentPromptPendingRef.current) {
+      return false;
+    }
+    aiConsentPromptPendingRef.current = true;
+    return await new Promise<boolean>((resolve) => {
+      Alert.alert(
+        "AI Processing",
+        "Peritio uses a third-party AI service to process your practice audio and conversation content for transcription, simulated responses, and scoring. Peritio does not store your practice audio.",
+        [
+          {
+            text: "Cancel",
+            style: "cancel",
+            onPress: () => {
+              aiConsentPromptPendingRef.current = false;
+              resolve(false);
+            },
+          },
+          {
+            text: "Continue",
+            onPress: () => {
+              void recordAiProcessingConsent(userId)
+                .then(() => resolve(true))
+                .catch(() => {
+                  setSetupError("Could not save AI processing permission. Please try again.");
+                  resolve(false);
+                })
+                .finally(() => {
+                  aiConsentPromptPendingRef.current = false;
+                });
+            },
+          },
+        ],
+        {
+          cancelable: true,
+          onDismiss: () => {
+            aiConsentPromptPendingRef.current = false;
+            resolve(false);
+          },
+        },
+      );
+    });
+  };
+
+  const deleteCurrentAccount = async () => {
+    if (!user || !mobileAuthToken || isDeletingAccount) {
+      return;
+    }
+    setIsDeletingAccount(true);
+    setSettingsError(null);
+    try {
+      await deleteMobileAccount(user.id, mobileAuthToken);
+    } catch (caught) {
+      setSettingsError(getErrorMessage(caught, "Could not delete your account. Please try again."));
+      setIsDeletingAccount(false);
+      return;
+    }
+    try {
+      try {
+        await clearAiProcessingConsent(user.id);
+      } catch {
+        // The full local identity reset below remains authoritative for sign-out.
+      }
+      await resetSessionToOnboarding("Your Peritio account was deleted.");
+    } catch {
+      invalidateIdentityScopedState();
+      setUser(null);
+      setMobileAuthToken(null);
+      setScreen("onboarding");
+      setOnboardingError("Your Peritio account was deleted.");
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  };
+
+  const confirmDeleteCurrentAccount = () => {
+    if (!user || !mobileAuthToken || isDeletingAccount) {
+      return;
+    }
+    Alert.alert(
+      "Delete your Peritio account?",
+      "Your account and personal information will be deleted, and you'll be signed out on this device.\n\nCertain usage and training records may be retained according to your organization's governing agreements, but will no longer be linked to your identity.\n\nThis can't be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete Account",
+          style: "destructive",
+          onPress: () => { void deleteCurrentAccount(); },
+        },
+      ],
+    );
+  };
+
   const startSimulation = async () => {
     if (!activeSegment || !activeScenario || !activeIndustry || !user || !mobileAuthToken) {
       setSetupError("Missing setup context. Please refresh and try again.");
@@ -3490,6 +3603,9 @@ export default function App() {
 
     setSetupError(null);
     try {
+      if (!await requestAiProcessingConsent(user.id)) {
+        return;
+      }
       const latestEntitlements = await refreshEntitlements();
       if (latestEntitlements && !latestEntitlements.canStartSimulation) {
         if (latestEntitlements.lockCode === "ORG_ACCESS_REQUIRED") {
@@ -5104,6 +5220,32 @@ export default function App() {
         >
           <Text style={styles.ghostButtonText}>Reset Local User</Text>
         </Pressable>
+        <Pressable
+          style={[styles.destructiveButton, isDeletingAccount ? styles.disabled : null]}
+          disabled={isDeletingAccount}
+          onPress={confirmDeleteCurrentAccount}
+        >
+          <Text style={styles.destructiveButtonText}>
+            {isDeletingAccount ? "Deleting Account..." : "Delete Account"}
+          </Text>
+        </Pressable>
+
+        <View style={styles.card}>
+          <Text style={styles.title}>Help & Legal</Text>
+          {[
+            { label: "Privacy", url: "https://peritio.ai/privacy" },
+            { label: "Terms", url: "https://peritio.ai/terms" },
+            { label: "Support", url: "https://peritio.ai/support" },
+          ].map((item) => (
+            <Pressable
+              key={item.label}
+              style={styles.linkButton}
+              onPress={() => confirmAndOpenExternalLink(item.url)}
+            >
+              <Text style={styles.linkButtonText}>{item.label}</Text>
+            </Pressable>
+          ))}
+        </View>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -7067,5 +7209,7 @@ function createStyles(theme: ThemeTokens) {
     voiceToggleButton: { flex: 1, minHeight: 42, borderRadius: 12, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.panel },
     voiceToggleText: { color: theme.text, fontSize: 13.5, fontWeight: "700" },
     signOutButton: { marginTop: 6, marginBottom: 18 },
+    destructiveButton: { minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: theme.danger, alignItems: "center", justifyContent: "center", marginBottom: 18, paddingHorizontal: 14 },
+    destructiveButtonText: { color: theme.danger, fontSize: 14, fontWeight: "800" },
   });
 }

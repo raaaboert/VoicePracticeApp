@@ -527,6 +527,17 @@ export async function fetchMobileUser(userId: string, authToken: string): Promis
   return requestJson<UserProfile>(`/mobile/users/${encodeURIComponent(userId)}`, undefined, authToken);
 }
 
+export async function deleteMobileAccount(
+  userId: string,
+  authToken: string,
+): Promise<{ deleted: true; alreadyDeleted: boolean }> {
+  return requestJson<{ deleted: true; alreadyDeleted: boolean }>(
+    `/mobile/users/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+    authToken,
+  );
+}
+
 export async function fetchSuperUserOrgOptions(
   userId: string,
   authToken: string,

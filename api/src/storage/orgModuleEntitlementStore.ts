@@ -33,6 +33,7 @@ export interface OrgModuleEntitlementStore {
   initialize(): Promise<void>;
   getOrgModuleEntitlement(orgId: string, moduleKey: OrgModuleKey): Promise<StoredOrgModuleEntitlement>;
   setOrgModuleEntitlement(input: SetOrgModuleEntitlementInput): Promise<OrgModuleEntitlementChange>;
+  deidentifyActor(userId: string, replacementUserId: string): Promise<number>;
 }
 
 interface CreateOrgModuleEntitlementStoreParams {
@@ -67,6 +68,10 @@ class NullOrgModuleEntitlementStore implements OrgModuleEntitlementStore {
 
   async setOrgModuleEntitlement(_input: SetOrgModuleEntitlementInput): Promise<OrgModuleEntitlementChange> {
     throw new Error("Organization module entitlements require postgres storage.");
+  }
+
+  async deidentifyActor(): Promise<number> {
+    return 0;
   }
 }
 
@@ -204,6 +209,20 @@ class PostgresOrgModuleEntitlementStore implements OrgModuleEntitlementStore {
     } finally {
       client.release();
     }
+  }
+
+  async deidentifyActor(userId: string, replacementUserId: string): Promise<number> {
+    await this.initialize();
+    const normalizedUserId = normalizeRequiredId(userId, "User id");
+    const normalizedReplacementUserId = normalizeRequiredId(replacementUserId, "Replacement user id");
+    if (normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+    const result = await this.pool.query(
+      "UPDATE org_module_entitlements SET updated_by_actor_id = $2 WHERE updated_by_actor_id = $1",
+      [normalizedUserId, normalizedReplacementUserId]
+    );
+    return result.rowCount ?? 0;
   }
 }
 

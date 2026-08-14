@@ -998,6 +998,9 @@ before(async () => {
       }
       return { previous, current, changed };
     },
+    async deidentifyActor() {
+      return 0;
+    },
   });
   imported.setTrainingContentAssetServiceForTest({
     async initiateUpload(params) {

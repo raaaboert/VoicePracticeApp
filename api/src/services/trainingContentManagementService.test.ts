@@ -244,6 +244,9 @@ function harness(enabled = true) {
     async setOrgModuleEntitlement() {
       throw new Error("not used");
     },
+    async deidentifyActor() {
+      return 0;
+    },
   };
   const defaultCategory = {
     id: "category_1",

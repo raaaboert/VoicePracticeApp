@@ -45,6 +45,7 @@ export interface ScoreRecordStore {
   getRecordById(scoreId: string): SimulationScoreRecord | null;
   listRecords(query?: ScoreRecordQuery): SimulationScoreRecord[];
   deleteRecordsForUser(userId: string): Promise<number>;
+  deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 interface CreateScoreRecordStoreParams {
@@ -495,6 +496,7 @@ abstract class BaseScoreRecordStore implements ScoreRecordStore {
   abstract importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }>;
   abstract appendRecord(record: SimulationScoreRecord): Promise<void>;
   abstract deleteRecordsForUser(userId: string): Promise<number>;
+  abstract deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 class FileScoreRecordStore extends BaseScoreRecordStore {
@@ -577,6 +579,29 @@ class FileScoreRecordStore extends BaseScoreRecordStore {
         this.setSnapshot(next);
       }
       return deletedCount;
+    });
+  }
+
+  async deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = userId.trim();
+    const normalizedReplacementUserId = replacementUserId.trim();
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const matchedCount = this.records.filter((record) => record.userId === normalizedUserId).length;
+      if (matchedCount > 0) {
+        const next = this.records.map((record) => (
+          record.userId === normalizedUserId
+            ? { ...record, userId: normalizedReplacementUserId, summary: undefined, coachingArtifact: null, normalizedCoachingThemes: null }
+            : record
+        ));
+        await this.savePayload({ records: next });
+        this.setSnapshot(next);
+      }
+      return matchedCount;
     });
   }
 
@@ -751,6 +776,34 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
         this.setSnapshot(this.records.filter((record) => record.userId !== normalizedUserId));
       }
       return deletedCount;
+    });
+  }
+
+  async deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number> {
+    const normalizedUserId = userId.trim();
+    const normalizedReplacementUserId = replacementUserId.trim();
+    if (!normalizedUserId || !normalizedReplacementUserId || normalizedUserId === normalizedReplacementUserId) {
+      return 0;
+    }
+
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const result = await this.pool.query<{ id: string }>(
+        `UPDATE score_records
+         SET user_id = $2, summary = NULL, coaching_artifact = NULL, normalized_coaching_themes = NULL
+         WHERE user_id = $1
+         RETURNING id`,
+        [normalizedUserId, normalizedReplacementUserId]
+      );
+      const updatedCount = result.rowCount ?? result.rows.length;
+      if (updatedCount > 0) {
+        this.setSnapshot(this.records.map((record) => (
+          record.userId === normalizedUserId
+            ? { ...record, userId: normalizedReplacementUserId, summary: undefined, coachingArtifact: null, normalizedCoachingThemes: null }
+            : record
+        )));
+      }
+      return updatedCount;
     });
   }
 
@@ -1043,6 +1096,10 @@ class UnsupportedScoreRecordStore extends BaseScoreRecordStore {
   }
 
   async deleteRecordsForUser(): Promise<number> {
+    throw new Error("Score record storage provider is not supported.");
+  }
+
+  async deidentifyRecordsForUser(): Promise<number> {
     throw new Error("Score record storage provider is not supported.");
   }
 }

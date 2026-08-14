@@ -91,6 +91,7 @@ export interface PerformancePlanStore {
   listAuditEvents(planId: string): Promise<PerformanceAuditEvent[]>;
   appendPlanUpdate(input: PerformancePlanAppendUpdateInput): Promise<PerformancePlanUpdateRecord>;
   listPlanUpdates(planId: string, limit?: number): Promise<PerformancePlanUpdateRecord[]>;
+  deletePlansForUser(userId: string, replacementActorId?: string): Promise<number>;
 }
 
 interface CreatePerformancePlanStoreParams {
@@ -793,6 +794,7 @@ abstract class BasePerformancePlanStore implements PerformancePlanStore {
   abstract listAuditEvents(planId: string): Promise<PerformanceAuditEvent[]>;
   abstract appendPlanUpdate(input: PerformancePlanAppendUpdateInput): Promise<PerformancePlanUpdateRecord>;
   abstract listPlanUpdates(planId: string, limit?: number): Promise<PerformancePlanUpdateRecord[]>;
+  abstract deletePlansForUser(userId: string, replacementActorId?: string): Promise<number>;
 }
 
 class FilePerformancePlanStore extends BasePerformancePlanStore {
@@ -1048,6 +1050,37 @@ class FilePerformancePlanStore extends BasePerformancePlanStore {
     return await this.withLock(async () => {
       const payload = await this.loadPayload();
       return sortPlanUpdates(payload.updates.filter((entry) => entry.planId === normalizedPlanId)).slice(0, Math.max(0, limit));
+    });
+  }
+
+  async deletePlansForUser(userId: string, replacementActorId?: string): Promise<number> {
+    const normalizedUserId = normalizeNullableString(userId);
+    const normalizedReplacementActorId = normalizeNullableString(replacementActorId);
+    if (!normalizedUserId) {
+      return 0;
+    }
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      const planIds = new Set(payload.plans.filter((plan) => plan.userId === normalizedUserId).map((plan) => plan.id));
+      const hasActorReferences = Boolean(normalizedReplacementActorId) && (
+        payload.plans.some((plan) => plan.createdByActorId === normalizedUserId || plan.cancelledByActorId === normalizedUserId)
+        || payload.auditEvents.some((entry) => entry.actorId === normalizedUserId)
+        || payload.updates.some((entry) => entry.authorActorId === normalizedUserId)
+      );
+      if (planIds.size === 0 && !hasActorReferences) {
+        return 0;
+      }
+      await this.savePayload(normalizePayload({
+        plans: payload.plans.filter((plan) => !planIds.has(plan.id)).map((plan) => ({
+          ...plan,
+          createdByActorId: plan.createdByActorId === normalizedUserId ? normalizedReplacementActorId : plan.createdByActorId,
+          cancelledByActorId: plan.cancelledByActorId === normalizedUserId ? normalizedReplacementActorId : plan.cancelledByActorId,
+        })),
+        scopeItems: payload.scopeItems.filter((entry) => !planIds.has(entry.planId)),
+        auditEvents: payload.auditEvents.filter((entry) => !planIds.has(entry.planId) && entry.actorId !== normalizedUserId),
+        updates: payload.updates.filter((entry) => !planIds.has(entry.planId) && entry.authorActorId !== normalizedUserId)
+      }));
+      return planIds.size;
     });
   }
 
@@ -1461,6 +1494,41 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
     }
     await this.ensureTable();
     return await loadPlanUpdates(this.pool, normalizedPlanId, limit);
+  }
+
+  async deletePlansForUser(userId: string, replacementActorId?: string): Promise<number> {
+    const normalizedUserId = normalizeNullableString(userId);
+    const normalizedReplacementActorId = normalizeNullableString(replacementActorId);
+    if (!normalizedUserId) {
+      return 0;
+    }
+    await this.ensureTable();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{ id: string }>(
+        "DELETE FROM performance_plans WHERE user_id = $1 RETURNING id",
+        [normalizedUserId]
+      );
+      if (normalizedReplacementActorId) {
+        await client.query(
+          `UPDATE performance_plans
+           SET created_by_actor_id = CASE WHEN created_by_actor_id = $1 THEN $2 ELSE created_by_actor_id END,
+               cancelled_by_actor_id = CASE WHEN cancelled_by_actor_id = $1 THEN $2 ELSE cancelled_by_actor_id END
+           WHERE created_by_actor_id = $1 OR cancelled_by_actor_id = $1`,
+          [normalizedUserId, normalizedReplacementActorId]
+        );
+        await client.query("DELETE FROM performance_plan_audit_events WHERE actor_id = $1", [normalizedUserId]);
+        await client.query("DELETE FROM performance_plan_updates WHERE author_actor_id = $1", [normalizedUserId]);
+      }
+      await client.query("COMMIT");
+      return result.rowCount ?? result.rows.length;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private async loadRelations(plan: PerformancePlan): Promise<PerformancePlanWithRelations> {

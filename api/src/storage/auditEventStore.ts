@@ -28,6 +28,7 @@ export interface AuditEventStore {
   ): Promise<{ importedCount: number; trimmedCount: number }>;
   appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null }): Promise<void>;
   listEvents(query?: AuditEventQuery): Promise<AuditEvent[]>;
+  deleteEventsForUser(userId: string): Promise<number>;
 }
 
 interface CreateAuditEventStoreParams {
@@ -271,6 +272,24 @@ class FileAuditEventStore implements AuditEventStore {
     });
   }
 
+  async deleteEventsForUser(userId: string): Promise<number> {
+    const normalizedUserId = normalizeNullableString(userId);
+    if (!normalizedUserId) {
+      return 0;
+    }
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      const next = payload.events.filter((event) => (
+        event.userId !== normalizedUserId && event.actorId !== normalizedUserId
+      ));
+      const deletedCount = payload.events.length - next.length;
+      if (deletedCount > 0) {
+        await this.savePayload({ events: next });
+      }
+      return deletedCount;
+    });
+  }
+
   private async loadPayload(): Promise<AuditEventFilePayload> {
     await ensureParentDirectory(this.filePath);
 
@@ -451,6 +470,19 @@ class PostgresAuditEventStore implements AuditEventStore {
     return result.rows
       .map((row) => mapRowToAuditEvent(row))
       .filter((entry): entry is AuditEvent => entry !== null);
+  }
+
+  async deleteEventsForUser(userId: string): Promise<number> {
+    const normalizedUserId = normalizeNullableString(userId);
+    if (!normalizedUserId) {
+      return 0;
+    }
+    await this.ensureTable();
+    const result = await this.pool.query<{ id: string }>(
+      "DELETE FROM audit_events WHERE user_id = $1 OR actor_id = $1 RETURNING id",
+      [normalizedUserId]
+    );
+    return result.rowCount ?? result.rows.length;
   }
 
   private async ensureTable(): Promise<void> {

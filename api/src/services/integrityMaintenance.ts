@@ -8,6 +8,7 @@ import type { SupportCaseStore } from "../storage/supportCaseStore.js";
 import { deactivateInvalidTrainingPackAssignments } from "./trainingPackAssignments.js";
 
 export const RECOGNIZED_SIMULATION_SESSION_STALE_RETENTION_MS = 48 * 60 * 60 * 1000;
+const DEIDENTIFIED_ACCOUNT_USER_ID = "deleted_user";
 
 export interface UserScopedHistoryRepairSummary {
   orphanedUsageSessionsDeleted: number;
@@ -92,6 +93,7 @@ export async function repairOrphanedUserScopedHistory(
       .map((user) => user.id.trim())
       .filter(Boolean)
   );
+  knownUserIds.add(DEIDENTIFIED_ACCOUNT_USER_ID);
 
   const usageUserIds = toUniqueUserIds(
     params.usageSessionAccess.list(params.db).map((record) => (knownUserIds.has(record.userId) ? null : record.userId))
