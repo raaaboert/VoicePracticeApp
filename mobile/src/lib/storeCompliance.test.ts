@@ -50,7 +50,7 @@ test("Delete confirmation cancel performs no request and failure preserves local
 test("AI processing consent gates simulation mounting and is cleared on reset and deletion", async () => {
   const app = await source(appPath);
   assert.match(app, /"AI Processing"/);
-  assert.match(app, /third-party AI service to process your practice audio and conversation content/);
+  assert.match(app, /OpenAI, a third-party AI service, to process your practice audio and conversation content/);
   assert.match(app, /Peritio does not store your practice audio\./);
 
   const startBlock = app.slice(app.indexOf("const startSimulation"), app.indexOf("const handleSessionComplete"));

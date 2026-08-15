@@ -3506,7 +3506,7 @@ export default function App() {
     return await new Promise<boolean>((resolve) => {
       Alert.alert(
         "AI Processing",
-        "Peritio uses a third-party AI service to process your practice audio and conversation content for transcription, simulated responses, and scoring. Peritio does not store your practice audio.",
+        "Peritio uses OpenAI, a third-party AI service, to process your practice audio and conversation content for transcription, simulated responses, and scoring. Peritio does not store your practice audio.",
         [
           {
             text: "Cancel",
