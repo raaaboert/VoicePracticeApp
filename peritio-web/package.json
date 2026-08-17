@@ -10,16 +10,16 @@
   },
   "dependencies": {
     "@voicepractice/shared": "file:../shared",
-    "lucide-react": "^0.468.0",
-    "next": "16.3.0",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
+    "lucide-react": "^1.31.0",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "react-markdown": "^10.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
+    "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "tsx": "^4.20.6",
-    "typescript": "~6.0.3"
+    "typescript": "~7.0.2"
   }
 }
