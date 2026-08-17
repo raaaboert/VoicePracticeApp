@@ -24,6 +24,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
   COMMON_TIMEZONES,
@@ -6937,12 +6938,14 @@ export default function App() {
   };
 
   return (
-    <SafeAreaProvider>
-      <StatusBar style={statusBarStyle} />
-      <LinearGradient colors={[theme.bgTop, theme.bgBottom]} style={styles.gradient}>
-        <SafeAreaView style={styles.safeArea}>{renderContent()}</SafeAreaView>
-      </LinearGradient>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={styles.fill}>
+      <SafeAreaProvider>
+        <StatusBar style={statusBarStyle} />
+        <LinearGradient colors={[theme.bgTop, theme.bgBottom]} style={styles.gradient}>
+          <SafeAreaView style={styles.safeArea}>{renderContent()}</SafeAreaView>
+        </LinearGradient>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 

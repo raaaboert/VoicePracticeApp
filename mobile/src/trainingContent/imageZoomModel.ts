@@ -11,26 +11,8 @@ export interface ImageTranslation {
   y: number;
 }
 
-export interface ImageTouchPoint {
-  pageX: number;
-  pageY: number;
-}
-
-export interface ImageGestureBaseline {
-  scale: number;
-  translation: ImageTranslation;
-  distance: number | null;
-  midpoint: ImageTranslation | null;
-  gestureDx: number;
-  gestureDy: number;
-}
-
-export interface ImageGestureTransform {
-  scale: number;
-  translation: ImageTranslation;
-}
-
 export function clampImageZoomScale(scale: number): number {
+  "worklet";
   if (!Number.isFinite(scale)) {
     return MIN_IMAGE_ZOOM_SCALE;
   }
@@ -63,6 +45,7 @@ export function clampImageTranslation(params: {
   viewport: ImageSize;
   scale: number;
 }): ImageTranslation {
+  "worklet";
   const scale = clampImageZoomScale(params.scale);
   if (scale === MIN_IMAGE_ZOOM_SCALE) {
     return { x: 0, y: 0 };
@@ -75,106 +58,11 @@ export function clampImageTranslation(params: {
   };
 }
 
-export function getTouchDistance(
-  first: ImageTouchPoint,
-  second: ImageTouchPoint,
-): number {
-  return Math.hypot(second.pageX - first.pageX, second.pageY - first.pageY);
-}
-
-export function createImageGestureBaseline(params: {
-  scale: number;
-  translation: ImageTranslation;
-  touches: readonly ImageTouchPoint[];
-  gestureDx?: number;
-  gestureDy?: number;
-}): ImageGestureBaseline {
-  const first = params.touches[0];
-  const second = params.touches[1];
-  return {
-    scale: params.scale,
-    translation: params.translation,
-    distance: first && second ? getTouchDistance(first, second) : null,
-    midpoint: first && second
-      ? { x: (first.pageX + second.pageX) / 2, y: (first.pageY + second.pageY) / 2 }
-      : null,
-    gestureDx: params.gestureDx ?? 0,
-    gestureDy: params.gestureDy ?? 0,
-  };
-}
-
-export function updateImageGesture(params: {
-  baseline: ImageGestureBaseline;
-  currentScale: number;
-  currentTranslation: ImageTranslation;
-  touches: readonly ImageTouchPoint[];
-  gestureDx: number;
-  gestureDy: number;
-}): { baseline: ImageGestureBaseline; transform: ImageGestureTransform | null } {
-  const first = params.touches[0];
-  const second = params.touches[1];
-  if (first && second) {
-    const distance = getTouchDistance(first, second);
-    const midpoint = {
-      x: (first.pageX + second.pageX) / 2,
-      y: (first.pageY + second.pageY) / 2,
-    };
-    if (params.baseline.distance === null || params.baseline.distance <= 0) {
-      return {
-        baseline: createImageGestureBaseline({
-          scale: params.currentScale,
-          translation: params.currentTranslation,
-          touches: params.touches,
-          gestureDx: params.gestureDx,
-          gestureDy: params.gestureDy,
-        }),
-        transform: null,
-      };
-    }
-    return {
-      baseline: params.baseline,
-      transform: {
-        scale: params.baseline.scale * (distance / params.baseline.distance),
-        translation: {
-          x: params.baseline.translation.x + (midpoint.x - (params.baseline.midpoint?.x ?? midpoint.x)),
-          y: params.baseline.translation.y + (midpoint.y - (params.baseline.midpoint?.y ?? midpoint.y)),
-        },
-      },
-    };
-  }
-
-  if (params.baseline.distance !== null) {
-    return {
-      baseline: createImageGestureBaseline({
-        scale: params.currentScale,
-        translation: params.currentTranslation,
-        touches: params.touches,
-        gestureDx: params.gestureDx,
-        gestureDy: params.gestureDy,
-      }),
-      transform: null,
-    };
-  }
-
-  if (params.currentScale <= MIN_IMAGE_ZOOM_SCALE) {
-    return { baseline: params.baseline, transform: null };
-  }
-  return {
-    baseline: params.baseline,
-    transform: {
-      scale: params.baseline.scale,
-      translation: {
-        x: params.baseline.translation.x + (params.gestureDx - params.baseline.gestureDx),
-        y: params.baseline.translation.y + (params.gestureDy - params.baseline.gestureDy),
-      },
-    },
-  };
-}
-
 export function getImageViewerTransform(
   scale: number,
   translation: ImageTranslation,
 ): Array<{ translateX: number } | { translateY: number } | { scale: number }> {
+  "worklet";
   return [
     { translateX: translation.x },
     { translateY: translation.y },

@@ -137,22 +137,38 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
 });
 
 test("image assets open a full-screen pinch-and-pan viewer without changing other viewers", () => {
+  const app = source("../../App.tsx");
   const image = source("./viewers/ImageContentViewer.tsx");
+  const modalStart = image.indexOf("<Modal");
+  const modalGestureRoot = image.indexOf("<GestureHandlerRootView", modalStart);
+  const modalSafeArea = image.indexOf("<SafeAreaProvider", modalGestureRoot);
+  const header = image.indexOf("<View style={styles.fullScreenHeader}>", modalSafeArea);
+  const detector = image.indexOf("<GestureDetector gesture={imageGesture}>", header);
 
   assert.match(image, /accessibilityHint="Opens a full-screen image viewer"/);
   assert.match(image, /<Modal/);
   assert.match(image, /presentationStyle="fullScreen"/);
   assert.match(image, /onRequestClose=\{\(\) => setFullScreenVisible\(false\)\}/);
+  assert.match(app, /<GestureHandlerRootView style=\{styles\.fill\}>[\s\S]*?<SafeAreaProvider>/);
+  assert.ok(modalGestureRoot > modalStart);
+  assert.ok(modalSafeArea > modalGestureRoot);
+  assert.ok(header > modalSafeArea);
+  assert.ok(detector > header);
   assert.match(image, /<SafeAreaProvider style=\{styles\.fullScreenRoot\}>/);
   assert.match(image, /const insets = useSafeAreaInsets\(\)/);
   assert.match(image, /paddingTop: insets\.top, paddingBottom: insets\.bottom/);
   assert.match(image, /closeButton:[\s\S]*?minHeight: 44/);
-  assert.match(image, /PanResponder\.create/);
-  assert.match(image, /event\.nativeEvent\.touches\.length >= 2/);
-  assert.match(image, /transform: getImageViewerTransform\(zoomScale, translation\)/);
-  assert.match(image, /updateImageGesture/);
+  assert.match(image, /Gesture\.Pinch\(\)/);
+  assert.match(image, /Gesture\.Pan\(\)/);
+  assert.match(image, /Gesture\.Simultaneous\(pinch, pan\)/);
+  assert.match(image, /\.averageTouches\(true\)/);
+  assert.match(image, /useSharedValue\(1\)/);
+  assert.match(image, /<Animated\.View/);
+  assert.match(image, /transform: getImageViewerTransform\(zoomScale\.value/);
+  assert.doesNotMatch(image, /PanResponder|panHandlers|nativeEvent\.touches|updateImageGesture/);
   assert.match(image, /Pinch to zoom\. Drag to pan\./);
   assert.match(image, /Close image viewer/);
+  assert.match(image, /source=\{\{ uri: url, headers \}\}/);
 });
 
 test("external and native resources use constrained rendering and leave-app confirmation", () => {

@@ -1,29 +1,30 @@
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ActivityIndicator,
   Image,
   Modal,
-  PanResponder,
   Pressable,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from "react-native";
+import {
+  Gesture,
+  GestureDetector,
+  GestureHandlerRootView,
+} from "react-native-gesture-handler";
+import Animated, { useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
   clampImageTranslation,
   clampImageZoomScale,
-  createImageGestureBaseline,
   fitImageWithinViewport,
   getImageViewerTransform,
-  updateImageGesture,
-  type ImageGestureBaseline,
   type ImageSize,
-  type ImageTranslation,
 } from "../imageZoomModel";
 import type { TrainingContentTheme } from "../theme";
 
@@ -60,20 +61,16 @@ export function ImageContentViewer({
   const [error, setError] = useState(false);
   const [fullScreenVisible, setFullScreenVisible] = useState(false);
   const [viewportDimensions, setViewportDimensions] = useState<ImageSize>({ width: 0, height: 0 });
-  const [zoomScale, setZoomScale] = useState(1);
-  const [translation, setTranslation] = useState<ImageTranslation>({ x: 0, y: 0 });
-  const zoomScaleRef = useRef(zoomScale);
-  const translationRef = useRef(translation);
-  const viewportDimensionsRef = useRef(viewportDimensions);
-  const fittedDimensionsRef = useRef<ImageSize>({ width: 0, height: 0 });
-  const gestureStartRef = useRef<ImageGestureBaseline>({
-    scale: 1,
-    translation: { x: 0, y: 0 },
-    distance: null,
-    midpoint: null,
-    gestureDx: 0,
-    gestureDy: 0,
-  });
+  const zoomScale = useSharedValue(1);
+  const translationX = useSharedValue(0);
+  const translationY = useSharedValue(0);
+  const pinchStartScale = useSharedValue(1);
+  const panStartX = useSharedValue(0);
+  const panStartY = useSharedValue(0);
+  const viewportWidth = useSharedValue(0);
+  const viewportHeight = useSharedValue(0);
+  const fittedWidth = useSharedValue(0);
+  const fittedHeight = useSharedValue(0);
   const availableWidth = Math.max(240, width - 32);
   const inlineDimensions = intrinsicDimensions
     ? {
@@ -88,71 +85,100 @@ export function ImageContentViewer({
     ? fitImageWithinViewport(intrinsicDimensions, viewportDimensions)
     : { width: 0, height: 0 };
 
-  zoomScaleRef.current = zoomScale;
-  translationRef.current = translation;
-  viewportDimensionsRef.current = viewportDimensions;
-  fittedDimensionsRef.current = fittedDimensions;
+  const resetZoom = useCallback(() => {
+    zoomScale.value = 1;
+    translationX.value = 0;
+    translationY.value = 0;
+    pinchStartScale.value = 1;
+    panStartX.value = 0;
+    panStartY.value = 0;
+  }, [panStartX, panStartY, pinchStartScale, translationX, translationY, zoomScale]);
 
-  const applyTransform = (scale: number, nextTranslation: ImageTranslation) => {
-    const boundedScale = clampImageZoomScale(scale);
-    const boundedTranslation = clampImageTranslation({
-      translation: nextTranslation,
-      fittedImage: fittedDimensionsRef.current,
-      viewport: viewportDimensionsRef.current,
-      scale: boundedScale,
-    });
-    zoomScaleRef.current = boundedScale;
-    translationRef.current = boundedTranslation;
-    setZoomScale(boundedScale);
-    setTranslation(boundedTranslation);
-  };
+  useEffect(() => {
+    viewportWidth.value = viewportDimensions.width;
+    viewportHeight.value = viewportDimensions.height;
+    fittedWidth.value = fittedDimensions.width;
+    fittedHeight.value = fittedDimensions.height;
+    resetZoom();
+  }, [
+    fittedDimensions.height,
+    fittedDimensions.width,
+    fittedHeight,
+    fittedWidth,
+    resetZoom,
+    viewportDimensions.height,
+    viewportDimensions.width,
+    viewportHeight,
+    viewportWidth,
+  ]);
 
-  const resetZoom = () => {
-    applyTransform(1, { x: 0, y: 0 });
-  };
-
-  const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: (event) => (
-      event.nativeEvent.touches.length >= 2 || zoomScaleRef.current > 1
-    ),
-    onMoveShouldSetPanResponder: (event, gestureState) => (
-      event.nativeEvent.touches.length >= 2
-      || (
-        zoomScaleRef.current > 1
-        && (Math.abs(gestureState.dx) > 2 || Math.abs(gestureState.dy) > 2)
-      )
-    ),
-    onPanResponderGrant: (event, gestureState) => {
-      gestureStartRef.current = createImageGestureBaseline({
-        scale: zoomScaleRef.current,
-        translation: translationRef.current,
-        touches: event.nativeEvent.touches,
-        gestureDx: gestureState.dx,
-        gestureDy: gestureState.dy,
+  const imageGesture = useMemo(() => {
+    const clampCurrentTranslation = () => {
+      "worklet";
+      const boundedTranslation = clampImageTranslation({
+        translation: { x: translationX.value, y: translationY.value },
+        fittedImage: { width: fittedWidth.value, height: fittedHeight.value },
+        viewport: { width: viewportWidth.value, height: viewportHeight.value },
+        scale: zoomScale.value,
       });
-    },
-    onPanResponderMove: (event, gestureState) => {
-      const update = updateImageGesture({
-        baseline: gestureStartRef.current,
-        currentScale: zoomScaleRef.current,
-        currentTranslation: translationRef.current,
-        touches: event.nativeEvent.touches,
-        gestureDx: gestureState.dx,
-        gestureDy: gestureState.dy,
+      translationX.value = boundedTranslation.x;
+      translationY.value = boundedTranslation.y;
+    };
+
+    const pinch = Gesture.Pinch()
+      .onStart(() => {
+        pinchStartScale.value = zoomScale.value;
+      })
+      .onUpdate((event) => {
+        zoomScale.value = clampImageZoomScale(pinchStartScale.value * event.scale);
+        clampCurrentTranslation();
+      })
+      .onFinalize(() => {
+        zoomScale.value = clampImageZoomScale(zoomScale.value);
+        clampCurrentTranslation();
       });
-      gestureStartRef.current = update.baseline;
-      if (update.transform) {
-        applyTransform(update.transform.scale, update.transform.translation);
-      }
-    },
-    onPanResponderRelease: () => {
-      applyTransform(zoomScaleRef.current, translationRef.current);
-    },
-    onPanResponderTerminate: () => {
-      applyTransform(zoomScaleRef.current, translationRef.current);
-    },
-    onPanResponderTerminationRequest: () => false,
-  }), []);
+
+    const pan = Gesture.Pan()
+      .averageTouches(true)
+      .onStart(() => {
+        panStartX.value = translationX.value;
+        panStartY.value = translationY.value;
+      })
+      .onUpdate((event) => {
+        const boundedTranslation = clampImageTranslation({
+          translation: {
+            x: panStartX.value + event.translationX,
+            y: panStartY.value + event.translationY,
+          },
+          fittedImage: { width: fittedWidth.value, height: fittedHeight.value },
+          viewport: { width: viewportWidth.value, height: viewportHeight.value },
+          scale: zoomScale.value,
+        });
+        translationX.value = boundedTranslation.x;
+        translationY.value = boundedTranslation.y;
+      })
+      .onFinalize(clampCurrentTranslation);
+
+    return Gesture.Simultaneous(pinch, pan);
+  }, [
+    fittedHeight,
+    fittedWidth,
+    panStartX,
+    panStartY,
+    pinchStartScale,
+    translationX,
+    translationY,
+    viewportHeight,
+    viewportWidth,
+    zoomScale,
+  ]);
+
+  const animatedImageStyle = useAnimatedStyle(() => ({
+    transform: getImageViewerTransform(zoomScale.value, {
+      x: translationX.value,
+      y: translationY.value,
+    }),
+  }));
 
   useEffect(() => {
     setIntrinsicDimensions(null);
@@ -213,57 +239,61 @@ export function ImageContentViewer({
         presentationStyle="fullScreen"
         onRequestClose={() => setFullScreenVisible(false)}
       >
-        <SafeAreaProvider style={styles.fullScreenRoot}>
-          <FullScreenImageSafeArea>
-            <View style={styles.fullScreenHeader}>
-              <Text style={styles.fullScreenTitle}>Image</Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Close image viewer"
-                style={styles.closeButton}
-                onPress={() => setFullScreenVisible(false)}
-              >
-                <MaterialCommunityIcons name="close" size={24} color="#ffffff" />
-                <Text style={styles.closeButtonText}>Close</Text>
-              </Pressable>
-            </View>
-            <View
-              style={styles.gestureSurface}
-              onLayout={(event) => {
-                const nextViewport = {
-                  width: event.nativeEvent.layout.width,
-                  height: event.nativeEvent.layout.height,
-                };
-                viewportDimensionsRef.current = nextViewport;
-                setViewportDimensions(nextViewport);
-                resetZoom();
-              }}
-              {...panResponder.panHandlers}
-            >
-              {fittedDimensions.width > 0 && fittedDimensions.height > 0 ? (
+        <GestureHandlerRootView style={styles.fullScreenRoot}>
+          <SafeAreaProvider style={styles.fullScreenRoot}>
+            <FullScreenImageSafeArea>
+              <View style={styles.fullScreenHeader}>
+                <Text style={styles.fullScreenTitle}>Image</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close image viewer"
+                  style={styles.closeButton}
+                  onPress={() => setFullScreenVisible(false)}
+                >
+                  <MaterialCommunityIcons name="close" size={24} color="#ffffff" />
+                  <Text style={styles.closeButtonText}>Close</Text>
+                </Pressable>
+              </View>
+              <GestureDetector gesture={imageGesture}>
                 <View
-                  style={{
-                    width: fittedDimensions.width,
-                    height: fittedDimensions.height,
-                    transform: getImageViewerTransform(zoomScale, translation),
+                  style={styles.gestureSurface}
+                  onLayout={(event) => {
+                    const nextViewport = {
+                      width: event.nativeEvent.layout.width,
+                      height: event.nativeEvent.layout.height,
+                    };
+                    setViewportDimensions(nextViewport);
+                    resetZoom();
                   }}
                 >
-                  <Image
-                    source={{ uri: url, headers }}
-                    resizeMode="contain"
-                    style={styles.fullScreenImage}
-                    onError={() => {
-                      setFullScreenVisible(false);
-                      setError(true);
-                    }}
-                    accessibilityLabel="Enlarged Training Content image"
-                  />
+                  {fittedDimensions.width > 0 && fittedDimensions.height > 0 ? (
+                    <Animated.View
+                      style={[
+                        {
+                          width: fittedDimensions.width,
+                          height: fittedDimensions.height,
+                        },
+                        animatedImageStyle,
+                      ]}
+                    >
+                      <Image
+                        source={{ uri: url, headers }}
+                        resizeMode="contain"
+                        style={styles.fullScreenImage}
+                        onError={() => {
+                          setFullScreenVisible(false);
+                          setError(true);
+                        }}
+                        accessibilityLabel="Enlarged Training Content image"
+                      />
+                    </Animated.View>
+                  ) : null}
                 </View>
-              ) : null}
-            </View>
-            <Text style={styles.gestureHint}>Pinch to zoom. Drag to pan.</Text>
-          </FullScreenImageSafeArea>
-        </SafeAreaProvider>
+              </GestureDetector>
+              <Text style={styles.gestureHint}>Pinch to zoom. Drag to pan.</Text>
+            </FullScreenImageSafeArea>
+          </SafeAreaProvider>
+        </GestureHandlerRootView>
       </Modal>
     </>
   );
