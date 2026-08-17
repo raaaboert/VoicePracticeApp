@@ -1,5 +1,6 @@
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -11,7 +12,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
   clampImageTranslation,
@@ -31,6 +32,21 @@ interface ImageContentViewerProps {
   headers: Record<string, string>;
   theme: TrainingContentTheme;
   onAccessError: () => void;
+}
+
+function FullScreenImageSafeArea({ children }: { children: ReactNode }) {
+  const insets = useSafeAreaInsets();
+
+  return (
+    <View
+      style={[
+        styles.fullScreenSafeArea,
+        { paddingTop: insets.top, paddingBottom: insets.bottom },
+      ]}
+    >
+      {children}
+    </View>
+  );
 }
 
 export function ImageContentViewer({
@@ -197,55 +213,57 @@ export function ImageContentViewer({
         presentationStyle="fullScreen"
         onRequestClose={() => setFullScreenVisible(false)}
       >
-        <SafeAreaView style={styles.fullScreenRoot} edges={["top", "bottom"]}>
-          <View style={styles.fullScreenHeader}>
-            <Text style={styles.fullScreenTitle}>Image</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Close image viewer"
-              style={styles.closeButton}
-              onPress={() => setFullScreenVisible(false)}
-            >
-              <MaterialCommunityIcons name="close" size={24} color="#ffffff" />
-              <Text style={styles.closeButtonText}>Close</Text>
-            </Pressable>
-          </View>
-          <View
-            style={styles.gestureSurface}
-            onLayout={(event) => {
-              const nextViewport = {
-                width: event.nativeEvent.layout.width,
-                height: event.nativeEvent.layout.height,
-              };
-              viewportDimensionsRef.current = nextViewport;
-              setViewportDimensions(nextViewport);
-              resetZoom();
-            }}
-            {...panResponder.panHandlers}
-          >
-            {fittedDimensions.width > 0 && fittedDimensions.height > 0 ? (
-              <View
-                style={{
-                  width: fittedDimensions.width,
-                  height: fittedDimensions.height,
-                  transform: getImageViewerTransform(zoomScale, translation),
-                }}
+        <SafeAreaProvider style={styles.fullScreenRoot}>
+          <FullScreenImageSafeArea>
+            <View style={styles.fullScreenHeader}>
+              <Text style={styles.fullScreenTitle}>Image</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close image viewer"
+                style={styles.closeButton}
+                onPress={() => setFullScreenVisible(false)}
               >
-                <Image
-                  source={{ uri: url, headers }}
-                  resizeMode="contain"
-                  style={styles.fullScreenImage}
-                  onError={() => {
-                    setFullScreenVisible(false);
-                    setError(true);
+                <MaterialCommunityIcons name="close" size={24} color="#ffffff" />
+                <Text style={styles.closeButtonText}>Close</Text>
+              </Pressable>
+            </View>
+            <View
+              style={styles.gestureSurface}
+              onLayout={(event) => {
+                const nextViewport = {
+                  width: event.nativeEvent.layout.width,
+                  height: event.nativeEvent.layout.height,
+                };
+                viewportDimensionsRef.current = nextViewport;
+                setViewportDimensions(nextViewport);
+                resetZoom();
+              }}
+              {...panResponder.panHandlers}
+            >
+              {fittedDimensions.width > 0 && fittedDimensions.height > 0 ? (
+                <View
+                  style={{
+                    width: fittedDimensions.width,
+                    height: fittedDimensions.height,
+                    transform: getImageViewerTransform(zoomScale, translation),
                   }}
-                  accessibilityLabel="Enlarged Training Content image"
-                />
-              </View>
-            ) : null}
-          </View>
-          <Text style={styles.gestureHint}>Pinch to zoom. Drag to pan.</Text>
-        </SafeAreaView>
+                >
+                  <Image
+                    source={{ uri: url, headers }}
+                    resizeMode="contain"
+                    style={styles.fullScreenImage}
+                    onError={() => {
+                      setFullScreenVisible(false);
+                      setError(true);
+                    }}
+                    accessibilityLabel="Enlarged Training Content image"
+                  />
+                </View>
+              ) : null}
+            </View>
+            <Text style={styles.gestureHint}>Pinch to zoom. Drag to pan.</Text>
+          </FullScreenImageSafeArea>
+        </SafeAreaProvider>
       </Modal>
     </>
   );
@@ -270,6 +288,7 @@ const styles = StyleSheet.create({
   },
   expandBadgeText: { color: "#ffffff", fontSize: 12, fontWeight: "700" },
   fullScreenRoot: { flex: 1, backgroundColor: "#000000" },
+  fullScreenSafeArea: { flex: 1 },
   fullScreenHeader: {
     minHeight: 54,
     flexDirection: "row",

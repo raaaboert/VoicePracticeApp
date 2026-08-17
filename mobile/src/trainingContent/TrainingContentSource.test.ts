@@ -143,6 +143,10 @@ test("image assets open a full-screen pinch-and-pan viewer without changing othe
   assert.match(image, /<Modal/);
   assert.match(image, /presentationStyle="fullScreen"/);
   assert.match(image, /onRequestClose=\{\(\) => setFullScreenVisible\(false\)\}/);
+  assert.match(image, /<SafeAreaProvider style=\{styles\.fullScreenRoot\}>/);
+  assert.match(image, /const insets = useSafeAreaInsets\(\)/);
+  assert.match(image, /paddingTop: insets\.top, paddingBottom: insets\.bottom/);
+  assert.match(image, /closeButton:[\s\S]*?minHeight: 44/);
   assert.match(image, /PanResponder\.create/);
   assert.match(image, /event\.nativeEvent\.touches\.length >= 2/);
   assert.match(image, /transform: getImageViewerTransform\(zoomScale, translation\)/);
