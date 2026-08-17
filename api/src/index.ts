@@ -1218,7 +1218,7 @@ function runSimulationPostResponseTask(
   });
 }
 
-const PENDING_UNIFIED_TURN_TTL_MS = 2 * 60 * 1000;
+const PENDING_UNIFIED_TURN_TTL_MS = 5 * 60 * 1000;
 
 type PendingUnifiedSubmitTurnResult =
   | {
@@ -18584,10 +18584,13 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", requireMobi
     elapsedMs: Date.now() - routeStartedAtMs,
     outcome: result.outcome,
   });
-  cleanupPendingUnifiedSubmitTurn({
+  // Keep the resolved, user-bound result available briefly so a mobile client
+  // interrupted after submitting can safely repeat the await request on resume.
+  console.log("[simulation-route]", {
+    route: "submit-turn-await",
     correlationId: requestedCorrelationId,
-    userId: authenticatedUserId,
-    reason: "after_resolve",
+    stage: "pending_turn_retained_for_recovery",
+    retentionMs: PENDING_UNIFIED_TURN_TTL_MS,
   });
 });
 

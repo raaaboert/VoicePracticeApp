@@ -1,10 +1,12 @@
 import {
   isExpiredSubmittedTurnAwait,
+  isTerminalSubmittedTurnRecoveryAwait,
   isUsableAwaitedAssistantReply,
   isUsableSimulationTranscript,
   shouldFallbackToLegacyAssistantReply,
   shouldFallbackToLegacyUnifiedSubmit,
 } from "./unifiedSubmit";
+import { MobileApiError } from "./apiError";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -85,11 +87,44 @@ runTest("assistant-await recovery retries only when the await route is unavailab
 });
 
 runTest("expired duplicate awaits are classified separately from compatibility fallback", () => {
-  const expiredAwait = new Error("Simulation assistant reply is no longer pending for this correlationId.");
+  const expiredAwait = new MobileApiError(
+    "Simulation assistant reply is no longer pending for this correlationId.",
+    410,
+    null,
+  );
   assert(isExpiredSubmittedTurnAwait(expiredAwait), "expired await responses should be recognized as stale/duplicate");
+  assert(
+    isTerminalSubmittedTurnRecoveryAwait(expiredAwait),
+    "410-style expired await responses should remain terminal during submitted-turn recovery",
+  );
   assert(
     shouldFallbackToLegacyAssistantReply(expiredAwait) === false,
     "expired awaits should not be mistaken for a missing compatibility route",
+  );
+});
+
+runTest("only the recovery-await provider timeout is terminal among 504 responses", () => {
+  assert(
+    isTerminalSubmittedTurnRecoveryAwait(
+      new MobileApiError("Timed out waiting for simulation assistant reply.", 504, null),
+    ),
+    "the submit-turn recovery await timeout should be terminal",
+  );
+  assert(
+    isTerminalSubmittedTurnRecoveryAwait(new MobileApiError("Gateway timeout.", 504, null)) === false,
+    "an unrelated 504 must not be classified as terminal recovery expiry",
+  );
+  assert(
+    isTerminalSubmittedTurnRecoveryAwait(
+      new MobileApiError("Timed out waiting for simulation assistant reply.", 503, null),
+    ) === false,
+    "the recovery timeout message without the exact 504 status must not be terminal",
+  );
+  assert(
+    isExpiredSubmittedTurnAwait(
+      new MobileApiError("Timed out waiting for simulation assistant reply.", 504, null),
+    ) === false,
+    "the recovery-only timeout must not change active-turn expired-await behavior",
   );
 });
 

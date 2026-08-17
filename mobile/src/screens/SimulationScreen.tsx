@@ -35,6 +35,7 @@ import {
   generateAssistantReply,
   isUsableAwaitedAssistantReply,
   isExpiredSubmittedTurnAwait,
+  isTerminalSubmittedTurnRecoveryAwait,
   isUsableSimulationTranscript,
   isOpenAiConfigured,
   isUnifiedSimulationSubmitEnabled,
@@ -106,6 +107,13 @@ import {
   shouldFollowTranscriptAfterMessage,
 } from "../lib/transcriptFollow";
 import { normalizeTranscriptText } from "../lib/transcriptText";
+import { getSimulationMessageWidthConstraints } from "../lib/simulationMessageLayout";
+import {
+  getPendingSubmittedTurnRecoveryAfterAwaitFailure,
+  getMissingSubmittedTurnMessages,
+  settleSimulationBeforeCompletion,
+  type PendingSubmittedTurnRecovery,
+} from "../lib/simulationTurnRecovery";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 
 interface SimulationScreenProps {
@@ -126,6 +134,9 @@ type OpeningLinePayload = Awaited<ReturnType<typeof createOpeningLine>>;
 type ActiveAssistantSpeech = {
   message: DialogueMessage;
   committed: boolean;
+};
+type PendingUnifiedTurnRecovery = PendingSubmittedTurnRecovery & {
+  speechPrefetch: PrefetchedRemoteSpeechChunk | null;
 };
 
 const SOFT_TURN_NOTICE_MS = 35000;
@@ -468,6 +479,7 @@ export function SimulationScreen({
   const [useLocalMockMode, setUseLocalMockMode] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [actionDockHeight, setActionDockHeight] = useState(0);
+  const [chatViewportWidth, setChatViewportWidth] = useState(0);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isStartingTurn, setIsStartingTurn] = useState(false);
   const [isResumingLifecyclePause, setIsResumingLifecyclePause] = useState(false);
@@ -505,6 +517,13 @@ export function SimulationScreen({
   } = screenLayout;
   const useIosCondensedStatusTimerPresentation = Platform.OS === "ios" && !Platform.isPad && windowWidth < 768;
   const localTestMode = !apiConfigured || useLocalMockMode;
+  const messageWidthConstraints = useMemo(
+    () => getSimulationMessageWidthConstraints({
+      viewportWidth: chatViewportWidth,
+      compact: useCompactTranscript,
+    }),
+    [chatViewportWidth, useCompactTranscript],
+  );
   const shouldUseFastStartRemoteTts =
     config.remoteTtsEnabled &&
     apiConfigured &&
@@ -577,6 +596,8 @@ export function SimulationScreen({
   const lifecycleResumeIntentRef = useRef<SimulationLifecycleResumeIntent | null>(null);
   const lifecycleResumeInProgressRef = useRef(false);
   const activeTurnSettlementRef = useRef<Promise<void> | null>(null);
+  const pendingUnifiedTurnRecoveryRef = useRef<PendingUnifiedTurnRecovery | null>(null);
+  const activeSubmittedTurnRecoveryRef = useRef<Promise<void> | null>(null);
 
   const maxSessionSeconds = useMemo(() => {
     const maxMinutes = Number(config.maxSimulationMinutes);
@@ -673,6 +694,13 @@ export function SimulationScreen({
     && !simulationClosedRef.current
     && !unmountedRef.current
     && lifecyclePauseReasonRef.current === null
+  ), []);
+
+  const isSessionGenerationCurrent = useCallback((generation: number) => (
+    sessionLifecycleGenerationRef.current === generation
+    && sessionActiveRef.current
+    && !simulationClosedRef.current
+    && !unmountedRef.current
   ), []);
 
   const isStartupGenerationCurrent = useCallback((generation: number) => (
@@ -2298,6 +2326,12 @@ export function SimulationScreen({
             },
           });
           logSimulationApiCall("submitRecordedSimulationTurn");
+          pendingUnifiedTurnRecoveryRef.current = {
+            correlationId,
+            userMessage: null,
+            assistantMessage: null,
+            speechPrefetch: null,
+          };
           const unifiedPayload = await submitRecordedSimulationTurn({
             userId,
             authToken,
@@ -2318,6 +2352,33 @@ export function SimulationScreen({
             correlationId,
             signal: turnAbortController.signal,
           });
+          const recoverableTranscript = unifiedPayload.transcriptText.trim();
+          const pendingUnifiedTurn = pendingUnifiedTurnRecoveryRef.current;
+          if (
+            pendingUnifiedTurn?.correlationId === correlationId
+            && unifiedPayload.outcome !== "no_clear_speech"
+            && isUsableSimulationTranscript(recoverableTranscript)
+            && !appearsToEchoAssistantReply(recoverableTranscript, messagesRef.current)
+          ) {
+            pendingUnifiedTurn.userMessage ??= {
+              id: createMessageId(),
+              role: "user",
+              content: recoverableTranscript,
+            };
+            if (unifiedPayload.outcome === "assistant_reply") {
+              pendingUnifiedTurn.assistantMessage = {
+                id: createMessageId(),
+                role: "assistant",
+                content: unifiedPayload.assistantText,
+              };
+              pendingUnifiedTurn.speechPrefetch = unifiedPayload.speechPrefetch;
+            }
+          } else if (
+            pendingUnifiedTurn?.correlationId === correlationId
+            && unifiedPayload.outcome === "no_clear_speech"
+          ) {
+            pendingUnifiedTurnRecoveryRef.current = null;
+          }
           throwIfSessionLifecycleInterrupted();
           unifiedSubmitResponseAtMs = Date.now();
           transcribeResponseAtMs = unifiedSubmitResponseAtMs;
@@ -2430,6 +2491,12 @@ export function SimulationScreen({
             throw unifiedError;
           }
           const shouldFallbackToLegacy = shouldFallbackToLegacyUnifiedSubmit(unifiedError);
+          if (
+            isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
+            && pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId
+          ) {
+            pendingUnifiedTurnRecoveryRef.current = null;
+          }
           if (shouldFallbackToLegacy) {
             logSimulationTiming({
               correlationId,
@@ -2559,12 +2626,23 @@ export function SimulationScreen({
         replyPayload = null;
         unifiedAssistantAwaitAbortController?.abort();
         unifiedAssistantAwaitPromise = null;
+        if (pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId) {
+          pendingUnifiedTurnRecoveryRef.current = null;
+        }
       }
 
       throwIfSessionLifecycleInterrupted();
 
       if (isUsableSimulationTranscript(userText)) {
-        const userMessage = { id: createMessageId(), role: "user" as const, content: userText };
+        const pendingUnifiedTurn = pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId
+          ? pendingUnifiedTurnRecoveryRef.current
+          : null;
+        const userMessage = pendingUnifiedTurn?.userMessage?.content === userText
+          ? pendingUnifiedTurn.userMessage
+          : { id: createMessageId(), role: "user" as const, content: userText };
+        if (pendingUnifiedTurn && !pendingUnifiedTurn.userMessage) {
+          pendingUnifiedTurn.userMessage = userMessage;
+        }
         let userMessageCommitted = false;
         const commitUserMessageIfNeeded = () => {
           if (
@@ -2592,6 +2670,32 @@ export function SimulationScreen({
             commitUserMessageIfNeeded();
             try {
               const awaitedPayload = await unifiedAssistantAwaitPromise;
+              const recoverableAwaitedTranscript = awaitedPayload.transcriptText.trim();
+              const pendingAwaitedTurn = pendingUnifiedTurnRecoveryRef.current;
+              if (
+                pendingAwaitedTurn?.correlationId === correlationId
+                && awaitedPayload.outcome === "assistant_reply"
+                && typeof awaitedPayload.assistantText === "string"
+                && isUsableSimulationTranscript(recoverableAwaitedTranscript)
+                && !appearsToEchoAssistantReply(recoverableAwaitedTranscript, messagesRef.current)
+              ) {
+                pendingAwaitedTurn.userMessage ??= {
+                  id: createMessageId(),
+                  role: "user",
+                  content: recoverableAwaitedTranscript,
+                };
+                pendingAwaitedTurn.assistantMessage = {
+                  id: createMessageId(),
+                  role: "assistant",
+                  content: awaitedPayload.assistantText,
+                };
+                pendingAwaitedTurn.speechPrefetch = awaitedPayload.speechPrefetch ?? null;
+              } else if (
+                pendingAwaitedTurn?.correlationId === correlationId
+                && awaitedPayload.outcome === "no_clear_speech"
+              ) {
+                pendingUnifiedTurnRecoveryRef.current = null;
+              }
               throwIfSessionLifecycleInterrupted();
               if (!isUsableAwaitedAssistantReply(awaitedPayload)) {
                 throw new Error("Assistant reply wait returned an incomplete response.");
@@ -2703,7 +2807,20 @@ export function SimulationScreen({
           if (isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
             commitUserMessageIfNeeded();
             const assistantTextReceivedAtMs = Date.now();
-            const assistantMessage = { id: createMessageId(), role: "assistant" as const, content: reply };
+            const recoverableAssistantMessage =
+              pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId
+              && pendingUnifiedTurnRecoveryRef.current.assistantMessage?.content === reply
+                ? pendingUnifiedTurnRecoveryRef.current.assistantMessage
+                : null;
+            const assistantMessage = recoverableAssistantMessage ?? {
+              id: createMessageId(),
+              role: "assistant" as const,
+              content: reply,
+            };
+            if (pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId) {
+              pendingUnifiedTurnRecoveryRef.current.assistantMessage = assistantMessage;
+              pendingUnifiedTurnRecoveryRef.current.speechPrefetch = prefetchedAssistantSpeech;
+            }
             let assistantMessageCommitted = false;
             const commitAssistantMessageIfNeeded = () => {
               if (
@@ -2719,6 +2836,9 @@ export function SimulationScreen({
                 phase: "assistant_message_committed",
                 startedAtMs: effectiveSubmitStartedAtMs,
               });
+              if (pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId) {
+                pendingUnifiedTurnRecoveryRef.current = null;
+              }
             };
             // eslint-disable-next-line no-console
             console.log("[TTS-TIMING]", {
@@ -2845,6 +2965,9 @@ export function SimulationScreen({
           }
         }
       } else {
+        if (pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId) {
+          pendingUnifiedTurnRecoveryRef.current = null;
+        }
         captureFailureReason ??= "no_usable_transcript";
         captureRetryStatus = getSimulationCaptureFailureStatus(captureFailureReason);
         setStatus(captureRetryStatus);
@@ -2963,6 +3086,12 @@ export function SimulationScreen({
       }
       if (assistantAwaitAbortControllerRef.current === unifiedAssistantAwaitAbortController) {
         assistantAwaitAbortControllerRef.current = null;
+      }
+      if (
+        lifecyclePauseReasonRef.current !== "background"
+        && pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId
+      ) {
+        pendingUnifiedTurnRecoveryRef.current = null;
       }
 
       if (continueLoop && !unmountedRef.current) {
@@ -3422,6 +3551,8 @@ export function SimulationScreen({
     lifecycleResumeInProgressRef.current = false;
     lifecycleResumeIntentRef.current = null;
     activeAssistantSpeechRef.current = null;
+    pendingUnifiedTurnRecoveryRef.current = null;
+    activeSubmittedTurnRecoveryRef.current = null;
     setIsStartingTurn(false);
     setIsResumingLifecyclePause(false);
     openingTtsInProgressRef.current = false;
@@ -3468,6 +3599,139 @@ export function SimulationScreen({
     onExit("This simulation was closed because the app was in the background too long.");
   }, [clearLifecyclePause, config.simulationSessionId, endSession, logSimulationTiming, onExit]);
 
+  const settlePendingSubmittedTurnRecovery = async (params: {
+    sessionLifecycleGeneration: number;
+    replayAssistant: boolean;
+  }): Promise<void> => {
+    if (activeSubmittedTurnRecoveryRef.current) {
+      await activeSubmittedTurnRecoveryRef.current;
+      return;
+    }
+    const pendingSubmittedTurn = pendingUnifiedTurnRecoveryRef.current;
+    if (!pendingSubmittedTurn) {
+      return;
+    }
+
+    const recoverySettlement = (async () => {
+      const recoveryCorrelationId = pendingSubmittedTurn.correlationId;
+      setMode("thinking");
+      setStatus("Recovering your submitted response...");
+
+      if (!pendingSubmittedTurn.assistantMessage) {
+        const recoveryAbortController = new AbortController();
+        assistantAwaitAbortControllerRef.current = recoveryAbortController;
+        try {
+          const recoveredPayload = await awaitSubmittedSimulationTurnReply({
+            userId,
+            authToken,
+            correlationId: recoveryCorrelationId,
+            signal: recoveryAbortController.signal,
+          });
+          if (!isSessionGenerationCurrent(params.sessionLifecycleGeneration)) {
+            throw new SimulationLifecycleInterruptedError();
+          }
+
+          const recoveredTranscript = recoveredPayload.transcriptText.trim();
+          if (
+            recoveredPayload.outcome === "assistant_reply"
+            && typeof recoveredPayload.assistantText === "string"
+            && isUsableSimulationTranscript(recoveredTranscript)
+            && !appearsToEchoAssistantReply(recoveredTranscript, messagesRef.current)
+          ) {
+            pendingSubmittedTurn.userMessage ??= {
+              id: createMessageId(),
+              role: "user",
+              content: recoveredTranscript,
+            };
+            pendingSubmittedTurn.assistantMessage = {
+              id: createMessageId(),
+              role: "assistant",
+              content: recoveredPayload.assistantText,
+            };
+            pendingSubmittedTurn.speechPrefetch = recoveredPayload.speechPrefetch ?? null;
+          } else {
+            pendingUnifiedTurnRecoveryRef.current = null;
+            return;
+          }
+        } catch (recoveryError) {
+          pendingUnifiedTurnRecoveryRef.current = getPendingSubmittedTurnRecoveryAfterAwaitFailure(
+            pendingUnifiedTurnRecoveryRef.current,
+            isTerminalSubmittedTurnRecoveryAwait(recoveryError),
+          );
+          throw recoveryError;
+        } finally {
+          recoveryAbortController.abort();
+          if (assistantAwaitAbortControllerRef.current === recoveryAbortController) {
+            assistantAwaitAbortControllerRef.current = null;
+          }
+        }
+      }
+
+      if (!isSessionGenerationCurrent(params.sessionLifecycleGeneration)) {
+        throw new SimulationLifecycleInterruptedError();
+      }
+      const recoveredSubmittedTurn = pendingUnifiedTurnRecoveryRef.current;
+      if (recoveredSubmittedTurn?.correlationId !== recoveryCorrelationId) {
+        return;
+      }
+
+      const recoveredMessages = getMissingSubmittedTurnMessages(
+        messagesRef.current,
+        recoveredSubmittedTurn,
+      );
+      for (const recoveredMessage of recoveredMessages) {
+        appendMessage(recoveredMessage);
+      }
+
+      const recoveredAssistantMessage = recoveredSubmittedTurn.assistantMessage;
+      const recoveredSpeechPrefetch = recoveredSubmittedTurn.speechPrefetch;
+      pendingUnifiedTurnRecoveryRef.current = null;
+      if (!params.replayAssistant || !recoveredAssistantMessage) {
+        return;
+      }
+
+      const assistantTextReceivedAtMs = Date.now();
+      setStatus("Restarting the interrupted AI response...");
+      await prepareIosPlaybackAudioMode(recoveryCorrelationId, "resume_submitted_turn");
+      assertForegroundSessionGenerationCurrent(params.sessionLifecycleGeneration);
+
+      const activeAssistantSpeech: ActiveAssistantSpeech = {
+        message: recoveredAssistantMessage,
+        committed: true,
+      };
+      activeAssistantSpeechRef.current = activeAssistantSpeech;
+      try {
+        await speakAssistantResponse(
+          recoveredAssistantMessage.content,
+          assistantTextReceivedAtMs,
+          () => {
+            if (!isForegroundSessionGenerationCurrent(params.sessionLifecycleGeneration)) {
+              return;
+            }
+            setMode("speaking");
+            setStatus("AI is speaking...");
+          },
+          recoveryCorrelationId,
+          recoveredSpeechPrefetch,
+        );
+      } finally {
+        if (activeAssistantSpeechRef.current === activeAssistantSpeech) {
+          activeAssistantSpeechRef.current = null;
+        }
+      }
+      assertForegroundSessionGenerationCurrent(params.sessionLifecycleGeneration);
+    })();
+
+    activeSubmittedTurnRecoveryRef.current = recoverySettlement;
+    try {
+      await recoverySettlement;
+    } finally {
+      if (activeSubmittedTurnRecoveryRef.current === recoverySettlement) {
+        activeSubmittedTurnRecoveryRef.current = null;
+      }
+    }
+  };
+
   const completeSessionAndScore = useCallback(async () => {
     if (!sessionActiveRef.current || sessionCompletionInProgressRef.current) {
       return;
@@ -3476,15 +3740,57 @@ export function SimulationScreen({
     sessionCompletionInProgressRef.current = true;
     try {
       const startedAt = sessionStartedAtRef.current ?? new Date();
+      if (activeTurnSettlementRef.current) {
+        setStatus("Finishing your submitted response...");
+      } else if (activeSubmittedTurnRecoveryRef.current || pendingUnifiedTurnRecoveryRef.current) {
+        setStatus("Recovering your submitted response before scoring...");
+      }
+      try {
+        await settleSimulationBeforeCompletion({
+          getActiveTurnSettlement: () => activeTurnSettlementRef.current,
+          getActiveRecoverySettlement: () => activeSubmittedTurnRecoveryRef.current,
+          hasPendingRecovery: () => pendingUnifiedTurnRecoveryRef.current !== null,
+          recoverPending: async () => {
+            setStatus("Recovering your submitted response before scoring...");
+            await settlePendingSubmittedTurnRecovery({
+              sessionLifecycleGeneration: sessionLifecycleGenerationRef.current,
+              replayAssistant: false,
+            });
+          },
+        });
+      } catch (recoveryError) {
+        if (isOrganizationAccessRequiredError(recoveryError)) {
+          onOrganizationAccessRequired();
+          return;
+        }
+        if (isSimulationLifecycleInterruptedError(recoveryError)) {
+          return;
+        }
+        if (pendingUnifiedTurnRecoveryRef.current) {
+          logSimulationTiming({
+            correlationId: createSimulationCorrelationId(config.simulationSessionId, "end-session-recovery"),
+            phase: "submitted_turn_recovery_before_score_failed",
+            details: {
+              message: getErrorMessage(recoveryError, "Could not recover the submitted response before scoring."),
+            },
+          });
+          setError("Your submitted response could not be recovered yet. Tap Resume Turn and retry before ending.");
+          setStatus("Submitted response recovery is required before scoring.");
+          return;
+        }
+        // The transcript/reply was already committed; speech replay failure
+        // cannot make the completed response ineligible for scoring.
+      }
       const endedAt = new Date();
       const rawDurationSeconds = Math.max(
         0,
         Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000),
       );
+      const completedHistory = [...messagesRef.current];
       await endSession(false);
       sessionStartedAtRef.current = null;
       setElapsedSeconds(rawDurationSeconds);
-      onSessionComplete([...messagesRef.current], config, {
+      onSessionComplete(completedHistory, config, {
         simulationSessionId: config.simulationSessionId,
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
@@ -3526,6 +3832,9 @@ export function SimulationScreen({
     });
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
     const interruptedTurnSettlement = activeTurnSettlementRef.current;
+    const hadSubmittedTurnRecovery = Boolean(
+      pendingUnifiedTurnRecoveryRef.current || activeSubmittedTurnRecoveryRef.current,
+    );
     clearLifecyclePause(Date.now());
 
     try {
@@ -3533,6 +3842,18 @@ export function SimulationScreen({
         await interruptedTurnSettlement;
       }
       assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+
+      if (pendingUnifiedTurnRecoveryRef.current || activeSubmittedTurnRecoveryRef.current) {
+        await settlePendingSubmittedTurnRecovery({
+          sessionLifecycleGeneration,
+          replayAssistant: true,
+        });
+        if (lifecycleResumeIntentRef.current === resumeIntent) {
+          lifecycleResumeIntentRef.current = null;
+        }
+        await startListeningTurn();
+        return;
+      }
 
       if (resumeIntent.kind === "replay_assistant") {
         const correlationId = createSimulationCorrelationId(
@@ -3611,6 +3932,23 @@ export function SimulationScreen({
         return;
       }
 
+      if (hadSubmittedTurnRecovery && pendingUnifiedTurnRecoveryRef.current) {
+        logSimulationTiming({
+          correlationId: pendingUnifiedTurnRecoveryRef.current.correlationId,
+          phase: "submitted_turn_recovery_failed",
+          details: {
+            message: getErrorMessage(resumeError, "Could not recover the submitted response."),
+          },
+        });
+        lifecyclePauseStartedAtRef.current = Date.now();
+        lifecyclePauseReasonRef.current = "background";
+        setLifecyclePauseActive(true);
+        setMode("idle");
+        setError("Your submitted response could not be recovered yet. Tap Resume Turn to retry.");
+        setStatus("Submitted response recovery is paused.");
+        return;
+      }
+
       logSimulationTiming({
         correlationId: createSimulationCorrelationId(config.simulationSessionId, "resume-turn"),
         phase: "simulation_lifecycle_resume_failed",
@@ -3619,7 +3957,11 @@ export function SimulationScreen({
           message: getErrorMessage(resumeError, "Could not resume the interrupted turn."),
         },
       });
-      setError("The interrupted AI audio could not be replayed. Peritio is continuing with your response.");
+      setError(
+        hadSubmittedTurnRecovery
+          ? "Your interrupted response expired before it could be recovered. Please record it again."
+          : "The interrupted AI audio could not be replayed. Peritio is continuing with your response.",
+      );
       if (lifecycleResumeIntentRef.current === resumeIntent) {
         lifecycleResumeIntentRef.current = null;
       }
@@ -3803,6 +4145,8 @@ export function SimulationScreen({
       lifecycleResumeIntentRef.current = null;
       activeAssistantSpeechRef.current = null;
       activeTurnSettlementRef.current = null;
+      pendingUnifiedTurnRecoveryRef.current = null;
+      activeSubmittedTurnRecoveryRef.current = null;
       setIsResumingLifecyclePause(false);
       sessionLifecycleGenerationRef.current += 1;
       lifecyclePauseStartedAtRef.current = null;
@@ -3880,6 +4224,8 @@ export function SimulationScreen({
       lifecycleResumeIntentRef.current = null;
       activeAssistantSpeechRef.current = null;
       activeTurnSettlementRef.current = null;
+      pendingUnifiedTurnRecoveryRef.current = null;
+      activeSubmittedTurnRecoveryRef.current = null;
       openingTtsInProgressRef.current = false;
       lifecyclePauseStartedAtRef.current = null;
       lifecyclePauseReasonRef.current = null;
@@ -4254,6 +4600,10 @@ export function SimulationScreen({
             contentContainerStyle={[styles.chatContent, useCompactTranscript ? styles.chatContentCompact : null]}
             nestedScrollEnabled
             scrollEventThrottle={16}
+            onLayout={(event) => {
+              const nextWidth = Math.floor(event.nativeEvent.layout.width);
+              setChatViewportWidth((currentWidth) => currentWidth === nextWidth ? currentWidth : nextWidth);
+            }}
             onScrollBeginDrag={() => {
               transcriptAutoFollowRef.current = false;
             }}
@@ -4292,6 +4642,9 @@ export function SimulationScreen({
                     styles.messageBubble,
                     useCompactTranscript ? styles.messageBubbleCompact : null,
                     message.role === "user" ? styles.userBubble : styles.aiBubble,
+                    messageWidthConstraints
+                      ? { maxWidth: messageWidthConstraints.bubbleMaxWidth }
+                      : null,
                   ]}
                 >
                   <Text
@@ -4308,6 +4661,9 @@ export function SimulationScreen({
                       styles.messageText,
                       useCompactTranscript ? styles.messageTextCompact : null,
                       message.role === "user" ? styles.userMessageText : styles.aiMessageText,
+                      messageWidthConstraints
+                        ? { maxWidth: messageWidthConstraints.textMaxWidth }
+                        : null,
                     ]}
                   >
                     {normalizeTranscriptText(message.content)}

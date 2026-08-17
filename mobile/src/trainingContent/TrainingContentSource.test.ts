@@ -136,6 +136,21 @@ test("signed asset URLs stay in viewer memory and every uploaded type has a dedi
   assert.match(docx, /FileSystem\.deleteAsync/);
 });
 
+test("image assets open a full-screen pinch-and-pan viewer without changing other viewers", () => {
+  const image = source("./viewers/ImageContentViewer.tsx");
+
+  assert.match(image, /accessibilityHint="Opens a full-screen image viewer"/);
+  assert.match(image, /<Modal/);
+  assert.match(image, /presentationStyle="fullScreen"/);
+  assert.match(image, /onRequestClose=\{\(\) => setFullScreenVisible\(false\)\}/);
+  assert.match(image, /PanResponder\.create/);
+  assert.match(image, /event\.nativeEvent\.touches\.length >= 2/);
+  assert.match(image, /transform: getImageViewerTransform\(zoomScale, translation\)/);
+  assert.match(image, /updateImageGesture/);
+  assert.match(image, /Pinch to zoom\. Drag to pan\./);
+  assert.match(image, /Close image viewer/);
+});
+
 test("external and native resources use constrained rendering and leave-app confirmation", () => {
   const links = source("./externalLinks.ts");
   const markdown = source("./markdownModel.ts");

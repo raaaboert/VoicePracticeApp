@@ -12,6 +12,7 @@ import type { PrefetchedRemoteSpeechChunk, RemoteTtsPreset, UnifiedSimulationTur
 import { getSimulationTranscriptionMimeType } from "./simulationRecordingProfile";
 export {
   isExpiredSubmittedTurnAwait,
+  isTerminalSubmittedTurnRecoveryAwait,
   isUsableAwaitedAssistantReply,
   isUsableSimulationTranscript,
   shouldFallbackToLegacyAssistantReply,

@@ -1,3 +1,7 @@
+import { MobileApiError } from "./apiError";
+
+const SUBMITTED_TURN_RECOVERY_TIMEOUT_MESSAGE = "Timed out waiting for simulation assistant reply.";
+
 export function shouldFallbackToLegacyUnifiedSubmit(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -28,6 +32,17 @@ export function isExpiredSubmittedTurnAwait(error: unknown): boolean {
     message.includes("no longer pending") ||
     message.includes("already cleaned") ||
     message.includes("expired")
+  );
+}
+
+export function isTerminalSubmittedTurnRecoveryAwait(error: unknown): boolean {
+  return (
+    isExpiredSubmittedTurnAwait(error)
+    || (
+      error instanceof MobileApiError
+      && error.status === 504
+      && error.message.trim() === SUBMITTED_TURN_RECOVERY_TIMEOUT_MESSAGE
+    )
   );
 }
 

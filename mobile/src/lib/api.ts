@@ -1067,7 +1067,7 @@ export async function awaitSimulationTurnResultViaApi(params: {
     },
     params.authToken,
     {
-      timeoutMs: 75_000,
+      timeoutMs: 90_000,
       signal: params.signal,
       ...(params.correlationId ? { headers: { "X-Correlation-Id": params.correlationId } } : {}),
     },
