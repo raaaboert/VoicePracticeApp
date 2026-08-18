@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { getCompactVoiceOrbStatus, getVoiceOrbStages } from "./voiceOrbPhases";
+
+const voiceOrbSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../components/VoiceOrb.tsx"),
+  "utf8",
+).replace(/\r\n/g, "\n");
 
 test("idle mode keeps all three stable phase rows visible before start", () => {
   const stages = getVoiceOrbStages("idle");
@@ -26,6 +34,31 @@ test("idle mode keeps all three stable phase rows visible before start", () => {
       status: "Standby",
     },
   ]);
+});
+
+test("recording mode keeps Process visible as the middle standby phase", () => {
+  const stages = getVoiceOrbStages("recording");
+
+  assert.deepEqual(
+    stages.map((stage) => stage.label),
+    ["Capture", "Process", "Deliver"],
+  );
+  assert.deepEqual(stages[1], {
+    key: "process",
+    label: "Process",
+    state: "standby",
+    status: "Standby",
+  });
+});
+
+test("regular stage rows do not enable Android paint clipping", () => {
+  const stepRowStart = voiceOrbSource.indexOf("stepRow: {");
+  const stepRowEnd = voiceOrbSource.indexOf("stepRowCompact: {", stepRowStart);
+  assert.ok(stepRowStart >= 0 && stepRowEnd > stepRowStart);
+  const stepRowStyle = voiceOrbSource.slice(stepRowStart, stepRowEnd);
+
+  // Android can clip rounded-row children when overflow is hidden beside an asymmetric hairline border.
+  assert.doesNotMatch(stepRowStyle, /overflow:\s*["']hidden["']/);
 });
 
 test("thinking mode keeps the process row present and active", () => {

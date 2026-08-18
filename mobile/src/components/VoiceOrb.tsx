@@ -768,7 +768,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingHorizontal: 10,
     paddingVertical: 10,
-    overflow: "hidden",
     position: "relative",
   },
   stepRowCompact: {
