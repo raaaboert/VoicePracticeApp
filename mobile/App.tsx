@@ -32,7 +32,7 @@ import {
   ORG_USER_ROLE_LABELS,
   secondsToWholeMinutes,
 } from "@voicepractice/shared";
-import type { SuperUserOrgOption } from "@voicepractice/shared";
+import type { MobileTrainingContentSummary, SuperUserOrgOption } from "@voicepractice/shared";
 import {
   AI_VOICE_GENDER_OPTIONS,
   AI_VOICE_OPTIONS,
@@ -147,6 +147,7 @@ import { ScorecardView } from "./src/screens/ScorecardView";
 import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
+import { RelatedTrainingContentScreen } from "./src/trainingContent/RelatedTrainingContentScreen";
 import { confirmAndOpenExternalLink } from "./src/trainingContent/externalLinks";
 import {
   clearAiProcessingConsent,
@@ -208,6 +209,7 @@ type Screen =
   | "scorecard"
   | "performance"
   | "training_content"
+  | "related_training_content"
   | "usage_dashboard"
   | "admin_home"
   | "admin_org_dashboard"
@@ -779,6 +781,9 @@ export default function App() {
   const [trainingContentEnabled, setTrainingContentEnabled] = useState(false);
   const [trainingContentNotice, setTrainingContentNotice] = useState<string | null>(null);
   const [isTrainingContentOpening, setIsTrainingContentOpening] = useState(false);
+  const [relatedTrainingContentItems, setRelatedTrainingContentItems] = useState<
+    MobileTrainingContentSummary[]
+  >([]);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
@@ -886,6 +891,7 @@ export default function App() {
     setTrainingContentEnabled(false);
     setTrainingContentNotice(null);
     setIsTrainingContentOpening(false);
+    setRelatedTrainingContentItems([]);
     setMyOrgAccessRequests([]);
     setOrgAccessRequestsLoading(false);
     setIsOrgRequestSaving(false);
@@ -3661,6 +3667,7 @@ export default function App() {
       setScorecardError(null);
       setScorecardStatus("score_unavailable");
       setScorecardDiagnostics(null);
+      setRelatedTrainingContentItems([]);
       setScreen("simulation");
     } catch (caught) {
       if (isOrganizationAccessRequiredError(caught)) {
@@ -3688,6 +3695,7 @@ export default function App() {
     timing: SessionTiming,
   ) => {
     setSimulationConfig(null);
+    setRelatedTrainingContentItems([]);
     setLastCompletedConfig(completedConfig);
     setScorecard(null);
     setScorecardError(null);
@@ -6840,6 +6848,7 @@ export default function App() {
           authToken={mobileAuthToken}
           onOrganizationAccessRequired={() => {
             setSimulationConfig(null);
+            setRelatedTrainingContentItems([]);
             setSetupError(null);
             setOrgRequestError(null);
             setOrgRequestNotice("Enter your organization access code to continue with Peritio AI.");
@@ -6847,8 +6856,13 @@ export default function App() {
           }}
           onExit={(message) => {
             setSimulationConfig(null);
+            setRelatedTrainingContentItems([]);
             setSetupError(message ?? null);
             setScreen("setup");
+          }}
+          onReviewRelatedLearningResources={(items) => {
+            setRelatedTrainingContentItems(items);
+            setScreen("related_training_content");
           }}
           onSessionComplete={handleSessionComplete}
         />
@@ -6884,6 +6898,24 @@ export default function App() {
           colorScheme={colorScheme}
           onBackToHome={returnFromTrainingContent}
           onModuleAvailabilityChange={handleTrainingContentAvailability}
+        />
+      );
+    }
+
+    if (
+      screen === "related_training_content"
+      && simulationConfig
+      && user
+      && mobileAuthToken
+      && relatedTrainingContentItems.length > 0
+    ) {
+      return (
+        <RelatedTrainingContentScreen
+          userId={user.id}
+          authToken={mobileAuthToken}
+          colorScheme={colorScheme}
+          initialItems={relatedTrainingContentItems}
+          onBackToScenario={() => setScreen("simulation")}
         />
       );
     }

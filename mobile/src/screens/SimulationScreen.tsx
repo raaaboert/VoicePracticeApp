@@ -11,6 +11,7 @@ import * as Speech from "expo-speech";
 import { ActivityIndicator, Alert, AppState, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import type { NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import type { MobileTrainingContentSummary } from "@voicepractice/shared";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
   getAiVoiceOption,
@@ -115,6 +116,8 @@ import {
   type PendingSubmittedTurnRecovery,
 } from "../lib/simulationTurnRecovery";
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
+import { fetchRelatedTrainingContent } from "../trainingContent/api";
+import { buildRelatedTrainingContentPresentation } from "../trainingContent/relatedTrainingContent";
 
 interface SimulationScreenProps {
   config: SimulationConfig;
@@ -123,6 +126,7 @@ interface SimulationScreenProps {
   authToken: string;
   onExit: (message?: string | null) => void;
   onOrganizationAccessRequired: () => void;
+  onReviewRelatedLearningResources: (items: MobileTrainingContentSummary[]) => void;
   onSessionComplete: (
     history: DialogueMessage[],
     config: SimulationConfig,
@@ -465,6 +469,7 @@ export function SimulationScreen({
   authToken,
   onExit,
   onOrganizationAccessRequired,
+  onReviewRelatedLearningResources,
   onSessionComplete,
 }: SimulationScreenProps) {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -484,6 +489,13 @@ export function SimulationScreen({
   const [isStartingTurn, setIsStartingTurn] = useState(false);
   const [isResumingLifecyclePause, setIsResumingLifecyclePause] = useState(false);
   const [lifecyclePauseActive, setLifecyclePauseActive] = useState(false);
+  const [relatedLearningResources, setRelatedLearningResources] = useState<
+    MobileTrainingContentSummary[]
+  >([]);
+  const relatedLearningResourcesPresentation = useMemo(
+    () => buildRelatedTrainingContentPresentation(relatedLearningResources),
+    [relatedLearningResources]
+  );
 
   const apiConfigured = useMemo(() => isOpenAiConfigured(), []);
   const unifiedSubmitEnabled = useMemo(() => isUnifiedSimulationSubmitEnabled(), []);
@@ -529,6 +541,30 @@ export function SimulationScreen({
     apiConfigured &&
     !useLocalMockMode &&
     Platform.OS !== "web";
+
+  useEffect(() => {
+    let cancelled = false;
+    setRelatedLearningResources([]);
+    void fetchRelatedTrainingContent(
+      userId,
+      config.scenario.id,
+      authToken,
+      config.trainingId
+    )
+      .then((response) => {
+        if (!cancelled) {
+          setRelatedLearningResources(response.items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRelatedLearningResources([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, config.scenario.id, config.trainingId, userId]);
   const logSimulationApiCall = useCallback((callName: string) => {
     // eslint-disable-next-line no-console
     console.log(
@@ -4482,6 +4518,29 @@ export function SimulationScreen({
           </View>
         </LinearGradient>
 
+        {!sessionActive && !isStartingSession && relatedLearningResourcesPresentation ? (
+          <View style={styles.relatedResourcesCard}>
+            <Text style={styles.relatedResourcesEyebrow}>Related Learning Resources</Text>
+            <Text style={styles.relatedResourcesTitle}>{relatedLearningResourcesPresentation.title}</Text>
+            <Text style={styles.relatedResourcesCopy}>
+              You have Learning Resources related to this scenario. Review them before practicing.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={relatedLearningResourcesPresentation.accessibilityLabel}
+              style={({ pressed }) => [
+                styles.relatedResourcesButton,
+                pressed ? styles.relatedResourcesButtonPressed : null,
+              ]}
+              onPress={() => onReviewRelatedLearningResources(relatedLearningResourcesPresentation.items)}
+            >
+              <Text style={styles.relatedResourcesButtonText}>
+                {relatedLearningResourcesPresentation.actionLabel}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {__DEV__ ? (
           <View style={[styles.debugModeCard, localTestMode ? styles.debugModeLocal : styles.debugModeRemote]}>
             <Text style={styles.debugModeText}>Mode: {localTestMode ? "LOCAL TEST" : "REMOTE"}</Text>
@@ -4819,6 +4878,50 @@ function createStyles(palette: SimulationPalette) {
       paddingVertical: 14,
       marginBottom: 12,
       gap: 7,
+    },
+    relatedResourcesCard: {
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.panel,
+      padding: 16,
+      marginBottom: 16,
+      gap: 7,
+    },
+    relatedResourcesEyebrow: {
+      color: palette.statusEyebrow,
+      fontSize: 11.5,
+      lineHeight: 16,
+      fontWeight: "800",
+      textTransform: "uppercase",
+      letterSpacing: 0.8,
+    },
+    relatedResourcesTitle: {
+      color: palette.text,
+      fontSize: 17,
+      lineHeight: 22,
+      fontWeight: "800",
+    },
+    relatedResourcesCopy: {
+      color: palette.textMuted,
+      fontSize: 13.5,
+      lineHeight: 19,
+    },
+    relatedResourcesButton: {
+      minHeight: 42,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: 12,
+      backgroundColor: palette.accentStrong,
+      marginTop: 3,
+      paddingHorizontal: 14,
+    },
+    relatedResourcesButtonPressed: { opacity: 0.74 },
+    relatedResourcesButtonText: {
+      color: palette.accentText,
+      fontSize: 14,
+      lineHeight: 19,
+      fontWeight: "800",
     },
     label: {
       color: palette.statusEyebrow,

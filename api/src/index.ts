@@ -635,6 +635,7 @@ let trainingContentManagementService: TrainingContentManagementService =
   defaultTrainingContentManagementService;
 const defaultTrainingContentMobileService = createTrainingContentMobileService({
   store: trainingContentStore,
+  scenarioLinkService: trainingContentScenarioLinkService,
   entitlementStore: orgModuleEntitlementStore,
   objectStorage: trainingContentObjectStorage,
   readiness: trainingContentStorageReadiness,
@@ -5022,10 +5023,16 @@ async function withMobileTrainingContentContext<T>(
     }
 
     const organization = user.orgId ? getOrgById(db, user.orgId) : null;
+    const configForUser = resolveConfigForUser(db, user);
     return handler({
       user,
       users: db.users,
       organizationActive: organization?.status === "active",
+      scenarioConfig: {
+        segments: configForUser.segments,
+        orgCustomScenarios: configForUser.orgCustomScenarios,
+        orgTrainings: configForUser.orgTrainings,
+      },
     });
   });
 }
@@ -17017,6 +17024,29 @@ app.get(
     try {
       const result = await withMobileTrainingContentContext(request, response, (context) =>
         trainingContentMobileService.getLibrary(context)
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/mobile/users/:userId/scenarios/:scenarioId/training-content",
+  async (request: Request, response: Response) => {
+    try {
+      const trainingId = typeof request.query.trainingId === "string"
+        ? request.query.trainingId
+        : null;
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getRelatedForScenario(
+          context,
+          request.params.scenarioId,
+          trainingId
+        )
       );
       if (result) {
         response.json(result);

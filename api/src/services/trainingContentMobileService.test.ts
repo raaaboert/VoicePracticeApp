@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  AppConfig,
   TrainingContentAssignment,
   TrainingContentCategory,
   TrainingContentItem,
@@ -18,6 +19,7 @@ import type {
   TrainingContentPresignedRequest,
 } from "../storage/trainingContentObjectStorage.js";
 import type {
+  TrainingContentScenarioLink,
   TrainingContentMobileReadRecord,
   TrainingContentMobileReadResult,
   TrainingContentStore,
@@ -29,9 +31,57 @@ import {
   MobileTrainingContentRequestContext,
   TrainingContentMobileServiceError,
 } from "./trainingContentMobileService.js";
+import { createTrainingContentScenarioLinkService } from "./trainingContentScenarioLinks.js";
 
 const NOW = "2026-07-28T15:00:00.000Z";
 const ORG_ID = "org_a";
+
+const scenarioConfig: Pick<
+  AppConfig,
+  "segments" | "orgCustomScenarios" | "orgTrainings"
+> = {
+  segments: [{
+    id: "sales",
+    label: "Sales",
+    summary: "Sales",
+    enabled: true,
+    scenarios: [{
+      id: "standard_visible",
+      segmentId: "sales",
+      title: "Standard visible",
+      description: "Visible scenario",
+      aiRole: "Buyer",
+    }],
+  }],
+  orgCustomScenarios: [{
+    id: "custom_visible",
+    orgId: ORG_ID,
+    segmentId: "sales",
+    title: "Custom visible",
+    description: "Visible custom scenario",
+    aiRole: "Buyer",
+    scoringGuidance: "Score it",
+    applicableIndustryIds: ["sales"],
+    enabled: true,
+    provenance: { sourceMode: "scratch", creationMethod: "manual" },
+    createdBy: "admin",
+    createdAt: NOW,
+    updatedAt: NOW,
+  }],
+  orgTrainings: [{
+    id: "training_visible",
+    orgId: ORG_ID,
+    name: "Sales readiness",
+    status: "active",
+    description: "Sales readiness",
+    createdAt: NOW,
+    updatedAt: NOW,
+    attachedTrainingPackIds: [],
+    attachedCustomScenarioIds: ["custom_visible"],
+    attachedTrainingPackCount: 0,
+    attachedCustomScenarioCount: 1,
+  }],
+};
 
 function buildUser(
   id: string,
@@ -152,8 +202,28 @@ function record(params: {
   };
 }
 
+function scenarioLink(
+  contentId: string,
+  scenarioId = "standard_visible",
+  overrides: Partial<TrainingContentScenarioLink> = {}
+): TrainingContentScenarioLink {
+  return {
+    id: `link_${contentId}_${scenarioId}`,
+    orgId: ORG_ID,
+    contentId,
+    focusTopicId: null,
+    scenarioId,
+    createdByActorId: "admin",
+    createdAt: NOW,
+    removedByActorId: null,
+    removedAt: null,
+    ...overrides,
+  };
+}
+
 class FakeStore implements TrainingContentStore {
   records: TrainingContentMobileReadRecord[] = [];
+  scenarioLinks: TrainingContentScenarioLink[] = [];
   maximumItems: number | null = null;
   truncated = false;
 
@@ -162,8 +232,20 @@ class FakeStore implements TrainingContentStore {
   async getContentItemForOrg(_orgId: string, contentId: string) {
     return this.records.find((entry) => entry.content.id === contentId)?.content ?? null;
   }
-  async listActiveScenarioLinksForContent() { return []; }
-  async listActiveScenarioLinksForScenario() { return []; }
+  async listActiveScenarioLinksForContent(orgId: string, contentId: string) {
+    return this.scenarioLinks.filter(
+      (entry) => entry.orgId === orgId
+        && entry.contentId === contentId
+        && entry.removedAt === null
+    );
+  }
+  async listActiveScenarioLinksForScenario(orgId: string, scenarioId: string) {
+    return this.scenarioLinks.filter(
+      (entry) => entry.orgId === orgId
+        && entry.scenarioId === scenarioId
+        && entry.removedAt === null
+    );
+  }
   async replaceActiveScenarioLinksForContent() { return []; }
   async listPublishedContentForMobile(
     orgId: string,
@@ -296,6 +378,7 @@ function setup(users = [buildUser("learner")]) {
   );
   const service = createTrainingContentMobileService({
     store,
+    scenarioLinkService: createTrainingContentScenarioLinkService(store),
     entitlementStore,
     objectStorage,
     readiness,
@@ -305,6 +388,7 @@ function setup(users = [buildUser("learner")]) {
     user: users[0],
     users,
     organizationActive: true,
+    scenarioConfig,
   };
   return { service, store, entitlementStore, objectStorage, readiness, context };
 }
@@ -377,6 +461,205 @@ test("library returns only eligible content with safe category and item ordering
     await fixture.service.getCategories(fixture.context),
     { categories: library.categories }
   );
+});
+
+test("related scenario resources return zero, one, or many eligible summaries", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const first = buildContent("first", category.id, 0);
+  const second = buildContent("second", category.id, 1);
+  fixture.store.records = [
+    record({ content: first, category, assignments: [assignment(first.id, "organization")] }),
+    record({ content: second, category, assignments: [assignment(second.id, "user", "learner")] }),
+  ];
+
+  assert.deepEqual(
+    await fixture.service.getRelatedForScenario(fixture.context, "standard_visible"),
+    { categories: [], items: [], truncated: false }
+  );
+
+  fixture.store.scenarioLinks = [scenarioLink(first.id)];
+  assert.deepEqual(
+    (await fixture.service.getRelatedForScenario(
+      fixture.context,
+      "standard_visible"
+    )).items.map((item) => item.id),
+    ["first"]
+  );
+
+  fixture.store.scenarioLinks.push(scenarioLink(second.id));
+  const many = await fixture.service.getRelatedForScenario(
+    fixture.context,
+    "standard_visible"
+  );
+  assert.deepEqual(many.items.map((item) => item.id), ["first", "second"]);
+  assert.deepEqual(many.categories.map((entry) => [entry.id, entry.itemCount]), [
+    ["category_a", 2],
+  ]);
+  assert.equal(many.truncated, false);
+});
+
+test("related scenario discovery filters unpublished, unassigned, and cross-org candidates", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const eligible = buildContent("eligible", category.id, 0);
+  const unpublished = buildContent("unpublished", category.id, 1, {
+    publicationState: "draft",
+    publishedAt: null,
+  });
+  const unassigned = buildContent("unassigned", category.id, 2);
+  const crossOrgCategory = buildCategory("cross_org_category", 0, { orgId: "org_b" });
+  const crossOrg = buildContent("cross_org", crossOrgCategory.id, 0, { orgId: "org_b" });
+  fixture.store.records = [
+    record({ content: eligible, category, assignments: [assignment(eligible.id, "organization")] }),
+    record({ content: unpublished, category, assignments: [assignment(unpublished.id, "organization")] }),
+    record({ content: unassigned, category, assignments: [] }),
+    record({
+      content: crossOrg,
+      category: crossOrgCategory,
+      assignments: [{ ...assignment(crossOrg.id, "organization"), orgId: "org_b" }],
+    }),
+  ];
+  fixture.store.scenarioLinks = fixture.store.records.map((entry) =>
+    scenarioLink(entry.content.id)
+  );
+
+  assert.deepEqual(
+    (await fixture.service.getRelatedForScenario(
+      fixture.context,
+      "standard_visible"
+    )).items.map((item) => item.id),
+    ["eligible"]
+  );
+});
+
+test("related scenario discovery fails closed for inactive membership or a disabled module", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const content = buildContent("eligible", category.id, 0);
+  fixture.store.records = [
+    record({ content, category, assignments: [assignment(content.id, "organization")] }),
+  ];
+  fixture.store.scenarioLinks = [scenarioLink(content.id)];
+
+  await assert.rejects(
+    fixture.service.getRelatedForScenario(
+      { ...fixture.context, user: { ...fixture.context.user, status: "disabled" } },
+      "standard_visible"
+    ),
+    (error: unknown) => error instanceof TrainingContentMobileServiceError
+      && error.code === "training_content_access_denied"
+  );
+
+  fixture.entitlementStore.enabled = false;
+  await assert.rejects(
+    fixture.service.getRelatedForScenario(fixture.context, "standard_visible"),
+    (error: unknown) => error instanceof TrainingContentMobileServiceError
+      && error.code === "module_disabled"
+  );
+});
+
+test("removed historical scenario links are not returned", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const active = buildContent("active", category.id, 0);
+  const removed = buildContent("removed", category.id, 1);
+  fixture.store.records = [active, removed].map((content) =>
+    record({ content, category, assignments: [assignment(content.id, "organization")] })
+  );
+  fixture.store.scenarioLinks = [
+    scenarioLink(active.id),
+    scenarioLink(removed.id, "standard_visible", {
+      removedAt: NOW,
+      removedByActorId: "admin",
+    }),
+  ];
+
+  assert.deepEqual(
+    (await fixture.service.getRelatedForScenario(
+      fixture.context,
+      "standard_visible"
+    )).items.map((item) => item.id),
+    ["active"]
+  );
+});
+
+test("custom scenarios require their visible Focus Topic and invalid scenarios cannot enumerate", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const content = buildContent("custom_resource", category.id, 0);
+  fixture.store.records = [
+    record({ content, category, assignments: [assignment(content.id, "organization")] }),
+  ];
+  fixture.store.scenarioLinks = [scenarioLink(content.id, "custom_visible")];
+
+  assert.deepEqual(
+    (await fixture.service.getRelatedForScenario(
+      fixture.context,
+      "custom_visible",
+      "training_visible"
+    )).items.map((item) => item.id),
+    ["custom_resource"]
+  );
+
+  const crossOrgScenario = {
+    ...scenarioConfig.orgCustomScenarios![0]!,
+    id: "custom_other_org",
+    orgId: "org_b",
+  };
+  const crossOrgTraining = {
+    ...scenarioConfig.orgTrainings![0]!,
+    id: "training_other_org",
+    attachedCustomScenarioIds: [crossOrgScenario.id],
+  };
+  await assert.rejects(
+    fixture.service.getRelatedForScenario(
+      {
+        ...fixture.context,
+        scenarioConfig: {
+          ...scenarioConfig,
+          orgCustomScenarios: [crossOrgScenario],
+          orgTrainings: [crossOrgTraining],
+        },
+      },
+      crossOrgScenario.id,
+      crossOrgTraining.id
+    ),
+    (error: unknown) => error instanceof TrainingContentMobileServiceError
+      && error.code === "scenario_not_found"
+  );
+
+  for (const [scenarioId, trainingId] of [
+    ["custom_visible", "other_training"],
+    ["missing", null],
+  ] as const) {
+    await assert.rejects(
+      fixture.service.getRelatedForScenario(fixture.context, scenarioId, trainingId),
+      (error: unknown) => error instanceof TrainingContentMobileServiceError
+        && error.code === "scenario_not_found"
+    );
+  }
+});
+
+test("a scenario relationship does not change ordinary Learning Resource eligibility", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const eligible = buildContent("eligible", category.id, 0);
+  const unassigned = buildContent("unassigned", category.id, 1);
+  fixture.store.records = [
+    record({ content: eligible, category, assignments: [assignment(eligible.id, "organization")] }),
+    record({ content: unassigned, category, assignments: [] }),
+  ];
+  fixture.store.scenarioLinks = [scenarioLink(eligible.id), scenarioLink(unassigned.id)];
+
+  const libraryIds = (await fixture.service.getLibrary(fixture.context)).items
+    .map((item) => item.id);
+  const relatedIds = (await fixture.service.getRelatedForScenario(
+    fixture.context,
+    "standard_visible"
+  )).items.map((item) => item.id);
+  assert.deepEqual(libraryIds, ["eligible"]);
+  assert.deepEqual(relatedIds, libraryIds);
 });
 
 test("manager and manager-team eligibility is dynamic and overlapping grants use OR semantics", async () => {

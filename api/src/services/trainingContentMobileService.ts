@@ -1,4 +1,5 @@
 import type {
+  AppConfig,
   MobileModuleAvailabilityResponse,
   MobileTrainingContentAssetAccessResponse,
   MobileTrainingContentCategoriesResponse,
@@ -18,12 +19,14 @@ import type {
   TrainingContentStore,
 } from "../storage/trainingContentStore.js";
 import { resolveTrainingContentEligibility } from "./trainingContentEligibility.js";
+import type { TrainingContentScenarioLinkService } from "./trainingContentScenarioLinks.js";
 import type { TrainingContentStorageReadinessService } from "./trainingContentStorageReadiness.js";
 
 export interface MobileTrainingContentRequestContext {
   user: UserProfile;
   users: readonly UserProfile[];
   organizationActive: boolean;
+  scenarioConfig: Pick<AppConfig, "segments" | "orgCustomScenarios" | "orgTrainings">;
 }
 
 export class TrainingContentMobileServiceError extends Error {
@@ -47,6 +50,11 @@ export interface TrainingContentMobileService {
   getCategories(
     context: MobileTrainingContentRequestContext
   ): Promise<MobileTrainingContentCategoriesResponse>;
+  getRelatedForScenario(
+    context: MobileTrainingContentRequestContext,
+    scenarioId: string,
+    trainingId?: string | null
+  ): Promise<MobileTrainingContentLibraryResponse>;
   getDetail(
     context: MobileTrainingContentRequestContext,
     contentId: string
@@ -60,6 +68,10 @@ export interface TrainingContentMobileService {
 
 interface TrainingContentMobileServiceDependencies {
   store: TrainingContentStore;
+  scenarioLinkService: Pick<
+    TrainingContentScenarioLinkService,
+    "listRawContentLinkCandidateIdsForScenario"
+  >;
   entitlementStore: OrgModuleEntitlementStore;
   objectStorage: TrainingContentObjectStorage;
   readiness: TrainingContentStorageReadinessService;
@@ -114,6 +126,41 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
   ): Promise<MobileTrainingContentCategoriesResponse> {
     const library = await this.getLibrary(context);
     return { categories: library.categories };
+  }
+
+  async getRelatedForScenario(
+    context: MobileTrainingContentRequestContext,
+    scenarioId: string,
+    trainingId?: string | null
+  ): Promise<MobileTrainingContentLibraryResponse> {
+    const orgId = await this.requireEnabledModule(context);
+    const normalizedScenarioId = scenarioId.trim();
+    if (
+      !normalizedScenarioId
+      || !isScenarioAvailableToMobileUser(
+        context.scenarioConfig,
+        orgId,
+        normalizedScenarioId,
+        trainingId
+      )
+    ) {
+      throw unavailableScenarioError();
+    }
+
+    const candidateIds = await this.dependencies.scenarioLinkService
+      .listRawContentLinkCandidateIdsForScenario(orgId, normalizedScenarioId);
+    const candidateRecords = await Promise.all(
+      candidateIds.map((contentId) =>
+        this.dependencies.store.getPublishedContentForMobile(orgId, contentId)
+      )
+    );
+    return buildLibrary(
+      candidateRecords.filter(
+        (record): record is TrainingContentMobileReadRecord =>
+          record !== null && isEligible(record, context, orgId)
+      ),
+      false
+    );
   }
 
   async getDetail(
@@ -329,6 +376,49 @@ function unavailableContentError(): TrainingContentMobileServiceError {
     404,
     "training_content_not_found"
   );
+}
+
+function unavailableScenarioError(): TrainingContentMobileServiceError {
+  return new TrainingContentMobileServiceError(
+    "Scenario is not available.",
+    404,
+    "scenario_not_found"
+  );
+}
+
+function isScenarioAvailableToMobileUser(
+  config: Pick<AppConfig, "segments" | "orgCustomScenarios" | "orgTrainings">,
+  orgId: string,
+  scenarioId: string,
+  trainingId?: string | null
+): boolean {
+  const standardScenarioAvailable = config.segments.some(
+    (segment) => segment.enabled === true
+      && (segment.scenarios ?? []).some(
+        (scenario) => scenario.id === scenarioId && scenario.enabled !== false
+      )
+  );
+  if (standardScenarioAvailable) {
+    return true;
+  }
+
+  const customScenarioAvailable = (config.orgCustomScenarios ?? []).some(
+    (scenario) => scenario.orgId === orgId
+      && scenario.id === scenarioId
+      && scenario.enabled === true
+  );
+  if (!customScenarioAvailable) {
+    return false;
+  }
+
+  const normalizedTrainingId = trainingId?.trim() ?? "";
+  const trainings = config.orgTrainings ?? [];
+  return normalizedTrainingId
+    ? trainings.some(
+      (training) => training.id === normalizedTrainingId
+        && training.attachedCustomScenarioIds.includes(scenarioId)
+    )
+    : trainings.some((training) => training.attachedCustomScenarioIds.includes(scenarioId));
 }
 
 function unavailableAssetError(): TrainingContentMobileServiceError {

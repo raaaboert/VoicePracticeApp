@@ -110,15 +110,19 @@ class FakeMobileTrainingContentService implements TrainingContentMobileService {
     method: string;
     context: MobileTrainingContentRequestContext;
     contentId?: string;
+    scenarioId?: string;
+    trainingId?: string | null;
   }> = [];
   failure: TrainingContentMobileServiceError | null = null;
 
   private record(
     method: string,
     context: MobileTrainingContentRequestContext,
-    contentId?: string
+    contentId?: string,
+    scenarioId?: string,
+    trainingId?: string | null
   ): void {
-    this.calls.push({ method, context, contentId });
+    this.calls.push({ method, context, contentId, scenarioId, trainingId });
     if (this.failure) {
       throw this.failure;
     }
@@ -152,6 +156,25 @@ class FakeMobileTrainingContentService implements TrainingContentMobileService {
   async getCategories(context: MobileTrainingContentRequestContext) {
     this.record("getCategories", context);
     return { categories: [] };
+  }
+  async getRelatedForScenario(
+    context: MobileTrainingContentRequestContext,
+    scenarioId: string,
+    trainingId?: string | null
+  ) {
+    this.record("getRelatedForScenario", context, undefined, scenarioId, trainingId);
+    return {
+      categories: [],
+      items: [{
+        id: "content",
+        contentType: "native" as const,
+        title: "Guide",
+        description: "",
+        category: { id: "category", name: "General" },
+        relatedFocusTopic: null,
+      }],
+      truncated: false,
+    };
   }
   async getDetail(context: MobileTrainingContentRequestContext, contentId: string) {
     this.record("getDetail", context, contentId);
@@ -273,6 +296,24 @@ test("mobile module and library routes derive current user and organization cont
   assert.equal(calls[0]?.context.user.orgId, "org_a");
   assert.equal(calls[0]?.context.organizationActive, true);
   assert.equal(calls[0]?.context.users.some((user) => user.id === "other"), true);
+});
+
+test("mobile related-resource route forwards only authenticated scenario context", async () => {
+  const result = await mobileRequest(
+    "/mobile/users/learner/scenarios/custom_visible/training-content?trainingId=training_visible",
+    "token_learner",
+    { headers: { "X-Superuser-Org-Id": "org_b" } }
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.items.map((item: { id: string }) => item.id), ["content"]);
+
+  const call = service.calls.at(-1);
+  assert.equal(call?.method, "getRelatedForScenario");
+  assert.equal(call?.context.user.id, "learner");
+  assert.equal(call?.context.user.orgId, "org_a");
+  assert.equal(call?.scenarioId, "custom_visible");
+  assert.equal(call?.trainingId, "training_visible");
+  assert.equal(Array.isArray(call?.context.scenarioConfig.segments), true);
 });
 
 test("mobile routes reject missing, mismatched, interim, and re-onboarding tokens", async () => {

@@ -215,6 +215,25 @@ test("replacement preserves an unavailable scenario only when it is already link
   );
 });
 
+test("preserving one unavailable scenario does not permit a different unavailable scenario", async () => {
+  const store = new FakeScenarioLinkStore();
+  const service = createTrainingContentScenarioLinkService(store);
+
+  await assert.rejects(
+    service.replaceScenarioLinksForContent({
+      config,
+      org: org(),
+      contentId: "content_1",
+      scenarioIds: ["standard_disabled", "some_other_disabled"],
+      preservedExistingScenarioIds: ["standard_disabled"],
+      actor: { actorType: "platform_admin", actorId: "admin_1" },
+    }),
+    (error: unknown) => error instanceof TrainingContentScenarioLinkServiceError
+      && error.code === "invalid_scenario_link_target"
+  );
+  assert.equal(store.replacements.length, 0);
+});
+
 test("service rejects nonexistent, invisible, cross-org, and disabled scenarios before mutation", async () => {
   for (const scenarioId of ["missing", "standard_hidden", "standard_disabled", "cross_org", "custom_disabled"]) {
     const store = new FakeScenarioLinkStore();

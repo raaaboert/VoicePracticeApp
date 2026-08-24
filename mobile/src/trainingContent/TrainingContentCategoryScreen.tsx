@@ -18,17 +18,19 @@ import type { TrainingContentTheme } from "./theme";
 interface TrainingContentCategoryScreenProps {
   category: MobileTrainingContentCategory | null;
   items: MobileTrainingContentSummary[];
-  refreshing: boolean;
+  refreshing?: boolean;
   theme: TrainingContentTheme;
+  title?: string;
+  emptyMessage?: string;
   onBack: () => void;
-  onRefresh: () => void;
+  onRefresh?: () => void;
   onOpenItem: (item: MobileTrainingContentSummary) => void;
 }
 
 export function TrainingContentCategoryScreen(
   props: TrainingContentCategoryScreenProps
 ) {
-  const title = props.category?.name ?? "All Content";
+  const title = props.title ?? props.category?.name ?? "All Content";
   const styles = createStyles(props.theme);
   return (
     <View style={styles.fill}>
@@ -36,9 +38,9 @@ export function TrainingContentCategoryScreen(
       <ScrollView
         style={styles.fill}
         contentContainerStyle={styles.content}
-        refreshControl={
-          <RefreshControl refreshing={props.refreshing} onRefresh={props.onRefresh} />
-        }
+        refreshControl={props.onRefresh ? (
+          <RefreshControl refreshing={props.refreshing ?? false} onRefresh={props.onRefresh} />
+        ) : undefined}
       >
         {props.category?.description ? (
           <Text style={styles.description}>{props.category.description}</Text>
@@ -51,7 +53,7 @@ export function TrainingContentCategoryScreen(
               color={props.theme.accent}
             />
             <Text style={styles.emptyText}>
-              No Learning Resources are available in this category.
+              {props.emptyMessage ?? "No Learning Resources are available in this category."}
             </Text>
           </View>
         ) : (

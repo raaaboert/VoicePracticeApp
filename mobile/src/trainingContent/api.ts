@@ -6,6 +6,7 @@ import type {
 } from "@voicepractice/shared";
 
 import { requestJson } from "../lib/api";
+import { relatedTrainingContentPath } from "./relatedTrainingContent";
 
 function userPath(userId: string): string {
   return `/mobile/users/${encodeURIComponent(userId)}`;
@@ -28,6 +29,19 @@ export function fetchTrainingContentLibrary(
 ): Promise<MobileTrainingContentLibraryResponse> {
   return requestJson<MobileTrainingContentLibraryResponse>(
     `${userPath(userId)}/training-content`,
+    { method: "GET" },
+    authToken
+  );
+}
+
+export function fetchRelatedTrainingContent(
+  userId: string,
+  scenarioId: string,
+  authToken: string,
+  trainingId?: string | null
+): Promise<MobileTrainingContentLibraryResponse> {
+  return requestJson<MobileTrainingContentLibraryResponse>(
+    relatedTrainingContentPath(userId, scenarioId, trainingId),
     { method: "GET" },
     authToken
   );
