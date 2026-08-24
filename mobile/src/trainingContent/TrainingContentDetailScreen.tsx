@@ -1,5 +1,8 @@
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
-import type { MobileTrainingContentDetail } from "@voicepractice/shared";
+import type {
+  MobileRelatedPracticeScenarioSummary,
+  MobileTrainingContentDetail,
+} from "@voicepractice/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -10,7 +13,10 @@ import {
   View,
 } from "react-native";
 
-import { fetchTrainingContentDetail } from "./api";
+import {
+  fetchRelatedPracticeScenarios,
+  fetchTrainingContentDetail,
+} from "./api";
 import {
   isTrainingContentItemRemoval,
   isTrainingContentModuleRemoval,
@@ -20,6 +26,7 @@ import { TRAINING_CONTENT_TYPE_LABELS } from "./TrainingContentCard";
 import { TrainingContentHeader } from "./TrainingContentHeader";
 import type { TrainingContentTheme } from "./theme";
 import { TrainingContentViewer } from "./TrainingContentViewer";
+import { normalizeRelatedPracticeScenarios } from "./relatedPracticeScenarios";
 
 interface TrainingContentDetailScreenProps {
   contentId: string;
@@ -29,6 +36,7 @@ interface TrainingContentDetailScreenProps {
   onBack: () => void;
   onModuleRemoved: (message: string) => void;
   onItemRemoved: (message: string) => void;
+  onPracticeScenario: (scenario: MobileRelatedPracticeScenarioSummary) => void;
 }
 
 export function TrainingContentDetailScreen(
@@ -38,7 +46,11 @@ export function TrainingContentDetailScreen(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
+  const [relatedScenarios, setRelatedScenarios] = useState<
+    MobileRelatedPracticeScenarioSummary[]
+  >([]);
   const generation = useRef(0);
+  const relatedGeneration = useRef(0);
   const styles = createStyles(props.theme);
 
   const load = useCallback(async () => {
@@ -93,6 +105,30 @@ export function TrainingContentDetailScreen(
     };
   }, [load]);
 
+  useEffect(() => {
+    const currentGeneration = relatedGeneration.current + 1;
+    relatedGeneration.current = currentGeneration;
+    setRelatedScenarios([]);
+    void fetchRelatedPracticeScenarios(
+      props.userId,
+      props.contentId,
+      props.authToken
+    )
+      .then((result) => {
+        if (relatedGeneration.current === currentGeneration) {
+          setRelatedScenarios(normalizeRelatedPracticeScenarios(result.scenarios));
+        }
+      })
+      .catch(() => {
+        if (relatedGeneration.current === currentGeneration) {
+          setRelatedScenarios([]);
+        }
+      });
+    return () => {
+      relatedGeneration.current += 1;
+    };
+  }, [props.authToken, props.contentId, props.userId]);
+
   return (
     <View style={styles.fill}>
       <TrainingContentHeader
@@ -143,6 +179,29 @@ export function TrainingContentDetailScreen(
                 .filter(Boolean)
                 .join(" \u00b7 ")}
             </Text>
+          ) : null}
+          {relatedScenarios.length > 0 ? (
+            <View style={styles.relatedSection}>
+              <Text style={styles.relatedHeading}>Related Practice Scenarios</Text>
+              {relatedScenarios.map((scenario) => (
+                <View key={scenario.id} style={styles.relatedRow}>
+                  <View style={styles.relatedIdentity}>
+                    <Text style={styles.relatedTitle}>{scenario.title}</Text>
+                    <Text style={styles.relatedSource}>
+                      {scenario.source === "custom" ? "Custom" : "Standard"}
+                    </Text>
+                  </View>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Practice ${scenario.title}`}
+                    style={styles.practiceButton}
+                    onPress={() => props.onPracticeScenario(scenario)}
+                  >
+                    <Text style={styles.practiceButtonText}>Practice</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
           ) : null}
           {viewerError ? (
             <View style={styles.inlineError}>
@@ -244,6 +303,43 @@ function createStyles(theme: TrainingContentTheme) {
       lineHeight: 17,
       marginTop: 12,
     },
+    relatedSection: {
+      marginTop: 18,
+      padding: 14,
+      gap: 10,
+      borderWidth: 1,
+      borderColor: theme.border,
+      borderRadius: 8,
+      backgroundColor: theme.surface,
+    },
+    relatedHeading: {
+      color: theme.text,
+      fontSize: 15,
+      lineHeight: 20,
+      fontWeight: "700",
+    },
+    relatedRow: {
+      minHeight: 48,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      paddingTop: 10,
+      borderTopWidth: 1,
+      borderTopColor: theme.border,
+    },
+    relatedIdentity: { flex: 1, gap: 2 },
+    relatedTitle: { color: theme.text, fontSize: 14, lineHeight: 19, fontWeight: "600" },
+    relatedSource: { color: theme.muted, fontSize: 12, lineHeight: 16 },
+    practiceButton: {
+      minHeight: 40,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 14,
+      borderRadius: 6,
+      backgroundColor: theme.accent,
+    },
+    practiceButtonText: { color: theme.accentText, fontSize: 14, fontWeight: "700" },
     inlineError: {
       padding: 10,
       marginTop: 12,

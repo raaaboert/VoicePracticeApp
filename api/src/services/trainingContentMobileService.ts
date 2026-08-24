@@ -1,6 +1,8 @@
 import type {
   AppConfig,
   MobileModuleAvailabilityResponse,
+  MobileRelatedPracticeScenarioSummary,
+  MobileRelatedPracticeScenariosResponse,
   MobileTrainingContentAssetAccessResponse,
   MobileTrainingContentCategoriesResponse,
   MobileTrainingContentDetail,
@@ -26,7 +28,10 @@ export interface MobileTrainingContentRequestContext {
   user: UserProfile;
   users: readonly UserProfile[];
   organizationActive: boolean;
-  scenarioConfig: Pick<AppConfig, "segments" | "orgCustomScenarios" | "orgTrainings">;
+  scenarioConfig: Pick<
+    AppConfig,
+    "industries" | "roleIndustries" | "segments" | "orgCustomScenarios" | "orgTrainings"
+  >;
 }
 
 export class TrainingContentMobileServiceError extends Error {
@@ -55,6 +60,10 @@ export interface TrainingContentMobileService {
     scenarioId: string,
     trainingId?: string | null
   ): Promise<MobileTrainingContentLibraryResponse>;
+  getRelatedScenariosForContent(
+    context: MobileTrainingContentRequestContext,
+    contentId: string
+  ): Promise<MobileRelatedPracticeScenariosResponse>;
   getDetail(
     context: MobileTrainingContentRequestContext,
     contentId: string
@@ -70,7 +79,8 @@ interface TrainingContentMobileServiceDependencies {
   store: TrainingContentStore;
   scenarioLinkService: Pick<
     TrainingContentScenarioLinkService,
-    "listRawContentLinkCandidateIdsForScenario"
+    | "listRawContentLinkCandidateIdsForScenario"
+    | "listRawScenarioLinkCandidatesForContent"
   >;
   entitlementStore: OrgModuleEntitlementStore;
   objectStorage: TrainingContentObjectStorage;
@@ -161,6 +171,27 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
       ),
       false
     );
+  }
+
+  async getRelatedScenariosForContent(
+    context: MobileTrainingContentRequestContext,
+    contentId: string
+  ): Promise<MobileRelatedPracticeScenariosResponse> {
+    const record = await this.requireEligibleContent(context, contentId);
+    const links = await this.dependencies.scenarioLinkService
+      .listRawScenarioLinkCandidatesForContent(record.content.orgId, record.content.id);
+    const scenarios = new Map<string, MobileRelatedPracticeScenarioSummary>();
+    for (const link of links) {
+      const scenario = resolveMobileScenarioLaunchContext(
+        context.scenarioConfig,
+        record.content.orgId,
+        link.scenarioId
+      );
+      if (scenario && !scenarios.has(scenario.id)) {
+        scenarios.set(scenario.id, scenario);
+      }
+    }
+    return { scenarios: [...scenarios.values()] };
   }
 
   async getDetail(
@@ -386,39 +417,102 @@ function unavailableScenarioError(): TrainingContentMobileServiceError {
   );
 }
 
+type MobileScenarioConfig = Pick<
+  AppConfig,
+  "industries" | "roleIndustries" | "segments" | "orgCustomScenarios" | "orgTrainings"
+>;
+
 function isScenarioAvailableToMobileUser(
-  config: Pick<AppConfig, "segments" | "orgCustomScenarios" | "orgTrainings">,
+  config: MobileScenarioConfig,
   orgId: string,
   scenarioId: string,
   trainingId?: string | null
 ): boolean {
-  const standardScenarioAvailable = config.segments.some(
-    (segment) => segment.enabled === true
-      && (segment.scenarios ?? []).some(
-        (scenario) => scenario.id === scenarioId && scenario.enabled !== false
-      )
-  );
-  if (standardScenarioAvailable) {
-    return true;
+  return resolveMobileScenarioLaunchContext(config, orgId, scenarioId, trainingId) !== null;
+}
+
+function resolveMobileScenarioLaunchContext(
+  config: MobileScenarioConfig,
+  orgId: string,
+  scenarioId: string,
+  trainingId?: string | null
+): MobileRelatedPracticeScenarioSummary | null {
+  const enabledIndustries = config.industries.filter((industry) => industry.enabled);
+  for (const segment of config.segments) {
+    if (!segment.enabled) {
+      continue;
+    }
+    const scenario = segment.scenarios.find(
+      (candidate) => candidate.id === scenarioId && candidate.enabled !== false
+    );
+    if (!scenario) {
+      continue;
+    }
+    const linkedIndustryId = config.roleIndustries.find(
+      (entry) => entry.active
+        && entry.roleId === segment.id
+        && enabledIndustries.some((industry) => industry.id === entry.industryId)
+    )?.industryId;
+    const hasMappedStandardOptions = config.roleIndustries.some(
+      (entry) => entry.active
+        && enabledIndustries.some((industry) => industry.id === entry.industryId)
+        && config.segments.some(
+          (candidate) => candidate.id === entry.roleId
+            && candidate.enabled
+            && candidate.scenarios.some((item) => item.enabled !== false)
+        )
+    );
+    const industryId = linkedIndustryId
+      ?? (!hasMappedStandardOptions ? enabledIndustries[0]?.id : null)
+      ?? null;
+    return industryId
+      ? {
+        id: scenario.id,
+        title: scenario.title,
+        source: "standard",
+        segmentId: segment.id,
+        industryId,
+        trainingId: null,
+      }
+      : null;
   }
 
-  const customScenarioAvailable = (config.orgCustomScenarios ?? []).some(
+  const customScenario = (config.orgCustomScenarios ?? []).find(
     (scenario) => scenario.orgId === orgId
       && scenario.id === scenarioId
       && scenario.enabled === true
   );
-  if (!customScenarioAvailable) {
-    return false;
+  const segment = customScenario
+    ? config.segments.find(
+      (candidate) => candidate.id === customScenario.segmentId && candidate.enabled
+    )
+    : null;
+  if (!customScenario || !segment) {
+    return null;
   }
 
   const normalizedTrainingId = trainingId?.trim() ?? "";
-  const trainings = config.orgTrainings ?? [];
-  return normalizedTrainingId
-    ? trainings.some(
-      (training) => training.id === normalizedTrainingId
-        && training.attachedCustomScenarioIds.includes(scenarioId)
-    )
-    : trainings.some((training) => training.attachedCustomScenarioIds.includes(scenarioId));
+  const validTrainings = (config.orgTrainings ?? [])
+    .filter((training) => training.status === "active"
+      && training.orgId === orgId
+      && training.attachedCustomScenarioIds.includes(customScenario.id))
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  const training = normalizedTrainingId
+    ? validTrainings.find((candidate) => candidate.id === normalizedTrainingId) ?? null
+    : validTrainings[0] ?? null;
+  const industry = enabledIndustries.find(
+    (candidate) => customScenario.applicableIndustryIds.includes(candidate.id)
+  ) ?? null;
+  return training && industry
+    ? {
+      id: customScenario.id,
+      title: customScenario.title,
+      source: "custom",
+      segmentId: segment.id,
+      industryId: industry.id,
+      trainingId: training.id,
+    }
+    : null;
 }
 
 function unavailableAssetError(): TrainingContentMobileServiceError {

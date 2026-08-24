@@ -1,4 +1,5 @@
 import type {
+  MobileRelatedPracticeScenarioSummary,
   MobileTrainingContentLibraryResponse,
   MobileTrainingContentSummary,
 } from "@voicepractice/shared";
@@ -32,10 +33,20 @@ interface TrainingContentScreenProps {
   colorScheme: AppColorScheme;
   onBackToHome: (message?: string) => void;
   onModuleAvailabilityChange: (enabled: boolean) => void;
+  initialContentId?: string | null;
+  onPracticeScenario: (
+    contentId: string,
+    scenario: MobileRelatedPracticeScenarioSummary
+  ) => void;
 }
 
 export function TrainingContentScreen(props: TrainingContentScreenProps) {
-  const [route, setRoute] = useState<TrainingContentRoute>({ type: "library" });
+  const [route, setRoute] = useState<TrainingContentRoute>(() => {
+    const contentId = props.initialContentId?.trim() ?? "";
+    return contentId
+      ? { type: "detail", contentId, returnRoute: { type: "library" } }
+      : { type: "library" };
+  });
   const [library, setLibrary] = useState<MobileTrainingContentLibraryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -193,6 +204,9 @@ export function TrainingContentScreen(props: TrainingContentScreenProps) {
           onBack={() => setRoute(route.returnRoute)}
           onModuleRemoved={handleModuleRemoved}
           onItemRemoved={handleItemRemoved}
+          onPracticeScenario={(scenario) =>
+            props.onPracticeScenario(route.contentId, scenario)
+          }
         />
       ) : null}
     </View>

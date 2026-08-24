@@ -233,6 +233,19 @@ export interface MobileTrainingContentDetailResponse {
   item: MobileTrainingContentDetail;
 }
 
+export interface MobileRelatedPracticeScenarioSummary {
+  id: string;
+  title: string;
+  source: "standard" | "custom";
+  segmentId: string;
+  industryId: string;
+  trainingId: string | null;
+}
+
+export interface MobileRelatedPracticeScenariosResponse {
+  scenarios: MobileRelatedPracticeScenarioSummary[];
+}
+
 export interface MobileTrainingContentAssetAccessResponse {
   access: {
     url: string;

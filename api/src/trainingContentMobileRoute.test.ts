@@ -176,6 +176,22 @@ class FakeMobileTrainingContentService implements TrainingContentMobileService {
       truncated: false,
     };
   }
+  async getRelatedScenariosForContent(
+    context: MobileTrainingContentRequestContext,
+    contentId: string
+  ) {
+    this.record("getRelatedScenariosForContent", context, contentId);
+    return {
+      scenarios: [{
+        id: "standard_visible",
+        title: "Standard visible",
+        source: "standard" as const,
+        segmentId: "sales",
+        industryId: "sales",
+        trainingId: null,
+      }],
+    };
+  }
   async getDetail(context: MobileTrainingContentRequestContext, contentId: string) {
     this.record("getDetail", context, contentId);
     return {
@@ -314,6 +330,26 @@ test("mobile related-resource route forwards only authenticated scenario context
   assert.equal(call?.scenarioId, "custom_visible");
   assert.equal(call?.trainingId, "training_visible");
   assert.equal(Array.isArray(call?.context.scenarioConfig.segments), true);
+});
+
+test("mobile related-scenario route forwards only authenticated resource context", async () => {
+  const result = await mobileRequest(
+    "/mobile/users/learner/training-content/content_from_path/related-scenarios",
+    "token_learner",
+    { headers: { "X-Superuser-Org-Id": "org_b" } }
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.scenarios.map((scenario: { id: string }) => scenario.id), [
+    "standard_visible",
+  ]);
+
+  const call = service.calls.at(-1);
+  assert.equal(call?.method, "getRelatedScenariosForContent");
+  assert.equal(call?.context.user.id, "learner");
+  assert.equal(call?.context.user.orgId, "org_a");
+  assert.equal(call?.contentId, "content_from_path");
+  assert.equal(Array.isArray(call?.context.scenarioConfig.industries), true);
+  assert.equal(Array.isArray(call?.context.scenarioConfig.roleIndustries), true);
 });
 
 test("mobile routes reject missing, mismatched, interim, and re-onboarding tokens", async () => {

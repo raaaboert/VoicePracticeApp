@@ -38,8 +38,10 @@ const ORG_ID = "org_a";
 
 const scenarioConfig: Pick<
   AppConfig,
-  "segments" | "orgCustomScenarios" | "orgTrainings"
+  "industries" | "roleIndustries" | "segments" | "orgCustomScenarios" | "orgTrainings"
 > = {
+  industries: [{ id: "sales", label: "Sales", enabled: true }],
+  roleIndustries: [{ roleId: "sales", industryId: "sales", active: true }],
   segments: [{
     id: "sales",
     label: "Sales",
@@ -224,6 +226,8 @@ function scenarioLink(
 class FakeStore implements TrainingContentStore {
   records: TrainingContentMobileReadRecord[] = [];
   scenarioLinks: TrainingContentScenarioLink[] = [];
+  scenarioLinkReads: Array<[string, string]> = [];
+  contentLinkReads: Array<[string, string]> = [];
   maximumItems: number | null = null;
   truncated = false;
 
@@ -233,6 +237,7 @@ class FakeStore implements TrainingContentStore {
     return this.records.find((entry) => entry.content.id === contentId)?.content ?? null;
   }
   async listActiveScenarioLinksForContent(orgId: string, contentId: string) {
+    this.contentLinkReads.push([orgId, contentId]);
     return this.scenarioLinks.filter(
       (entry) => entry.orgId === orgId
         && entry.contentId === contentId
@@ -240,6 +245,7 @@ class FakeStore implements TrainingContentStore {
     );
   }
   async listActiveScenarioLinksForScenario(orgId: string, scenarioId: string) {
+    this.scenarioLinkReads.push([orgId, scenarioId]);
     return this.scenarioLinks.filter(
       (entry) => entry.orgId === orgId
         && entry.scenarioId === scenarioId
@@ -499,6 +505,27 @@ test("related scenario resources return zero, one, or many eligible summaries", 
   assert.equal(many.truncated, false);
 });
 
+test("missing linked content is excluded without hiding other eligible resources", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const eligible = buildContent("eligible", category.id, 0);
+  fixture.store.records = [
+    record({ content: eligible, category, assignments: [assignment(eligible.id, "organization")] }),
+  ];
+  fixture.store.scenarioLinks = [
+    scenarioLink("missing_content"),
+    scenarioLink(eligible.id),
+  ];
+
+  assert.deepEqual(
+    (await fixture.service.getRelatedForScenario(
+      fixture.context,
+      "standard_visible"
+    )).items.map((item) => item.id),
+    ["eligible"]
+  );
+});
+
 test("related scenario discovery filters unpublished, unassigned, and cross-org candidates", async () => {
   const fixture = setup();
   const category = buildCategory("category_a", 0);
@@ -641,6 +668,46 @@ test("custom scenarios require their visible Focus Topic and invalid scenarios c
   }
 });
 
+test("a visible but mismatched custom-scenario training context fails before link enumeration", async () => {
+  const fixture = setup();
+  const unrelatedScenario = {
+    ...scenarioConfig.orgCustomScenarios![0]!,
+    id: "custom_unrelated",
+    title: "Unrelated custom scenario",
+  };
+  const unrelatedTraining = {
+    ...scenarioConfig.orgTrainings![0]!,
+    id: "training_unrelated",
+    name: "Unrelated Focus Topic",
+    attachedCustomScenarioIds: [unrelatedScenario.id],
+  };
+  const context: MobileTrainingContentRequestContext = {
+    ...fixture.context,
+    scenarioConfig: {
+      ...scenarioConfig,
+      orgCustomScenarios: [
+        ...scenarioConfig.orgCustomScenarios!,
+        unrelatedScenario,
+      ],
+      orgTrainings: [
+        ...scenarioConfig.orgTrainings!,
+        unrelatedTraining,
+      ],
+    },
+  };
+
+  await assert.rejects(
+    fixture.service.getRelatedForScenario(
+      context,
+      "custom_visible",
+      unrelatedTraining.id
+    ),
+    (error: unknown) => error instanceof TrainingContentMobileServiceError
+      && error.code === "scenario_not_found"
+  );
+  assert.deepEqual(fixture.store.scenarioLinkReads, []);
+});
+
 test("a scenario relationship does not change ordinary Learning Resource eligibility", async () => {
   const fixture = setup();
   const category = buildCategory("category_a", 0);
@@ -660,6 +727,215 @@ test("a scenario relationship does not change ordinary Learning Resource eligibi
   )).items.map((item) => item.id);
   assert.deepEqual(libraryIds, ["eligible"]);
   assert.deepEqual(relatedIds, libraryIds);
+});
+
+test("reverse links return only user-scoped standard and custom launch summaries", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const content = buildContent("resource", category.id, 0);
+  fixture.store.records = [
+    record({ content, category, assignments: [assignment(content.id, "organization")] }),
+  ];
+  const disabledStandard = {
+    id: "standard_disabled",
+    segmentId: "sales",
+    title: "Disabled standard",
+    description: "Disabled",
+    aiRole: "Buyer",
+    enabled: false,
+  };
+  const otherOrgCustom = {
+    ...scenarioConfig.orgCustomScenarios![0]!,
+    id: "custom_other_org",
+    orgId: "org_b",
+    title: "Other org custom",
+  };
+  const hiddenCustom = {
+    ...scenarioConfig.orgCustomScenarios![0]!,
+    id: "custom_hidden",
+    title: "Hidden custom",
+    enabled: true,
+  };
+  const deterministicTraining = {
+    ...scenarioConfig.orgTrainings![0]!,
+    id: "training_alpha",
+    name: "Alpha Focus Topic",
+  };
+  const context: MobileTrainingContentRequestContext = {
+    ...fixture.context,
+    scenarioConfig: {
+      ...scenarioConfig,
+      segments: [{
+        ...scenarioConfig.segments[0]!,
+        scenarios: [...scenarioConfig.segments[0]!.scenarios, disabledStandard],
+      }],
+      orgCustomScenarios: [
+        ...scenarioConfig.orgCustomScenarios!,
+        otherOrgCustom,
+        hiddenCustom,
+      ],
+      orgTrainings: [
+        ...scenarioConfig.orgTrainings!,
+        deterministicTraining,
+        {
+          ...scenarioConfig.orgTrainings![0]!,
+          id: "training_other_org",
+          orgId: "org_b",
+          attachedCustomScenarioIds: [otherOrgCustom.id],
+        },
+      ],
+    },
+  };
+  fixture.store.scenarioLinks = [
+    scenarioLink(content.id, "standard_visible"),
+    scenarioLink(content.id, "standard_disabled"),
+    scenarioLink(content.id, "standard_outside_scope"),
+    scenarioLink(content.id, "custom_visible"),
+    scenarioLink(content.id, otherOrgCustom.id),
+    scenarioLink(content.id, hiddenCustom.id),
+    scenarioLink(content.id, "missing_scenario"),
+    scenarioLink(content.id, "standard_visible", { id: "duplicate_active_for_test" }),
+    scenarioLink(content.id, "removed_scenario", {
+      removedAt: NOW,
+      removedByActorId: "admin",
+    }),
+  ];
+
+  const result = await fixture.service.getRelatedScenariosForContent(context, content.id);
+  assert.deepEqual(result, {
+    scenarios: [{
+      id: "standard_visible",
+      title: "Standard visible",
+      source: "standard",
+      segmentId: "sales",
+      industryId: "sales",
+      trainingId: null,
+    }, {
+      id: "custom_visible",
+      title: "Custom visible",
+      source: "custom",
+      segmentId: "sales",
+      industryId: "sales",
+      trainingId: "training_alpha",
+    }],
+  });
+  assert.deepEqual(fixture.store.contentLinkReads, [[ORG_ID, content.id]]);
+});
+
+test("reverse-link enumeration requires independently eligible Learning Resource access", async () => {
+  const cases: Array<{
+    name: string;
+    configure: (fixture: ReturnType<typeof setup>) => MobileTrainingContentRequestContext;
+  }> = [
+    {
+      name: "unassigned",
+      configure: (fixture) => fixture.context,
+    },
+    {
+      name: "unpublished",
+      configure: (fixture) => {
+        fixture.store.records[0]!.content.publicationState = "draft";
+        fixture.store.records[0]!.content.publishedAt = null;
+        return fixture.context;
+      },
+    },
+    {
+      name: "archived category",
+      configure: (fixture) => {
+        fixture.store.records[0]!.category.archivedAt = NOW;
+        return fixture.context;
+      },
+    },
+    {
+      name: "archived content",
+      configure: (fixture) => {
+        fixture.store.records[0]!.content.archivedAt = NOW;
+        return fixture.context;
+      },
+    },
+    {
+      name: "module disabled",
+      configure: (fixture) => {
+        fixture.entitlementStore.enabled = false;
+        return fixture.context;
+      },
+    },
+    {
+      name: "inactive membership",
+      configure: (fixture) => ({
+        ...fixture.context,
+        user: { ...fixture.context.user, status: "disabled" },
+      }),
+    },
+    {
+      name: "incomplete membership",
+      configure: (fixture) => ({
+        ...fixture.context,
+        user: { ...fixture.context.user, firstName: null },
+      }),
+    },
+    {
+      name: "inactive organization",
+      configure: (fixture) => ({ ...fixture.context, organizationActive: false }),
+    },
+  ];
+
+  for (const entry of cases) {
+    const fixture = setup();
+    const category = buildCategory("category_a", 0);
+    const content = buildContent("protected_resource", category.id, 0);
+    fixture.store.records = [record({
+      content,
+      category,
+      assignments: entry.name === "unassigned"
+        ? []
+        : [assignment(content.id, "organization")],
+    })];
+    fixture.store.scenarioLinks = [scenarioLink(content.id)];
+    await assert.rejects(
+      fixture.service.getRelatedScenariosForContent(entry.configure(fixture), content.id),
+      (error: unknown) => error instanceof TrainingContentMobileServiceError,
+      entry.name
+    );
+    assert.deepEqual(fixture.store.contentLinkReads, [], entry.name);
+  }
+
+  const crossOrg = setup();
+  const otherCategory = buildCategory("other_category", 0, { orgId: "org_b" });
+  const otherContent = buildContent("guessed_other_org", otherCategory.id, 0, { orgId: "org_b" });
+  crossOrg.store.records = [record({
+    content: otherContent,
+    category: otherCategory,
+    assignments: [{ ...assignment(otherContent.id, "organization"), orgId: "org_b" }],
+  })];
+  crossOrg.store.scenarioLinks = [scenarioLink(otherContent.id, "standard_visible", { orgId: "org_b" })];
+  await assert.rejects(
+    crossOrg.service.getRelatedScenariosForContent(crossOrg.context, otherContent.id),
+    (error: unknown) => error instanceof TrainingContentMobileServiceError
+  );
+  assert.deepEqual(crossOrg.store.contentLinkReads, []);
+});
+
+test("a reverse relationship cannot make an unavailable scenario visible", async () => {
+  const fixture = setup();
+  const category = buildCategory("category_a", 0);
+  const content = buildContent("resource", category.id, 0);
+  fixture.store.records = [record({
+    content,
+    category,
+    assignments: [assignment(content.id, "organization")],
+  })];
+  fixture.store.scenarioLinks = [scenarioLink(content.id, "not_in_user_config")];
+
+  assert.deepEqual(
+    await fixture.service.getRelatedScenariosForContent(fixture.context, content.id),
+    { scenarios: [] }
+  );
+  await assert.rejects(
+    fixture.service.getRelatedForScenario(fixture.context, "not_in_user_config"),
+    (error: unknown) => error instanceof TrainingContentMobileServiceError
+      && error.code === "scenario_not_found"
+  );
 });
 
 test("manager and manager-team eligibility is dynamic and overlapping grants use OR semantics", async () => {

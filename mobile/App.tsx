@@ -32,7 +32,11 @@ import {
   ORG_USER_ROLE_LABELS,
   secondsToWholeMinutes,
 } from "@voicepractice/shared";
-import type { MobileTrainingContentSummary, SuperUserOrgOption } from "@voicepractice/shared";
+import type {
+  MobileRelatedPracticeScenarioSummary,
+  MobileTrainingContentSummary,
+  SuperUserOrgOption,
+} from "@voicepractice/shared";
 import {
   AI_VOICE_GENDER_OPTIONS,
   AI_VOICE_OPTIONS,
@@ -160,6 +164,10 @@ import {
   isTrainingContentModuleRemoval,
   trainingContentErrorMessage,
 } from "./src/trainingContent/model";
+import {
+  buildRelatedPracticeSetupSelection,
+  relatedPracticeSetupBackDestination,
+} from "./src/trainingContent/relatedPracticeNavigation";
 import {
   AiVoiceGender,
   AiVoiceProfile,
@@ -784,6 +792,8 @@ export default function App() {
   const [relatedTrainingContentItems, setRelatedTrainingContentItems] = useState<
     MobileTrainingContentSummary[]
   >([]);
+  const [trainingContentPracticeReturnContentId, setTrainingContentPracticeReturnContentId] =
+    useState<string | null>(null);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
@@ -892,6 +902,7 @@ export default function App() {
     setTrainingContentNotice(null);
     setIsTrainingContentOpening(false);
     setRelatedTrainingContentItems([]);
+    setTrainingContentPracticeReturnContentId(null);
     setMyOrgAccessRequests([]);
     setOrgAccessRequestsLoading(false);
     setIsOrgRequestSaving(false);
@@ -4254,6 +4265,7 @@ export default function App() {
     }
     setIsTrainingContentOpening(true);
     setTrainingContentNotice(null);
+    setTrainingContentPracticeReturnContentId(null);
     try {
       const response = await fetchMobileModules(user.id, mobileAuthToken);
       if (!response.modules.trainingContent.enabled) {
@@ -4279,8 +4291,24 @@ export default function App() {
   }, [isTrainingContentOpening, mobileAuthToken, user]);
 
   const returnFromTrainingContent = useCallback((message?: string) => {
+    setTrainingContentPracticeReturnContentId(null);
     setTrainingContentNotice(message ?? null);
     setScreen("home");
+  }, []);
+
+  const openRelatedPracticeScenario = useCallback((
+    contentId: string,
+    scenario: MobileRelatedPracticeScenarioSummary
+  ) => {
+    const selection = buildRelatedPracticeSetupSelection(scenario);
+    setTrainingContentPracticeReturnContentId(contentId);
+    setScenarioCatalogTab(selection.scenarioCatalogTab);
+    setSelectedTrainingId(selection.selectedTrainingId);
+    setSelectedIndustryId(selection.selectedIndustryId);
+    setSelectedRoleId(selection.selectedRoleId);
+    setSelectedScenarioId(selection.selectedScenarioId);
+    setSetupError(null);
+    setScreen("setup");
   }, []);
 
   const handleTrainingContentAvailability = useCallback((enabled: boolean) => {
@@ -4506,7 +4534,10 @@ export default function App() {
 
         <Pressable
           style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
-          onPress={() => setScreen("setup")}
+          onPress={() => {
+            setTrainingContentPracticeReturnContentId(null);
+            setScreen("setup");
+          }}
         >
           <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
         </Pressable>
@@ -4962,7 +4993,12 @@ export default function App() {
     return (
       <View style={styles.fill}>
       <View style={styles.topRow}>
-        <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
+        <Pressable
+          style={styles.ghostButton}
+          onPress={() => setScreen(relatedPracticeSetupBackDestination(
+            trainingContentPracticeReturnContentId
+          ))}
+        >
           <Text style={styles.ghostButtonText}>Back</Text>
         </Pressable>
         <Text style={styles.topTitle}>Setup</Text>
@@ -6898,6 +6934,8 @@ export default function App() {
           colorScheme={colorScheme}
           onBackToHome={returnFromTrainingContent}
           onModuleAvailabilityChange={handleTrainingContentAvailability}
+          initialContentId={trainingContentPracticeReturnContentId}
+          onPracticeScenario={openRelatedPracticeScenario}
         />
       );
     }
@@ -6916,6 +6954,7 @@ export default function App() {
           colorScheme={colorScheme}
           initialItems={relatedTrainingContentItems}
           onBackToScenario={() => setScreen("simulation")}
+          onPracticeScenario={openRelatedPracticeScenario}
         />
       );
     }

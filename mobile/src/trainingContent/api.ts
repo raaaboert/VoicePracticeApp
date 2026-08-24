@@ -1,5 +1,6 @@
 import type {
   MobileModuleAvailabilityResponse,
+  MobileRelatedPracticeScenariosResponse,
   MobileTrainingContentAssetAccessResponse,
   MobileTrainingContentDetailResponse,
   MobileTrainingContentLibraryResponse,
@@ -7,6 +8,7 @@ import type {
 
 import { requestJson } from "../lib/api";
 import { relatedTrainingContentPath } from "./relatedTrainingContent";
+import { relatedPracticeScenariosPath } from "./relatedPracticeScenarios";
 
 function userPath(userId: string): string {
   return `/mobile/users/${encodeURIComponent(userId)}`;
@@ -54,6 +56,18 @@ export function fetchTrainingContentDetail(
 ): Promise<MobileTrainingContentDetailResponse> {
   return requestJson<MobileTrainingContentDetailResponse>(
     `${userPath(userId)}/training-content/${encodeURIComponent(contentId)}`,
+    { method: "GET" },
+    authToken
+  );
+}
+
+export function fetchRelatedPracticeScenarios(
+  userId: string,
+  contentId: string,
+  authToken: string
+): Promise<MobileRelatedPracticeScenariosResponse> {
+  return requestJson<MobileRelatedPracticeScenariosResponse>(
+    relatedPracticeScenariosPath(userId, contentId),
     { method: "GET" },
     authToken
   );

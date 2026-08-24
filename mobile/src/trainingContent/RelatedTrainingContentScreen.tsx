@@ -1,4 +1,7 @@
-import type { MobileTrainingContentSummary } from "@voicepractice/shared";
+import type {
+  MobileRelatedPracticeScenarioSummary,
+  MobileTrainingContentSummary,
+} from "@voicepractice/shared";
 import { useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -17,6 +20,10 @@ interface RelatedTrainingContentScreenProps {
   colorScheme: AppColorScheme;
   initialItems: MobileTrainingContentSummary[];
   onBackToScenario: () => void;
+  onPracticeScenario: (
+    contentId: string,
+    scenario: MobileRelatedPracticeScenarioSummary
+  ) => void;
 }
 
 export function RelatedTrainingContentScreen(
@@ -76,6 +83,9 @@ export function RelatedTrainingContentScreen(
           }}
           onModuleRemoved={() => props.onBackToScenario()}
           onItemRemoved={handleUnavailableItem}
+          onPracticeScenario={(scenario) =>
+            props.onPracticeScenario(route.contentId, scenario)
+          }
         />
       )}
     </View>

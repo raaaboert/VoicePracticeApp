@@ -5029,6 +5029,8 @@ async function withMobileTrainingContentContext<T>(
       users: db.users,
       organizationActive: organization?.status === "active",
       scenarioConfig: {
+        industries: configForUser.industries,
+        roleIndustries: configForUser.roleIndustries,
         segments: configForUser.segments,
         orgCustomScenarios: configForUser.orgCustomScenarios,
         orgTrainings: configForUser.orgTrainings,
@@ -17046,6 +17048,25 @@ app.get(
           context,
           request.params.scenarioId,
           trainingId
+        )
+      );
+      if (result) {
+        response.json(result);
+      }
+    } catch (error) {
+      respondWithTrainingContentMobileError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/mobile/users/:userId/training-content/:contentId/related-scenarios",
+  async (request: Request, response: Response) => {
+    try {
+      const result = await withMobileTrainingContentContext(request, response, (context) =>
+        trainingContentMobileService.getRelatedScenariosForContent(
+          context,
+          request.params.contentId
         )
       );
       if (result) {
