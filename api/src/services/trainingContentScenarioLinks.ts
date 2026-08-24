@@ -19,6 +19,12 @@ export interface TrainingContentScenarioLinkTarget {
   source: TrainingContentScenarioLinkTargetSource;
 }
 
+export interface TrainingContentScenarioLinkDisplayTarget {
+  scenarioId: string;
+  title: string;
+  available: boolean;
+}
+
 export class TrainingContentScenarioLinkServiceError extends Error {
   constructor(
     message: string,
@@ -45,6 +51,11 @@ export interface TrainingContentScenarioLinkService {
     orgId: string,
     scenarioId: string
   ): Promise<string[]>;
+  validateScenarioLinkTargets(params: {
+    config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
+    org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
+    scenarioIds: readonly string[];
+  }): string[];
   replaceScenarioLinksForContent(params: {
     config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
     org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
@@ -81,6 +92,51 @@ export function listValidTrainingContentScenarioLinkTargets(params: {
   return [...targets.values()].sort((left, right) => left.scenarioId.localeCompare(right.scenarioId));
 }
 
+export function resolveTrainingContentScenarioLinkDisplayTargets(params: {
+  config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
+  org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
+  scenarioIds: readonly string[];
+}): TrainingContentScenarioLinkDisplayTarget[] {
+  const validTargets = new Map(
+    listValidTrainingContentScenarioLinkTargets(params).map((target) => [target.scenarioId, target])
+  );
+  const standardTitles = new Map(
+    params.config.segments.flatMap((segment) =>
+      segment.scenarios.map((scenario) => [scenario.id, scenario.title] as const)
+    )
+  );
+  const customTitles = new Map(
+    (params.org.customScenarios ?? [])
+      .filter((scenario) => scenario.orgId === params.org.id)
+      .map((scenario) => [scenario.id, scenario.title] as const)
+  );
+  return normalizeStoredScenarioIds(params.scenarioIds).map((scenarioId) => {
+    const validTarget = validTargets.get(scenarioId);
+    return {
+      scenarioId,
+      title: validTarget?.title
+        ?? standardTitles.get(scenarioId)
+        ?? customTitles.get(scenarioId)
+        ?? "Unavailable scenario",
+      available: validTarget !== undefined,
+    };
+  });
+}
+
+function normalizeStoredScenarioIds(values: readonly string[]): string[] {
+  const unique = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    const scenarioId = value.trim();
+    if (scenarioId) {
+      unique.add(scenarioId);
+    }
+  }
+  return [...unique];
+}
+
 class DefaultTrainingContentScenarioLinkService implements TrainingContentScenarioLinkService {
   constructor(private readonly store: ScenarioLinkStore) {}
 
@@ -105,6 +161,25 @@ class DefaultTrainingContentScenarioLinkService implements TrainingContentScenar
     return [...new Set(links.map((link) => link.contentId))];
   }
 
+  validateScenarioLinkTargets(params: {
+    config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
+    org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
+    scenarioIds: readonly string[];
+  }): string[] {
+    const scenarioIds = normalizeScenarioIds(params.scenarioIds);
+    const validTargets = new Set(
+      listValidTrainingContentScenarioLinkTargets(params).map((target) => target.scenarioId)
+    );
+    const invalidScenarioId = scenarioIds.find((scenarioId) => !validTargets.has(scenarioId));
+    if (invalidScenarioId) {
+      throw new TrainingContentScenarioLinkServiceError(
+        "One or more selected scenarios is not available to this organization.",
+        "invalid_scenario_link_target"
+      );
+    }
+    return scenarioIds;
+  }
+
   async replaceScenarioLinksForContent(params: {
     config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
     org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
@@ -113,17 +188,7 @@ class DefaultTrainingContentScenarioLinkService implements TrainingContentScenar
     actor: ReplaceTrainingContentScenarioLinksInput["actor"];
     now?: Date;
   }): Promise<TrainingContentScenarioLink[]> {
-    const scenarioIds = normalizeScenarioIds(params.scenarioIds);
-    const validTargets = new Set(
-      listValidTrainingContentScenarioLinkTargets(params).map((target) => target.scenarioId)
-    );
-    const invalidScenarioId = scenarioIds.find((scenarioId) => !validTargets.has(scenarioId));
-    if (invalidScenarioId) {
-      throw new TrainingContentScenarioLinkServiceError(
-        `Scenario is not available to this organization: ${invalidScenarioId}`,
-        "invalid_scenario_link_target"
-      );
-    }
+    const scenarioIds = this.validateScenarioLinkTargets(params);
     return this.store.replaceActiveScenarioLinksForContent({
       orgId: requiredId(params.org.id, "Organization id"),
       contentId: requiredId(params.contentId, "Content id"),
@@ -146,8 +211,20 @@ function mapStandardTarget(
 }
 
 function normalizeScenarioIds(values: readonly string[]): string[] {
+  if (!Array.isArray(values)) {
+    throw new TrainingContentScenarioLinkServiceError(
+      "Related scenario ids must be an array.",
+      "invalid_scenario_link_target"
+    );
+  }
   const unique = new Set<string>();
   for (const value of values) {
+    if (typeof value !== "string") {
+      throw new TrainingContentScenarioLinkServiceError(
+        "Scenario id must be a string.",
+        "invalid_scenario_link_target"
+      );
+    }
     const scenarioId = requiredId(value, "Scenario id");
     unique.add(scenarioId);
   }

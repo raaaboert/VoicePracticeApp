@@ -28,6 +28,7 @@ import {
   DashboardTrainingContentLifecycleRequest,
   DashboardTrainingContentListResponse,
   DashboardTrainingContentOrderResponse,
+  DashboardTrainingContentScenarioOptionsResponse,
   DashboardTrainingContentTargetsResponse,
   DashboardTrainingContentUploadInitiationRequest,
   DashboardTrainingContentUploadInitiationResponse,
@@ -827,6 +828,16 @@ export async function getDashboardTrainingContentFocusTopics(
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<DashboardTrainingContentFocusTopicsResponse>(
     appendOrgQuery("/dashboard/admin/training-content-targets/focus-topics", orgId),
+    { token }
+  );
+}
+
+export async function getDashboardTrainingContentScenarioOptions(
+  orgId?: string | null
+): Promise<DashboardTrainingContentScenarioOptionsResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentScenarioOptionsResponse>(
+    appendOrgQuery("/dashboard/admin/training-content-targets/scenarios", orgId),
     { token }
   );
 }

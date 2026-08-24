@@ -354,11 +354,18 @@ export interface DashboardTrainingContentAssignmentSelection {
   managerTeams: DashboardTrainingContentTarget[];
 }
 
+export interface DashboardTrainingContentRelatedScenario {
+  id: string;
+  title: string;
+  available: boolean;
+}
+
 export interface DashboardTrainingContentDetail extends DashboardTrainingContentListItem {
   nativeBody: string | null;
   externalUrl: string | null;
   latestVideoUploadAsset?: DashboardTrainingContentAsset | null;
   assignments: DashboardTrainingContentAssignmentSelection;
+  relatedScenarios: DashboardTrainingContentRelatedScenario[];
 }
 
 export interface DashboardTrainingContentOrganization {
@@ -394,6 +401,7 @@ export interface CreateDashboardTrainingContentRequest {
   focusTopicId?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
+  relatedScenarioIds?: string[];
 }
 
 export interface UpdateDashboardTrainingContentRequest {
@@ -404,6 +412,7 @@ export interface UpdateDashboardTrainingContentRequest {
   focusTopicId?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
+  relatedScenarioIds?: string[];
 }
 
 export interface UpdateDashboardTrainingContentAssignmentsRequest {
@@ -436,6 +445,19 @@ export interface DashboardTrainingContentFocusTopicsResponse {
   org: DashboardTrainingContentOrganization;
   generatedAt: string;
   focusTopics: DashboardTrainingContentFocusTopic[];
+}
+
+export interface DashboardTrainingContentScenarioOption {
+  id: string;
+  title: string;
+  source: "standard" | "custom";
+}
+
+export interface DashboardTrainingContentScenarioOptionsResponse {
+  viewer: DashboardViewer;
+  org: DashboardTrainingContentOrganization;
+  generatedAt: string;
+  scenarios: DashboardTrainingContentScenarioOption[];
 }
 
 export interface DashboardTrainingContentCategory {

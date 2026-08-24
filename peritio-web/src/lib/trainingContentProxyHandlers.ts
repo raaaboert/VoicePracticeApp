@@ -12,6 +12,7 @@ import type {
   DashboardTrainingContentLifecycleRequest,
   DashboardTrainingContentListResponse,
   DashboardTrainingContentOrderResponse,
+  DashboardTrainingContentScenarioOptionsResponse,
   DashboardTrainingContentTargetsResponse,
   DashboardTrainingContentUploadInitiationRequest,
   DashboardTrainingContentUploadInitiationResponse,
@@ -76,6 +77,9 @@ export interface TrainingContentProxyServices {
   getFocusTopics: (
     orgId?: string | null
   ) => Promise<DashboardTrainingContentFocusTopicsResponse>;
+  getScenarioOptions: (
+    orgId?: string | null
+  ) => Promise<DashboardTrainingContentScenarioOptionsResponse>;
   getCategories: (
     orgId?: string | null,
     includeArchived?: boolean
@@ -278,6 +282,17 @@ export async function handleTrainingContentFocusTopicsGet(
     return hostResponse;
   }
   return handleJson(() => services.getFocusTopics(requestedOrgId(request)));
+}
+
+export async function handleTrainingContentScenarioOptionsGet(
+  request: NextRequest,
+  services: Pick<TrainingContentProxyServices, "getScenarioOptions">
+): Promise<NextResponse> {
+  const hostResponse = rejectHost(request);
+  if (hostResponse) {
+    return hostResponse;
+  }
+  return handleJson(() => services.getScenarioOptions(requestedOrgId(request)));
 }
 
 export async function handleTrainingContentCategoriesGet(

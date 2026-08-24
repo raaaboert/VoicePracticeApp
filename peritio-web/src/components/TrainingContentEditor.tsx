@@ -31,6 +31,7 @@ import type {
   DashboardTrainingContentDetail,
   DashboardTrainingContentDetailResponse,
   DashboardTrainingContentFocusTopic,
+  DashboardTrainingContentScenarioOption,
   DashboardTrainingContentTarget,
   DashboardTrainingContentTargetsResponse,
   DashboardTrainingContentUploadInitiationResponse,
@@ -192,12 +193,14 @@ export function TrainingContentEditor({
   initialItem,
   categories,
   focusTopics,
+  scenarioOptions: _scenarioOptions,
   fileLimits,
   orgId,
 }: {
   initialItem: DashboardTrainingContentDetail;
   categories: DashboardTrainingContentCategory[];
   focusTopics: DashboardTrainingContentFocusTopic[];
+  scenarioOptions: DashboardTrainingContentScenarioOption[];
   fileLimits: TrainingContentFileLimitsBytes;
   orgId: string | null;
 }) {

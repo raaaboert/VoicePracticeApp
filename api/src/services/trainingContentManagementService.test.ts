@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  AppConfig,
+  EnterpriseOrg,
+  OrgCustomScenario,
   OrgTrainingRecord,
   TrainingContentAssignment,
   TrainingContentItem,
@@ -11,11 +14,19 @@ import type {
 import { buildDashboardAdminCapabilities } from "./dashboardAuthorization.js";
 import {
   createTrainingContentManagementService,
+  mapTrainingContentManagementServiceError,
+  type TrainingContentReferenceData,
   TrainingContentManagementServiceError,
 } from "./trainingContentManagementService.js";
+import {
+  createTrainingContentScenarioLinkService,
+  TrainingContentScenarioLinkServiceError,
+} from "./trainingContentScenarioLinks.js";
 import type {
+  ReplaceTrainingContentScenarioLinksInput,
   TrainingContentCurrentAssetRecord,
   TrainingContentManagementDetail,
+  TrainingContentScenarioLink,
 } from "../storage/trainingContentStore.js";
 
 const NOW = "2026-07-28T12:00:00.000Z";
@@ -162,6 +173,7 @@ function assignment(
 function harness(enabled = true) {
   const calls: Array<{ method: string; input: any }> = [];
   let current = detail();
+  let scenarioLinks: TrainingContentScenarioLink[] = [];
   const store = {
     async initialize() {},
     async listContentItemsForOrg() { return [current.content]; },
@@ -172,6 +184,27 @@ function harness(enabled = true) {
     },
     async getContentDetailForOrg(orgId: string, contentId: string) {
       return orgId === "org_1" && contentId === current.content.id ? current : null;
+    },
+    async listActiveScenarioLinksForContent(orgId: string, contentId: string) {
+      return scenarioLinks.filter((link) => link.orgId === orgId && link.contentId === contentId);
+    },
+    async listActiveScenarioLinksForScenario(orgId: string, scenarioId: string) {
+      return scenarioLinks.filter((link) => link.orgId === orgId && link.scenarioId === scenarioId);
+    },
+    async replaceActiveScenarioLinksForContent(input: ReplaceTrainingContentScenarioLinksInput) {
+      calls.push({ method: "replaceLinks", input });
+      scenarioLinks = input.scenarioIds.map((scenarioId, index) => ({
+        id: `link_${index + 1}`,
+        orgId: input.orgId,
+        contentId: input.contentId,
+        focusTopicId: null,
+        scenarioId,
+        createdByActorId: input.actor.actorId,
+        createdAt: NOW,
+        removedByActorId: null,
+        removedAt: null,
+      }));
+      return scenarioLinks;
     },
     async createContent(input: any) {
       calls.push({ method: "create", input });
@@ -338,6 +371,7 @@ function harness(enabled = true) {
         image: 20,
       },
     } as any,
+    scenarioLinkService: createTrainingContentScenarioLinkService(store as any),
   });
   return {
     service,
@@ -346,6 +380,22 @@ function harness(enabled = true) {
     categoryStore,
     setCurrent(next: ReturnType<typeof detail>) {
       current = next;
+    },
+    setScenarioLinks(scenarioIds: string[]) {
+      scenarioLinks = scenarioIds.map((scenarioId, index) => ({
+        id: `existing_link_${index + 1}`,
+        orgId: "org_1",
+        contentId: current.content.id,
+        focusTopicId: null,
+        scenarioId,
+        createdByActorId: "admin",
+        createdAt: NOW,
+        removedByActorId: null,
+        removedAt: null,
+      }));
+    },
+    getScenarioLinks() {
+      return scenarioLinks;
     },
   };
 }
@@ -356,7 +406,95 @@ const context = {
   capabilities: buildDashboardAdminCapabilities("org_admin"),
 };
 
-const references = {
+const scenarioConfig: Pick<AppConfig, "segments" | "industries" | "roleIndustries"> = {
+  industries: [
+    { id: "sales", label: "Sales", enabled: true },
+    { id: "medical", label: "Medical", enabled: true },
+  ],
+  roleIndustries: [
+    { roleId: "sales_role", industryId: "sales", active: true },
+    { roleId: "medical_role", industryId: "medical", active: true },
+  ],
+  segments: [
+    {
+      id: "sales_role",
+      label: "Sales",
+      summary: "Sales scenarios",
+      enabled: true,
+      scenarios: [
+        {
+          id: "standard_a",
+          segmentId: "sales_role",
+          title: "Standard A",
+          description: "Standard A",
+          aiRole: "Buyer",
+        },
+        {
+          id: "standard_b",
+          segmentId: "sales_role",
+          title: "Standard B",
+          description: "Standard B",
+          aiRole: "Buyer",
+        },
+        {
+          id: "standard_disabled",
+          segmentId: "sales_role",
+          title: "Disabled standard",
+          description: "Disabled",
+          aiRole: "Buyer",
+          enabled: false,
+        },
+      ],
+    },
+    {
+      id: "medical_role",
+      label: "Medical",
+      summary: "Medical scenarios",
+      enabled: true,
+      scenarios: [{
+        id: "standard_hidden",
+        segmentId: "medical_role",
+        title: "Hidden standard",
+        description: "Hidden",
+        aiRole: "Patient",
+      }],
+    },
+  ],
+};
+
+function customScenario(overrides: Partial<OrgCustomScenario> = {}): OrgCustomScenario {
+  return {
+    id: "custom_a",
+    orgId: "org_1",
+    segmentId: "sales_role",
+    title: "Custom A",
+    description: "Custom A",
+    aiRole: "Buyer",
+    scoringGuidance: "Score it",
+    applicableIndustryIds: ["sales"],
+    enabled: true,
+    provenance: { sourceMode: "scratch", creationMethod: "manual" },
+    createdBy: "admin",
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  };
+}
+
+const scenarioOrg: Pick<
+  EnterpriseOrg,
+  "id" | "activeIndustries" | "customScenarios"
+> = {
+  id: "org_1",
+  activeIndustries: ["sales"],
+  customScenarios: [
+    customScenario(),
+    customScenario({ id: "custom_disabled", title: "Disabled custom", enabled: false }),
+    customScenario({ id: "custom_cross_org", title: "Cross-org custom", orgId: "org_2" }),
+  ],
+};
+
+const references: TrainingContentReferenceData = {
   users: [
     user("admin", { orgRole: "org_admin" }),
     user("learner", { employeeId: "EMP-1" }),
@@ -369,6 +507,8 @@ const references = {
     topic("archived_topic", { status: "archived" }),
     topic("other_topic", { orgId: "org_2" }),
   ],
+  scenarioConfig,
+  scenarioOrg,
 };
 
 test("management requires both module entitlement and server-derived capability", async () => {
@@ -791,4 +931,289 @@ test("management responses expose an active video replacement for list and edito
   assert.equal(loaded.latestVideoUploadAsset?.id, "asset_processing");
   assert.equal(loaded.latestVideoUploadAsset?.uploadState, "processing");
   assert.equal(loaded.latestVideoUploadAsset?.processingAttemptCount, 0);
+});
+
+test("scenario options reuse Phase A visibility for standard and custom scenarios", async () => {
+  const { service } = harness();
+  const options = await service.listScenarioOptions({ context, references });
+  assert.deepEqual(
+    options.map((option) => [option.id, option.source]),
+    [
+      ["custom_a", "custom"],
+      ["standard_a", "standard"],
+      ["standard_b", "standard"],
+    ]
+  );
+});
+
+test("scenario-link validation maps to a stable non-enumerating API error", () => {
+  const mapped = mapTrainingContentManagementServiceError(
+    new TrainingContentScenarioLinkServiceError(
+      "internal target detail",
+      "invalid_scenario_link_target"
+    )
+  );
+  assert.equal(mapped.status, 400);
+  assert.equal(mapped.code, "training_content_invalid_scenario");
+  assert.equal(mapped.message, "One or more selected scenarios is not available to this organization.");
+  assert.deepEqual(mapped.details, { field: "relatedScenarioIds" });
+});
+
+test("create preserves omitted, empty, one, and multiple related scenario semantics", async (t) => {
+  await t.test("omitted does not replace relationships and remains backward compatible", async () => {
+    const { service, calls } = harness();
+    const created = await service.createContent({
+      context,
+      references,
+      input: { contentType: "native", title: "Legacy payload", nativeBody: "# Legacy" },
+    });
+    assert.deepEqual(created.relatedScenarios, []);
+    assert.equal(calls.some((call) => call.method === "replaceLinks"), false);
+  });
+
+  for (const scenarioIds of [[], ["standard_a"], ["standard_a", "standard_b"]]) {
+    await t.test(`${scenarioIds.length} selected scenario(s) replaces the exact set`, async () => {
+      const { service, calls } = harness();
+      const created = await service.createContent({
+        context,
+        references,
+        input: {
+          contentType: "native",
+          title: "Linked resource",
+          nativeBody: "# Linked",
+          relatedScenarioIds: scenarioIds,
+        },
+      });
+      const replacement = calls.find((call) => call.method === "replaceLinks");
+      assert.deepEqual(replacement?.input.scenarioIds, scenarioIds);
+      assert.deepEqual(created.relatedScenarios.map((scenario) => scenario.id), scenarioIds);
+    });
+  }
+});
+
+test("update preserves omitted, empty, one-to-many, and many-to-one relationship semantics", async (t) => {
+  await t.test("omitted uses the existing metadata path without replacing links", async () => {
+    const instance = harness();
+    instance.setScenarioLinks(["standard_a"]);
+    const updated = await instance.service.updateContent({
+      context,
+      references,
+      contentId: "content_1",
+      input: { expectedUpdatedAt: NOW, title: "Legacy update" },
+    });
+    assert.equal(updated.title, "Legacy update");
+    assert.deepEqual(updated.relatedScenarios.map((scenario) => scenario.id), ["standard_a"]);
+    assert.equal(instance.calls.some((call) => call.method === "replaceLinks"), false);
+  });
+
+  for (const [existing, replacement] of [
+    [["standard_a"], []],
+    [["standard_a"], ["standard_a", "standard_b"]],
+    [["standard_a", "standard_b"], ["standard_b"]],
+  ] as const) {
+    await t.test(`${existing.length} link(s) to ${replacement.length} link(s)`, async () => {
+      const instance = harness();
+      instance.setScenarioLinks([...existing]);
+      const updated = await instance.service.updateContent({
+        context,
+        references,
+        contentId: "content_1",
+        input: { expectedUpdatedAt: NOW, relatedScenarioIds: [...replacement] },
+      });
+      assert.deepEqual(updated.relatedScenarios.map((scenario) => scenario.id), replacement);
+      assert.equal(instance.calls.some((call) => call.method === "update"), false);
+    });
+  }
+});
+
+test("valid standard, custom, and combined scenario selections persist", async (t) => {
+  for (const scenarioIds of [
+    ["standard_a"],
+    ["custom_a"],
+    ["standard_a", "custom_a"],
+  ]) {
+    await t.test(scenarioIds.join(" + "), async () => {
+      const { service, calls } = harness();
+      await service.updateContent({
+        context,
+        references,
+        contentId: "content_1",
+        input: { expectedUpdatedAt: NOW, relatedScenarioIds: scenarioIds },
+      });
+      assert.deepEqual(
+        calls.find((call) => call.method === "replaceLinks")?.input.scenarioIds,
+        scenarioIds
+      );
+    });
+  }
+});
+
+test("related scenario IDs are trimmed and deduplicated before replacement", async () => {
+  const { service, calls } = harness();
+  await service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: {
+      expectedUpdatedAt: NOW,
+      relatedScenarioIds: [" standard_a ", "standard_a", " custom_a "],
+    },
+  });
+  assert.deepEqual(
+    calls.find((call) => call.method === "replaceLinks")?.input.scenarioIds,
+    ["standard_a", "custom_a"]
+  );
+});
+
+test("invalid related scenarios reject the entire request before mutation without leaking ownership", async (t) => {
+  const invalidIds = [
+    " ",
+    "missing_scenario",
+    "standard_hidden",
+    "standard_disabled",
+    "custom_disabled",
+    "custom_cross_org",
+  ];
+  for (const scenarioId of invalidIds) {
+    await t.test(scenarioId.trim() || "blank", async () => {
+      const instance = harness();
+      await assert.rejects(
+        instance.service.updateContent({
+          context,
+          references,
+          contentId: "content_1",
+          input: {
+            expectedUpdatedAt: NOW,
+            title: "Must not persist",
+            relatedScenarioIds: [scenarioId],
+          },
+        }),
+        (error: unknown) => error instanceof Error
+          && !error.message.includes(scenarioId.trim() || "blank")
+      );
+      assert.deepEqual(instance.calls, []);
+    });
+  }
+
+  await t.test("mixed valid and invalid", async () => {
+    const instance = harness();
+    instance.setScenarioLinks(["standard_b"]);
+    await assert.rejects(instance.service.updateContent({
+      context,
+      references,
+      contentId: "content_1",
+      input: {
+        expectedUpdatedAt: NOW,
+        title: "Must not update",
+        relatedScenarioIds: ["standard_a", "missing_scenario"],
+      },
+    }));
+    assert.deepEqual(instance.calls, []);
+    assert.deepEqual(instance.getScenarioLinks().map((link) => link.scenarioId), ["standard_b"]);
+  });
+});
+
+test("links-only edits preserve assignments, Focus Topic, and content metadata", async () => {
+  const instance = harness();
+  const existingAssignments = [assignment("user", "learner")];
+  instance.setCurrent(detail({
+    title: "Original title",
+    description: "Original description",
+    focusTopicId: "topic_1",
+    focusTopicNameSnapshot: "Coaching",
+  }, existingAssignments));
+
+  const updated = await instance.service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: { expectedUpdatedAt: NOW, relatedScenarioIds: ["standard_a"] },
+  });
+
+  assert.equal(instance.calls.some((call) => call.method === "update"), false);
+  assert.equal(instance.calls.some((call) => call.method === "assign"), false);
+  assert.equal(updated.title, "Original title");
+  assert.equal(updated.description, "Original description");
+  assert.equal(updated.categoryId, "category_1");
+  assert.equal(updated.focusTopicId, "topic_1");
+  assert.equal(updated.publicationState, "draft");
+  assert.equal(updated.nativeBody, "# Foundation");
+  assert.equal(updated.externalUrl, null);
+  assert.equal(updated.assignments.availableToEveryone, false);
+  assert.deepEqual(updated.assignments.users.map((target) => target.userId), ["learner"]);
+});
+
+test("published Learning Resources may update scenario links", async () => {
+  const instance = harness();
+  instance.setCurrent(detail({ publicationState: "published" }, [assignment("user", "learner")]));
+  const updated = await instance.service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: { expectedUpdatedAt: NOW, relatedScenarioIds: ["standard_a"] },
+  });
+  assert.equal(updated.publicationState, "published");
+  assert.deepEqual(updated.relatedScenarios.map((scenario) => scenario.id), ["standard_a"]);
+});
+
+test("links-only edits still enforce optimistic concurrency", async () => {
+  const instance = harness();
+  await assert.rejects(
+    instance.service.updateContent({
+      context,
+      references,
+      contentId: "content_1",
+      input: {
+        expectedUpdatedAt: "2026-07-28T11:59:00.000Z",
+        relatedScenarioIds: ["standard_a"],
+      },
+    }),
+    (error: unknown) => error instanceof TrainingContentManagementServiceError
+      && error.code === "training_content_conflict"
+  );
+  assert.deepEqual(instance.calls, []);
+});
+
+test("links-only edits preserve the existing archived-content edit restriction", async () => {
+  const instance = harness();
+  instance.setCurrent(detail({ publicationState: "archived" }));
+  await assert.rejects(
+    instance.service.updateContent({
+      context,
+      references,
+      contentId: "content_1",
+      input: { expectedUpdatedAt: NOW, relatedScenarioIds: ["standard_a"] },
+    }),
+    (error: unknown) => error instanceof TrainingContentManagementServiceError
+      && error.code === "training_content_archived"
+  );
+  assert.deepEqual(instance.calls, []);
+});
+
+test("detail mapping includes active links and marks stale linked targets unavailable", async () => {
+  const instance = harness();
+  instance.setScenarioLinks(["standard_a", "standard_disabled", "missing_scenario"]);
+  const loaded = await instance.service.getContent({
+    context,
+    references,
+    contentId: "content_1",
+  });
+  assert.deepEqual(loaded.relatedScenarios, [
+    { id: "standard_a", title: "Standard A", available: true },
+    { id: "standard_disabled", title: "Disabled standard", available: false },
+    { id: "missing_scenario", title: "Unavailable scenario", available: false },
+  ]);
+});
+
+test("removed scenario links are absent because detail reads active links only", async () => {
+  const instance = harness();
+  instance.setScenarioLinks(["standard_a", "standard_b"]);
+  await instance.service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: { expectedUpdatedAt: NOW, relatedScenarioIds: ["standard_b"] },
+  });
+  const loaded = await instance.service.getContent({ context, references, contentId: "content_1" });
+  assert.deepEqual(loaded.relatedScenarios.map((scenario) => scenario.id), ["standard_b"]);
 });

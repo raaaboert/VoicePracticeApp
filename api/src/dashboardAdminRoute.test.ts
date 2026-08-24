@@ -96,6 +96,7 @@ function buildTrainingContentRouteItem(overrides: Record<string, unknown> = {}) 
       managers: [],
       managerTeams: [],
     },
+    relatedScenarios: [],
     ...overrides,
   };
 }
@@ -1239,6 +1240,15 @@ before(async () => {
         status: "active",
       }] as any;
     },
+    async listScenarioOptions(params) {
+      trainingContentManagementRouteCalls.push({ method: "scenarios", params });
+      authorizeTrainingContentManagement(params);
+      return [{
+        id: "scenario_scope",
+        title: "Scoped scenario",
+        source: "standard",
+      }] as any;
+    },
     async listCategories(params) {
       trainingContentManagementRouteCalls.push({ method: "categories", params });
       authorizeTrainingContentManagement(params);
@@ -1981,11 +1991,16 @@ test("Training Content management routes enforce module, capability, explicit sc
       body: JSON.stringify({
         contentType: "native",
         title: "Created content",
+        relatedScenarioIds: ["scenario_scope"],
       }),
     }
   );
   assert.equal(created.status, 201);
   assert.equal((created.body.item as any).title, "Created content");
+  assert.deepEqual(
+    trainingContentManagementRouteCalls.at(-1)?.params.input.relatedScenarioIds,
+    ["scenario_scope"]
+  );
 
   const contentId = "22222222-2222-4222-8222-222222222222";
   const updated = await dashboardRequest(
@@ -2057,6 +2072,15 @@ test("Training Content management routes enforce module, capability, explicit sc
     orgAdminToken
   );
   assert.equal(focusTopics.status, 200);
+  const scenarioOptions = await dashboardRequest(
+    "/dashboard/admin/training-content-targets/scenarios",
+    orgAdminToken
+  );
+  assert.equal(scenarioOptions.status, 200);
+  assert.deepEqual(
+    (scenarioOptions.body.scenarios as any[]).map((scenario) => scenario.id),
+    ["scenario_scope"]
+  );
 
   const categories = await dashboardRequest(
     "/dashboard/admin/training-content/categories",

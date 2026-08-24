@@ -8,6 +8,7 @@ import {
   DashboardSessionInvalidError,
   getDashboardTrainingContentCategories,
   getDashboardTrainingContentFocusTopics,
+  getDashboardTrainingContentScenarioOptions,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
@@ -20,10 +21,12 @@ export default async function NewTrainingContentPage({
   const orgId = params.orgId?.trim() || null;
   let topics;
   let categories;
+  let scenarioOptions;
   try {
-    [topics, categories] = await Promise.all([
+    [topics, categories, scenarioOptions] = await Promise.all([
       getDashboardTrainingContentFocusTopics(orgId),
       getDashboardTrainingContentCategories(orgId),
+      getDashboardTrainingContentScenarioOptions(orgId),
     ]);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
@@ -50,6 +53,7 @@ export default async function NewTrainingContentPage({
         orgId={orgId}
         categories={categories.categories}
         focusTopics={topics.focusTopics}
+        scenarioOptions={scenarioOptions.scenarios}
       />
     </>
   );

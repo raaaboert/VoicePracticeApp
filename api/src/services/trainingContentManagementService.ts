@@ -16,7 +16,11 @@ import {
   type DashboardTrainingContentLifecycleRequest,
   type DashboardTrainingContentListItem,
   type DashboardTrainingContentOrderGroup,
+  type DashboardTrainingContentRelatedScenario,
+  type DashboardTrainingContentScenarioOption,
   type DashboardTrainingContentTarget,
+  type AppConfig,
+  type EnterpriseOrg,
   type OrgTrainingRecord,
   type ReorderDashboardTrainingContentCategoriesRequest,
   type ReorderDashboardTrainingContentRequest,
@@ -49,6 +53,12 @@ import {
 } from "../storage/trainingContentStore.js";
 import { canManageTrainingContent } from "./trainingContentAuthorization.js";
 import type { TrainingContentManagementRequestContext } from "./trainingContentAssetService.js";
+import {
+  listValidTrainingContentScenarioLinkTargets,
+  resolveTrainingContentScenarioLinkDisplayTargets,
+  type TrainingContentScenarioLinkService,
+  TrainingContentScenarioLinkServiceError,
+} from "./trainingContentScenarioLinks.js";
 import { isEligibleManagerUser, resolveStoredUserDisplayName } from "./userProfiles.js";
 
 const TITLE_MAX_LENGTH = 200;
@@ -65,6 +75,8 @@ const LIST_SORT_SET = new Set<string>(TRAINING_CONTENT_LIST_SORTS);
 export interface TrainingContentReferenceData {
   users: readonly UserProfile[];
   focusTopics: readonly OrgTrainingRecord[];
+  scenarioConfig: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
+  scenarioOrg: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
 }
 
 export interface TrainingContentManagementList {
@@ -165,6 +177,10 @@ export interface TrainingContentManagementService {
     context: TrainingContentManagementRequestContext;
     references: TrainingContentReferenceData;
   }): Promise<DashboardTrainingContentFocusTopic[]>;
+  listScenarioOptions(params: {
+    context: TrainingContentManagementRequestContext;
+    references: TrainingContentReferenceData;
+  }): Promise<DashboardTrainingContentScenarioOption[]>;
   listCategories(params: {
     context: TrainingContentManagementRequestContext;
     includeArchived?: unknown;
@@ -206,6 +222,7 @@ interface TrainingContentManagementServiceParams {
   categoryStore: TrainingContentCategoryStore;
   entitlementStore: OrgModuleEntitlementStore;
   storageConfig: TrainingContentStorageConfig;
+  scenarioLinkService: TrainingContentScenarioLinkService;
 }
 
 class DefaultTrainingContentManagementService implements TrainingContentManagementService {
@@ -256,7 +273,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     if (!detail) {
       throw notFoundError();
     }
-    return mapDetail(detail, params.context.orgId, params.references);
+    return this.mapDetail(detail, params.context.orgId, params.references);
   }
 
   async createContent(params: {
@@ -274,8 +291,16 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       "focusTopicId",
       "nativeBody",
       "externalUrl",
+      "relatedScenarioIds",
     ]);
     const actor = buildActor(params.context);
+    const relatedScenarioIds = params.input.relatedScenarioIds === undefined
+      ? undefined
+      : this.dependencies.scenarioLinkService.validateScenarioLinkTargets({
+        config: params.references.scenarioConfig,
+        org: params.references.scenarioOrg,
+        scenarioIds: params.input.relatedScenarioIds,
+      });
     const category = params.input.categoryId === undefined
       || params.input.categoryId === null
       || params.input.categoryId === ""
@@ -309,7 +334,17 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       actor,
       now: params.now,
     });
-    return mapDetail(detail, params.context.orgId, params.references);
+    if (relatedScenarioIds !== undefined) {
+      await this.dependencies.scenarioLinkService.replaceScenarioLinksForContent({
+        config: params.references.scenarioConfig,
+        org: params.references.scenarioOrg,
+        contentId: detail.content.id,
+        scenarioIds: relatedScenarioIds,
+        actor,
+        now: params.now,
+      });
+    }
+    return this.mapDetail(detail, params.context.orgId, params.references);
   }
 
   async updateContent(params: {
@@ -328,6 +363,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       "focusTopicId",
       "nativeBody",
       "externalUrl",
+      "relatedScenarioIds",
     ]);
     const contentId = requiredId(params.contentId, "Content id");
     const current = await this.dependencies.store.getContentDetailForOrg(
@@ -337,6 +373,14 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     if (!current) {
       throw notFoundError();
     }
+
+    const relatedScenarioIds = params.input.relatedScenarioIds === undefined
+      ? undefined
+      : this.dependencies.scenarioLinkService.validateScenarioLinkTargets({
+        config: params.references.scenarioConfig,
+        org: params.references.scenarioOrg,
+        scenarioIds: params.input.relatedScenarioIds,
+      });
 
     const focusTopic = params.input.focusTopicId === undefined
       ? undefined
@@ -351,29 +395,65 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         params.context.orgId,
         params.input.categoryId
       )).id;
-    const detail = await this.dependencies.store.updateContent({
-      orgId: params.context.orgId,
-      contentId,
-      expectedUpdatedAt: normalizeExpectedUpdatedAt(params.input.expectedUpdatedAt),
-      categoryId,
-      title: params.input.title === undefined ? undefined : normalizeTitle(params.input.title),
-      description: params.input.description === undefined
-        ? undefined
-        : normalizeDescription(params.input.description),
-      focusTopicId: params.input.focusTopicId === undefined ? undefined : focusTopic?.id ?? null,
-      focusTopicNameSnapshot: params.input.focusTopicId === undefined
-        ? undefined
-        : focusTopic?.name ?? null,
-      nativeBody: params.input.nativeBody === undefined
-        ? undefined
-        : normalizeNativeBodyForType(params.input.nativeBody, current.content.contentType),
-      externalUrl: params.input.externalUrl === undefined
-        ? undefined
-        : normalizeExternalUrlForType(params.input.externalUrl, current.content.contentType),
-      actor: buildActor(params.context),
-      now: params.now,
-    });
-    return mapDetail(detail, params.context.orgId, params.references);
+    const expectedUpdatedAt = normalizeExpectedUpdatedAt(params.input.expectedUpdatedAt);
+    const hasContentChanges = [
+      params.input.categoryId,
+      params.input.title,
+      params.input.description,
+      params.input.focusTopicId,
+      params.input.nativeBody,
+      params.input.externalUrl,
+    ].some((value) => value !== undefined);
+    if (relatedScenarioIds !== undefined && current.content.publicationState === "archived") {
+      throw new TrainingContentManagementServiceError(
+        "Archived Training Content cannot be edited.",
+        409,
+        "training_content_archived"
+      );
+    }
+    let detail = current;
+    if (hasContentChanges || relatedScenarioIds === undefined) {
+      detail = await this.dependencies.store.updateContent({
+        orgId: params.context.orgId,
+        contentId,
+        expectedUpdatedAt,
+        categoryId,
+        title: params.input.title === undefined ? undefined : normalizeTitle(params.input.title),
+        description: params.input.description === undefined
+          ? undefined
+          : normalizeDescription(params.input.description),
+        focusTopicId: params.input.focusTopicId === undefined ? undefined : focusTopic?.id ?? null,
+        focusTopicNameSnapshot: params.input.focusTopicId === undefined
+          ? undefined
+          : focusTopic?.name ?? null,
+        nativeBody: params.input.nativeBody === undefined
+          ? undefined
+          : normalizeNativeBodyForType(params.input.nativeBody, current.content.contentType),
+        externalUrl: params.input.externalUrl === undefined
+          ? undefined
+          : normalizeExternalUrlForType(params.input.externalUrl, current.content.contentType),
+        actor: buildActor(params.context),
+        now: params.now,
+      });
+    } else if (expectedUpdatedAt !== current.content.updatedAt) {
+      throw new TrainingContentManagementServiceError(
+        "Training Content changed in another session. Reload before saving.",
+        409,
+        "training_content_conflict",
+        { currentUpdatedAt: current.content.updatedAt }
+      );
+    }
+    if (relatedScenarioIds !== undefined) {
+      await this.dependencies.scenarioLinkService.replaceScenarioLinksForContent({
+        config: params.references.scenarioConfig,
+        org: params.references.scenarioOrg,
+        contentId,
+        scenarioIds: relatedScenarioIds,
+        actor: buildActor(params.context),
+        now: params.now,
+      });
+    }
+    return this.mapDetail(detail, params.context.orgId, params.references);
   }
 
   async updateAssignments(params: {
@@ -464,7 +544,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       actor: buildActor(params.context),
       now: params.now,
     });
-    return mapDetail(detail, params.context.orgId, params.references);
+    return this.mapDetail(detail, params.context.orgId, params.references);
   }
 
   async transitionContent(params: {
@@ -499,7 +579,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       actor: buildActor(params.context),
       now: params.now,
     });
-    return mapDetail(detail, params.context.orgId, params.references);
+    return this.mapDetail(detail, params.context.orgId, params.references);
   }
 
   async listUserTargets(params: {
@@ -548,6 +628,21 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         name: topic.name,
         status: topic.status,
       }));
+  }
+
+  async listScenarioOptions(params: {
+    context: TrainingContentManagementRequestContext;
+    references: TrainingContentReferenceData;
+  }): Promise<DashboardTrainingContentScenarioOption[]> {
+    await this.authorize(params.context);
+    return listValidTrainingContentScenarioLinkTargets({
+      config: params.references.scenarioConfig,
+      org: params.references.scenarioOrg,
+    }).map((scenario) => ({
+      id: scenario.scenarioId,
+      title: scenario.title,
+      source: scenario.source,
+    }));
   }
 
   async listCategories(params: {
@@ -709,6 +804,26 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     return category;
   }
 
+  private async mapDetail(
+    detail: TrainingContentManagementDetail,
+    orgId: string,
+    references: TrainingContentReferenceData
+  ): Promise<DashboardTrainingContentDetail> {
+    const links = await this.dependencies.scenarioLinkService
+      .listRawScenarioLinkCandidatesForContent(orgId, detail.content.id);
+    const relatedScenarios: DashboardTrainingContentRelatedScenario[] =
+      resolveTrainingContentScenarioLinkDisplayTargets({
+        config: references.scenarioConfig,
+        org: references.scenarioOrg,
+        scenarioIds: links.map((link) => link.scenarioId),
+      }).map((scenario) => ({
+        id: scenario.scenarioId,
+        title: scenario.title,
+        available: scenario.available,
+      }));
+    return mapDetail(detail, orgId, references, relatedScenarios);
+  }
+
   private async authorize(context: TrainingContentManagementRequestContext): Promise<void> {
     const orgId = requiredId(context.orgId, "Organization id");
     const entitlement = await this.dependencies.entitlementStore.getOrgModuleEntitlement(
@@ -811,7 +926,8 @@ function mapListItem(
 function mapDetail(
   detail: TrainingContentManagementDetail,
   orgId: string,
-  references: TrainingContentReferenceData
+  references: TrainingContentReferenceData,
+  relatedScenarios: DashboardTrainingContentRelatedScenario[]
 ): DashboardTrainingContentDetail {
   const base = mapListItem(detail, orgId, references);
   return {
@@ -822,6 +938,7 @@ function mapDetail(
       ? mapDashboardAsset(detail.latestVideoUploadAsset)
       : null,
     assignments: mapAssignmentSelection(detail, orgId, references),
+    relatedScenarios,
   };
 }
 
@@ -1474,6 +1591,14 @@ export function mapTrainingContentManagementServiceError(
 ): TrainingContentManagementServiceError {
   if (error instanceof TrainingContentManagementServiceError) {
     return error;
+  }
+  if (error instanceof TrainingContentScenarioLinkServiceError) {
+    return new TrainingContentManagementServiceError(
+      "One or more selected scenarios is not available to this organization.",
+      400,
+      "training_content_invalid_scenario",
+      { field: "relatedScenarioIds" }
+    );
   }
   if (error instanceof TrainingContentStoreError) {
     const status = error.code === "training_content_not_found"

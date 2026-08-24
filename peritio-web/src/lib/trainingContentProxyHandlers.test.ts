@@ -22,6 +22,7 @@ import {
   handleTrainingContentListGet,
   handleTrainingContentOrderGet,
   handleTrainingContentOrderUpdate,
+  handleTrainingContentScenarioOptionsGet,
   handleTrainingContentTransition,
   handleTrainingContentUpdate,
   handleTrainingContentUploadFinalize,
@@ -107,6 +108,7 @@ function detailResponse(
         managers: [],
         managerTeams: [],
       },
+      relatedScenarios: [],
       ...overrides,
     },
   };
@@ -424,6 +426,76 @@ test("Training Content proxy forwards create, PATCH, assignment PUT, and lifecyc
       orgId: "org_1",
     },
   ]);
+});
+
+test("Training Content proxy preserves omitted, empty, and populated related scenario arrays", async (t) => {
+  for (const [label, body, expectedHasField] of [
+    ["omitted", { contentType: "native", title: "Legacy" }, false],
+    ["empty", { contentType: "native", title: "Empty", relatedScenarioIds: [] }, true],
+    ["populated", {
+      contentType: "native",
+      title: "Linked",
+      relatedScenarioIds: ["scenario_a", "scenario_b"],
+    }, true],
+  ] as const) {
+    await t.test(label, async () => {
+      let captured: Record<string, unknown> | null = null;
+      await handleTrainingContentCreate(
+        request("/api/admin/training-content?orgId=org_1", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        {
+          createContent: async (input) => {
+            captured = input as unknown as Record<string, unknown>;
+            return detailResponse();
+          },
+        }
+      );
+      assert.equal(Object.hasOwn(captured!, "relatedScenarioIds"), expectedHasField);
+      if (expectedHasField) {
+        assert.deepEqual(captured!.relatedScenarioIds, body.relatedScenarioIds);
+      }
+    });
+  }
+
+  let updateInput: Record<string, unknown> | null = null;
+  await handleTrainingContentUpdate(
+    request("/api/admin/training-content/content_1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedUpdatedAt: NOW, relatedScenarioIds: [] }),
+    }),
+    "content_1",
+    {
+      updateContent: async (_contentId, input) => {
+        updateInput = input as unknown as Record<string, unknown>;
+        return detailResponse();
+      },
+    }
+  );
+  assert.deepEqual(updateInput!.relatedScenarioIds, []);
+});
+
+test("Training Content scenario-options proxy forwards organization context", async () => {
+  let capturedOrgId: string | null | undefined;
+  const response = await handleTrainingContentScenarioOptionsGet(
+    request("/api/admin/training-content-targets/scenarios?orgId=org_1"),
+    {
+      getScenarioOptions: async (orgId) => {
+        capturedOrgId = orgId;
+        return {
+          viewer: viewer(),
+          org: { id: "org_1", name: "Example" },
+          generatedAt: NOW,
+          scenarios: [{ id: "scenario_a", title: "Scenario A", source: "standard" }],
+        };
+      },
+    }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(capturedOrgId, "org_1");
 });
 
 test("Training Content upload proxy returns signing metadata while bytes bypass Next.js", async () => {

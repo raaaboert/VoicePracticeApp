@@ -17,6 +17,7 @@ import type {
   DashboardTrainingContentCategory,
   DashboardTrainingContentDetailResponse,
   DashboardTrainingContentFocusTopic,
+  DashboardTrainingContentScenarioOption,
   TrainingContentType,
 } from "@voicepractice/shared";
 
@@ -45,10 +46,12 @@ export function TrainingContentCreateForm({
   orgId,
   categories,
   focusTopics,
+  scenarioOptions: _scenarioOptions,
 }: {
   orgId: string | null;
   categories: DashboardTrainingContentCategory[];
   focusTopics: DashboardTrainingContentFocusTopic[];
+  scenarioOptions: DashboardTrainingContentScenarioOption[];
 }) {
   const router = useRouter();
   const defaultCategoryId = categories.find((category) => category.isDefault)?.id

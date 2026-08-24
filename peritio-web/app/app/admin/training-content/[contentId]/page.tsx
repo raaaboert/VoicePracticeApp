@@ -9,6 +9,7 @@ import {
   getDashboardTrainingContentCategories,
   getDashboardTrainingContentDetail,
   getDashboardTrainingContentFocusTopics,
+  getDashboardTrainingContentScenarioOptions,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { trainingContentTypeLabel } from "@/src/lib/trainingContentPresentation";
@@ -25,11 +26,13 @@ export default async function TrainingContentDetailPage({
   let detail;
   let topics;
   let categories;
+  let scenarioOptions;
   try {
-    [detail, topics, categories] = await Promise.all([
+    [detail, topics, categories, scenarioOptions] = await Promise.all([
       getDashboardTrainingContentDetail(contentId, orgId),
       getDashboardTrainingContentFocusTopics(orgId),
       getDashboardTrainingContentCategories(orgId),
+      getDashboardTrainingContentScenarioOptions(orgId),
     ]);
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
@@ -59,6 +62,7 @@ export default async function TrainingContentDetailPage({
         initialItem={detail.item}
         categories={categories.categories}
         focusTopics={topics.focusTopics}
+        scenarioOptions={scenarioOptions.scenarios}
         fileLimits={detail.fileLimitsBytes}
         orgId={orgId}
       />

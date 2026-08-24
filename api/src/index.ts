@@ -251,6 +251,7 @@ import {
   OrgModuleEntitlementStore,
 } from "./storage/orgModuleEntitlementStore.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
+import { createTrainingContentScenarioLinkService } from "./services/trainingContentScenarioLinks.js";
 import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
 import {
   createTrainingContentAssetStore,
@@ -620,11 +621,15 @@ const defaultTrainingContentAssetService = createTrainingContentAssetService({
   backup: trainingContentBackup,
 });
 let trainingContentAssetService: TrainingContentAssetService = defaultTrainingContentAssetService;
+const trainingContentScenarioLinkService = createTrainingContentScenarioLinkService(
+  trainingContentStore
+);
 const defaultTrainingContentManagementService = createTrainingContentManagementService({
   store: trainingContentStore,
   categoryStore: trainingContentCategoryStore,
   entitlementStore: orgModuleEntitlementStore,
   storageConfig: runtimeConfig.trainingContentStorage,
+  scenarioLinkService: trainingContentScenarioLinkService,
 });
 let trainingContentManagementService: TrainingContentManagementService =
   defaultTrainingContentManagementService;
@@ -7797,6 +7802,8 @@ async function resolveTrainingContentManagementResources(
         focusTopics: db.orgTrainings.filter(
           (topic) => topic.orgId === adminContext.org.id
         ),
+        scenarioConfig: db.config,
+        scenarioOrg: adminContext.org,
       },
       org: adminContext.org,
     };
@@ -11695,6 +11702,34 @@ app.get(
         org: { id: resources.org.id, name: resources.org.name },
         generatedAt: nowIso(),
         focusTopics,
+      });
+    } catch (error) {
+      respondWithTrainingContentManagementError(error, response);
+    }
+  }
+);
+
+app.get(
+  "/dashboard/admin/training-content-targets/scenarios",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) {
+      return;
+    }
+    try {
+      const scenarios = await trainingContentManagementService.listScenarioOptions({
+        context: resources.context,
+        references: resources.references,
+      });
+      response.json({
+        viewer: {
+          ...request.dashboard!.viewer,
+          capabilities: resources.context.capabilities,
+        },
+        org: { id: resources.org.id, name: resources.org.name },
+        generatedAt: nowIso(),
+        scenarios,
       });
     } catch (error) {
       respondWithTrainingContentManagementError(error, response);
