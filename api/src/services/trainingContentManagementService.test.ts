@@ -419,6 +419,7 @@ const scenarioConfig: Pick<AppConfig, "segments" | "industries" | "roleIndustrie
   ],
   roleIndustries: [
     { roleId: "sales_role", industryId: "sales", active: true },
+    { roleId: "disabled_sales_role", industryId: "sales", active: true },
     { roleId: "medical_role", industryId: "medical", active: true },
   ],
   segments: [
@@ -451,6 +452,20 @@ const scenarioConfig: Pick<AppConfig, "segments" | "industries" | "roleIndustrie
           enabled: false,
         },
       ],
+    },
+    {
+      id: "disabled_sales_role",
+      label: "Disabled Sales",
+      summary: "Disabled Sales scenarios",
+      enabled: false,
+      scenarios: [{
+        id: "standard_disabled_segment",
+        segmentId: "disabled_sales_role",
+        title: "Disabled segment standard",
+        description: "Disabled segment standard",
+        aiRole: "Buyer",
+        enabled: true,
+      }],
     },
     {
       id: "medical_role",
@@ -1123,6 +1138,7 @@ test("invalid related scenarios reject the entire request before mutation withou
     "missing_scenario",
     "standard_hidden",
     "standard_disabled",
+    "standard_disabled_segment",
     "custom_disabled",
     "custom_cross_org",
   ];
@@ -1224,6 +1240,58 @@ test("adding a valid scenario preserves an already-linked unavailable scenario",
     updated.relatedScenarios.map((scenario) => [scenario.id, scenario.available]),
     [["standard_disabled", false], ["standard_a", true]]
   );
+});
+
+test("a disabled-segment link remains displayable and retainable until removal, then cannot be re-added", async () => {
+  const instance = harness();
+  instance.setScenarioLinks(["standard_disabled_segment"]);
+
+  const loaded = await instance.service.getContent({
+    context,
+    references,
+    contentId: "content_1",
+  });
+  assert.deepEqual(
+    loaded.relatedScenarios.map((scenario) => [scenario.id, scenario.available]),
+    [["standard_disabled_segment", false]]
+  );
+
+  const retained = await instance.service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: {
+      expectedUpdatedAt: NOW,
+      relatedScenarioIds: ["standard_disabled_segment"],
+    },
+  });
+  assert.deepEqual(
+    retained.relatedScenarios.map((scenario) => [scenario.id, scenario.available]),
+    [["standard_disabled_segment", false]]
+  );
+
+  const removed = await instance.service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: { expectedUpdatedAt: NOW, relatedScenarioIds: [] },
+  });
+  assert.deepEqual(removed.relatedScenarios, []);
+
+  await assert.rejects(
+    instance.service.updateContent({
+      context,
+      references,
+      contentId: "content_1",
+      input: {
+        expectedUpdatedAt: NOW,
+        relatedScenarioIds: ["standard_disabled_segment"],
+      },
+    }),
+    (error: unknown) => error instanceof TrainingContentScenarioLinkServiceError
+      && error.code === "invalid_scenario_link_target"
+  );
+  assert.deepEqual(instance.getScenarioLinks(), []);
 });
 
 test("links-only edits still enforce optimistic concurrency", async () => {

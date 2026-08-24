@@ -73,7 +73,14 @@ export function listValidTrainingContentScenarioLinkTargets(params: {
   org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
 }): TrainingContentScenarioLinkTarget[] {
   const targets = new Map<string, TrainingContentScenarioLinkTarget>();
-  for (const scenario of listOrgVisibleStandardScenarios(params).filter((row) => row.enabled)) {
+  const enabledStandardSegmentIds = new Set(
+    (params.config.segments ?? [])
+      .filter((segment) => segment.enabled === true)
+      .map((segment) => segment.id)
+  );
+  for (const scenario of listOrgVisibleStandardScenarios(params).filter(
+    (row) => row.enabled && enabledStandardSegmentIds.has(row.segmentId)
+  )) {
     targets.set(scenario.scenarioId, mapStandardTarget(scenario));
   }
   for (const scenario of params.org.customScenarios ?? []) {

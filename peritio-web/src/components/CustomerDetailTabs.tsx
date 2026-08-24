@@ -112,7 +112,7 @@ export function CustomerDetailTabs({
                       {trainingPack.title}
                     </Link>
                   </h3>
-                  <p>{trainingPack.trainingTopic || "No training brief recorded."}</p>
+                  <p>{trainingPack.trainingTopic || "No Training Pack Brief recorded."}</p>
                   <dl className="inline-stats">
                     <div>
                       <dt>Assigned</dt>

@@ -121,7 +121,7 @@ export function EnterpriseCompanyDivisionsCard({
   const deleteDivision = async (division: OrgDivisionRecord) => {
     const confirmed = window.confirm(
       `Delete division "${division.name}" from ${orgName ?? "this company"}?\n\n` +
-        "Live user, training, and standard-scenario assignments for this division will be cleared. Historical attribution stays intact."
+        "Live user, Focus Topic, and standard-scenario assignments for this division will be cleared. Historical attribution stays intact."
     );
     if (!confirmed) {
       return;

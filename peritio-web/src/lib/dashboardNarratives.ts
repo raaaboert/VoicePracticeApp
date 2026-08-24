@@ -652,12 +652,12 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
       ? topTraining
         ? `This account is active, but usage is still concentrated in ${topTraining.title}.`
         : "This account is active, but usage is still narrow."
-      : "This account has real usage across more than one Focus Topic.",
+      : "This account has real usage across more than one Training Pack.",
     totalScoredAttemptsLast30Days < MIN_CUSTOMER_SCORE_EVIDENCE
       ? "The score read is still early, so the clearest conclusion is about adoption and focus rather than performance movement."
       : buildMovementSummary(customer.scoreDeltaLast30Days),
     underusedActiveTrainings > 0
-      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Focus Topic")} remain quiet, which is the clearest rollout gap.`
+      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Training Pack")} remain quiet, which is the clearest rollout gap.`
       : null,
   ]);
 
@@ -683,7 +683,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
       {
         label: "Focus",
         value: topTraining?.title ?? topScenario?.title ?? "No dominant focus yet",
-        context: topTraining ? "Most active Focus Topic" : topScenario ? "Most active scenario" : "Usage is still taking shape",
+        context: topTraining ? "Most active Training Pack" : topScenario ? "Most active scenario" : "Usage is still taking shape",
       },
     ]),
     priorities: compactPriorities([
@@ -692,7 +692,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         "Account traction",
         topTraining
           ? `The account is active, and ${topTraining.title} is the clearest center of gravity.`
-          : "The account is active, but no single Focus Topic has separated clearly yet."
+          : "The account is active, but no single Training Pack has separated clearly yet."
       ),
       makePriority(
         "caution",
@@ -705,7 +705,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         "watch",
         "Account watchpoint",
         underusedActiveTrainings > 0
-          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Focus Topic")} remain quiet and deserve rollout attention.`
+          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Training Pack")} remain quiet and deserve rollout attention.`
           : insights.coachingInsights.repeatedFocusArea
             ? `${insights.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in the current coaching record.`
             : "The next useful question is whether the current activity pattern broadens or stays narrow."
@@ -723,7 +723,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
           ? `${customer.simulationsLast30Days} simulations across ${engagedUsers} ${pluralize(engagedUsers, "user")} with recent practice`
           : `${customer.simulationsLast30Days} simulations`,
       focusLabel: topTraining?.title ?? topScenario?.title ?? null,
-      watchLabel: underusedActiveTrainings > 0 ? `${underusedActiveTrainings} underused active Focus Topics` : insights.coachingInsights.repeatedFocusArea,
+      watchLabel: underusedActiveTrainings > 0 ? `${underusedActiveTrainings} underused active Training Packs` : insights.coachingInsights.repeatedFocusArea,
     },
   };
 }
@@ -888,7 +888,7 @@ export function buildUserDetailNarrative(payload: DashboardUserDetailResponse): 
       {
         label: "Focus",
         value: dominantTraining ?? dominantScenario ?? user.latestScenarioTitle ?? "No dominant focus yet",
-        context: dominantTraining ? "Most frequent recent training" : dominantScenario ? "Most frequent recent scenario" : "Latest visible activity",
+        context: dominantTraining ? "Most frequent recent Training Pack" : dominantScenario ? "Most frequent recent scenario" : "Latest visible activity",
       },
     ]),
     priorities: compactPriorities([

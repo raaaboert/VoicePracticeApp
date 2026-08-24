@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(componentsDir, "..", "..");
-const editorSource = readFileSync(join(componentsDir, "TrainingContentEditor.tsx"), "utf8");
+const editorSource = readFileSync(join(componentsDir, "TrainingContentEditor.tsx"), "utf8")
+  .replace(/\r\n/g, "\n");
 const createSource = readFileSync(join(componentsDir, "TrainingContentCreateForm.tsx"), "utf8");
 const scenarioSelectorSource = readFileSync(
   join(componentsDir, "TrainingContentScenarioSelector.tsx"),

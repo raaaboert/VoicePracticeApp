@@ -20,6 +20,7 @@ const config: Pick<AppConfig, "segments" | "industries" | "roleIndustries"> = {
   ],
   roleIndustries: [
     { roleId: "sales", industryId: "solar", active: true },
+    { roleId: "disabled_segment", industryId: "solar", active: true },
     { roleId: "medical", industryId: "medical", active: true },
   ],
   segments: [
@@ -31,6 +32,22 @@ const config: Pick<AppConfig, "segments" | "industries" | "roleIndustries"> = {
       scenarios: [
         { id: "standard_visible", segmentId: "sales", title: "Visible", description: "Visible", aiRole: "Buyer" },
         { id: "standard_disabled", segmentId: "sales", title: "Disabled", description: "Disabled", aiRole: "Buyer", enabled: false },
+      ],
+    },
+    {
+      id: "disabled_segment",
+      label: "Disabled segment",
+      summary: "Disabled segment",
+      enabled: false,
+      scenarios: [
+        {
+          id: "standard_disabled_segment",
+          segmentId: "disabled_segment",
+          title: "Disabled segment scenario",
+          description: "Disabled segment scenario",
+          aiRole: "Buyer",
+          enabled: true,
+        },
       ],
     },
     {
@@ -140,6 +157,12 @@ test("scenario-link targets reject disabled standard and custom scenarios", () =
   assert.equal(ids.includes("custom_disabled"), false);
 });
 
+test("scenario-link targets reject standard scenarios under disabled segments", () => {
+  const ids = listValidTrainingContentScenarioLinkTargets({ config, org: org() })
+    .map((target) => target.scenarioId);
+  assert.equal(ids.includes("standard_disabled_segment"), false);
+});
+
 test("scenario-link targets reject custom scenarios owned by another organization", () => {
   const ids = listValidTrainingContentScenarioLinkTargets({
     config,
@@ -235,7 +258,14 @@ test("preserving one unavailable scenario does not permit a different unavailabl
 });
 
 test("service rejects nonexistent, invisible, cross-org, and disabled scenarios before mutation", async () => {
-  for (const scenarioId of ["missing", "standard_hidden", "standard_disabled", "cross_org", "custom_disabled"]) {
+  for (const scenarioId of [
+    "missing",
+    "standard_hidden",
+    "standard_disabled",
+    "standard_disabled_segment",
+    "cross_org",
+    "custom_disabled",
+  ]) {
     const store = new FakeScenarioLinkStore();
     const service = createTrainingContentScenarioLinkService(store);
     await assert.rejects(
