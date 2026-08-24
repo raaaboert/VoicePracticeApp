@@ -8,6 +8,10 @@ const componentsDir = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(componentsDir, "..", "..");
 const editorSource = readFileSync(join(componentsDir, "TrainingContentEditor.tsx"), "utf8");
 const createSource = readFileSync(join(componentsDir, "TrainingContentCreateForm.tsx"), "utf8");
+const scenarioSelectorSource = readFileSync(
+  join(componentsDir, "TrainingContentScenarioSelector.tsx"),
+  "utf8"
+);
 const categoriesSource = readFileSync(
   join(componentsDir, "TrainingContentCategoryManager.tsx"),
   "utf8"
@@ -73,6 +77,20 @@ test("Training Content forms separate categories from optional Focus Topics and 
   assert.equal(editorSource.includes("Close"), true);
   assert.equal(unsavedDialogSource.includes("Discard unsaved changes?"), true);
   assert.equal(unsavedDialogSource.includes("Keep editing"), true);
+});
+
+test("Learning Resource forms place the accessible Related Scenarios selector after Focus Topic", () => {
+  for (const source of [createSource, editorSource]) {
+    assert.equal(source.includes("<TrainingContentScenarioSelector"), true);
+    assert.equal(source.indexOf("Related Focus Topic") < source.indexOf("<TrainingContentScenarioSelector"), true);
+  }
+  assert.equal(scenarioSelectorSource.includes("Related Scenarios"), true);
+  assert.equal(scenarioSelectorSource.includes("Search scenarios"), true);
+  assert.equal(scenarioSelectorSource.includes("aria-label={`Remove ${scenario.title}"), true);
+  assert.equal(scenarioSelectorSource.includes("scenario.available ?"), true);
+  assert.equal(scenarioSelectorSource.includes(": \"Unavailable\""), true);
+  assert.equal(scenarioSelectorSource.includes("option.source === \"custom\""), true);
+  assert.equal(scenarioSelectorSource.includes("fetch("), false);
 });
 
 test("Training Content library groups the default view and exposes category-aware filters", () => {

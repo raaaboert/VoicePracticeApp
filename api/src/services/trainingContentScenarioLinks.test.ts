@@ -198,6 +198,23 @@ test("service accepts an enabled custom scenario owned by the organization", asy
   assert.deepEqual(store.replacements[0]?.scenarioIds, ["custom_visible"]);
 });
 
+test("replacement preserves an unavailable scenario only when it is already linked", async () => {
+  const store = new FakeScenarioLinkStore();
+  const service = createTrainingContentScenarioLinkService(store);
+  await service.replaceScenarioLinksForContent({
+    config,
+    org: org(),
+    contentId: "content_1",
+    scenarioIds: ["standard_disabled", "standard_visible"],
+    preservedExistingScenarioIds: ["standard_disabled"],
+    actor: { actorType: "platform_admin", actorId: "admin_1" },
+  });
+  assert.deepEqual(
+    store.replacements[0]?.scenarioIds,
+    ["standard_disabled", "standard_visible"]
+  );
+});
+
 test("service rejects nonexistent, invisible, cross-org, and disabled scenarios before mutation", async () => {
   for (const scenarioId of ["missing", "standard_hidden", "standard_disabled", "cross_org", "custom_disabled"]) {
     const store = new FakeScenarioLinkStore();

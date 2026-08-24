@@ -41,6 +41,7 @@ import type {
 } from "@voicepractice/shared";
 
 import { TrainingContentMarkdown } from "@/src/components/TrainingContentMarkdown";
+import { TrainingContentScenarioSelector } from "@/src/components/TrainingContentScenarioSelector";
 import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
 import {
   formatTrainingContentVideoFailureCategory,
@@ -69,6 +70,12 @@ import {
   directUploadTrainingContentAsset,
   TrainingContentDirectUploadError,
 } from "@/src/lib/trainingContentDirectUpload";
+import {
+  buildUpdateRelatedScenarioIdsField,
+  createTrainingContentScenarioSelection,
+  hasTrainingContentScenarioSelectionChanges,
+  type TrainingContentScenarioSelectionItem,
+} from "@/src/lib/trainingContentScenarioSelection";
 
 interface ContentDraft {
   categoryId: string;
@@ -193,7 +200,7 @@ export function TrainingContentEditor({
   initialItem,
   categories,
   focusTopics,
-  scenarioOptions: _scenarioOptions,
+  scenarioOptions,
   fileLimits,
   orgId,
 }: {
@@ -208,6 +215,9 @@ export function TrainingContentEditor({
   const [item, setItem] = useState(initialItem);
   const [draft, setDraft] = useState(() => createDraft(initialItem));
   const [assignments, setAssignments] = useState(() => createAssignmentDraft(initialItem));
+  const [relatedScenarios, setRelatedScenarios] = useState<
+    TrainingContentScenarioSelectionItem[]
+  >(() => createTrainingContentScenarioSelection(initialItem.relatedScenarios, scenarioOptions));
   const [nativeMode, setNativeMode] = useState<"write" | "preview">("write");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -233,7 +243,9 @@ export function TrainingContentEditor({
   );
 
   const archived = item.publicationState === "archived";
-  const dirty = hasMetadataChanges(item, draft) || hasAssignmentChanges(item, assignments);
+  const dirty = hasMetadataChanges(item, draft)
+    || hasAssignmentChanges(item, assignments)
+    || hasTrainingContentScenarioSelectionChanges(item.relatedScenarios, relatedScenarios);
   const policy = getTrainingContentFilePolicy(item.contentType);
   const videoUploadBlocked = trainingContentVideoUploadIsBlocked(latestVideoUploadAsset);
   const listPath = `/app/admin/training-content${orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""}`;
@@ -331,6 +343,7 @@ export function TrainingContentEditor({
     setItem(next);
     setDraft(createDraft(next));
     setAssignments(createAssignmentDraft(next));
+    setRelatedScenarios(createTrainingContentScenarioSelection(next.relatedScenarios, scenarioOptions));
     setLatestVideoUploadAsset(restoreTrainingContentVideoProcessingAsset(next));
     setConflict(false);
     setPreviewUrl(null);
@@ -414,13 +427,20 @@ export function TrainingContentEditor({
 
   const saveChanges = async (): Promise<DashboardTrainingContentDetail> => {
     let next = item;
-    if (hasMetadataChanges(item, draft)) {
+    const relatedScenarioIdsField = buildUpdateRelatedScenarioIdsField(
+      item.relatedScenarios,
+      relatedScenarios
+    );
+    if (hasMetadataChanges(item, draft) || relatedScenarioIdsField.relatedScenarioIds !== undefined) {
       const response = await fetchAdminApiJson<DashboardTrainingContentDetailResponse>(
         withOrg(`/api/admin/training-content/${encodeURIComponent(item.id)}`, orgId),
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildMetadataPatch(item, draft)),
+          body: JSON.stringify({
+            ...buildMetadataPatch(item, draft),
+            ...relatedScenarioIdsField,
+          }),
         }
       );
       next = response.item;
@@ -811,6 +831,12 @@ export function TrainingContentEditor({
               ))}
             </select>
           </label>
+          <TrainingContentScenarioSelector
+            options={scenarioOptions}
+            selected={relatedScenarios}
+            disabled={archived || saving}
+            onChange={setRelatedScenarios}
+          />
         </div>
       </section>
 

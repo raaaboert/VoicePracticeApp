@@ -55,6 +55,7 @@ export interface TrainingContentScenarioLinkService {
     config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
     org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
     scenarioIds: readonly string[];
+    preservedExistingScenarioIds?: readonly string[];
   }): string[];
   replaceScenarioLinksForContent(params: {
     config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
@@ -63,6 +64,7 @@ export interface TrainingContentScenarioLinkService {
     scenarioIds: readonly string[];
     actor: ReplaceTrainingContentScenarioLinksInput["actor"];
     now?: Date;
+    preservedExistingScenarioIds?: readonly string[];
   }): Promise<TrainingContentScenarioLink[]>;
 }
 
@@ -165,11 +167,15 @@ class DefaultTrainingContentScenarioLinkService implements TrainingContentScenar
     config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
     org: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
     scenarioIds: readonly string[];
+    preservedExistingScenarioIds?: readonly string[];
   }): string[] {
     const scenarioIds = normalizeScenarioIds(params.scenarioIds);
     const validTargets = new Set(
       listValidTrainingContentScenarioLinkTargets(params).map((target) => target.scenarioId)
     );
+    for (const scenarioId of normalizeScenarioIds(params.preservedExistingScenarioIds ?? [])) {
+      validTargets.add(scenarioId);
+    }
     const invalidScenarioId = scenarioIds.find((scenarioId) => !validTargets.has(scenarioId));
     if (invalidScenarioId) {
       throw new TrainingContentScenarioLinkServiceError(
@@ -187,6 +193,7 @@ class DefaultTrainingContentScenarioLinkService implements TrainingContentScenar
     scenarioIds: readonly string[];
     actor: ReplaceTrainingContentScenarioLinksInput["actor"];
     now?: Date;
+    preservedExistingScenarioIds?: readonly string[];
   }): Promise<TrainingContentScenarioLink[]> {
     const scenarioIds = this.validateScenarioLinkTargets(params);
     return this.store.replaceActiveScenarioLinksForContent({

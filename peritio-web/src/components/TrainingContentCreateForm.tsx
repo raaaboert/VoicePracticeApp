@@ -22,7 +22,12 @@ import type {
 } from "@voicepractice/shared";
 
 import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
+import { TrainingContentScenarioSelector } from "@/src/components/TrainingContentScenarioSelector";
 import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
+import {
+  buildCreateRelatedScenarioIdsField,
+  type TrainingContentScenarioSelectionItem,
+} from "@/src/lib/trainingContentScenarioSelection";
 import {
   trainingContentOrgQuery,
   trainingContentTypeLabel,
@@ -46,7 +51,7 @@ export function TrainingContentCreateForm({
   orgId,
   categories,
   focusTopics,
-  scenarioOptions: _scenarioOptions,
+  scenarioOptions,
 }: {
   orgId: string | null;
   categories: DashboardTrainingContentCategory[];
@@ -64,6 +69,9 @@ export function TrainingContentCreateForm({
   const [focusTopicId, setFocusTopicId] = useState("");
   const [nativeBody, setNativeBody] = useState("");
   const [externalUrl, setExternalUrl] = useState("");
+  const [relatedScenarios, setRelatedScenarios] =
+    useState<TrainingContentScenarioSelectionItem[]>([]);
+  const [relatedScenariosTouched, setRelatedScenariosTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
@@ -75,6 +83,7 @@ export function TrainingContentCreateForm({
     || focusTopicId
     || nativeBody
     || externalUrl
+    || relatedScenariosTouched
     || categoryId !== defaultCategoryId
   );
 
@@ -115,6 +124,7 @@ export function TrainingContentCreateForm({
         title,
         description,
         focusTopicId: focusTopicId || null,
+        ...buildCreateRelatedScenarioIdsField(relatedScenarios, relatedScenariosTouched),
       };
       if (contentType === "native") {
         input.nativeBody = nativeBody || null;
@@ -247,6 +257,15 @@ export function TrainingContentCreateForm({
                   ))}
                 </select>
               </label>
+              <TrainingContentScenarioSelector
+                options={scenarioOptions}
+                selected={relatedScenarios}
+                disabled={saving}
+                onChange={(selected) => {
+                  setRelatedScenarios(selected);
+                  setRelatedScenariosTouched(true);
+                }}
+              />
             </div>
           </section>
 

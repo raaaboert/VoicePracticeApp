@@ -374,12 +374,19 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       throw notFoundError();
     }
 
+    const existingScenarioIds = params.input.relatedScenarioIds === undefined
+      ? []
+      : (await this.dependencies.scenarioLinkService.listRawScenarioLinkCandidatesForContent(
+        params.context.orgId,
+        contentId
+      )).map((link) => link.scenarioId);
     const relatedScenarioIds = params.input.relatedScenarioIds === undefined
       ? undefined
       : this.dependencies.scenarioLinkService.validateScenarioLinkTargets({
         config: params.references.scenarioConfig,
         org: params.references.scenarioOrg,
         scenarioIds: params.input.relatedScenarioIds,
+        preservedExistingScenarioIds: existingScenarioIds,
       });
 
     const focusTopic = params.input.focusTopicId === undefined
@@ -451,6 +458,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         scenarioIds: relatedScenarioIds,
         actor: buildActor(params.context),
         now: params.now,
+        preservedExistingScenarioIds: existingScenarioIds,
       });
     }
     return this.mapDetail(detail, params.context.orgId, params.references);

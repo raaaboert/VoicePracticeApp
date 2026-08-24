@@ -170,7 +170,10 @@ function assignment(
   };
 }
 
-function harness(enabled = true) {
+function harness(
+  enabled = true,
+  options: { scenarioReplacementError?: Error } = {}
+) {
   const calls: Array<{ method: string; input: any }> = [];
   let current = detail();
   let scenarioLinks: TrainingContentScenarioLink[] = [];
@@ -193,6 +196,9 @@ function harness(enabled = true) {
     },
     async replaceActiveScenarioLinksForContent(input: ReplaceTrainingContentScenarioLinksInput) {
       calls.push({ method: "replaceLinks", input });
+      if (options.scenarioReplacementError) {
+        throw options.scenarioReplacementError;
+      }
       scenarioLinks = input.scenarioIds.map((scenarioId, index) => ({
         id: `link_${index + 1}`,
         orgId: input.orgId,
@@ -959,6 +965,52 @@ test("scenario-link validation maps to a stable non-enumerating API error", () =
   assert.deepEqual(mapped.details, { field: "relatedScenarioIds" });
 });
 
+test("create rejects instead of returning success when scenario-link persistence fails", async () => {
+  const infrastructureError = new Error("scenario-link store unavailable");
+  const { service, calls } = harness(true, { scenarioReplacementError: infrastructureError });
+
+  await assert.rejects(
+    service.createContent({
+      context,
+      references,
+      input: {
+        contentType: "native",
+        title: "Linked resource",
+        nativeBody: "# Linked",
+        relatedScenarioIds: ["standard_a"],
+      },
+    }),
+    (error: unknown) => error === infrastructureError
+  );
+
+  assert.deepEqual(calls.map((call) => call.method), ["create", "replaceLinks"]);
+  assert.equal(
+    mapTrainingContentManagementServiceError(infrastructureError).code,
+    "training_content_operation_failed"
+  );
+});
+
+test("content update rejects instead of returning success when scenario-link persistence fails", async () => {
+  const infrastructureError = new Error("scenario-link store unavailable");
+  const { service, calls } = harness(true, { scenarioReplacementError: infrastructureError });
+
+  await assert.rejects(
+    service.updateContent({
+      context,
+      references,
+      contentId: "content_1",
+      input: {
+        expectedUpdatedAt: NOW,
+        title: "Updated title",
+        relatedScenarioIds: ["standard_a"],
+      },
+    }),
+    (error: unknown) => error === infrastructureError
+  );
+
+  assert.deepEqual(calls.map((call) => call.method), ["update", "replaceLinks"]);
+});
+
 test("create preserves omitted, empty, one, and multiple related scenario semantics", async (t) => {
   await t.test("omitted does not replace relationships and remains backward compatible", async () => {
     const { service, calls } = harness();
@@ -1154,6 +1206,24 @@ test("published Learning Resources may update scenario links", async () => {
   });
   assert.equal(updated.publicationState, "published");
   assert.deepEqual(updated.relatedScenarios.map((scenario) => scenario.id), ["standard_a"]);
+});
+
+test("adding a valid scenario preserves an already-linked unavailable scenario", async () => {
+  const instance = harness();
+  instance.setScenarioLinks(["standard_disabled"]);
+  const updated = await instance.service.updateContent({
+    context,
+    references,
+    contentId: "content_1",
+    input: {
+      expectedUpdatedAt: NOW,
+      relatedScenarioIds: ["standard_disabled", "standard_a"],
+    },
+  });
+  assert.deepEqual(
+    updated.relatedScenarios.map((scenario) => [scenario.id, scenario.available]),
+    [["standard_disabled", false], ["standard_a", true]]
+  );
 });
 
 test("links-only edits still enforce optimistic concurrency", async () => {
