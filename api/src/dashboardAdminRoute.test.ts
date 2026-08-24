@@ -29,6 +29,14 @@ import { TrainingContentManagementServiceError } from "./services/trainingConten
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 
 const NOW = "2026-07-25T15:00:00.000Z";
+const RECENT_ACTIVITY_ANCHOR_MS = Date.now();
+const DAY_MS = 86_400_000;
+const MINUTE_MS = 60_000;
+
+function daysAgo(days: number, minuteOffset = 0): string {
+  return new Date(RECENT_ACTIVITY_ANCHOR_MS - days * DAY_MS + minuteOffset * MINUTE_MS).toISOString();
+}
+
 const MOBILE_TOKEN_SECRET = "mobile_token_secret_for_dashboard_admin_route_tests";
 const WEB_AUTH_TOKEN_SECRET = "web_auth_token_secret_for_dashboard_admin_route_tests";
 const WEB_AUTH_CODE_SECRET = "web_auth_code_secret_for_dashboard_admin_route_tests";
@@ -280,8 +288,8 @@ function buildUsageSessionRecord(
     scenarioId: overrides.scenarioId ?? "scenario_scope",
     trainingId: overrides.trainingId ?? null,
     trainingPackId: overrides.trainingPackId === undefined ? "pack_scope" : overrides.trainingPackId,
-    startedAt: overrides.startedAt ?? "2026-07-20T12:00:00.000Z",
-    endedAt: overrides.endedAt ?? "2026-07-20T12:05:00.000Z",
+    startedAt: overrides.startedAt ?? daysAgo(10),
+    endedAt: overrides.endedAt ?? daysAgo(10, 5),
     rawDurationSeconds: overrides.rawDurationSeconds ?? 300,
     billedSecondsAdded: overrides.billedSecondsAdded ?? 300,
     createdAt: overrides.createdAt ?? NOW,
@@ -304,8 +312,8 @@ function buildScoreRecord(
     trainingId: overrides.trainingId ?? null,
     trainingPackId: overrides.trainingPackId === undefined ? "pack_scope" : overrides.trainingPackId,
     industryId: overrides.industryId ?? "people_management",
-    startedAt: overrides.startedAt ?? "2026-07-20T12:00:00.000Z",
-    endedAt: overrides.endedAt ?? "2026-07-20T12:05:00.000Z",
+    startedAt: overrides.startedAt ?? daysAgo(10),
+    endedAt: overrides.endedAt ?? daysAgo(10, 5),
     communicationScore: overrides.communicationScore ?? 82,
     outcomeScore: overrides.outcomeScore ?? 80,
     overallScore: overrides.overallScore ?? 81,
@@ -606,13 +614,13 @@ function buildDatabase(): ApiDatabase {
     ],
     usageSessions: [
       buildUsageSessionRecord("usage_self", "user_admin", {
-        endedAt: "2026-07-20T12:05:00.000Z",
-        startedAt: "2026-07-20T12:00:00.000Z",
+        endedAt: daysAgo(10, 5),
+        startedAt: daysAgo(10),
       }),
       buildUsageSessionRecord("usage_direct", "learner", {
         divisionId: "division_a",
-        endedAt: "2026-07-21T12:05:00.000Z",
-        startedAt: "2026-07-21T12:00:00.000Z",
+        endedAt: daysAgo(9, 5),
+        startedAt: daysAgo(9),
       }),
       buildUsageSessionRecord("usage_direct_division_b_old", "learner", {
         divisionId: "division_b",
@@ -621,18 +629,18 @@ function buildDatabase(): ApiDatabase {
         startedAt: "2025-01-21T12:00:00.000Z",
       }),
       buildUsageSessionRecord("usage_unassigned", "unassigned_learner", {
-        endedAt: "2026-07-22T12:05:00.000Z",
-        startedAt: "2026-07-22T12:00:00.000Z",
+        endedAt: daysAgo(8, 5),
+        startedAt: daysAgo(8),
       }),
       buildUsageSessionRecord("usage_other_report", "other_manager_report", {
-        endedAt: "2026-07-23T12:05:00.000Z",
-        startedAt: "2026-07-23T12:00:00.000Z",
+        endedAt: daysAgo(7, 5),
+        startedAt: daysAgo(7),
       }),
       buildUsageSessionRecord("usage_other_org", "other_org_user", {
         orgId: "org_2",
         trainingPackId: "pack_other",
-        endedAt: "2026-07-24T12:05:00.000Z",
-        startedAt: "2026-07-24T12:00:00.000Z",
+        endedAt: daysAgo(6, 5),
+        startedAt: daysAgo(6),
       }),
     ],
     mobileAuthTokens: [
@@ -657,14 +665,14 @@ function buildDatabase(): ApiDatabase {
     ],
     scoreRecords: [
       buildScoreRecord("score_self", "user_admin", {
-        endedAt: "2026-07-20T12:05:00.000Z",
-        startedAt: "2026-07-20T12:00:00.000Z",
+        endedAt: daysAgo(10, 5),
+        startedAt: daysAgo(10),
         overallScore: 80,
       }),
       buildScoreRecord("score_direct", "learner", {
         divisionId: "division_a",
-        endedAt: "2026-07-21T12:05:00.000Z",
-        startedAt: "2026-07-21T12:00:00.000Z",
+        endedAt: daysAgo(9, 5),
+        startedAt: daysAgo(9),
         overallScore: 90,
       }),
       buildScoreRecord("score_direct_division_b_old", "learner", {
@@ -675,20 +683,20 @@ function buildDatabase(): ApiDatabase {
         overallScore: 55,
       }),
       buildScoreRecord("score_unassigned", "unassigned_learner", {
-        endedAt: "2026-07-22T12:05:00.000Z",
-        startedAt: "2026-07-22T12:00:00.000Z",
+        endedAt: daysAgo(8, 5),
+        startedAt: daysAgo(8),
         overallScore: 10,
       }),
       buildScoreRecord("score_other_report", "other_manager_report", {
-        endedAt: "2026-07-23T12:05:00.000Z",
-        startedAt: "2026-07-23T12:00:00.000Z",
+        endedAt: daysAgo(7, 5),
+        startedAt: daysAgo(7),
         overallScore: 20,
       }),
       buildScoreRecord("score_other_org", "other_org_user", {
         orgId: "org_2",
         trainingPackId: "pack_other",
-        endedAt: "2026-07-24T12:05:00.000Z",
-        startedAt: "2026-07-24T12:00:00.000Z",
+        endedAt: daysAgo(6, 5),
+        startedAt: daysAgo(6),
         overallScore: 70,
       }),
     ],
