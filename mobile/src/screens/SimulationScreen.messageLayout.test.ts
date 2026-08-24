@@ -27,6 +27,7 @@ test("simulation bubbles apply viewport-derived pixel constraints to the bubble 
   assert.match(source, /getSimulationMessageWidthConstraints/);
   assert.match(source, /maxWidth: messageWidthConstraints\.bubbleMaxWidth/);
   assert.match(source, /maxWidth: messageWidthConstraints\.textMaxWidth/);
+  assert.match(source, /lineBreakStrategyIOS="standard"/);
 });
 
 test("user and AI bubbles retain their existing alignment and transcript normalization", () => {

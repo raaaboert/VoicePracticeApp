@@ -5497,7 +5497,13 @@ export default function App() {
                   onPress={cancelOrganizationPlanSupport}
                   disabled={isOrganizationPlanSupportSubmitting}
                 >
-                  <Text style={styles.ghostButtonText}>Cancel</Text>
+                  <Text
+                    style={[styles.ghostButtonText, styles.organizationPlanSupportModalActionText]}
+                    maxFontSizeMultiplier={1.2}
+                    numberOfLines={2}
+                  >
+                    Cancel
+                  </Text>
                 </Pressable>
                 <Pressable
                   style={[
@@ -5510,7 +5516,11 @@ export default function App() {
                     void requestOrganizationPlanSupport();
                   }}
                 >
-                  <Text style={styles.primaryButtonText}>
+                  <Text
+                    style={[styles.primaryButtonText, styles.organizationPlanSupportModalActionText]}
+                    maxFontSizeMultiplier={1.2}
+                    numberOfLines={2}
+                  >
                     {isOrganizationPlanSupportSubmitting ? "Submitting..." : "Submit Request"}
                   </Text>
                 </Pressable>
@@ -6284,9 +6294,9 @@ export default function App() {
                         <Text
                           style={[styles.primaryButtonText, styles.orgAccessRequestActionText]}
                           maxFontSizeMultiplier={1.2}
-                          numberOfLines={2}
+                          numberOfLines={1}
                         >
-                          Approve Membership
+                          Approve
                         </Text>
                       </Pressable>
                       <Pressable
@@ -6303,7 +6313,7 @@ export default function App() {
                         <Text
                           style={[styles.ghostButtonText, styles.orgAccessRequestActionText]}
                           maxFontSizeMultiplier={1.2}
-                          numberOfLines={2}
+                          numberOfLines={1}
                         >
                           Reject
                         </Text>
@@ -7215,8 +7225,9 @@ function createStyles(theme: ThemeTokens) {
     organizationPlanSupportModalTitle: { color: theme.text, fontSize: 20, fontWeight: "800" },
     organizationPlanSupportFieldLabel: { color: theme.text, fontSize: 14, fontWeight: "700", marginTop: 2 },
     organizationPlanSupportInput: { minHeight: 140, borderRadius: 12, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.inputBg, color: theme.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16 },
-    organizationPlanSupportModalActions: { flexDirection: "row", gap: 10, marginTop: 2 },
-    organizationPlanSupportModalAction: { flex: 1 },
+    organizationPlanSupportModalActions: { flexDirection: "row", alignItems: "stretch", gap: 10, marginTop: 2 },
+    organizationPlanSupportModalAction: { flex: 1, height: 52, minHeight: 52, borderRadius: 14, paddingHorizontal: 12 },
+    organizationPlanSupportModalActionText: { fontSize: 14, lineHeight: 18, fontWeight: "800", textAlign: "center" },
     warningCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.warningBorder, backgroundColor: theme.warningBg, padding: 12, marginBottom: 12 },
     warningText: { color: theme.warningText, fontSize: 13.5, lineHeight: 19 },
     errorCard: { borderRadius: 14, borderWidth: 1, borderColor: theme.errorCardBorder, backgroundColor: theme.errorCardBg, padding: 12, marginBottom: 12 },
@@ -7278,7 +7289,7 @@ function createStyles(theme: ThemeTokens) {
     primaryButtonText: { color: theme.primaryButtonText, fontSize: 16, fontWeight: "800" },
     orgAccessRequestActions: { flexDirection: "row", gap: 10, marginTop: 8 },
     orgAccessRequestAction: { flex: 1, height: 52, minHeight: 52, borderRadius: 14, paddingHorizontal: 12 },
-    orgAccessRequestActionText: { fontSize: 14, lineHeight: 18, textAlign: "center" },
+    orgAccessRequestActionText: { fontSize: 14, lineHeight: 18, fontWeight: "800", textAlign: "center" },
     disabled: { opacity: 0.55 },
     chipRow: { gap: 8, paddingVertical: 8 },
     timezoneChip: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.dropdownOptionBg },

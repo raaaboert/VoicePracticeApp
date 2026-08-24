@@ -29,7 +29,9 @@ test("org-admin approval actions share geometry while retaining semantic styles"
   assert.match(requestScreen, /styles\.ghostButtonText, styles\.orgAccessRequestActionText/);
   assert.match(requestScreen, /disabled=\{adminLoading\}/);
   assert.equal(requestScreen.match(/maxFontSizeMultiplier=\{1\.2\}/g)?.length, 2);
-  assert.equal(requestScreen.match(/numberOfLines=\{2\}/g)?.length, 2);
+  assert.equal(requestScreen.match(/numberOfLines=\{1\}/g)?.length, 2);
+  assert.match(requestScreen, />\s*Approve\s*<\/Text>/);
+  assert.match(requestScreen, />\s*Reject\s*<\/Text>/);
 
   assert.match(
     styleSource,
@@ -37,7 +39,7 @@ test("org-admin approval actions share geometry while retaining semantic styles"
   );
   assert.match(
     appSource,
-    /orgAccessRequestActionText: \{ fontSize: 14, lineHeight: 18, textAlign: "center" \}/,
+    /orgAccessRequestActionText: \{ fontSize: 14, lineHeight: 18, fontWeight: "800", textAlign: "center" \}/,
   );
 });
 

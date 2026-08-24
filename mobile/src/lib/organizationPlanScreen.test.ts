@@ -109,3 +109,24 @@ test("Organization Plan support failure preserves the draft and allows retry", (
   assert.match(failureSource, /setIsOrganizationPlanSupportSubmitting\(false\)/);
   assert.doesNotMatch(failureSource, /setOrganizationPlanSupportDraft\(""\)/);
 });
+
+test("Organization Plan support actions share geometry and centered Dynamic Type-safe text", () => {
+  const source = organizationPlanSource();
+
+  assert.equal(source.match(/styles\.organizationPlanSupportModalAction,/g)?.length, 2);
+  assert.equal(source.match(/styles\.organizationPlanSupportModalActionText/g)?.length, 2);
+  assert.equal(source.match(/maxFontSizeMultiplier=\{1\.2\}/g)?.length, 2);
+  assert.equal(source.match(/numberOfLines=\{2\}/g)?.length, 2);
+  assert.match(
+    appSource,
+    /organizationPlanSupportModalActions: \{ flexDirection: "row", alignItems: "stretch", gap: 10, marginTop: 2 \}/,
+  );
+  assert.match(
+    appSource,
+    /organizationPlanSupportModalAction: \{ flex: 1, height: 52, minHeight: 52, borderRadius: 14, paddingHorizontal: 12 \}/,
+  );
+  assert.match(
+    appSource,
+    /organizationPlanSupportModalActionText: \{ fontSize: 14, lineHeight: 18, fontWeight: "800", textAlign: "center" \}/,
+  );
+});

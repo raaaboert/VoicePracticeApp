@@ -4716,6 +4716,7 @@ export function SimulationScreen({
                     {message.role === "user" ? "You" : "AI"}
                   </Text>
                   <Text
+                    lineBreakStrategyIOS="standard"
                     style={[
                       styles.messageText,
                       useCompactTranscript ? styles.messageTextCompact : null,
