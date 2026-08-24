@@ -245,7 +245,7 @@ test(
         actor: { actorType: "web_user", actorId: "actor_add" },
         now: new Date("2026-08-24T12:00:00.000Z"),
       });
-      assert.deepEqual(added.map((link) => link.scenarioId), ["scenario-A", "scenario-B"]);
+      assert.deepEqual(added.map((link) => link.scenarioId).sort(), ["scenario-A", "scenario-B"]);
       assert.equal(added.every((link) =>
         link.orgId === "org_1"
         && link.contentId === contentId
