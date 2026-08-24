@@ -191,6 +191,191 @@ test(
 );
 
 test(
+  "real PostgreSQL scenario-link replacement adds, soft-removes, restores, reverses, deduplicates, and rolls back atomically",
+  { skip: !databaseUrl },
+  async () => {
+    assertSafeIntegrationDatabase(databaseUrl);
+    const setupPool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 15_000,
+      idleTimeoutMillis: 10_000,
+    });
+    const schema = `tc_scenario_store_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let scopedPool: Pool | null = null;
+    try {
+      await setupPool.query(`CREATE SCHEMA ${quotedSchema}`);
+      scopedPool = new Pool({
+        connectionString: databaseUrl,
+        max: 2,
+        connectionTimeoutMillis: 15_000,
+        idleTimeoutMillis: 10_000,
+        options: `-c search_path=${schema}`,
+      });
+      const store = createTrainingContentStore({
+        provider: "postgres",
+        databaseUrl,
+        pgPoolMax: 2,
+        pgConnectTimeoutMs: 15_000,
+        pgIdleTimeoutMs: 10_000,
+        queryPool: scopedPool,
+      });
+      await store.initialize();
+
+      const contentId = randomUUID();
+      const categoryId = await insertContentCategory(scopedPool, "org_1");
+      await scopedPool.query(
+        `
+          INSERT INTO org_content_items (
+            id, org_id, category_id, title, content_type,
+            created_by_actor_id, updated_by_actor_id
+          )
+          VALUES ($1, 'org_1', $2, 'Production-store scenario links', 'native', 'integration_test', 'integration_test')
+        `,
+        [contentId, categoryId]
+      );
+
+      assert.deepEqual(await store.listActiveScenarioLinksForContent("org_1", contentId), []);
+
+      const added = await store.replaceActiveScenarioLinksForContent({
+        orgId: "org_1",
+        contentId,
+        scenarioIds: ["scenario-A", "scenario-B"],
+        actor: { actorType: "web_user", actorId: "actor_add" },
+        now: new Date("2026-08-24T12:00:00.000Z"),
+      });
+      assert.deepEqual(added.map((link) => link.scenarioId), ["scenario-A", "scenario-B"]);
+      assert.equal(added.every((link) =>
+        link.orgId === "org_1"
+        && link.contentId === contentId
+        && link.focusTopicId === null
+        && link.removedAt === null
+        && link.removedByActorId === null
+      ), true);
+      const initialIds = new Map(added.map((link) => [link.scenarioId, link.id]));
+
+      const replaced = await store.replaceActiveScenarioLinksForContent({
+        orgId: "org_1",
+        contentId,
+        scenarioIds: ["scenario-B", "scenario-C"],
+        actor: { actorType: "web_user", actorId: "actor_replace" },
+        now: new Date("2026-08-24T12:01:00.000Z"),
+      });
+      assert.deepEqual(replaced.map((link) => link.scenarioId), ["scenario-B", "scenario-C"]);
+      assert.equal(replaced.find((link) => link.scenarioId === "scenario-B")?.id, initialIds.get("scenario-B"));
+      const afterReplaceRows = await scopedPool.query<{
+        scenario_id: string;
+        focus_topic_id: string | null;
+        removed_by_actor_id: string | null;
+        removed_at: Date | null;
+      }>(
+        `
+          SELECT scenario_id, focus_topic_id, removed_by_actor_id, removed_at
+          FROM org_content_scenario_links
+          WHERE org_id = 'org_1' AND content_id = $1
+          ORDER BY scenario_id, created_at
+        `,
+        [contentId]
+      );
+      assert.equal(afterReplaceRows.rows.filter((row) => row.scenario_id === "scenario-B" && row.removed_at === null).length, 1);
+      assert.deepEqual(
+        afterReplaceRows.rows.find((row) => row.scenario_id === "scenario-A"),
+        {
+          scenario_id: "scenario-A",
+          focus_topic_id: null,
+          removed_by_actor_id: "actor_replace",
+          removed_at: new Date("2026-08-24T12:01:00.000Z"),
+        }
+      );
+
+      assert.deepEqual(await store.replaceActiveScenarioLinksForContent({
+        orgId: "org_1",
+        contentId,
+        scenarioIds: [],
+        actor: { actorType: "web_user", actorId: "actor_empty" },
+        now: new Date("2026-08-24T12:02:00.000Z"),
+      }), []);
+      const afterEmpty = await scopedPool.query<{ total: string; removed: string }>(
+        `
+          SELECT COUNT(*)::text AS total, COUNT(*) FILTER (WHERE removed_at IS NOT NULL)::text AS removed
+          FROM org_content_scenario_links
+          WHERE org_id = 'org_1' AND content_id = $1
+        `,
+        [contentId]
+      );
+      assert.deepEqual(afterEmpty.rows[0], { total: "3", removed: "3" });
+
+      const restored = await store.replaceActiveScenarioLinksForContent({
+        orgId: "org_1",
+        contentId,
+        scenarioIds: ["scenario-A"],
+        actor: { actorType: "web_user", actorId: "actor_restore" },
+        now: new Date("2026-08-24T12:03:00.000Z"),
+      });
+      assert.equal(restored.length, 1);
+      assert.equal(restored[0]?.id, initialIds.get("scenario-A"));
+      assert.equal(restored[0]?.focusTopicId, null);
+      assert.equal(restored[0]?.removedAt, null);
+      assert.equal(restored[0]?.removedByActorId, null);
+
+      const reverse = await store.listActiveScenarioLinksForScenario("org_1", "scenario-A");
+      assert.deepEqual(reverse.map((link) => link.contentId), [contentId]);
+      assert.deepEqual(await store.listActiveScenarioLinksForScenario("org_2", "scenario-A"), []);
+
+      await expectPostgresError(
+        () => scopedPool!.query(
+          `
+            INSERT INTO org_content_scenario_links (
+              id, org_id, content_id, focus_topic_id, scenario_id, created_by_actor_id
+            )
+            VALUES ($1, 'org_1', $2, NULL, 'scenario-A', 'integration_test')
+          `,
+          [randomUUID(), contentId]
+        ),
+        "23505"
+      );
+
+      await store.replaceActiveScenarioLinksForContent({
+        orgId: "org_1",
+        contentId,
+        scenarioIds: ["scenario-A", "scenario-B"],
+        actor: { actorType: "web_user", actorId: "actor_atomic_setup" },
+        now: new Date("2026-08-24T12:04:00.000Z"),
+      });
+      await scopedPool.query(
+        `
+          ALTER TABLE org_content_scenario_links
+          ADD CONSTRAINT org_content_scenario_links_test_failure_check
+          CHECK (scenario_id <> 'scenario-failure')
+        `
+      );
+      await assert.rejects(
+        store.replaceActiveScenarioLinksForContent({
+          orgId: "org_1",
+          contentId,
+          scenarioIds: ["scenario-A", "scenario-failure"],
+          actor: { actorType: "web_user", actorId: "actor_atomic_failure" },
+          now: new Date("2026-08-24T12:05:00.000Z"),
+        }),
+        (error: unknown) => (error as { code?: string } | null)?.code === "23514"
+      );
+      assert.deepEqual(
+        (await store.listActiveScenarioLinksForContent("org_1", contentId)).map((link) => link.scenarioId),
+        ["scenario-A", "scenario-B"]
+      );
+    } finally {
+      await scopedPool?.end();
+      try {
+        await setupPool.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      } finally {
+        await setupPool.end();
+      }
+    }
+  }
+);
+
+test(
   "migration 010 backfills existing content into one idempotent General category",
   { skip: !databaseUrl },
   async () => {
