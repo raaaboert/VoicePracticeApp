@@ -174,6 +174,26 @@ export interface ReplaceTrainingContentAssignmentsInput {
   now?: Date;
 }
 
+export interface TrainingContentScenarioLink {
+  id: string;
+  orgId: string;
+  contentId: string;
+  focusTopicId: string | null;
+  scenarioId: string;
+  createdByActorId: string;
+  createdAt: string;
+  removedByActorId: string | null;
+  removedAt: string | null;
+}
+
+export interface ReplaceTrainingContentScenarioLinksInput {
+  orgId: string;
+  contentId: string;
+  scenarioIds: string[];
+  actor: TrainingContentMutationActor;
+  now?: Date;
+}
+
 export interface TransitionTrainingContentInput {
   orgId: string;
   contentId: string;
@@ -187,6 +207,17 @@ export interface TrainingContentStore {
   initialize(): Promise<void>;
   listContentItemsForOrg(orgId: string): Promise<TrainingContentItem[]>;
   getContentItemForOrg(orgId: string, contentId: string): Promise<TrainingContentItem | null>;
+  listActiveScenarioLinksForContent(
+    orgId: string,
+    contentId: string
+  ): Promise<TrainingContentScenarioLink[]>;
+  listActiveScenarioLinksForScenario(
+    orgId: string,
+    scenarioId: string
+  ): Promise<TrainingContentScenarioLink[]>;
+  replaceActiveScenarioLinksForContent(
+    input: ReplaceTrainingContentScenarioLinksInput
+  ): Promise<TrainingContentScenarioLink[]>;
   listPublishedContentForMobile(
     orgId: string,
     maximumItems?: number
@@ -286,6 +317,18 @@ interface TrainingContentAssignmentRow {
   created_at: string | Date;
   revoked_by_actor_id: string | null;
   revoked_at: string | Date | null;
+}
+
+interface TrainingContentScenarioLinkRow {
+  id: string;
+  org_id: string;
+  content_id: string;
+  focus_topic_id: string | null;
+  scenario_id: string;
+  created_by_actor_id: string;
+  created_at: string | Date;
+  removed_by_actor_id: string | null;
+  removed_at: string | Date | null;
 }
 
 interface TrainingContentManagementRow extends TrainingContentItemRow {
@@ -411,6 +454,18 @@ const ASSIGNMENT_COLUMNS = `
   revoked_at
 `;
 
+const SCENARIO_LINK_COLUMNS = `
+  id,
+  org_id,
+  content_id,
+  focus_topic_id,
+  scenario_id,
+  created_by_actor_id,
+  created_at,
+  removed_by_actor_id,
+  removed_at
+`;
+
 class NullTrainingContentStore implements TrainingContentStore {
   async initialize(): Promise<void> {
     // Training Content is relational and unavailable for non-postgres providers.
@@ -422,6 +477,18 @@ class NullTrainingContentStore implements TrainingContentStore {
 
   async getContentItemForOrg(): Promise<TrainingContentItem | null> {
     return null;
+  }
+
+  async listActiveScenarioLinksForContent(): Promise<TrainingContentScenarioLink[]> {
+    return [];
+  }
+
+  async listActiveScenarioLinksForScenario(): Promise<TrainingContentScenarioLink[]> {
+    return [];
+  }
+
+  async replaceActiveScenarioLinksForContent(): Promise<TrainingContentScenarioLink[]> {
+    return this.unavailable();
   }
 
   async listPublishedContentForMobile(): Promise<TrainingContentMobileReadResult> {
@@ -606,6 +673,148 @@ class PostgresTrainingContentStore implements TrainingContentStore {
   async getContentItemForOrg(orgId: string, contentId: string): Promise<TrainingContentItem | null> {
     await this.initialize();
     return getContentItem(this.pool, orgId, contentId);
+  }
+
+  async listActiveScenarioLinksForContent(
+    orgId: string,
+    contentId: string
+  ): Promise<TrainingContentScenarioLink[]> {
+    await this.initialize();
+    return listActiveScenarioLinksForContent(this.pool, orgId, contentId);
+  }
+
+  async listActiveScenarioLinksForScenario(
+    orgId: string,
+    scenarioId: string
+  ): Promise<TrainingContentScenarioLink[]> {
+    await this.initialize();
+    const result = await this.pool.query<TrainingContentScenarioLinkRow>(
+      `
+        SELECT ${SCENARIO_LINK_COLUMNS}
+        FROM org_content_scenario_links
+        WHERE org_id = $1 AND scenario_id = $2 AND removed_at IS NULL
+        ORDER BY created_at ASC, id ASC
+      `,
+      [requiredId(orgId, "Organization id"), requiredId(scenarioId, "Scenario id")]
+    );
+    return result.rows.map(mapScenarioLinkRow);
+  }
+
+  async replaceActiveScenarioLinksForContent(
+    input: ReplaceTrainingContentScenarioLinksInput
+  ): Promise<TrainingContentScenarioLink[]> {
+    await this.initialize();
+    const orgId = requiredId(input.orgId, "Organization id");
+    const contentId = requiredId(input.contentId, "Content id");
+    const scenarioIds = deduplicateRequiredIds(input.scenarioIds, "Scenario id");
+    const actorId = requiredId(input.actor.actorId, "Actor id");
+    const now = input.now ?? new Date();
+    if (!Number.isFinite(now.getTime())) {
+      throw new Error("Training Content scenario-link mutation time is invalid.");
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const content = await client.query<{ id: string }>(
+        `
+          SELECT id
+          FROM org_content_items
+          WHERE org_id = $1 AND id = $2
+          FOR UPDATE
+        `,
+        [orgId, contentId]
+      );
+      if (!content.rows[0]) {
+        throw new TrainingContentStoreError(
+          "Training Content was not found.",
+          "training_content_not_found"
+        );
+      }
+
+      const activeResult = await client.query<TrainingContentScenarioLinkRow>(
+        `
+          SELECT ${SCENARIO_LINK_COLUMNS}
+          FROM org_content_scenario_links
+          WHERE org_id = $1 AND content_id = $2 AND removed_at IS NULL
+          FOR UPDATE
+        `,
+        [orgId, contentId]
+      );
+      const active = activeResult.rows.map(mapScenarioLinkRow);
+      const desiredIds = new Set(scenarioIds);
+      const activeIds = new Set(active.map((link) => link.scenarioId));
+      const removed = active.filter((link) => !desiredIds.has(link.scenarioId));
+      const added = scenarioIds.filter((scenarioId) => !activeIds.has(scenarioId));
+
+      if (removed.length > 0) {
+        await client.query(
+          `
+            UPDATE org_content_scenario_links
+            SET removed_by_actor_id = $4,
+                removed_at = $5
+            WHERE org_id = $1
+              AND content_id = $2
+              AND id = ANY($3::uuid[])
+              AND removed_at IS NULL
+          `,
+          [orgId, contentId, removed.map((link) => link.id), actorId, now]
+        );
+      }
+
+      for (const scenarioId of added) {
+        const restored = await client.query<TrainingContentScenarioLinkRow>(
+          `
+            UPDATE org_content_scenario_links
+            SET focus_topic_id = NULL,
+                created_by_actor_id = $4,
+                created_at = $5,
+                removed_by_actor_id = NULL,
+                removed_at = NULL
+            WHERE id = (
+              SELECT id
+              FROM org_content_scenario_links
+              WHERE org_id = $1
+                AND content_id = $2
+                AND scenario_id = $3
+                AND removed_at IS NOT NULL
+              ORDER BY removed_at DESC, created_at DESC, id DESC
+              LIMIT 1
+              FOR UPDATE
+            )
+            RETURNING ${SCENARIO_LINK_COLUMNS}
+          `,
+          [orgId, contentId, scenarioId, actorId, now]
+        );
+        if (restored.rows[0]) {
+          continue;
+        }
+        await client.query(
+          `
+            INSERT INTO org_content_scenario_links (
+              id,
+              org_id,
+              content_id,
+              focus_topic_id,
+              scenario_id,
+              created_by_actor_id,
+              created_at
+            )
+            VALUES ($1, $2, $3, NULL, $4, $5, $6)
+          `,
+          [randomUUID(), orgId, contentId, scenarioId, actorId, now]
+        );
+      }
+
+      const result = await listActiveScenarioLinksForContent(client, orgId, contentId);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listPublishedContentForMobile(
@@ -1773,6 +1982,37 @@ function mapAssignmentRow(row: TrainingContentAssignmentRow): TrainingContentAss
   };
 }
 
+function mapScenarioLinkRow(row: TrainingContentScenarioLinkRow): TrainingContentScenarioLink {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    contentId: row.content_id,
+    focusTopicId: row.focus_topic_id,
+    scenarioId: row.scenario_id,
+    createdByActorId: row.created_by_actor_id,
+    createdAt: requiredIso(row.created_at, "Scenario link created time"),
+    removedByActorId: row.removed_by_actor_id,
+    removedAt: optionalIso(row.removed_at),
+  };
+}
+
+async function listActiveScenarioLinksForContent(
+  queryable: TrainingContentQueryable,
+  orgId: string,
+  contentId: string
+): Promise<TrainingContentScenarioLink[]> {
+  const result = await queryable.query<TrainingContentScenarioLinkRow>(
+    `
+      SELECT ${SCENARIO_LINK_COLUMNS}
+      FROM org_content_scenario_links
+      WHERE org_id = $1 AND content_id = $2 AND removed_at IS NULL
+      ORDER BY created_at ASC, id ASC
+    `,
+    [requiredId(orgId, "Organization id"), requiredId(contentId, "Content id")]
+  );
+  return result.rows.map(mapScenarioLinkRow);
+}
+
 function countAssignments(
   assignments: readonly TrainingContentAssignment[]
 ): TrainingContentAssignmentCounts {
@@ -1811,6 +2051,14 @@ function deduplicateAssignments(
   return [...byKey.values()].sort((left, right) =>
     assignmentKey(left).localeCompare(assignmentKey(right))
   );
+}
+
+function deduplicateRequiredIds(values: readonly string[], label: string): string[] {
+  const unique = new Set<string>();
+  for (const value of values) {
+    unique.add(requiredId(value, label));
+  }
+  return [...unique];
 }
 
 function assignmentKey(assignment: {

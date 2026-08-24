@@ -81,6 +81,116 @@ async function insertContentCategory(
 }
 
 test(
+  "migration 013 preserves scenario-link tenant, active-uniqueness, and reverse-lookup constraints while allowing NULL Focus Topic",
+  { skip: !databaseUrl },
+  async () => {
+    assertSafeIntegrationDatabase(databaseUrl);
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 15_000,
+      idleTimeoutMillis: 10_000,
+    });
+    const client = await pool.connect();
+    const schema = `tc_scenario_links_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    try {
+      await client.query(`CREATE SCHEMA ${quotedSchema}`);
+      await client.query(`SET search_path TO ${quotedSchema}`);
+      await runMigrations(client, await loadTrainingContentMigrationSql());
+
+      const contentId = randomUUID();
+      const categoryId = await insertContentCategory(client, "org_1");
+      await client.query(
+        `
+          INSERT INTO org_content_items (
+            id, org_id, category_id, title, content_type,
+            created_by_actor_id, updated_by_actor_id
+          )
+          VALUES ($1, 'org_1', $2, 'Scenario-linked guide', 'native', 'integration_test', 'integration_test')
+        `,
+        [contentId, categoryId]
+      );
+
+      await client.query(
+        `
+          INSERT INTO org_content_scenario_links (
+            id, org_id, content_id, focus_topic_id, scenario_id, created_by_actor_id
+          )
+          VALUES ($1, 'org_1', $2, NULL, 'scenario_a', 'integration_test')
+        `,
+        [randomUUID(), contentId]
+      );
+      const nullable = await client.query<{ is_nullable: string }>(
+        `
+          SELECT is_nullable
+          FROM information_schema.columns
+          WHERE table_schema = $1
+            AND table_name = 'org_content_scenario_links'
+            AND column_name = 'focus_topic_id'
+        `,
+        [schema]
+      );
+      assert.equal(nullable.rows[0]?.is_nullable, "YES");
+
+      await expectPostgresError(
+        () => client.query(
+          `
+            INSERT INTO org_content_scenario_links (
+              id, org_id, content_id, focus_topic_id, scenario_id, created_by_actor_id
+            )
+            VALUES ($1, 'org_1', $2, NULL, 'scenario_a', 'integration_test')
+          `,
+          [randomUUID(), contentId]
+        ),
+        "23505"
+      );
+      await expectPostgresError(
+        () => client.query(
+          `
+            INSERT INTO org_content_scenario_links (
+              id, org_id, content_id, focus_topic_id, scenario_id, created_by_actor_id
+            )
+            VALUES ($1, 'org_2', $2, NULL, 'scenario_cross_org', 'integration_test')
+          `,
+          [randomUUID(), contentId]
+        ),
+        "23503"
+      );
+
+      const reverseLinks = await client.query<{ content_id: string }>(
+        `
+          SELECT content_id
+          FROM org_content_scenario_links
+          WHERE org_id = 'org_1' AND scenario_id = 'scenario_a' AND removed_at IS NULL
+        `
+      );
+      assert.deepEqual(reverseLinks.rows.map((entry) => entry.content_id), [contentId]);
+      const indexes = await client.query<{ indexname: string }>(
+        `
+          SELECT indexname
+          FROM pg_indexes
+          WHERE schemaname = $1 AND tablename = 'org_content_scenario_links'
+        `,
+        [schema]
+      );
+      const indexNames = new Set(indexes.rows.map((entry) => entry.indexname));
+      assert.equal(indexNames.has("org_content_scenario_links_active_unique_idx"), true);
+      assert.equal(indexNames.has("org_content_scenario_links_scenario_idx"), true);
+      assert.equal(indexNames.has("org_content_scenario_links_topic_idx"), true);
+    } finally {
+      try {
+        await client.query("SET search_path TO public");
+        await client.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      } finally {
+        client.release();
+        await pool.end();
+      }
+    }
+  }
+);
+
+test(
   "migration 010 backfills existing content into one idempotent General category",
   { skip: !databaseUrl },
   async () => {
@@ -98,7 +208,7 @@ test(
       await client.query(`CREATE SCHEMA ${quotedSchema}`);
       await client.query(`SET search_path TO ${quotedSchema}`);
       const migrations = await loadTrainingContentMigrationSql();
-      assert.equal(migrations.length, 5);
+      assert.equal(migrations.length, 6);
       await runMigrations(client, migrations.slice(0, 2));
       const contentId = randomUUID();
       await client.query(

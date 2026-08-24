@@ -162,6 +162,9 @@ class FakeStore implements TrainingContentStore {
   async getContentItemForOrg(_orgId: string, contentId: string) {
     return this.records.find((entry) => entry.content.id === contentId)?.content ?? null;
   }
+  async listActiveScenarioLinksForContent() { return []; }
+  async listActiveScenarioLinksForScenario() { return []; }
+  async replaceActiveScenarioLinksForContent() { return []; }
   async listPublishedContentForMobile(
     orgId: string,
     maximumItems?: number
