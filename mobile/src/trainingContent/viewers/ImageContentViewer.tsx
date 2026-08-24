@@ -214,7 +214,7 @@ export function ImageContentViewer({
     <>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Training Content image"
+        accessibilityLabel="Learning Resource image"
         accessibilityHint="Opens a full-screen image viewer"
         style={[styles.frame, { backgroundColor: theme.mediaBackground }]}
         onPress={() => {
@@ -284,7 +284,7 @@ export function ImageContentViewer({
                           setFullScreenVisible(false);
                           setError(true);
                         }}
-                        accessibilityLabel="Enlarged Training Content image"
+                        accessibilityLabel="Enlarged Learning Resource image"
                       />
                     </Animated.View>
                   ) : null}

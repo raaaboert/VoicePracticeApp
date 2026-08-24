@@ -24,7 +24,7 @@ export function EnterpriseModuleEntitlementsCard({
       </div>
       <div className="module-entitlement-row">
         <div>
-          <div className="module-entitlement-name">Training Content</div>
+          <div className="module-entitlement-name">Learning Resources</div>
           <div className={`module-entitlement-status ${enabled ? "enabled" : "disabled"}`}>
             {unavailable ? "Unavailable" : enabled ? "Enabled" : "Disabled"}
           </div>
@@ -33,7 +33,7 @@ export function EnterpriseModuleEntitlementsCard({
           <input
             type="checkbox"
             role="switch"
-            aria-label="Enable Training Content"
+            aria-label="Enable Learning Resources"
             aria-checked={enabled}
             checked={enabled}
             disabled={saving || unavailable}

@@ -11,10 +11,33 @@ import type {
 
 import {
   buildAggregateCompanyNarrative,
+  buildAggregateTrainingNarrative,
   buildAggregateUsersNarrative,
   buildCustomerNarrative,
   buildUserHighlights,
 } from "./dashboardNarratives";
+
+test("aggregate Focus Topic narrative uses locked no-selection copy", () => {
+  const narrative = buildAggregateTrainingNarrative(null);
+
+  assert.equal(
+    narrative.summary,
+    "No Focus Topic is selected yet. Choose one to review recent activity, confidence, and supporting evidence."
+  );
+  assert.deepEqual(narrative.signals[0], {
+    label: "Activity",
+    value: "No Focus Topic selected",
+    context: "Choose a Focus Topic above",
+  });
+  assert.equal(narrative.priorities[0]?.title, "Select a Focus Topic");
+  assert.equal(
+    narrative.priorities[0]?.detail,
+    "Pick a Focus Topic first so the dashboard has a clear reporting scope."
+  );
+  assert.equal(narrative.facts.subject, "Focus Topic");
+  assert.equal(narrative.facts.volumeLabel, "No Focus Topic selected");
+  assert.equal(narrative.facts.watchLabel, "Choose a Focus Topic");
+});
 
 function createEmptyCoachingInsights(): DashboardCoachingInsights {
   return {
@@ -200,8 +223,21 @@ test("aggregate company narrative derives traction context from recent-practice 
 
   assert.equal(narrative.signals[0]?.value, "6 recent attempts");
   assert.equal(narrative.signals[0]?.context, "1 user with recent practice");
+  assert.equal(narrative.signals[1]?.value, "1 active Focus Topic");
+  assert.equal(narrative.signals[1]?.context, "1 Focus Topic in scope");
   assert.match(narrative.facts.volumeLabel, /1 user with recent practice/);
   assert.doesNotMatch(narrative.facts.volumeLabel, /active users/i);
+
+  const pluralNarrative = buildAggregateCompanyNarrative({
+    overview,
+    trainings: [
+      createTrainingRow(),
+      createTrainingRow({ id: "training-2", name: "Coaching Foundations" }),
+    ],
+    userReport,
+  });
+  assert.equal(pluralNarrative.signals[1]?.value, "2 active Focus Topics");
+  assert.equal(pluralNarrative.signals[1]?.context, "2 Focus Topics in scope");
 });
 
 test("customer narrative uses visible recent-practice users rather than account-status counts", () => {

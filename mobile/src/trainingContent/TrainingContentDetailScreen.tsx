@@ -62,7 +62,7 @@ export function TrainingContentDetailScreen(
       }
       const message = trainingContentErrorMessage(
         caught,
-        "Training content could not be loaded."
+        "This Learning Resource could not be loaded."
       );
       if (isTrainingContentModuleRemoval(caught)) {
         props.onModuleRemoved(message);
@@ -96,7 +96,7 @@ export function TrainingContentDetailScreen(
   return (
     <View style={styles.fill}>
       <TrainingContentHeader
-        title={item?.title ?? "Training Content"}
+        title={item?.title ?? "Learning Resource"}
         onBack={props.onBack}
         theme={props.theme}
       />

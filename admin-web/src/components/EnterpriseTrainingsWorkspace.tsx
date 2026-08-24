@@ -163,7 +163,7 @@ export function EnterpriseTrainingsWorkspace({
         setEditorTargetId(null);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not load training workspace.");
+      setError(caught instanceof Error ? caught.message : "Could not load Focus Topic workspace.");
     } finally {
       setLoading(false);
     }
@@ -224,7 +224,7 @@ export function EnterpriseTrainingsWorkspace({
   const saveTraining = async () => {
     const name = editorState.name.trim();
     if (!name) {
-      setError("Training name is required.");
+      setError("Focus Topic name is required.");
       return;
     }
 
@@ -244,7 +244,7 @@ export function EnterpriseTrainingsWorkspace({
           } satisfies CreateOrgTrainingRequest),
         });
         replaceTrainingSummary(created, { select: true });
-        setNotice(`Created training "${created.name}".`);
+        setNotice(`Created Focus Topic "${created.name}".`);
       } else if (selectedTraining) {
         const updated = await adminFetch<OrgTrainingSummary>(`/orgs/${orgId}/trainings/${selectedTraining.id}`, {
           method: "PATCH",
@@ -256,10 +256,10 @@ export function EnterpriseTrainingsWorkspace({
           } satisfies UpdateOrgTrainingRequest),
         });
         replaceTrainingSummary(updated, { select: true });
-        setNotice(`Saved training "${updated.name}".`);
+        setNotice(`Saved Focus Topic "${updated.name}".`);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save training.");
+      setError(caught instanceof Error ? caught.message : "Could not save Focus Topic.");
     } finally {
       setTrainingSaving(false);
     }
@@ -270,12 +270,12 @@ export function EnterpriseTrainingsWorkspace({
       return;
     }
     if (selectedTraining.attachedTrainingPackCount > 0 || selectedTraining.attachedCustomScenarioCount > 0) {
-      setError("Remove or delete the training's packs and custom scenarios before deleting the training.");
+      setError("Remove or delete the Focus Topic's packs and custom scenarios before deleting the Focus Topic.");
       return;
     }
 
     const confirmed = window.confirm(
-      `Delete training "${selectedTraining.name}"?`,
+      `Delete Focus Topic "${selectedTraining.name}"?`,
     );
     if (!confirmed) {
       return;
@@ -290,9 +290,9 @@ export function EnterpriseTrainingsWorkspace({
       });
       setTrainings((prev) => prev.filter((entry) => entry.id !== selectedTraining.id));
       setEditorTargetId(null);
-      setNotice(`Deleted training "${selectedTraining.name}".`);
+      setNotice(`Deleted Focus Topic "${selectedTraining.name}".`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not delete training.");
+      setError(caught instanceof Error ? caught.message : "Could not delete Focus Topic.");
     } finally {
       setDeletingTrainingId(null);
     }
@@ -334,8 +334,8 @@ export function EnterpriseTrainingsWorkspace({
       <div className="card enterprise-section-card">
         <div className="card-header">
           <div>
-            <h3 style={{ marginBottom: 6 }}>Trainings</h3>
-            <p className="small enterprise-note">Select a training to open its detail workspace and attached assets.</p>
+            <h3 style={{ marginBottom: 6 }}>Focus Topics</h3>
+            <p className="small enterprise-note">Select a Focus Topic to open its detail workspace and attached assets.</p>
           </div>
           <div className="card-actions">
             <button
@@ -346,34 +346,34 @@ export function EnterpriseTrainingsWorkspace({
               {loading ? "Refreshing..." : "Refresh Workspace"}
             </button>
             <button type="button" className="primary" onClick={startCreateTraining}>
-              Create Training
+              Create Focus Topic
             </button>
           </div>
         </div>
         <div className="enterprise-search-row">
           <div className="enterprise-search-field">
-            <label>Search Trainings</label>
+            <label>Search Focus Topics</label>
             <input
               type="search"
               value={trainingSearch}
               onChange={(event) => setTrainingSearch(event.target.value)}
-              placeholder="Search by training name"
+              placeholder="Search by Focus Topic name"
             />
           </div>
         </div>
         <p className="small enterprise-note">
-          {generatedAt ? `Workspace refreshed ${formatDateTime(generatedAt)}.` : "Training workspace data is loading."}
+          {generatedAt ? `Workspace refreshed ${formatDateTime(generatedAt)}.` : "Focus Topic workspace data is loading."}
         </p>
         {trainings.length === 0 ? (
           <div className="enterprise-training-empty">
-            <p>No trainings created yet.</p>
+            <p>No Focus Topics created yet.</p>
           </div>
         ) : (
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Training Name</th>
+                  <th>Focus Topic Name</th>
                   <th>Division</th>
                   <th>Created</th>
                   <th>Status</th>
@@ -387,7 +387,7 @@ export function EnterpriseTrainingsWorkspace({
                 {filteredTrainings.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="small">
-                      No trainings match your search.
+                      No Focus Topics match your search.
                     </td>
                   </tr>
                 ) : (
@@ -454,8 +454,8 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card enterprise-section-card">
           <div className="card-header">
             <div>
-              <h3 style={{ marginBottom: 6 }}>Training Details</h3>
-              <p className="small">Select a training above to view its details and attached assets.</p>
+              <h3 style={{ marginBottom: 6 }}>Focus Topic Details</h3>
+              <p className="small">Select a Focus Topic above to view its details and attached assets.</p>
             </div>
           </div>
         </div>
@@ -463,11 +463,11 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card enterprise-section-card">
           <div className="card-header">
             <div>
-              <h3 style={{ marginBottom: 6 }}>Training Details</h3>
+              <h3 style={{ marginBottom: 6 }}>Focus Topic Details</h3>
               <p className="small">
                 {selectedTraining
                   ? `Editing ${selectedTraining.name}.`
-                  : "Create a training, save it, then manage the packs and scenarios attached to it."}
+                  : "Create a Focus Topic, save it, then manage the packs and scenarios attached to it."}
               </p>
             </div>
             <div className="card-actions">
@@ -478,11 +478,11 @@ export function EnterpriseTrainingsWorkspace({
                   disabled={trainingSaving || deletingTrainingId === selectedTraining.id}
                   onClick={() => void deleteTraining()}
                 >
-                  {deletingTrainingId === selectedTraining.id ? "Deleting..." : "Delete Training"}
+                  {deletingTrainingId === selectedTraining.id ? "Deleting..." : "Delete Focus Topic"}
                 </button>
               ) : null}
               <button type="button" className="primary" disabled={trainingSaving} onClick={() => void saveTraining()}>
-                {trainingSaving ? "Saving..." : editorTargetId === NEW_TRAINING_ID ? "Create Training" : "Save Training"}
+                {trainingSaving ? "Saving..." : editorTargetId === NEW_TRAINING_ID ? "Create Focus Topic" : "Save Focus Topic"}
               </button>
             </div>
           </div>
@@ -521,11 +521,11 @@ export function EnterpriseTrainingsWorkspace({
           <div className="enterprise-subsection">
             <div className="enterprise-detail-grid">
               <div className="enterprise-detail-item">
-                <label>Training Name</label>
+                <label>Focus Topic Name</label>
                 <input
                   value={editorState.name}
                   onChange={(event) => setEditorState((prev) => ({ ...prev, name: event.target.value }))}
-                  placeholder="Enter training name"
+                  placeholder="Enter Focus Topic name"
                 />
               </div>
               <div className="enterprise-detail-item">
@@ -566,7 +566,7 @@ export function EnterpriseTrainingsWorkspace({
                 </select>
                 <div className="small" style={{ marginTop: 4 }}>
                   {divisionsEnabled
-                    ? "Assigned divisions restrict visibility to matching users. Unassigned trainings remain general."
+                    ? "Assigned divisions restrict visibility to matching users. Unassigned Focus Topics remain general."
                     : "Division assignments are retained, but live routing is currently disabled for this company."}
                 </div>
               </div>
@@ -583,11 +583,11 @@ export function EnterpriseTrainingsWorkspace({
           </div>
 
           {!selectedTraining ? (
-            <p className="small">Save the training first, then create and manage its packs and custom scenarios below.</p>
+            <p className="small">Save the Focus Topic first, then create and manage its packs and custom scenarios below.</p>
           ) : null}
           {selectedTraining ? (
             <p className="small" style={{ marginTop: 12 }}>
-              Custom scenarios do not accept direct division assignments. They inherit routing from this training.
+              Custom scenarios do not accept direct division assignments. They inherit routing from this Focus Topic.
             </p>
           ) : null}
         </div>

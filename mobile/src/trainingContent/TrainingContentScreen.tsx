@@ -68,7 +68,7 @@ export function TrainingContentScreen(props: TrainingContentScreenProps) {
     try {
       const modules = await fetchMobileModules(props.userId, props.authToken);
       if (!modules.modules.trainingContent.enabled) {
-        handleModuleRemoved("Training Content is no longer enabled.");
+        handleModuleRemoved("Learning Resources are no longer enabled.");
         return;
       }
       const nextLibrary = await fetchTrainingContentLibrary(
@@ -97,7 +97,7 @@ export function TrainingContentScreen(props: TrainingContentScreenProps) {
       }
       const message = trainingContentErrorMessage(
         caught,
-        "Training content could not be loaded."
+        "This Learning Resource could not be loaded."
       );
       if (isTrainingContentModuleRemoval(caught)) {
         handleModuleRemoved(message);

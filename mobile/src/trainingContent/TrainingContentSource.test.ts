@@ -21,10 +21,10 @@ test("Training Content is a first-class entitlement-controlled home module", () 
   assert.match(home, /Review company resources and learning materials\./);
   assert.match(home, /void openTrainingContent\(\)/);
   assert.ok(
-    home.indexOf('accessibilityLabel="Open Training Content"') >
+    home.indexOf('accessibilityLabel="Open Learning Resources"') >
       home.indexOf("activeSegment ? (")
   );
-  assert.doesNotMatch(menu, /Training Content/);
+  assert.doesNotMatch(menu, /Learning Resources/);
   assert.match(app, /screen === "training_content"/);
   assert.match(app, /fetchMobileModules\(user\.id, mobileAuthToken\)/);
 });
@@ -39,7 +39,7 @@ test("library navigation keeps search, category, detail, and empty states inside
   assert.match(screen, /type: "category"/);
   assert.match(screen, /type: "detail"/);
   assert.match(screen, /setQuery/);
-  assert.match(library, /Search training content/);
+  assert.match(library, /Search Learning Resources/);
   assert.match(library, /All Content/);
   assert.match(library, /TRAINING_CONTENT_EMPTY_MESSAGE/);
   assert.match(library, /keyboardShouldPersistTaps="handled"/);
@@ -48,10 +48,37 @@ test("library navigation keeps search, category, detail, and empty states inside
     /keyboardDismissMode=\{Platform\.OS === "ios" \? "interactive" : "none"\}/
   );
   assert.match(category, /onOpenItem/);
+  assert.match(category, /No Learning Resources are available in this category\./);
   assert.doesNotMatch(detail, /RefreshControl|refreshControl|refreshing/);
   assert.match(library, /refreshControl/);
   assert.match(category, /refreshControl/);
   assert.doesNotMatch(`${library}${category}${detail}`, /Mark Complete|assignment details|publication state/i);
+});
+
+test("custom scenario setup uses the locked Focus Topic copy", () => {
+  const app = source("../../App.tsx");
+
+  assert.match(app, /title="Focus Topic"/);
+  assert.match(app, /placeholder="Select Focus Topic"/);
+  assert.match(
+    app,
+    /Custom scenarios are organized by Focus Topic\. Choose a Focus Topic first, then select from its related scenarios\./
+  );
+});
+
+test("legacy Focus Topic migration copy is suppressed by exact description match only", () => {
+  const app = source("../../App.tsx");
+
+  assert.match(
+    app,
+    /const LEGACY_ORG_TRAINING_MIGRATION_DESCRIPTION =\s*"Auto-created to preserve existing enterprise training assets during the training-first workspace migration\.";/
+  );
+  assert.match(app, /const description = \(value \?\? ""\)\.trim\(\);/);
+  assert.match(
+    app,
+    /return description === LEGACY_ORG_TRAINING_MIGRATION_DESCRIPTION \? "" : description;/
+  );
+  assert.match(app, /description: sanitizeTrainingDescription\(training\.description\)/);
 });
 
 test("Training Content viewer Back remains an in-app route transition", () => {

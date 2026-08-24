@@ -24,6 +24,7 @@ const librarySource = readFileSync(
 test("Training Content navigation is conditional and uses dedicated pages", () => {
   assert.equal(adminSource.includes("{trainingContentAvailable ? ("), true);
   assert.equal(adminSource.includes("viewer.orgRole"), false);
+  assert.equal(adminSource.includes("Learning Resources"), true);
   assert.equal(
     existsSync(join(webRoot, "app", "app", "admin", "training-content", "page.tsx")),
     true
@@ -48,8 +49,8 @@ test("Training Content navigation is conditional and uses dedicated pages", () =
 
 test("Training Content editor guards destructive actions, conflicts, and duplicate submits", () => {
   assert.equal(editorSource.includes("beforeunload"), true);
-  assert.equal(editorSource.includes("window.confirm(\"Archive this Training Content?"), true);
-  assert.equal(editorSource.includes("window.confirm(\"Unpublish this Training Content"), true);
+  assert.equal(editorSource.includes("window.confirm(\"Archive this Learning Resource?"), true);
+  assert.equal(editorSource.includes("window.confirm(\"Unpublish this Learning Resource"), true);
   assert.equal(editorSource.includes("window.confirm(\"Replace the current file"), true);
   assert.equal(editorSource.includes("Reload current version"), true);
   assert.equal(editorSource.includes("disabled={saving || uploading}"), true);
@@ -64,7 +65,7 @@ test("Training Content forms separate categories from optional Focus Topics and 
     assert.equal(source.includes("Display order"), false);
     assert.equal(source.includes("beforeunload"), true);
     assert.equal(source.includes("<UnsavedChangesDialog"), true);
-    assert.equal(source.includes("Back to Training Content"), true);
+    assert.equal(source.includes("Back to Learning Resources"), true);
     assert.equal(source.includes("training-content-sticky-actions"), true);
   }
   assert.equal(createSource.includes("required"), true);
@@ -81,6 +82,7 @@ test("Training Content library groups the default view and exposes category-awar
   assert.equal(librarySource.includes("Related Focus Topic"), true);
   assert.equal(librarySource.includes("Manage Categories"), true);
   assert.equal(librarySource.includes("Reorder Content"), true);
+  assert.equal(librarySource.includes("Add Learning Resource"), true);
   assert.equal(librarySource.includes("showCategory"), true);
 });
 

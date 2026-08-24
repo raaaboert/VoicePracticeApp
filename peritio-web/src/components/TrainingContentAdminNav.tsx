@@ -22,7 +22,7 @@ export function TrainingContentAdminNav({
         className={`tab-button${active === "training-content" ? " active" : ""}`}
         href={`/app/admin/training-content${query}`}
       >
-        Training Content
+        Learning Resources
       </Link>
     </nav>
   );

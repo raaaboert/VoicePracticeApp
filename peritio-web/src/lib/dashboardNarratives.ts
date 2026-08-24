@@ -231,20 +231,20 @@ export function buildUserHighlights(users: DashboardUserReportResponse["users"])
 export function buildAggregateTrainingNarrative(training: DashboardTrainingWorkspaceRow | null): DashboardNarrative {
   if (!training) {
     return {
-      summary: "No training is selected yet. Choose one to review recent activity, confidence, and supporting evidence.",
+      summary: "No Focus Topic is selected yet. Choose one to review recent activity, confidence, and supporting evidence.",
       signals: compactSignals([
-        { label: "Activity", value: "No training selected", context: "Choose a training above" },
+        { label: "Activity", value: "No Focus Topic selected", context: "Choose a Focus Topic above" },
       ]),
       priorities: compactPriorities([
-        makePriority("primary", "Select a training", "Pick a training first so the dashboard has a clear reporting scope."),
+        makePriority("primary", "Select a Focus Topic", "Pick a Focus Topic first so the dashboard has a clear reporting scope."),
       ]),
       facts: {
-        subject: "training",
+        subject: "Focus Topic",
         activityLevel: "none",
         evidenceLevel: "none",
-        volumeLabel: "No training selected",
+        volumeLabel: "No Focus Topic selected",
         focusLabel: null,
-        watchLabel: "Choose a training",
+        watchLabel: "Choose a Focus Topic",
       },
     };
   }
@@ -263,7 +263,7 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
 
   const summary =
     totalAttempts === 0
-      ? "This training is not seeing recent practice yet. Until activity appears, the main question is rollout rather than performance."
+      ? "This Focus Topic is not seeing recent practice yet. Until activity appears, the main question is rollout rather than performance."
       : activeLearners <= 1
         ? joinSentences([
             "Practice is active, but still concentrated in one learner.",
@@ -273,7 +273,7 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
           ])
         : totalAttempts >= 8 && activeLearners >= 2
           ? joinSentences([
-              `This training has repeat practice across ${formatCount(activeLearners, "learner")}.`,
+              `This Focus Topic has repeat practice across ${formatCount(activeLearners, "learner")}.`,
               topScenario
                 ? topScenarioShare >= 0.5
                   ? `${topScenario.title} is carrying most of the current practice.`
@@ -285,7 +285,7 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
             ])
           : joinSentences([
             "Practice is visible, but still early.",
-            topScenario ? `${topScenario.title} is the clearest activity center so far.` : "No single scenario is defining the training yet.",
+            topScenario ? `${topScenario.title} is the clearest activity center so far.` : "No single scenario is defining the Focus Topic yet.",
             "The clearest read is coverage, not performance movement.",
           ]);
 
@@ -314,7 +314,7 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
         topScenario ? "Practice is concentrating" : "Practice is still forming",
         topScenario
           ? `${topScenario.title} is the clearest center of gravity${topScenarioShare >= 0.5 ? " and is taking most of the recent volume" : ""}.`
-          : "No single scenario is active enough yet to define how this training is really being used."
+          : "No single scenario is active enough yet to define how this Focus Topic is really being used."
       ),
       makePriority(
         "caution",
@@ -327,7 +327,7 @@ export function buildAggregateTrainingNarrative(training: DashboardTrainingWorks
         "watch",
         "Coverage gap",
         underusedScenarioCount > 0
-          ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} remain quiet, which is the clearest coverage gap in this training.`
+          ? `${underusedScenarioCount} ${pluralize(underusedScenarioCount, "scenario")} remain quiet, which is the clearest coverage gap in this Focus Topic.`
           : lowestScenario
             ? `${lowestScenario} is the weakest scored scenario on current evidence and is the best next place to look.`
             : "The next useful question is whether practice broadens beyond the current active scenarios."
@@ -488,7 +488,7 @@ export function buildAggregateCompanyNarrative(params: {
       summary: "There is no meaningful traction yet. Without recent practice, this is still a rollout view rather than a performance view.",
       signals: compactSignals([
         { label: "Traction", value: "No recent attempts", context: "Last 30 days" },
-        { label: "Breadth", value: "0 active trainings", context: "No training has recent usage" },
+        { label: "Breadth", value: "0 active Focus Topics", context: "No Focus Topic has recent usage" },
       ]),
       priorities: compactPriorities([
         makePriority(
@@ -544,8 +544,8 @@ export function buildAggregateCompanyNarrative(params: {
       },
       {
         label: "Breadth",
-        value: formatCount(activeTrainings.length, "active training"),
-        context: `${formatCount(params.trainings.length, "training")} in scope`,
+        value: formatCount(activeTrainings.length, "active Focus Topic"),
+        context: `${formatCount(params.trainings.length, "Focus Topic")} in scope`,
       },
       {
         label: "Confidence",
@@ -578,7 +578,7 @@ export function buildAggregateCompanyNarrative(params: {
         "watch",
         "Leadership watchpoint",
         underusedActiveTrainings > 0
-          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} are still quiet, which is the clearest rollout gap.`
+          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Focus Topic")} are still quiet, which is the clearest rollout gap.`
           : topScenario
             ? `${topScenario.title} is the strongest live scenario signal; watch whether usage broadens beyond that current center of gravity.`
             : "The next useful question is whether the current activity pattern broadens or stays narrow."
@@ -596,7 +596,7 @@ export function buildAggregateCompanyNarrative(params: {
           ? `${totalAttempts} attempts across ${engagedUsers} ${pluralize(engagedUsers, "user")} with recent practice`
           : `${totalAttempts} attempts`,
       focusLabel: topTraining?.name ?? topScenario?.title ?? null,
-      watchLabel: underusedActiveTrainings > 0 ? `${underusedActiveTrainings} underused active trainings` : null,
+      watchLabel: underusedActiveTrainings > 0 ? `${underusedActiveTrainings} underused active Focus Topics` : null,
     },
   };
 }
@@ -652,12 +652,12 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
       ? topTraining
         ? `This account is active, but usage is still concentrated in ${topTraining.title}.`
         : "This account is active, but usage is still narrow."
-      : "This account has real usage across more than one training area.",
+      : "This account has real usage across more than one Focus Topic.",
     totalScoredAttemptsLast30Days < MIN_CUSTOMER_SCORE_EVIDENCE
       ? "The score read is still early, so the clearest conclusion is about adoption and focus rather than performance movement."
       : buildMovementSummary(customer.scoreDeltaLast30Days),
     underusedActiveTrainings > 0
-      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet, which is the clearest rollout gap.`
+      ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Focus Topic")} remain quiet, which is the clearest rollout gap.`
       : null,
   ]);
 
@@ -683,7 +683,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
       {
         label: "Focus",
         value: topTraining?.title ?? topScenario?.title ?? "No dominant focus yet",
-        context: topTraining ? "Most active training" : topScenario ? "Most active scenario" : "Usage is still taking shape",
+        context: topTraining ? "Most active Focus Topic" : topScenario ? "Most active scenario" : "Usage is still taking shape",
       },
     ]),
     priorities: compactPriorities([
@@ -692,7 +692,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         "Account traction",
         topTraining
           ? `The account is active, and ${topTraining.title} is the clearest center of gravity.`
-          : "The account is active, but no single training area has separated clearly yet."
+          : "The account is active, but no single Focus Topic has separated clearly yet."
       ),
       makePriority(
         "caution",
@@ -705,7 +705,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
         "watch",
         "Account watchpoint",
         underusedActiveTrainings > 0
-          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "training")} remain quiet and deserve rollout attention.`
+          ? `${underusedActiveTrainings} active ${pluralize(underusedActiveTrainings, "Focus Topic")} remain quiet and deserve rollout attention.`
           : insights.coachingInsights.repeatedFocusArea
             ? `${insights.coachingInsights.repeatedFocusArea} is the strongest repeated coaching theme in the current coaching record.`
             : "The next useful question is whether the current activity pattern broadens or stays narrow."
@@ -723,7 +723,7 @@ export function buildCustomerNarrative(payload: DashboardCustomerDetailResponse)
           ? `${customer.simulationsLast30Days} simulations across ${engagedUsers} ${pluralize(engagedUsers, "user")} with recent practice`
           : `${customer.simulationsLast30Days} simulations`,
       focusLabel: topTraining?.title ?? topScenario?.title ?? null,
-      watchLabel: underusedActiveTrainings > 0 ? `${underusedActiveTrainings} underused active trainings` : insights.coachingInsights.repeatedFocusArea,
+      watchLabel: underusedActiveTrainings > 0 ? `${underusedActiveTrainings} underused active Focus Topics` : insights.coachingInsights.repeatedFocusArea,
     },
   };
 }

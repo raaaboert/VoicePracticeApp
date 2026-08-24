@@ -5,7 +5,7 @@ import type {
 } from "@voicepractice/shared";
 
 export const TRAINING_CONTENT_EMPTY_MESSAGE =
-  "No training content is available to you yet.";
+  "No Learning Resources are available to you yet.";
 
 export function canRequestTrainingContentModule(user: UserProfile | null): boolean {
   return Boolean(

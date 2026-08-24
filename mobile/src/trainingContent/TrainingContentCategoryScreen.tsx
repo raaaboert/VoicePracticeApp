@@ -51,7 +51,7 @@ export function TrainingContentCategoryScreen(
               color={props.theme.accent}
             />
             <Text style={styles.emptyText}>
-              No training content is available in this category.
+              No Learning Resources are available in this category.
             </Text>
           </View>
         ) : (

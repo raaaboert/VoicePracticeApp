@@ -461,7 +461,7 @@ export function TrainingContentEditor({
       setMessage(item.publicationState === "draft" ? "Draft saved." : "Changes saved.");
       router.refresh();
     } catch (caught) {
-      handleError(caught, "Could not save Training Content.");
+      handleError(caught, "Could not save Learning Resource.");
     } finally {
       setSaving(false);
     }
@@ -470,13 +470,13 @@ export function TrainingContentEditor({
   const transition = async (action: "publish" | "unpublish" | "archive") => {
     if (
       action === "unpublish"
-      && !window.confirm("Unpublish this Training Content and return it to Draft?")
+      && !window.confirm("Unpublish this Learning Resource and return it to Draft?")
     ) {
       return;
     }
     if (
       action === "archive"
-      && !window.confirm("Archive this Training Content? It will remain available in archived records.")
+      && !window.confirm("Archive this Learning Resource? It will remain available in archived records.")
     ) {
       return;
     }
@@ -500,14 +500,14 @@ export function TrainingContentEditor({
       acceptItem(response.item);
       setMessage(
         action === "publish"
-          ? "Training Content published."
+          ? "Learning Resource published."
           : action === "unpublish"
-            ? "Training Content returned to Draft."
-            : "Training Content archived."
+            ? "Learning Resource returned to Draft."
+            : "Learning Resource archived."
       );
       router.refresh();
     } catch (caught) {
-      handleError(caught, `Could not ${action} Training Content.`);
+      handleError(caught, `Could not ${action} Learning Resource.`);
     } finally {
       setSaving(false);
     }
@@ -719,7 +719,7 @@ export function TrainingContentEditor({
         disabled={saving || uploading}
       >
         <ArrowLeft size={17} aria-hidden="true" />
-        Back to Training Content
+        Back to Learning Resources
       </button>
       {message ? <div className="notice success">{message}</div> : null}
       {error ? (

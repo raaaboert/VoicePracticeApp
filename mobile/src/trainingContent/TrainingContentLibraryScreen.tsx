@@ -47,17 +47,17 @@ export function TrainingContentLibraryScreen(
   return (
     <View style={styles.fill}>
       <TrainingContentHeader
-        title="Training Content"
+        title="Learning Resources"
         onBack={props.onBack}
         theme={props.theme}
       />
       <View style={styles.searchShell}>
         <MaterialCommunityIcons name="magnify" size={21} color={props.theme.muted} />
         <TextInput
-          accessibilityLabel="Search training content"
+          accessibilityLabel="Search Learning Resources"
           value={props.query}
           onChangeText={props.onChangeQuery}
-          placeholder="Search training content"
+          placeholder="Search Learning Resources"
           placeholderTextColor={props.theme.muted}
           autoCorrect={false}
           returnKeyType="search"
@@ -90,7 +90,7 @@ export function TrainingContentLibraryScreen(
         {props.loading ? (
           <View style={styles.state}>
             <ActivityIndicator color={props.theme.accent} />
-            <Text style={styles.stateText}>Loading training content...</Text>
+            <Text style={styles.stateText}>Loading Learning Resources...</Text>
           </View>
         ) : props.error ? (
           <View style={styles.state}>
@@ -108,7 +108,7 @@ export function TrainingContentLibraryScreen(
           <>
             <Text style={styles.sectionTitle}>Search Results</Text>
             {results.length === 0 ? (
-              <Text style={styles.emptyText}>No matching training content.</Text>
+              <Text style={styles.emptyText}>No matching Learning Resources.</Text>
             ) : (
               <View style={styles.cardList}>
                 {results.map((item) => (

@@ -36,7 +36,7 @@ export default async function ReorderTrainingContentPage({
   return (
     <>
       <PageHeader
-        eyebrow="Training Content"
+        eyebrow="Learning Resources"
         title="Reorder Content"
         description={`Set the library order for ${payload.org.name}.`}
       />

@@ -362,6 +362,8 @@ type ScenarioTrainingOption = {
 const AUTO_ERROR_REPORT_THROTTLE_MS = 10 * 60 * 1000;
 const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 const IOS_VOICE_SAMPLE_TIMEOUT_MS = 30_000;
+const LEGACY_ORG_TRAINING_MIGRATION_DESCRIPTION =
+  "Auto-created to preserve existing enterprise training assets during the training-first workspace migration.";
 const APP_ICON_ART = require("./assets/PeritioLogo_061526.png");
 const APP_STARTUP_ART = require("./peritio-source-splash.png");
 const APP_SURFACE_COLORS = {
@@ -386,6 +388,11 @@ function getErrorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function sanitizeTrainingDescription(value: string | null | undefined): string {
+  const description = (value ?? "").trim();
+  return description === LEGACY_ORG_TRAINING_MIGRATION_DESCRIPTION ? "" : description;
 }
 
 function shouldAutoReportErrorMessage(message: string): boolean {
@@ -1328,7 +1335,7 @@ export default function App() {
         return {
           id: training.id,
           label: training.name,
-          description: training.description ?? "",
+          description: sanitizeTrainingDescription(training.description),
           attachedScenarioCount: attachedScenarios.length,
           industries,
         };
@@ -3598,7 +3605,7 @@ export default function App() {
       return;
     }
     if (scenarioCatalogTab === "custom" && !activeTraining) {
-      setSetupError("Select a training before starting a custom scenario.");
+      setSetupError("Select a Focus Topic before starting a custom scenario.");
       return;
     }
 
@@ -4207,7 +4214,7 @@ export default function App() {
         setTrainingContentNotice(
           trainingContentErrorMessage(
             caught,
-            "Training Content availability could not be checked."
+            "Learning Resource availability could not be checked."
           )
         );
       });
@@ -4243,7 +4250,7 @@ export default function App() {
       const response = await fetchMobileModules(user.id, mobileAuthToken);
       if (!response.modules.trainingContent.enabled) {
         setTrainingContentEnabled(false);
-        setTrainingContentNotice("Training Content is no longer enabled.");
+        setTrainingContentNotice("Learning Resources are no longer enabled.");
         return;
       }
       setTrainingContentEnabled(true);
@@ -4255,7 +4262,7 @@ export default function App() {
       setTrainingContentNotice(
         trainingContentErrorMessage(
           caught,
-          "Training Content could not be opened."
+          "Learning Resources could not be opened."
         )
       );
     } finally {
@@ -4515,7 +4522,7 @@ export default function App() {
         {trainingContentEnabled ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Open Training Content"
+            accessibilityLabel="Open Learning Resources"
             style={[
               styles.trainingModuleTile,
               isTrainingContentOpening ? styles.disabled : null,
@@ -4533,7 +4540,7 @@ export default function App() {
               />
             </View>
             <View style={styles.trainingModuleCopy}>
-              <Text style={styles.trainingModuleTitle}>Training Content</Text>
+              <Text style={styles.trainingModuleTitle}>Learning Resources</Text>
               <Text style={styles.trainingModuleBody}>
                 Review company resources and learning materials.
               </Text>
@@ -4981,7 +4988,7 @@ export default function App() {
           {scenarioCatalogTab === "custom" ? (
             <Text style={styles.hintText}>
               {hasCustomScenarioOptions
-                ? "Custom scenarios are now organized by training. Pick a training first, then choose from the scenarios attached to it."
+                ? "Custom scenarios are organized by Focus Topic. Choose a Focus Topic first, then select from its related scenarios."
                 : "No active custom scenarios are available for this account yet."}
             </Text>
           ) : (
@@ -4992,13 +4999,13 @@ export default function App() {
 
           {scenarioCatalogTab === "custom" ? (
             <>
-              <Text style={styles.hintText}>Training</Text>
+              <Text style={styles.hintText}>Focus Topic</Text>
               <SelectionDropdown
-                title="Training"
+                title="Focus Topic"
                 value={selectedTrainingId}
                 options={trainingSelectOptions}
                 onChange={setSelectedTrainingId}
-                placeholder="Select training"
+                placeholder="Select Focus Topic"
                 styles={styles}
               />
               {activeTraining ? (
@@ -5006,7 +5013,7 @@ export default function App() {
                   {activeTraining.description
                     ? `${activeTraining.description} `
                     : ""}
-                  Attached scenarios: {activeTraining.attachedScenarioCount}.
+                  Related scenarios: {activeTraining.attachedScenarioCount}.
                 </Text>
               ) : null}
             </>

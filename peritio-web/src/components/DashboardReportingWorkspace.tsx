@@ -135,8 +135,8 @@ export function DashboardReportingWorkspace({
           <h1>Performance overview</h1>
           <p className="page-description">
             {isSuperUser
-              ? "See the company, training, and learner signals that matter most across the customer accounts in scope."
-              : "See the company, training, and learner signals that matter most in the current reporting scope."}
+              ? "See the company, Focus Topic, and learner signals that matter most across the customer accounts in scope."
+              : "See the company, Focus Topic, and learner signals that matter most in the current reporting scope."}
           </p>
         </div>
         {isDemoData ? (
@@ -196,7 +196,7 @@ export function DashboardReportingWorkspace({
           className={`tab-button${activeTab === "training" ? " active" : ""}`}
           onClick={() => setActiveTab("training")}
         >
-          Training
+          Focus Topic
         </button>
         <button
           type="button"
@@ -213,7 +213,7 @@ export function DashboardReportingWorkspace({
             <div className="dashboard-selector-grid">
               <div className="dashboard-selector-field">
                 <label className="field-label" htmlFor="training-selector">
-                  Training
+                  Focus Topic
                 </label>
                 <select
                   id="training-selector"
@@ -222,7 +222,7 @@ export function DashboardReportingWorkspace({
                   onChange={(event) => setSelectedTrainingId(event.target.value || null)}
                   disabled={trainings.length === 0}
                 >
-                  {trainings.length === 0 ? <option value="">No trainings available</option> : null}
+                  {trainings.length === 0 ? <option value="">No Focus Topics available</option> : null}
                   {trainings.map((training) => (
                     <option key={training.id} value={training.id}>
                       {getTrainingOptionLabel(training, multipleOrgsInScope)}
@@ -245,11 +245,11 @@ export function DashboardReportingWorkspace({
                 </div>
               ) : (
                 <div className="empty-state-panel">
-                  <h3>No trainings available</h3>
+                  <h3>No Focus Topics available</h3>
                   <p>
                     {isSuperUser
-                      ? "No trainings are available across the customer accounts currently in scope yet."
-                      : "No trainings are available for your current reporting scope yet."}
+                      ? "No Focus Topics are available across the customer accounts currently in scope yet."
+                      : "No Focus Topics are available for your current reporting scope yet."}
                   </p>
                 </div>
               )}
@@ -260,16 +260,16 @@ export function DashboardReportingWorkspace({
             <>
               <DashboardNarrativePanel
                 eyebrow="Story"
-                title="Training summary"
+                title="Focus Topic summary"
                 narrative={trainingNarrative}
               />
 
-              <DashboardSupportSignals title="Training support signals" signals={trainingNarrative.signals} />
+              <DashboardSupportSignals title="Focus Topic support signals" signals={trainingNarrative.signals} />
 
               <DashboardWhatMattersSection items={trainingNarrative.priorities} />
 
               <DashboardProofSection
-                title="Training detail"
+                title="Focus Topic detail"
                 description="Open the user and scenario tables for exact usage, scoring, and latest activity."
                 preview="User and scenario tables"
               >
@@ -316,7 +316,7 @@ export function DashboardReportingWorkspace({
                     ) : (
                       <div className="empty-state-panel">
                         <h3>No user activity yet</h3>
-                        <p>This training does not have recent learner activity to report yet.</p>
+                        <p>This Focus Topic does not have recent learner activity to report yet.</p>
                       </div>
                     )}
                   </div>
@@ -356,7 +356,7 @@ export function DashboardReportingWorkspace({
                     ) : (
                       <div className="empty-state-panel">
                         <h3>No scenario activity yet</h3>
-                        <p>This training has not produced scenario-level reporting in the current window yet.</p>
+                        <p>This Focus Topic has not produced scenario-level reporting in the current window yet.</p>
                       </div>
                     )}
                   </div>
@@ -393,7 +393,7 @@ export function DashboardReportingWorkspace({
                           <th>User</th>
                           <th>Attempts</th>
                           <th>Average score</th>
-                          <th>Trainings practiced</th>
+                          <th>Focus Topics practiced</th>
                           <th>Latest activity</th>
                         </tr>
                       </thead>
@@ -451,12 +451,12 @@ export function DashboardReportingWorkspace({
 
           <DashboardProofSection
             title="Company detail"
-            description="Open the training table for usage, breadth, score, and latest-activity detail."
-            preview="Training activity table"
+            description="Open the Focus Topic table for usage, breadth, score, and latest-activity detail."
+            preview="Focus Topic activity table"
           >
             <div className="dashboard-proof-stack">
               <div className="dashboard-proof-block">
-                <h3>Training activity</h3>
+                <h3>Focus Topic activity</h3>
                 <p>Attempt totals reflect recent usage. Average score reflects conclusive scored attempts only.</p>
 
                 {topTrainings.length > 0 ? (
@@ -464,7 +464,7 @@ export function DashboardReportingWorkspace({
                     <table className="data-table dashboard-table">
                       <thead>
                         <tr>
-                          <th>Training</th>
+                          <th>Focus Topic</th>
                           <th>Company</th>
                           <th>Attempts</th>
                           <th>Active learners</th>
@@ -491,11 +491,11 @@ export function DashboardReportingWorkspace({
                   </div>
                 ) : (
                   <div className="empty-state-panel">
-                    <h3>No training activity yet</h3>
+                    <h3>No Focus Topic activity yet</h3>
                     <p>
                       {isSuperUser
-                        ? "Training-level aggregate reporting will appear here as activity is recorded across customer accounts in scope."
-                        : "Training-level company reporting will appear here as activity is recorded."}
+                        ? "Focus Topic-level aggregate reporting will appear here as activity is recorded across customer accounts in scope."
+                        : "Focus Topic-level company reporting will appear here as activity is recorded."}
                     </p>
                   </div>
                 )}

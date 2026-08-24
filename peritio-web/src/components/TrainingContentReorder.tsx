@@ -162,9 +162,9 @@ export function TrainingContentReorder({
       setSavedGroups(cloneGroups(next));
       setSavedOrderKey(orderKey(next));
       setOrderRevision(response.orderRevision);
-      setMessage("Training Content order saved.");
+      setMessage("Learning Resource order saved.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save Training Content order.");
+      setError(caught instanceof Error ? caught.message : "Could not save Learning Resource order.");
     } finally {
       setSaving(false);
     }
@@ -179,7 +179,7 @@ export function TrainingContentReorder({
         disabled={saving}
       >
         <ArrowLeft size={17} aria-hidden="true" />
-        Back to Training Content
+        Back to Learning Resources
       </button>
 
       {message ? <div className="notice success">{message}</div> : null}

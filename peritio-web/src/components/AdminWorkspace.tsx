@@ -309,7 +309,7 @@ export function AdminWorkspace({
             className="tab-button"
             href={`/app/admin/training-content${encodeOrgQuery(orgId)}`}
           >
-            Training Content
+            Learning Resources
           </Link>
         ) : null}
       </div>

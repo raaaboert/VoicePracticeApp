@@ -773,9 +773,9 @@ export default function EnterpriseOrgPage() {
         orgId: updated.orgId,
         modules: updated.modules,
       });
-      setSuccessMessage(`Training Content ${enabled ? "enabled" : "disabled"}.`);
+      setSuccessMessage(`Learning Resources ${enabled ? "enabled" : "disabled"}.`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update Training Content.");
+      setError(caught instanceof Error ? caught.message : "Could not update Learning Resources.");
     } finally {
       setSavingTrainingContentModule(false);
     }
@@ -893,7 +893,7 @@ export default function EnterpriseOrgPage() {
             className={`tab-button ${activeTab === "trainings" ? "active" : ""}`}
             onClick={() => setActiveTab("trainings")}
           >
-            Trainings
+            Focus Topics
           </button>
           <button
             id="enterprise-tab-users"

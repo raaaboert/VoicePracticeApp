@@ -26,6 +26,14 @@ const limits: TrainingContentFileLimitsBytes = {
 test("Training Content file selection follows the effective API limits and allowlist", () => {
   assert.equal(
     validateTrainingContentFileSelection({
+      contentType: "unsupported" as never,
+      file: { name: "guide.pdf", type: "application/pdf", size: 100 },
+      limits,
+    }),
+    "This Learning Resource type does not accept a file."
+  );
+  assert.equal(
+    validateTrainingContentFileSelection({
       contentType: "pdf",
       file: { name: "guide.pdf", type: "application/pdf", size: limits.pdf },
       limits,

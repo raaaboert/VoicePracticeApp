@@ -4,6 +4,7 @@ import test from "node:test";
 import type { MobileTrainingContentLibraryResponse } from "@voicepractice/shared";
 
 import {
+  TRAINING_CONTENT_EMPTY_MESSAGE,
   canRequestTrainingContentModule,
   isTrainingContentItemRemoval,
   isTrainingContentModuleRemoval,
@@ -43,6 +44,10 @@ test("Training Content search stays within the authorized library fields", () =>
   assert.deepEqual(searchTrainingContent(library.items, "product").map((item) => item.id), ["catalog"]);
   assert.deepEqual(searchTrainingContent(library.items, "customer care").map((item) => item.id), ["catalog"]);
   assert.deepEqual(searchTrainingContent(library.items, "  ").map((item) => item.id), ["welcome", "catalog"]);
+});
+
+test("Learning Resources empty state uses the locked customer-facing terminology", () => {
+  assert.equal(TRAINING_CONTENT_EMPTY_MESSAGE, "No Learning Resources are available to you yet.");
 });
 
 test("category selection preserves server category and item order", () => {

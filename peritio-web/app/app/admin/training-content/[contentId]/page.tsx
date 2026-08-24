@@ -52,7 +52,7 @@ export default async function TrainingContentDetailPage({
       <PageHeader
         eyebrow={`${trainingContentTypeLabel(detail.item.contentType)} | Version ${detail.item.contentVersion}`}
         title={detail.item.title}
-        description={detail.item.description || `Training Content for ${detail.org.name}.`}
+        description={detail.item.description || `Learning Resource for ${detail.org.name}.`}
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />
       <TrainingContentEditor

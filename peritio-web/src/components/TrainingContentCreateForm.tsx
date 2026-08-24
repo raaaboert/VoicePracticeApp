@@ -96,7 +96,7 @@ export function TrainingContentCreateForm({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!contentType) {
-      setError("Select a Training Content type.");
+      setError("Select a Learning Resource type.");
       return;
     }
     if (!categoryId) {
@@ -132,7 +132,7 @@ export function TrainingContentCreateForm({
       );
       router.refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not create Training Content.");
+      setError(caught instanceof Error ? caught.message : "Could not create Learning Resource.");
     } finally {
       setSaving(false);
     }
@@ -147,7 +147,7 @@ export function TrainingContentCreateForm({
         disabled={saving}
       >
         <ArrowLeft size={17} aria-hidden="true" />
-        Back to Training Content
+        Back to Learning Resources
       </button>
       <section className="training-content-band">
         <div className="section-header">

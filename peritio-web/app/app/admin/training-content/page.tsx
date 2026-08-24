@@ -190,7 +190,7 @@ export default async function TrainingContentPage({
     <>
       <PageHeader
         eyebrow="Admin"
-        title="Training Content"
+        title="Learning Resources"
         description={`Manage learning resources for ${payload.org.name}.`}
         actions={
           <div className="page-actions training-content-page-actions">
@@ -213,7 +213,7 @@ export default async function TrainingContentPage({
               href={`/app/admin/training-content/new${trainingContentOrgQuery(orgId)}`}
             >
               <FilePlus2 size={18} aria-hidden="true" />
-              Add Training Content
+              Add Learning Resource
             </Link>
           </div>
         }
@@ -307,7 +307,7 @@ export default async function TrainingContentPage({
         </div>
         {payload.items.length === 0 ? (
           <div className="empty-state">
-            <h3>No Training Content found</h3>
+            <h3>No Learning Resources found</h3>
             <p>Adjust the current filters or add a new item.</p>
           </div>
         ) : grouped ? (
@@ -335,7 +335,7 @@ export default async function TrainingContentPage({
         )}
 
         {payload.totalPages > 1 ? (
-          <nav className="training-content-pagination" aria-label="Training Content pages">
+          <nav className="training-content-pagination" aria-label="Learning Resources pages">
             {payload.page > 1 ? (
               <Link className="icon-text-button" href={pageHref(queryState, payload.page - 1)}>
                 <ArrowLeft size={17} aria-hidden="true" />

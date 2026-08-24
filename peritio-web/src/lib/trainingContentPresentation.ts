@@ -128,7 +128,7 @@ export function validateTrainingContentFileSelection(params: {
 }): string | null {
   const policy = getTrainingContentFilePolicy(params.contentType);
   if (!policy) {
-    return "This Training Content type does not accept a file.";
+    return "This Learning Resource type does not accept a file.";
   }
   const extension = params.file.name.split(".").pop()?.trim().toLowerCase() ?? "";
   if (!policy.extensions.includes(extension)) {

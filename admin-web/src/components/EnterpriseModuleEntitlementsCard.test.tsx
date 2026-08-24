@@ -19,8 +19,9 @@ test("Training Content account module card renders server state as an accessible
       onTrainingContentChange={() => {}}
     />
   );
-  assert.match(enabled, />Training Content</);
+  assert.match(enabled, />Learning Resources</);
   assert.match(enabled, /role="switch"/);
+  assert.match(enabled, /aria-label="Enable Learning Resources"/);
   assert.match(enabled, /aria-checked="true"/);
   assert.match(enabled, /checked=""/);
   assert.match(enabled, />Enabled</);

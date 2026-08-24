@@ -570,7 +570,7 @@ export function EnterpriseTrainingPacksCard({
                     {loading
                       ? "Loading..."
                       : trainingScope
-                        ? "No training packs are attached to this training yet."
+                        ? "No training packs are attached to this Focus Topic yet."
                         : "No training packs found for this account."}
                   </td>
                 </tr>

@@ -1467,7 +1467,7 @@ export function EnterpriseCustomScenariosCard({
                       {loading
                         ? "Loading..."
                         : trainingScope
-                          ? "No custom scenarios are attached to this training yet."
+                          ? "No custom scenarios are attached to this Focus Topic yet."
                           : "No custom scenarios found for this account."}
                     </td>
                   </tr>

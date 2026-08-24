@@ -41,8 +41,8 @@ export default async function NewTrainingContentPage({
   return (
     <>
       <PageHeader
-        eyebrow="Training Content"
-        title="New Training Content"
+        eyebrow="Learning Resources"
+        title="New Learning Resource"
         description={`Create a draft for ${topics.org.name}.`}
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />

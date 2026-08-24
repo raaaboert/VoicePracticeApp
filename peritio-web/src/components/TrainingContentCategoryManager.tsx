@@ -271,7 +271,7 @@ export function TrainingContentCategoryManager({
         disabled={saving}
       >
         <ArrowLeft size={17} aria-hidden="true" />
-        Back to Training Content
+        Back to Learning Resources
       </button>
 
       {message ? <div className="notice success">{message}</div> : null}

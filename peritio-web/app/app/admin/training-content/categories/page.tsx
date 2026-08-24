@@ -36,9 +36,9 @@ export default async function TrainingContentCategoriesPage({
   return (
     <>
       <PageHeader
-        eyebrow="Training Content"
+        eyebrow="Learning Resources"
         title="Manage Categories"
-        description={`Organize the Training Content library for ${payload.org.name}.`}
+        description={`Organize the Learning Resources library for ${payload.org.name}.`}
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />
       <TrainingContentCategoryManager
