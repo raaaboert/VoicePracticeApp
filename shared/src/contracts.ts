@@ -464,6 +464,14 @@ export interface DashboardTrainingContentScenarioOption {
   id: string;
   title: string;
   source: "standard" | "custom";
+  role: {
+    id: string;
+    label: string;
+  } | null;
+  focusTopics: Array<{
+    id: string;
+    label: string;
+  }>;
 }
 
 export interface DashboardTrainingContentScenarioOptionsResponse {

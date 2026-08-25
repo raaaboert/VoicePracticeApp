@@ -2092,6 +2092,23 @@ html[data-theme="light"] .progress-track {
   padding-left: 2.25rem;
 }
 
+.scenario-selector-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.scenario-selector-filter {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.scenario-selector-filter .text-input {
+  width: 100%;
+}
+
 .scenario-option-list {
   display: grid;
   gap: 0.45rem;

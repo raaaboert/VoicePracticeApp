@@ -7,7 +7,10 @@ import type { DashboardTrainingContentScenarioOption } from "@voicepractice/shar
 import {
   addTrainingContentScenarioSelection,
   filterTrainingContentScenarioOptions,
+  listTrainingContentScenarioFocusTopicFilters,
+  listTrainingContentScenarioRoleFilters,
   removeTrainingContentScenarioSelection,
+  type TrainingContentScenarioSourceFilter,
   type TrainingContentScenarioSelectionItem,
 } from "@/src/lib/trainingContentScenarioSelection";
 
@@ -23,13 +26,32 @@ export function TrainingContentScenarioSelector({
   onChange: (selected: TrainingContentScenarioSelectionItem[]) => void;
 }) {
   const searchId = useId();
+  const roleFilterId = useId();
+  const sourceFilterId = useId();
+  const focusTopicFilterId = useId();
   const descriptionId = useId();
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
-  const filteredOptions = useMemo(
-    () => filterTrainingContentScenarioOptions(options, selected, query),
-    [options, query, selected]
+  const [roleId, setRoleId] = useState("");
+  const [source, setSource] = useState<TrainingContentScenarioSourceFilter>("all");
+  const [focusTopicId, setFocusTopicId] = useState("");
+  const roleOptions = useMemo(
+    () => listTrainingContentScenarioRoleFilters(options),
+    [options]
   );
+  const focusTopicOptions = useMemo(
+    () => listTrainingContentScenarioFocusTopicFilters(options),
+    [options]
+  );
+  const filteredOptions = useMemo(
+    () => filterTrainingContentScenarioOptions(options, selected, query, {
+      roleId,
+      source,
+      focusTopicId,
+    }),
+    [focusTopicId, options, query, roleId, selected, source]
+  );
+  const filtersActive = Boolean(query.trim() || roleId || source !== "all");
 
   const returnFocusToSearch = () => searchInput.current?.focus();
 
@@ -113,10 +135,64 @@ export function TrainingContentScenarioSelector({
           value={query}
           disabled={disabled}
           aria-describedby={descriptionId}
-          placeholder="Search by scenario title or source"
+          placeholder="Search by scenario, source, role, or Focus Topic"
           onChange={(event) => setQuery(event.target.value)}
         />
       </div>
+
+      <div className="scenario-selector-filters">
+        <label className="scenario-selector-filter" htmlFor={roleFilterId}>
+          <span className="field-label">Role</span>
+          <select
+            id={roleFilterId}
+            className="text-input"
+            value={roleId}
+            onChange={(event) => setRoleId(event.target.value)}
+          >
+            <option value="">All Roles</option>
+            {roleOptions.map((role) => (
+              <option key={role.id} value={role.id}>{role.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="scenario-selector-filter" htmlFor={sourceFilterId}>
+          <span className="field-label">Source</span>
+          <select
+            id={sourceFilterId}
+            className="text-input"
+            value={source}
+            onChange={(event) => {
+              const nextSource = event.target.value as TrainingContentScenarioSourceFilter;
+              setSource(nextSource);
+              if (nextSource !== "custom") {
+                setFocusTopicId("");
+              }
+            }}
+          >
+            <option value="all">All</option>
+            <option value="standard">Standard</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        {source === "custom" ? (
+          <label className="scenario-selector-filter" htmlFor={focusTopicFilterId}>
+            <span className="field-label">Focus Topic</span>
+            <select
+              id={focusTopicFilterId}
+              className="text-input"
+              value={focusTopicId}
+              onChange={(event) => setFocusTopicId(event.target.value)}
+            >
+              <option value="">All Focus Topics</option>
+              {focusTopicOptions.map((focusTopic) => (
+                <option key={focusTopic.id} value={focusTopic.id}>{focusTopic.label}</option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+      </div>
+
+      <strong>Available scenarios ({filteredOptions.length})</strong>
 
       <div className="scenario-option-list" aria-label="Available scenarios">
         {filteredOptions.map((option) => (
@@ -133,13 +209,16 @@ export function TrainingContentScenarioSelector({
             />
             <span>
               <strong>{option.title}</strong>
-              <small>{option.source === "custom" ? "Custom" : "Standard"}</small>
+              <small>
+                {option.source === "custom" ? "Custom" : "Standard"}
+                {option.role ? ` · ${option.role.label}` : ""}
+              </small>
             </span>
           </label>
         ))}
         {filteredOptions.length === 0 ? (
           <p className="muted-copy scenario-option-empty">
-            {query.trim()
+            {filtersActive
               ? "No matching available scenarios."
               : options.length === 0
                 ? "No scenarios are currently available."

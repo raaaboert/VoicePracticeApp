@@ -22,6 +22,7 @@ import {
   type AppConfig,
   type EnterpriseOrg,
   type OrgTrainingRecord,
+  type OrgTrainingScenarioAttachmentRecord,
   type ReorderDashboardTrainingContentCategoriesRequest,
   type ReorderDashboardTrainingContentRequest,
   type TrainingContentAssignmentType,
@@ -75,6 +76,7 @@ const LIST_SORT_SET = new Set<string>(TRAINING_CONTENT_LIST_SORTS);
 export interface TrainingContentReferenceData {
   users: readonly UserProfile[];
   focusTopics: readonly OrgTrainingRecord[];
+  focusTopicScenarioAttachments?: readonly OrgTrainingScenarioAttachmentRecord[];
   scenarioConfig: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
   scenarioOrg: Pick<EnterpriseOrg, "id" | "activeIndustries" | "customScenarios">;
 }
@@ -643,14 +645,57 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     references: TrainingContentReferenceData;
   }): Promise<DashboardTrainingContentScenarioOption[]> {
     await this.authorize(params.context);
-    return listValidTrainingContentScenarioLinkTargets({
+    const targets = listValidTrainingContentScenarioLinkTargets({
       config: params.references.scenarioConfig,
       org: params.references.scenarioOrg,
-    }).map((scenario) => ({
-      id: scenario.scenarioId,
-      title: scenario.title,
-      source: scenario.source,
-    }));
+    });
+    const roleLabelsById = new Map(
+      params.references.scenarioConfig.segments
+        .map((segment) => [segment.id.trim(), segment.label.trim()] as const)
+        .filter(([id, label]) => id && label)
+    );
+    const activeFocusTopicsById = new Map(
+      params.references.focusTopics
+        .filter((topic) => topic.orgId === params.context.orgId && topic.status === "active")
+        .map((topic) => [topic.id, topic] as const)
+    );
+    const focusTopicsByCustomScenarioId = new Map<
+      string,
+      Map<string, { id: string; label: string }>
+    >();
+    for (const attachment of params.references.focusTopicScenarioAttachments ?? []) {
+      if (attachment.orgId !== params.context.orgId) {
+        continue;
+      }
+      const focusTopic = activeFocusTopicsById.get(attachment.trainingId);
+      if (!focusTopic) {
+        continue;
+      }
+      const scenarioId = attachment.scenarioId.trim();
+      const focusTopicLabel = focusTopic.name.trim();
+      if (!scenarioId || !focusTopicLabel) {
+        continue;
+      }
+      const entries = focusTopicsByCustomScenarioId.get(scenarioId) ?? new Map();
+      entries.set(focusTopic.id, { id: focusTopic.id, label: focusTopicLabel });
+      focusTopicsByCustomScenarioId.set(scenarioId, entries);
+    }
+    return targets.map((scenario) => {
+      const roleId = scenario.segmentId.trim();
+      const roleLabel = roleLabelsById.get(roleId) ?? null;
+      const focusTopics = scenario.source === "custom"
+        ? [...(focusTopicsByCustomScenarioId.get(scenario.scenarioId)?.values() ?? [])]
+          .sort((left, right) => left.label.localeCompare(right.label, undefined, { sensitivity: "base" })
+            || left.id.localeCompare(right.id))
+        : [];
+      return {
+        id: scenario.scenarioId,
+        title: scenario.title,
+        source: scenario.source,
+        role: roleId && roleLabel ? { id: roleId, label: roleLabel } : null,
+        focusTopics,
+      };
+    });
   }
 
   async listCategories(params: {

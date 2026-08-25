@@ -954,15 +954,55 @@ test("management responses expose an active video replacement for list and edito
   assert.equal(loaded.latestVideoUploadAsset?.processingAttemptCount, 0);
 });
 
-test("scenario options reuse Phase A visibility for standard and custom scenarios", async () => {
+test("scenario options expose role metadata and only active same-org custom Focus Topics", async () => {
   const { service } = harness();
-  const options = await service.listScenarioOptions({ context, references });
+  const scenarioReferences: TrainingContentReferenceData = {
+    ...references,
+    focusTopics: [
+      topic("topic_1", { name: "Prospecting" }),
+      topic("topic_2", { name: "Discovery" }),
+      topic("draft_topic", { name: "Draft topic", status: "draft" }),
+      topic("archived_topic", { status: "archived" }),
+      topic("other_topic", { orgId: "org_2" }),
+    ],
+    focusTopicScenarioAttachments: [
+      { id: "attachment_1", orgId: "org_1", trainingId: "topic_1", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+      { id: "attachment_2", orgId: "org_1", trainingId: "topic_2", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+      { id: "attachment_duplicate", orgId: "org_1", trainingId: "topic_1", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+      { id: "attachment_draft", orgId: "org_1", trainingId: "draft_topic", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+      { id: "attachment_archived", orgId: "org_1", trainingId: "archived_topic", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+      { id: "attachment_foreign_topic", orgId: "org_1", trainingId: "other_topic", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+      { id: "attachment_foreign_org", orgId: "org_2", trainingId: "topic_1", scenarioId: "custom_a", createdAt: NOW, updatedAt: NOW },
+    ],
+  };
+  const options = await service.listScenarioOptions({ context, references: scenarioReferences });
   assert.deepEqual(
-    options.map((option) => [option.id, option.source]),
+    options,
     [
-      ["custom_a", "custom"],
-      ["standard_a", "standard"],
-      ["standard_b", "standard"],
+      {
+        id: "custom_a",
+        title: "Custom A",
+        source: "custom",
+        role: { id: "sales_role", label: "Sales" },
+        focusTopics: [
+          { id: "topic_2", label: "Discovery" },
+          { id: "topic_1", label: "Prospecting" },
+        ],
+      },
+      {
+        id: "standard_a",
+        title: "Standard A",
+        source: "standard",
+        role: { id: "sales_role", label: "Sales" },
+        focusTopics: [],
+      },
+      {
+        id: "standard_b",
+        title: "Standard B",
+        source: "standard",
+        role: { id: "sales_role", label: "Sales" },
+        focusTopics: [],
+      },
     ]
   );
 });

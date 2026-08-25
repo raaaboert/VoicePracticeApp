@@ -10,6 +10,19 @@ export interface TrainingContentScenarioSelectionItem {
   source: DashboardTrainingContentScenarioOption["source"] | null;
 }
 
+export type TrainingContentScenarioSourceFilter = "all" | "standard" | "custom";
+
+export interface TrainingContentScenarioOptionFilters {
+  roleId?: string;
+  source?: TrainingContentScenarioSourceFilter;
+  focusTopicId?: string;
+}
+
+export interface TrainingContentScenarioFilterOption {
+  id: string;
+  label: string;
+}
+
 export function createTrainingContentScenarioSelection(
   relatedScenarios: readonly DashboardTrainingContentRelatedScenario[],
   options: readonly DashboardTrainingContentScenarioOption[]
@@ -37,18 +50,61 @@ export function createTrainingContentScenarioSelection(
 export function filterTrainingContentScenarioOptions(
   options: readonly DashboardTrainingContentScenarioOption[],
   selected: readonly TrainingContentScenarioSelectionItem[],
-  query: string
+  query: string,
+  filters: TrainingContentScenarioOptionFilters = {}
 ): DashboardTrainingContentScenarioOption[] {
   const selectedIds = new Set(trainingContentScenarioSelectionIds(selected));
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  const roleId = normalizeId(filters.roleId ?? "");
+  const source = filters.source ?? "all";
+  const focusTopicId = source === "custom" ? normalizeId(filters.focusTopicId ?? "") : "";
   return normalizeTrainingContentScenarioOptions(options).filter((option) => {
     if (selectedIds.has(option.id)) {
       return false;
     }
-    return !normalizedQuery
-      || option.title.toLocaleLowerCase().includes(normalizedQuery)
-      || option.source.includes(normalizedQuery);
+    if (source !== "all" && option.source !== source) {
+      return false;
+    }
+    if (roleId && option.role?.id !== roleId) {
+      return false;
+    }
+    if (focusTopicId && !option.focusTopics.some((topic) => topic.id === focusTopicId)) {
+      return false;
+    }
+    return !normalizedQuery || [
+      option.title,
+      option.source,
+      option.role?.label ?? "",
+      ...option.focusTopics.map((topic) => topic.label),
+    ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
   });
+}
+
+export function listTrainingContentScenarioRoleFilters(
+  options: readonly DashboardTrainingContentScenarioOption[]
+): TrainingContentScenarioFilterOption[] {
+  const roles = new Map<string, TrainingContentScenarioFilterOption>();
+  for (const option of normalizeTrainingContentScenarioOptions(options)) {
+    if (option.role) {
+      roles.set(option.role.id, option.role);
+    }
+  }
+  return sortFilterOptions(roles.values());
+}
+
+export function listTrainingContentScenarioFocusTopicFilters(
+  options: readonly DashboardTrainingContentScenarioOption[]
+): TrainingContentScenarioFilterOption[] {
+  const focusTopics = new Map<string, TrainingContentScenarioFilterOption>();
+  for (const option of normalizeTrainingContentScenarioOptions(options)) {
+    if (option.source !== "custom") {
+      continue;
+    }
+    for (const focusTopic of option.focusTopics) {
+      focusTopics.set(focusTopic.id, focusTopic);
+    }
+  }
+  return sortFilterOptions(focusTopics.values());
 }
 
 export function addTrainingContentScenarioSelection(
@@ -124,9 +180,43 @@ function normalizeTrainingContentScenarioOptions(
     if (!id || !title || normalized.has(id)) {
       continue;
     }
-    normalized.set(id, { id, title, source: option.source });
+    const role = normalizeFilterOption(option.role);
+    const focusTopics = option.source === "custom"
+      ? sortFilterOptions(normalizeFilterOptions(option.focusTopics ?? []).values())
+      : [];
+    normalized.set(id, { id, title, source: option.source, role, focusTopics });
   }
   return [...normalized.values()];
+}
+
+function normalizeFilterOptions(
+  values: readonly TrainingContentScenarioFilterOption[]
+): Map<string, TrainingContentScenarioFilterOption> {
+  const normalized = new Map<string, TrainingContentScenarioFilterOption>();
+  for (const value of values) {
+    const option = normalizeFilterOption(value);
+    if (option) {
+      normalized.set(option.id, option);
+    }
+  }
+  return normalized;
+}
+
+function normalizeFilterOption(
+  value: TrainingContentScenarioFilterOption | null | undefined
+): TrainingContentScenarioFilterOption | null {
+  const id = normalizeId(value?.id ?? "");
+  const label = value?.label.trim() ?? "";
+  return id && label ? { id, label } : null;
+}
+
+function sortFilterOptions(
+  values: Iterable<TrainingContentScenarioFilterOption>
+): TrainingContentScenarioFilterOption[] {
+  return [...values].sort((left, right) =>
+    left.label.localeCompare(right.label, undefined, { sensitivity: "base" })
+      || left.id.localeCompare(right.id)
+  );
 }
 
 function sortedIds(

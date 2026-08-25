@@ -12,14 +12,51 @@ import {
   createTrainingContentScenarioSelection,
   filterTrainingContentScenarioOptions,
   hasTrainingContentScenarioSelectionChanges,
+  listTrainingContentScenarioFocusTopicFilters,
+  listTrainingContentScenarioRoleFilters,
   removeTrainingContentScenarioSelection,
   trainingContentScenarioSelectionIds,
 } from "./trainingContentScenarioSelection";
 
 const options: DashboardTrainingContentScenarioOption[] = [
-  { id: "standard_a", title: "Discovery call", source: "standard" },
-  { id: "custom_a", title: "Acme objection handling", source: "custom" },
-  { id: "standard_b", title: "Coaching conversation", source: "standard" },
+  {
+    id: "standard_a",
+    title: "Discovery call",
+    source: "standard",
+    role: { id: "sales", label: "Sales" },
+    focusTopics: [],
+  },
+  {
+    id: "custom_a",
+    title: "Acme objection handling",
+    source: "custom",
+    role: { id: "sales", label: "Sales" },
+    focusTopics: [
+      { id: "prospecting", label: "Prospecting" },
+      { id: "objections", label: "Objection Handling" },
+    ],
+  },
+  {
+    id: "standard_b",
+    title: "Coaching conversation",
+    source: "standard",
+    role: { id: "manager", label: "Manager" },
+    focusTopics: [],
+  },
+  {
+    id: "custom_b",
+    title: "Renewal objection",
+    source: "custom",
+    role: { id: "customer_success", label: "Customer Success" },
+    focusTopics: [{ id: "retention", label: "Retention" }],
+  },
+  {
+    id: "custom_unmapped",
+    title: "General conversation",
+    source: "custom",
+    role: null,
+    focusTopics: [],
+  },
 ];
 
 test("Related Scenarios selector renders its label, options, source, and empty selection", () => {
@@ -36,6 +73,9 @@ test("Related Scenarios selector renders its label, options, source, and empty s
   assert.match(html, /Custom/);
   assert.match(html, /aria-label="Available scenarios"/);
   assert.match(html, /Search scenarios/);
+  assert.match(html, /All Roles/);
+  assert.match(html, /Source/);
+  assert.match(html, /Available scenarios \(5\)/);
 });
 
 test("create permits zero selections and preserves omission until selection changes", () => {
@@ -54,11 +94,89 @@ test("scenario search filters by title and source and excludes selected options"
   );
   assert.deepEqual(
     filterTrainingContentScenarioOptions(options, selected, "custom").map((option) => option.id),
-    ["custom_a"]
+    ["custom_a", "custom_b", "custom_unmapped"]
   );
   assert.equal(
     filterTrainingContentScenarioOptions(options, selected, "discovery").length,
     0
+  );
+});
+
+test("source filters show all, standard-only, and custom-only available scenarios", () => {
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", { source: "all" }).map((option) => option.id),
+    ["standard_a", "custom_a", "standard_b", "custom_b", "custom_unmapped"]
+  );
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", { source: "standard" }).map((option) => option.id),
+    ["standard_a", "standard_b"]
+  );
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", { source: "custom" }).map((option) => option.id),
+    ["custom_a", "custom_b", "custom_unmapped"]
+  );
+});
+
+test("role filters use existing role metadata and conservatively exclude unmapped scenarios", () => {
+  assert.deepEqual(listTrainingContentScenarioRoleFilters(options), [
+    { id: "customer_success", label: "Customer Success" },
+    { id: "manager", label: "Manager" },
+    { id: "sales", label: "Sales" },
+  ]);
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", { roleId: "sales" }).map((option) => option.id),
+    ["standard_a", "custom_a"]
+  );
+});
+
+test("custom Focus Topic filters support multiple relationships and deterministic options", () => {
+  assert.deepEqual(listTrainingContentScenarioFocusTopicFilters(options), [
+    { id: "objections", label: "Objection Handling" },
+    { id: "prospecting", label: "Prospecting" },
+    { id: "retention", label: "Retention" },
+  ]);
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", {
+      source: "custom",
+      focusTopicId: "prospecting",
+    }).map((option) => option.id),
+    ["custom_a"]
+  );
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", {
+      source: "custom",
+      focusTopicId: "objections",
+    }).map((option) => option.id),
+    ["custom_a"]
+  );
+});
+
+test("search, role, source, and Focus Topic filters combine", () => {
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "objection", {
+      roleId: "sales",
+      source: "custom",
+      focusTopicId: "prospecting",
+    }).map((option) => option.id),
+    ["custom_a"]
+  );
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "renewal", {
+      roleId: "sales",
+      source: "custom",
+      focusTopicId: "prospecting",
+    }),
+    []
+  );
+});
+
+test("switching away from Custom removes the effective Focus Topic restriction", () => {
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, [], "", {
+      source: "standard",
+      focusTopicId: "prospecting",
+    }).map((option) => option.id),
+    ["standard_a", "standard_b"]
   );
 });
 
@@ -159,14 +277,55 @@ test("adding a scenario retains existing available and stale IDs", () => {
   });
 });
 
+test("filtering available results does not hide, deselect, or change submitted selections", () => {
+  const initial = createTrainingContentScenarioSelection(
+    [
+      { id: "standard_a", title: "Discovery call", available: true },
+      { id: "custom_a", title: "Acme objection handling", available: true },
+    ],
+    options
+  );
+  assert.deepEqual(
+    filterTrainingContentScenarioOptions(options, initial, "renewal", {
+      roleId: "customer_success",
+      source: "custom",
+      focusTopicId: "retention",
+    }).map((option) => option.id),
+    ["custom_b"]
+  );
+  assert.deepEqual(trainingContentScenarioSelectionIds(initial), ["standard_a", "custom_a"]);
+  assert.deepEqual(buildUpdateRelatedScenarioIdsField(initial, initial), {});
+
+  const html = renderToStaticMarkup(createElement(TrainingContentScenarioSelector, {
+    options,
+    selected: initial,
+    onChange: () => {},
+  }));
+  assert.match(html, /Discovery call/);
+  assert.match(html, /Acme objection handling/);
+  assert.match(html, /Selected scenarios \(2\)/);
+});
+
 test("duplicate and blank server options are never displayed or selectable", () => {
   const malformed = [
     ...options,
-    { id: " standard_a ", title: "Duplicate", source: "standard" as const },
-    { id: " ", title: "Blank", source: "custom" as const },
+    {
+      id: " standard_a ",
+      title: "Duplicate",
+      source: "standard" as const,
+      role: { id: "sales", label: "Sales" },
+      focusTopics: [],
+    },
+    {
+      id: " ",
+      title: "Blank",
+      source: "custom" as const,
+      role: null,
+      focusTopics: [],
+    },
   ];
   assert.deepEqual(
     filterTrainingContentScenarioOptions(malformed, [], "").map((option) => option.id),
-    ["standard_a", "custom_a", "standard_b"]
+    ["standard_a", "custom_a", "standard_b", "custom_b", "custom_unmapped"]
   );
 });

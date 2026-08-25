@@ -7811,6 +7811,9 @@ async function resolveTrainingContentManagementResources(
         focusTopics: db.orgTrainings.filter(
           (topic) => topic.orgId === adminContext.org.id
         ),
+        focusTopicScenarioAttachments: db.orgTrainingScenarioAttachments.filter(
+          (attachment) => attachment.orgId === adminContext.org.id
+        ),
         scenarioConfig: db.config,
         scenarioOrg: adminContext.org,
       },

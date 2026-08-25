@@ -489,13 +489,26 @@ test("Training Content scenario-options proxy forwards organization context", as
           viewer: viewer(),
           org: { id: "org_1", name: "Example" },
           generatedAt: NOW,
-          scenarios: [{ id: "scenario_a", title: "Scenario A", source: "standard" }],
+          scenarios: [{
+            id: "scenario_a",
+            title: "Scenario A",
+            source: "standard",
+            role: { id: "sales", label: "Sales" },
+            focusTopics: [],
+          }],
         };
       },
     }
   );
   assert.equal(response.status, 200);
   assert.equal(capturedOrgId, "org_1");
+  assert.deepEqual((await response.json()).scenarios, [{
+    id: "scenario_a",
+    title: "Scenario A",
+    source: "standard",
+    role: { id: "sales", label: "Sales" },
+    focusTopics: [],
+  }]);
 });
 
 test("Training Content upload proxy returns signing metadata while bytes bypass Next.js", async () => {
