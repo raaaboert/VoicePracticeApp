@@ -27,9 +27,17 @@ export const LEARNER_USER_ID = "prompt_route_learner";
 export const STANDARD_SCENARIO_ID = "standard_renewal";
 export const CUSTOM_SCENARIO_ID = "custom_recovery_route";
 export const CUSTOM_TRAINING_ID = "training_custom_recovery";
+export const LONG_GUIDANCE_SCENARIO_ID = "custom_long_guidance_route";
+export const WRONG_CUSTOM_TRAINING_ID = "training_unrelated_active";
+export const INACTIVE_CUSTOM_TRAINING_ID = "training_custom_archived";
 export const CLIENT_BASELINE_SENTINEL = "CLIENT BASELINE MUST NOT REACH THE PROVIDER";
 export const CUSTOM_SCORING_GUIDANCE =
   "Prioritize ownership, recovery dates, and explicit stakeholder alignment.";
+export const ROLEPLAY_GUIDANCE_OVERFLOW_MARKER = "OVERFLOW_AFTER_ROLEPLAY_LIMIT";
+export const LONG_CUSTOM_SCORING_GUIDANCE =
+  "Prioritize ownership, recovery dates, and explicit stakeholder alignment.\n" +
+  "x".repeat(4_000) +
+  ROLEPLAY_GUIDANCE_OVERFLOW_MARKER;
 
 export interface CapturedRoutePrompt {
   systemPrompt: string;
@@ -56,11 +64,21 @@ export interface PromptRouteHarness {
     personaStyle: "defensive" | "frustrated" | "skeptical";
     trainingId?: string;
   }): Promise<CapturedPromptFamily>;
+  requestOpening(params: {
+    orgId: string;
+    scenarioId: string;
+    trainingId?: string;
+  }): Promise<{ status: number; body: Record<string, unknown>; providerCallCount: number }>;
   startLearnerSession(simulationSessionId: string): Promise<Record<string, unknown>>;
   scoreLearnerSession(params: {
     simulationSessionId: string;
     userTurnCount: 1 | 2 | 3;
-  }): Promise<{ status: number; body: Record<string, unknown>; providerCallCount: number }>;
+  }): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+    providerCallCount: number;
+    evaluationSystemPrompt: string | null;
+  }>;
   readPersistedScoreRecords(): Promise<SimulationScoreRecord[]>;
   close(): Promise<void>;
 }
@@ -150,6 +168,15 @@ function buildCustomScenario(): OrgCustomScenario {
     createdBy: ROUTE_USER_ID,
     createdAt: NOW,
     updatedAt: NOW,
+  };
+}
+
+function buildLongGuidanceCustomScenario(): OrgCustomScenario {
+  return {
+    ...buildCustomScenario(),
+    id: LONG_GUIDANCE_SCENARIO_ID,
+    title: "Recover a rollout with detailed guidance",
+    scoringGuidance: LONG_CUSTOM_SCORING_GUIDANCE,
   };
 }
 
@@ -244,6 +271,7 @@ function buildDatabase(): ApiDatabase {
   ];
 
   const customScenario = buildCustomScenario();
+  const longGuidanceCustomScenario = buildLongGuidanceCustomScenario();
   return {
     config,
     users: [buildUser(), buildLearner()],
@@ -252,7 +280,7 @@ function buildDatabase(): ApiDatabase {
         id: STANDARD_ORG_ID,
         enableModularPromptArchitecture: false,
         activeIndustries: ["technology", "healthcare"],
-        customScenarios: [customScenario],
+        customScenarios: [customScenario, longGuidanceCustomScenario],
       }),
       buildOrg({
         id: MODULAR_ORG_ID,
@@ -272,6 +300,26 @@ function buildDatabase(): ApiDatabase {
         createdAt: NOW,
         updatedAt: NOW,
       },
+      {
+        id: WRONG_CUSTOM_TRAINING_ID,
+        orgId: STANDARD_ORG_ID,
+        name: "Unrelated Active Topic",
+        status: "active",
+        description: "An active Focus Topic that does not contain the recovery scenario.",
+        divisionId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        id: INACTIVE_CUSTOM_TRAINING_ID,
+        orgId: STANDARD_ORG_ID,
+        name: "Archived Recovery Topic",
+        status: "archived",
+        description: "An archived Focus Topic that contains the recovery scenario.",
+        divisionId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
     ],
     orgTrainingPackAttachments: [],
     orgTrainingScenarioAttachments: [
@@ -279,6 +327,22 @@ function buildDatabase(): ApiDatabase {
         id: "attachment_custom_recovery",
         orgId: STANDARD_ORG_ID,
         trainingId: CUSTOM_TRAINING_ID,
+        scenarioId: CUSTOM_SCENARIO_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        id: "attachment_long_guidance",
+        orgId: STANDARD_ORG_ID,
+        trainingId: CUSTOM_TRAINING_ID,
+        scenarioId: LONG_GUIDANCE_SCENARIO_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        id: "attachment_archived_recovery",
+        orgId: STANDARD_ORG_ID,
+        trainingId: INACTIVE_CUSTOM_TRAINING_ID,
         scenarioId: CUSTOM_SCENARIO_ID,
         createdAt: NOW,
         updatedAt: NOW,
@@ -471,6 +535,29 @@ export async function startPromptRouteHarness(params: {
         }),
       };
     },
+    async requestOpening({ orgId, scenarioId, trainingId }) {
+      const requestCountBefore = providerRequests.length;
+      const response = await originalFetch(`${baseUrl}/mobile/users/${ROUTE_USER_ID}/ai/opening`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${MOBILE_TOKEN}`,
+          "Content-Type": "application/json",
+          "X-Superuser-Org-Id": orgId,
+        },
+        body: JSON.stringify({
+          scenarioId,
+          trainingId,
+          difficulty: "hard",
+          personaStyle: "frustrated",
+          industryId: "healthcare",
+        }),
+      });
+      return {
+        status: response.status,
+        body: await response.json() as Record<string, unknown>,
+        providerCallCount: providerRequests.length - requestCountBefore,
+      };
+    },
     async startLearnerSession(simulationSessionId): Promise<Record<string, unknown>> {
       const response = await originalFetch(
         `${baseUrl}/mobile/users/${LEARNER_USER_ID}/simulation-sessions/start`,
@@ -521,10 +608,14 @@ export async function startPromptRouteHarness(params: {
           history: dialogueHistory.slice(0, userTurnCount * 2),
         }),
       });
+      const providerCallCount = providerRequests.length - requestCountBefore;
+      const providerRequest = providerCallCount === 1 ? providerRequests.at(-1) : null;
+      const evaluationSystemPrompt = providerRequest?.input?.[0]?.content ?? null;
       return {
         status: response.status,
         body: await response.json() as Record<string, unknown>,
-        providerCallCount: providerRequests.length - requestCountBefore,
+        providerCallCount,
+        evaluationSystemPrompt,
       };
     },
     async readPersistedScoreRecords(): Promise<SimulationScoreRecord[]> {

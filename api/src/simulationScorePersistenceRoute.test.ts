@@ -14,12 +14,24 @@ import {
 
 type StableScoreRecord = Omit<SimulationScoreRecord, "createdAt">;
 
+interface PromptGolden {
+  roleplay: string;
+  opening: string;
+  evaluation: string;
+}
+
 const fixture = JSON.parse(
   readFileSync(
     resolve(dirname(fileURLToPath(import.meta.url)), "test-fixtures", "phase0-score-contract.json"),
     "utf8",
   ),
 ) as { persistedLearnerScore: StableScoreRecord };
+const routePromptFixture = JSON.parse(
+  readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "test-fixtures", "phase0-route-prompts.json"),
+    "utf8",
+  ),
+) as { customNonModular: PromptGolden };
 
 let harness: PromptRouteHarness;
 
@@ -39,6 +51,7 @@ test("learner score route persists the current recognized-session score contract
   assert.equal(result.status, 201, JSON.stringify(result.body));
   assert.equal(result.body.status, "scored");
   assert.equal(result.providerCallCount, 1);
+  assert.equal(result.evaluationSystemPrompt, routePromptFixture.customNonModular.evaluation);
 
   const records = await harness.readPersistedScoreRecords();
   const record = records.find((entry) => entry.simulationSessionId === simulationSessionId);

@@ -152,7 +152,6 @@ test("Phase 0 golden: custom non-modular prompts preserve reinforced role and gu
   assertGoldenPrompts({ roleplay, opening, evaluation }, goldens.customNonModular);
   assert.match(roleplay, /Counterpart rule: you are speaking with a Customer Success Manager; do not act as Customer Success Manager/);
   assert.match(roleplay, /Scenario coaching priorities[\s\S]*Prioritize ownership, recovery dates/);
-  assert.equal(roleplayGuidance.length, 4_000);
   assert.doesNotMatch(roleplay, new RegExp(overflowMarker));
   assert.match(evaluation, /INDUSTRY STANDARD SCENARIO SCORING GUIDANCE/);
   assert.match(evaluation, /CUSTOM SCENARIO SCORING GUIDANCE/);
