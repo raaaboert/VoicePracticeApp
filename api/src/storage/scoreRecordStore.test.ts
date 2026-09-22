@@ -371,6 +371,148 @@ test("file score record store refreshSnapshot picks up out-of-band writes and de
   }
 });
 
+test("postgres score record store maps a realistic SELECT row into the score contract", async () => {
+  const originalPoolQuery = Pool.prototype.query;
+  const originalPoolConnect = Pool.prototype.connect;
+  const startedAt = new Date("2026-09-21T16:00:00.000-06:00");
+  const endedAt = new Date("2026-09-21T16:08:30.000-06:00");
+  const createdAt = new Date("2026-09-21T16:08:31.250-06:00");
+
+  try {
+    Pool.prototype.query = (async function query(
+      this: Pool,
+      text: string,
+      values?: unknown[]
+    ): Promise<{ rows: unknown[]; rowCount: number }> {
+      void this;
+      void values;
+      if (/SELECT[\s\S]*FROM score_records/.test(text)) {
+        return {
+          rows: [
+            {
+              id: "score_pg_mapped",
+              simulation_session_id: "sim_pg_mapped",
+              user_id: "user_pg_1",
+              org_id: "org_pg_1",
+              division_id: "division_pg_1",
+              training_id: "training_pg_1",
+              training_pack_id: null,
+              industry_id: "healthcare",
+              segment_id: "customer_success",
+              scenario_id: "custom_recovery_route",
+              started_at: startedAt,
+              ended_at: endedAt,
+              created_at: createdAt,
+              overall_score: 84,
+              persuasion: 8,
+              clarity: 9,
+              empathy: 8,
+              assertiveness: 7,
+              communication_score: 82,
+              outcome_score: 88,
+              completion_level: "complete",
+              objective_achieved: true,
+              summary: "The learner recovered trust and secured a dated follow-up.",
+              coaching_artifact: {
+                strengths: ["Named accountable owners", "Confirmed the recovery date"],
+                improvementAreas: ["Surface compliance risk earlier"],
+                coachingPriority: "risk discovery",
+              },
+              normalized_coaching_themes: {
+                strengths: [
+                  { id: "ownership", label: "Ownership" },
+                  { id: "next_steps", label: "Next Steps" },
+                ],
+                improvementAreas: [{ id: "risk_discovery", label: "Risk Discovery" }],
+                coachingPriority: { id: "risk_discovery", label: "Risk Discovery" },
+              },
+              rubric_version: "phase0-v3",
+              model: "gpt-5.4",
+              prompt_version: "prompt-phase0-v1",
+              input_tokens: 1320,
+              output_tokens: 280,
+              total_tokens: 1600,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }) as typeof Pool.prototype.query;
+
+    Pool.prototype.connect = (async function connect(this: Pool) {
+      void this;
+      return {
+        async query() {
+          return { rows: [], rowCount: 0 };
+        },
+        release() {
+          return undefined;
+        },
+      };
+    }) as unknown as typeof Pool.prototype.connect;
+
+    const store = createScoreRecordStore({
+      provider: "postgres",
+      dbPath: "ignored-for-postgres.json",
+      databaseUrl: "postgres://example.invalid/test",
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000,
+    });
+
+    await store.initialize();
+
+    assert.deepEqual(store.getRecordById("score_pg_mapped"), {
+      id: "score_pg_mapped",
+      simulationSessionId: "sim_pg_mapped",
+      userId: "user_pg_1",
+      orgId: "org_pg_1",
+      divisionId: "division_pg_1",
+      segmentId: "customer_success",
+      scenarioId: "custom_recovery_route",
+      trainingId: "training_pg_1",
+      trainingPackId: undefined,
+      industryId: "healthcare",
+      startedAt: "2026-09-21T22:00:00.000Z",
+      endedAt: "2026-09-21T22:08:30.000Z",
+      communicationScore: 82,
+      outcomeScore: 88,
+      overallScore: 84,
+      completionLevel: "complete",
+      objectiveAchieved: true,
+      persuasion: 8,
+      clarity: 9,
+      empathy: 8,
+      assertiveness: 7,
+      summary: "The learner recovered trust and secured a dated follow-up.",
+      coachingArtifact: {
+        strengths: ["Named accountable owners", "Confirmed the recovery date"],
+        improvementAreas: ["Surface compliance risk earlier"],
+        coachingPriority: "risk discovery",
+      },
+      normalizedCoachingThemes: {
+        strengths: [
+          { id: "ownership", label: "Ownership" },
+          { id: "next_steps", label: "Next Steps" },
+        ],
+        improvementAreas: [{ id: "risk_discovery", label: "Risk Discovery" }],
+        coachingPriority: { id: "risk_discovery", label: "Risk Discovery" },
+      },
+      rubricVersion: "phase0-v3",
+      model: "gpt-5.4",
+      promptVersion: "prompt-phase0-v1",
+      inputTokens: 1320,
+      outputTokens: 280,
+      totalTokens: 1600,
+      createdAt: "2026-09-21T22:08:31.250Z",
+    });
+  } finally {
+    Pool.prototype.query = originalPoolQuery;
+    Pool.prototype.connect = originalPoolConnect;
+  }
+});
+
 test("postgres score record store appendRecord uses a valid placeholder set for score upserts", async () => {
   const originalPoolQuery = Pool.prototype.query;
   const originalPoolConnect = Pool.prototype.connect;
