@@ -37,17 +37,18 @@ For this modernization initiative:
 - Promote `main` only after the complete modernization initiative has been accepted in staging and production promotion is explicitly approved.
 - Production must remain untouched until that final promotion.
 
-The approved initiative mapping is that staging tracks `staging`, production tracks `main`, and production API/worker auto-deploy remains off. The current repository runbook still describes the older arrangement in which staging tracks `main` and production may deploy a pinned commit or release branch. Repository files cannot prove live provider settings, and no authenticated Render console or Render CLI was available during this work.
+The approved initiative mapping is that staging tracks `staging`, production tracks `main`, and production API/worker auto-deploy remains off. The current repository runbook still describes the older arrangement in which staging tracks `main` and production may deploy a pinned commit or release branch.
 
-**REQUIRES MANUAL VERIFICATION BEFORE FIRST PUSH TO STAGING**
+Manual Render verification completed before the first Phase 0 push. The verified mapping is:
 
-Manual verification must establish and record:
+| Service | Branch | Auto-deploy |
+| --- | --- | --- |
+| `voicepractice-api-dev` | `staging` | On commit |
+| `peritio-video-worker-staging` | `staging` | On commit |
+| `peritio-api-prod` | `main` | Off |
+| `peritio-video-worker-prod` | `main` | Off |
 
-- the staging API and worker deploy branch and auto-deploy state;
-- the production API and worker deploy branch; and
-- that production API and worker auto-deploy are off.
-
-Do not push Phase 0 commits or the new baseline tag until this verification is complete or the owner explicitly approves the push.
+Phase 0 was pushed successfully to `staging`. Staging API and worker deployed commit `44a0b8531876a3962a322d68b8eeedabe3ecd67c`; production remained untouched. The resolved staging runtime used Luna for simulation, Terra for scoring, Responses API routing, low simulation reasoning, medium scoring reasoning, enabled modular prompting, enabled remote TTS, observed `whisper-1` transcription, and observed `gpt-4o-mini-tts` speech. A real staging simulation completed with four learner turns and a successful scorecard. The associated smoke latency observations and the transient deployment deadlock are recorded in [`Peritio_Phase_0_Latency_Baseline.md`](./Peritio_Phase_0_Latency_Baseline.md).
 
 ## Runtime model baseline
 
