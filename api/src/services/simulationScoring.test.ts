@@ -208,6 +208,128 @@ test("normalizeSimulationScorecard resolves inconsistent completion and outcome 
   assert.equal(lowOutcomeClaimedSuccess.overallScore, 65);
 });
 
+test("Phase 0 score contract preserves complete, unsuccessful, partial, inconclusive, and threshold outcomes", () => {
+  const cases = [
+    {
+      name: "complete successful",
+      raw: {
+        outcomeScore: 92,
+        completionLevel: "complete",
+        objectiveAchieved: true,
+        persuasion: 8,
+        clarity: 9,
+        empathy: 7,
+        assertiveness: 8,
+      },
+      expected: {
+        communicationScore: 80,
+        outcomeScore: 92,
+        overallScore: 84,
+        completionLevel: "complete",
+        objectiveAchieved: true,
+      },
+    },
+    {
+      name: "complete unsuccessful",
+      raw: {
+        outcomeScore: 95,
+        completionLevel: "complete",
+        objectiveAchieved: false,
+        persuasion: 9,
+        clarity: 9,
+        empathy: 8,
+        assertiveness: 9,
+      },
+      expected: {
+        communicationScore: 88,
+        outcomeScore: 69,
+        overallScore: 65,
+        completionLevel: "complete",
+        objectiveAchieved: false,
+      },
+    },
+    {
+      name: "partial",
+      raw: {
+        outcomeScore: 82,
+        completionLevel: "partial",
+        objectiveAchieved: true,
+        persuasion: 7,
+        clarity: 8,
+        empathy: 6,
+        assertiveness: 7,
+      },
+      expected: {
+        communicationScore: 70,
+        outcomeScore: 69,
+        overallScore: 65,
+        completionLevel: "partial",
+        objectiveAchieved: false,
+      },
+    },
+    {
+      name: "inconclusive",
+      raw: {
+        outcomeScore: 60,
+        completionLevel: "inconclusive",
+        objectiveAchieved: false,
+        persuasion: 5,
+        clarity: 6,
+        empathy: 5,
+        assertiveness: 6,
+      },
+      expected: {
+        communicationScore: 55,
+        outcomeScore: 60,
+        overallScore: 57,
+        completionLevel: "inconclusive",
+        objectiveAchieved: false,
+      },
+    },
+    {
+      name: "claimed success below outcome threshold",
+      raw: {
+        outcomeScore: 69,
+        completionLevel: "complete",
+        objectiveAchieved: true,
+        persuasion: 9,
+        clarity: 8,
+        empathy: 8,
+        assertiveness: 9,
+      },
+      expected: {
+        communicationScore: 85,
+        outcomeScore: 69,
+        overallScore: 65,
+        completionLevel: "complete",
+        objectiveAchieved: false,
+      },
+    },
+  ] as const;
+
+  assert.deepEqual(getDefaultScoringWeights(), {
+    persuasion: 0.25,
+    clarity: 0.25,
+    empathy: 0.25,
+    assertiveness: 0.25,
+  });
+
+  for (const scoreCase of cases) {
+    const normalized = normalizeSimulationScorecard(scoreCase.raw, getDefaultScoringWeights());
+    assert.deepEqual(
+      {
+        communicationScore: normalized.communicationScore,
+        outcomeScore: normalized.outcomeScore,
+        overallScore: normalized.overallScore,
+        completionLevel: normalized.completionLevel,
+        objectiveAchieved: normalized.objectiveAchieved,
+      },
+      scoreCase.expected,
+      scoreCase.name,
+    );
+  }
+});
+
 test("assertValidSimulationScorePayload rejects fully missing scorer JSON instead of allowing neutral scores", () => {
   assert.throws(
     () => assertValidSimulationScorePayload({}),

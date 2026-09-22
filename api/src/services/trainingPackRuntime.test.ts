@@ -11,7 +11,13 @@ import {
 test("Training Pack invalid overrides retain default weights and do not activate the suffix", () => {
   const warnings: string[] = [];
   const result = resolveTrainingPackScoringWeights(
-    { persuasion: 0, unsupportedDimension: 2 },
+    {
+      persuasion: 0,
+      clarity: -1,
+      empathy: Number.NaN,
+      assertiveness: Number.POSITIVE_INFINITY,
+      unsupportedDimension: 2,
+    },
     { logger: (message) => warnings.push(message) },
   );
 
@@ -26,6 +32,9 @@ test("Training Pack invalid overrides retain default weights and do not activate
   });
   assert.deepEqual(warnings, [
     '[training-pack] Ignoring invalid non-positive scoring override for key "persuasion".',
+    '[training-pack] Ignoring invalid non-positive scoring override for key "clarity".',
+    '[training-pack] Ignoring invalid non-positive scoring override for key "empathy".',
+    '[training-pack] Ignoring invalid non-positive scoring override for key "assertiveness".',
     '[training-pack] Ignoring unsupported scoring override key "unsupportedDimension".',
     "[training-pack] No valid scoring override values found; falling back to default scoring weights.",
   ]);

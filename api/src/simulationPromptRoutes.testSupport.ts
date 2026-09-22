@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -11,16 +11,19 @@ import {
   createDefaultConfig,
   type EnterpriseOrg,
   type OrgCustomScenario,
+  type SimulationScoreRecord,
   type UserProfile,
 } from "@voicepractice/shared";
 
 const NOW = "2026-09-21T12:00:00.000Z";
 const MOBILE_TOKEN_SECRET = "phase_0_prompt_route_secret_123456";
 const MOBILE_TOKEN = "phase_0_prompt_route_token";
+const LEARNER_TOKEN = "phase_0_prompt_route_learner_token";
 
 export const STANDARD_ORG_ID = "org_prompt_base";
 export const MODULAR_ORG_ID = "org_prompt_modular";
 export const ROUTE_USER_ID = "prompt_route_reviewer";
+export const LEARNER_USER_ID = "prompt_route_learner";
 export const STANDARD_SCENARIO_ID = "standard_renewal";
 export const CUSTOM_SCENARIO_ID = "custom_recovery_route";
 export const CUSTOM_TRAINING_ID = "training_custom_recovery";
@@ -53,6 +56,12 @@ export interface PromptRouteHarness {
     personaStyle: "defensive" | "frustrated" | "skeptical";
     trainingId?: string;
   }): Promise<CapturedPromptFamily>;
+  startLearnerSession(simulationSessionId: string): Promise<Record<string, unknown>>;
+  scoreLearnerSession(params: {
+    simulationSessionId: string;
+    userTurnCount: 1 | 2 | 3;
+  }): Promise<{ status: number; body: Record<string, unknown>; providerCallCount: number }>;
+  readPersistedScoreRecords(): Promise<SimulationScoreRecord[]>;
   close(): Promise<void>;
 }
 
@@ -86,6 +95,35 @@ function buildUser(): UserProfile {
     dailyOverageExpiresAt: null,
     isSuperUser: true,
     isPlatformAdmin: true,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+function buildLearner(): UserProfile {
+  return {
+    id: LEARNER_USER_ID,
+    email: "prompt-route-learner@peritio.test",
+    firstName: "Route",
+    lastName: "Learner",
+    employeeId: "PHASE0-LEARNER",
+    managerUserId: null,
+    emailVerifiedAt: NOW,
+    dashboardAccessEnabled: false,
+    mobileProfileReonboardingRequired: false,
+    accountType: "enterprise",
+    tier: "enterprise",
+    status: "active",
+    orgId: STANDARD_ORG_ID,
+    orgRole: "user",
+    timezone: "America/Denver",
+    pendingTimezone: null,
+    pendingTimezoneEffectiveAt: null,
+    planAnchorAt: NOW,
+    manualBonusSeconds: 0,
+    dailySecondsCapOverride: null,
+    allowDailyOverageThisCycle: false,
+    dailyOverageExpiresAt: null,
     createdAt: NOW,
     updatedAt: NOW,
   };
@@ -208,7 +246,7 @@ function buildDatabase(): ApiDatabase {
   const customScenario = buildCustomScenario();
   return {
     config,
-    users: [buildUser()],
+    users: [buildUser(), buildLearner()],
     orgs: [
       buildOrg({
         id: STANDARD_ORG_ID,
@@ -253,6 +291,12 @@ function buildDatabase(): ApiDatabase {
       {
         userId: ROUTE_USER_ID,
         tokenHash: hashToken(MOBILE_TOKEN),
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        userId: LEARNER_USER_ID,
+        tokenHash: hashToken(LEARNER_TOKEN),
         createdAt: NOW,
         updatedAt: NOW,
       },
@@ -319,6 +363,11 @@ export async function startPromptRouteHarness(params: {
 }): Promise<PromptRouteHarness> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "simulation-prompt-routes-"));
   const dbPath = path.join(tempDir, "db.local.json");
+  const parsedDbPath = path.parse(dbPath);
+  const scoreRecordPath = path.join(
+    parsedDbPath.dir,
+    `${parsedDbPath.name}.score-records${parsedDbPath.ext}`,
+  );
   await writeFile(dbPath, JSON.stringify(buildDatabase(), null, 2), "utf8");
   configureEnvironment(dbPath, params.modularEnvironmentEnabled);
 
@@ -421,6 +470,75 @@ export async function startPromptRouteHarness(params: {
           history: dialogueHistory,
         }),
       };
+    },
+    async startLearnerSession(simulationSessionId): Promise<Record<string, unknown>> {
+      const response = await originalFetch(
+        `${baseUrl}/mobile/users/${LEARNER_USER_ID}/simulation-sessions/start`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${LEARNER_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            simulationSessionId,
+            segmentId: "customer_success",
+            scenarioId: CUSTOM_SCENARIO_ID,
+            trainingId: CUSTOM_TRAINING_ID,
+            clientStartedAt: new Date().toISOString(),
+          }),
+        },
+      );
+      const body = await response.json() as Record<string, unknown>;
+      assert.equal(response.status, 201, JSON.stringify(body));
+      assert.deepEqual(body, {
+        recognized: true,
+        simulationSessionId,
+        status: "started",
+        serverStartedAt: body.serverStartedAt,
+      });
+      assert.equal(typeof body.serverStartedAt, "string");
+      return body;
+    },
+    async scoreLearnerSession({ simulationSessionId, userTurnCount }) {
+      const requestCountBefore = providerRequests.length;
+      const response = await originalFetch(`${baseUrl}/mobile/users/${LEARNER_USER_ID}/ai/score`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LEARNER_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          scenarioId: CUSTOM_SCENARIO_ID,
+          trainingId: CUSTOM_TRAINING_ID,
+          difficulty: "hard",
+          personaStyle: "frustrated",
+          industryId: "healthcare",
+          industryBaseline: CLIENT_BASELINE_SENTINEL,
+          simulationSessionId,
+          startedAt: "2026-09-21T11:55:00.000Z",
+          endedAt: "2026-09-21T12:00:00.000Z",
+          history: dialogueHistory.slice(0, userTurnCount * 2),
+        }),
+      });
+      return {
+        status: response.status,
+        body: await response.json() as Record<string, unknown>,
+        providerCallCount: providerRequests.length - requestCountBefore,
+      };
+    },
+    async readPersistedScoreRecords(): Promise<SimulationScoreRecord[]> {
+      try {
+        const payload = JSON.parse(await readFile(scoreRecordPath, "utf8")) as {
+          records?: SimulationScoreRecord[];
+        };
+        return Array.isArray(payload.records) ? payload.records : [];
+      } catch (error) {
+        if ((error as { code?: string }).code === "ENOENT") {
+          return [];
+        }
+        throw error;
+      }
     },
     async close(): Promise<void> {
       globalThis.fetch = originalFetch;

@@ -1,0 +1,57 @@
+{
+  "persistedLearnerScore": {
+    "id": "score_sim_phase0_persisted_score",
+    "simulationSessionId": "sim_phase0_persisted_score",
+    "userId": "prompt_route_learner",
+    "orgId": "org_prompt_base",
+    "segmentId": "customer_success",
+    "scenarioId": "custom_recovery_route",
+    "trainingId": "training_custom_recovery",
+    "industryId": "healthcare",
+    "startedAt": "2026-09-21T11:55:00.000Z",
+    "endedAt": "2026-09-21T12:00:00.000Z",
+    "communicationScore": 80,
+    "outcomeScore": 76,
+    "overallScore": 79,
+    "completionLevel": "complete",
+    "objectiveAchieved": true,
+    "persuasion": 8,
+    "clarity": 9,
+    "empathy": 7,
+    "assertiveness": 8,
+    "summary": "Handled the conversation well.",
+    "coachingArtifact": {
+      "strengths": [
+        "Clear framing"
+      ],
+      "improvementAreas": [
+        "Tighter close"
+      ],
+      "coachingPriority": "Tighter close"
+    },
+    "normalizedCoachingThemes": {
+      "strengths": [
+        {
+          "id": "clarity_structure",
+          "label": "Clarity and structure"
+        }
+      ],
+      "improvementAreas": [
+        {
+          "id": "next_steps_closing",
+          "label": "Next steps and closing"
+        }
+      ],
+      "coachingPriority": {
+        "id": "next_steps_closing",
+        "label": "Next steps and closing"
+      }
+    },
+    "rubricVersion": "2026-04-09.v1",
+    "model": "route-scoring-model",
+    "promptVersion": "2026-04-09.v1",
+    "inputTokens": 12,
+    "outputTokens": 8,
+    "totalTokens": 20
+  }
+}

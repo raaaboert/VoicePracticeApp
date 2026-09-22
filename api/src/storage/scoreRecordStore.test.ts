@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -245,6 +245,89 @@ test("file score record store imports legacy score records with immediate author
   }
 });
 
+test("file score record store preserves the current normalized legacy-record round trip", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-score-record-legacy-roundtrip-"));
+  try {
+    const dbPath = path.join(tempDir, "db.local.json");
+    const scorePath = path.join(tempDir, "db.local.score-records.json");
+    const legacyRecord = {
+      id: "score_legacy_contract",
+      userId: "legacy_user",
+      segmentId: "legacy_segment",
+      scenarioId: "legacy_scenario",
+      startedAt: "2025-12-01T10:00:00.000Z",
+      endedAt: "2025-12-01T10:05:00.000Z",
+      overallScore: 75,
+      persuasion: 7,
+      clarity: 8,
+      empathy: 7,
+      assertiveness: 8,
+      createdAt: "2025-12-01T10:05:30.000Z",
+    };
+    await writeFile(scorePath, JSON.stringify({ records: [legacyRecord] }, null, 2), "utf8");
+
+    const store = createScoreRecordStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000,
+    });
+    await store.initialize();
+
+    assert.deepEqual(store.getRecordById(legacyRecord.id), {
+      id: legacyRecord.id,
+      simulationSessionId: undefined,
+      userId: legacyRecord.userId,
+      orgId: null,
+      divisionId: undefined,
+      segmentId: legacyRecord.segmentId,
+      scenarioId: legacyRecord.scenarioId,
+      trainingId: undefined,
+      trainingPackId: undefined,
+      industryId: undefined,
+      startedAt: legacyRecord.startedAt,
+      endedAt: legacyRecord.endedAt,
+      communicationScore: undefined,
+      outcomeScore: undefined,
+      overallScore: 75,
+      completionLevel: undefined,
+      objectiveAchieved: undefined,
+      persuasion: 7,
+      clarity: 8,
+      empathy: 7,
+      assertiveness: 8,
+      summary: undefined,
+      coachingArtifact: null,
+      normalizedCoachingThemes: null,
+      rubricVersion: undefined,
+      model: undefined,
+      promptVersion: undefined,
+      inputTokens: undefined,
+      outputTokens: undefined,
+      totalTokens: undefined,
+      createdAt: legacyRecord.createdAt,
+    });
+
+    const persisted = JSON.parse(await readFile(scorePath, "utf8")) as { records: Array<Record<string, unknown>> };
+    assert.deepEqual(persisted.records, [legacyRecord]);
+
+    const reopenedStore = createScoreRecordStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000,
+    });
+    await reopenedStore.initialize();
+    assert.deepEqual(reopenedStore.getRecordById(legacyRecord.id), store.getRecordById(legacyRecord.id));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("file score record store refreshSnapshot picks up out-of-band writes and deletes", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-score-record-store-refresh-"));
   try {
@@ -362,24 +445,50 @@ test("postgres score record store appendRecord uses a valid placeholder set for 
 
     assert.equal(highestPlaceholder, insert.values.length);
     assert.equal(insert.values.length, 31);
-    assert.equal(insert.values[1], "sim_123");
-    assert.equal(insert.values[12], 81);
-    assert.equal(insert.values[13], 74);
-    assert.equal(insert.values[15], "complete");
-    assert.equal(insert.values[16], true);
-    assert.deepEqual(insert.values[22], {
-      strengths: ["Clear structure"],
-      improvementAreas: ["Stronger close"],
-      coachingPriority: "clarity"
-    });
-    assert.deepEqual(insert.values[23], {
-      strengths: [{ id: "clarity", label: "Clarity" }],
-      improvementAreas: [{ id: "close", label: "Closing" }],
-      coachingPriority: { id: "clarity", label: "Clarity" }
-    });
-    assert.equal(insert.values[30], "2026-03-31T10:05:00.000Z");
+    assert.deepEqual(insert.values, [
+      "score_pg",
+      "sim_123",
+      "user_1",
+      "org_1",
+      null,
+      "segment_1",
+      "scenario_1",
+      null,
+      null,
+      null,
+      "2026-03-31T10:00:00.000Z",
+      "2026-03-31T10:05:00.000Z",
+      81,
+      74,
+      82,
+      "complete",
+      true,
+      8,
+      9,
+      7,
+      8,
+      "Solid attempt",
+      {
+        strengths: ["Clear structure"],
+        improvementAreas: ["Stronger close"],
+        coachingPriority: "clarity",
+      },
+      {
+        strengths: [{ id: "clarity", label: "Clarity" }],
+        improvementAreas: [{ id: "close", label: "Closing" }],
+        coachingPriority: { id: "clarity", label: "Clarity" },
+      },
+      "rubric_v1",
+      "gpt-test",
+      "prompt_v1",
+      10,
+      12,
+      22,
+      "2026-03-31T10:05:00.000Z",
+    ]);
     assert.match(insert.text, /\$23::jsonb,\s*\$24::jsonb,\s*\$25,/);
     assert.match(insert.text, /\$31::timestamptz/);
+    assert.match(insert.text, /ON CONFLICT \(id\) DO UPDATE/);
   } finally {
     Pool.prototype.query = originalPoolQuery;
     Pool.prototype.connect = originalPoolConnect;
@@ -427,6 +536,35 @@ test("postgres score record store migration covers all columns used by append an
     });
 
     await store.initialize();
+
+    const createTableBody = capturedMigration.match(
+      /CREATE TABLE IF NOT EXISTS score_records \(([\s\S]*?)\);/,
+    )?.[1];
+    assert.ok(createTableBody);
+    for (const definition of [
+      "id TEXT PRIMARY KEY",
+      "user_id TEXT NOT NULL",
+      "segment_id TEXT NOT NULL",
+      "scenario_id TEXT NOT NULL",
+      "started_at TIMESTAMPTZ NOT NULL",
+      "ended_at TIMESTAMPTZ NOT NULL",
+      "overall_score DOUBLE PRECISION NOT NULL",
+      "persuasion DOUBLE PRECISION NOT NULL",
+      "clarity DOUBLE PRECISION NOT NULL",
+      "empathy DOUBLE PRECISION NOT NULL",
+      "assertiveness DOUBLE PRECISION NOT NULL",
+      "created_at TIMESTAMPTZ NOT NULL",
+      "coaching_artifact JSONB NULL",
+      "normalized_coaching_themes JSONB NULL",
+      "rubric_version TEXT NULL",
+      "model TEXT NULL",
+      "prompt_version TEXT NULL",
+      "input_tokens INTEGER NULL",
+      "output_tokens INTEGER NULL",
+      "total_tokens INTEGER NULL",
+    ]) {
+      assert.match(createTableBody, new RegExp(`\\b${definition.replaceAll(" ", "\\s+")}\\b`));
+    }
 
     for (const column of [
       "simulation_session_id",
