@@ -6972,6 +6972,7 @@ export default function App() {
     if (screen === "performance" && user && mobileAuthToken) {
       return (
         <PerformanceScreen
+          colorScheme={colorScheme}
           userId={user.id}
           authToken={mobileAuthToken}
           onBack={() => setScreen("home")}

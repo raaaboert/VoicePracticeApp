@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ActivityIndicator,
@@ -49,8 +49,11 @@ import {
 } from "../lib/api";
 import { formatPerformanceDate } from "../lib/performanceDateFormatting";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import type { AppColorScheme } from "../types";
+import { getPerformanceTheme, type PerformanceTheme } from "./performanceTheme";
 
 interface PerformanceScreenProps {
+  colorScheme: AppColorScheme;
   userId: string;
   authToken: string;
   onBack: () => void;
@@ -58,6 +61,20 @@ interface PerformanceScreenProps {
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type GoalMode = "activity" | "performance" | "both";
+type PerformanceStyles = ReturnType<typeof createStyles>;
+
+const PerformanceThemeContext = createContext<{
+  palette: PerformanceTheme;
+  styles: PerformanceStyles;
+} | null>(null);
+
+function usePerformanceTheme() {
+  const theme = useContext(PerformanceThemeContext);
+  if (!theme) {
+    throw new Error("Performance theme is unavailable.");
+  }
+  return theme;
+}
 
 const ACTIVITY_METRICS: Array<{ value: PerformanceActivityMetricType; label: string }> = [
   { value: "weekly_practice_minutes", label: "Weekly minutes" },
@@ -187,6 +204,7 @@ function progressRatio(actual: number, target: number): number {
 }
 
 function ProgressBar({ ratio }: { ratio: number }) {
+  const { styles } = usePerformanceTheme();
   return (
     <View style={styles.progressTrack}>
       <View style={[styles.progressFill, { width: `${Math.round(ratio * 100)}%` }]} />
@@ -205,6 +223,7 @@ function PlanSummaryCard({
   attribution?: string;
   onOpen?: () => void;
 }) {
+  const { styles } = usePerformanceTheme();
   const Wrapper = onOpen ? Pressable : View;
   const status = derivePerformancePlanPresentationStatus(plan);
   const activityLine = buildPerformanceActivityLine(plan, progress);
@@ -256,6 +275,7 @@ function PlanSummaryCard({
 }
 
 function FinalResultBlock({ plan }: { plan: PerformancePlan }) {
+  const { styles } = usePerformanceTheme();
   if (!plan.finalResult) {
     return null;
   }
@@ -296,6 +316,7 @@ function PlanDetailModal({
   onClose: () => void;
   onUpdated: (detail: MobilePerformancePlanDetailResponse) => void;
 }) {
+  const { styles } = usePerformanceTheme();
   if (!detail) {
     return null;
   }
@@ -333,6 +354,7 @@ function PlanDetailModalContent({
   onClose: () => void;
   onUpdated: (detail: MobilePerformancePlanDetailResponse) => void;
 }) {
+  const { palette, styles } = usePerformanceTheme();
   const insets = useSafeAreaInsets();
   const bottomInsetPadding = Math.max(insets.bottom, 12) + 24;
   const [body, setBody] = useState("");
@@ -393,7 +415,7 @@ function PlanDetailModalContent({
                     value={body}
                     onChangeText={setBody}
                     placeholder="Write an update..."
-                    placeholderTextColor="#7d877a"
+                    placeholderTextColor={palette.inputPlaceholder}
                     multiline
                     maxLength={2000}
                   />
@@ -440,6 +462,7 @@ function OptionChip({
   onPress: () => void;
   disabled?: boolean;
 }) {
+  const { styles } = usePerformanceTheme();
   return (
     <Pressable
       style={[styles.chip, selected ? styles.chipSelected : null, disabled ? styles.disabled : null]}
@@ -462,6 +485,7 @@ function CalendarDateField({
   minimumDate?: string;
   onChange: (value: string) => void;
 }) {
+  const { styles } = usePerformanceTheme();
   const [open, setOpen] = useState(false);
   return (
     <View style={styles.formField}>
@@ -496,6 +520,7 @@ function CalendarDatePicker({
   onClose: () => void;
   onSelect: (value: string) => void;
 }) {
+  const { styles } = usePerformanceTheme();
   const selected = parseDateKey(value) ?? parseDateKey(todayDateKey())!;
   const [monthCursor, setMonthCursor] = useState(dateKeyFromParts(selected.year, selected.month, 1));
   const cursor = parseDateKey(monthCursor) ?? selected;
@@ -564,6 +589,7 @@ function PerformanceCreateForm({
   authToken: string;
   onCreated: () => Promise<void>;
 }) {
+  const { palette, styles } = usePerformanceTheme();
   const [goalMode, setGoalMode] = useState<GoalMode>("both");
   const [startDate, setStartDate] = useState(todayDateKey());
   const [endDate, setEndDate] = useState(addDaysDateKey(30));
@@ -753,7 +779,7 @@ function PerformanceCreateForm({
                 }}
                 keyboardType="decimal-pad"
                 placeholder="Activity target"
-                placeholderTextColor="#7d877a"
+                placeholderTextColor={palette.inputPlaceholder}
               />
             </>
           ) : null}
@@ -781,7 +807,7 @@ function PerformanceCreateForm({
                   }}
                   keyboardType="decimal-pad"
                   placeholder="Target score"
-                  placeholderTextColor="#7d877a"
+                  placeholderTextColor={palette.inputPlaceholder}
                 />
               ) : (
                 <>
@@ -794,7 +820,7 @@ function PerformanceCreateForm({
                     }}
                     keyboardType="decimal-pad"
                     placeholder="Improvement amount"
-                    placeholderTextColor="#7d877a"
+                    placeholderTextColor={palette.inputPlaceholder}
                   />
                   <Text style={styles.metricLabel}>Comparison window</Text>
                   <View style={styles.chipRow}>
@@ -883,6 +909,7 @@ function GoalSection({
   action?: ReactNode;
   children: ReactNode;
 }) {
+  const { styles } = usePerformanceTheme();
   const childArray = Array.isArray(children) ? children.filter(Boolean) : children ? [children] : [];
   return (
     <View style={styles.goalSection}>
@@ -904,7 +931,9 @@ function GoalSection({
   );
 }
 
-export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScreenProps) {
+export function PerformanceScreen({ colorScheme, userId, authToken, onBack }: PerformanceScreenProps) {
+  const palette = useMemo(() => getPerformanceTheme(colorScheme), [colorScheme]);
+  const styles = useMemo(() => createStyles(palette), [palette]);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [current, setCurrent] = useState<MobilePerformanceCurrentResponse | null>(null);
   const [options, setOptions] = useState<MobilePerformancePlanOptionsResponse | null>(null);
@@ -970,7 +999,8 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
   }, [loadPerformance]);
 
   return (
-    <View style={styles.fill}>
+    <PerformanceThemeContext.Provider value={{ palette, styles }}>
+      <View style={styles.fill}>
       <View style={styles.topRow}>
         <Pressable style={styles.backButton} onPress={onBack}>
           <Text style={styles.backButtonText}>Back</Text>
@@ -1063,7 +1093,8 @@ export function PerformanceScreen({ userId, authToken, onBack }: PerformanceScre
         onClose={() => setDetail(null)}
         onUpdated={setDetail}
       />
-    </View>
+      </View>
+    </PerformanceThemeContext.Provider>
   );
 }
 
@@ -1082,6 +1113,7 @@ function PerformanceCreateGoalModal({
   onCreated: () => Promise<void>;
   onClose: () => void;
 }) {
+  const { styles } = usePerformanceTheme();
   return (
     <Modal
       visible={visible}
@@ -1115,6 +1147,7 @@ function PerformanceCreateGoalModalContent({
   onCreated: () => Promise<void>;
   onClose: () => void;
 }) {
+  const { styles } = usePerformanceTheme();
   const insets = useSafeAreaInsets();
   const bottomInsetPadding = Math.max(insets.bottom, 12) + 24;
 
@@ -1148,22 +1181,23 @@ function PerformanceCreateGoalModalContent({
   );
 }
 
-const styles = StyleSheet.create({
-  fill: { flex: 1 },
+function createStyles(palette: PerformanceTheme) {
+  return StyleSheet.create({
+  fill: { flex: 1, backgroundColor: palette.background },
   scroll: { flex: 1 },
   content: { paddingBottom: 24 },
   createFormContent: { paddingHorizontal: 14, paddingTop: 14 },
   createFormBody: { gap: 12 },
-  modalSafeArea: { flex: 1, backgroundColor: "#101711" },
-  modalScreen: { flex: 1, backgroundColor: "#101711", padding: 14 },
+  modalSafeArea: { flex: 1, backgroundColor: palette.background },
+  modalScreen: { flex: 1, backgroundColor: palette.background, padding: 14 },
   createModalHeader: {
     gap: 12,
     paddingHorizontal: 14,
     paddingTop: 10,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(246,240,223,0.12)",
-    backgroundColor: "#101711",
+    borderBottomColor: palette.borderSubtle,
+    backgroundColor: palette.background,
   },
   createModalHeaderActions: { alignItems: "flex-end" },
   createModalCancelButton: { minHeight: 44 },
@@ -1174,7 +1208,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 12,
   },
-  topTitle: { color: "#f6f0df", fontSize: 19, fontWeight: "700" },
+  topTitle: { color: palette.text, fontSize: 19, fontWeight: "700" },
   headerSpacer: { minWidth: 78 },
   backButton: {
     minWidth: 78,
@@ -1183,15 +1217,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.2)",
-    backgroundColor: "rgba(20,28,22,0.68)",
+    borderColor: palette.buttonBorder,
+    backgroundColor: palette.controlInset,
   },
-  backButtonText: { color: "#f6f0df", fontWeight: "700" },
+  backButtonText: { color: palette.text, fontWeight: "700" },
   card: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "rgba(19,27,22,0.78)",
+    borderColor: palette.border,
+    backgroundColor: palette.card,
     padding: 14,
     marginBottom: 12,
     gap: 8,
@@ -1199,8 +1233,8 @@ const styles = StyleSheet.create({
   goalSection: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.16)",
-    backgroundColor: "rgba(19,27,22,0.72)",
+    borderColor: palette.sectionBorder,
+    backgroundColor: palette.section,
     marginBottom: 14,
     overflow: "hidden",
   },
@@ -1210,7 +1244,7 @@ const styles = StyleSheet.create({
     gap: 10,
     padding: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(246,240,223,0.1)",
+    borderBottomColor: palette.sectionDivider,
   },
   goalSectionBody: {
     padding: 10,
@@ -1219,36 +1253,36 @@ const styles = StyleSheet.create({
   planCard: {
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "rgba(143,184,141,0.34)",
-    backgroundColor: "rgba(15,24,18,0.92)",
+    borderColor: palette.planBorder,
+    backgroundColor: palette.planCard,
     padding: 14,
     gap: 8,
   },
   modalSheet: {
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "rgba(19,27,22,0.96)",
+    borderColor: palette.border,
+    backgroundColor: palette.surfaceStrong,
     padding: 14,
     gap: 12,
   },
   row: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   flex: { flex: 1 },
   eyebrow: {
-    color: "#c9b88f",
+    color: palette.eyebrow,
     fontSize: 12,
     fontWeight: "800",
     letterSpacing: 0,
     textTransform: "uppercase",
   },
-  title: { color: "#f6f0df", fontSize: 18, fontWeight: "800" },
-  body: { color: "#d8ddcf", fontSize: 14, lineHeight: 20 },
-  subtle: { color: "#aeb8a8", fontSize: 13, lineHeight: 18 },
+  title: { color: palette.text, fontSize: 18, fontWeight: "800" },
+  body: { color: palette.body, fontSize: 14, lineHeight: 20 },
+  subtle: { color: palette.muted, fontSize: 13, lineHeight: 18 },
   statusPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
-  statusActive: { backgroundColor: "rgba(114,157,116,0.28)" },
-  statusScheduled: { backgroundColor: "rgba(201,184,143,0.24)" },
-  statusMuted: { backgroundColor: "rgba(255,255,255,0.1)" },
-  statusText: { color: "#f6f0df", fontSize: 12, fontWeight: "800" },
+  statusActive: { backgroundColor: palette.activeStatus },
+  statusScheduled: { backgroundColor: palette.scheduledStatus },
+  statusMuted: { backgroundColor: palette.mutedStatus },
+  statusText: { color: palette.text, fontSize: 12, fontWeight: "800" },
   smallButton: {
     minHeight: 36,
     paddingHorizontal: 12,
@@ -1256,28 +1290,28 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "rgba(255,255,255,0.06)",
+    borderColor: palette.border,
+    backgroundColor: palette.control,
   },
-  smallButtonText: { color: "#f6f0df", fontWeight: "800" },
+  smallButtonText: { color: palette.text, fontWeight: "800" },
   sectionActionButton: {
     minHeight: 38,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 12,
-    backgroundColor: "#8fb88d",
+    backgroundColor: palette.accent,
     paddingHorizontal: 12,
   },
-  sectionActionButtonText: { color: "#102017", fontWeight: "900" },
+  sectionActionButtonText: { color: palette.accentText, fontWeight: "900" },
   formRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   formField: { flex: 1, minWidth: 130, gap: 6 },
   textInput: {
     minHeight: 44,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "rgba(8,13,10,0.42)",
-    color: "#f6f0df",
+    borderColor: palette.border,
+    backgroundColor: palette.input,
+    color: palette.text,
     paddingHorizontal: 12,
     fontSize: 15,
   },
@@ -1286,12 +1320,12 @@ const styles = StyleSheet.create({
     minHeight: 44,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "rgba(8,13,10,0.42)",
+    borderColor: palette.border,
+    backgroundColor: palette.input,
     justifyContent: "center",
     paddingHorizontal: 12,
   },
-  dateButtonText: { color: "#f6f0df", fontSize: 15, fontWeight: "700" },
+  dateButtonText: { color: palette.text, fontSize: 15, fontWeight: "700" },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chipColumn: { gap: 8 },
   chip: {
@@ -1300,53 +1334,53 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "rgba(255,255,255,0.06)",
+    borderColor: palette.border,
+    backgroundColor: palette.control,
     paddingHorizontal: 11,
     paddingVertical: 8,
   },
   chipSelected: {
-    borderColor: "rgba(143,184,141,0.82)",
-    backgroundColor: "rgba(143,184,141,0.2)",
+    borderColor: palette.selectedBorder,
+    backgroundColor: palette.accentSoft,
   },
-  chipText: { color: "#d8ddcf", fontSize: 13, fontWeight: "700" },
-  chipTextSelected: { color: "#f6f0df" },
+  chipText: { color: palette.body, fontSize: 13, fontWeight: "700" },
+  chipTextSelected: { color: palette.text },
   metricBlock: { gap: 6, marginTop: 4 },
   statusSummary: { gap: 3, marginTop: 4 },
-  metricLabel: { color: "#aeb8a8", fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
-  metricValue: { color: "#f6f0df", fontSize: 20, fontWeight: "800" },
-  progressTrack: { height: 9, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
-  progressFill: { height: 9, borderRadius: 999, backgroundColor: "#8fb88d" },
+  metricLabel: { color: palette.muted, fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
+  metricValue: { color: palette.text, fontSize: 20, fontWeight: "800" },
+  progressTrack: { height: 9, borderRadius: 999, backgroundColor: palette.progressTrack, overflow: "hidden" },
+  progressFill: { height: 9, borderRadius: 999, backgroundColor: palette.accent },
   statGrid: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   statBox: {
     flex: 1,
     minWidth: 90,
     borderRadius: 14,
     padding: 10,
-    backgroundColor: "rgba(255,255,255,0.07)",
+    backgroundColor: palette.statBackground,
   },
-  insightRow: { gap: 4, paddingVertical: 6, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)" },
-  updateItem: { gap: 4, paddingVertical: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)" },
+  insightRow: { gap: 4, paddingVertical: 6, borderTopWidth: 1, borderTopColor: palette.divider },
+  updateItem: { gap: 4, paddingVertical: 10, borderTopWidth: 1, borderTopColor: palette.divider },
   errorCard: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(240,138,138,0.36)",
-    backgroundColor: "rgba(91,35,35,0.34)",
+    borderColor: palette.errorBorder,
+    backgroundColor: palette.errorBackground,
     padding: 14,
     marginBottom: 12,
   },
-  errorText: { color: "#ffd6d6", lineHeight: 20 },
+  errorText: { color: palette.errorText, lineHeight: 20 },
   previewBox: {
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(143,184,141,0.28)",
-    backgroundColor: "rgba(143,184,141,0.08)",
+    borderColor: palette.previewBorder,
+    backgroundColor: palette.previewBackground,
     padding: 12,
     gap: 6,
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: palette.modalBackdrop,
     alignItems: "center",
     justifyContent: "center",
     padding: 16,
@@ -1356,15 +1390,15 @@ const styles = StyleSheet.create({
     maxWidth: 360,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.18)",
-    backgroundColor: "#152017",
+    borderColor: palette.border,
+    backgroundColor: palette.calendarPanel,
     padding: 14,
     gap: 12,
   },
   calendarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 4 },
   calendarHeader: {
     width: "13.5%",
-    color: "#aeb8a8",
+    color: palette.muted,
     textAlign: "center",
     fontSize: 12,
     fontWeight: "800",
@@ -1376,9 +1410,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 10,
   },
-  calendarCellSelected: { backgroundColor: "#8fb88d" },
-  calendarCellText: { color: "#d8ddcf", fontWeight: "800" },
-  calendarCellTextSelected: { color: "#102017" },
+  calendarCellSelected: { backgroundColor: palette.accent },
+  calendarCellText: { color: palette.body, fontWeight: "800" },
+  calendarCellTextSelected: { color: palette.accentText },
   primaryButton: {
     minHeight: 46,
     flex: 1,
@@ -1386,9 +1420,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 16,
-    backgroundColor: "#8fb88d",
+    backgroundColor: palette.accent,
   },
-  primaryButtonText: { color: "#102017", fontWeight: "900" },
+  primaryButtonText: { color: palette.accentText, fontWeight: "900" },
   secondaryButton: {
     minHeight: 46,
     flex: 1,
@@ -1397,9 +1431,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(246,240,223,0.2)",
-    backgroundColor: "rgba(255,255,255,0.07)",
+    borderColor: palette.buttonBorder,
+    backgroundColor: palette.buttonBackground,
   },
-  secondaryButtonText: { color: "#f6f0df", fontWeight: "800" },
+  secondaryButtonText: { color: palette.text, fontWeight: "800" },
   disabled: { opacity: 0.6 },
-});
+  });
+}
