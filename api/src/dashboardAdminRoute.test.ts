@@ -749,6 +749,13 @@ async function readAuditMetadataJson(): Promise<string> {
   return JSON.stringify((payload.events ?? []).map((event) => event.metadata ?? null));
 }
 
+async function readPlatformAuditEvents(): Promise<AuditEvent[]> {
+  const payload = JSON.parse(await readFile(auditEventsPath(), "utf8")) as {
+    events?: AuditEvent[];
+  };
+  return Array.isArray(payload.events) ? payload.events : [];
+}
+
 async function readUser(userId: string): Promise<UserProfile | undefined> {
   const db = await readDb();
   return db.users.find((user) => user.id === userId);
@@ -1785,6 +1792,44 @@ test("internal Admin Utility module endpoint is authorized, tenant-scoped, persi
 
   const missingOrg = await adminRequest("/orgs/org_missing/modules");
   assert.equal(missingOrg.status, 404);
+});
+
+test("organization contact updates remain admin-only, narrow, persistent, and auditable", async () => {
+  const unauthorized = await publicRequest("/orgs/org_1", {
+    method: "PATCH",
+    body: JSON.stringify({
+      contactName: "Updated Contact",
+      contactEmail: "updated.contact@acme.example",
+    }),
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const before = (await readDb()).orgs.find((org) => org.id === "org_1");
+  assert.ok(before);
+
+  const updated = await adminRequest("/orgs/org_1", {
+    method: "PATCH",
+    body: JSON.stringify({
+      contactName: "Updated Contact",
+      contactEmail: "updated.contact@acme.example",
+    }),
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.contactName, "Updated Contact");
+  assert.equal(updated.body.contactEmail, "updated.contact@acme.example");
+  assert.equal(updated.body.name, before.name);
+  assert.equal(updated.body.joinCode, before.joinCode);
+
+  await waitForWriteToSettle();
+  const persisted = (await readDb()).orgs.find((org) => org.id === "org_1");
+  assert.equal(persisted?.contactName, "Updated Contact");
+  assert.equal(persisted?.contactEmail, "updated.contact@acme.example");
+
+  const audit = (await readPlatformAuditEvents())
+    .filter((event) => event.action === "org.updated" && event.orgId === "org_1")
+    .at(-1);
+  assert.ok(audit);
+  assert.deepEqual((audit.metadata as { fields?: unknown }).fields, ["contactName", "contactEmail"]);
 });
 
 test("Training Content asset routes derive tenant and actor, require explicit super-user scope, and reject server-owned fields", async () => {

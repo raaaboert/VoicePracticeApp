@@ -22,6 +22,8 @@ import { EnterpriseCompanyDivisionsCard } from "../../../../src/components/Enter
 import { EnterpriseStandardScenarioDivisionCard } from "../../../../src/components/EnterpriseStandardScenarioDivisionCard";
 import { EnterpriseTrainingsWorkspace } from "../../../../src/components/EnterpriseTrainingsWorkspace";
 import { EnterpriseModuleEntitlementsCard } from "../../../../src/components/EnterpriseModuleEntitlementsCard";
+import { EnterpriseAccountContactCard } from "../../../../src/components/EnterpriseAccountContactCard";
+import type { OrganizationContactUpdatePayload, OrganizationContactValues } from "../../../../src/components/enterpriseAccountContact";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
 import { adminFetch } from "../../../../src/lib/api";
 import { withAdminMode } from "../../../../src/lib/adminMode";
@@ -716,6 +718,24 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const saveOrganizationContact = async (
+    payload: OrganizationContactUpdatePayload,
+  ): Promise<OrganizationContactValues> => {
+    if (!dashboard) {
+      throw new Error("Organization details are not available.");
+    }
+
+    const updated = await adminFetch<EnterpriseOrg>(`/orgs/${dashboard.org.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    setDashboard((previous) => (previous ? { ...previous, org: updated } : previous));
+    return {
+      contactName: updated.contactName,
+      contactEmail: updated.contactEmail,
+    };
+  };
+
   const toggleOrgStatus = async () => {
     if (!dashboard) {
       return;
@@ -1007,15 +1027,12 @@ export default function EnterpriseOrgPage() {
                     <label>Account Status</label>
                     <div className="enterprise-detail-value">{dashboard.org.status === "active" ? "Active" : "Deactivated"}</div>
                   </div>
-                  <div className="enterprise-detail-item">
-                    <label>Company Contact</label>
-                    <div className="enterprise-detail-value">{dashboard.org.contactName || "-"}</div>
-                  </div>
-                  <div className="enterprise-detail-item">
-                    <label>Contact Email</label>
-                    <div className="enterprise-detail-value break-word">{dashboard.org.contactEmail || "-"}</div>
-                  </div>
                 </div>
+                <EnterpriseAccountContactCard
+                  contactName={dashboard.org.contactName}
+                  contactEmail={dashboard.org.contactEmail}
+                  onSave={saveOrganizationContact}
+                />
               </div>
 
               <EnterpriseModuleEntitlementsCard
