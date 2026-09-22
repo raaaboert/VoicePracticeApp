@@ -84,14 +84,14 @@ Phase 0 produces a reset specification only.
 - It is rehearsed against staging before any production use.
 - Production performance history is reset once, immediately before or during final production cutover, after explicit approval and verified backup/restore readiness.
 
-The later Phase 0 reset specification must resolve these retention questions before implementation:
+The finalized contract is recorded in [`Peritio_Performance_History_Reset.md`](./Peritio_Performance_History_Reset.md). It resolves the Phase 0 retention questions as follows:
 
-| Data | Unresolved decision |
+| Data | Locked treatment |
 | --- | --- |
-| Performance plans and goals | Preserve, delete, cancel, or rebuild plans whose baselines, progress, and final results depend on disposable scores |
-| Usage and billing truth | Determine whether simulation usage is disposable performance history or durable billing/accounting truth; preserve billing correctness and idempotency |
-| AI accounting events | Decide which event kinds are retained for accounting/audit purposes instead of deleting all AI usage events |
-| Support cases | Preserve by default unless the owner explicitly classifies pre-official-use cases as disposable |
-| Assignment progress | Preserve assignment definitions; decide whether derived `startedAt` and `completedAt` are reset and how they are rebuilt |
+| Performance plans and goals | Delete the disposable pre-official plans and their scope, plan-audit, update, baseline, and final-result artifacts. |
+| Usage and billing truth | Preserve authoritative usage rows for financial/quota truth and apply a recorded cutover timestamp so pre-cutover rows no longer contribute to learner/performance history. |
+| AI accounting events | Preserve all valid AI usage events and reconcile any legacy copies into the authoritative store. |
+| Support cases | Preserve. |
+| Assignment progress | Preserve assignment definitions and assignees; reset derived `startedAt` and `completedAt` values tied to disposable history. |
 
 Existing reset scripts do not settle these questions: they clear support cases and all AI usage events, reset assignment progress, and do not clear the separate Performance plan store. They must not be run as the modernization reset.

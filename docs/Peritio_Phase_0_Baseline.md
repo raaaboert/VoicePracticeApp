@@ -96,6 +96,10 @@ Before any destructive reset tooling is used, verify the backup inventory and in
 - Training Pack scoring overrides affect only persuasion, clarity, empathy, and assertiveness. They affect Overall only through the Communication composite; the Communication/Outcome blend and unresolved cap remain unchanged.
 - Success behaviors, failure patterns, and compliance constraints are not independently appended to the evaluation prompt today.
 
+The full-route Training Pack activation path is Postgres-dependent. The file-backed route-golden harness intentionally does not activate a Training Pack; pure orchestrator and runtime tests protect pack composition and scoring-weight calculations. This is an accepted Phase 0 test limitation. Do not add a production test seam for it now. Consider a real-Postgres route test when Phase 6 changes this path.
+
+The Phase 0 read-only scoring-weight inventory is recorded in [`Peritio_Phase_0_Scoring_Weight_Override_Audit.md`](./Peritio_Phase_0_Scoring_Weight_Override_Audit.md).
+
 ### Focus Topics and Learning Resources
 
 - Focus Topic (`OrgTraining`) authoritative storage remains the current app-state collections: `orgTrainings`, `orgTrainingScenarioAttachments`, and `orgTrainingPackAttachments`.
