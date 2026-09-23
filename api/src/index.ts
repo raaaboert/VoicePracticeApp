@@ -346,6 +346,7 @@ import {
   listVisibleOrganizationUsers,
   normalizeManagerUserId,
   normalizeOptionalStoredUserName,
+  normalizePerformanceAccess,
   normalizeRequiredUserNameInput,
   repairInvalidManagerAssignments,
   resolveStoredUserDisplayName,
@@ -4091,7 +4092,8 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
         activeDivisionIds?.has(normalizedDivisionId)
           ? normalizedDivisionId
           : null,
-      orgRole: candidateUser.accountType === "enterprise" ? normalizeOrgUserRole(candidateUser.orgRole) : "user"
+      orgRole: candidateUser.accountType === "enterprise" ? normalizeOrgUserRole(candidateUser.orgRole) : "user",
+      performanceAccess: normalizePerformanceAccess(candidateUser, validOrgIds)
     };
   });
   repairInvalidManagerAssignments(normalizedUsers, now);
@@ -5187,6 +5189,11 @@ function buildWebAuthSessionUser(user: UserProfile): WebAuthSessionResponse["ses
     accountType: user.accountType,
     orgId: user.orgId
   };
+}
+
+function buildMobileUserProfile(user: UserProfile): UserProfile {
+  const { performanceAccess: _performanceAccess, ...mobileUser } = user;
+  return mobileUser;
 }
 
 function getWebAuthRequestUserAgent(request: Request): string | null {
@@ -7993,6 +8000,7 @@ function buildDashboardAdminUserRow(params: {
     displayName: resolveStoredUserDisplayName(params.user),
     employeeId: params.user.employeeId ?? null,
     orgRole: params.user.orgRole,
+    performanceAccess: normalizePerformanceAccess(params.user),
     managerUserId,
     managerDisplayName: manager ? resolveStoredUserDisplayName(manager) : null,
     managerEmail: manager?.email ?? null,
@@ -16469,7 +16477,7 @@ app.post(
         expiresAt: verification.expiresAt
       });
       const payload: MobileOnboardResponse = {
-        user: existing,
+        user: buildMobileUserProfile(existing),
         authToken,
         verificationRequired: true,
         verificationExpiresAt: verification.expiresAt,
@@ -16528,7 +16536,7 @@ app.post(
       }
     });
     const payload: MobileOnboardResponse = {
-      user,
+      user: buildMobileUserProfile(user),
       authToken,
       verificationRequired: true,
       verificationExpiresAt: verification.expiresAt,
@@ -16649,7 +16657,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
 
     if (!needsCodeVerification && !profileProvided && hasCompleteUserName(user)) {
       const payload: MobileOnboardResponse = {
-        user,
+        user: buildMobileUserProfile(user),
         authToken,
         verificationRequired: false,
         verificationExpiresAt: null,
@@ -16777,7 +16785,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       ? upsertMobileAuthToken(db, user.id, now.toISOString())
       : authToken;
     const payload: MobileOnboardResponse = {
-      user,
+      user: buildMobileUserProfile(user),
       authToken: responseAuthToken,
       verificationRequired: false,
       verificationExpiresAt: null,
@@ -16810,7 +16818,7 @@ app.get("/mobile/users/:userId", async (request: Request, response: Response) =>
     }
 
     materializeUserTimezone(user, new Date());
-    response.json(user);
+    response.json(buildMobileUserProfile(user));
   });
 });
 
@@ -17758,7 +17766,7 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
         timezoneChanged: typeof patch.timezone === "string" && resolveTimeZone(patch.timezone) !== user.timezone
       }
     });
-    response.json(user);
+    response.json(buildMobileUserProfile(user));
   });
 });
 

@@ -53,6 +53,7 @@ function viewer(): DashboardViewer {
     orgId: "org_1",
     orgName: "Example",
     orgRole: "org_admin",
+    performanceAccess: "organization",
     capabilities: {
       viewOrganizationUsers: true,
       manageRegularOrganizationUsers: true,

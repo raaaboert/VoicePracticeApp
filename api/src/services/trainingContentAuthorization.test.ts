@@ -61,6 +61,7 @@ function buildViewer(overrides: Partial<DashboardViewer> = {}): DashboardViewer 
     orgId: overrides.orgId === undefined ? "org_1" : overrides.orgId,
     orgName: overrides.orgName === undefined ? "Org One" : overrides.orgName,
     orgRole: overrides.orgRole === undefined ? "org_admin" : overrides.orgRole,
+    performanceAccess: overrides.performanceAccess ?? "organization",
     capabilities: overrides.capabilities ?? buildDashboardAdminCapabilities("org_admin"),
   };
 }

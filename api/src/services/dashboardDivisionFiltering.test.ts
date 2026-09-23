@@ -125,6 +125,7 @@ function createViewer(overrides?: Partial<DashboardViewer>): DashboardViewer {
     orgId: overrides?.orgId ?? "org_1",
     orgName: overrides?.orgName ?? "Org 1",
     orgRole: overrides?.orgRole ?? "org_admin",
+    performanceAccess: overrides?.performanceAccess ?? "organization",
     capabilities: overrides?.capabilities ?? {
       viewOrganizationUsers: true,
       manageRegularOrganizationUsers: true,

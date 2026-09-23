@@ -7,11 +7,14 @@ import { normalizeEmployeeIdInput } from "./employeeIds.js";
 import {
   normalizeManagerUserId,
   normalizeOptionalStoredUserName,
+  normalizePerformanceAccess,
   repairInvalidManagerAssignments
 } from "./userProfiles.js";
 import {
   migrateUserProfileAppStateNormalization,
   normalizeAppStateMigrations,
+  PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY,
+  PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION,
   USER_PROFILE_APP_STATE_MIGRATION_KEY,
   USER_PROFILE_APP_STATE_MIGRATION_VERSION
 } from "./userProfileAppStateMigration.js";
@@ -94,6 +97,7 @@ function ensureTestDatabaseShape(raw: unknown): ApiDatabase {
       managerUserId:
         candidateUser.accountType === "enterprise" ? normalizeManagerUserId(candidateUser.managerUserId) : null,
       orgRole: candidateUser.accountType === "enterprise" ? normalizeOrgUserRole(candidateUser.orgRole) : "user",
+      performanceAccess: normalizePerformanceAccess(candidateUser, new Set(["org_1", "org_2"])),
       dashboardAccessEnabled:
         candidateUser.accountType === "enterprise" ? candidateUser.dashboardAccessEnabled === true : false,
       mobileProfileReonboardingRequired:
@@ -146,6 +150,10 @@ test("user profile app-state migration saves legacy normalized fields and then b
   assert.equal(saveCount, 1);
   const saved = persisted as ApiDatabase;
   assert.equal(saved.appStateMigrations?.[USER_PROFILE_APP_STATE_MIGRATION_KEY], USER_PROFILE_APP_STATE_MIGRATION_VERSION);
+  assert.equal(
+    saved.appStateMigrations?.[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY],
+    PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION
+  );
   assert.equal(saved.users[1]?.firstName, "Ada");
   assert.equal(saved.users[1]?.lastName, null);
   assert.equal(saved.users[1]?.employeeId, "EMP-1");
@@ -169,6 +177,90 @@ test("user profile app-state migration saves legacy normalized fields and then b
 
   assert.deepEqual(replay, { saved: false, profileChanged: false, markerChanged: false });
   assert.equal(saveCount, 1);
+});
+
+test("performance-access migration backfills compatibility values, preserves explicit values, and is idempotent", async () => {
+  const raw = buildDb([
+    buildUser("legacy_org_admin", { orgRole: "org_admin" }),
+    buildUser("legacy_user_admin", { orgRole: "user_admin" }),
+    buildUser("legacy_user", { orgRole: "user" }),
+    buildUser("explicit_none", { orgRole: "org_admin", performanceAccess: "none" }),
+    buildUser("explicit_team", { orgRole: "user", performanceAccess: "team" }),
+    buildUser("explicit_organization", {
+      firstName: "Grace",
+      lastName: "Hopper",
+      employeeId: "GH-1",
+      managerUserId: "legacy_user_admin",
+      orgRole: "user",
+      performanceAccess: "organization",
+      divisionId: "division_1",
+      dashboardAccessEnabled: true,
+      mobileProfileReonboardingRequired: true,
+    }),
+    {
+      ...buildUser("invalid_user_admin", { orgRole: "user_admin" }),
+      performanceAccess: "invalid",
+    } as unknown as UserProfile,
+    {
+      ...buildUser("individual", {
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user",
+      }),
+      performanceAccess: "invalid",
+    } as unknown as UserProfile,
+  ]);
+  for (const userId of ["legacy_org_admin", "legacy_user_admin", "legacy_user"]) {
+    delete (raw.users.find((user) => user.id === userId) as Partial<UserProfile>).performanceAccess;
+  }
+  const unrelatedBefore = {
+    ...raw.users.find((user) => user.id === "explicit_organization")!,
+  };
+
+  let persisted: unknown = structuredClone(raw);
+  let saveCount = 0;
+  const migrate = () => migrateUserProfileAppStateNormalization({
+    storage: {
+      async loadRaw() {
+        return persisted;
+      },
+      async save(db) {
+        saveCount += 1;
+        persisted = db;
+      },
+    },
+    ensureDatabaseShape: ensureTestDatabaseShape,
+    buildPersistedDatabaseSnapshot: persistedSnapshot,
+  });
+
+  const result = await migrate();
+  assert.deepEqual(result, { saved: true, profileChanged: true, markerChanged: true });
+  assert.equal(saveCount, 1);
+  const saved = persisted as ApiDatabase;
+  const usersById = new Map(saved.users.map((user) => [user.id, user]));
+  assert.equal(usersById.get("legacy_org_admin")?.performanceAccess, "organization");
+  assert.equal(usersById.get("legacy_user_admin")?.performanceAccess, "team");
+  assert.equal(usersById.get("legacy_user")?.performanceAccess, "none");
+  assert.equal(usersById.get("explicit_none")?.performanceAccess, "none");
+  assert.equal(usersById.get("explicit_team")?.performanceAccess, "team");
+  assert.equal(usersById.get("explicit_organization")?.performanceAccess, "organization");
+  assert.equal(usersById.get("invalid_user_admin")?.performanceAccess, "team");
+  assert.equal(usersById.get("individual")?.performanceAccess, "none");
+  assert.equal(saved.appStateMigrations?.[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY], PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION);
+  assert.deepEqual(
+    {
+      ...usersById.get("explicit_organization"),
+      performanceAccess: unrelatedBefore.performanceAccess,
+    },
+    unrelatedBefore
+  );
+
+  const snapshotAfterFirstRun = structuredClone(saved);
+  const replay = await migrate();
+  assert.deepEqual(replay, { saved: false, profileChanged: false, markerChanged: false });
+  assert.equal(saveCount, 1);
+  assert.deepEqual(persisted, snapshotAfterFirstRun);
 });
 
 test("user profile app-state migration preserves valid fields and clears invalid managers", async () => {

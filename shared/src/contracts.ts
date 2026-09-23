@@ -15,6 +15,9 @@ export type OrgStatus = (typeof ORG_STATUSES)[number];
 export const ORG_USER_ROLES = ["org_admin", "user_admin", "user"] as const;
 export type OrgUserRole = (typeof ORG_USER_ROLES)[number];
 
+export const PERFORMANCE_ACCESS_LEVELS = ["none", "team", "organization"] as const;
+export type PerformanceAccessLevel = (typeof PERFORMANCE_ACCESS_LEVELS)[number];
+
 export const DASHBOARD_ACCESS_TYPES = ["super_user", "customer_dashboard_user"] as const;
 export type DashboardAccessType = (typeof DASHBOARD_ACCESS_TYPES)[number];
 
@@ -800,6 +803,7 @@ export interface UserProfile {
   status: UserStatus;
   orgId: string | null;
   orgRole: OrgUserRole;
+  performanceAccess?: PerformanceAccessLevel;
   divisionId?: string | null;
   timezone: string;
   pendingTimezone: string | null;
@@ -1639,6 +1643,7 @@ export interface DashboardViewer {
   orgId: string | null;
   orgName: string | null;
   orgRole: OrgUserRole | null;
+  performanceAccess: PerformanceAccessLevel;
   capabilities: DashboardAdminCapabilities;
 }
 
@@ -2458,6 +2463,7 @@ export interface DashboardAdminUserRow {
   displayName: string;
   employeeId: string | null;
   orgRole: OrgUserRole;
+  performanceAccess: PerformanceAccessLevel;
   managerUserId: string | null;
   managerDisplayName: string | null;
   managerEmail: string | null;
@@ -3143,6 +3149,10 @@ export function isIndustryId(value: string): value is IndustryId {
 
 export function isOrgUserRole(value: string): value is OrgUserRole {
   return ORG_USER_ROLES.includes(value as OrgUserRole);
+}
+
+export function isPerformanceAccessLevel(value: string): value is PerformanceAccessLevel {
+  return PERFORMANCE_ACCESS_LEVELS.includes(value as PerformanceAccessLevel);
 }
 
 export function isOrgJoinRequestStatus(value: string): value is OrgJoinRequestStatus {

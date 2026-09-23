@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { UserProfile } from "@voicepractice/shared";
+import {
+  PERFORMANCE_ACCESS_LEVELS,
+  isPerformanceAccessLevel,
+  type UserProfile,
+} from "@voicepractice/shared";
 
 import {
   canBeAssignedAsManager,
+  normalizePerformanceAccess,
   repairInvalidManagerAssignments,
   validateManagerAssignment,
 } from "./userProfiles.js";
@@ -43,6 +48,60 @@ function user(id: string, overrides: Partial<UserProfile> = {}): UserProfile {
     ...overrides,
   };
 }
+
+test("performance access contract accepts only the canonical levels", () => {
+  assert.deepEqual(PERFORMANCE_ACCESS_LEVELS, ["none", "team", "organization"]);
+  for (const level of PERFORMANCE_ACCESS_LEVELS) {
+    assert.equal(isPerformanceAccessLevel(level), true);
+  }
+  assert.equal(isPerformanceAccessLevel("org_admin"), false);
+  assert.equal(isPerformanceAccessLevel(""), false);
+});
+
+test("performance access normalization preserves valid explicit enterprise values", () => {
+  assert.equal(normalizePerformanceAccess(user("org_admin_none", {
+    orgRole: "org_admin",
+    performanceAccess: "none",
+  })), "none");
+  assert.equal(normalizePerformanceAccess(user("regular_team", {
+    orgRole: "user",
+    performanceAccess: "team",
+  })), "team");
+  assert.equal(normalizePerformanceAccess(user("regular_organization", {
+    orgRole: "user",
+    performanceAccess: "organization",
+  })), "organization");
+});
+
+test("performance access normalization derives missing and malformed legacy values from org role", () => {
+  assert.equal(normalizePerformanceAccess(user("org_admin", { orgRole: "org_admin" })), "organization");
+  assert.equal(normalizePerformanceAccess(user("user_admin", { orgRole: "user_admin" })), "team");
+  assert.equal(normalizePerformanceAccess(user("regular_user", { orgRole: "user" })), "none");
+  assert.equal(normalizePerformanceAccess({
+    ...user("invalid_user_admin", { orgRole: "user_admin" }),
+    performanceAccess: "invalid",
+  }), "team");
+});
+
+test("performance access normalization forces non-enterprise and no-org users to none", () => {
+  assert.equal(normalizePerformanceAccess(user("individual", {
+    accountType: "individual",
+    tier: "free",
+    orgId: null,
+    orgRole: "org_admin",
+    performanceAccess: "organization",
+  })), "none");
+  assert.equal(normalizePerformanceAccess(user("missing_org", {
+    orgId: null,
+    orgRole: "org_admin",
+    performanceAccess: "organization",
+  })), "none");
+  assert.equal(normalizePerformanceAccess(user("unknown_org", {
+    orgId: "org_unknown",
+    orgRole: "org_admin",
+    performanceAccess: "organization",
+  }), new Set(["org_1"])), "none");
+});
 
 test("canBeAssignedAsManager preserves the current relationship eligibility rule", () => {
   assert.equal(canBeAssignedAsManager(user("user_admin", { orgRole: "user_admin" }), "org_1"), true);

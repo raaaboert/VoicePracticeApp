@@ -3,6 +3,8 @@ import type { LockedAppStateUpdate } from "../storage.js";
 
 export const USER_PROFILE_APP_STATE_MIGRATION_KEY = "user_profile_management_v1";
 export const USER_PROFILE_APP_STATE_MIGRATION_VERSION = "2026-07-27";
+export const PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY = "performance_access_v1";
+export const PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION = "2026-09-22";
 
 const MISSING_FIELD = "__peritio_missing_field__";
 
@@ -51,6 +53,7 @@ export function buildUserProfileMigrationFingerprint(users: unknown): unknown[] 
       employeeId: persistedField(record, "employeeId"),
       managerUserId: persistedField(record, "managerUserId"),
       orgRole: persistedField(record, "orgRole"),
+      performanceAccess: persistedField(record, "performanceAccess"),
       dashboardAccessEnabled: persistedField(record, "dashboardAccessEnabled"),
       mobileProfileReonboardingRequired: persistedField(record, "mobileProfileReonboardingRequired")
     };
@@ -71,7 +74,9 @@ export async function migrateUserProfileAppStateNormalization(params: {
     const rawRecord = asRecord(raw);
     const normalized = params.ensureDatabaseShape(raw);
     const migrations = normalizeAppStateMigrations(rawRecord.appStateMigrations);
-    const markerChanged = migrations[USER_PROFILE_APP_STATE_MIGRATION_KEY] !== USER_PROFILE_APP_STATE_MIGRATION_VERSION;
+    const markerChanged =
+      migrations[USER_PROFILE_APP_STATE_MIGRATION_KEY] !== USER_PROFILE_APP_STATE_MIGRATION_VERSION ||
+      migrations[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY] !== PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION;
     const profileChanged = !fingerprintsMatch(
       buildUserProfileMigrationFingerprint(rawRecord.users),
       buildUserProfileMigrationFingerprint(normalized.users)
@@ -79,7 +84,8 @@ export async function migrateUserProfileAppStateNormalization(params: {
 
     normalized.appStateMigrations = {
       ...migrations,
-      [USER_PROFILE_APP_STATE_MIGRATION_KEY]: USER_PROFILE_APP_STATE_MIGRATION_VERSION
+      [USER_PROFILE_APP_STATE_MIGRATION_KEY]: USER_PROFILE_APP_STATE_MIGRATION_VERSION,
+      [PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY]: PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION
     };
 
     if (!profileChanged && !markerChanged) {

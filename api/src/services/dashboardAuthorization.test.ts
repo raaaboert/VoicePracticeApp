@@ -69,6 +69,7 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
   assert.equal(viewer.accessType, "customer_dashboard_user");
   assert.equal("isPlatformAdmin" in viewer, false);
   assert.equal(viewer.orgRole, "org_admin");
+  assert.equal(viewer.performanceAccess, "organization");
   assert.deepEqual(viewer.capabilities, {
     viewOrganizationUsers: true,
     manageRegularOrganizationUsers: true,
@@ -107,6 +108,7 @@ test("mixed platform_admin plus tenant-valid user keeps tenant-scoped dashboard 
   assert.equal(viewer.accessType, "customer_dashboard_user");
   assert.equal("isPlatformAdmin" in viewer, false);
   assert.equal(viewer.orgRole, "org_admin");
+  assert.equal(viewer.performanceAccess, "organization");
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), false);
@@ -137,6 +139,7 @@ test("super users retain cross-account dashboard access", () => {
   assert.equal(viewer.accessType, "super_user");
   assert.equal("isPlatformAdmin" in viewer, false);
   assert.equal(viewer.orgRole, null);
+  assert.equal(viewer.performanceAccess, "none");
   assert.deepEqual(viewer.capabilities, {
     viewOrganizationUsers: false,
     manageRegularOrganizationUsers: false,
@@ -193,6 +196,24 @@ test("dashboard-ineligible enterprise user does not resolve a dashboard viewer",
   assert.equal(eligibility.eligible, false);
   assert.equal(eligibility.reason, "inactive_org");
   assert.equal(viewer, null);
+});
+
+test("dashboard viewer exposes explicit normalized performance access without using it for eligibility", () => {
+  const user = createUser({
+    performanceAccess: "none",
+    orgRole: "org_admin",
+  });
+  const db = createDb({
+    users: [user],
+    orgs: [{ id: "org_a", name: "Org A", status: "active" }],
+  });
+
+  const viewer = resolveDashboardViewer(db, user);
+
+  assert.ok(viewer);
+  assert.equal(viewer.performanceAccess, "none");
+  assert.equal(viewer.orgRole, "org_admin");
+  assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
 });
 
 test("enterprise user without dashboard access does not resolve a dashboard viewer", () => {

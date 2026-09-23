@@ -1,4 +1,5 @@
 import { ApiDatabase, DashboardAdminCapabilities, DashboardViewer, EnterpriseOrg, OrgUserRole, UserProfile } from "@voicepractice/shared";
+import { normalizePerformanceAccess } from "./userProfiles.js";
 
 export type DashboardAccessEligibilityReason =
   | "inactive_user"
@@ -154,6 +155,7 @@ export function resolveDashboardViewer(db: ApiDatabase, user: UserProfile): Dash
     orgId: eligibility.org?.id ?? null,
     orgName: eligibility.org?.name ?? null,
     orgRole: user.isSuperUser === true ? null : user.orgRole,
+    performanceAccess: normalizePerformanceAccess(user),
     capabilities: user.isSuperUser === true ? buildDashboardAdminCapabilities(null) : buildDashboardAdminCapabilities(user.orgRole),
   };
 }

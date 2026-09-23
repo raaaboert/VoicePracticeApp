@@ -38,6 +38,7 @@ function createViewer(): DashboardViewer {
     orgId: "org_1",
     orgName: "Rob's Company",
     orgRole: "org_admin",
+    performanceAccess: "organization",
     capabilities: {
       viewOrganizationUsers: true,
       manageRegularOrganizationUsers: true,
@@ -60,6 +61,7 @@ function createUserRow(overrides: Partial<DashboardAdminUserRow> = {}): Dashboar
     displayName: "Approved User",
     employeeId: null,
     orgRole: "user",
+    performanceAccess: overrides.performanceAccess ?? "none",
     managerUserId: null,
     managerDisplayName: null,
     managerEmail: null,

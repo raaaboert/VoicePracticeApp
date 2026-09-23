@@ -691,6 +691,7 @@ function buildDemoCustomerFacingViewer(viewer: DashboardViewer): DashboardViewer
     orgId: DASHBOARD_DEMO_ACCOUNT_ID,
     orgName: "SampleCo Training",
     orgRole: "org_admin",
+    performanceAccess: "organization",
     capabilities: {
       viewOrganizationUsers: true,
       manageRegularOrganizationUsers: true,

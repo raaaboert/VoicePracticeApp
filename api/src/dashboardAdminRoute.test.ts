@@ -2266,10 +2266,18 @@ test("dashboard admin users are tenant-scoped and regular users cannot access Ad
 
   const result = await dashboardRequest("/dashboard/admin/users");
   assert.equal(result.status, 200);
-  const users = result.body.users as Array<{ userId: string; employeeId: string | null }>;
+  const users = result.body.users as Array<{
+    userId: string;
+    employeeId: string | null;
+    performanceAccess: "none" | "team" | "organization";
+  }>;
   assert.equal(users.some((user) => user.userId === "learner"), true);
   assert.equal(users.some((user) => user.userId === "other_org_user"), false);
   assert.equal(users.find((user) => user.userId === "learner")?.employeeId, "EMP-1");
+  assert.equal(users.find((user) => user.userId === "org_admin")?.performanceAccess, "organization");
+  assert.equal(users.find((user) => user.userId === "user_admin")?.performanceAccess, "team");
+  assert.equal(users.find((user) => user.userId === "learner")?.performanceAccess, "none");
+  assert.equal((result.body.viewer as { performanceAccess?: string }).performanceAccess, "organization");
 });
 
 test("user-admin users are scoped to themselves and directly assigned reports", async () => {
@@ -2281,9 +2289,52 @@ test("user-admin users are scoped to themselves and directly assigned reports", 
   assert.deepEqual(userIds, ["learner", "learner_atomic", "learner_status", "role_target", "user_admin"]);
   assert.deepEqual(result.body.managerOptions, []);
 
-  const viewer = result.body.viewer as { capabilities?: { approveRejectAccessRequests?: boolean; assignUserManagers?: boolean } };
+  const viewer = result.body.viewer as {
+    performanceAccess?: string;
+    capabilities?: { approveRejectAccessRequests?: boolean; assignUserManagers?: boolean };
+  };
+  assert.equal(viewer.performanceAccess, "team");
   assert.equal(viewer.capabilities?.approveRejectAccessRequests, false);
   assert.equal(viewer.capabilities?.assignUserManagers, false);
+});
+
+test("current user mutation routes cannot write performance access and mobile responses omit it", async () => {
+  const dashboardOnlyField = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "organization" }),
+  });
+  assert.equal(dashboardOnlyField.status, 400);
+
+  const platformPatch = await adminRequest("/users/unassigned_learner", {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "organization" }),
+  });
+  assert.equal(platformPatch.status, 200);
+  assert.equal(platformPatch.body.performanceAccess, "none");
+
+  const mobileAdminOnlyField = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/unassigned_learner",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ performanceAccess: "organization" }),
+    }
+  );
+  assert.equal(mobileAdminOnlyField.status, 400);
+
+  const mobileSelfPatch = await mobileRequest("/mobile/users/org_admin/settings", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "none" }),
+  });
+  assert.equal(mobileSelfPatch.status, 200);
+  assert.equal("performanceAccess" in mobileSelfPatch.body, false);
+
+  const mobileProfile = await mobileRequest("/mobile/users/org_admin", "token_org_admin");
+  assert.equal(mobileProfile.status, 200);
+  assert.equal("performanceAccess" in mobileProfile.body, false);
+
+  assert.equal((await readUser("unassigned_learner"))?.performanceAccess, "none");
+  assert.equal((await readUser("org_admin"))?.performanceAccess, "organization");
 });
 
 test("dashboard training drilldowns enforce manager scope", async () => {
@@ -2808,10 +2859,12 @@ test("org admin role and status changes update access and clear manager assignme
   assert.equal(promoted.status, 200);
   const promotedRow = promoted.body.user as {
     orgRole?: string;
+    performanceAccess?: string;
     dashboardAccessEnabled?: boolean;
     managerUserId?: string | null;
   };
   assert.equal(promotedRow.orgRole, "user_admin");
+  assert.equal(promotedRow.performanceAccess, "none");
   assert.equal(promotedRow.dashboardAccessEnabled, true);
   assert.equal(promotedRow.managerUserId, null);
 
@@ -2822,10 +2875,12 @@ test("org admin role and status changes update access and clear manager assignme
   assert.equal(demoted.status, 200);
   const demotedRow = demoted.body.user as {
     orgRole?: string;
+    performanceAccess?: string;
     dashboardAccessEnabled?: boolean;
     assignedReportCount?: number;
   };
   assert.equal(demotedRow.orgRole, "user");
+  assert.equal(demotedRow.performanceAccess, "team");
   assert.equal(demotedRow.dashboardAccessEnabled, false);
   assert.equal(demotedRow.assignedReportCount, 0);
   const demoteReport = await waitForPersistedUserState(

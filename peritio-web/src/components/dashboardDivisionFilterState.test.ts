@@ -88,6 +88,7 @@ test("canRenderDashboardWorkspaceDivisionFilter stays off for aggregate super-us
         orgId: null,
         orgName: null,
         orgRole: null,
+        performanceAccess: "none",
         capabilities: {
           viewOrganizationUsers: false,
           manageRegularOrganizationUsers: false,
@@ -114,6 +115,7 @@ test("canRenderDashboardWorkspaceDivisionFilter stays off for aggregate super-us
         orgId: "org_1",
         orgName: "Org 1",
         orgRole: "org_admin",
+        performanceAccess: "organization",
         capabilities: {
           viewOrganizationUsers: true,
           manageRegularOrganizationUsers: true,

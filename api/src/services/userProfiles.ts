@@ -1,4 +1,12 @@
-import type { ApiDatabase, DashboardViewer, OrgUserRole, UserProfile } from "@voicepractice/shared";
+import {
+  isOrgUserRole,
+  isPerformanceAccessLevel,
+  type ApiDatabase,
+  type DashboardViewer,
+  type OrgUserRole,
+  type PerformanceAccessLevel,
+  type UserProfile,
+} from "@voicepractice/shared";
 
 export const USER_PROFILE_NAME_MAX_LENGTH = 80;
 export const USER_PROFILE_NAME_NOT_PROVIDED = "Not provided";
@@ -70,6 +78,35 @@ export function normalizeManagerUserId(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+export function normalizePerformanceAccess(user: {
+  accountType?: unknown;
+  orgId?: unknown;
+  orgRole?: unknown;
+  performanceAccess?: unknown;
+}, validOrganizationIds?: ReadonlySet<string>): PerformanceAccessLevel {
+  const hasOrganizationContext =
+    user.accountType === "enterprise" &&
+    typeof user.orgId === "string" &&
+    user.orgId.trim().length > 0 &&
+    (!validOrganizationIds || validOrganizationIds.has(user.orgId));
+  if (!hasOrganizationContext) {
+    return "none";
+  }
+
+  if (typeof user.performanceAccess === "string" && isPerformanceAccessLevel(user.performanceAccess)) {
+    return user.performanceAccess;
+  }
+
+  const orgRole = typeof user.orgRole === "string" && isOrgUserRole(user.orgRole) ? user.orgRole : "user";
+  if (orgRole === "org_admin") {
+    return "organization";
+  }
+  if (orgRole === "user_admin") {
+    return "team";
+  }
+  return "none";
 }
 
 // Manager relationships currently require an active User Admin. Keep this
