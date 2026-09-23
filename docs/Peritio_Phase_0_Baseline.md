@@ -76,7 +76,23 @@ Before any destructive reset tooling is used, verify the backup inventory and in
 - This initiative makes no runtime model, TTS, or STT changes.
 - Existing simulation setup, launch, prompt, and scoring behavior remains authoritative until a later approved phase deliberately changes it.
 
+## Prompt and score golden update procedure
+
+Prompt and score goldens are regression contracts, not snapshots to regenerate whenever a test fails. Before changing one, identify the intentional production behavior or contract change that requires the expected output to change. Inspect the semantic difference among the prior expected output, the new production behavior, and the proposed expected output. Never update a golden solely to make a failing test pass without first proving that the production behavior change is intentional.
+
+After an intentional golden update, run the focused affected test suite, the broader relevant regression group where one exists, and `npm run verify:fast`; then inspect the diff manually. The commit message or associated documentation must explain why the golden changed.
+
+Current prompt golden fixtures are very large single-line JSON and must not be reformatted in Phase 0. Before the first intentional prompt-fixture change, first convert them to reviewable per-prompt `.txt` fixtures or an equivalently human-reviewable representation. That conversion must preserve behavior, prompt semantics, and whitespace/content unless an explicit contract change requires a difference, and it must receive a reviewable diff before acceptance.
+
 ## Current behavior to preserve
+
+### End Session and Score
+
+`End Session and Score` remains functionally available while an explicitly submitted learner turn is in transcription, AI generation, or assistant TTS playback. If the learner requests End in that state, the request is accepted but the submitted turn is not discarded. `completeSessionAndScore()` waits for active-turn settlement; the assistant response and speech complete normally, then the pending End operation resumes and scoring begins. This can appear automatic because the learner has already requested End while the assistant continues speaking.
+
+This intentional deferred completion behavior predates Phase 0 and protects scoring and history integrity for a submitted response. Its UX feedback may be improved later, but it is not a Phase 0 blocker. If the learner instead taps End while merely recording an unsent response, no submitted turn requires settlement: the recording is discarded and scoring uses already committed history.
+
+The only identified automatic end-and-score path is the organization maximum-session timer. Desired outcome/objective achievement does not end a live simulation; `objectiveAchieved` and `completionLevel` are scoring/evaluation concepts, not live-turn termination signals.
 
 ### Numeric scoring
 

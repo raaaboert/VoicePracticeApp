@@ -73,6 +73,8 @@ The route logs do not measure direct database-lock hold or wait time. Existing r
 
 ## Deployment observation, separate from latency
 
-The initial simultaneous staging API and worker deployment encountered one Postgres `deadlock detected` error during `initializeTrainingContentSchema`. Redeploying the identical API commit then succeeded cleanly.
+The initial simultaneous staging API and worker deployment encountered one Postgres `deadlock detected` error during `initializeTrainingContentSchema`. The identical API commit was redeployed without source or configuration changes and succeeded cleanly; staging then passed the real simulation/scoring smoke test.
 
-This is an operational startup observation, not a simulation latency measurement. A single transient occurrence does not justify a Phase 0 source change. Monitor for recurrence and investigate if it repeats.
+This pre-existing startup behavior is an operational observation, not a simulation latency measurement, and no evidence of corruption was found. Multiple startup initializers perform DDL, so simultaneous API and worker cold starts can theoretically acquire schema/table locks in conflicting order. The failure is loud and recoverable. A single transient occurrence does not justify a Phase 0 source change.
+
+When coordinated cold starts or deploys are practical to control, prefer staggering API and worker startup. If startup DDL reports `deadlock detected`, redeploy or retry. Monitor for recurrence; if it becomes recurrent, evaluate holding an advisory lock across the broader startup-DDL sequence in Phase 1B or later. Phase 1A adds no schema and is not blocked by this observation.

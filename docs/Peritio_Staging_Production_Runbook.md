@@ -1,5 +1,11 @@
 # Peritio Staging / Production Runbook
 
+> ## Temporary modernization supersession — Performance Intelligence / Focus Topic initiative
+>
+> For the entire modernization initiative, this notice supersedes the normal branch and promotion workflow below when they conflict. `staging` is the modernization development and integration branch. The staging API (`voicepractice-api-dev`) and staging video worker (`peritio-video-worker-staging`) both track `staging` and auto-deploy on commit. The production API (`peritio-api-prod`) and production video worker (`peritio-video-worker-prod`) both track `main`, with production auto-deploy off.
+>
+> `main` is frozen at `aa79a9d1fbac6704eb1d0033af81c6342538073d`, identified by annotated tag `pre-performance-intelligence-baseline-2026-09-21`. Do not merge, rebase, fast-forward, or otherwise promote Phase 0, Phase 1A, Phase 1B, or any later individual phase into `main`. Production promotion may occur only after the complete modernization initiative is accepted in staging and explicit production-cutover approval is given. [`Peritio_Phase_0_Baseline.md`](./Peritio_Phase_0_Baseline.md) and [`Peritio_Phase_0_Decisions.md`](./Peritio_Phase_0_Decisions.md) are authoritative over this runbook's normal/default workflow during that period.
+
 Last updated: 2026-07-13
 
 ## Environment Map
