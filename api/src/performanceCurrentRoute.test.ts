@@ -524,6 +524,28 @@ async function seedStores(): Promise<void> {
     ],
     auditEvents: []
   });
+  await planStore.createPlan({
+    plan: buildPlan({
+      id: "perf_plan_none_report",
+      userId: "user_none_report",
+      startDate: "2099-10-01",
+      endDate: "2099-10-31"
+    }),
+    scopeItems: [
+      buildScopeItem({
+        id: "perf_scope_none_report",
+        planId: "perf_plan_none_report",
+        userId: "user_none_report"
+      })
+    ],
+    auditEvents: [
+      buildAuditEvent({
+        id: "perf_audit_none_report",
+        planId: "perf_plan_none_report",
+        userId: "user_none_report"
+      })
+    ]
+  });
 
   const usageStore = createUsageSessionStore({
     provider: "file",
@@ -1259,6 +1281,46 @@ test("dashboard Performance Goals follow performance access independently from o
     dashboardUserAdminNoneToken
   );
   assert.equal(userAdminNonePreview.status, 404);
+});
+
+test("user admin with no performance access cannot reach direct-report Performance Goal routes", async () => {
+  const planPath = "/dashboard/performance/plans/perf_plan_none_report";
+
+  const detail = await dashboardRequest(planPath, undefined, dashboardUserAdminNoneToken);
+  assert.equal(detail.status, 404);
+
+  const updates = await dashboardRequest(`${planPath}/updates`, undefined, dashboardUserAdminNoneToken);
+  assert.equal(updates.status, 404);
+
+  const comment = await dashboardRequest(
+    `${planPath}/updates`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "This role must not bypass performance access." })
+    },
+    dashboardUserAdminNoneToken
+  );
+  assert.equal(comment.status, 404);
+
+  const edit = await dashboardRequest(
+    planPath,
+    {
+      method: "PATCH",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_none_report" }))
+    },
+    dashboardUserAdminNoneToken
+  );
+  assert.equal(edit.status, 404);
+
+  const cancel = await dashboardRequest(
+    `${planPath}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason: "This role must not bypass performance access." })
+    },
+    dashboardUserAdminNoneToken
+  );
+  assert.equal(cancel.status, 404);
 });
 
 test("dashboard Performance super user sees a grouped portfolio instead of mixed plan rows", async () => {

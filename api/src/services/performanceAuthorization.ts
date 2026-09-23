@@ -66,7 +66,6 @@ export function canViewPerformanceTarget(params: {
   }
 
   return (
-    params.target.status === "active" &&
     params.target.orgRole === "user" &&
     normalizeManagerUserId(params.target.managerUserId) === params.actor.id
   );

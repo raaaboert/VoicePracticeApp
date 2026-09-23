@@ -82,6 +82,7 @@ import {
   setActiveSuperUserOrgId,
 } from "./src/lib/api";
 import type { MobileOrgAccessRequestSummary } from "./src/lib/api";
+import { loadOrgAdminDashboardData } from "./src/lib/orgAdminDashboardLoad";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import {
   buildInsufficientEvidenceMessage,
@@ -1666,20 +1667,27 @@ export default function App() {
     const requestGeneration = identityScopedRequestGenerationRef.current;
     setAdminLoading(true);
     setAdminError(null);
+    setOrgAdminAnalytics(null);
 
     try {
-      const [dashboardPayload, analyticsPayload] = await Promise.all([
-        fetchOrgAdminDashboard(user.id, mobileAuthToken),
-        fetchOrgAdminAnalytics(user.id, mobileAuthToken, { days: adminRangeDays }),
-      ]);
+      const result = await loadOrgAdminDashboardData(
+        () => fetchOrgAdminDashboard(user.id, mobileAuthToken),
+        () => fetchOrgAdminAnalytics(user.id, mobileAuthToken, { days: adminRangeDays }),
+      );
       if (requestGeneration !== identityScopedRequestGenerationRef.current) {
         return;
       }
-      setOrgAdminDashboard(dashboardPayload);
+      setOrgAdminDashboard(result.dashboard);
       setAdminDefaultDailyMinutesInput(
-        String(Math.max(0, Math.floor((dashboardPayload.org.perUserDailySecondsCap ?? 0) / 60))),
+        String(Math.max(0, Math.floor((result.dashboard.org.perUserDailySecondsCap ?? 0) / 60))),
       );
-      setOrgAdminAnalytics(analyticsPayload);
+      setOrgAdminAnalytics(result.analytics);
+      if (result.analyticsError) {
+        void submitAutoErrorReport("admin_org_analytics.refresh", result.analyticsError, {
+          screen: "admin_org_dashboard",
+          details: { days: adminRangeDays },
+        });
+      }
     } catch (caught) {
       if (requestGeneration !== identityScopedRequestGenerationRef.current) {
         return;
@@ -6047,6 +6055,8 @@ export default function App() {
             </Pressable>
           </View>
 
+          {orgAdminAnalytics ? (
+            <>
           <View style={styles.card}>
             <Text style={styles.title}>Score Analytics</Text>
             <Text style={styles.body}>Average score and trends across your organization.</Text>
@@ -6199,6 +6209,8 @@ export default function App() {
               </View>
             )}
           </View>
+            </>
+          ) : null}
 
           <Pressable style={styles.primaryButton} onPress={() => setScreen("admin_user_list")}>
             <Text style={styles.primaryButtonText}>Manage Users</Text>

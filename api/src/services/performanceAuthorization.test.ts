@@ -77,7 +77,7 @@ test("none grants no dashboard performance or Performance Goal target scope", ()
   assert.equal(canViewOrganizationPerformance({ actor, orgId: "org_1" }), false);
 });
 
-test("team includes self and active regular direct reports without recursion or division expansion", () => {
+test("team includes self and regular direct reports regardless of status without recursion or division expansion", () => {
   const actor = user("actor", { performanceAccess: "team", divisionId: "division_a" });
   const direct = user("direct", { managerUserId: actor.id, divisionId: "division_a" });
   const otherDivisionDirect = user("other_division_direct", {
@@ -87,8 +87,17 @@ test("team includes self and active regular direct reports without recursion or 
   const reportOfReport = user("report_of_report", { managerUserId: direct.id });
   const unrelated = user("unrelated", { divisionId: "division_a" });
   const noManager = user("no_manager", { managerUserId: null });
-  const inactive = user("inactive", { managerUserId: actor.id, status: "disabled" });
-  const crossOrg = user("cross_org", { orgId: "org_2", managerUserId: actor.id });
+  const disabledDirect = user("disabled_direct", { managerUserId: actor.id, status: "disabled" });
+  const disabledUnrelated = user("disabled_unrelated", { status: "disabled" });
+  const disabledReportOfReport = user("disabled_report_of_report", {
+    managerUserId: direct.id,
+    status: "disabled",
+  });
+  const disabledCrossOrg = user("disabled_cross_org", {
+    orgId: "org_2",
+    managerUserId: actor.id,
+    status: "disabled",
+  });
   const nonRegularDirect = user("non_regular_direct", { managerUserId: actor.id, orgRole: "user_admin" });
 
   assert.deepEqual(
@@ -99,13 +108,19 @@ test("team includes self and active regular direct reports without recursion or 
       reportOfReport,
       unrelated,
       noManager,
-      inactive,
-      crossOrg,
+      disabledDirect,
+      disabledUnrelated,
+      disabledReportOfReport,
+      disabledCrossOrg,
       nonRegularDirect,
     ]),
-    ["actor", "direct", "other_division_direct"]
+    ["actor", "direct", "disabled_direct", "other_division_direct"]
   );
   assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: direct }), true);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: disabledDirect }), true);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: disabledUnrelated }), false);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: disabledReportOfReport }), false);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: disabledCrossOrg }), false);
   assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: unrelated }), false);
 });
 
@@ -163,12 +178,14 @@ test("performance scope follows performanceAccess independently from admin and c
   assert.equal(isContentManagerSubject(regularTeam, "org_1"), false);
 });
 
-test("legacy role-derived states preserve their previous active-user result sets", () => {
+test("legacy role-derived states preserve active and disabled historical result sets", () => {
   const orgAdmin = user("org_admin", { orgRole: "org_admin", performanceAccess: undefined });
   const userAdmin = user("user_admin", { orgRole: "user_admin", performanceAccess: undefined });
   const direct = user("direct", { managerUserId: userAdmin.id });
+  const disabledDirect = user("disabled_direct", { managerUserId: userAdmin.id, status: "disabled" });
+  const disabledUnrelated = user("disabled_unrelated", { status: "disabled" });
   const unrelated = user("unrelated");
-  const users = [orgAdmin, userAdmin, direct, unrelated];
+  const users = [orgAdmin, userAdmin, direct, disabledDirect, disabledUnrelated, unrelated];
 
   const legacyScope = (actor: UserProfile): string[] => users
     .filter((target) => {

@@ -52,6 +52,7 @@ let regularDashboardToken: string;
 let regularTeamToken: string;
 let regularOrganizationToken: string;
 let orgAdminNoneToken: string;
+let userAdminNoneToken: string;
 let superToken: string;
 let adminToken: string | null = null;
 let setSimulationAiBudgetGraceForTest: (userId: string, expiresAtMs: number) => void;
@@ -408,9 +409,17 @@ function buildDatabase(): ApiDatabase {
         performanceAccess: "none",
         dashboardAccessEnabled: true,
       }),
+      buildUser("user_admin_none", "manager-no-performance@acme.example", {
+        orgRole: "user_admin",
+        performanceAccess: "none",
+        dashboardAccessEnabled: true,
+        firstName: "Nina",
+        lastName: "No Performance",
+      }),
       buildUser("unassigned_learner", "unassigned@acme.example", {
         orgRole: "user",
         employeeId: "EMP-U",
+        managerUserId: "user_admin_none",
       }),
       buildUser("other_manager_report", "other-report@acme.example", {
         orgRole: "user",
@@ -872,6 +881,7 @@ async function seedStores(): Promise<void> {
   regularTeamToken = await issue("regular_team", "customer_dashboard_user", "org_1");
   regularOrganizationToken = await issue("regular_organization", "customer_dashboard_user", "org_1");
   orgAdminNoneToken = await issue("org_admin_none", "customer_dashboard_user", "org_1");
+  userAdminNoneToken = await issue("user_admin_none", "customer_dashboard_user", "org_1");
   superToken = await issue("super_user", "super_user", null);
 }
 
@@ -2402,6 +2412,33 @@ test("dashboard performance routes enforce independent team, organization, and n
   assert.equal(noneAdminDirectory.status, 200);
 });
 
+test("user admin with no performance access gets empty reporting scope without losing admin scope", async () => {
+  const overview = await dashboardRequest("/dashboard/overview", userAdminNoneToken);
+  assert.equal(overview.status, 200);
+  const summary = overview.body.summary as {
+    activeUsers: number;
+    simulationsLast30Days: number;
+    averageScoreThisPeriod: number | null;
+  };
+  assert.equal(summary.activeUsers, 0);
+  assert.equal(summary.simulationsLast30Days, 0);
+  assert.equal(summary.averageScoreThisPeriod, null);
+
+  const users = await dashboardRequest("/dashboard/users", userAdminNoneToken);
+  assert.equal(users.status, 200);
+  assert.deepEqual(users.body.users, []);
+
+  const directReportAttempt = await dashboardRequest("/dashboard/attempts/score_unassigned", userAdminNoneToken);
+  assert.equal(directReportAttempt.status, 404);
+  assert.equal(directReportAttempt.body.error, "Attempt detail not found.");
+
+  const adminDirectory = await dashboardRequest("/dashboard/admin/users", userAdminNoneToken);
+  assert.equal(adminDirectory.status, 200);
+  const adminUserIds = (adminDirectory.body.users as Array<{ userId: string }>).map((user) => user.userId);
+  assert.equal(adminUserIds.includes("user_admin_none"), true);
+  assert.equal(adminUserIds.includes("unassigned_learner"), true);
+});
+
 test("dashboard training drilldowns enforce manager scope", async () => {
   const workspace = await dashboardRequest("/dashboard/reporting/trainings", userAdminToken);
   assert.equal(workspace.status, 200);
@@ -2647,6 +2684,10 @@ test("mobile organization score analytics requires organization performance acce
   assert.equal((redactedAdminDetail.body.usage as { sessions?: number }).sessions, 0);
   assert.equal((redactedAdminDetail.body.scores as { sessions?: number }).sessions, 0);
   assert.deepEqual((redactedAdminDetail.body.scores as { recent?: unknown[] }).recent, []);
+  assert.equal(
+    "dailyOverageExtraSecondsConsumed" in (redactedAdminDetail.body.user as Record<string, unknown>),
+    true
+  );
 
   const performanceOnlyAdminDirectoryDenied = await mobileRequest(
     "/mobile/users/regular_organization/admin/org/users/learner",
@@ -2659,6 +2700,10 @@ test("mobile organization score analytics requires organization performance acce
     "token_org_admin_none"
   );
   assert.equal(administrativeDashboardRetained.status, 200);
+  assert.equal(
+    typeof (administrativeDashboardRetained.body.usage as { monthlyAllottedSeconds?: unknown }).monthlyAllottedSeconds,
+    "number"
+  );
 });
 
 test("org admins manage tenant-bound daily defaults and temporary overage without contract authority", async () => {
@@ -2961,8 +3006,9 @@ test("org admins edit names and managers while user-admin managers cannot", asyn
   const managerOptions = usersResult.body.managerOptions as Array<{ userId: string; displayName: string }>;
   assert.deepEqual(
     managerOptions.map((manager) => manager.displayName),
-    ["Aaron Lead", "Brie Lead", "Maya Manager", "Zoe Eligible"]
+    ["Aaron Lead", "Brie Lead", "Maya Manager", "Nina No Performance", "Zoe Eligible"]
   );
+  assert.equal(managerOptions.some((manager) => manager.userId === "user_admin_none"), true);
   assert.equal(managerOptions.some((manager) => manager.userId === "other_org_admin"), false);
   assert.equal(managerOptions.some((manager) => manager.userId === "disabled_user_admin"), false);
 });
