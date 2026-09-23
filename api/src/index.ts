@@ -342,7 +342,7 @@ import {
   getUserFirstName,
   getUserLastName,
   hasCompleteUserName,
-  isEligibleManagerUser,
+  canBeAssignedAsManager,
   listVisibleOrganizationUsers,
   normalizeManagerUserId,
   normalizeOptionalStoredUserName,
@@ -7943,7 +7943,7 @@ function canDashboardAdminChangeUserStatus(params: {
 
 function buildDashboardAdminManagerOptions(orgUsers: readonly UserProfile[], orgId: string): DashboardAdminManagerOption[] {
   return orgUsers
-    .filter((user) => isEligibleManagerUser(user, orgId))
+    .filter((user) => canBeAssignedAsManager(user, orgId))
     .map((user) => ({
       userId: user.id,
       email: user.email,

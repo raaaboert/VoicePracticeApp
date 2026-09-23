@@ -72,7 +72,9 @@ export function normalizeManagerUserId(value: unknown): string | null {
   return trimmed || null;
 }
 
-export function isEligibleManagerUser(user: UserProfile, orgId: string): boolean {
+// Manager relationships currently require an active User Admin. Keep this
+// separate from Learning Resource content subjects and future performance rules.
+export function canBeAssignedAsManager(user: UserProfile, orgId: string): boolean {
   return (
     user.accountType === "enterprise" &&
     user.orgId === orgId &&
@@ -204,7 +206,7 @@ export function validateManagerAssignment(params: {
   }
 
   const manager = params.orgUsers.find((user) => user.id === params.managerUserId) ?? null;
-  if (!manager || !params.target.orgId || !isEligibleManagerUser(manager, params.target.orgId)) {
+  if (!manager || !params.target.orgId || !canBeAssignedAsManager(manager, params.target.orgId)) {
     return {
       ok: false,
       error: "Manager must be an active user admin in the same organization.",
@@ -248,7 +250,7 @@ export function repairInvalidManagerAssignments(users: UserProfile[], updatedAt:
       canManagerAssignmentTargetBeManaged(user) &&
       Boolean(user.orgId) &&
       managerUserId !== user.id &&
-      Boolean(manager && user.orgId && isEligibleManagerUser(manager, user.orgId));
+      Boolean(manager && user.orgId && canBeAssignedAsManager(manager, user.orgId));
 
     if (!valid) {
       user.managerUserId = null;
