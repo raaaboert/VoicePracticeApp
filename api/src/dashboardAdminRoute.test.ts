@@ -49,6 +49,9 @@ let server: Server;
 let orgAdminToken: string;
 let userAdminToken: string;
 let regularDashboardToken: string;
+let regularTeamToken: string;
+let regularOrganizationToken: string;
+let orgAdminNoneToken: string;
 let superToken: string;
 let adminToken: string | null = null;
 let setSimulationAiBudgetGraceForTest: (userId: string, expiresAtMs: number) => void;
@@ -168,6 +171,7 @@ function buildUser(id: string, email: string, overrides: Partial<UserProfile> = 
     status: overrides.status ?? "active",
     orgId: overrides.orgId === undefined ? "org_1" : overrides.orgId,
     orgRole: overrides.orgRole ?? "user",
+    performanceAccess: overrides.performanceAccess,
     divisionId: overrides.divisionId ?? null,
     timezone: overrides.timezone ?? "America/Denver",
     pendingTimezone: overrides.pendingTimezone ?? null,
@@ -386,6 +390,22 @@ function buildDatabase(): ApiDatabase {
       }),
       buildUser("regular_dashboard", "viewer@acme.example", {
         orgRole: "user",
+        dashboardAccessEnabled: true,
+      }),
+      buildUser("regular_team", "team-viewer@acme.example", {
+        orgRole: "user",
+        performanceAccess: "team",
+        dashboardAccessEnabled: true,
+        divisionId: "division_a",
+      }),
+      buildUser("regular_organization", "organization-viewer@acme.example", {
+        orgRole: "user",
+        performanceAccess: "organization",
+        dashboardAccessEnabled: true,
+      }),
+      buildUser("org_admin_none", "admin-no-performance@acme.example", {
+        orgRole: "org_admin",
+        performanceAccess: "none",
         dashboardAccessEnabled: true,
       }),
       buildUser("unassigned_learner", "unassigned@acme.example", {
@@ -651,7 +671,10 @@ function buildDatabase(): ApiDatabase {
       buildMobileToken("rate_limited", "token_rate_limited"),
       buildMobileToken("nameless_free", "token_nameless_free"),
       buildMobileToken("org_admin", "token_org_admin"),
+      buildMobileToken("org_admin_none", "token_org_admin_none"),
       buildMobileToken("user_admin", "token_user_admin"),
+      buildMobileToken("regular_team", "token_regular_team"),
+      buildMobileToken("regular_organization", "token_regular_organization"),
       buildMobileToken("eligible_user_admin", "token_other_manager"),
       buildMobileToken("mobile_scope_manager", "token_mobile_scope_manager"),
       buildMobileToken("reset_old_token", "token_before_reset"),
@@ -846,6 +869,9 @@ async function seedStores(): Promise<void> {
   orgAdminToken = await issue("org_admin", "customer_dashboard_user", "org_1");
   userAdminToken = await issue("user_admin", "customer_dashboard_user", "org_1");
   regularDashboardToken = await issue("regular_dashboard", "customer_dashboard_user", "org_1");
+  regularTeamToken = await issue("regular_team", "customer_dashboard_user", "org_1");
+  regularOrganizationToken = await issue("regular_organization", "customer_dashboard_user", "org_1");
+  orgAdminNoneToken = await issue("org_admin_none", "customer_dashboard_user", "org_1");
   superToken = await issue("super_user", "super_user", null);
 }
 
@@ -2337,6 +2363,45 @@ test("current user mutation routes cannot write performance access and mobile re
   assert.equal((await readUser("org_admin"))?.performanceAccess, "organization");
 });
 
+test("dashboard performance routes enforce independent team, organization, and none scope", async () => {
+  const teamUsers = await dashboardRequest("/dashboard/users", regularTeamToken);
+  assert.equal(teamUsers.status, 200);
+  assert.deepEqual(
+    (teamUsers.body.users as Array<{ userId: string }>).map((user) => user.userId).sort(),
+    ["regular_team"]
+  );
+
+  const directAttempt = await dashboardRequest("/dashboard/attempts/score_direct", userAdminToken);
+  assert.equal(directAttempt.status, 200);
+  const unrelatedAttempt = await dashboardRequest("/dashboard/attempts/score_unassigned", userAdminToken);
+  assert.equal(unrelatedAttempt.status, 404);
+  assert.equal(unrelatedAttempt.body.error, "Attempt detail not found.");
+  const crossOrgAttempt = await dashboardRequest("/dashboard/attempts/score_other_org", userAdminToken);
+  assert.equal(crossOrgAttempt.status, 404);
+
+  const otherDivision = await dashboardRequest("/dashboard/users?divisionId=division_b", userAdminToken);
+  assert.equal(otherDivision.status, 200);
+  assert.equal(
+    (otherDivision.body.users as Array<{ userId: string }>).some((user) => user.userId === "unassigned_learner"),
+    false
+  );
+
+  const organizationAttempt = await dashboardRequest("/dashboard/attempts/score_unassigned", regularOrganizationToken);
+  assert.equal(organizationAttempt.status, 200);
+  const organizationCrossOrg = await dashboardRequest("/dashboard/attempts/score_other_org", regularOrganizationToken);
+  assert.equal(organizationCrossOrg.status, 404);
+  const organizationAdminDenied = await dashboardRequest("/dashboard/admin/users", regularOrganizationToken);
+  assert.equal(organizationAdminDenied.status, 403);
+
+  const noneAttempt = await dashboardRequest("/dashboard/attempts/score_direct", orgAdminNoneToken);
+  assert.equal(noneAttempt.status, 404);
+  const noneUsers = await dashboardRequest("/dashboard/users", orgAdminNoneToken);
+  assert.equal(noneUsers.status, 200);
+  assert.deepEqual(noneUsers.body.users, []);
+  const noneAdminDirectory = await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken);
+  assert.equal(noneAdminDirectory.status, 200);
+});
+
 test("dashboard training drilldowns enforce manager scope", async () => {
   const workspace = await dashboardRequest("/dashboard/reporting/trainings", userAdminToken);
   assert.equal(workspace.status, 200);
@@ -2543,6 +2608,57 @@ test("mobile user-admin routes are scoped to self and direct reports", async () 
     body: JSON.stringify({ status: "disabled" })
   });
   assert.equal(crossTenantWrite.status, 404);
+});
+
+test("mobile organization score analytics requires organization performance access", async () => {
+  const migratedOrgAdmin = await mobileRequest("/mobile/users/org_admin/admin/org/analytics", "token_org_admin");
+  assert.equal(migratedOrgAdmin.status, 200);
+
+  const regularOrganization = await mobileRequest(
+    "/mobile/users/regular_organization/admin/org/analytics",
+    "token_regular_organization"
+  );
+  assert.equal(regularOrganization.status, 200);
+  assert.equal((regularOrganization.body.org as { id?: string }).id, "org_1");
+
+  const teamDenied = await mobileRequest("/mobile/users/regular_team/admin/org/analytics", "token_regular_team");
+  assert.equal(teamDenied.status, 403);
+  assert.equal(teamDenied.body.error, "Organization performance access required.");
+
+  const orgAdminNoneDenied = await mobileRequest(
+    "/mobile/users/org_admin_none/admin/org/analytics",
+    "token_org_admin_none"
+  );
+  assert.equal(orgAdminNoneDenied.status, 403);
+  assert.equal(orgAdminNoneDenied.body.error, "Organization performance access required.");
+
+  const migratedAdminDetail = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin"
+  );
+  assert.equal(migratedAdminDetail.status, 200);
+  assert.equal(Number((migratedAdminDetail.body.scores as { sessions?: number }).sessions) > 0, true);
+
+  const redactedAdminDetail = await mobileRequest(
+    "/mobile/users/org_admin_none/admin/org/users/learner",
+    "token_org_admin_none"
+  );
+  assert.equal(redactedAdminDetail.status, 200);
+  assert.equal((redactedAdminDetail.body.usage as { sessions?: number }).sessions, 0);
+  assert.equal((redactedAdminDetail.body.scores as { sessions?: number }).sessions, 0);
+  assert.deepEqual((redactedAdminDetail.body.scores as { recent?: unknown[] }).recent, []);
+
+  const performanceOnlyAdminDirectoryDenied = await mobileRequest(
+    "/mobile/users/regular_organization/admin/org/users/learner",
+    "token_regular_organization"
+  );
+  assert.equal(performanceOnlyAdminDirectoryDenied.status, 403);
+
+  const administrativeDashboardRetained = await mobileRequest(
+    "/mobile/users/org_admin_none/admin/org/dashboard",
+    "token_org_admin_none"
+  );
+  assert.equal(administrativeDashboardRetained.status, 200);
 });
 
 test("org admins manage tenant-bound daily defaults and temporary overage without contract authority", async () => {

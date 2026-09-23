@@ -330,7 +330,6 @@ import {
   normalizeEmployeeIdInput,
 } from "./services/employeeIds.js";
 import {
-  canActorManagePerformanceUser,
   canActorManageRegularUser,
   canActorSeeOrganizationUser,
   canEnterpriseActorManageRegularUser,
@@ -338,7 +337,6 @@ import {
   canManagerAssignmentTargetBeManaged,
   canOrgAdminManageRole,
   clearAssignmentsForManager,
-  getDashboardPermittedUserIds,
   getUserFirstName,
   getUserLastName,
   hasCompleteUserName,
@@ -352,6 +350,12 @@ import {
   resolveStoredUserDisplayName,
   validateManagerAssignment,
 } from "./services/userProfiles.js";
+import {
+  canActorManagePerformanceUser,
+  canViewPerformanceTarget,
+  canViewOrganizationPerformance,
+  getDashboardPermittedUserIds,
+} from "./services/performanceAuthorization.js";
 import {
   completeRecognizedSimulationUsage,
   normalizeSimulationSessionId,
@@ -21500,16 +21504,19 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       return;
     }
 
+    const canViewTargetPerformance = canViewPerformanceTarget({ actor, target });
     const now = new Date();
     const periodEndAt = now.toISOString();
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
     const periodStartMs = new Date(periodStartAt).getTime();
     const periodEndMs = now.getTime();
-    const activityWindow = simulationHistoryAccess.listActivityWindow(db, {
-      userId: target.id,
-      periodStartAt: new Date(periodStartAt),
-      periodEndAt: now
-    });
+    const activityWindow = canViewTargetPerformance
+      ? simulationHistoryAccess.listActivityWindow(db, {
+          userId: target.id,
+          periodStartAt: new Date(periodStartAt),
+          periodEndAt: now
+        })
+      : { usageSessions: [], scoreRecords: [] };
     const sessions = activityWindow.usageSessions;
     const scores = activityWindow.scoreRecords;
     const billedSeconds = usageSessionAccess.sumBilledSeconds(sessions);
@@ -21797,8 +21804,8 @@ app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, re
       return;
     }
 
-    if (actor.orgRole !== "org_admin") {
-      response.status(403).json({ error: "Org admin access required." });
+    if (!canViewOrganizationPerformance({ actor, orgId: actor.orgId })) {
+      response.status(403).json({ error: "Organization performance access required." });
       return;
     }
 

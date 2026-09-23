@@ -41,6 +41,9 @@ let planStore: PerformancePlanStore;
 let dashboardToken: string;
 let dashboardViewerToken: string;
 let dashboardManagerToken: string;
+let dashboardRegularOrganizationToken: string;
+let dashboardOrgAdminNoneToken: string;
+let dashboardUserAdminNoneToken: string;
 let platformDashboardToken: string;
 
 function hashMobileToken(token: string): string {
@@ -233,6 +236,24 @@ function buildDatabase(): ApiDatabase {
         lastName: "Manager",
         dashboardAccessEnabled: true,
         orgRole: "user_admin"
+      }),
+      buildUser("dashboard_regular_organization", "organization@example.com", {
+        dashboardAccessEnabled: true,
+        orgRole: "user",
+        performanceAccess: "organization"
+      }),
+      buildUser("dashboard_org_admin_none", "admin-none@example.com", {
+        dashboardAccessEnabled: true,
+        orgRole: "org_admin",
+        performanceAccess: "none"
+      }),
+      buildUser("dashboard_user_admin_none", "manager-none@example.com", {
+        dashboardAccessEnabled: true,
+        orgRole: "user_admin",
+        performanceAccess: "none"
+      }),
+      buildUser("user_none_report", "none-report@example.com", {
+        managerUserId: "dashboard_user_admin_none"
       }),
       buildUser("platform_admin", "platform-admin@peritio.ai", {
         firstName: "Platform",
@@ -562,6 +583,29 @@ async function seedStores(): Promise<void> {
     orgId: "org_1"
   });
   dashboardManagerToken = managerIssued.token;
+  const dashboardRegularOrganization = buildDatabase().users.find((user) => user.id === "dashboard_regular_organization");
+  assert.ok(dashboardRegularOrganization);
+  const regularOrganizationIssued = webAuthService.issueSession(
+    dashboardRegularOrganization,
+    14 * 24 * 60,
+    sessionIssuedAt,
+    { accessType: "customer_dashboard_user", orgId: "org_1" }
+  );
+  dashboardRegularOrganizationToken = regularOrganizationIssued.token;
+  const dashboardOrgAdminNone = buildDatabase().users.find((user) => user.id === "dashboard_org_admin_none");
+  assert.ok(dashboardOrgAdminNone);
+  const orgAdminNoneIssued = webAuthService.issueSession(dashboardOrgAdminNone, 14 * 24 * 60, sessionIssuedAt, {
+    accessType: "customer_dashboard_user",
+    orgId: "org_1"
+  });
+  dashboardOrgAdminNoneToken = orgAdminNoneIssued.token;
+  const dashboardUserAdminNone = buildDatabase().users.find((user) => user.id === "dashboard_user_admin_none");
+  assert.ok(dashboardUserAdminNone);
+  const userAdminNoneIssued = webAuthService.issueSession(dashboardUserAdminNone, 14 * 24 * 60, sessionIssuedAt, {
+    accessType: "customer_dashboard_user",
+    orgId: "org_1"
+  });
+  dashboardUserAdminNoneToken = userAdminNoneIssued.token;
   const platformUser = buildDatabase().users.find((user) => user.id === "platform_admin");
   assert.ok(platformUser);
   const platformIssued = webAuthService.issueSession(platformUser, 14 * 24 * 60, sessionIssuedAt, {
@@ -581,6 +625,9 @@ async function seedStores(): Promise<void> {
   await webAuthStore.saveSession(issued.record);
   await webAuthStore.saveSession(viewerIssued.record);
   await webAuthStore.saveSession(managerIssued.record);
+  await webAuthStore.saveSession(regularOrganizationIssued.record);
+  await webAuthStore.saveSession(orgAdminNoneIssued.record);
+  await webAuthStore.saveSession(userAdminNoneIssued.record);
   await webAuthStore.saveSession(platformIssued.record);
 }
 
@@ -1152,6 +1199,66 @@ test("dashboard Performance user-admins are scoped to self and direct reports", 
     dashboardManagerToken
   );
   assert.equal(otherManagerReportPreview.status, 404);
+});
+
+test("dashboard Performance Goals follow performance access independently from org role", async () => {
+  const organizationWorkspace = await dashboardRequest(
+    "/dashboard/performance",
+    undefined,
+    dashboardRegularOrganizationToken
+  );
+  assert.equal(organizationWorkspace.status, 200);
+  const organizationUsers = organizationWorkspace.body.users as Array<{ userId?: string; canManagePerformancePlans?: boolean }>;
+  assert.equal(organizationUsers.some((user) => user.userId === "user_manage" && user.canManagePerformancePlans === true), true);
+  assert.equal(organizationUsers.some((user) => user.userId === "user_other_manager_report"), true);
+
+  const organizationPreview = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_manage" }))
+    },
+    dashboardRegularOrganizationToken
+  );
+  assert.equal(organizationPreview.status, 200);
+
+  const organizationCrossOrg = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_other_org", orgId: "org_2" }))
+    },
+    dashboardRegularOrganizationToken
+  );
+  assert.equal(organizationCrossOrg.status, 404);
+
+  const orgAdminNoneWorkspace = await dashboardRequest(
+    "/dashboard/performance",
+    undefined,
+    dashboardOrgAdminNoneToken
+  );
+  assert.equal(orgAdminNoneWorkspace.status, 200);
+  assert.deepEqual(orgAdminNoneWorkspace.body.users, []);
+
+  const orgAdminNonePreview = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_manage" }))
+    },
+    dashboardOrgAdminNoneToken
+  );
+  assert.equal(orgAdminNonePreview.status, 404);
+
+  const userAdminNonePreview = await dashboardRequest(
+    "/dashboard/performance/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_none_report" }))
+    },
+    dashboardUserAdminNoneToken
+  );
+  assert.equal(userAdminNonePreview.status, 404);
 });
 
 test("dashboard Performance super user sees a grouped portfolio instead of mixed plan rows", async () => {

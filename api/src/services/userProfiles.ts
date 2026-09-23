@@ -1,7 +1,6 @@
 import {
   isOrgUserRole,
   isPerformanceAccessLevel,
-  type ApiDatabase,
   type DashboardViewer,
   type OrgUserRole,
   type PerformanceAccessLevel,
@@ -189,30 +188,6 @@ export function listVisibleOrganizationUsers(params: {
   });
 }
 
-export function getDashboardPermittedUserIds(params: {
-  db: Pick<ApiDatabase, "users">;
-  actor: UserProfile;
-  viewer: DashboardViewer;
-  orgIds?: ReadonlySet<string> | null;
-}): Set<string> {
-  const orgIds = params.orgIds ?? null;
-  const permitted = new Set<string>();
-
-  for (const user of params.db.users) {
-    if (user.accountType !== "enterprise" || !user.orgId) {
-      continue;
-    }
-    if (orgIds && !orgIds.has(user.orgId)) {
-      continue;
-    }
-    if (canActorSeeOrganizationUser({ actor: params.actor, viewer: params.viewer, target: user })) {
-      permitted.add(user.id);
-    }
-  }
-
-  return permitted;
-}
-
 export function canManagerAssignmentTargetBeManaged(target: UserProfile): boolean {
   return target.accountType === "enterprise" && target.orgRole === "user";
 }
@@ -328,14 +303,6 @@ export function canEnterpriseActorManageRegularUser(params: {
     return params.target.orgRole === "user" && normalizeManagerUserId(params.target.managerUserId) === params.actor.id;
   }
   return false;
-}
-
-export function canActorManagePerformanceUser(params: {
-  actor: UserProfile;
-  viewer: DashboardViewer;
-  target: UserProfile;
-}): boolean {
-  return canActorManageRegularUser(params) || (params.target.id === params.actor.id && params.actor.orgRole === "user_admin");
 }
 
 export function canOrgAdminManageRole(role: OrgUserRole): role is "user" | "user_admin" {
