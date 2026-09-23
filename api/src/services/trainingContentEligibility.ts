@@ -5,7 +5,7 @@ import type {
   UserProfile,
 } from "@voicepractice/shared";
 
-import { isEligibleManagerUser, normalizeManagerUserId } from "./userProfiles.js";
+import { isContentManagerSubject, normalizeManagerUserId } from "./userProfiles.js";
 
 export interface TrainingContentEligibilityResult {
   eligible: boolean;
@@ -64,7 +64,7 @@ export function resolveTrainingContentEligibility(params: {
     }
 
     const manager = usersById.get(assignment.subjectUserId) ?? null;
-    if (!manager || !isEligibleManagerUser(manager, params.orgId)) {
+    if (!manager || !isContentManagerSubject(manager, params.orgId)) {
       continue;
     }
     if (assignment.assignmentType === "manager" && manager.id === user.id) {

@@ -81,6 +81,18 @@ export function isEligibleManagerUser(user: UserProfile, orgId: string): boolean
   );
 }
 
+// Learning Resource manager and manager-team assignments intentionally retain the
+// current active User Admin requirement. Keep this separate from manager
+// relationship eligibility and future performance visibility rules.
+export function isContentManagerSubject(user: UserProfile, orgId: string): boolean {
+  return (
+    user.accountType === "enterprise" &&
+    user.orgId === orgId &&
+    user.status === "active" &&
+    user.orgRole === "user_admin"
+  );
+}
+
 export function isRegularManagedUser(user: UserProfile): boolean {
   return user.accountType === "enterprise" && user.orgRole === "user";
 }

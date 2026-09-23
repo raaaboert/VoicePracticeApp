@@ -60,7 +60,7 @@ import {
   type TrainingContentScenarioLinkService,
   TrainingContentScenarioLinkServiceError,
 } from "./trainingContentScenarioLinks.js";
-import { isEligibleManagerUser, resolveStoredUserDisplayName } from "./userProfiles.js";
+import { isContentManagerSubject, resolveStoredUserDisplayName } from "./userProfiles.js";
 
 const TITLE_MAX_LENGTH = 200;
 const DESCRIPTION_MAX_LENGTH = 2_000;
@@ -503,7 +503,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     }
     for (const managerId of new Set([...managerIds, ...managerTeamIds])) {
       const manager = usersById.get(managerId) ?? null;
-      if (!manager || !isEligibleManagerUser(manager, params.context.orgId)) {
+      if (!manager || !isContentManagerSubject(manager, params.context.orgId)) {
         throw validationError(
           "A selected manager is no longer an active User Admin in this organization.",
           { field: "managerIds" }
@@ -1119,7 +1119,7 @@ function mapStoredTarget(
   return toTarget(
     user,
     managerRequired
-      ? isEligibleManagerUser(user, orgId)
+      ? isContentManagerSubject(user, orgId)
       : isActiveOrganizationUser(user, orgId)
   );
 }
@@ -1160,7 +1160,7 @@ function searchTargets(params: {
   return params.users
     .filter((user) =>
       params.managersOnly
-        ? isEligibleManagerUser(user, params.orgId)
+        ? isContentManagerSubject(user, params.orgId)
         : isActiveOrganizationUser(user, params.orgId)
     )
     .filter((user) => {
@@ -1234,7 +1234,7 @@ function assertHasEffectiveAssignment(
       : null;
     return assignment.assignmentType === "user"
       ? isActiveOrganizationUser(user, orgId)
-      : Boolean(user && isEligibleManagerUser(user, orgId));
+      : Boolean(user && isContentManagerSubject(user, orgId));
   });
   if (!hasEffectiveAssignment) {
     throw new TrainingContentManagementServiceError(
