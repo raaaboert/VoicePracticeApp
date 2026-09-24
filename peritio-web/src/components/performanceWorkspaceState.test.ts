@@ -8,9 +8,16 @@ import {
   filterPerformanceRowsForUser,
   filterPerformanceUsers,
   getVisiblePerformanceHistoryRows,
+  resolvePerformanceUserSelectorEmptyState,
   resolveSelectedPerformanceUser,
   shouldClosePerformanceDetailWhenHistoryCollapses,
 } from "./performanceWorkspaceState";
+
+test("Performance user selector distinguishes no authorization from an empty authorized search", () => {
+  assert.equal(resolvePerformanceUserSelectorEmptyState("none", 0), "authorization");
+  assert.equal(resolvePerformanceUserSelectorEmptyState("team", 0), "search");
+  assert.equal(resolvePerformanceUserSelectorEmptyState("organization", 2), null);
+});
 
 function createUser(overrides?: Partial<DashboardPerformanceUserOption>): DashboardPerformanceUserOption {
   return {

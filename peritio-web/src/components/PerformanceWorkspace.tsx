@@ -34,6 +34,7 @@ import {
   filterPerformanceRowsForUser,
   filterPerformanceUsers,
   getVisiblePerformanceHistoryRows,
+  resolvePerformanceUserSelectorEmptyState,
   resolveSelectedPerformanceUser,
   shouldClosePerformanceDetailWhenHistoryCollapses,
 } from "@/src/components/performanceWorkspaceState";
@@ -174,6 +175,10 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
     () => filterPerformanceUsers(workspace.users, userSearch),
     [userSearch, workspace.users],
   );
+  const userSelectorEmptyState = resolvePerformanceUserSelectorEmptyState(
+    workspace.viewer.performanceAccess,
+    filteredUsers.length,
+  );
   const filteredScenarios = useMemo(() => {
     const query = scenarioSearch.trim().toLowerCase();
     const scenarios = selectedUser?.assignableScenarios ?? [];
@@ -255,6 +260,19 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
                 </Link>
               </article>
             ))}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (userSelectorEmptyState === "authorization") {
+    return (
+      <div className="performance-stack">
+        <section className="section-card">
+          <div className="empty-state-panel">
+            <h3>You don’t currently have access to organization performance data.</h3>
+            <p>Contact another organization administrator or your Peritio administrator to request Performance Access.</p>
           </div>
         </section>
       </div>
@@ -464,7 +482,7 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
           />
         </label>
         <div className="performance-user-selector" role="listbox" aria-label="Performance user selector">
-          {filteredUsers.length === 0 ? (
+          {userSelectorEmptyState === "search" ? (
             <div className="empty-state-panel">
               <h3>No users found</h3>
               <p>Try a different name or email within your current dashboard scope.</p>

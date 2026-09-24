@@ -1,4 +1,21 @@
-import type { DashboardPerformancePlanRow, DashboardPerformanceUserOption } from "@voicepractice/shared";
+import type {
+  DashboardPerformancePlanRow,
+  DashboardPerformanceUserOption,
+  PerformanceAccessLevel,
+} from "@voicepractice/shared";
+
+export type PerformanceUserSelectorEmptyState = "authorization" | "search" | null;
+
+export function resolvePerformanceUserSelectorEmptyState(
+  performanceAccess: PerformanceAccessLevel,
+  matchingUserCount: number,
+): PerformanceUserSelectorEmptyState {
+  if (performanceAccess === "none") {
+    return "authorization";
+  }
+
+  return matchingUserCount === 0 ? "search" : null;
+}
 
 function normalizeSearch(value: string): string {
   return value.trim().toLowerCase();

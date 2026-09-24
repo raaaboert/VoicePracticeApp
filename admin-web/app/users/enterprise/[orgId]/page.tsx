@@ -1289,8 +1289,20 @@ export default function EnterpriseOrgPage() {
               </div>
             </div>
             {cardExpanded.accessRequests ? (
-              <div className="table-wrap">
-                <table className="data-table">
+              <div className="table-wrap enterprise-user-table-wrap">
+                <table className="data-table enterprise-user-table">
+                  <colgroup>
+                    <col className="enterprise-user-email-column" />
+                    <col className="enterprise-user-role-column" />
+                    <col className="enterprise-user-performance-column" />
+                    <col className="enterprise-user-division-column" />
+                    <col className="enterprise-user-dashboard-column" />
+                    <col className="enterprise-user-status-column" />
+                    <col className="enterprise-user-allotment-column" />
+                    <col className="enterprise-user-overage-column" />
+                    <col className="enterprise-user-usage-column" />
+                    <col className="enterprise-user-actions-column" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>User</th>

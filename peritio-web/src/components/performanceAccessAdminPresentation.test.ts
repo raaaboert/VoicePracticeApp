@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(componentsDir, "AdminWorkspace.tsx"), "utf8");
+const performanceWorkspaceSource = readFileSync(join(componentsDir, "PerformanceWorkspace.tsx"), "utf8");
 
 test("customer Admin performance access editor uses the server capability and blocks self editing", () => {
   assert.equal(source.includes("viewer.capabilities.managePerformanceAccess"), true);
@@ -31,4 +32,12 @@ test("customer Admin manager confirmation copy follows report relationships inst
     source.includes("Demote ${user.email} to User? Dashboard access will be removed, sessions revoked, and"),
     false
   );
+});
+
+test("Performance workspace presents authorization and search empty states distinctly", () => {
+  assert.equal(performanceWorkspaceSource.includes("workspace.viewer.performanceAccess"), true);
+  assert.equal(performanceWorkspaceSource.includes("You don’t currently have access to organization performance data."), true);
+  assert.equal(performanceWorkspaceSource.includes("Try a different name or email within your current dashboard scope."), true);
+  assert.equal(performanceWorkspaceSource.includes("userSelectorEmptyState === \"authorization\""), true);
+  assert.equal(performanceWorkspaceSource.includes("userSelectorEmptyState === \"search\""), true);
 });
