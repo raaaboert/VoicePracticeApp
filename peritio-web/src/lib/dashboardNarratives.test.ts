@@ -73,6 +73,7 @@ function createDashboardViewer(): DashboardViewer {
       editUserNames: false,
       manageUserRoles: false,
       assignUserManagers: false,
+      managePerformanceAccess: false,
       manageOrganizationContent: false,
     },
   };

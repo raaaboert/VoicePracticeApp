@@ -78,6 +78,7 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
     editUserNames: true,
     manageUserRoles: true,
     assignUserManagers: true,
+    managePerformanceAccess: true,
     manageOrganizationContent: true,
   });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
@@ -148,6 +149,7 @@ test("super users retain cross-account dashboard access", () => {
     editUserNames: false,
     manageUserRoles: false,
     assignUserManagers: false,
+    managePerformanceAccess: false,
     manageOrganizationContent: false,
   });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), true);
@@ -263,6 +265,7 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     editUserNames: false,
     manageUserRoles: false,
     assignUserManagers: false,
+    managePerformanceAccess: false,
     manageOrganizationContent: false,
   });
 
@@ -274,6 +277,7 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     editUserNames: false,
     manageUserRoles: false,
     assignUserManagers: false,
+    managePerformanceAccess: false,
     manageOrganizationContent: false,
   });
 
@@ -285,6 +289,11 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     editUserNames: true,
     manageUserRoles: true,
     assignUserManagers: true,
+    managePerformanceAccess: true,
     manageOrganizationContent: true,
   });
+
+  assert.equal(buildDashboardAdminCapabilities("org_admin").managePerformanceAccess, true);
+  assert.equal(buildDashboardAdminCapabilities("user_admin").managePerformanceAccess, false);
+  assert.equal(buildDashboardAdminCapabilities("user").managePerformanceAccess, false);
 });

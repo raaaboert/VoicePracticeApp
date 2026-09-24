@@ -26,6 +26,7 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
       editUserNames: true,
       manageUserRoles: true,
       assignUserManagers: true,
+      managePerformanceAccess: true,
       manageOrganizationContent: true,
     };
   }
@@ -39,6 +40,7 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
       editUserNames: true,
       manageUserRoles: true,
       assignUserManagers: true,
+      managePerformanceAccess: true,
       manageOrganizationContent: true,
     };
   }
@@ -52,6 +54,7 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
       editUserNames: false,
       manageUserRoles: false,
       assignUserManagers: false,
+      managePerformanceAccess: false,
       manageOrganizationContent: false,
     };
   }
@@ -64,6 +67,7 @@ export function buildDashboardAdminCapabilities(role: OrgUserRole | null, option
     editUserNames: false,
     manageUserRoles: false,
     assignUserManagers: false,
+    managePerformanceAccess: false,
     manageOrganizationContent: false,
   };
 }

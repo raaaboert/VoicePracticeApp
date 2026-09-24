@@ -31,6 +31,7 @@ function createViewer(overrides?: Partial<DashboardViewer>): DashboardViewer {
       editUserNames: false,
       manageUserRoles: false,
       assignUserManagers: false,
+      managePerformanceAccess: false,
       manageOrganizationContent: false,
     },
     ...overrides,

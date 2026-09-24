@@ -134,6 +134,7 @@ function createViewer(overrides?: Partial<DashboardViewer>): DashboardViewer {
       editUserNames: true,
       manageUserRoles: true,
       assignUserManagers: true,
+      managePerformanceAccess: true,
       manageOrganizationContent: true,
     },
   };

@@ -700,6 +700,7 @@ function buildDemoCustomerFacingViewer(viewer: DashboardViewer): DashboardViewer
       editUserNames: true,
       manageUserRoles: true,
       assignUserManagers: true,
+      managePerformanceAccess: true,
       manageOrganizationContent: true,
     },
   };

@@ -62,6 +62,7 @@ function viewer(): DashboardViewer {
       editUserNames: true,
       manageUserRoles: true,
       assignUserManagers: true,
+      managePerformanceAccess: true,
       manageOrganizationContent: true,
     },
   };

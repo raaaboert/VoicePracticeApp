@@ -173,6 +173,7 @@ import {
   isAccountType,
   isOrgUserRole,
   isOrgJoinRequestStatus,
+  isPerformanceAccessLevel,
   isTierId,
   isUserStatus,
   secondsToWholeMinutes,
@@ -3355,6 +3356,7 @@ function ensureDemoEnterpriseData(db: {
     );
     const existingUser = duplicateById ?? duplicateByEmail;
     if (existingUser) {
+      const wasEnterpriseMember = existingUser.accountType === "enterprise" && Boolean(existingUser.orgId);
       existingUser.emailVerifiedAt = existingUser.emailVerifiedAt ?? existingUser.createdAt ?? now;
       existingUser.firstName = normalizeOptionalStoredUserName(existingUser.firstName);
       existingUser.lastName = normalizeOptionalStoredUserName(existingUser.lastName);
@@ -3365,6 +3367,9 @@ function ensureDemoEnterpriseData(db: {
       existingUser.managerUserId = normalizeManagerUserId(existingUser.managerUserId);
       existingUser.orgId = demoUser.orgId;
       existingUser.orgRole = demoUser.orgRole;
+      if (!wasEnterpriseMember) {
+        existingUser.performanceAccess = "none";
+      }
       existingUser.status = existingUser.status ?? "active";
       existingUser.timezone = existingUser.timezone ?? "America/New_York";
       existingUser.dailySecondsCapOverride = normalizeOptionalSecondsCap(existingUser.dailySecondsCapOverride);
@@ -3394,6 +3399,7 @@ function ensureDemoEnterpriseData(db: {
       status: "active",
       orgId: demoUser.orgId,
       orgRole: demoUser.orgRole,
+      performanceAccess: "none",
       timezone: "America/New_York",
       pendingTimezone: null,
       pendingTimezoneEffectiveAt: null,
@@ -8121,6 +8127,7 @@ function decideEnterpriseJoinRequest(params: {
     targetUser.tier = "enterprise";
     targetUser.orgId = params.org.id;
     targetUser.orgRole = "user";
+    targetUser.performanceAccess = "none";
     targetUser.managerUserId = null;
     targetUser.dashboardAccessEnabled = false;
     targetUser.mobileProfileReonboardingRequired = false;
@@ -12397,8 +12404,9 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
   const hasStatusPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "status");
   const hasRolePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "orgRole");
   const hasManagerPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "managerUserId");
-  if (!hasFirstNamePatch && !hasLastNamePatch && !hasEmployeeIdPatch && !hasStatusPatch && !hasRolePatch && !hasManagerPatch) {
-    response.status(400).json({ error: "Provide firstName, lastName, employeeId, status, orgRole, or managerUserId." });
+  const hasPerformanceAccessPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "performanceAccess");
+  if (!hasFirstNamePatch && !hasLastNamePatch && !hasEmployeeIdPatch && !hasStatusPatch && !hasRolePatch && !hasManagerPatch && !hasPerformanceAccessPatch) {
+    response.status(400).json({ error: "Provide firstName, lastName, employeeId, status, orgRole, managerUserId, or performanceAccess." });
     return;
   }
 
@@ -12437,6 +12445,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
     const beforeOrgRole = target.orgRole;
     const beforeManagerUserId = normalizeManagerUserId(target.managerUserId);
     const beforeDashboardAccessEnabled = target.dashboardAccessEnabled === true;
+    const beforePerformanceAccess = normalizePerformanceAccess(target);
     const beforeEligibleAsManager = canBeAssignedAsManager(target, adminContext.org.id);
     let nextFirstName = beforeFirstName;
     let nextLastName = beforeLastName;
@@ -12445,6 +12454,25 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
     let nextOrgRole = beforeOrgRole;
     let nextManagerUserId = beforeManagerUserId;
     let nextDashboardAccessEnabled = beforeDashboardAccessEnabled;
+    let nextPerformanceAccess = beforePerformanceAccess;
+
+    if (hasPerformanceAccessPatch) {
+      if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "managePerformanceAccess", response)) {
+        return;
+      }
+      if (target.id === request.dashboard!.user.id) {
+        response.status(403).json({
+          error: "You cannot change your own performance access.",
+          code: "dashboard_scope_denied",
+        });
+        return;
+      }
+      if (typeof body.performanceAccess !== "string" || !isPerformanceAccessLevel(body.performanceAccess)) {
+        response.status(400).json({ error: "Valid performance access is required." });
+        return;
+      }
+      nextPerformanceAccess = body.performanceAccess;
+    }
 
     if (hasFirstNamePatch || hasLastNamePatch) {
       if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "editUserNames", response)) {
@@ -12637,6 +12665,9 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
     target.orgRole = nextOrgRole;
     target.managerUserId = nextManagerUserId;
     target.dashboardAccessEnabled = nextDashboardAccessEnabled;
+    if (hasPerformanceAccessPatch) {
+      target.performanceAccess = nextPerformanceAccess;
+    }
     target.status = nextStatus;
 
     if (hasStatusPatch) {
@@ -12699,6 +12730,19 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
           nextRole: target.orgRole,
           dashboardAccessRevoked: beforeDashboardAccessEnabled && target.dashboardAccessEnabled !== true,
           clearedAssignedReportCount: clearedAssignmentUserIds.size,
+        }
+      });
+    }
+    const afterPerformanceAccess = normalizePerformanceAccess(target);
+    if (beforePerformanceAccess !== afterPerformanceAccess) {
+      appendWebAuditEvent(db, request.dashboard!.user, {
+        action: "org_user.performance_access.changed",
+        orgId: adminContext.org.id,
+        userId: target.id,
+        message: "Changed organization user performance access.",
+        metadata: {
+          previousPerformanceAccess: beforePerformanceAccess,
+          nextPerformanceAccess: afterPerformanceAccess,
         }
       });
     }
@@ -15588,6 +15632,7 @@ app.get("/orgs/:orgId/dashboard", requireAdmin, async (request: Request, respons
         email: user.email,
         status: user.status,
         orgRole: user.orgRole,
+        performanceAccess: normalizePerformanceAccess(user),
         divisionId: user.divisionId ?? null,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         dailySecondsCapOverride: user.dailySecondsCapOverride,
@@ -15804,6 +15849,7 @@ app.post("/admin/settings/superusers", requireAdmin, async (request: Request, re
       status: "active",
       orgId: null,
       orgRole: "user",
+      performanceAccess: "none",
       timezone: "UTC",
       pendingTimezone: null,
       pendingTimezoneEffectiveAt: null,
@@ -15918,6 +15964,17 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
     return;
   }
 
+  const hasPerformanceAccess = Object.prototype.hasOwnProperty.call(body ?? {}, "performanceAccess");
+  if (hasPerformanceAccess && (typeof body.performanceAccess !== "string" || !isPerformanceAccessLevel(body.performanceAccess))) {
+    response.status(400).json({ error: "Valid performance access is required." });
+    return;
+  }
+  const performanceAccess = body.performanceAccess ?? "none";
+  if (body.accountType !== "enterprise" && performanceAccess !== "none") {
+    response.status(400).json({ error: "Performance access applies only to enterprise users." });
+    return;
+  }
+
   const timezone = resolveTimeZone(body.timezone);
 
   await withDatabase(async (db) => {
@@ -15977,6 +16034,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
       status: "active",
       orgId,
       orgRole: body.accountType === "enterprise" ? normalizeOrgUserRole(body.orgRole) : "user",
+      performanceAccess,
       divisionId: null,
       timezone,
       pendingTimezone: null,
@@ -16002,7 +16060,8 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
         accountType: user.accountType,
         tier: user.tier,
-        orgRole: user.orgRole
+        orgRole: user.orgRole,
+        performanceAccess: user.performanceAccess
       }
     });
     response.status(201).json(user);
@@ -16012,6 +16071,11 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
 app.patch("/users/:userId", requireAdmin, async (request: Request, response: Response) => {
   const userId = request.params.userId;
   const patch = request.body as UpdateUserRequest;
+  const hasPerformanceAccessPatch = Object.prototype.hasOwnProperty.call(patch ?? {}, "performanceAccess");
+  if (hasPerformanceAccessPatch && (typeof patch.performanceAccess !== "string" || !isPerformanceAccessLevel(patch.performanceAccess))) {
+    response.status(400).json({ error: "Valid performance access is required." });
+    return;
+  }
 
   await withDatabase(async (db) => {
     const user = getUserById(db, userId);
@@ -16028,6 +16092,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       canBeAssignedAsManager(user, managerRelationshipOrgIdBeforeUpdate)
     );
     const beforeEmployeeId = user.employeeId ?? null;
+    const beforeAccountType = user.accountType;
     const before = {
       email: user.email,
       employeeIdPresent: Boolean(beforeEmployeeId),
@@ -16038,6 +16103,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       status: user.status,
       orgId: user.orgId,
       orgRole: user.orgRole,
+      performanceAccess: normalizePerformanceAccess(user),
       divisionId: user.divisionId ?? null,
       manualBonusSeconds: user.manualBonusSeconds,
       dailySecondsCapOverride: user.dailySecondsCapOverride,
@@ -16103,6 +16169,10 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
 
       nextAccountType = patch.accountType;
     }
+    if (hasPerformanceAccessPatch && nextAccountType !== "enterprise" && patch.performanceAccess !== "none") {
+      response.status(400).json({ error: "Performance access applies only to enterprise users." });
+      return;
+    }
 
     if (patch.status) {
       if (!isUserStatus(patch.status)) {
@@ -16165,6 +16235,13 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     user.accountType = nextAccountType;
     user.orgId = nextOrgId;
     user.employeeId = nextAccountType === "enterprise" ? employeeIdPatch.value : null;
+    if (nextAccountType !== "enterprise") {
+      user.performanceAccess = "none";
+    } else if (hasPerformanceAccessPatch) {
+      user.performanceAccess = patch.performanceAccess;
+    } else if (beforeAccountType !== "enterprise") {
+      user.performanceAccess = "none";
+    }
 
     if (nextAccountType === "enterprise") {
       if (patch.orgRole !== undefined) {
@@ -16311,6 +16388,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
           status: user.status,
           orgId: user.orgId,
           orgRole: user.orgRole,
+          performanceAccess: normalizePerformanceAccess(user),
           divisionId: user.divisionId ?? null,
           manualBonusSeconds: user.manualBonusSeconds,
           dailySecondsCapOverride: user.dailySecondsCapOverride,
@@ -16538,6 +16616,7 @@ app.post(
       status: "active",
       orgId: null,
       orgRole: "user",
+      performanceAccess: "none",
       timezone,
       pendingTimezone: null,
       pendingTimezoneEffectiveAt: null,
@@ -22422,6 +22501,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       targetUser.tier = "enterprise";
       targetUser.orgId = org.id;
       targetUser.orgRole = assignOrgAdmin ? "org_admin" : "user";
+      targetUser.performanceAccess = "none";
       targetUser.status = "active";
       targetUser.updatedAt = nowValue;
       const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({

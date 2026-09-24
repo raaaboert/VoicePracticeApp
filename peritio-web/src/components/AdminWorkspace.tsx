@@ -10,6 +10,7 @@ import type {
   DashboardAdminUserRow,
   DashboardAdminUsersResponse,
   OrgUserRole,
+  PerformanceAccessLevel,
   UserStatus,
 } from "@voicepractice/shared";
 
@@ -29,6 +30,7 @@ interface UserDraft {
   employeeId: string;
   orgRole: OrgUserRole;
   managerUserId: string;
+  performanceAccess: PerformanceAccessLevel;
 }
 
 function encodeOrgQuery(orgId: string | null): string {
@@ -60,6 +62,10 @@ function managerLabel(user: DashboardAdminUserRow): string {
   return user.managerDisplayName ?? "Not provided";
 }
 
+function performanceAccessLabel(value: PerformanceAccessLevel): string {
+  return value === "none" ? "None" : value === "team" ? "Team" : "Organization";
+}
+
 function createDraft(user: DashboardAdminUserRow): UserDraft {
   return {
     firstName: user.firstName ?? "",
@@ -67,6 +73,7 @@ function createDraft(user: DashboardAdminUserRow): UserDraft {
     employeeId: user.employeeId ?? "",
     orgRole: user.orgRole,
     managerUserId: user.managerUserId ?? "",
+    performanceAccess: user.performanceAccess,
   };
 }
 
@@ -127,6 +134,7 @@ export function AdminWorkspace({
   const [savingRequestId, setSavingRequestId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const canManageAccessRequests = usersPayload.viewer.capabilities.approveRejectAccessRequests;
+  const canManagePerformanceAccess = usersPayload.viewer.capabilities.managePerformanceAccess;
   const managerOptions = usersPayload.managerOptions ?? [];
 
   const filteredUsers = useMemo(() => {
@@ -186,6 +194,9 @@ export function AdminWorkspace({
     }
     if (user.canAssignManager && draft.orgRole === "user" && (draft.managerUserId || null) !== (user.managerUserId ?? null)) {
       body.managerUserId = draft.managerUserId || null;
+    }
+    if (canManagePerformanceAccess && !user.isSelf && draft.performanceAccess !== user.performanceAccess) {
+      body.performanceAccess = draft.performanceAccess;
     }
 
     if (Object.keys(body).length === 0) {
@@ -348,6 +359,7 @@ export function AdminWorkspace({
                   <th>Employee ID</th>
                   <th>Role</th>
                   <th>Manager</th>
+                  <th>Performance Access</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -356,11 +368,13 @@ export function AdminWorkspace({
                 {filteredUsers.map((user) => {
                   const isEditing = editingUserId === user.userId;
                   const draft = drafts[user.userId] ?? createDraft(user);
+                  const canEditPerformanceAccess = canManagePerformanceAccess && !user.isSelf;
                   const canEditUser =
                     user.canEditNames ||
                     user.canEditEmployeeId ||
                     user.canChangeRole ||
-                    (user.canAssignManager && user.orgRole === "user");
+                    (user.canAssignManager && user.orgRole === "user") ||
+                    canEditPerformanceAccess;
 
                   return (
                     <tr key={user.userId}>
@@ -438,6 +452,30 @@ export function AdminWorkspace({
                           </select>
                         ) : (
                           managerLabel(user)
+                        )}
+                      </td>
+                      <td>
+                        {isEditing && canEditPerformanceAccess ? (
+                          <select
+                            className="text-input compact-input"
+                            aria-label={`Performance Access for ${user.email}`}
+                            value={draft.performanceAccess}
+                            disabled={savingUserId === user.userId}
+                            onChange={(event) => updateDraft(user.userId, {
+                              performanceAccess: event.target.value as PerformanceAccessLevel,
+                            })}
+                          >
+                            <option value="none">None</option>
+                            <option value="team">Team</option>
+                            <option value="organization">Organization</option>
+                          </select>
+                        ) : (
+                          <>
+                            {performanceAccessLabel(user.performanceAccess)}
+                            {user.isSelf && canManagePerformanceAccess ? (
+                              <div className="table-subcopy">Another org admin or platform administrator must change this.</div>
+                            ) : null}
+                          </>
                         )}
                       </td>
                       <td>

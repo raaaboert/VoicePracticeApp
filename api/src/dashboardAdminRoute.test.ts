@@ -541,6 +541,12 @@ function buildDatabase(): ApiDatabase {
         orgId: null,
         orgRole: "user",
       }),
+      buildUser("platform_admin_pending", "platform-admin-pending@gmail.com", {
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user",
+      }),
       buildUser("reject_user", "reject@gmail.com", {
         accountType: "individual",
         tier: "free",
@@ -784,6 +790,7 @@ function buildDatabase(): ApiDatabase {
       buildJoinRequest("jr_pending", "pending_user", "pending@gmail.com"),
       buildJoinRequest("jr_reject", "reject_user", "reject@gmail.com"),
       buildJoinRequest("jr_mobile", "gmail_join_2", "gmail.two@gmail.com"),
+      buildJoinRequest("jr_platform_admin", "platform_admin_pending", "platform-admin-pending@gmail.com"),
       buildJoinRequest("jr_other", "other_pending", "other-pending@gmail.com", "org_2"),
       {
         ...buildJoinRequest("jr_rejected_ai", "rejected_ai", "rejected-ai@gmail.com"),
@@ -2360,6 +2367,10 @@ test("dashboard admin users are tenant-scoped and regular users cannot access Ad
   assert.equal(users.find((user) => user.userId === "user_admin")?.performanceAccess, "team");
   assert.equal(users.find((user) => user.userId === "learner")?.performanceAccess, "none");
   assert.equal((result.body.viewer as { performanceAccess?: string }).performanceAccess, "organization");
+  assert.equal(
+    (result.body.viewer as { capabilities?: { managePerformanceAccess?: boolean } }).capabilities?.managePerformanceAccess,
+    true
+  );
 });
 
 test("user-admin users are scoped to themselves and directly assigned reports", async () => {
@@ -2373,27 +2384,19 @@ test("user-admin users are scoped to themselves and directly assigned reports", 
 
   const viewer = result.body.viewer as {
     performanceAccess?: string;
-    capabilities?: { approveRejectAccessRequests?: boolean; assignUserManagers?: boolean };
+    capabilities?: {
+      approveRejectAccessRequests?: boolean;
+      assignUserManagers?: boolean;
+      managePerformanceAccess?: boolean;
+    };
   };
   assert.equal(viewer.performanceAccess, "team");
   assert.equal(viewer.capabilities?.approveRejectAccessRequests, false);
   assert.equal(viewer.capabilities?.assignUserManagers, false);
+  assert.equal(viewer.capabilities?.managePerformanceAccess, false);
 });
 
-test("current user mutation routes cannot write performance access and mobile responses omit it", async () => {
-  const dashboardOnlyField = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
-    method: "PATCH",
-    body: JSON.stringify({ performanceAccess: "organization" }),
-  });
-  assert.equal(dashboardOnlyField.status, 400);
-
-  const platformPatch = await adminRequest("/users/unassigned_learner", {
-    method: "PATCH",
-    body: JSON.stringify({ performanceAccess: "organization" }),
-  });
-  assert.equal(platformPatch.status, 200);
-  assert.equal(platformPatch.body.performanceAccess, "none");
-
+test("mobile and self-service mutation routes cannot write performance access", async () => {
   const mobileAdminOnlyField = await mobileRequest(
     "/mobile/users/org_admin/admin/org/users/unassigned_learner",
     "token_org_admin",
@@ -2417,6 +2420,165 @@ test("current user mutation routes cannot write performance access and mobile re
 
   assert.equal((await readUser("unassigned_learner"))?.performanceAccess, "none");
   assert.equal((await readUser("org_admin"))?.performanceAccess, "organization");
+});
+
+test("dashboard performance-access mutation is authorized, audited, isolated, and effective next request", async () => {
+  const selfDenied = await dashboardRequest("/dashboard/admin/users/org_admin", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "none" }),
+  });
+  assert.equal(selfDenied.status, 403);
+  assert.equal(selfDenied.body.code, "dashboard_scope_denied");
+
+  const userAdminElevated = await adminRequest("/users/user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "organization" }),
+  });
+  assert.equal(userAdminElevated.status, 200);
+  const userAdminDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+  assert.equal(userAdminDenied.status, 403);
+  assert.equal((await readUser("learner"))?.performanceAccess, "none");
+  await adminRequest("/users/user_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+
+  const regularDenied = await dashboardRequest("/dashboard/admin/users/regular_dashboard", regularDashboardToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+  assert.equal(regularDenied.status === 403 || regularDenied.status === 404, true);
+
+  const crossOrgDenied = await dashboardRequest("/dashboard/admin/users/other_org_user", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+  assert.equal(crossOrgDenied.status, 404);
+
+  for (const invalidValue of ["", "admin", "manager", "all", "org", null, [], {}, "TEAM"]) {
+    const invalid = await dashboardRequest("/dashboard/admin/users/regular_manager_to_promote", orgAdminToken, {
+      method: "PATCH",
+      body: JSON.stringify({ performanceAccess: invalidValue }),
+    });
+    assert.equal(invalid.status, 400, JSON.stringify(invalidValue));
+  }
+  assert.equal((await readUser("regular_manager_to_promote"))?.performanceAccess, "none");
+
+  const targetBefore = await readUser("user_admin_none");
+  const reportBefore = await readUser("unassigned_learner");
+  assert.ok(targetBefore);
+  assert.ok(reportBefore);
+  const changedToTeam = await dashboardRequest("/dashboard/admin/users/user_admin_none", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+  assert.equal(changedToTeam.status, 200);
+  const changedRow = changedToTeam.body.user as {
+    performanceAccess?: string;
+    orgRole?: string;
+    managerUserId?: string | null;
+    dashboardAccessEnabled?: boolean;
+    status?: string;
+  };
+  assert.equal(changedRow.performanceAccess, "team");
+  assert.equal(changedRow.orgRole, targetBefore.orgRole);
+  assert.equal(changedRow.managerUserId, targetBefore.managerUserId ?? null);
+  assert.equal(changedRow.dashboardAccessEnabled, targetBefore.dashboardAccessEnabled);
+  assert.equal(changedRow.status, targetBefore.status);
+  assert.equal((await readUser("unassigned_learner"))?.managerUserId, reportBefore.managerUserId);
+
+  const nextRequestTeamScope = await dashboardRequest("/dashboard/users", userAdminNoneToken);
+  assert.equal(nextRequestTeamScope.status, 200);
+  assert.deepEqual(
+    (nextRequestTeamScope.body.users as Array<{ userId: string }>).map((user) => user.userId).sort(),
+    ["unassigned_learner", "user_admin_none"]
+  );
+
+  await waitForWriteToSettle();
+  const changeEventsBeforeNoOp = (await readPlatformAuditEvents()).filter(
+    (event) => event.action === "org_user.performance_access.changed" && event.userId === "user_admin_none"
+  );
+  const audit = changeEventsBeforeNoOp.at(-1);
+  assert.ok(audit);
+  assert.equal(audit.actorType, "web_user");
+  assert.equal(audit.actorId, "org_admin");
+  assert.deepEqual(audit.metadata, {
+    previousPerformanceAccess: "none",
+    nextPerformanceAccess: "team",
+  });
+
+  const noOp = await dashboardRequest("/dashboard/admin/users/user_admin_none", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+  assert.equal(noOp.status, 200);
+  await waitForWriteToSettle();
+  const changeEventsAfterNoOp = (await readPlatformAuditEvents()).filter(
+    (event) => event.action === "org_user.performance_access.changed" && event.userId === "user_admin_none"
+  );
+  assert.equal(changeEventsAfterNoOp.length, changeEventsBeforeNoOp.length);
+
+  const changedToOrganization = await dashboardRequest("/dashboard/admin/users/user_admin_none", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "organization" }),
+  });
+  assert.equal(changedToOrganization.status, 200);
+  assert.equal((changedToOrganization.body.user as { performanceAccess?: string }).performanceAccess, "organization");
+
+  const changedBackToNone = await dashboardRequest("/dashboard/admin/users/user_admin_none", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "none" }),
+  });
+  assert.equal(changedBackToNone.status, 200);
+  const nextRequestNoneScope = await dashboardRequest("/dashboard/users", userAdminNoneToken);
+  assert.equal(nextRequestNoneScope.status, 200);
+  assert.deepEqual(nextRequestNoneScope.body.users, []);
+  assert.equal((await readUser("unassigned_learner"))?.managerUserId, reportBefore.managerUserId);
+
+  const dashboardDisabledTarget = await dashboardRequest(
+    "/dashboard/admin/users/regular_manager_to_promote",
+    orgAdminToken,
+    { method: "PATCH", body: JSON.stringify({ performanceAccess: "team" }) }
+  );
+  assert.equal(dashboardDisabledTarget.status, 200);
+  assert.equal((dashboardDisabledTarget.body.user as { dashboardAccessEnabled?: boolean }).dashboardAccessEnabled, false);
+  assert.equal((await readUser("regular_manager_to_promote_report"))?.managerUserId, "regular_manager_to_promote");
+  const removedLastReport = await dashboardRequest(
+    "/dashboard/admin/users/regular_manager_to_promote_report",
+    orgAdminToken,
+    { method: "PATCH", body: JSON.stringify({ managerUserId: "eligible_user_admin" }) }
+  );
+  assert.equal(removedLastReport.status, 200);
+  assert.equal((await readUser("regular_manager_to_promote"))?.performanceAccess, "team");
+  const restoredReport = await dashboardRequest(
+    "/dashboard/admin/users/regular_manager_to_promote_report",
+    orgAdminToken,
+    { method: "PATCH", body: JSON.stringify({ managerUserId: "regular_manager_to_promote" }) }
+  );
+  assert.equal(restoredReport.status, 200);
+  const restoredManagerAccess = await dashboardRequest(
+    "/dashboard/admin/users/regular_manager_to_promote",
+    orgAdminToken,
+    { method: "PATCH", body: JSON.stringify({ performanceAccess: "none" }) }
+  );
+  assert.equal(restoredManagerAccess.status, 200);
+
+  const superUserChange = await dashboardRequest(
+    "/dashboard/admin/users/other_org_user?orgId=org_2",
+    superToken,
+    { method: "PATCH", body: JSON.stringify({ performanceAccess: "team" }) }
+  );
+  assert.equal(superUserChange.status, 200);
+  assert.equal((superUserChange.body.user as { performanceAccess?: string }).performanceAccess, "team");
+  const superUserRestore = await dashboardRequest(
+    "/dashboard/admin/users/other_org_user?orgId=org_2",
+    superToken,
+    { method: "PATCH", body: JSON.stringify({ performanceAccess: "none" }) }
+  );
+  assert.equal(superUserRestore.status, 200);
 });
 
 test("dashboard performance routes enforce independent team, organization, and none scope", async () => {
@@ -3368,6 +3530,141 @@ test("dashboard admin write routes reject cross-tenant manipulation attempts", a
   assert.equal(db.enterpriseJoinRequests.find((request) => request.id === "jr_other")?.status, "pending");
 });
 
+test("platform user creation and mutation persist explicit independent performance access", async () => {
+  const createEnterpriseUser = async (
+    suffix: string,
+    orgRole: "user" | "user_admin" | "org_admin",
+    performanceAccess?: "none" | "team" | "organization"
+  ) => adminRequest("/users", {
+    method: "POST",
+    body: JSON.stringify({
+      email: `performance-${suffix}@acme.example`,
+      tier: "enterprise",
+      accountType: "enterprise",
+      orgId: "org_1",
+      orgRole,
+      ...(performanceAccess ? { performanceAccess } : {}),
+    }),
+  });
+
+  const regularDefault = await createEnterpriseUser("regular-default", "user");
+  const userAdminDefault = await createEnterpriseUser("user-admin-default", "user_admin");
+  const orgAdminDefault = await createEnterpriseUser("org-admin-default", "org_admin");
+  const regularTeam = await createEnterpriseUser("regular-team", "user", "team");
+  const regularOrganization = await createEnterpriseUser("regular-organization", "user", "organization");
+
+  for (const [result, expectedRole, expectedAccess] of [
+    [regularDefault, "user", "none"],
+    [userAdminDefault, "user_admin", "none"],
+    [orgAdminDefault, "org_admin", "none"],
+    [regularTeam, "user", "team"],
+    [regularOrganization, "user", "organization"],
+  ] as const) {
+    assert.equal(result.status, 201);
+    assert.equal(result.body.orgRole, expectedRole);
+    assert.equal(result.body.performanceAccess, expectedAccess);
+  }
+
+  for (const invalidValue of ["", "admin", "manager", "all", "org", null, [], {}, "TEAM"]) {
+    const invalid = await adminRequest("/users", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "invalid-performance-create@acme.example",
+        tier: "enterprise",
+        accountType: "enterprise",
+        orgId: "org_1",
+        orgRole: "user",
+        performanceAccess: invalidValue,
+      }),
+    });
+    assert.equal(invalid.status, 400, JSON.stringify(invalidValue));
+  }
+
+  const regularDefaultId = regularDefault.body.id as string;
+  const promotedNone = await adminRequest(`/users/${regularDefaultId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user_admin" }),
+  });
+  assert.equal(promotedNone.status, 200);
+  assert.equal(promotedNone.body.performanceAccess, "none");
+
+  const grantedTeam = await adminRequest(`/users/${regularDefaultId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "team" }),
+  });
+  assert.equal(grantedTeam.status, 200);
+  assert.equal(grantedTeam.body.orgRole, "user_admin");
+  assert.equal(grantedTeam.body.performanceAccess, "team");
+  assert.equal(grantedTeam.body.managerUserId, null);
+
+  const demotedTeam = await adminRequest(`/users/${regularDefaultId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user" }),
+  });
+  assert.equal(demotedTeam.status, 200);
+  assert.equal(demotedTeam.body.performanceAccess, "team");
+
+  const regularOrganizationId = regularOrganization.body.id as string;
+  const promotedOrganization = await adminRequest(`/users/${regularOrganizationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "org_admin" }),
+  });
+  assert.equal(promotedOrganization.status, 200);
+  assert.equal(promotedOrganization.body.performanceAccess, "organization");
+  const demotedOrganization = await adminRequest(`/users/${regularOrganizationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user" }),
+  });
+  assert.equal(demotedOrganization.status, 200);
+  assert.equal(demotedOrganization.body.performanceAccess, "organization");
+
+  for (const invalidValue of ["", "admin", "manager", "all", "org", null, [], {}, "TEAM"]) {
+    const invalid = await adminRequest(`/users/${regularDefaultId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ performanceAccess: invalidValue }),
+    });
+    assert.equal(invalid.status, 400, JSON.stringify(invalidValue));
+  }
+  assert.equal((await readUser(regularDefaultId))?.performanceAccess, "team");
+
+  const individual = await adminRequest("/users", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "performance-individual-transition@example.com",
+      tier: "free",
+      accountType: "individual",
+      orgRole: "user",
+    }),
+  });
+  assert.equal(individual.status, 201);
+  assert.equal(individual.body.performanceAccess, "none");
+  const transitionedToEnterprise = await adminRequest(`/users/${individual.body.id as string}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      accountType: "enterprise",
+      tier: "enterprise",
+      orgId: "org_1",
+      orgRole: "org_admin",
+    }),
+  });
+  assert.equal(transitionedToEnterprise.status, 200);
+  assert.equal(transitionedToEnterprise.body.orgRole, "org_admin");
+  assert.equal(transitionedToEnterprise.body.performanceAccess, "none");
+
+  const unauthenticated = await publicRequest("/users", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "unauthenticated-performance@acme.example",
+      tier: "enterprise",
+      accountType: "enterprise",
+      orgId: "org_1",
+      orgRole: "user",
+      performanceAccess: "team",
+    }),
+  });
+  assert.equal(unauthenticated.status, 401);
+});
+
 test("platform user audit metadata does not serialize raw Employee IDs", async () => {
   const created = await adminRequest("/users", {
     method: "POST",
@@ -3395,6 +3692,7 @@ test("platform user audit metadata does not serialize raw Employee IDs", async (
   assert.equal(auditMetadata.includes("PLAT-RAW-2"), false);
   assert.equal(auditMetadata.includes("employeeIdPresent"), true);
   assert.equal(auditMetadata.includes("employeeIdChanged"), true);
+  assert.equal(auditMetadata.includes("performanceAccess"), true);
 });
 
 test("mobile onboarding collects names and company code without granting immediate access", async () => {
@@ -3831,6 +4129,7 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   });
   assert.equal(approved.status, 200);
   assert.equal((approved.body.request as { status?: string }).status, "approved");
+  assert.equal((await waitForPersistedUserState("pending_user", (user) => user?.orgId === "org_1"))?.performanceAccess, "none");
 
   const usersAfterApproval = await dashboardRequest("/dashboard/admin/users", orgAdminToken);
   assert.equal(usersAfterApproval.status, 200);
@@ -3863,6 +4162,19 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   );
   assert.equal(mobileApproved.status, 200);
   assert.equal((mobileApproved.body.request as { status?: string }).status, "approved");
+  assert.equal((await waitForPersistedUserState("gmail_join_2", (user) => user?.orgId === "org_1"))?.performanceAccess, "none");
+
+  const platformAdminApproved = await adminRequest("/org-join-requests/jr_platform_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ action: "approve", assignOrgAdmin: true }),
+  });
+  assert.equal(platformAdminApproved.status, 200);
+  const approvedOrgAdmin = await waitForPersistedUserState(
+    "platform_admin_pending",
+    (user) => user?.orgRole === "org_admin"
+  );
+  assert.equal(approvedOrgAdmin?.orgRole, "org_admin");
+  assert.equal(approvedOrgAdmin?.performanceAccess, "none");
 
   await waitForPersistedUserOrg("pending_user", "org_1");
   await waitForPersistedUserOrg("gmail_join_2", "org_1");

@@ -1655,6 +1655,7 @@ export interface DashboardAdminCapabilities {
   editUserNames: boolean;
   manageUserRoles: boolean;
   assignUserManagers: boolean;
+  managePerformanceAccess: boolean;
   manageOrganizationContent: boolean;
 }
 
@@ -2276,6 +2277,7 @@ export interface CreateUserRequest {
   timezone: string;
   orgId?: string | null;
   orgRole?: OrgUserRole;
+  performanceAccess?: PerformanceAccessLevel;
   isPlatformAdmin?: boolean;
   dashboardAccessEnabled?: boolean;
 }
@@ -2320,6 +2322,7 @@ export interface UpdateUserRequest {
   timezone?: string;
   orgId?: string | null;
   orgRole?: OrgUserRole;
+  performanceAccess?: PerformanceAccessLevel;
   divisionId?: string | null;
   manualBonusSeconds?: number;
   dailySecondsCapOverride?: number | null;
@@ -2507,6 +2510,7 @@ export interface DashboardAdminUpdateUserRequest {
   status?: UserStatus;
   orgRole?: OrgUserRole;
   managerUserId?: string | null;
+  performanceAccess?: PerformanceAccessLevel;
 }
 
 export interface DashboardAdminUpdateUserResponse {

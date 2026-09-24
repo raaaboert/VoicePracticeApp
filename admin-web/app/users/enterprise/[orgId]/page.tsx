@@ -10,6 +10,7 @@ import {
   OrgDivisionListResponse,
   OrgModuleEntitlementsResponse,
   OrgUserRole,
+  PerformanceAccessLevel,
   EnterpriseOrg,
   OrgDivisionRecord,
   UpdateOrgModuleEntitlementResponse,
@@ -33,6 +34,7 @@ interface OrgDashboardUserRow {
   email: string;
   status: UserStatus;
   orgRole: OrgUserRole;
+  performanceAccess: PerformanceAccessLevel;
   divisionId: string | null;
   dashboardAccessEnabled: boolean;
   dailySecondsCapOverride: number | null;
@@ -462,7 +464,7 @@ export default function EnterpriseOrgPage() {
       Pick<
         UserProfile,
         "orgRole" | "status" | "dashboardAccessEnabled" | "dailySecondsCapOverride" | "allowDailyOverageThisCycle"
-        | "divisionId"
+        | "divisionId" | "performanceAccess"
       >
     >,
   ) => {
@@ -489,6 +491,7 @@ export default function EnterpriseOrgPage() {
                   ...row,
                   status: updated.status,
                   orgRole: updated.orgRole,
+                  performanceAccess: updated.performanceAccess ?? "none",
                   divisionId: updated.divisionId ?? null,
                   dashboardAccessEnabled: updated.dashboardAccessEnabled === true,
                   dailySecondsCapOverride: updated.dailySecondsCapOverride,
@@ -1396,6 +1399,7 @@ export default function EnterpriseOrgPage() {
                     <tr>
                       <th>Email</th>
                       <th>Role</th>
+                      <th>Performance Access</th>
                       <th>Division</th>
                       <th>Dashboard Access</th>
                       <th>Locked Out</th>
@@ -1408,13 +1412,13 @@ export default function EnterpriseOrgPage() {
                   <tbody>
                 {(dashboard?.users ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="small">
+                    <td colSpan={10} className="small">
                       {loading ? "Loading..." : "No users found for this enterprise account."}
                     </td>
                   </tr>
                 ) : filteredOrgUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="small">
+                    <td colSpan={10} className="small">
                       No users match "{userSearch.trim()}".
                     </td>
                   </tr>
@@ -1439,6 +1443,23 @@ export default function EnterpriseOrgPage() {
                                 </option>
                               ))}
                             </select>
+                          </td>
+                          <td>
+                            <select
+                              aria-label={`Performance Access for ${user.email}`}
+                              value={user.performanceAccess}
+                              disabled={savingUserId === user.userId || deletingUserId === user.userId}
+                              onChange={(event) => {
+                                void patchEnterpriseUser(user.userId, {
+                                  performanceAccess: event.target.value as PerformanceAccessLevel,
+                                });
+                              }}
+                            >
+                              <option value="none">None</option>
+                              <option value="team">Team</option>
+                              <option value="organization">Organization</option>
+                            </select>
+                            <div className="small">Controls performance visibility only.</div>
                           </td>
                           <td>
                             <select
