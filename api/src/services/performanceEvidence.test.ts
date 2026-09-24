@@ -105,6 +105,56 @@ test("normalizes a full current score without qualitative or token payloads", ()
 
   assert.equal(evidence.recordEra, "outcome_aware");
   assert.equal(evidence.scoringGeneration, "2026-04-09.v1");
+  assert.deepEqual(
+    {
+      overallScore: evidence.overallScore,
+      communicationScore: evidence.communicationScore,
+      outcomeScore: evidence.outcomeScore,
+      persuasion: evidence.persuasion,
+      clarity: evidence.clarity,
+      empathy: evidence.empathy,
+      assertiveness: evidence.assertiveness,
+      completionLevel: evidence.completionLevel,
+      objectiveAchieved: evidence.objectiveAchieved,
+    },
+    {
+      overallScore: 77,
+      communicationScore: 80,
+      outcomeScore: 70,
+      persuasion: 8,
+      clarity: 8,
+      empathy: 8,
+      assertiveness: 8,
+      completionLevel: "complete",
+      objectiveAchieved: true,
+    },
+  );
+  assert.deepEqual(
+    {
+      evidenceId: evidence.evidenceId,
+      simulationSessionId: evidence.simulationSessionId,
+      userId: evidence.userId,
+      orgId: evidence.orgId,
+      segmentId: evidence.segmentId,
+      scenarioId: evidence.scenarioId,
+      trainingId: evidence.trainingId,
+      rubricVersion: evidence.rubricVersion,
+      promptVersion: evidence.promptVersion,
+      model: evidence.model,
+    },
+    {
+      evidenceId: "score_current",
+      simulationSessionId: "sim_current",
+      userId: "user_current",
+      orgId: "org_current",
+      segmentId: "segment_current",
+      scenarioId: "scenario_current",
+      trainingId: "training_current",
+      rubricVersion: "2026-04-09.v1",
+      promptVersion: "2026-04-09.v1",
+      model: "gpt-score",
+    },
+  );
   assert.deepEqual(evidence.metricAvailability, {
     overall: true,
     communication: true,

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { SimulationScoreRecord } from "@voicepractice/shared";
+import type { SimulationScoreRecord, TrainingPack } from "@voicepractice/shared";
 
 import {
   LEARNER_USER_ID,
@@ -35,8 +35,36 @@ const routePromptFixture = JSON.parse(
 
 let harness: PromptRouteHarness;
 
+const nonDefaultWeightTrainingPack: TrainingPack = {
+  id: "pack_non_default_weights",
+  organizationId: "org_prompt_base",
+  title: "Non-default scoring weights",
+  trainingTopic: "Verify applied scoring-weight provenance.",
+  learningObjectives: [],
+  successBehaviors: [],
+  failurePatterns: [],
+  requiredBehavioralTriggers: ["scenario:custom_recovery_route"],
+  scoringWeightOverrides: { persuasion: 0.5 },
+  complianceConstraints: "",
+  audienceLevel: "test",
+  active: true,
+  createdAt: "2026-09-21T12:00:00.000Z",
+  updatedAt: "2026-09-21T12:00:00.000Z",
+};
+
+const nonDefaultNormalizedWeights = {
+  persuasion: 0.4,
+  clarity: 0.2,
+  empathy: 0.2,
+  assertiveness: 0.2,
+};
+
 before(async () => {
-  harness = await startPromptRouteHarness({ modularEnvironmentEnabled: false });
+  harness = await startPromptRouteHarness({
+    modularEnvironmentEnabled: true,
+    learnerOrgModularPromptEnabled: true,
+    trainingPacks: [nonDefaultWeightTrainingPack],
+  });
 });
 
 after(async () => {
@@ -65,6 +93,32 @@ test("learner score route persists the current recognized-session score contract
   assert.equal(Object.hasOwn(record, "trainingPackId"), false);
   assert.equal(record.divisionId, undefined);
   assert.equal(Object.hasOwn(record, "divisionId"), false);
+});
+
+test("learner score route persists the non-default normalized weights actually applied", async () => {
+  const simulationSessionId = "sim_non_default_applied_weights";
+  await harness.startLearnerSession(simulationSessionId, {
+    trainingPackId: nonDefaultWeightTrainingPack.id,
+  });
+
+  const result = await harness.scoreLearnerSession({
+    simulationSessionId,
+    userTurnCount: 3,
+    trainingPackId: nonDefaultWeightTrainingPack.id,
+  });
+  assert.equal(result.status, 201, JSON.stringify(result.body));
+  assert.equal(result.body.status, "scored");
+  assert.equal(result.providerCallCount, 1);
+  assert.match(
+    result.evaluationSystemPrompt ?? "",
+    /persuasion: 0\.4000[\s\S]*clarity: 0\.2000[\s\S]*empathy: 0\.2000[\s\S]*assertiveness: 0\.2000/,
+  );
+
+  const records = await harness.readPersistedScoreRecords();
+  const record = records.find((entry) => entry.simulationSessionId === simulationSessionId);
+  assert.ok(record);
+  assert.equal(record.trainingPackId, nonDefaultWeightTrainingPack.id);
+  assert.deepEqual(record.scoringWeightsApplied, nonDefaultNormalizedWeights);
 });
 
 test("learner score route returns not_scored below three user turns and writes no record", async () => {

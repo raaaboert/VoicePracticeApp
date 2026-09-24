@@ -12,6 +12,7 @@ import {
   type EnterpriseOrg,
   type OrgCustomScenario,
   type SimulationScoreRecord,
+  type TrainingPack,
   type UserProfile,
 } from "@voicepractice/shared";
 
@@ -69,10 +70,14 @@ export interface PromptRouteHarness {
     scenarioId: string;
     trainingId?: string;
   }): Promise<{ status: number; body: Record<string, unknown>; providerCallCount: number }>;
-  startLearnerSession(simulationSessionId: string): Promise<Record<string, unknown>>;
+  startLearnerSession(
+    simulationSessionId: string,
+    options?: { trainingPackId?: string },
+  ): Promise<Record<string, unknown>>;
   scoreLearnerSession(params: {
     simulationSessionId: string;
     userTurnCount: 1 | 2 | 3;
+    trainingPackId?: string;
   }): Promise<{
     status: number;
     body: Record<string, unknown>;
@@ -213,7 +218,7 @@ function buildOrg(params: {
   };
 }
 
-function buildDatabase(): ApiDatabase {
+function buildDatabase(learnerOrgModularPromptEnabled: boolean): ApiDatabase {
   const config = createDefaultConfig(NOW);
   config.activeSegmentId = "account_executive";
   config.defaultDifficulty = "medium";
@@ -278,7 +283,7 @@ function buildDatabase(): ApiDatabase {
     orgs: [
       buildOrg({
         id: STANDARD_ORG_ID,
-        enableModularPromptArchitecture: false,
+        enableModularPromptArchitecture: learnerOrgModularPromptEnabled,
         activeIndustries: ["technology", "healthcare"],
         customScenarios: [customScenario, longGuidanceCustomScenario],
       }),
@@ -424,6 +429,8 @@ function configureEnvironment(tempDbPath: string, modularEnvironmentEnabled: boo
 
 export async function startPromptRouteHarness(params: {
   modularEnvironmentEnabled: boolean;
+  learnerOrgModularPromptEnabled?: boolean;
+  trainingPacks?: TrainingPack[];
 }): Promise<PromptRouteHarness> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "simulation-prompt-routes-"));
   const dbPath = path.join(tempDir, "db.local.json");
@@ -432,10 +439,20 @@ export async function startPromptRouteHarness(params: {
     parsedDbPath.dir,
     `${parsedDbPath.name}.score-records${parsedDbPath.ext}`,
   );
-  await writeFile(dbPath, JSON.stringify(buildDatabase(), null, 2), "utf8");
+  await writeFile(
+    dbPath,
+    JSON.stringify(buildDatabase(params.learnerOrgModularPromptEnabled === true), null, 2),
+    "utf8",
+  );
   configureEnvironment(dbPath, params.modularEnvironmentEnabled);
 
   const imported = await import("./index.js");
+  const trainingPacks = params.trainingPacks ?? [];
+  if (trainingPacks.length > 0) {
+    imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
+      trainingPacks.filter((pack) => pack.organizationId === orgId),
+    );
+  }
   const server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -558,7 +575,7 @@ export async function startPromptRouteHarness(params: {
         providerCallCount: providerRequests.length - requestCountBefore,
       };
     },
-    async startLearnerSession(simulationSessionId): Promise<Record<string, unknown>> {
+    async startLearnerSession(simulationSessionId, options): Promise<Record<string, unknown>> {
       const response = await originalFetch(
         `${baseUrl}/mobile/users/${LEARNER_USER_ID}/simulation-sessions/start`,
         {
@@ -572,6 +589,7 @@ export async function startPromptRouteHarness(params: {
             segmentId: "customer_success",
             scenarioId: CUSTOM_SCENARIO_ID,
             trainingId: CUSTOM_TRAINING_ID,
+            ...(options?.trainingPackId ? { trainingPackId: options.trainingPackId } : {}),
             clientStartedAt: new Date().toISOString(),
           }),
         },
@@ -587,7 +605,7 @@ export async function startPromptRouteHarness(params: {
       assert.equal(typeof body.serverStartedAt, "string");
       return body;
     },
-    async scoreLearnerSession({ simulationSessionId, userTurnCount }) {
+    async scoreLearnerSession({ simulationSessionId, userTurnCount, trainingPackId }) {
       const requestCountBefore = providerRequests.length;
       const response = await originalFetch(`${baseUrl}/mobile/users/${LEARNER_USER_ID}/ai/score`, {
         method: "POST",
@@ -598,6 +616,7 @@ export async function startPromptRouteHarness(params: {
         body: JSON.stringify({
           scenarioId: CUSTOM_SCENARIO_ID,
           trainingId: CUSTOM_TRAINING_ID,
+          ...(trainingPackId ? { trainingPackId } : {}),
           difficulty: "hard",
           personaStyle: "frustrated",
           industryId: "healthcare",
@@ -633,6 +652,9 @@ export async function startPromptRouteHarness(params: {
     },
     async close(): Promise<void> {
       globalThis.fetch = originalFetch;
+      if (trainingPacks.length > 0) {
+        imported.setDashboardTrainingPackLoaderForTest(null);
+      }
       await new Promise<void>((resolve, reject) =>
         server.close((error) => error ? reject(error) : resolve()),
       );
