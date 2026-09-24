@@ -305,6 +305,9 @@ import {
   initializeDatabaseStoresForReadiness,
   initializeDatabaseStoresForStartup
 } from "./services/databaseStoreInitialization.js";
+import {
+  migrateLegacyAuditEventsFromAppState as migrateLegacyAuditEventsFromAppStateState
+} from "./services/legacyAuditEventAppStateMigration.js";
 import { migrateUserProfileAppStateNormalization as migrateUserProfileAppStateNormalizationState } from "./services/userProfileAppStateMigration.js";
 import {
   handleDashboardWebAuthCodeRequest,
@@ -4424,19 +4427,14 @@ const withDatabase = withDatabaseWrite;
 
 async function migrateLegacyAuditEventsFromAppState(): Promise<void> {
   await withDatabaseLock(async () => {
-    const db = await loadDatabase();
-    if (!Object.prototype.hasOwnProperty.call(db, "auditEvents")) {
-      return;
-    }
-
-    const legacyAuditEvents = Array.isArray(db.auditEvents) ? db.auditEvents : [];
-    const migration = await auditEventStore.importLegacyEvents(legacyAuditEvents, {
+    const migration = await migrateLegacyAuditEventsFromAppStateState({
+      loadDatabase,
+      saveDatabase,
+      auditEventStore,
       maxRecords: MAX_AUDIT_EVENTS
     });
-    delete (db as Partial<ApiDatabase>).auditEvents;
-    await saveDatabase(db);
 
-    if (legacyAuditEvents.length > 0 || migration.trimmedCount > 0) {
+    if (migration.legacyEventCount > 0 || migration.trimmedCount > 0) {
       logWarn(
         `[audit][migration] moved ${migration.importedCount} legacy events to dedicated storage; `
         + `trimmed ${migration.trimmedCount} events beyond the ${MAX_AUDIT_EVENTS} record cap.`

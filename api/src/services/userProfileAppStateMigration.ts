@@ -13,6 +13,14 @@ export const PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY = "performance_access_v1
 export const PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION = "2026-09-22";
 
 const MISSING_FIELD = "__peritio_missing_field__";
+const LEGACY_EXTRACTED_STORE_FIELDS = [
+  "usageSessions",
+  "aiUsageEvents",
+  "scoreRecords",
+  "webAuthSessions",
+  "auditEvents",
+  "supportCases"
+] as const;
 
 export interface UserProfileAppStateMigrationStorage {
   loadRaw(): Promise<unknown>;
@@ -115,6 +123,20 @@ function fingerprintsMatch(left: unknown[], right: unknown[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function preserveLegacyExtractedStorePayloads(
+  snapshot: ApiDatabase,
+  rawRecord: Record<string, unknown>
+): ApiDatabase {
+  const preserved = snapshot as ApiDatabase & Record<string, unknown>;
+  const preservedRecord = preserved as Record<string, unknown>;
+  for (const field of LEGACY_EXTRACTED_STORE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(rawRecord, field)) {
+      preservedRecord[field] = rawRecord[field];
+    }
+  }
+  return preserved;
+}
+
 export async function migrateUserProfileAppStateNormalization(params: {
   storage: UserProfileAppStateMigrationStorage;
   ensureDatabaseShape: (candidate: unknown) => ApiDatabase;
@@ -158,7 +180,10 @@ export async function migrateUserProfileAppStateNormalization(params: {
     await params.syncEmployeeIds?.(normalized.users);
     return {
       shouldSave: true,
-      state: params.buildPersistedDatabaseSnapshot(normalized),
+      state: preserveLegacyExtractedStorePayloads(
+        params.buildPersistedDatabaseSnapshot(normalized),
+        rawRecord
+      ),
       result: {
         saved: true,
         profileChanged,

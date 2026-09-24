@@ -29,6 +29,9 @@ import {
   USER_PROFILE_APP_STATE_MIGRATION_VERSION
 } from "./userProfileAppStateMigration.js";
 import { createDatabaseStorage } from "../storage.js";
+import { createAuditEventStore } from "../storage/auditEventStore.js";
+import { initializeDatabaseStoresForStartup } from "./databaseStoreInitialization.js";
+import { migrateLegacyAuditEventsFromAppState } from "./legacyAuditEventAppStateMigration.js";
 
 const NOW = "2026-07-27T12:00:00.000Z";
 
@@ -152,6 +155,25 @@ function persistedSnapshot(db: ApiDatabase): ApiDatabase {
   return structuredClone(db) as ApiDatabase;
 }
 
+function ensureStartupDatabaseShape(raw: unknown): ApiDatabase {
+  const normalized = ensureTestDatabaseShape(raw);
+  const candidate = (raw ?? {}) as Partial<ApiDatabase>;
+  normalized.auditEvents = Array.isArray(candidate.auditEvents) ? candidate.auditEvents : undefined;
+  return normalized;
+}
+
+function persistedStartupSnapshot(db: ApiDatabase): ApiDatabase {
+  const snapshot = structuredClone(db) as ApiDatabase;
+  const extracted = snapshot as Partial<ApiDatabase>;
+  delete extracted.usageSessions;
+  delete extracted.aiUsageEvents;
+  delete extracted.scoreRecords;
+  delete extracted.webAuthSessions;
+  delete extracted.auditEvents;
+  delete extracted.supportCases;
+  return snapshot;
+}
+
 function createFileStorage(dbPath: string) {
   return createDatabaseStorage({
     provider: "file",
@@ -164,6 +186,201 @@ function createFileStorage(dbPath: string) {
     createDefaultDatabase: () => buildDb([]),
   });
 }
+
+test("frozen production baseline startup compatibility migrates performance access before legacy audit writes", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "phase-0-startup-compatibility-"));
+  const dbPath = path.join(tempDir, "db.local.json");
+  try {
+    const users = [
+      buildUser("org_admin_missing", { orgRole: "org_admin" }),
+      buildUser("user_admin_missing", { orgRole: "user_admin" }),
+      buildUser("user_missing"),
+      buildUser("org_admin_malformed", {
+        orgRole: "org_admin",
+        performanceAccess: "legacy_org_admin" as UserProfile["performanceAccess"]
+      }),
+      buildUser("user_admin_malformed", {
+        orgRole: "user_admin",
+        performanceAccess: "legacy_user_admin" as UserProfile["performanceAccess"]
+      }),
+      buildUser("user_malformed", {
+        performanceAccess: "legacy_user" as UserProfile["performanceAccess"]
+      }),
+      buildUser("org_admin_explicit_none", { orgRole: "org_admin", performanceAccess: "none" }),
+      buildUser("user_explicit_organization", { performanceAccess: "organization" }),
+      buildUser("individual_missing", {
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user"
+      })
+    ];
+    for (const user of users.filter((entry) => entry.id.endsWith("_missing"))) {
+      delete (user as Partial<UserProfile>).performanceAccess;
+    }
+
+    const initial = buildDb(users);
+    initial.auditEvents = [{
+      id: "audit_phase_0",
+      actorType: "platform_admin",
+      actorId: "legacy_admin",
+      action: "phase_0.baseline",
+      orgId: "org_1",
+      userId: "org_admin_missing",
+      message: "Frozen production baseline audit event.",
+      metadata: { source: "phase_0" },
+      createdAt: NOW
+    }];
+    delete initial.appStateMigrations?.[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY];
+    await writeFile(dbPath, JSON.stringify(initial, null, 2), "utf8");
+
+    const baseStorage = createDatabaseStorage({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1,
+      pgIdleTimeoutMs: 1,
+      ensureDatabaseShape: ensureStartupDatabaseShape,
+      createDefaultDatabase: () => buildDb([])
+    });
+    let appStateWriteCount = 0;
+    const storage = {
+      loadRaw: () => baseStorage.loadRaw(),
+      load: () => baseStorage.load(),
+      async save(db: ApiDatabase): Promise<void> {
+        appStateWriteCount += 1;
+        await baseStorage.save(db);
+      },
+      async updateAppStateWithLock<T>(
+        handler: Parameters<typeof baseStorage.updateAppStateWithLock<T>>[0]
+      ): Promise<T> {
+        const update = await handler(await baseStorage.loadRaw());
+        if (update.shouldSave) {
+          await this.save(update.state);
+        }
+        return update.result;
+      }
+    };
+    const auditEventStore = createAuditEventStore({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1,
+      pgIdleTimeoutMs: 1
+    });
+    const noOpStore = { async initialize(): Promise<void> {} };
+    let employeeClaimStoreInitialized = false;
+    let employeeClaimSyncCount = 0;
+    const profileMigrationResults: Array<{ saved: boolean; profileChanged: boolean; markerChanged: boolean }> = [];
+    const auditMigrationResults: Awaited<ReturnType<typeof migrateLegacyAuditEventsFromAppState>>[] = [];
+
+    const runStartup = async (): Promise<void> => {
+      employeeClaimStoreInitialized = false;
+      await initializeDatabaseStoresForStartup({
+        stores: {
+          auditEventStore,
+          aiUsageEventStore: noOpStore,
+          simulationSessionStore: noOpStore,
+          usageSessionStore: noOpStore,
+          scoreRecordStore: noOpStore,
+          supportCaseStore: noOpStore,
+          webAuthSessionStore: noOpStore,
+          performancePlanStore: noOpStore,
+          userEmployeeIdClaimStore: {
+            async initialize(): Promise<void> {
+              employeeClaimStoreInitialized = true;
+            }
+          },
+          orgModuleEntitlementStore: noOpStore,
+          trainingContentStore: noOpStore,
+          trainingContentAssetStore: noOpStore,
+          trainingPackStore: noOpStore
+        },
+        maintenance: {
+          async migrateUserProfileAppStateNormalization(): Promise<void> {
+            profileMigrationResults.push(await migrateUserProfileAppStateNormalization({
+              storage,
+              ensureDatabaseShape: ensureStartupDatabaseShape,
+              buildPersistedDatabaseSnapshot: persistedStartupSnapshot,
+              async syncEmployeeIds(): Promise<void> {
+                assert.equal(employeeClaimStoreInitialized, true);
+                employeeClaimSyncCount += 1;
+              }
+            }));
+          },
+          async migrateLegacyAuditEventsFromAppState(): Promise<void> {
+            auditMigrationResults.push(await migrateLegacyAuditEventsFromAppState({
+              loadDatabase: () => storage.load(),
+              saveDatabase: (db) => storage.save(persistedStartupSnapshot(db)),
+              auditEventStore,
+              maxRecords: 1_000
+            }));
+          },
+          async migrateLegacyAiUsageEventsFromAppState(): Promise<void> {},
+          async migrateLegacyUsageSessionsFromAppState(): Promise<void> {},
+          async migrateLegacyScoreRecordsFromAppState(): Promise<void> {},
+          async migrateLegacySupportCasesFromAppState(): Promise<void> {},
+          async migrateLegacyWebAuthSessionsFromAppState(): Promise<void> {},
+          async runStartupUsageIntegrityMaintenance(): Promise<void> {
+            await storage.load();
+          }
+        }
+      });
+    };
+
+    await runStartup();
+    const firstPersisted = await baseStorage.loadRaw() as ApiDatabase;
+    const firstUsers = new Map(firstPersisted.users.map((user) => [user.id, user]));
+    assert.deepEqual(
+      Object.fromEntries(Array.from(firstUsers, ([id, user]) => [id, user.performanceAccess])),
+      {
+        org_admin_missing: "organization",
+        user_admin_missing: "team",
+        user_missing: "none",
+        org_admin_malformed: "organization",
+        user_admin_malformed: "team",
+        user_malformed: "none",
+        org_admin_explicit_none: "none",
+        user_explicit_organization: "organization",
+        individual_missing: "none"
+      }
+    );
+    assert.equal(
+      firstPersisted.appStateMigrations?.[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY],
+      PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(firstPersisted, "auditEvents"), false);
+    assert.deepEqual(profileMigrationResults[0], { saved: true, profileChanged: true, markerChanged: true });
+    assert.deepEqual(auditMigrationResults[0], {
+      migrated: true,
+      legacyEventCount: 1,
+      importedCount: 1,
+      trimmedCount: 0
+    });
+    assert.deepEqual((await auditEventStore.listEvents()).map((event) => event.id), ["audit_phase_0"]);
+    assert.equal(employeeClaimSyncCount, 1);
+    assert.equal(appStateWriteCount, 2);
+
+    await runStartup();
+    const secondPersisted = await baseStorage.loadRaw() as ApiDatabase;
+    assert.deepEqual(secondPersisted.users, firstPersisted.users);
+    assert.deepEqual(secondPersisted.appStateMigrations, firstPersisted.appStateMigrations);
+    assert.deepEqual(profileMigrationResults[1], { saved: false, profileChanged: false, markerChanged: false });
+    assert.equal(employeeClaimSyncCount, 1);
+    assert.equal(appStateWriteCount, 3);
+    assert.deepEqual(auditMigrationResults[1], {
+      migrated: true,
+      legacyEventCount: 0,
+      importedCount: 0,
+      trimmedCount: 0
+    });
+    assert.deepEqual((await auditEventStore.listEvents()).map((event) => event.id), ["audit_phase_0"]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("user profile app-state migration saves legacy normalized fields and then becomes idempotent", async () => {
   const raw = buildDb([

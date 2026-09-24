@@ -57,6 +57,8 @@ export async function initializeDatabaseStoresForStartup(params: {
   stores: StartupStoreSet;
   maintenance: StartupStoreMaintenance;
 }): Promise<void> {
+  await params.stores.userEmployeeIdClaimStore.initialize();
+  await params.maintenance.migrateUserProfileAppStateNormalization();
   await params.stores.auditEventStore.initialize();
   await params.maintenance.migrateLegacyAuditEventsFromAppState();
   await params.stores.aiUsageEventStore.initialize();
@@ -71,11 +73,9 @@ export async function initializeDatabaseStoresForStartup(params: {
   await params.stores.webAuthSessionStore.initialize();
   await params.maintenance.migrateLegacyWebAuthSessionsFromAppState();
   await params.stores.performancePlanStore.initialize();
-  await params.stores.userEmployeeIdClaimStore.initialize();
   await params.stores.orgModuleEntitlementStore.initialize();
   await params.stores.trainingContentStore.initialize();
   await params.stores.trainingContentAssetStore.initialize();
-  await params.maintenance.migrateUserProfileAppStateNormalization();
   await params.stores.trainingPackStore.initialize();
   await params.maintenance.runStartupUsageIntegrityMaintenance();
 }

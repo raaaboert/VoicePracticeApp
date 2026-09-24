@@ -90,6 +90,8 @@ test("database startup initializes Performance tables through the normal extract
   });
 
   assert.deepEqual(calls, [
+    "userEmployeeIdClaimStore.initialize",
+    "migrateUserProfileAppStateNormalization",
     "auditEventStore.initialize",
     "migrateLegacyAuditEventsFromAppState",
     "aiUsageEventStore.initialize",
@@ -104,11 +106,9 @@ test("database startup initializes Performance tables through the normal extract
     "webAuthSessionStore.initialize",
     "migrateLegacyWebAuthSessionsFromAppState",
     "performancePlanStore.initialize",
-    "userEmployeeIdClaimStore.initialize",
     "orgModuleEntitlementStore.initialize",
     "trainingContentStore.initialize",
     "trainingContentAssetStore.initialize",
-    "migrateUserProfileAppStateNormalization",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
   ]);
