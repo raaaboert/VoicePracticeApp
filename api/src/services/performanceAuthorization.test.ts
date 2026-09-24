@@ -174,8 +174,14 @@ test("performance scope follows performanceAccess independently from admin and c
   assert.equal(isContentManagerSubject(userAdminNone, "org_1"), true);
 
   const regularTeam = user("regular_team", { performanceAccess: "team" });
-  assert.equal(canBeAssignedAsManager(regularTeam, "org_1"), false);
+  assert.equal(canBeAssignedAsManager(regularTeam, "org_1"), true);
   assert.equal(isContentManagerSubject(regularTeam, "org_1"), false);
+
+  const regularNoneManager = user("regular_none_manager", { performanceAccess: "none" });
+  const regularNoneReport = user("regular_none_report", { managerUserId: regularNoneManager.id });
+  assert.equal(canBeAssignedAsManager(regularNoneManager, "org_1"), true);
+  assert.deepEqual(scope(regularNoneManager, [regularNoneManager, regularNoneReport]), []);
+  assert.equal(regularNoneManager.performanceAccess, "none");
 });
 
 test("legacy role-derived states preserve active and disabled historical result sets", () => {

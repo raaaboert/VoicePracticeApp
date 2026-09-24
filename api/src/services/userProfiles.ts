@@ -108,14 +108,13 @@ export function normalizePerformanceAccess(user: {
   return "none";
 }
 
-// Manager relationships currently require an active User Admin. Keep this
-// separate from Learning Resource content subjects and future performance rules.
+// Manager relationships are based on active organization membership. Keep this
+// separate from administrative, Learning Resource, and performance permissions.
 export function canBeAssignedAsManager(user: UserProfile, orgId: string): boolean {
   return (
     user.accountType === "enterprise" &&
     user.orgId === orgId &&
-    user.status === "active" &&
-    user.orgRole === "user_admin"
+    user.status === "active"
   );
 }
 
@@ -221,7 +220,7 @@ export function validateManagerAssignment(params: {
   if (!manager || !params.target.orgId || !canBeAssignedAsManager(manager, params.target.orgId)) {
     return {
       ok: false,
-      error: "Manager must be an active user admin in the same organization.",
+      error: "Manager must be an active member of the same organization.",
       code: "manager_invalid",
     };
   }

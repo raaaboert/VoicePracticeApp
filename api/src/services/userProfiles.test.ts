@@ -9,6 +9,7 @@ import {
 
 import {
   canBeAssignedAsManager,
+  isContentManagerSubject,
   normalizePerformanceAccess,
   repairInvalidManagerAssignments,
   validateManagerAssignment,
@@ -103,10 +104,22 @@ test("performance access normalization forces non-enterprise and no-org users to
   }), new Set(["org_1"])), "none");
 });
 
-test("canBeAssignedAsManager preserves the current relationship eligibility rule", () => {
+test("canBeAssignedAsManager accepts every active same-org enterprise role independently from permissions", () => {
   assert.equal(canBeAssignedAsManager(user("user_admin", { orgRole: "user_admin" }), "org_1"), true);
-  assert.equal(canBeAssignedAsManager(user("regular_user"), "org_1"), false);
-  assert.equal(canBeAssignedAsManager(user("org_admin", { orgRole: "org_admin" }), "org_1"), false);
+  assert.equal(canBeAssignedAsManager(user("org_admin", { orgRole: "org_admin" }), "org_1"), true);
+  for (const performanceAccess of PERFORMANCE_ACCESS_LEVELS) {
+    const regularManager = user(`regular_${performanceAccess}`, {
+      performanceAccess,
+      dashboardAccessEnabled: performanceAccess !== "none",
+      managerUserId: "another_manager",
+    });
+    assert.equal(canBeAssignedAsManager(regularManager, "org_1"), true, performanceAccess);
+    assert.equal(isContentManagerSubject(regularManager, "org_1"), false, performanceAccess);
+  }
+  assert.equal(
+    canBeAssignedAsManager(user("user_admin_none", { orgRole: "user_admin", performanceAccess: "none" }), "org_1"),
+    true
+  );
   assert.equal(
     canBeAssignedAsManager(user("inactive_admin", { orgRole: "user_admin", status: "disabled" }), "org_1"),
     false
@@ -125,28 +138,34 @@ test("canBeAssignedAsManager preserves the current relationship eligibility rule
   assert.equal(canBeAssignedAsManager(user("missing_org", { orgRole: "user_admin", orgId: null }), "org_1"), false);
 });
 
-test("manager assignment validation preserves current acceptance and rejection rules", () => {
+test("manager assignment validation accepts every eligible role and rejects invalid candidates", () => {
   const target = user("report");
-  const validManager = user("valid_manager", { orgRole: "user_admin" });
+  const validManagers = [
+    user("regular_manager", { performanceAccess: "none", managerUserId: "regular_manager_manager" }),
+    user("user_admin_manager", { orgRole: "user_admin", performanceAccess: "none" }),
+    user("org_admin_manager", { orgRole: "org_admin" }),
+  ];
   const invalidManagers = [
-    user("regular_manager"),
     user("cross_org_manager", { orgRole: "user_admin", orgId: "org_2" }),
     user("inactive_manager", { orgRole: "user_admin", status: "disabled" }),
+    user("individual_manager", { accountType: "individual", tier: "free", orgId: null }),
   ];
 
-  const valid = validateManagerAssignment({
-    orgUsers: [target, validManager, ...invalidManagers],
-    target,
-    managerUserId: validManager.id,
-  });
-  assert.equal(valid.ok, true);
-  if (valid.ok) {
-    assert.equal(valid.manager?.id, validManager.id);
+  for (const manager of validManagers) {
+    const valid = validateManagerAssignment({
+      orgUsers: [target, ...validManagers, ...invalidManagers],
+      target,
+      managerUserId: manager.id,
+    });
+    assert.equal(valid.ok, true, manager.id);
+    if (valid.ok) {
+      assert.equal(valid.manager?.id, manager.id);
+    }
   }
 
   for (const manager of invalidManagers) {
     const result = validateManagerAssignment({
-      orgUsers: [target, validManager, ...invalidManagers],
+      orgUsers: [target, ...validManagers, ...invalidManagers],
       target,
       managerUserId: manager.id,
     });
@@ -156,8 +175,15 @@ test("manager assignment validation preserves current acceptance and rejection r
     }
   }
 
+  const missingManager = validateManagerAssignment({
+    orgUsers: [target, ...validManagers],
+    target,
+    managerUserId: "missing_manager",
+  });
+  assert.equal(missingManager.ok, false);
+
   const selfAssignment = validateManagerAssignment({
-    orgUsers: [target, validManager],
+    orgUsers: [target, ...validManagers],
     target,
     managerUserId: target.id,
   });
@@ -167,29 +193,63 @@ test("manager assignment validation preserves current acceptance and rejection r
   }
 });
 
-test("repairInvalidManagerAssignments preserves valid relationships and clears stale ones deterministically", () => {
-  const validManager = user("valid_manager", { orgRole: "user_admin" });
+test("repairInvalidManagerAssignments preserves every eligible manager role and clears stale relationships", () => {
   const regularManager = user("regular_manager");
-  const reportWithValidManager = user("valid_report", { managerUserId: validManager.id });
+  const userAdminManager = user("user_admin_manager", { orgRole: "user_admin" });
+  const orgAdminManager = user("org_admin_manager", { orgRole: "org_admin" });
+  const inactiveManager = user("inactive_manager", { status: "disabled" });
+  const crossOrgManager = user("cross_org_manager", { orgId: "org_2" });
+  const individualManager = user("individual_manager", { accountType: "individual", tier: "free", orgId: null });
   const reportWithRegularManager = user("regular_report", { managerUserId: regularManager.id });
+  const reportWithUserAdminManager = user("user_admin_report", { managerUserId: userAdminManager.id });
+  const reportWithOrgAdminManager = user("org_admin_report", { managerUserId: orgAdminManager.id });
+  const reportWithInactiveManager = user("inactive_report", { managerUserId: inactiveManager.id });
+  const reportWithCrossOrgManager = user("cross_org_report", { managerUserId: crossOrgManager.id });
+  const reportWithIndividualManager = user("individual_report", { managerUserId: individualManager.id });
   const reportWithMissingManager = user("missing_report", { managerUserId: "missing_manager" });
   const selfManagedReport = user("self_report", { managerUserId: "self_report" });
   const users = [
-    validManager,
     regularManager,
-    reportWithValidManager,
+    userAdminManager,
+    orgAdminManager,
+    inactiveManager,
+    crossOrgManager,
+    individualManager,
     reportWithRegularManager,
+    reportWithUserAdminManager,
+    reportWithOrgAdminManager,
+    reportWithInactiveManager,
+    reportWithCrossOrgManager,
+    reportWithIndividualManager,
     reportWithMissingManager,
     selfManagedReport,
   ];
 
   assert.deepEqual(repairInvalidManagerAssignments(users, "2026-09-22T13:00:00.000Z"), [
-    reportWithRegularManager.id,
+    reportWithInactiveManager.id,
+    reportWithCrossOrgManager.id,
+    reportWithIndividualManager.id,
     reportWithMissingManager.id,
     selfManagedReport.id,
   ]);
-  assert.equal(reportWithValidManager.managerUserId, validManager.id);
-  assert.equal(reportWithRegularManager.managerUserId, null);
+  assert.equal(reportWithRegularManager.managerUserId, regularManager.id);
+  assert.equal(reportWithUserAdminManager.managerUserId, userAdminManager.id);
+  assert.equal(reportWithOrgAdminManager.managerUserId, orgAdminManager.id);
+  assert.equal(reportWithInactiveManager.managerUserId, null);
+  assert.equal(reportWithCrossOrgManager.managerUserId, null);
+  assert.equal(reportWithIndividualManager.managerUserId, null);
   assert.equal(reportWithMissingManager.managerUserId, null);
   assert.equal(selfManagedReport.managerUserId, null);
+});
+
+test("manager repair is independent from performance access changes", () => {
+  const manager = user("manager", { performanceAccess: "none" });
+  const report = user("report", { managerUserId: manager.id });
+
+  for (const performanceAccess of PERFORMANCE_ACCESS_LEVELS) {
+    manager.performanceAccess = performanceAccess;
+    assert.deepEqual(repairInvalidManagerAssignments([manager, report], NOW), []);
+    assert.equal(report.managerUserId, manager.id);
+    assert.equal(manager.managerUserId, null);
+  }
 });

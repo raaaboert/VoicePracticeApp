@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { ApiDatabase, createDefaultConfig, isOrgUserRole, UserProfile } from "@voicepractice/shared";
@@ -8,7 +11,8 @@ import {
   normalizeManagerUserId,
   normalizeOptionalStoredUserName,
   normalizePerformanceAccess,
-  repairInvalidManagerAssignments
+  repairInvalidManagerAssignments,
+  validateManagerAssignment
 } from "./userProfiles.js";
 import {
   migrateUserProfileAppStateNormalization,
@@ -263,12 +267,14 @@ test("performance-access migration backfills compatibility values, preserves exp
   assert.deepEqual(persisted, snapshotAfterFirstRun);
 });
 
-test("user profile app-state migration preserves valid fields and clears invalid managers", async () => {
+test("user profile app-state migration preserves role-independent managers and clears invalid managers", async () => {
   const raw = buildDb([
     buildUser("valid_manager", { orgRole: "user_admin", dashboardAccessEnabled: true }),
+    buildUser("org_admin_manager", { orgRole: "org_admin" }),
     buildUser("inactive_manager", { orgRole: "user_admin", status: "disabled" }),
     buildUser("regular_manager"),
     buildUser("cross_org_manager", { orgId: "org_2", orgRole: "user_admin" }),
+    buildUser("individual_manager", { accountType: "individual", tier: "free", orgId: null }),
     buildUser("valid_report", {
       firstName: "Grace",
       lastName: "Hopper",
@@ -278,7 +284,10 @@ test("user profile app-state migration preserves valid fields and clears invalid
     }),
     buildUser("cross_org_report", { managerUserId: "cross_org_manager" }),
     buildUser("regular_manager_report", { managerUserId: "regular_manager" }),
-    buildUser("inactive_manager_report", { managerUserId: "inactive_manager" })
+    buildUser("org_admin_manager_report", { managerUserId: "org_admin_manager" }),
+    buildUser("inactive_manager_report", { managerUserId: "inactive_manager" }),
+    buildUser("individual_manager_report", { managerUserId: "individual_manager" }),
+    buildUser("missing_manager_report", { managerUserId: "missing_manager" })
   ]);
 
   const savedSnapshots: ApiDatabase[] = [];
@@ -304,9 +313,53 @@ test("user profile app-state migration preserves valid fields and clears invalid
   assert.equal(usersById.get("valid_report")?.employeeId, "GH-1");
   assert.equal(usersById.get("valid_report")?.managerUserId, "valid_manager");
   assert.equal(usersById.get("valid_report")?.mobileProfileReonboardingRequired, true);
+  assert.equal(usersById.get("regular_manager_report")?.managerUserId, "regular_manager");
+  assert.equal(usersById.get("org_admin_manager_report")?.managerUserId, "org_admin_manager");
   assert.equal(usersById.get("cross_org_report")?.managerUserId, null);
-  assert.equal(usersById.get("regular_manager_report")?.managerUserId, null);
   assert.equal(usersById.get("inactive_manager_report")?.managerUserId, null);
+  assert.equal(usersById.get("individual_manager_report")?.managerUserId, null);
+  assert.equal(usersById.get("missing_manager_report")?.managerUserId, null);
+});
+
+test("file storage reload cycles preserve a valid regular manager relationship", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "manager-load-cycle-"));
+  const dbPath = path.join(tempDir, "db.local.json");
+  try {
+    const regularManager = buildUser("regular_manager", { performanceAccess: "none" });
+    const report = buildUser("report", { managerUserId: regularManager.id });
+    const assignment = validateManagerAssignment({
+      orgUsers: [regularManager, report],
+      target: report,
+      managerUserId: regularManager.id,
+    });
+    assert.equal(assignment.ok, true);
+
+    await writeFile(dbPath, JSON.stringify(buildDb([regularManager, report]), null, 2), "utf8");
+    const createFileStorage = () => createDatabaseStorage({
+      provider: "file",
+      dbPath,
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1,
+      pgIdleTimeoutMs: 1,
+      ensureDatabaseShape: ensureTestDatabaseShape,
+      createDefaultDatabase: () => buildDb([]),
+    });
+
+    const firstLoad = await createFileStorage().load();
+    assert.equal(firstLoad.users.find((user) => user.id === report.id)?.managerUserId, regularManager.id);
+    await createFileStorage().save(firstLoad);
+
+    const secondLoad = await createFileStorage().load();
+    assert.equal(secondLoad.users.find((user) => user.id === report.id)?.managerUserId, regularManager.id);
+    assert.equal(secondLoad.users.find((user) => user.id === regularManager.id)?.performanceAccess, "none");
+    await createFileStorage().save(secondLoad);
+
+    const thirdLoad = await createFileStorage().load();
+    assert.equal(thirdLoad.users.find((user) => user.id === report.id)?.managerUserId, regularManager.id);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 function createPostgresMigrationHarness(params: {

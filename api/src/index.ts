@@ -12437,6 +12437,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
     const beforeOrgRole = target.orgRole;
     const beforeManagerUserId = normalizeManagerUserId(target.managerUserId);
     const beforeDashboardAccessEnabled = target.dashboardAccessEnabled === true;
+    const beforeEligibleAsManager = canBeAssignedAsManager(target, adminContext.org.id);
     let nextFirstName = beforeFirstName;
     let nextLastName = beforeLastName;
     let nextEmployeeId = beforeEmployeeId;
@@ -12612,8 +12613,11 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
 
     const now = nowIso();
     const clearedAssignmentUserIds = new Set<string>();
-    const shouldClearManagerAssignments =
-      beforeOrgRole === "user_admin" && (nextOrgRole !== "user_admin" || nextStatus !== "active");
+    const shouldClearManagerAssignments = beforeEligibleAsManager && !canBeAssignedAsManager({
+      ...target,
+      orgRole: nextOrgRole,
+      status: nextStatus,
+    }, adminContext.org.id);
     if (shouldClearManagerAssignments) {
       clearAssignmentsForManager({
         users: db.users,
@@ -12727,7 +12731,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         action: "org_user.manager_assignments.cleared",
         orgId: adminContext.org.id,
         userId: target.id,
-        message: "Cleared manager assignments for changed user admin.",
+        message: "Cleared manager assignments for an ineligible manager.",
         metadata: {
           clearedAssignedReportCount: clearedAssignmentUserIds.size,
           roleChanged: beforeOrgRole !== target.orgRole,
@@ -16017,6 +16021,12 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     }
 
     const beforeDashboardViewer = resolveDashboardViewer(db, user);
+    const managerRelationshipOrgIdBeforeUpdate =
+      user.accountType === "enterprise" && user.orgId ? user.orgId : null;
+    const beforeEligibleAsManager = Boolean(
+      managerRelationshipOrgIdBeforeUpdate &&
+      canBeAssignedAsManager(user, managerRelationshipOrgIdBeforeUpdate)
+    );
     const beforeEmployeeId = user.employeeId ?? null;
     const before = {
       email: user.email,
@@ -16251,6 +16261,16 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       user,
       nowIso: now.toISOString(),
     });
+    const clearedAssignmentUserIds =
+      beforeEligibleAsManager &&
+      managerRelationshipOrgIdBeforeUpdate &&
+      !canBeAssignedAsManager(user, managerRelationshipOrgIdBeforeUpdate)
+        ? clearAssignmentsForManager({
+            users: db.users,
+            managerUserId: user.id,
+            updatedAt: now.toISOString(),
+          })
+        : [];
 
     const afterDashboardViewer = resolveDashboardViewer(db, user);
     const dashboardScopeChanged =
@@ -16272,6 +16292,9 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
 
     user.updatedAt = now.toISOString();
     emitMobileUpdateForUser(db, user.id, "user");
+    for (const clearedUserId of clearedAssignmentUserIds) {
+      emitMobileUpdateForUser(db, clearedUserId, "user");
+    }
     appendPlatformAuditEvent(db, {
       action: "user.updated",
       orgId: user.orgId,
@@ -21637,6 +21660,8 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
+    const beforeEligibleAsManager = canBeAssignedAsManager(target, org.id);
+
     if (target.id === actor.id) {
       response.status(403).json({ error: "You cannot lock or unlock your own account." });
       return;
@@ -21747,7 +21772,17 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     target.dailyOverageBaseSecondsCap = nextDailyOverageBaseSecondsCap;
     target.dailyOverageExtraSecondsGranted = nextDailyOverageExtraSecondsGranted;
     target.updatedAt = nowIso();
+    const clearedAssignmentUserIds = beforeEligibleAsManager && !canBeAssignedAsManager(target, org.id)
+      ? clearAssignmentsForManager({
+          users: db.users,
+          managerUserId: target.id,
+          updatedAt: target.updatedAt,
+        })
+      : [];
     emitMobileUpdateForUser(db, target.id, "user");
+    for (const clearedUserId of clearedAssignmentUserIds) {
+      emitMobileUpdateForUser(db, clearedUserId, "user");
+    }
     appendMobileAuditEvent(db, actor, {
       action: "org_user.status_updated",
       orgId: actor.orgId,

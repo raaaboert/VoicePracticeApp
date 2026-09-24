@@ -455,6 +455,52 @@ function buildDatabase(): ApiDatabase {
         employeeId: "EMP-DD",
         managerUserId: "manager_to_disable",
       }),
+      buildUser("regular_manager_to_promote", "regular-manager@acme.example", {
+        orgRole: "user",
+        performanceAccess: "none",
+        firstName: "Riley",
+        lastName: "Regular Manager",
+        employeeId: "MGR-R",
+      }),
+      buildUser("regular_manager_to_promote_report", "regular-manager-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-RM",
+        managerUserId: "regular_manager_to_promote",
+      }),
+      buildUser("manager_to_org_admin", "org-admin-manager@acme.example", {
+        orgRole: "user_admin",
+        dashboardAccessEnabled: true,
+        firstName: "Orla",
+        lastName: "Manager",
+        employeeId: "MGR-OA",
+      }),
+      buildUser("manager_to_org_admin_report", "org-admin-manager-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-OA",
+        managerUserId: "manager_to_org_admin",
+      }),
+      buildUser("manager_to_individual", "individual-manager@acme.example", {
+        orgRole: "user",
+        firstName: "Taylor",
+        lastName: "Transfer",
+        employeeId: "MGR-T",
+      }),
+      buildUser("manager_to_individual_report", "individual-manager-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-T",
+        managerUserId: "manager_to_individual",
+      }),
+      buildUser("mobile_manager_to_disable", "mobile-disable-manager@acme.example", {
+        orgRole: "user_admin",
+        firstName: "Morgan",
+        lastName: "Mobile Disable",
+        employeeId: "MGR-MD",
+      }),
+      buildUser("mobile_manager_to_disable_report", "mobile-disable-report@acme.example", {
+        orgRole: "user",
+        employeeId: "EMP-MD",
+        managerUserId: "mobile_manager_to_disable",
+      }),
       buildUser("mobile_scope_manager", "mobile-scope-manager@acme.example", {
         orgRole: "user_admin",
         dashboardAccessEnabled: true,
@@ -2942,11 +2988,16 @@ test("mobile manager scope updates immediately after reassignment and demotion",
     body: JSON.stringify({ orgRole: "user" })
   });
   assert.equal(demoted.status, 200);
+  const retainedReport = await waitForPersistedUserState(
+    "mobile_scope_report",
+    (user) => user?.managerUserId === "mobile_scope_manager"
+  );
+  assert.equal(retainedReport?.managerUserId, "mobile_scope_manager");
   const demotedList = await mobileRequest("/mobile/users/mobile_scope_manager/admin/org/users", "token_mobile_scope_manager");
   assert.equal(demotedList.status, 403);
 });
 
-test("org admins edit names and managers while user-admin managers cannot", async () => {
+test("manager options and assignment validation share role-independent eligibility", async () => {
   const userAdminNameDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ firstName: "No", lastName: "Access" }),
@@ -2965,13 +3016,21 @@ test("org admins edit names and managers while user-admin managers cannot", asyn
   });
   assert.equal(userAdminManagerDenied.status, 403);
 
-  for (const managerUserId of ["other_org_admin", "disabled_user_admin", "regular_dashboard", "unassigned_learner"]) {
+  for (const managerUserId of [
+    "other_org_user",
+    "other_org_admin",
+    "disabled_ai_user",
+    "disabled_user_admin",
+    "gmail_join",
+    "missing_manager",
+  ]) {
     const invalid = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
       method: "PATCH",
       body: JSON.stringify({ managerUserId }),
     });
     assert.equal(invalid.status, 400);
     assert.equal(invalid.body.code, "manager_invalid");
+    assert.equal(invalid.body.error, "Manager must be an active member of the same organization.");
   }
 
   const selfAssignment = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
@@ -2980,6 +3039,18 @@ test("org admins edit names and managers while user-admin managers cannot", asyn
   });
   assert.equal(selfAssignment.status, 400);
   assert.equal(selfAssignment.body.code, "manager_invalid");
+
+  for (const managerUserId of ["regular_dashboard", "eligible_user_admin", "org_admin_peer"]) {
+    const valid = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
+      method: "PATCH",
+      body: JSON.stringify({ managerUserId }),
+    });
+    assert.equal(valid.status, 200, managerUserId);
+    assert.equal((valid.body.user as { managerUserId?: string }).managerUserId, managerUserId);
+  }
+  assert.equal((await readUser("regular_dashboard"))?.performanceAccess, "none");
+  assert.equal((await readUser("regular_team"))?.managerUserId, null);
+  assert.equal((await readUser("regular_organization"))?.managerUserId, null);
 
   const assigned = await dashboardRequest("/dashboard/admin/users/unassigned_learner", orgAdminToken, {
     method: "PATCH",
@@ -3003,17 +3074,47 @@ test("org admins edit names and managers while user-admin managers cannot", asyn
 
   const usersResult = await dashboardRequest("/dashboard/admin/users", orgAdminToken);
   assert.equal(usersResult.status, 200);
-  const managerOptions = usersResult.body.managerOptions as Array<{ userId: string; displayName: string }>;
+  const managerOptions = usersResult.body.managerOptions as Array<{
+    userId: string;
+    email: string;
+    displayName: string;
+  }>;
+  const managerOptionIds = new Set(managerOptions.map((manager) => manager.userId));
+  for (const eligibleId of [
+    "regular_dashboard",
+    "regular_team",
+    "regular_organization",
+    "user_admin_none",
+    "eligible_user_admin",
+    "org_admin",
+    "org_admin_peer",
+  ]) {
+    assert.equal(managerOptionIds.has(eligibleId), true, eligibleId);
+  }
+  for (const ineligibleId of [
+    "disabled_ai_user",
+    "disabled_user_admin",
+    "other_org_user",
+    "other_org_admin",
+    "gmail_join",
+  ]) {
+    assert.equal(managerOptionIds.has(ineligibleId), false, ineligibleId);
+  }
   assert.deepEqual(
-    managerOptions.map((manager) => manager.displayName),
-    ["Aaron Lead", "Brie Lead", "Maya Manager", "Nina No Performance", "Zoe Eligible"]
+    managerOptions,
+    [...managerOptions].sort(
+      (left, right) =>
+        left.displayName.localeCompare(right.displayName, undefined, { sensitivity: "base" }) ||
+        left.email.localeCompare(right.email, undefined, { sensitivity: "base" }) ||
+        left.userId.localeCompare(right.userId)
+    )
   );
   assert.equal(managerOptions.some((manager) => manager.userId === "user_admin_none"), true);
   assert.equal(managerOptions.some((manager) => manager.userId === "other_org_admin"), false);
   assert.equal(managerOptions.some((manager) => manager.userId === "disabled_user_admin"), false);
 });
 
-test("org admin role and status changes update access and clear manager assignments", async () => {
+test("role changes preserve reports while eligibility loss clears manager assignments", async () => {
   const promoted = await dashboardRequest("/dashboard/admin/users/role_target", orgAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ orgRole: "user_admin" }),
@@ -3044,12 +3145,29 @@ test("org admin role and status changes update access and clear manager assignme
   assert.equal(demotedRow.orgRole, "user");
   assert.equal(demotedRow.performanceAccess, "team");
   assert.equal(demotedRow.dashboardAccessEnabled, false);
-  assert.equal(demotedRow.assignedReportCount, 0);
+  assert.equal(demotedRow.assignedReportCount, 1);
   const demoteReport = await waitForPersistedUserState(
     "manager_to_demote_report",
-    (user) => user?.managerUserId === null
+    (user) => user?.managerUserId === "manager_to_demote"
   );
-  assert.equal(demoteReport?.managerUserId, null);
+  assert.equal(demoteReport?.managerUserId, "manager_to_demote");
+
+  const promotedRegularManager = await dashboardRequest("/dashboard/admin/users/regular_manager_to_promote", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user_admin" }),
+  });
+  assert.equal(promotedRegularManager.status, 200);
+  assert.equal((promotedRegularManager.body.user as { orgRole?: string; assignedReportCount?: number }).orgRole, "user_admin");
+  assert.equal((promotedRegularManager.body.user as { assignedReportCount?: number }).assignedReportCount, 1);
+  assert.equal((await readUser("regular_manager_to_promote_report"))?.managerUserId, "regular_manager_to_promote");
+
+  const promotedOrgAdminManager = await adminRequest("/users/manager_to_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "org_admin" }),
+  });
+  assert.equal(promotedOrgAdminManager.status, 200);
+  assert.equal((promotedOrgAdminManager.body as { orgRole?: string }).orgRole, "org_admin");
+  assert.equal((await readUser("manager_to_org_admin_report"))?.managerUserId, "manager_to_org_admin");
 
   const deactivated = await dashboardRequest("/dashboard/admin/users/manager_to_disable", orgAdminToken, {
     method: "PATCH",
@@ -3064,6 +3182,35 @@ test("org admin role and status changes update access and clear manager assignme
     (user) => user?.managerUserId === null
   );
   assert.equal(disabledReport?.managerUserId, null);
+
+  const mobileDisabled = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/mobile_manager_to_disable",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ status: "disabled" }),
+    }
+  );
+  assert.equal(mobileDisabled.status, 200);
+  assert.equal((mobileDisabled.body as { status?: string }).status, "disabled");
+  const mobileDisabledReport = await waitForPersistedUserState(
+    "mobile_manager_to_disable_report",
+    (user) => user?.managerUserId === null
+  );
+  assert.equal(mobileDisabledReport?.managerUserId, null);
+
+  const removedFromEnterprise = await adminRequest("/users/manager_to_individual", {
+    method: "PATCH",
+    body: JSON.stringify({ accountType: "individual", employeeId: null }),
+  });
+  assert.equal(removedFromEnterprise.status, 200);
+  assert.equal((removedFromEnterprise.body as { accountType?: string }).accountType, "individual");
+  assert.equal((removedFromEnterprise.body as { orgId?: string | null }).orgId, null);
+  const removedManagerReport = await waitForPersistedUserState(
+    "manager_to_individual_report",
+    (user) => user?.managerUserId === null
+  );
+  assert.equal(removedManagerReport?.managerUserId, null);
 });
 
 test("dashboard admin role boundaries block user-admin access to administrators", async () => {
