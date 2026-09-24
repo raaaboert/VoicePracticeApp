@@ -210,7 +210,7 @@ export function AdminWorkspace({
       user.orgRole === "user_admin" &&
       body.orgRole === "user" &&
       !window.confirm(
-        `Demote ${user.email} to User? Dashboard access will be removed, sessions revoked, and ${user.assignedReportCount} direct report assignment${user.assignedReportCount === 1 ? "" : "s"} cleared.`
+        `Demote ${user.email} to User? Dashboard access will be removed and sessions revoked.`
       )
     ) {
       return;
@@ -234,9 +234,9 @@ export function AdminWorkspace({
   const changeStatus = async (user: DashboardAdminUserRow, status: UserStatus) => {
     const verb = status === "active" ? "reactivate" : "deactivate";
     const warning =
-      status === "disabled" && user.orgRole === "user_admin"
+      status === "disabled" && user.assignedReportCount > 0
         ? `Deactivate ${user.email}? Their dashboard sessions will be revoked and ${user.assignedReportCount} direct report assignment${user.assignedReportCount === 1 ? "" : "s"} cleared.`
-        : `Deactivate ${user.email}?`;
+        : `Deactivate ${user.email}? Their dashboard sessions will be revoked.`;
     if (status === "disabled" && !window.confirm(warning)) {
       return;
     }

@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { MobileApiError } from "./apiError";
 import { loadOrgAdminDashboardData } from "./orgAdminDashboardLoad";
+
+const sourceDirectory = dirname(fileURLToPath(import.meta.url));
+const appSource = readFileSync(resolve(sourceDirectory, "../../App.tsx"), "utf8");
 
 test("org admin dashboard and analytics load independently when both succeed", async () => {
   const result = await loadOrgAdminDashboardData(
@@ -58,4 +64,18 @@ test("admin dashboard failure remains a load failure", async () => {
     ),
     (error) => error === dashboardError,
   );
+});
+
+test("App org-admin refresh uses the decoupled dashboard and analytics loader", () => {
+  assert.match(appSource, /import \{ loadOrgAdminDashboardData \} from "\.\/src\/lib\/orgAdminDashboardLoad";/);
+  const start = appSource.indexOf("const refreshOrgAdminDashboard = useCallback");
+  const end = appSource.indexOf("const refreshOrgAdminUsers = useCallback", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const refreshSource = appSource.slice(start, end);
+
+  assert.match(refreshSource, /await loadOrgAdminDashboardData\(/);
+  assert.match(refreshSource, /\(\) => fetchOrgAdminDashboard\(/);
+  assert.match(refreshSource, /\(\) => fetchOrgAdminAnalytics\(/);
+  assert.doesNotMatch(refreshSource, /Promise\.all\s*\(/);
 });

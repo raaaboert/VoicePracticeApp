@@ -57,6 +57,7 @@ let superToken: string;
 let adminToken: string | null = null;
 let setSimulationAiBudgetGraceForTest: (userId: string, expiresAtMs: number) => void;
 let ensureDatabaseShapeForTest: (raw: unknown) => ApiDatabase;
+let ensureDemoEnterpriseDataForTest: (db: ApiDatabase, now: string) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -1054,6 +1055,7 @@ before(async () => {
   const imported = await import("./index.js");
   setSimulationAiBudgetGraceForTest = imported.setSimulationAiBudgetGraceForTest;
   ensureDatabaseShapeForTest = imported.ensureDatabaseShape;
+  ensureDemoEnterpriseDataForTest = imported.ensureDemoEnterpriseData;
   imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
     [
       buildTrainingPack("pack_scope", "org_1"),
@@ -2620,6 +2622,34 @@ test("dashboard performance routes enforce independent team, organization, and n
   assert.equal(noneAdminDirectory.status, 200);
 });
 
+test("org admins without performance scope receive organization billing usage without performance rows", async () => {
+  const overview = await dashboardRequest("/dashboard/overview", orgAdminNoneToken);
+  assert.equal(overview.status, 200);
+  const summary = overview.body.summary as {
+    monthlyUsageMinutes: number;
+    simulationsLast30Days: number;
+    averageScoreThisPeriod: number | null;
+  };
+  assert.equal(summary.monthlyUsageMinutes, 20);
+  assert.equal(summary.simulationsLast30Days, 0);
+  assert.equal(summary.averageScoreThisPeriod, null);
+
+  const customers = overview.body.customers as Array<{
+    orgId: string;
+    usedMinutesThisPeriod: number;
+    simulationsLast30Days: number;
+    averageScoreThisPeriod: number | null;
+    customerUserEmails: string[];
+  }>;
+  const customer = customers.find((row) => row.orgId === "org_1");
+  assert.ok(customer);
+  assert.equal(customer.usedMinutesThisPeriod, 20);
+  assert.equal(customer.simulationsLast30Days, 0);
+  assert.equal(customer.averageScoreThisPeriod, null);
+  assert.deepEqual(customer.customerUserEmails, []);
+  assert.deepEqual(overview.body.topScenarios, []);
+});
+
 test("user admin with no performance access gets empty reporting scope without losing admin scope", async () => {
   const overview = await dashboardRequest("/dashboard/overview", userAdminNoneToken);
   assert.equal(overview.status, 200);
@@ -2889,8 +2919,10 @@ test("mobile organization score analytics requires organization performance acce
     "token_org_admin_none"
   );
   assert.equal(redactedAdminDetail.status, 200);
-  assert.equal((redactedAdminDetail.body.usage as { sessions?: number }).sessions, 0);
+  assert.equal((redactedAdminDetail.body.usage as { sessions?: number }).sessions, 1);
+  assert.equal((redactedAdminDetail.body.usage as { billedSeconds?: number }).billedSeconds, 300);
   assert.equal((redactedAdminDetail.body.scores as { sessions?: number }).sessions, 0);
+  assert.equal((redactedAdminDetail.body.scores as { avgOverallScore?: number | null }).avgOverallScore, null);
   assert.deepEqual((redactedAdminDetail.body.scores as { recent?: unknown[] }).recent, []);
   assert.equal(
     "dailyOverageExtraSecondsConsumed" in (redactedAdminDetail.body.user as Record<string, unknown>),
@@ -2902,6 +2934,11 @@ test("mobile organization score analytics requires organization performance acce
     "token_regular_organization"
   );
   assert.equal(performanceOnlyAdminDirectoryDenied.status, 403);
+  const performanceOnlyAdminDashboardDenied = await mobileRequest(
+    "/mobile/users/regular_organization/admin/org/dashboard",
+    "token_regular_organization"
+  );
+  assert.equal(performanceOnlyAdminDashboardDenied.status, 403);
 
   const administrativeDashboardRetained = await mobileRequest(
     "/mobile/users/org_admin_none/admin/org/dashboard",
@@ -3514,6 +3551,24 @@ test("dashboard admin user patching is atomic across Employee ID and status", as
 });
 
 test("dashboard admin write routes reject cross-tenant manipulation attempts", async () => {
+  const dashboardMoveAttempt = await dashboardRequest("/dashboard/admin/users/learner", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ orgId: "org_2" }),
+  });
+  assert.equal(dashboardMoveAttempt.status, 400);
+  assert.equal((await readUser("learner"))?.orgId, "org_1");
+
+  const mobileMoveAttempt = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/users/learner",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ orgId: "org_2" }),
+    }
+  );
+  assert.equal(mobileMoveAttempt.status, 400);
+  assert.equal((await readUser("learner"))?.orgId, "org_1");
+
   const crossTenantUserPatch = await dashboardRequest("/dashboard/admin/users/other_org_user?orgId=org_2", orgAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" }),
@@ -3651,6 +3706,70 @@ test("platform user creation and mutation persist explicit independent performan
   assert.equal(transitionedToEnterprise.body.orgRole, "org_admin");
   assert.equal(transitionedToEnterprise.body.performanceAccess, "none");
 
+  const orgAdminDefaultId = orgAdminDefault.body.id as string;
+  const orgAdminGrantedOrganization = await adminRequest(`/users/${orgAdminDefaultId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ performanceAccess: "organization" }),
+  });
+  assert.equal(orgAdminGrantedOrganization.status, 200);
+  const orgAdminMovedWithoutAccess = await adminRequest(`/users/${orgAdminDefaultId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgId: "org_2" }),
+  });
+  assert.equal(orgAdminMovedWithoutAccess.status, 200);
+  assert.equal(orgAdminMovedWithoutAccess.body.orgId, "org_2");
+  assert.equal(orgAdminMovedWithoutAccess.body.orgRole, "org_admin");
+  assert.equal(orgAdminMovedWithoutAccess.body.performanceAccess, "none");
+
+  const regularTeamId = regularTeam.body.id as string;
+  const movedWithExplicitAccess = await adminRequest(`/users/${regularTeamId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgId: "org_2", performanceAccess: "organization" }),
+  });
+  assert.equal(movedWithExplicitAccess.status, 200);
+  assert.equal(movedWithExplicitAccess.body.orgId, "org_2");
+  assert.equal(movedWithExplicitAccess.body.orgRole, "user");
+  assert.equal(movedWithExplicitAccess.body.performanceAccess, "organization");
+
+  const managerMovedAcrossOrgs = await adminRequest("/users/manager_to_demote", {
+    method: "PATCH",
+    body: JSON.stringify({ orgId: "org_2" }),
+  });
+  assert.equal(managerMovedAcrossOrgs.status, 200);
+  assert.equal(managerMovedAcrossOrgs.body.orgId, "org_2");
+  assert.equal(managerMovedAcrossOrgs.body.performanceAccess, "none");
+  assert.equal(managerMovedAcrossOrgs.body.divisionId, null);
+  assert.equal(managerMovedAcrossOrgs.body.managerUserId, null);
+  const clearedCrossOrgReport = await waitForPersistedUserState(
+    "manager_to_demote_report",
+    (user) => user?.managerUserId === null
+  );
+  assert.equal(clearedCrossOrgReport?.managerUserId, null);
+
+  const orgMoveAudit = (await readPlatformAuditEvents())
+    .slice()
+    .reverse()
+    .find((event) => event.action === "user.updated" && event.userId === orgAdminDefaultId);
+  assert.ok(orgMoveAudit);
+  const orgMoveMetadata = orgMoveAudit.metadata as {
+    before?: { orgId?: string | null; performanceAccess?: string };
+    after?: { orgId?: string | null; performanceAccess?: string };
+  };
+  assert.equal(orgMoveMetadata.before?.orgId, "org_1");
+  assert.equal(orgMoveMetadata.before?.performanceAccess, "organization");
+  assert.equal(orgMoveMetadata.after?.orgId, "org_2");
+  assert.equal(orgMoveMetadata.after?.performanceAccess, "none");
+
+  for (const movedUserId of [orgAdminDefaultId, regularTeamId, "manager_to_demote"]) {
+    const restored = await adminRequest(`/users/${movedUserId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ orgId: "org_1" }),
+    });
+    assert.equal(restored.status, 200);
+    assert.equal(restored.body.orgId, "org_1");
+    assert.equal(restored.body.performanceAccess, "none");
+  }
+
   const unauthenticated = await publicRequest("/users", {
     method: "POST",
     body: JSON.stringify({
@@ -3663,6 +3782,26 @@ test("platform user creation and mutation persist explicit independent performan
     }),
   });
   assert.equal(unauthenticated.status, 401);
+});
+
+test("demo enterprise transitions reset access across organizations and preserve same-org explicit access", () => {
+  const db = buildDatabase();
+  db.users.push(buildUser("usr_demo_people_admin", "demo-move@acme.example", {
+    orgId: "org_1",
+    orgRole: "org_admin",
+    performanceAccess: "organization",
+  }));
+
+  ensureDemoEnterpriseDataForTest(db, NOW);
+  const moved = db.users.find((user) => user.id === "usr_demo_people_admin");
+  assert.ok(moved);
+  assert.equal(moved.orgId, "org_demo_people");
+  assert.equal(moved.performanceAccess, "none");
+
+  moved.performanceAccess = "team";
+  ensureDemoEnterpriseDataForTest(db, NOW);
+  assert.equal(moved.orgId, "org_demo_people");
+  assert.equal(moved.performanceAccess, "team");
 });
 
 test("platform user audit metadata does not serialize raw Employee IDs", async () => {

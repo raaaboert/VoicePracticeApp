@@ -3357,6 +3357,7 @@ function ensureDemoEnterpriseData(db: {
     const existingUser = duplicateById ?? duplicateByEmail;
     if (existingUser) {
       const wasEnterpriseMember = existingUser.accountType === "enterprise" && Boolean(existingUser.orgId);
+      const previousEnterpriseOrgId = wasEnterpriseMember ? existingUser.orgId : null;
       existingUser.emailVerifiedAt = existingUser.emailVerifiedAt ?? existingUser.createdAt ?? now;
       existingUser.firstName = normalizeOptionalStoredUserName(existingUser.firstName);
       existingUser.lastName = normalizeOptionalStoredUserName(existingUser.lastName);
@@ -3367,7 +3368,7 @@ function ensureDemoEnterpriseData(db: {
       existingUser.managerUserId = normalizeManagerUserId(existingUser.managerUserId);
       existingUser.orgId = demoUser.orgId;
       existingUser.orgRole = demoUser.orgRole;
-      if (!wasEnterpriseMember) {
+      if (!wasEnterpriseMember || previousEnterpriseOrgId !== demoUser.orgId) {
         existingUser.performanceAccess = "none";
       }
       existingUser.status = existingUser.status ?? "active";
@@ -6332,12 +6333,19 @@ async function buildDashboardCustomerSummary(
   db: ApiDatabase,
   org: EnterpriseOrg,
   divisionId: string | null = null,
-  permittedUserIds: ReadonlySet<string> | null = null
+  permittedUserIds: ReadonlySet<string> | null = null,
+  includeAdministrativeUsage = false
 ): Promise<DashboardCustomerSummary> {
   const normalizedOrg = ensureOrgContractFields(org);
   const now = new Date();
   const billing = computeMonthlyPeriodBounds(resolveOrgBillingAnchorAt(normalizedOrg, now), now);
-  const usage = buildDashboardOrgUsageSnapshot(db, normalizedOrg, now, divisionId, permittedUserIds);
+  const usage = buildDashboardOrgUsageSnapshot(
+    db,
+    normalizedOrg,
+    now,
+    divisionId,
+    includeAdministrativeUsage ? null : permittedUserIds
+  );
   const last30DaysThreshold = now.getTime() - 30 * 24 * 60 * 60 * 1000;
   const previous30DaysThreshold = now.getTime() - 60 * 24 * 60 * 60 * 1000;
   const customerUsers = db.users
@@ -8368,7 +8376,13 @@ async function buildDashboardOverview(
     orgIds: accessibleOrgIds,
   });
   const customers = await Promise.all(
-    accessibleOrgs.map((org) => buildDashboardCustomerSummary(db, org, divisionId, permittedUserIds))
+    accessibleOrgs.map((org) => buildDashboardCustomerSummary(
+      db,
+      org,
+      divisionId,
+      permittedUserIds,
+      viewer.accessType === "super_user" || viewer.capabilities.viewOrganizationUsers
+    ))
   );
   const now = new Date();
   const nowMs = now.getTime();
@@ -13072,7 +13086,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance goal management requires org admin or user admin access.",
+        error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -13164,7 +13178,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance goal management requires org admin or user admin access.",
+        error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -13277,7 +13291,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance goal management requires org admin or user admin access.",
+        error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -13491,7 +13505,7 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance goal management requires org admin or user admin access.",
+        error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -13570,7 +13584,7 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
     }
     if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
-        error: "Performance goal management requires org admin or user admin access.",
+        error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
       });
       return;
@@ -16093,6 +16107,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     );
     const beforeEmployeeId = user.employeeId ?? null;
     const beforeAccountType = user.accountType;
+    const beforeOrgId = user.orgId;
     const before = {
       email: user.email,
       employeeIdPresent: Boolean(beforeEmployeeId),
@@ -16235,11 +16250,16 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     user.accountType = nextAccountType;
     user.orgId = nextOrgId;
     user.employeeId = nextAccountType === "enterprise" ? employeeIdPatch.value : null;
+    const movedBetweenEnterpriseOrgs =
+      beforeAccountType === "enterprise" &&
+      nextAccountType === "enterprise" &&
+      Boolean(beforeOrgId) &&
+      beforeOrgId !== nextOrgId;
     if (nextAccountType !== "enterprise") {
       user.performanceAccess = "none";
     } else if (hasPerformanceAccessPatch) {
       user.performanceAccess = patch.performanceAccess;
-    } else if (beforeAccountType !== "enterprise") {
+    } else if (beforeAccountType !== "enterprise" || movedBetweenEnterpriseOrgs) {
       user.performanceAccess = "none";
     }
 
@@ -21612,6 +21632,11 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
     const periodStartMs = new Date(periodStartAt).getTime();
     const periodEndMs = now.getTime();
+    const billingSessions = usageSessionAccess.listByUserRange(db, {
+      userId: target.id,
+      startedAtFrom: new Date(periodStartAt),
+      startedAtBefore: now
+    });
     const activityWindow = canViewTargetPerformance
       ? simulationHistoryAccess.listActivityWindow(db, {
           userId: target.id,
@@ -21619,9 +21644,8 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
           periodEndAt: now
         })
       : { usageSessions: [], scoreRecords: [] };
-    const sessions = activityWindow.usageSessions;
     const scores = activityWindow.scoreRecords;
-    const billedSeconds = usageSessionAccess.sumBilledSeconds(sessions);
+    const billedSeconds = usageSessionAccess.sumBilledSeconds(billingSessions);
     const avgOverallScore = scoreRecordAccess.computeAverageOverallScore(scores);
     const dailyOverage = resolveUserDailyOverageAllowance(db, target, now);
 
@@ -21647,7 +21671,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       },
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
       usage: {
-        sessions: sessions.length,
+        sessions: billingSessions.length,
         billedSeconds
       },
       scores: {
@@ -23116,7 +23140,7 @@ export function setTrainingContentMobileServiceForTest(
   trainingContentMobileService = service ?? defaultTrainingContentMobileService;
 }
 
-export { app, createDefaultDatabase, ensureDatabaseShape };
+export { app, createDefaultDatabase, ensureDatabaseShape, ensureDemoEnterpriseData };
 
 if (runtimeConfig.nodeEnv !== "test") {
   void startApiServer().catch((error: unknown) => {

@@ -19,3 +19,16 @@ test("customer Admin performance access editor offers only the supported values"
   assert.equal(source.includes('<option value="team">Team</option>'), true);
   assert.equal(source.includes('<option value="organization">Organization</option>'), true);
 });
+
+test("customer Admin manager confirmation copy follows report relationships instead of role", () => {
+  assert.equal(
+    source.includes("Demote ${user.email} to User? Dashboard access will be removed and sessions revoked."),
+    true
+  );
+  assert.equal(source.includes('status === "disabled" && user.assignedReportCount > 0'), true);
+  assert.equal(source.includes('status === "disabled" && user.orgRole === "user_admin"'), false);
+  assert.equal(
+    source.includes("Demote ${user.email} to User? Dashboard access will be removed, sessions revoked, and"),
+    false
+  );
+});

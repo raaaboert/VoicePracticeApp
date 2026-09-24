@@ -1323,6 +1323,46 @@ test("user admin with no performance access cannot reach direct-report Performan
   assert.equal(cancel.status, 404);
 });
 
+test("org admin with no performance access cannot reach another user's Performance Goal routes", async () => {
+  const planPath = "/dashboard/performance/plans/perf_plan_none_report";
+
+  const detail = await dashboardRequest(planPath, undefined, dashboardOrgAdminNoneToken);
+  assert.equal(detail.status, 404);
+
+  const updates = await dashboardRequest(`${planPath}/updates`, undefined, dashboardOrgAdminNoneToken);
+  assert.equal(updates.status, 404);
+
+  const comment = await dashboardRequest(
+    `${planPath}/updates`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body: "Administrative role must not bypass performance access." })
+    },
+    dashboardOrgAdminNoneToken
+  );
+  assert.equal(comment.status, 404);
+
+  const edit = await dashboardRequest(
+    planPath,
+    {
+      method: "PATCH",
+      body: JSON.stringify(buildCreatePlanRequest({ userId: "user_none_report" }))
+    },
+    dashboardOrgAdminNoneToken
+  );
+  assert.equal(edit.status, 404);
+
+  const cancel = await dashboardRequest(
+    `${planPath}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason: "Administrative role must not bypass performance access." })
+    },
+    dashboardOrgAdminNoneToken
+  );
+  assert.equal(cancel.status, 404);
+});
+
 test("dashboard Performance super user sees a grouped portfolio instead of mixed plan rows", async () => {
   const result = await dashboardRequest("/dashboard/performance", undefined, platformDashboardToken);
 
