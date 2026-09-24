@@ -20428,6 +20428,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       rubricVersion: AI_RUBRIC_VERSION,
       model: aiDetails.responseModel,
       promptVersion: AI_PROMPT_VERSION,
+      scoringWeightsApplied: scoringWeights,
       inputTokens: toUsageEventToken(aiDetails.tokenUsage.inputTokens),
       outputTokens: toUsageEventToken(aiDetails.tokenUsage.outputTokens),
       totalTokens: toUsageEventToken(aiDetails.tokenUsage.totalTokens),
@@ -20711,6 +20712,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     const now = new Date();
     const coachingArtifact = normalizeSimulationScoreCoachingArtifact(body.coachingArtifact ?? null);
     const normalizedCoachingThemes = buildNormalizedSimulationScoreThemesFromArtifact(coachingArtifact);
+    const scoringWeights = getDefaultScoringWeights();
     const normalizedScorecard = normalizeSimulationScorecard(
       {
         communicationScore: body.communicationScore,
@@ -20724,7 +20726,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
         assertiveness: body.assertiveness,
         summary: body.summary
       },
-      getDefaultScoringWeights()
+      scoringWeights
     );
     const record: SimulationScoreRecord = {
       id: recognizedSessionId ? `score_${recognizedSessionId}` : `score_${uuid()}`,
@@ -20750,6 +20752,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       summary: typeof body.summary === "string" && body.summary.trim() ? body.summary.trim() : undefined,
       coachingArtifact,
       normalizedCoachingThemes,
+      scoringWeightsApplied: scoringWeights,
       createdAt: now.toISOString()
     };
 

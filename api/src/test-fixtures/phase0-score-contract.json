@@ -50,6 +50,12 @@
     "rubricVersion": "2026-04-09.v1",
     "model": "route-scoring-model",
     "promptVersion": "2026-04-09.v1",
+    "scoringWeightsApplied": {
+      "persuasion": 0.25,
+      "clarity": 0.25,
+      "empathy": 0.25,
+      "assertiveness": 0.25
+    },
     "inputTokens": 12,
     "outputTokens": 8,
     "totalTokens": 20

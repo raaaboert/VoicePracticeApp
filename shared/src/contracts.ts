@@ -764,6 +764,7 @@ export interface EnterpriseOrg {
 export const TRAINING_PACK_SCORING_KEYS = ["persuasion", "clarity", "empathy", "assertiveness"] as const;
 export type TrainingPackScoringKey = (typeof TRAINING_PACK_SCORING_KEYS)[number];
 export type TrainingPackScoringWeightOverrides = Record<string, number>;
+export type SimulationScoringWeightsApplied = Record<TrainingPackScoringKey, number>;
 export const ORG_TRAINING_STATUSES = ["draft", "active", "archived"] as const;
 export type OrgTrainingStatus = (typeof ORG_TRAINING_STATUSES)[number];
 
@@ -1013,6 +1014,7 @@ export interface SimulationScoreRecord {
   rubricVersion?: string;
   model?: string;
   promptVersion?: string;
+  scoringWeightsApplied?: SimulationScoringWeightsApplied;
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;

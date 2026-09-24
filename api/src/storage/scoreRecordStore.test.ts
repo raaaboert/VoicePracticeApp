@@ -57,6 +57,9 @@ function createScore(overrides: Partial<SimulationScoreRecord> = {}): Simulation
     rubricVersion: overrides.rubricVersion ?? "rubric_v1",
     model: overrides.model ?? "gpt-test",
     promptVersion: overrides.promptVersion ?? "prompt_v1",
+    scoringWeightsApplied: Object.prototype.hasOwnProperty.call(overrides, "scoringWeightsApplied")
+      ? overrides.scoringWeightsApplied
+      : { persuasion: 0.25, clarity: 0.25, empathy: 0.25, assertiveness: 0.25 },
     inputTokens: overrides.inputTokens ?? 10,
     outputTokens: overrides.outputTokens ?? 12,
     totalTokens: overrides.totalTokens ?? 22,
@@ -104,6 +107,12 @@ test("file score record store appends, queries, gets by id, and deletes by user"
 
     assert.equal(store.getRecordById("score_b")?.trainingPackId, "pack_2");
     assert.equal(store.getRecordById("score_b")?.divisionId, "division_2");
+    assert.deepEqual(store.getRecordById("score_b")?.scoringWeightsApplied, {
+      persuasion: 0.25,
+      clarity: 0.25,
+      empathy: 0.25,
+      assertiveness: 0.25,
+    });
     assert.deepEqual(
       store.listRecords({ userId: "user_1" }).map((record) => record.id),
       ["score_a", "score_c"]
@@ -304,6 +313,7 @@ test("file score record store preserves the current normalized legacy-record rou
       rubricVersion: undefined,
       model: undefined,
       promptVersion: undefined,
+      scoringWeightsApplied: undefined,
       inputTokens: undefined,
       outputTokens: undefined,
       totalTokens: undefined,
@@ -429,6 +439,12 @@ test("postgres score record store maps a realistic SELECT row into the score con
               rubric_version: "phase0-v3",
               model: "gpt-5.4",
               prompt_version: "prompt-phase0-v1",
+              scoring_weights_applied: {
+                persuasion: 0.4,
+                clarity: 0.2,
+                empathy: 0.2,
+                assertiveness: 0.2,
+              },
               input_tokens: 1320,
               output_tokens: 280,
               total_tokens: 1600,
@@ -502,6 +518,12 @@ test("postgres score record store maps a realistic SELECT row into the score con
       rubricVersion: "phase0-v3",
       model: "gpt-5.4",
       promptVersion: "prompt-phase0-v1",
+      scoringWeightsApplied: {
+        persuasion: 0.4,
+        clarity: 0.2,
+        empathy: 0.2,
+        assertiveness: 0.2,
+      },
       inputTokens: 1320,
       outputTokens: 280,
       totalTokens: 1600,
@@ -570,7 +592,13 @@ test("postgres score record store appendRecord uses a valid placeholder set for 
         communicationScore: 81,
         outcomeScore: 74,
         completionLevel: "complete",
-        objectiveAchieved: true
+        objectiveAchieved: true,
+        scoringWeightsApplied: {
+          persuasion: 0.4,
+          clarity: 0.2,
+          empathy: 0.2,
+          assertiveness: 0.2,
+        },
       })
     );
 
@@ -586,7 +614,7 @@ test("postgres score record store appendRecord uses a valid placeholder set for 
     }, 0);
 
     assert.equal(highestPlaceholder, insert.values.length);
-    assert.equal(insert.values.length, 31);
+    assert.equal(insert.values.length, 32);
     assert.deepEqual(insert.values, [
       "score_pg",
       "sim_123",
@@ -623,13 +651,19 @@ test("postgres score record store appendRecord uses a valid placeholder set for 
       "rubric_v1",
       "gpt-test",
       "prompt_v1",
+      {
+        persuasion: 0.4,
+        clarity: 0.2,
+        empathy: 0.2,
+        assertiveness: 0.2,
+      },
       10,
       12,
       22,
       "2026-03-31T10:05:00.000Z",
     ]);
-    assert.match(insert.text, /\$23::jsonb,\s*\$24::jsonb,\s*\$25,/);
-    assert.match(insert.text, /\$31::timestamptz/);
+    assert.match(insert.text, /\$23::jsonb,\s*\$24::jsonb,\s*\$25,\s*\$26,\s*\$27,\s*\$28::jsonb,/);
+    assert.match(insert.text, /\$32::timestamptz/);
     assert.match(insert.text, /ON CONFLICT \(id\) DO UPDATE/);
   } finally {
     Pool.prototype.query = originalPoolQuery;

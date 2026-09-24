@@ -7,7 +7,8 @@ import {
   SimulationCompletionLevel,
   SimulationScoreCoachingArtifact,
   SimulationScoreNormalizedThemes,
-  SimulationScoreRecord
+  SimulationScoreRecord,
+  SimulationScoringWeightsApplied,
 } from "@voicepractice/shared";
 
 import { StorageProvider } from "../runtimeConfig.js";
@@ -89,6 +90,7 @@ interface ScoreRecordRow {
   rubric_version: string | null;
   model: string | null;
   prompt_version: string | null;
+  scoring_weights_applied: SimulationScoringWeightsApplied | null;
   input_tokens: number | string | null;
   output_tokens: number | string | null;
   total_tokens: number | string | null;
@@ -156,6 +158,27 @@ function normalizeOptionalBoolean(value: unknown): boolean | undefined {
   }
 
   return undefined;
+}
+
+function normalizeScoringWeightsApplied(value: unknown): SimulationScoringWeightsApplied | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const candidate = value as Partial<Record<keyof SimulationScoringWeightsApplied, unknown>>;
+  const weights = {
+    persuasion: normalizeNumber(candidate.persuasion),
+    clarity: normalizeNumber(candidate.clarity),
+    empathy: normalizeNumber(candidate.empathy),
+    assertiveness: normalizeNumber(candidate.assertiveness),
+  };
+  if (Object.values(weights).some((weight) => weight === null || weight < 0 || weight > 1)) {
+    return undefined;
+  }
+
+  const normalized = weights as SimulationScoringWeightsApplied;
+  const total = Object.values(normalized).reduce((sum, weight) => sum + weight, 0);
+  return Math.abs(total - 1) <= 1e-9 ? normalized : undefined;
 }
 
 function normalizeCompletionLevel(value: unknown): SimulationCompletionLevel | undefined {
@@ -304,6 +327,9 @@ function normalizeScoreRecord(candidate: unknown): SimulationScoreRecord | null 
     rubricVersion: normalizeNullableString((candidate as { rubricVersion?: unknown }).rubricVersion) ?? undefined,
     model: normalizeNullableString((candidate as { model?: unknown }).model) ?? undefined,
     promptVersion: normalizeNullableString((candidate as { promptVersion?: unknown }).promptVersion) ?? undefined,
+    scoringWeightsApplied: normalizeScoringWeightsApplied(
+      (candidate as { scoringWeightsApplied?: unknown }).scoringWeightsApplied
+    ),
     inputTokens: normalizeOptionalNonNegativeInteger((candidate as { inputTokens?: unknown }).inputTokens),
     outputTokens: normalizeOptionalNonNegativeInteger((candidate as { outputTokens?: unknown }).outputTokens),
     totalTokens: normalizeOptionalNonNegativeInteger((candidate as { totalTokens?: unknown }).totalTokens),
@@ -462,6 +488,7 @@ function mapScoreRecordRow(row: ScoreRecordRow): SimulationScoreRecord | null {
     rubricVersion: row.rubric_version,
     model: row.model,
     promptVersion: row.prompt_version,
+    scoringWeightsApplied: row.scoring_weights_applied,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     totalTokens: row.total_tokens,
@@ -850,6 +877,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
               rubric_version TEXT NULL,
               model TEXT NULL,
               prompt_version TEXT NULL,
+              scoring_weights_applied JSONB NULL,
               input_tokens INTEGER NULL,
               output_tokens INTEGER NULL,
               total_tokens INTEGER NULL,
@@ -882,6 +910,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS rubric_version TEXT NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS model TEXT NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS prompt_version TEXT NULL;
+            ALTER TABLE score_records ADD COLUMN IF NOT EXISTS scoring_weights_applied JSONB NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS input_tokens INTEGER NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS output_tokens INTEGER NULL;
             ALTER TABLE score_records ADD COLUMN IF NOT EXISTS total_tokens INTEGER NULL;
@@ -934,6 +963,7 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
           rubric_version,
           model,
           prompt_version,
+          scoring_weights_applied,
           input_tokens,
           output_tokens,
           total_tokens,
@@ -998,6 +1028,7 @@ async function upsertScoreRecordRow(
         rubric_version,
         model,
         prompt_version,
+        scoring_weights_applied,
         input_tokens,
         output_tokens,
         total_tokens,
@@ -1008,7 +1039,7 @@ async function upsertScoreRecordRow(
         $11::timestamptz, $12::timestamptz,
         $13, $14, $15, $16, $17,
         $18, $19, $20, $21, $22,
-        $23::jsonb, $24::jsonb, $25, $26, $27, $28, $29, $30, $31::timestamptz
+        $23::jsonb, $24::jsonb, $25, $26, $27, $28::jsonb, $29, $30, $31, $32::timestamptz
       )
       ON CONFLICT (id) DO UPDATE
         SET simulation_session_id = EXCLUDED.simulation_session_id,
@@ -1037,6 +1068,7 @@ async function upsertScoreRecordRow(
             rubric_version = EXCLUDED.rubric_version,
             model = EXCLUDED.model,
             prompt_version = EXCLUDED.prompt_version,
+            scoring_weights_applied = EXCLUDED.scoring_weights_applied,
             input_tokens = EXCLUDED.input_tokens,
             output_tokens = EXCLUDED.output_tokens,
             total_tokens = EXCLUDED.total_tokens,
@@ -1070,6 +1102,7 @@ async function upsertScoreRecordRow(
       record.rubricVersion ?? null,
       record.model ?? null,
       record.promptVersion ?? null,
+      record.scoringWeightsApplied ?? null,
       record.inputTokens ?? null,
       record.outputTokens ?? null,
       record.totalTokens ?? null,
