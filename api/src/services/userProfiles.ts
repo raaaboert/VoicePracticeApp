@@ -1,5 +1,4 @@
 import {
-  isOrgUserRole,
   isPerformanceAccessLevel,
   type DashboardViewer,
   type OrgUserRole,
@@ -98,13 +97,6 @@ export function normalizePerformanceAccess(user: {
     return user.performanceAccess;
   }
 
-  const orgRole = typeof user.orgRole === "string" && isOrgUserRole(user.orgRole) ? user.orgRole : "user";
-  if (orgRole === "org_admin") {
-    return "organization";
-  }
-  if (orgRole === "user_admin") {
-    return "team";
-  }
   return "none";
 }
 

@@ -89,6 +89,7 @@ function buildUser(
     status: "active",
     orgId: "org_1",
     orgRole: "user",
+    performanceAccess: "none",
     divisionId: "division_a",
     timezone: "America/Denver",
     pendingTimezone: null,
@@ -219,7 +220,8 @@ function buildDatabase(): ApiDatabase {
         firstName: "Olivia",
         lastName: "Admin",
         dashboardAccessEnabled: true,
-        orgRole: "org_admin"
+        orgRole: "org_admin",
+        performanceAccess: "organization"
       }),
       buildUser("dashboard_viewer", "viewer@example.com", {
         dashboardAccessEnabled: true,
@@ -229,13 +231,15 @@ function buildDatabase(): ApiDatabase {
         firstName: "Maya",
         lastName: "Manager",
         dashboardAccessEnabled: true,
-        orgRole: "user_admin"
+        orgRole: "user_admin",
+        performanceAccess: "team"
       }),
       buildUser("dashboard_other_manager", "other-manager@example.com", {
         firstName: "Other",
         lastName: "Manager",
         dashboardAccessEnabled: true,
-        orgRole: "user_admin"
+        orgRole: "user_admin",
+        performanceAccess: "team"
       }),
       buildUser("dashboard_regular_organization", "organization@example.com", {
         dashboardAccessEnabled: true,

@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ApiDatabase, createDefaultConfig, isOrgUserRole, UserProfile } from "@voicepractice/shared";
+import {
+  ApiDatabase,
+  createDefaultConfig,
+  type EnterpriseOrg,
+  isOrgUserRole,
+  UserProfile,
+} from "@voicepractice/shared";
 
 import { normalizeEmployeeIdInput } from "./employeeIds.js";
 import {
@@ -59,11 +65,38 @@ function buildUser(id: string, overrides: Partial<UserProfile> = {}): UserProfil
   };
 }
 
+function buildOrg(id: string): EnterpriseOrg {
+  return {
+    id,
+    name: `Organization ${id}`,
+    status: "active",
+    contactName: "Organization Owner",
+    contactEmail: `owner-${id}@example.test`,
+    emailDomain: null,
+    joinCode: `JOIN-${id}`,
+    activeIndustries: ["people_management"],
+    dailySecondsQuota: 3600,
+    perUserDailySecondsCap: 1800,
+    pendingPerUserDailySecondsCap: null,
+    pendingPerUserDailySecondsCapEffectiveAt: null,
+    manualBonusSeconds: 0,
+    contractSignedAt: NOW,
+    monthlyMinutesAllotted: 1000,
+    renewalTotalUsd: 1000,
+    softLimitPercentTriggers: [80, 100],
+    maxSimulationMinutes: 20,
+    divisionsEnabled: false,
+    customScenarios: [],
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
 function buildDb(users: UserProfile[], migrations?: Record<string, string>): ApiDatabase {
   return {
     config: createDefaultConfig(NOW),
     users,
-    orgs: [],
+    orgs: [buildOrg("org_1"), buildOrg("org_2")],
     orgDivisions: [],
     orgTrainings: [],
     orgTrainingPackAttachments: [],
@@ -117,6 +150,19 @@ function ensureTestDatabaseShape(raw: unknown): ApiDatabase {
 
 function persistedSnapshot(db: ApiDatabase): ApiDatabase {
   return structuredClone(db) as ApiDatabase;
+}
+
+function createFileStorage(dbPath: string) {
+  return createDatabaseStorage({
+    provider: "file",
+    dbPath,
+    databaseUrl: null,
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    ensureDatabaseShape: ensureTestDatabaseShape,
+    createDefaultDatabase: () => buildDb([]),
+  });
 }
 
 test("user profile app-state migration saves legacy normalized fields and then becomes idempotent", async () => {
@@ -265,6 +311,150 @@ test("performance-access migration backfills compatibility values, preserves exp
   assert.deepEqual(replay, { saved: false, profileChanged: false, markerChanged: false });
   assert.equal(saveCount, 1);
   assert.deepEqual(persisted, snapshotAfterFirstRun);
+});
+
+test("file-backed unmigrated production state preserves raw legacy roles until performance-access migration", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "performance-access-unmigrated-"));
+  const dbPath = path.join(tempDir, "db.local.json");
+  try {
+    const raw = buildDb([
+      buildUser("org_admin_missing", { orgRole: "org_admin" }),
+      buildUser("user_admin_missing", { orgRole: "user_admin" }),
+      buildUser("user_missing"),
+      { ...buildUser("org_admin_invalid", { orgRole: "org_admin" }), performanceAccess: "garbage" } as unknown as UserProfile,
+      { ...buildUser("user_admin_invalid", { orgRole: "user_admin" }), performanceAccess: "TEAM" } as unknown as UserProfile,
+      { ...buildUser("user_invalid"), performanceAccess: "invalid" } as unknown as UserProfile,
+      buildUser("org_admin_explicit_none", { orgRole: "org_admin", performanceAccess: "none" }),
+      buildUser("user_explicit_organization", { performanceAccess: "organization" }),
+      buildUser("individual_missing", {
+        accountType: "individual",
+        tier: "free",
+        orgId: null,
+        orgRole: "user",
+      }),
+    ]);
+    for (const id of ["org_admin_missing", "user_admin_missing", "user_missing", "individual_missing"]) {
+      delete (raw.users.find((user) => user.id === id) as Partial<UserProfile>).performanceAccess;
+    }
+    await writeFile(dbPath, JSON.stringify(raw, null, 2), "utf8");
+
+    const storage = createFileStorage(dbPath);
+    const beforeRuntimeLoad = await readFile(dbPath, "utf8");
+    const runtimeBeforeMigration = await storage.load();
+    const runtimeBeforeById = new Map(runtimeBeforeMigration.users.map((user) => [user.id, user]));
+    assert.equal(runtimeBeforeById.get("org_admin_missing")?.performanceAccess, "none");
+    assert.equal(runtimeBeforeById.get("user_admin_missing")?.performanceAccess, "none");
+    assert.equal(runtimeBeforeById.get("org_admin_invalid")?.performanceAccess, "none");
+    assert.equal(runtimeBeforeById.get("user_admin_invalid")?.performanceAccess, "none");
+    assert.equal(await readFile(dbPath, "utf8"), beforeRuntimeLoad);
+
+    const result = await migrateUserProfileAppStateNormalization({
+      storage,
+      ensureDatabaseShape: ensureTestDatabaseShape,
+      buildPersistedDatabaseSnapshot: persistedSnapshot,
+    });
+    assert.deepEqual(result, { saved: true, profileChanged: true, markerChanged: true });
+
+    const persisted = JSON.parse(await readFile(dbPath, "utf8")) as ApiDatabase;
+    const persistedById = new Map(persisted.users.map((user) => [user.id, user]));
+    assert.equal(persistedById.get("org_admin_missing")?.performanceAccess, "organization");
+    assert.equal(persistedById.get("user_admin_missing")?.performanceAccess, "team");
+    assert.equal(persistedById.get("user_missing")?.performanceAccess, "none");
+    assert.equal(persistedById.get("org_admin_invalid")?.performanceAccess, "organization");
+    assert.equal(persistedById.get("user_admin_invalid")?.performanceAccess, "team");
+    assert.equal(persistedById.get("user_invalid")?.performanceAccess, "none");
+    assert.equal(persistedById.get("org_admin_explicit_none")?.performanceAccess, "none");
+    assert.equal(persistedById.get("user_explicit_organization")?.performanceAccess, "organization");
+    assert.equal(persistedById.get("individual_missing")?.performanceAccess, "none");
+    assert.equal(
+      persisted.appStateMigrations?.[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY],
+      PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION,
+    );
+
+    const afterFirstMigration = await readFile(dbPath, "utf8");
+    const reloaded = await createFileStorage(dbPath).load();
+    assert.deepEqual(
+      reloaded.users.map((user) => [user.id, user.performanceAccess]),
+      persisted.users.map((user) => [user.id, user.performanceAccess]),
+    );
+    const replay = await migrateUserProfileAppStateNormalization({
+      storage: createFileStorage(dbPath),
+      ensureDatabaseShape: ensureTestDatabaseShape,
+      buildPersistedDatabaseSnapshot: persistedSnapshot,
+    });
+    assert.deepEqual(replay, { saved: false, profileChanged: false, markerChanged: false });
+    assert.equal(await readFile(dbPath, "utf8"), afterFirstMigration);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed marker-present state fails closed and preserves every explicit performance value", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "performance-access-migrated-"));
+  const dbPath = path.join(tempDir, "db.local.json");
+  try {
+    const raw = buildDb([
+      buildUser("org_admin_missing", { orgRole: "org_admin" }),
+      buildUser("user_admin_missing", { orgRole: "user_admin" }),
+      { ...buildUser("org_admin_invalid", { orgRole: "org_admin" }), performanceAccess: "garbage" } as unknown as UserProfile,
+      { ...buildUser("user_admin_invalid", { orgRole: "user_admin" }), performanceAccess: "TEAM" } as unknown as UserProfile,
+      buildUser("org_admin_none", { orgRole: "org_admin", performanceAccess: "none" }),
+      buildUser("user_admin_none", { orgRole: "user_admin", performanceAccess: "none" }),
+      buildUser("user_team", { orgRole: "user", performanceAccess: "team" }),
+      buildUser("user_organization", { orgRole: "user", performanceAccess: "organization" }),
+      buildUser("org_admin_team", { orgRole: "org_admin", performanceAccess: "team" }),
+      buildUser("user_admin_organization", { orgRole: "user_admin", performanceAccess: "organization" }),
+    ], {
+      [USER_PROFILE_APP_STATE_MIGRATION_KEY]: USER_PROFILE_APP_STATE_MIGRATION_VERSION,
+      [PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY]: PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION,
+    });
+    for (const id of ["org_admin_missing", "user_admin_missing"]) {
+      delete (raw.users.find((user) => user.id === id) as Partial<UserProfile>).performanceAccess;
+    }
+    await writeFile(dbPath, JSON.stringify(raw, null, 2), "utf8");
+
+    const storage = createFileStorage(dbPath);
+    const loaded = await storage.load();
+    const loadedById = new Map(loaded.users.map((user) => [user.id, user]));
+    for (const id of ["org_admin_missing", "user_admin_missing", "org_admin_invalid", "user_admin_invalid"]) {
+      assert.equal(loadedById.get(id)?.performanceAccess, "none");
+    }
+    assert.equal(loadedById.get("org_admin_none")?.performanceAccess, "none");
+    assert.equal(loadedById.get("user_admin_none")?.performanceAccess, "none");
+    assert.equal(loadedById.get("user_team")?.performanceAccess, "team");
+    assert.equal(loadedById.get("user_organization")?.performanceAccess, "organization");
+    assert.equal(loadedById.get("org_admin_team")?.performanceAccess, "team");
+    assert.equal(loadedById.get("user_admin_organization")?.performanceAccess, "organization");
+
+    const result = await migrateUserProfileAppStateNormalization({
+      storage,
+      ensureDatabaseShape: ensureTestDatabaseShape,
+      buildPersistedDatabaseSnapshot: persistedSnapshot,
+    });
+    assert.deepEqual(result, { saved: true, profileChanged: true, markerChanged: false });
+    const persisted = JSON.parse(await readFile(dbPath, "utf8")) as ApiDatabase;
+    const persistedById = new Map(persisted.users.map((user) => [user.id, user]));
+    for (const id of ["org_admin_missing", "user_admin_missing", "org_admin_invalid", "user_admin_invalid"]) {
+      assert.equal(persistedById.get(id)?.performanceAccess, "none");
+    }
+    assert.equal(persistedById.get("org_admin_none")?.performanceAccess, "none");
+    assert.equal(persistedById.get("user_admin_none")?.performanceAccess, "none");
+    assert.equal(persistedById.get("user_team")?.performanceAccess, "team");
+    assert.equal(persistedById.get("user_organization")?.performanceAccess, "organization");
+    assert.equal(persistedById.get("org_admin_team")?.performanceAccess, "team");
+    assert.equal(persistedById.get("user_admin_organization")?.performanceAccess, "organization");
+
+    const afterRepair = await readFile(dbPath, "utf8");
+    const replay = await migrateUserProfileAppStateNormalization({
+      storage: createFileStorage(dbPath),
+      ensureDatabaseShape: ensureTestDatabaseShape,
+      buildPersistedDatabaseSnapshot: persistedSnapshot,
+    });
+    assert.deepEqual(replay, { saved: false, profileChanged: false, markerChanged: false });
+    assert.equal(await readFile(dbPath, "utf8"), afterRepair);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("user profile app-state migration preserves role-independent managers and clears invalid managers", async () => {

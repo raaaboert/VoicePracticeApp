@@ -74,14 +74,18 @@ test("performance access normalization preserves valid explicit enterprise value
   })), "organization");
 });
 
-test("performance access normalization derives missing and malformed legacy values from org role", () => {
-  assert.equal(normalizePerformanceAccess(user("org_admin", { orgRole: "org_admin" })), "organization");
-  assert.equal(normalizePerformanceAccess(user("user_admin", { orgRole: "user_admin" })), "team");
+test("performance access normalization fails closed for missing and malformed values regardless of org role", () => {
+  assert.equal(normalizePerformanceAccess(user("org_admin", { orgRole: "org_admin" })), "none");
+  assert.equal(normalizePerformanceAccess(user("user_admin", { orgRole: "user_admin" })), "none");
   assert.equal(normalizePerformanceAccess(user("regular_user", { orgRole: "user" })), "none");
   assert.equal(normalizePerformanceAccess({
     ...user("invalid_user_admin", { orgRole: "user_admin" }),
     performanceAccess: "invalid",
-  }), "team");
+  }), "none");
+  assert.equal(normalizePerformanceAccess({
+    ...user("uppercase_user_admin", { orgRole: "user_admin" }),
+    performanceAccess: "TEAM",
+  }), "none");
 });
 
 test("performance access normalization forces non-enterprise and no-org users to none", () => {

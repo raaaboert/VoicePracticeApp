@@ -1,4 +1,10 @@
-import type { ApiDatabase, UserProfile } from "@voicepractice/shared";
+import {
+  isOrgUserRole,
+  isPerformanceAccessLevel,
+  type ApiDatabase,
+  type PerformanceAccessLevel,
+  type UserProfile,
+} from "@voicepractice/shared";
 import type { LockedAppStateUpdate } from "../storage.js";
 
 export const USER_PROFILE_APP_STATE_MIGRATION_KEY = "user_profile_management_v1";
@@ -39,6 +45,51 @@ function persistedField(record: Record<string, unknown>, key: keyof UserProfile)
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] ?? null : MISSING_FIELD;
 }
 
+export function deriveLegacyPerformanceAccessForMigration(
+  user: Record<string, unknown>,
+  validOrganizationIds: ReadonlySet<string>,
+): PerformanceAccessLevel {
+  const hasOrganizationContext =
+    user.accountType === "enterprise" &&
+    typeof user.orgId === "string" &&
+    user.orgId.trim().length > 0 &&
+    validOrganizationIds.has(user.orgId);
+  if (!hasOrganizationContext) {
+    return "none";
+  }
+
+  if (typeof user.performanceAccess === "string" && isPerformanceAccessLevel(user.performanceAccess)) {
+    return user.performanceAccess;
+  }
+
+  const orgRole = typeof user.orgRole === "string" && isOrgUserRole(user.orgRole) ? user.orgRole : "user";
+  if (orgRole === "org_admin") {
+    return "organization";
+  }
+  if (orgRole === "user_admin") {
+    return "team";
+  }
+  return "none";
+}
+
+function applyLegacyPerformanceAccessMigration(rawUsers: unknown, normalized: ApiDatabase): void {
+  const persistedUsers = Array.isArray(rawUsers) ? rawUsers.map((user) => asRecord(user)) : [];
+  const persistedUsersById = new Map(
+    persistedUsers
+      .filter((user) => typeof user.id === "string")
+      .map((user) => [user.id as string, user] as const),
+  );
+  const validOrganizationIds = new Set(normalized.orgs.map((org) => org.id));
+
+  normalized.users = normalized.users.map((user, index) => {
+    const persistedUser = persistedUsersById.get(user.id) ?? persistedUsers[index] ?? {};
+    return {
+      ...user,
+      performanceAccess: deriveLegacyPerformanceAccessForMigration(persistedUser, validOrganizationIds),
+    };
+  });
+}
+
 export function buildUserProfileMigrationFingerprint(users: unknown): unknown[] {
   if (!Array.isArray(users)) {
     return [];
@@ -72,11 +123,16 @@ export async function migrateUserProfileAppStateNormalization(params: {
 }): Promise<UserProfileAppStateMigrationResult> {
   const prepareUpdate = async (raw: unknown): Promise<LockedAppStateUpdate<UserProfileAppStateMigrationResult>> => {
     const rawRecord = asRecord(raw);
-    const normalized = params.ensureDatabaseShape(raw);
     const migrations = normalizeAppStateMigrations(rawRecord.appStateMigrations);
+    const performanceAccessMigrationRequired =
+      migrations[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY] !== PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION;
+    const normalized = params.ensureDatabaseShape(raw);
+    if (performanceAccessMigrationRequired) {
+      applyLegacyPerformanceAccessMigration(rawRecord.users, normalized);
+    }
     const markerChanged =
       migrations[USER_PROFILE_APP_STATE_MIGRATION_KEY] !== USER_PROFILE_APP_STATE_MIGRATION_VERSION ||
-      migrations[PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY] !== PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION;
+      performanceAccessMigrationRequired;
     const profileChanged = !fingerprintsMatch(
       buildUserProfileMigrationFingerprint(rawRecord.users),
       buildUserProfileMigrationFingerprint(normalized.users)

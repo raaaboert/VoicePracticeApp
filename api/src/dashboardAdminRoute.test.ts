@@ -173,7 +173,7 @@ function buildUser(id: string, email: string, overrides: Partial<UserProfile> = 
     status: overrides.status ?? "active",
     orgId: overrides.orgId === undefined ? "org_1" : overrides.orgId,
     orgRole: overrides.orgRole ?? "user",
-    performanceAccess: overrides.performanceAccess,
+    performanceAccess: overrides.performanceAccess ?? "none",
     divisionId: overrides.divisionId ?? null,
     timezone: overrides.timezone ?? "America/Denver",
     pendingTimezone: overrides.pendingTimezone ?? null,
@@ -348,6 +348,7 @@ function buildDatabase(): ApiDatabase {
     users: [
       buildUser("org_admin", "admin@acme.example", {
         orgRole: "org_admin",
+        performanceAccess: "organization",
         dashboardAccessEnabled: true,
         employeeId: "ADM-1",
       }),
@@ -357,6 +358,7 @@ function buildDatabase(): ApiDatabase {
       }),
       buildUser("user_admin", "manager@acme.example", {
         orgRole: "user_admin",
+        performanceAccess: "team",
         dashboardAccessEnabled: true,
         firstName: "Maya",
         lastName: "Manager",
@@ -434,6 +436,7 @@ function buildDatabase(): ApiDatabase {
       }),
       buildUser("manager_to_demote", "aaron.lead@acme.example", {
         orgRole: "user_admin",
+        performanceAccess: "team",
         dashboardAccessEnabled: true,
         firstName: "Aaron",
         lastName: "Lead",
@@ -3620,6 +3623,20 @@ test("platform user creation and mutation persist explicit independent performan
     assert.equal(result.body.performanceAccess, expectedAccess);
   }
 
+  const orgAdminNoneRoleCheckId = orgAdminDefault.body.id as string;
+  const demotedOrgAdminNone = await adminRequest(`/users/${orgAdminNoneRoleCheckId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user" }),
+  });
+  assert.equal(demotedOrgAdminNone.status, 200);
+  assert.equal(demotedOrgAdminNone.body.performanceAccess, "none");
+  const restoredOrgAdminNone = await adminRequest(`/users/${orgAdminNoneRoleCheckId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "org_admin" }),
+  });
+  assert.equal(restoredOrgAdminNone.status, 200);
+  assert.equal(restoredOrgAdminNone.body.performanceAccess, "none");
+
   for (const invalidValue of ["", "admin", "manager", "all", "org", null, [], {}, "TEAM"]) {
     const invalid = await adminRequest("/users", {
       method: "POST",
@@ -3638,10 +3655,17 @@ test("platform user creation and mutation persist explicit independent performan
   const regularDefaultId = regularDefault.body.id as string;
   const promotedNone = await adminRequest(`/users/${regularDefaultId}`, {
     method: "PATCH",
-    body: JSON.stringify({ orgRole: "user_admin" }),
+    body: JSON.stringify({ orgRole: "org_admin" }),
   });
   assert.equal(promotedNone.status, 200);
   assert.equal(promotedNone.body.performanceAccess, "none");
+
+  const movedToUserAdminNone = await adminRequest(`/users/${regularDefaultId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user_admin" }),
+  });
+  assert.equal(movedToUserAdminNone.status, 200);
+  assert.equal(movedToUserAdminNone.body.performanceAccess, "none");
 
   const grantedTeam = await adminRequest(`/users/${regularDefaultId}`, {
     method: "PATCH",
@@ -3660,6 +3684,12 @@ test("platform user creation and mutation persist explicit independent performan
   assert.equal(demotedTeam.body.performanceAccess, "team");
 
   const regularOrganizationId = regularOrganization.body.id as string;
+  const promotedOrganizationToUserAdmin = await adminRequest(`/users/${regularOrganizationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orgRole: "user_admin" }),
+  });
+  assert.equal(promotedOrganizationToUserAdmin.status, 200);
+  assert.equal(promotedOrganizationToUserAdmin.body.performanceAccess, "organization");
   const promotedOrganization = await adminRequest(`/users/${regularOrganizationId}`, {
     method: "PATCH",
     body: JSON.stringify({ orgRole: "org_admin" }),

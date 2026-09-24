@@ -39,6 +39,7 @@ function createUser(overrides?: Partial<UserProfile>): UserProfile {
     status: "active",
     orgId: "org_a",
     orgRole: "org_admin",
+    performanceAccess: "organization",
     timezone: "America/Denver",
     pendingTimezone: null,
     pendingTimezoneEffectiveAt: null,
@@ -216,6 +217,30 @@ test("dashboard viewer exposes explicit normalized performance access without us
   assert.equal(viewer.performanceAccess, "none");
   assert.equal(viewer.orgRole, "org_admin");
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
+});
+
+test("dashboard viewer fails closed for missing or malformed performance access regardless of role", () => {
+  const orgAdminMissing = createUser({
+    id: "org_admin_missing_performance",
+    email: "org-admin-missing@example.com",
+    orgRole: "org_admin",
+    performanceAccess: undefined,
+  });
+  const userAdminMalformed = {
+    ...createUser({
+      id: "user_admin_malformed_performance",
+      email: "user-admin-malformed@example.com",
+      orgRole: "user_admin",
+    }),
+    performanceAccess: "TEAM",
+  } as unknown as UserProfile;
+  const db = createDb({
+    users: [orgAdminMissing, userAdminMalformed],
+    orgs: [{ id: "org_a", name: "Org A", status: "active" }],
+  });
+
+  assert.equal(resolveDashboardViewer(db, orgAdminMissing)?.performanceAccess, "none");
+  assert.equal(resolveDashboardViewer(db, userAdminMalformed)?.performanceAccess, "none");
 });
 
 test("enterprise user without dashboard access does not resolve a dashboard viewer", () => {

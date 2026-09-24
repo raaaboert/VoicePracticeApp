@@ -184,7 +184,7 @@ test("performance scope follows performanceAccess independently from admin and c
   assert.equal(regularNoneManager.performanceAccess, "none");
 });
 
-test("legacy role-derived states preserve active and disabled historical result sets", () => {
+test("missing runtime performance access fails closed regardless of legacy role", () => {
   const orgAdmin = user("org_admin", { orgRole: "org_admin", performanceAccess: undefined });
   const userAdmin = user("user_admin", { orgRole: "user_admin", performanceAccess: undefined });
   const direct = user("direct", { managerUserId: userAdmin.id });
@@ -193,21 +193,13 @@ test("legacy role-derived states preserve active and disabled historical result 
   const unrelated = user("unrelated");
   const users = [orgAdmin, userAdmin, direct, disabledDirect, disabledUnrelated, unrelated];
 
-  const legacyScope = (actor: UserProfile): string[] => users
-    .filter((target) => {
-      if (actor.orgRole === "org_admin") {
-        return actor.orgId === target.orgId;
-      }
-      return actor.orgRole === "user_admin" && actor.orgId === target.orgId && (
-        target.id === actor.id || (target.orgRole === "user" && target.managerUserId === actor.id)
-      );
-    })
-    .map((target) => target.id)
-    .sort();
-
-  assert.deepEqual(scope(orgAdmin, users), legacyScope(orgAdmin));
-  assert.deepEqual(scope(userAdmin, users), legacyScope(userAdmin));
+  assert.deepEqual(scope(orgAdmin, users), []);
+  assert.deepEqual(scope(userAdmin, users), []);
   assert.deepEqual(scope(user("regular", { performanceAccess: undefined }), users), []);
+  assert.deepEqual(scope(user("invalid_org_admin", {
+    orgRole: "org_admin",
+    performanceAccess: "invalid" as UserProfile["performanceAccess"],
+  }), users), []);
 });
 
 test("super-user performance scope ignores informational access but stays inside caller-authorized organizations", () => {
