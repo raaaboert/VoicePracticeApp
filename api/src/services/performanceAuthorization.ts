@@ -7,21 +7,31 @@ import {
 
 import { normalizeManagerUserId, normalizePerformanceAccess } from "./userProfiles.js";
 
+export interface PerformanceAuthorizationUser {
+  readonly id: string;
+  readonly accountType: UserProfile["accountType"];
+  readonly orgId: string | null;
+  readonly orgRole: UserProfile["orgRole"];
+  readonly isSuperUser?: boolean;
+  readonly managerUserId?: string | null;
+  readonly performanceAccess?: PerformanceAccessLevel;
+}
+
 export function resolvePerformanceAccessLevel(
-  actor: UserProfile,
+  actor: PerformanceAuthorizationUser,
   validOrganizationIds?: ReadonlySet<string>
 ): PerformanceAccessLevel {
   return normalizePerformanceAccess(actor, validOrganizationIds);
 }
 
-function isDashboardSuperUser(actor: UserProfile, viewer: DashboardViewer): boolean {
+function isDashboardSuperUser(actor: PerformanceAuthorizationUser, viewer: DashboardViewer): boolean {
   return viewer.accessType === "super_user" && actor.isSuperUser === true;
 }
 
 export function canViewPerformanceTarget(params: {
-  actor: UserProfile;
+  actor: PerformanceAuthorizationUser;
   viewer?: DashboardViewer;
-  target: UserProfile;
+  target: PerformanceAuthorizationUser;
   validOrganizationIds?: ReadonlySet<string>;
 }): boolean {
   if (params.viewer && isDashboardSuperUser(params.actor, params.viewer)) {
@@ -72,8 +82,8 @@ export function canViewPerformanceTarget(params: {
 }
 
 export function resolvePerformanceScope(params: {
-  db: Pick<ApiDatabase, "users">;
-  actor: UserProfile;
+  db: Pick<ApiDatabase, "users"> | { users: readonly PerformanceAuthorizationUser[] };
+  actor: PerformanceAuthorizationUser;
   viewer: DashboardViewer;
   orgIds?: ReadonlySet<string> | null;
 }): Set<string> {
@@ -97,8 +107,8 @@ export function resolvePerformanceScope(params: {
 }
 
 export function getDashboardPermittedUserIds(params: {
-  db: Pick<ApiDatabase, "users">;
-  actor: UserProfile;
+  db: Pick<ApiDatabase, "users"> | { users: readonly PerformanceAuthorizationUser[] };
+  actor: PerformanceAuthorizationUser;
   viewer: DashboardViewer;
   orgIds?: ReadonlySet<string> | null;
 }): Set<string> {
@@ -106,15 +116,15 @@ export function getDashboardPermittedUserIds(params: {
 }
 
 export function canActorManagePerformanceUser(params: {
-  actor: UserProfile;
+  actor: PerformanceAuthorizationUser;
   viewer: DashboardViewer;
-  target: UserProfile;
+  target: PerformanceAuthorizationUser;
 }): boolean {
   return canViewPerformanceTarget(params);
 }
 
 export function canViewOrganizationPerformance(params: {
-  actor: UserProfile;
+  actor: PerformanceAuthorizationUser;
   orgId: string;
 }): boolean {
   if (params.actor.accountType !== "enterprise" || params.actor.orgId !== params.orgId) {
