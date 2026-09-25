@@ -360,6 +360,7 @@ import {
   canViewOrganizationPerformance,
   getDashboardPermittedUserIds,
 } from "./services/performanceAuthorization.js";
+import { capturePerformanceEvidenceSourceSnapshot as capturePerformanceEvidenceSourceSnapshotState } from "./services/performanceEvidenceSourceSnapshot.js";
 import {
   completeRecognizedSimulationUsage,
   normalizeSimulationSessionId,
@@ -4363,6 +4364,17 @@ async function withFreshReportingRead<T>(handler: (db: ApiDatabase) => Promise<T
     await refreshReportingSnapshots();
     const db = await loadDatabase({ forceStorageRead: true });
     return await handler(db);
+  });
+}
+
+async function capturePerformanceEvidenceSourceSnapshot() {
+  return await capturePerformanceEvidenceSourceSnapshotState({
+    refreshScoreRecords: async () => {
+      await scoreRecordStore.refreshSnapshot();
+    },
+    getScoreSnapshot: () => scoreRecordStore.getSnapshot(),
+    withDatabaseLock,
+    loadAppState: async () => await loadDatabase({ forceStorageRead: true }),
   });
 }
 

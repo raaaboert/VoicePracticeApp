@@ -381,6 +381,37 @@ test("file score record store refreshSnapshot picks up out-of-band writes and de
   }
 });
 
+test("file score record store replaces snapshots without changing an already captured source reference", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-score-record-store-snapshot-"));
+  try {
+    const store = createScoreRecordStore({
+      provider: "file",
+      dbPath: path.join(tempDir, "db.local.json"),
+      databaseUrl: null,
+      pgPoolMax: 1,
+      pgConnectTimeoutMs: 1_000,
+      pgIdleTimeoutMs: 1_000,
+    });
+    await store.initialize();
+    await store.appendRecord(createScore({ id: "score_before_capture" }));
+
+    const capturedSnapshot = store.getSnapshot();
+    await store.appendRecord(createScore({
+      id: "score_after_capture",
+      createdAt: "2026-04-01T10:05:00.000Z",
+    }));
+
+    assert.deepEqual(capturedSnapshot.map((record) => record.id), ["score_before_capture"]);
+    assert.deepEqual(
+      store.getSnapshot().map((record) => record.id),
+      ["score_before_capture", "score_after_capture"],
+    );
+    assert.notStrictEqual(store.getSnapshot(), capturedSnapshot);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("postgres score record store maps a realistic SELECT row into the score contract", async () => {
   const originalPoolQuery = Pool.prototype.query;
   const originalPoolConnect = Pool.prototype.connect;

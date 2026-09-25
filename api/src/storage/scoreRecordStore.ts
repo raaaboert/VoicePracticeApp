@@ -41,6 +41,7 @@ export interface ScoreRecordQuery {
 export interface ScoreRecordStore {
   initialize(): Promise<void>;
   refreshSnapshot(): Promise<void>;
+  getSnapshot(): readonly SimulationScoreRecord[];
   importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }>;
   appendRecord(record: SimulationScoreRecord): Promise<void>;
   getRecordById(scoreId: string): SimulationScoreRecord | null;
@@ -507,6 +508,12 @@ abstract class BaseScoreRecordStore implements ScoreRecordStore {
     }
 
     return this.recordsById.get(normalizedScoreId) ?? null;
+  }
+
+  // Every refresh and write replaces this array rather than changing it in place.
+  // Callers must treat the returned source snapshot and its records as read-only.
+  getSnapshot(): readonly SimulationScoreRecord[] {
+    return this.records;
   }
 
   listRecords(query: ScoreRecordQuery = {}): SimulationScoreRecord[] {
