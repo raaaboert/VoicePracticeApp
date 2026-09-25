@@ -4,7 +4,11 @@ import test from "node:test";
 import type { SimulationScoreRecord } from "@voicepractice/shared";
 
 import {
+  annotateDuplicateSimulationSessionConflict,
+  detectDuplicateSimulationSessionConflicts,
+  isPerformanceEvidenceQuarantined,
   LEGACY_UNVERSIONED_SCORING_GENERATION,
+  normalizePerformanceEvidenceBatch,
   normalizePerformanceEvidence,
   PERFORMANCE_EVIDENCE_EXTREME_BACKDATING_TOLERANCE_MS,
   UNVERSIONED_OUTCOME_AWARE_SCORING_GENERATION,
@@ -98,6 +102,19 @@ function accepted(record: SimulationScoreRecord) {
   const result = normalizePerformanceEvidence(record);
   assert.equal(result.status, "accepted", JSON.stringify(result));
   return result.evidence;
+}
+
+function acceptedBatchEvidence(
+  result: ReturnType<typeof normalizePerformanceEvidenceBatch>,
+  index: number,
+) {
+  const normalized = result.results[index];
+  assert.ok(normalized, `missing batch result at index ${index}`);
+  assert.equal(normalized.status, "accepted", JSON.stringify(normalized));
+  if (normalized.status !== "accepted") {
+    throw new Error("Expected accepted batch evidence");
+  }
+  return normalized.evidence;
 }
 
 test("normalizes a full current score without qualitative or token payloads", () => {
@@ -318,4 +335,168 @@ test("rejects malformed applied scoring weights instead of preserving false prov
   }));
   assert.equal(result.status, "rejected");
   assert.equal(result.rejections.some((entry) => entry.code === "invalid_scoring_weights"), true);
+});
+
+test("A: flags two valid distinct score IDs for the same simulation session", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_a", simulationSessionId: "sim_duplicate" }),
+    modernScore({ id: "score_b", simulationSessionId: "sim_duplicate" }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, [{
+    simulationSessionId: "sim_duplicate",
+    scoreIds: ["score_a", "score_b"],
+  }]);
+  assert.deepEqual(acceptedBatchEvidence(result, 0).anomalies, ["duplicate_session_conflict"]);
+  assert.deepEqual(acceptedBatchEvidence(result, 1).anomalies, ["duplicate_session_conflict"]);
+});
+
+test("B: reports one conflict and flags all three distinct score IDs for a session", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_c", simulationSessionId: "sim_triple" }),
+    modernScore({ id: "score_a", simulationSessionId: "sim_triple" }),
+    modernScore({ id: "score_b", simulationSessionId: "sim_triple" }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, [{
+    simulationSessionId: "sim_triple",
+    scoreIds: ["score_a", "score_b", "score_c"],
+  }]);
+  for (const index of [0, 1, 2]) {
+    assert.equal(
+      acceptedBatchEvidence(result, index).anomalies.includes("duplicate_session_conflict"),
+      true,
+    );
+  }
+});
+
+test("C: does not treat repeated snapshots of one score ID as a duplicate-session conflict", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_authoritative", simulationSessionId: "sim_retry" }),
+    modernScore({ id: "score_authoritative", simulationSessionId: "sim_retry" }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, []);
+  assert.deepEqual(acceptedBatchEvidence(result, 0).anomalies, []);
+  assert.deepEqual(acceptedBatchEvidence(result, 1).anomalies, []);
+});
+
+test("D: keeps different simulation sessions independent", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_one", simulationSessionId: "sim_one" }),
+    modernScore({ id: "score_two", simulationSessionId: "sim_two" }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, []);
+  assert.deepEqual(acceptedBatchEvidence(result, 0).anomalies, []);
+  assert.deepEqual(acceptedBatchEvidence(result, 1).anomalies, []);
+});
+
+test("E: null, absent, and empty simulation session IDs do not collide", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_null", simulationSessionId: null }),
+    modernScore({ id: "score_absent", simulationSessionId: undefined }),
+    modernScore({ id: "score_empty", simulationSessionId: " " }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, []);
+  for (const index of [0, 1, 2]) {
+    assert.deepEqual(acceptedBatchEvidence(result, index).anomalies, []);
+  }
+});
+
+test("F: a rejected sibling still quarantines valid evidence from the same raw session", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_valid", simulationSessionId: "sim_mixed" }),
+    modernScore({ id: "score_invalid", simulationSessionId: "sim_mixed", overallScore: 101 }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, [{
+    simulationSessionId: "sim_mixed",
+    scoreIds: ["score_invalid", "score_valid"],
+  }]);
+  assert.deepEqual(acceptedBatchEvidence(result, 0).anomalies, ["duplicate_session_conflict"]);
+  assert.equal(result.results[1]?.status, "rejected");
+});
+
+test("G: reports malformed duplicate-session siblings without inventing accepted evidence", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_invalid_a", simulationSessionId: "sim_invalid", overallScore: 101 }),
+    modernScore({ id: "score_invalid_b", simulationSessionId: "sim_invalid", persuasion: 0 }),
+  ]);
+
+  assert.deepEqual(result.duplicateSessionConflicts, [{
+    simulationSessionId: "sim_invalid",
+    scoreIds: ["score_invalid_a", "score_invalid_b"],
+  }]);
+  assert.deepEqual(result.results.map((entry) => entry.status), ["rejected", "rejected"]);
+});
+
+test("H: preserves timing anomalies when duplicate-session evidence is quarantined", () => {
+  const createdAt = new Date("2026-09-24T10:05:30.000Z");
+  const futureEndedAt = new Date(
+    createdAt.getTime() + SIMULATION_SESSION_COMPLETION_FUTURE_TOLERANCE_MS + 1,
+  );
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({
+      id: "score_timing",
+      simulationSessionId: "sim_timing_duplicate",
+      endedAt: futureEndedAt.toISOString(),
+      createdAt: createdAt.toISOString(),
+    }),
+    modernScore({ id: "score_sibling", simulationSessionId: "sim_timing_duplicate" }),
+  ]);
+
+  const evidence = acceptedBatchEvidence(result, 0);
+  assert.deepEqual(evidence.anomalies, ["timing_anomaly", "duplicate_session_conflict"]);
+  assert.equal(isPerformanceEvidenceQuarantined(evidence), true);
+});
+
+test("I: does not mutate raw records or independently normalized canonical evidence", () => {
+  const records = [
+    modernScore({ id: "score_immutable_a", simulationSessionId: "sim_immutable" }),
+    modernScore({ id: "score_immutable_b", simulationSessionId: "sim_immutable" }),
+  ];
+  const rawSnapshot = structuredClone(records);
+  const canonical = accepted(records[0]!);
+  const canonicalSnapshot = structuredClone(canonical);
+  const annotatedCanonical = annotateDuplicateSimulationSessionConflict(canonical);
+
+  const result = normalizePerformanceEvidenceBatch(records);
+
+  assert.deepEqual(records, rawSnapshot);
+  assert.deepEqual(canonical, canonicalSnapshot);
+  assert.notStrictEqual(annotatedCanonical, canonical);
+  assert.deepEqual(annotatedCanonical.anomalies, ["duplicate_session_conflict"]);
+  assert.notStrictEqual(acceptedBatchEvidence(result, 0), canonical);
+  assert.deepEqual(canonical.anomalies, []);
+});
+
+test("J: conflict diagnostics and ordered batch results are deterministic", () => {
+  const records = [
+    modernScore({ id: "score_z", simulationSessionId: "sim_b" }),
+    modernScore({ id: "score_a", simulationSessionId: "sim_b" }),
+    modernScore({ id: "score_y", simulationSessionId: "sim_a" }),
+    modernScore({ id: "score_b", simulationSessionId: "sim_a" }),
+  ];
+
+  assert.deepEqual(
+    detectDuplicateSimulationSessionConflicts(records),
+    [
+      { simulationSessionId: "sim_a", scoreIds: ["score_b", "score_y"] },
+      { simulationSessionId: "sim_b", scoreIds: ["score_a", "score_z"] },
+    ],
+  );
+  assert.deepEqual(normalizePerformanceEvidenceBatch(records), normalizePerformanceEvidenceBatch(records));
+});
+
+test("K: one authoritative recognized-retry row has no duplicate-session anomaly", () => {
+  const result = normalizePerformanceEvidenceBatch([
+    modernScore({ id: "score_sim_recognized_retry", simulationSessionId: "sim_recognized_retry" }),
+  ]);
+
+  const evidence = acceptedBatchEvidence(result, 0);
+  assert.deepEqual(result.duplicateSessionConflicts, []);
+  assert.deepEqual(evidence.anomalies, []);
+  assert.equal(isPerformanceEvidenceQuarantined(evidence), false);
 });

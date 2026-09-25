@@ -101,6 +101,16 @@ export type PerformanceEvidenceNormalizationResult =
       rejections: PerformanceEvidenceRejection[];
     };
 
+export interface DuplicateSimulationSessionConflict {
+  simulationSessionId: string;
+  scoreIds: string[];
+}
+
+export interface PerformanceEvidenceBatchNormalizationResult {
+  results: PerformanceEvidenceNormalizationResult[];
+  duplicateSessionConflicts: DuplicateSimulationSessionConflict[];
+}
+
 const OUTCOME_AWARE_FIELDS = [
   "communicationScore",
   "outcomeScore",
@@ -119,6 +129,37 @@ function normalizeOptionalIdentifier(value: unknown): string | undefined {
   }
   const normalized = value.trim();
   return normalized || undefined;
+}
+
+/**
+ * Finds ambiguous simulation sessions in a raw score snapshot. A conflict is
+ * defined by distinct authoritative score IDs, independently of whether any
+ * individual score can become canonical evidence.
+ */
+export function detectDuplicateSimulationSessionConflicts(
+  scoreRecords: readonly SimulationScoreRecord[],
+): DuplicateSimulationSessionConflict[] {
+  const scoreIdsBySessionId = new Map<string, Set<string>>();
+
+  for (const record of scoreRecords) {
+    const simulationSessionId = normalizeOptionalIdentifier(record.simulationSessionId);
+    const scoreId = normalizeOptionalIdentifier(record.id);
+    if (!simulationSessionId || !scoreId) {
+      continue;
+    }
+
+    const scoreIds = scoreIdsBySessionId.get(simulationSessionId) ?? new Set<string>();
+    scoreIds.add(scoreId);
+    scoreIdsBySessionId.set(simulationSessionId, scoreIds);
+  }
+
+  return [...scoreIdsBySessionId.entries()]
+    .filter(([, scoreIds]) => scoreIds.size > 1)
+    .map(([simulationSessionId, scoreIds]) => ({
+      simulationSessionId,
+      scoreIds: [...scoreIds].sort(),
+    }))
+    .sort((left, right) => left.simulationSessionId.localeCompare(right.simulationSessionId));
 }
 
 function parseTimestamp(value: unknown): Date | null {
@@ -351,4 +392,53 @@ export function normalizePerformanceEvidence(
       evidenceAtSource,
     },
   };
+}
+
+/**
+ * Duplicate-session evidence is retained for diagnostics but quarantined from
+ * any future performance aggregation.
+ */
+export function isPerformanceEvidenceQuarantined(
+  evidence: Pick<CanonicalPerformanceEvidence, "anomalies">,
+): boolean {
+  return evidence.anomalies.includes("duplicate_session_conflict");
+}
+
+export function annotateDuplicateSimulationSessionConflict(
+  evidence: CanonicalPerformanceEvidence,
+): CanonicalPerformanceEvidence {
+  const anomalies: PerformanceEvidenceAnomaly[] = evidence.anomalies.includes(
+    "duplicate_session_conflict",
+  )
+    ? [...evidence.anomalies]
+    : [...evidence.anomalies, "duplicate_session_conflict"];
+  return { ...evidence, anomalies };
+}
+
+export function normalizePerformanceEvidenceBatch(
+  scoreRecords: readonly SimulationScoreRecord[],
+): PerformanceEvidenceBatchNormalizationResult {
+  const duplicateSessionConflicts = detectDuplicateSimulationSessionConflicts(scoreRecords);
+  const conflictedSessionIds = new Set(
+    duplicateSessionConflicts.map((conflict) => conflict.simulationSessionId),
+  );
+
+  const results = scoreRecords.map((record) => {
+    const result = normalizePerformanceEvidence(record);
+    const simulationSessionId = normalizeOptionalIdentifier(record.simulationSessionId);
+    if (
+      result.status !== "accepted"
+      || !simulationSessionId
+      || !conflictedSessionIds.has(simulationSessionId)
+    ) {
+      return result;
+    }
+
+    return {
+      status: "accepted" as const,
+      evidence: annotateDuplicateSimulationSessionConflict(result.evidence),
+    };
+  });
+
+  return { results, duplicateSessionConflicts };
 }
