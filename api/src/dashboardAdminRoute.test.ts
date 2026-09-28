@@ -10,6 +10,7 @@ import test, { after, before } from "node:test";
 import {
   AuditEvent,
   ApiDatabase,
+  computeMonthlyPeriodBounds,
   createDefaultConfig,
   EnterpriseJoinRequestRecord,
   EnterpriseOrg,
@@ -32,9 +33,20 @@ const NOW = "2026-07-25T15:00:00.000Z";
 const RECENT_ACTIVITY_ANCHOR_MS = Date.now();
 const DAY_MS = 86_400_000;
 const MINUTE_MS = 60_000;
+const BILLING_USAGE_PERIOD_START_MS = new Date(
+  computeMonthlyPeriodBounds(NOW, new Date()).periodStartAt,
+).getTime();
 
 function daysAgo(days: number, minuteOffset = 0): string {
   return new Date(RECENT_ACTIVITY_ANCHOR_MS - days * DAY_MS + minuteOffset * MINUTE_MS).toISOString();
+}
+
+function billingPeriodUsageWindow(minuteOffset = 0): Pick<UsageSessionRecord, "startedAt" | "endedAt"> {
+  const startedAt = new Date(BILLING_USAGE_PERIOD_START_MS + minuteOffset * MINUTE_MS);
+  return {
+    startedAt: startedAt.toISOString(),
+    endedAt: new Date(startedAt.getTime() + 5 * MINUTE_MS).toISOString(),
+  };
 }
 
 const MOBILE_TOKEN_SECRET = "mobile_token_secret_for_dashboard_admin_route_tests";
@@ -699,13 +711,11 @@ function buildDatabase(): ApiDatabase {
     ],
     usageSessions: [
       buildUsageSessionRecord("usage_self", "user_admin", {
-        endedAt: daysAgo(10, 5),
-        startedAt: daysAgo(10),
+        ...billingPeriodUsageWindow(),
       }),
       buildUsageSessionRecord("usage_direct", "learner", {
         divisionId: "division_a",
-        endedAt: daysAgo(9, 5),
-        startedAt: daysAgo(9),
+        ...billingPeriodUsageWindow(10),
       }),
       buildUsageSessionRecord("usage_direct_division_b_old", "learner", {
         divisionId: "division_b",
@@ -714,12 +724,10 @@ function buildDatabase(): ApiDatabase {
         startedAt: "2025-01-21T12:00:00.000Z",
       }),
       buildUsageSessionRecord("usage_unassigned", "unassigned_learner", {
-        endedAt: daysAgo(8, 5),
-        startedAt: daysAgo(8),
+        ...billingPeriodUsageWindow(20),
       }),
       buildUsageSessionRecord("usage_other_report", "other_manager_report", {
-        endedAt: daysAgo(7, 5),
-        startedAt: daysAgo(7),
+        ...billingPeriodUsageWindow(30),
       }),
       buildUsageSessionRecord("usage_other_org", "other_org_user", {
         orgId: "org_2",
