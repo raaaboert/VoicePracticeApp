@@ -111,6 +111,7 @@ export interface OrganizationPerformanceActivityAggregate {
 export interface OrganizationPerformanceAggregate {
   readonly calendarMonth: OrganizationPerformanceCalendarMonth & { readonly timeZone: "UTC" };
   readonly dimensionFilter: OrganizationPerformanceDimensionFilter | null;
+  readonly historicalScope: "organization_history" | "current_population";
   readonly activity: OrganizationPerformanceActivityAggregate | null;
   readonly completionGroups: readonly OrganizationPerformanceCompletionGroup[];
   readonly metricGroups: readonly OrganizationPerformanceMetricAggregate[];
@@ -148,17 +149,21 @@ interface MetricDefinition {
   readonly composite: boolean;
 }
 
-interface PrivacySelection {
-  readonly rows: readonly OrganizationEvidenceCandidate[] | null;
-  readonly adjustmentApplied: boolean;
-}
-
-interface PrivacyBuildResult<T> {
-  readonly value: T;
-  readonly adjustmentApplied: boolean;
-}
-
 type CurrentSubjectClassifier = (candidate: OrganizationEvidenceCandidate) => boolean;
+type HistoricalPrivacyMode = "all_eligible_history" | "current_only";
+
+interface CompletionPopulation {
+  readonly scoringGeneration: string;
+  readonly completionRows: readonly OrganizationEvidenceCandidate[];
+  readonly objectiveRows: readonly OrganizationEvidenceCandidate[];
+}
+
+interface MetricPopulation {
+  readonly definition: MetricDefinition;
+  readonly scoringGeneration: string;
+  readonly profileId?: string;
+  readonly rows: readonly OrganizationEvidenceCandidate[];
+}
 
 const METRICS: readonly MetricDefinition[] = [
   { metric: "overall", availability: "overall", value: (row) => row.overallScore, composite: true },
@@ -253,23 +258,6 @@ function concentration(candidates: readonly OrganizationEvidenceCandidate[]): Or
   };
 }
 
-function applyHistoricalPrivacy(
-  candidates: readonly OrganizationEvidenceCandidate[],
-  isCurrentSubject: CurrentSubjectClassifier | undefined,
-): PrivacySelection {
-  if (!isCurrentSubject) return { rows: candidates, adjustmentApplied: false };
-  const currentRows: OrganizationEvidenceCandidate[] = [];
-  const protectedRows: OrganizationEvidenceCandidate[] = [];
-  for (const candidate of candidates) {
-    (isCurrentSubject(candidate) ? currentRows : protectedRows).push(candidate);
-  }
-  const protectedContributorCount = contributorCounts(protectedRows).size;
-  if (protectedContributorCount === 0 || protectedContributorCount >= ORGANIZATION_PERFORMANCE_PROTECTED_CONTRIBUTOR_THRESHOLD) {
-    return { rows: candidates, adjustmentApplied: false };
-  }
-  return { rows: currentRows.length > 0 ? currentRows : null, adjustmentApplied: true };
-}
-
 function isConclusive(candidate: OrganizationEvidenceCandidate): boolean {
   return candidate.completionLevel === undefined || candidate.completionLevel === "complete";
 }
@@ -306,6 +294,76 @@ function matchesDimension(candidate: OrganizationEvidenceCandidate, filter: Orga
   return candidate.trainingId === filter.id;
 }
 
+function completionPopulations(
+  candidates: readonly OrganizationEvidenceCandidate[],
+): CompletionPopulation[] {
+  const generations = [...new Set(candidates.map((candidate) => candidate.scoringGeneration))].sort();
+  return generations.map((scoringGeneration) => {
+    const generationRows = candidates.filter((candidate) => candidate.scoringGeneration === scoringGeneration);
+    return {
+      scoringGeneration,
+      completionRows: generationRows.filter((candidate) => candidate.metricAvailability.completion),
+      objectiveRows: generationRows.filter((candidate) => candidate.metricAvailability.objective),
+    };
+  });
+}
+
+function metricPopulations(
+  candidates: readonly OrganizationEvidenceCandidate[],
+): MetricPopulation[] {
+  const populations: MetricPopulation[] = [];
+  for (const definition of METRICS) {
+    const grouped = new Map<string, OrganizationEvidenceCandidate[]>();
+    for (const candidate of candidates) {
+      const value = definition.value(candidate);
+      if (!isConclusive(candidate) || !candidate.metricAvailability[definition.availability] || value === undefined) continue;
+      const profileId = definition.composite ? profileIdentity(candidate.scoringWeightsApplied) : undefined;
+      const key = `${candidate.scoringGeneration}\u0000${profileId ?? ""}`;
+      const rows = grouped.get(key) ?? [];
+      rows.push(candidate);
+      grouped.set(key, rows);
+    }
+    for (const [key, rows] of grouped) {
+      const [scoringGeneration, profileId] = key.split("\u0000");
+      populations.push({ definition, scoringGeneration: scoringGeneration!, profileId: profileId || undefined, rows });
+    }
+  }
+  return populations.sort((left, right) =>
+    (METRIC_ORDER.get(left.definition.metric)! - METRIC_ORDER.get(right.definition.metric)!)
+    || left.scoringGeneration.localeCompare(right.scoringGeneration)
+    || (left.profileId ?? "").localeCompare(right.profileId ?? ""));
+}
+
+function protectedContributorCount(
+  candidates: readonly OrganizationEvidenceCandidate[],
+  isCurrentSubject: CurrentSubjectClassifier,
+): number {
+  return contributorCounts(candidates.filter((candidate) => !isCurrentSubject(candidate))).size;
+}
+
+function protectedPopulationIsSafe(
+  candidates: readonly OrganizationEvidenceCandidate[],
+  isCurrentSubject: CurrentSubjectClassifier,
+): boolean {
+  const count = protectedContributorCount(candidates, isCurrentSubject);
+  return count === 0 || count >= ORGANIZATION_PERFORMANCE_PROTECTED_CONTRIBUTOR_THRESHOLD;
+}
+
+function selectResponsePrivacyMode(
+  candidates: readonly OrganizationEvidenceCandidate[],
+  isCurrentSubject: CurrentSubjectClassifier,
+): HistoricalPrivacyMode {
+  const populations: Array<readonly OrganizationEvidenceCandidate[]> = [candidates];
+  for (const population of completionPopulations(candidates)) {
+    if (population.completionRows.length > 0) populations.push(population.completionRows);
+    if (population.objectiveRows.length > 0) populations.push(population.objectiveRows);
+  }
+  for (const population of metricPopulations(candidates)) populations.push(population.rows);
+  return populations.every((population) => protectedPopulationIsSafe(population, isCurrentSubject))
+    ? "all_eligible_history"
+    : "current_only";
+}
+
 function buildCompletionAggregate(
   rows: readonly OrganizationEvidenceCandidate[],
   adjustmentApplied: boolean,
@@ -340,90 +398,32 @@ function buildObjectiveAggregate(
 
 function buildCompletionGroups(
   candidates: readonly OrganizationEvidenceCandidate[],
-  isCurrentSubject: CurrentSubjectClassifier | undefined,
-): PrivacyBuildResult<OrganizationPerformanceCompletionGroup[]> {
-  const groups: OrganizationPerformanceCompletionGroup[] = [];
-  let adjustmentApplied = false;
-  const generations = [...new Set(candidates.map((candidate) => candidate.scoringGeneration))].sort();
-  for (const scoringGeneration of generations) {
-    const generationRows = candidates.filter((candidate) => candidate.scoringGeneration === scoringGeneration);
-    const completion = applyHistoricalPrivacy(
-      generationRows.filter((candidate) => candidate.metricAvailability.completion),
-      isCurrentSubject,
-    );
-    const objective = applyHistoricalPrivacy(
-      generationRows.filter((candidate) => candidate.metricAvailability.objective),
-      isCurrentSubject,
-    );
-    adjustmentApplied ||= completion.adjustmentApplied || objective.adjustmentApplied;
-    if (completion.rows === null && objective.rows === null) continue;
-    if (
-      (completion.rows === null || completion.rows.length === 0)
-      && (objective.rows === null || objective.rows.length === 0)
-      && (completion.adjustmentApplied || objective.adjustmentApplied)
-    ) continue;
-    groups.push({
-      scoringGeneration,
-      ...(completion.rows === null ? {} : { completion: buildCompletionAggregate(completion.rows, completion.adjustmentApplied) }),
-      ...(objective.rows === null ? {} : { objective: buildObjectiveAggregate(objective.rows, objective.adjustmentApplied) }),
-    });
-  }
-  return { value: groups, adjustmentApplied };
+  historicalPrivacyAdjustmentApplied: boolean,
+): OrganizationPerformanceCompletionGroup[] {
+  return completionPopulations(candidates).map(({ scoringGeneration, completionRows, objectiveRows }) => ({
+    scoringGeneration,
+    completion: buildCompletionAggregate(completionRows, historicalPrivacyAdjustmentApplied),
+    objective: buildObjectiveAggregate(objectiveRows, historicalPrivacyAdjustmentApplied),
+  }));
 }
 
 function buildMetricGroups(
   candidates: readonly OrganizationEvidenceCandidate[],
-  isCurrentSubject: CurrentSubjectClassifier | undefined,
-): PrivacyBuildResult<OrganizationPerformanceMetricAggregate[]> {
-  const sourceGroups: Array<{
-    definition: MetricDefinition;
-    scoringGeneration: string;
-    profileId?: string;
-    rows: OrganizationEvidenceCandidate[];
-  }> = [];
-  for (const definition of METRICS) {
-    const qualifying = candidates.filter((candidate) => {
-      const value = definition.value(candidate);
-      return isConclusive(candidate) && candidate.metricAvailability[definition.availability] && value !== undefined;
-    });
-    const grouped = new Map<string, OrganizationEvidenceCandidate[]>();
-    for (const candidate of qualifying) {
-      const profileId = definition.composite ? profileIdentity(candidate.scoringWeightsApplied) : undefined;
-      const key = `${candidate.scoringGeneration}\u0000${profileId ?? ""}`;
-      const rows = grouped.get(key) ?? [];
-      rows.push(candidate);
-      grouped.set(key, rows);
-    }
-    for (const [key, rows] of grouped) {
-      const [scoringGeneration, profileId] = key.split("\u0000");
-      sourceGroups.push({ definition, scoringGeneration: scoringGeneration!, profileId: profileId || undefined, rows });
-    }
-  }
-
-  let adjustmentApplied = false;
-  const value = sourceGroups
-    .sort((left, right) =>
-      (METRIC_ORDER.get(left.definition.metric)! - METRIC_ORDER.get(right.definition.metric)!)
-      || left.scoringGeneration.localeCompare(right.scoringGeneration)
-      || (left.profileId ?? "").localeCompare(right.profileId ?? ""))
-    .flatMap(({ definition, scoringGeneration, rows }) => {
-      const selection = applyHistoricalPrivacy(rows, isCurrentSubject);
-      adjustmentApplied ||= selection.adjustmentApplied;
-      if (selection.rows === null) return [];
-      const displayedRows = selection.rows;
-      const values = displayedRows.map((candidate) => definition.value(candidate)!).sort((left, right) => left - right);
-      return [{
-        metric: definition.metric,
-        scoringGeneration,
-        ...(definition.composite ? { weightProfile: weightProfile(displayedRows[0]!.scoringWeightsApplied) } : {}),
-        mean: values.reduce((sum, metricValue) => sum + metricValue, 0) / values.length,
-        qualifyingObservationCount: values.length,
-        evidenceStrength: evidenceStrength(displayedRows, values.length),
-        concentration: concentration(displayedRows),
-        historicalPrivacyAdjustmentApplied: selection.adjustmentApplied,
-      }];
-    });
-  return { value, adjustmentApplied };
+  historicalPrivacyAdjustmentApplied: boolean,
+): OrganizationPerformanceMetricAggregate[] {
+  return metricPopulations(candidates).map(({ definition, scoringGeneration, rows }) => {
+    const values = rows.map((candidate) => definition.value(candidate)!).sort((left, right) => left - right);
+    return {
+      metric: definition.metric,
+      scoringGeneration,
+      ...(definition.composite ? { weightProfile: weightProfile(rows[0]!.scoringWeightsApplied) } : {}),
+      mean: values.reduce((sum, metricValue) => sum + metricValue, 0) / values.length,
+      qualifyingObservationCount: values.length,
+      evidenceStrength: evidenceStrength(rows, values.length),
+      concentration: concentration(rows),
+      historicalPrivacyAdjustmentApplied,
+    };
+  });
 }
 
 function aggregateOrganizationPerformanceInternal(
@@ -437,11 +437,24 @@ function aggregateOrganizationPerformanceInternal(
     const evidenceAt = Date.parse(candidate.evidenceAt);
     return evidenceAt >= start && evidenceAt < before && matchesDimension(candidate, dimensionFilter);
   });
-  const activitySelection = applyHistoricalPrivacy(candidates, isCurrentSubject);
-  const completionGroups = buildCompletionGroups(candidates, isCurrentSubject);
-  const metricGroups = buildMetricGroups(candidates, isCurrentSubject);
-  const historicalPrivacyAdjustmentApplied =
-    activitySelection.adjustmentApplied || completionGroups.adjustmentApplied || metricGroups.adjustmentApplied;
+  const historicalScope = dimensionFilter === undefined ? "organization_history" : "current_population";
+  let privacyMode: HistoricalPrivacyMode = "all_eligible_history";
+  let historicalPrivacyAdjustmentApplied = false;
+  let displayedCandidates = candidates;
+  let suppressEmptyActivity = false;
+  if (isCurrentSubject && dimensionFilter !== undefined) {
+    privacyMode = "current_only";
+    displayedCandidates = candidates.filter(isCurrentSubject);
+  } else if (isCurrentSubject) {
+    privacyMode = selectResponsePrivacyMode(candidates, isCurrentSubject);
+    if (privacyMode === "current_only") {
+      historicalPrivacyAdjustmentApplied = candidates.some((candidate) => !isCurrentSubject(candidate));
+      displayedCandidates = candidates.filter(isCurrentSubject);
+      suppressEmptyActivity = historicalPrivacyAdjustmentApplied && displayedCandidates.length === 0;
+    }
+  }
+  const completionGroups = buildCompletionGroups(displayedCandidates, historicalPrivacyAdjustmentApplied);
+  const metricGroups = buildMetricGroups(displayedCandidates, historicalPrivacyAdjustmentApplied);
 
   return {
     calendarMonth: {
@@ -450,27 +463,34 @@ function aggregateOrganizationPerformanceInternal(
       timeZone: ORGANIZATION_PERFORMANCE_AGGREGATION_TIME_ZONE,
     },
     dimensionFilter: dimensionFilter ?? null,
-    activity: activitySelection.rows === null ? null : {
-      attemptCount: activitySelection.rows.length,
-      conclusiveAttemptCount: activitySelection.rows.filter(isConclusive).length,
-      evidenceStrength: evidenceStrength(activitySelection.rows, activitySelection.rows.length),
-      concentration: concentration(activitySelection.rows),
-      historicalPrivacyAdjustmentApplied: activitySelection.adjustmentApplied,
+    historicalScope,
+    activity: suppressEmptyActivity ? null : {
+      attemptCount: displayedCandidates.length,
+      conclusiveAttemptCount: displayedCandidates.filter(isConclusive).length,
+      evidenceStrength: evidenceStrength(displayedCandidates, displayedCandidates.length),
+      concentration: concentration(displayedCandidates),
+      historicalPrivacyAdjustmentApplied,
     },
-    completionGroups: completionGroups.value,
-    metricGroups: metricGroups.value,
+    completionGroups,
+    metricGroups,
     historicalPrivacyAdjustmentApplied,
   };
 }
 
-/** Existing pure Slice 4B aggregate for already-safe/internal candidate populations. */
+/**
+ * INTERNAL - NOT ROUTE-SAFE.
+ * Routes/controllers must use queryAuthorizedOrganizationPerformance.
+ */
 export function aggregateOrganizationPerformance(
   input: AggregateOrganizationPerformanceInput,
 ): UnprotectedOrganizationPerformanceAggregate {
   return aggregateOrganizationPerformanceInternal(input, undefined) as UnprotectedOrganizationPerformanceAggregate;
 }
 
-/** Internal privacy-aware aggregation primitive used only by the controlled organization facade. */
+/**
+ * INTERNAL - NOT ROUTE-SAFE.
+ * Routes/controllers must use queryAuthorizedOrganizationPerformance.
+ */
 export function aggregateOrganizationPerformanceWithHistoricalPrivacy(
   input: AggregateOrganizationPerformanceInput,
   isCurrentSubject: CurrentSubjectClassifier,

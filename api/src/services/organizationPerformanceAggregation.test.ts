@@ -346,6 +346,7 @@ test("output is deterministic and contains no candidate identity or exact timest
   const first = aggregate(rows);
   const second = aggregate([...rows].reverse());
   assert.deepEqual(second, first);
+  assert.equal(first.historicalScope, "organization_history");
   const serialized = JSON.stringify(first);
   for (const forbidden of [
     "subjectKey", "userId", "evidenceId", "simulationSessionId", "evidenceAt",
@@ -355,7 +356,7 @@ test("output is deterministic and contains no candidate identity or exact timest
   }
   assert.deepEqual(Object.keys(first).sort(), [
     "activity", "calendarMonth", "completionGroups", "dimensionFilter",
-    "historicalPrivacyAdjustmentApplied", "metricGroups",
+    "historicalPrivacyAdjustmentApplied", "historicalScope", "metricGroups",
   ]);
   assert.deepEqual(Object.keys(first.activity).sort(), [
     "attemptCount", "concentration", "conclusiveAttemptCount", "evidenceStrength",

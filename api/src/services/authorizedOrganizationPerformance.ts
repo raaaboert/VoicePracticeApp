@@ -43,6 +43,10 @@ function assertOrganizationPerformanceCandidateOrganization(
  * Controlled, route-ready organization intelligence boundary. It authorizes
  * the full historical organization evidence set before applying the one-month,
  * one-dimension aggregate and protected-history policy.
+ *
+ * Residual privacy limit: current-subject classification follows this snapshot.
+ * Saved organization-wide results across membership changes may therefore
+ * differ; membership hysteresis/versioning is intentionally deferred.
  */
 export function queryAuthorizedOrganizationPerformance(
   query: AuthorizedOrganizationPerformanceQuery,

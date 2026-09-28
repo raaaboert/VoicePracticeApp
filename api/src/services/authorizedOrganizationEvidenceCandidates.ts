@@ -101,7 +101,11 @@ function projectOrganizationEvidenceCandidate(
     : { ...base, subjectKind: "user", subjectKey: evidence.userId };
 }
 
-/** Returns historically org-stamped evidence for future anonymous aggregation.
+/**
+ * INTERNAL - NOT ROUTE-SAFE.
+ * Routes/controllers must use queryAuthorizedOrganizationPerformance.
+ *
+ * Returns historically org-stamped evidence for future anonymous aggregation.
  * This does not authorize person targets or decide cohort privacy thresholds.
  * Ordering is canonical evidenceAt ascending, then internal evidenceId.
  */

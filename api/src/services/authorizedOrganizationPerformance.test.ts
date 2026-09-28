@@ -234,15 +234,17 @@ test("counts all deidentified history as one protected contributor bucket", () =
   assert.equal(included.historicalPrivacyAdjustmentApplied, false);
 });
 
-test("enforces privacy independently for each metric generation and weight profile", () => {
+test("uses current-only response mode when any protected metric/profile population is unsafe", () => {
+  const current = user("current_profile");
+  const currentRow = score("current_profile", current.id, { overallScore: 20, scoringWeightsApplied: WEIGHTS_B });
   const oneProfileA = [score("profile_a", "former_a", { overallScore: 10, scoringWeightsApplied: WEIGHTS_A })];
   const fiveProfileB = Array.from({ length: 5 }, (_, index) =>
     score(`profile_b_${index}`, `former_b_${index}`, { overallScore: 80, scoringWeightsApplied: WEIGHTS_B }));
-  const result = query([...oneProfileA, ...fiveProfileB]);
+  const result = query([currentRow, ...oneProfileA, ...fiveProfileB], [current]);
   const overall = metric(result, "overall");
-  assert.equal(result.activity?.attemptCount, 6);
+  assert.equal(result.activity?.attemptCount, 1);
   assert.equal(overall.length, 1);
-  assert.equal(overall[0]?.mean, 80);
+  assert.equal(overall[0]?.mean, 20);
   assert.deepEqual(overall[0]?.weightProfile, {
     kind: "known",
     profileKey: "known:100000000:200000000:300000000:400000000",
@@ -251,7 +253,7 @@ test("enforces privacy independently for each metric generation and weight profi
   assert.equal(result.historicalPrivacyAdjustmentApplied, true);
 });
 
-test("enforces completion and objective privacy on their exact independent populations", () => {
+test("response precheck covers completion and objective populations and removes their protected-only labels", () => {
   const availability = (completion: boolean, objective: boolean) => ({
     overall: false,
     communication: false,
@@ -286,6 +288,7 @@ test("enforces completion and objective privacy on their exact independent popul
     objectiveAchieved: true,
   });
   const rows = [
+    candidate("current", "current_generation", true, true),
     ...Array.from({ length: 5 }, (_, index) =>
       candidate(`completion_${index}`, "completion_safe", true, index === 0)),
     ...Array.from({ length: 5 }, (_, index) =>
@@ -293,15 +296,123 @@ test("enforces completion and objective privacy on their exact independent popul
   ];
   const result = aggregateOrganizationPerformanceWithHistoricalPrivacy(
     { candidates: rows, calendarMonth: MONTH },
-    () => false,
+    (row) => row.subjectKind === "user" && row.subjectKey === "current",
   );
-  const completionSafe = result.completionGroups.find((group) => group.scoringGeneration === "completion_safe")!;
-  const objectiveSafe = result.completionGroups.find((group) => group.scoringGeneration === "objective_safe")!;
-  assert.equal(completionSafe.completion?.availableObservationCount, 5);
-  assert.equal(completionSafe.objective, undefined);
-  assert.equal(objectiveSafe.completion, undefined);
-  assert.equal(objectiveSafe.objective?.availableObservationCount, 5);
+  assert.equal(result.activity?.attemptCount, 1);
+  assert.deepEqual(result.completionGroups.map((group) => group.scoringGeneration), ["current_generation"]);
+  assert.equal(result.completionGroups[0]?.completion?.availableObservationCount, 1);
+  assert.equal(result.completionGroups[0]?.objective?.availableObservationCount, 1);
   assert.equal(result.historicalPrivacyAdjustmentApplied, true);
+});
+
+test("dimension-filtered views never include protected history, preventing cross-query differencing", () => {
+  const current = user("current_e", { divisionId: "division_e" });
+  const protectedD = Array.from({ length: 5 }, (_, index) =>
+    score(`protected_d_${index}`, `protected_d_${index}`, {
+      divisionId: "division_d",
+      overallScore: 10 + (index * 10),
+    }));
+  const protectedE = score("protected_e", "protected_e", { divisionId: "division_e", overallScore: 90 });
+  const currentE = score("current_e", current.id, { divisionId: "division_e", overallScore: 20 });
+  const records = [...protectedD, protectedE, currentE];
+
+  const organization = query(records, [current]);
+  const divisionD = query(records, [current], { dimensionFilter: { dimension: "division", id: "division_d" } });
+  const divisionE = query(records, [current], { dimensionFilter: { dimension: "division", id: "division_e" } });
+  const divisionEWithoutProtected = query([currentE], [current], {
+    dimensionFilter: { dimension: "division", id: "division_e" },
+  });
+
+  assert.equal(organization.activity?.attemptCount, 7);
+  assert.equal(organization.historicalScope, "organization_history");
+  assert.equal(metric(organization, "overall")[0]?.qualifyingObservationCount, 7);
+  assert.equal(divisionD.activity?.attemptCount, 0);
+  assert.deepEqual(divisionD.metricGroups, []);
+  assert.equal(divisionE.activity?.attemptCount, 1);
+  assert.equal(metric(divisionE, "overall")[0]?.mean, 20);
+  assert.deepEqual(divisionE, divisionEWithoutProtected);
+  assert.equal(divisionD.historicalScope, "current_population");
+  assert.equal(divisionE.historicalScope, "current_population");
+  assert.equal(divisionD.historicalPrivacyAdjustmentApplied, false);
+  assert.equal(divisionE.historicalPrivacyAdjustmentApplied, false);
+  assert.equal(divisionE.activity?.historicalPrivacyAdjustmentApplied, false);
+  assert.equal(metric(divisionE, "overall")[0]?.historicalPrivacyAdjustmentApplied, false);
+
+  const oldRecoveredProtectedScore =
+    metric(organization, "overall")[0]!.mean * 7
+    - 30 * 5
+    - metric(divisionE, "overall")[0]!.mean;
+  assert.equal(oldRecoveredProtectedScore, 90);
+  assert.equal(metric(divisionD, "overall").length, 0);
+});
+
+test("protected-only and empty filtered participation cells are observationally identical", () => {
+  const protectedOnly = query([
+    score("protected_training", "former_training", { trainingId: "training_secret" }),
+  ], [], { dimensionFilter: { dimension: "training", id: "training_secret" } });
+  const empty = query([], [], { dimensionFilter: { dimension: "training", id: "training_secret" } });
+  assert.deepEqual(protectedOnly, empty);
+  assert.equal(protectedOnly.activity?.attemptCount, 0);
+  assert.equal(protectedOnly.historicalPrivacyAdjustmentApplied, false);
+  assert.equal(protectedOnly.historicalScope, "current_population");
+});
+
+test("one response mode keeps activity, completion, objective, and metric counts privacy-consistent", () => {
+  const currentUsers = [user("consistent_current_a"), user("consistent_current_b")];
+  const currentRows = currentUsers.map((subject, index) =>
+    score(`consistent_current_${index}`, subject.id, { overallScore: 10 + (index * 10), scoringWeightsApplied: WEIGHTS_A }));
+  const protectedRows = [
+    ...Array.from({ length: 4 }, (_, index) =>
+      score(`consistent_b_${index}`, `consistent_b_${index}`, { overallScore: 80, scoringWeightsApplied: WEIGHTS_B })),
+    score("consistent_a", "consistent_a", { overallScore: 90, scoringWeightsApplied: WEIGHTS_A }),
+  ];
+  const result = query([...currentRows, ...protectedRows], currentUsers);
+  const completion = result.completionGroups[0]!;
+  const overall = metric(result, "overall");
+  assert.equal(result.activity?.attemptCount, 2);
+  assert.equal(result.activity?.conclusiveAttemptCount, 2);
+  assert.equal(completion.completion?.availableObservationCount, 2);
+  assert.equal(completion.objective?.availableObservationCount, 2);
+  assert.equal(overall.length, 1);
+  assert.equal(overall[0]?.qualifyingObservationCount, 2);
+  assert.equal(result.activity?.historicalPrivacyAdjustmentApplied, true);
+  assert.equal(completion.completion?.historicalPrivacyAdjustmentApplied, true);
+  assert.equal(completion.objective?.historicalPrivacyAdjustmentApplied, true);
+  assert.equal(overall[0]?.historicalPrivacyAdjustmentApplied, true);
+});
+
+test("current-only fallback leaves no protected-only generation or profile shell", () => {
+  const current = user("current_label");
+  const currentRow = score("current_label", current.id, { rubricVersion: "current_generation" });
+  const protectedLegacy = score("protected_legacy", "former_legacy", {
+    rubricVersion: "2026-03-06.v2",
+    communicationScore: undefined,
+    outcomeScore: undefined,
+    completionLevel: undefined,
+    objectiveAchieved: undefined,
+    scoringWeightsApplied: undefined,
+  });
+  const result = query([currentRow, protectedLegacy], [current]);
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("2026-03-06.v2"), false);
+  assert.equal(serialized.includes('"profileKey":"unknown"'), false);
+  assert.deepEqual(result.completionGroups.map((group) => group.scoringGeneration), ["current_generation"]);
+  assert.equal(result.metricGroups.every((group) => group.scoringGeneration === "current_generation"), true);
+});
+
+test("small filtered current cohorts remain visible under the static current-population contract", () => {
+  for (const count of [1, 3]) {
+    const users = Array.from({ length: count }, (_, index) => user(`filtered_current_${count}_${index}`));
+    const rows = users.map((subject, index) =>
+      score(`filtered_current_${count}_${index}`, subject.id, { divisionId: "division_current", overallScore: 60 + index }));
+    const result = query(rows, users, { dimensionFilter: { dimension: "division", id: "division_current" } });
+    const overall = metric(result, "overall")[0]!;
+    assert.equal(result.activity?.attemptCount, count);
+    assert.equal(overall.qualifyingObservationCount, count);
+    assert.equal(overall.evidenceStrength.limitedEvidence, true);
+    assert.equal(result.historicalPrivacyAdjustmentApplied, false);
+    assert.equal(result.historicalScope, "current_population");
+  }
 });
 
 test("supports one dimension only and validates before candidate acquisition", () => {
