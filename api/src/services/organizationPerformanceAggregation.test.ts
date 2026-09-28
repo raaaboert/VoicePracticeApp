@@ -71,6 +71,17 @@ test("UTC calendar month includes its first instant and excludes the next month"
   assert.equal(result.activity.attemptCount, 2);
 });
 
+test("December includes its final UTC instant and excludes January rollover", () => {
+  const result = aggregateOrganizationPerformance({
+    candidates: [
+      candidate({ evidenceAt: "2026-12-31T23:59:59.999Z", subjectKey: "december" }),
+      candidate({ evidenceAt: "2027-01-01T00:00:00.000Z", subjectKey: "january" }),
+    ],
+    calendarMonth: { year: 2026, month: 12 },
+  });
+  assert.equal(result.activity.attemptCount, 1);
+});
+
 test("rejects invalid months, invalid dimensions, and arbitrary date windows", () => {
   for (const input of [
     { candidates: [], calendarMonth: { year: 1969, month: 9 } },
@@ -79,6 +90,10 @@ test("rejects invalid months, invalid dimensions, and arbitrary date windows", (
     { candidates: [], calendarMonth: MONTH, dimensionFilter: { dimension: "person", id: "x" } },
     { candidates: [], calendarMonth: MONTH, dimensionFilter: { dimension: "training", id: " " } },
     { candidates: [], calendarMonth: MONTH, evidenceAtFrom: "2026-09-01T00:00:00.000Z" },
+    { candidates: [], calendarMonth: MONTH, evidenceAtBefore: "2026-10-01T00:00:00.000Z" },
+    { candidates: [], calendarMonth: MONTH, startAt: "2026-09-01T00:00:00.000Z" },
+    { candidates: [], calendarMonth: MONTH, endAt: "2026-10-01T00:00:00.000Z" },
+    { candidates: [], calendarMonth: MONTH, dimensionFilter: null },
   ]) {
     assert.throws(
       () => aggregateOrganizationPerformance(input as Parameters<typeof aggregateOrganizationPerformance>[0]),
@@ -148,12 +163,28 @@ test("composites group by generation and exact known or unknown weight profile",
   assert.deepEqual(overallA.map((group) => group.mean), [40, 70, 30]);
   assert.deepEqual(overallA.map((group) => group.qualifyingObservationCount), [1, 2, 1]);
   assert.deepEqual(overallA.map((group) => group.weightProfile), [
-    { kind: "known", weights: KNOWN_WEIGHTS_B },
-    { kind: "known", weights: KNOWN_WEIGHTS_A },
-    { kind: "unknown" },
+    { kind: "known", profileKey: "known:100000000:200000000:300000000:400000000", weights: KNOWN_WEIGHTS_B },
+    { kind: "known", profileKey: "known:400000000:300000000:200000000:100000000", weights: KNOWN_WEIGHTS_A },
+    { kind: "unknown", profileKey: "unknown" },
   ]);
   assert.equal(metric(result, "overall", "generation_b")[0]?.mean, 20);
   assert.deepEqual(metric(result, "communication").map((group) => group.mean), [50, 80, 40]);
+});
+
+test("canonicalizes equivalent floating-point profiles while retaining materially different profiles", () => {
+  const result = aggregate([
+    candidate({ subjectKey: "exact", overallScore: 60, scoringWeightsApplied: KNOWN_WEIGHTS_A }),
+    candidate({
+      subjectKey: "nearby", overallScore: 80,
+      scoringWeightsApplied: { persuasion: 0.4000000000000001, clarity: 0.3, empathy: 0.2, assertiveness: 0.1 },
+    }),
+    candidate({ subjectKey: "different", overallScore: 40, scoringWeightsApplied: KNOWN_WEIGHTS_B }),
+  ]);
+  const groups = metric(result, "overall");
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((group) => group.mean), [40, 70]);
+  assert.equal(groups[1]?.weightProfile?.profileKey, "known:400000000:300000000:200000000:100000000");
+  assert.notEqual(groups[0]?.weightProfile?.profileKey, groups[1]?.weightProfile?.profileKey);
 });
 
 test("conservative contributors count known subjects distinctly and all deidentified rows once", () => {
@@ -176,9 +207,66 @@ test("limited evidence never suppresses numeric results and clears only with eno
   assert.equal(metric(observationLimited, "overall")[0]?.evidenceStrength.limitedEvidence, true);
   assert.ok(metric(observationLimited, "overall")[0]?.mean !== undefined);
 
+  const contributorLimited = aggregate(Array.from({ length: 10 }, (_, index) =>
+    candidate({ subjectKey: `subject_${index % 4}`, overallScore: 70 + index })));
+  assert.equal(metric(contributorLimited, "overall")[0]?.evidenceStrength.limitedEvidence, true);
+
   const enough = aggregate(Array.from({ length: 10 }, (_, index) =>
     candidate({ subjectKey: `subject_${index % 5}`, overallScore: 70 + index })));
   assert.equal(metric(enough, "overall")[0]?.evidenceStrength.limitedEvidence, false);
+});
+
+test("completion and objective concentration use their own denominator populations", () => {
+  const rows = Array.from({ length: 100 }, (_, index) => {
+    if (index < 94) {
+      return candidate({
+        subjectKey: "completion_power",
+        metricAvailability: {
+          overall: true, communication: true, outcome: true, persuasion: true, clarity: true,
+          empathy: true, assertiveness: true, completion: true, objective: false,
+        },
+      });
+    }
+    return candidate({
+      subjectKey: index < 98 ? "objective_power" : `objective_other_${index}`,
+      metricAvailability: {
+        overall: true, communication: true, outcome: true, persuasion: true, clarity: true,
+        empathy: true, assertiveness: true, completion: false, objective: true,
+      },
+    });
+  });
+  const group = aggregate(rows).completionGroups[0]!;
+  assert.equal(group.completion.availableObservationCount, 94);
+  assert.deepEqual(group.completion.concentration, { largestContributionShare: 1, concentrationWarning: true });
+  assert.equal(group.objective.availableObservationCount, 6);
+  assert.deepEqual(group.objective.concentration, { largestContributionShare: 4 / 6, concentrationWarning: true });
+  assert.equal(group.completion.completionRate, 1);
+  assert.equal(group.objective.objectiveAchievementRate, 1);
+});
+
+test("group evidence strength uses each metric's qualifying population", () => {
+  const rows = Array.from({ length: 100 }, (_, index) => candidate({
+    subjectKey: `subject_${index % 5}`,
+    outcomeScore: index < 6 ? 80 : undefined,
+    metricAvailability: {
+      overall: true, communication: true, outcome: index < 6, persuasion: true, clarity: true,
+      empathy: true, assertiveness: true, completion: true, objective: true,
+    },
+  }));
+  const outcome = metric(aggregate(rows), "outcome")[0]!;
+  assert.equal(outcome.qualifyingObservationCount, 6);
+  assert.equal(outcome.evidenceStrength.limitedEvidence, true);
+});
+
+test("complete objective-false evidence remains conclusive but lowers only objective achievement", () => {
+  const result = aggregate([candidate({ overallScore: 91, completionLevel: "complete", objectiveAchieved: false })]);
+  assert.equal(result.activity.conclusiveAttemptCount, 1);
+  assert.equal(metric(result, "overall")[0]?.mean, 91);
+  const group = result.completionGroups[0]!;
+  assert.equal(group.completion.completeCount, 1);
+  assert.equal(group.objective.availableObservationCount, 1);
+  assert.equal(group.objective.achievedCount, 0);
+  assert.equal(group.objective.objectiveAchievementRate, 0);
 });
 
 test("concentration warns only above forty percent and retains the aggregate", () => {
@@ -189,6 +277,7 @@ test("concentration warns only above forty percent and retains the aggregate", (
   assert.deepEqual(metric(exactly, "persuasion")[0]?.concentration, {
     largestContributionShare: 0.4, concentrationWarning: false,
   });
+  assert.deepEqual(exactly.activity.concentration, { largestContributionShare: 0.4, concentrationWarning: false });
 
   const above = aggregate([
     candidate({ subjectKey: "power", persuasion: 9 }), candidate({ subjectKey: "power", persuasion: 9 }), candidate({ subjectKey: "power", persuasion: 9 }),
@@ -198,6 +287,7 @@ test("concentration warns only above forty percent and retains the aggregate", (
   assert.deepEqual(metric(above, "persuasion")[0]?.concentration, {
     largestContributionShare: 0.6, concentrationWarning: true,
   });
+  assert.deepEqual(above.activity.concentration, { largestContributionShare: 0.6, concentrationWarning: true });
 
   const deidentified = aggregate([
     candidate({ subjectKind: "deidentified" }), candidate({ subjectKind: "deidentified" }), candidate({ subjectKind: "deidentified" }),
@@ -206,6 +296,7 @@ test("concentration warns only above forty percent and retains the aggregate", (
   assert.deepEqual(metric(deidentified, "persuasion")[0]?.concentration, {
     largestContributionShare: 0.6, concentrationWarning: true,
   });
+  assert.deepEqual(deidentified.activity.concentration, { largestContributionShare: 0.6, concentrationWarning: true });
 });
 
 test("completion and objective rates use only available values within each generation", () => {
@@ -263,15 +354,15 @@ test("output is deterministic and contains no candidate identity or exact timest
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
   assert.deepEqual(Object.keys(first).sort(), ["activity", "calendarMonth", "completionGroups", "dimensionFilter", "metricGroups"]);
-  assert.deepEqual(Object.keys(first.activity).sort(), ["attemptCount", "conclusiveAttemptCount", "evidenceStrength"]);
+  assert.deepEqual(Object.keys(first.activity).sort(), ["attemptCount", "concentration", "conclusiveAttemptCount", "evidenceStrength"]);
   assert.deepEqual(Object.keys(first.calendarMonth).sort(), ["month", "timeZone", "year"]);
   assert.deepEqual(Object.keys(first.activity.evidenceStrength).sort(), ["conservativeContributorCount", "limitedEvidence"]);
   assert.deepEqual(Object.keys(first.completionGroups[0]!).sort(), ["completion", "objective", "scoringGeneration"]);
   assert.deepEqual(Object.keys(first.completionGroups[0]!.completion).sort(), [
-    "availableObservationCount", "completeCount", "completionRate", "evidenceStrength", "inconclusiveCount", "partialCount",
+    "availableObservationCount", "completeCount", "completionRate", "concentration", "evidenceStrength", "inconclusiveCount", "partialCount",
   ]);
   assert.deepEqual(Object.keys(first.completionGroups[0]!.objective).sort(), [
-    "achievedCount", "availableObservationCount", "evidenceStrength", "objectiveAchievementRate",
+    "achievedCount", "availableObservationCount", "concentration", "evidenceStrength", "objectiveAchievementRate",
   ]);
   assert.deepEqual(Object.keys(first.metricGroups[0]!).sort(), [
     "concentration", "evidenceStrength", "mean", "metric", "qualifyingObservationCount", "scoringGeneration", "weightProfile",

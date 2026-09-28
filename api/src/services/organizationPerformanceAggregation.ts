@@ -37,10 +37,16 @@ export type OrganizationPerformanceMetric =
   | "assertiveness";
 
 export type OrganizationPerformanceWeightProfile =
-  | { readonly kind: "known"; readonly weights: SimulationScoringWeightsApplied }
-  | { readonly kind: "unknown" };
+  | {
+      readonly kind: "known";
+      /** Stable 1e-9-canonical aggregation identity; not source provenance. */
+      readonly profileKey: string;
+      readonly weights: SimulationScoringWeightsApplied;
+    }
+  | { readonly kind: "unknown"; readonly profileKey: "unknown" };
 
 export interface OrganizationPerformanceEvidenceStrength {
+  /** Conservative lower bound: deidentified rows deliberately count as one bucket. */
   readonly conservativeContributorCount: number;
   readonly limitedEvidence: boolean;
 }
@@ -67,6 +73,7 @@ export interface OrganizationPerformanceCompletionAggregate {
   readonly inconclusiveCount: number;
   readonly completionRate: number | null;
   readonly evidenceStrength: OrganizationPerformanceEvidenceStrength;
+  readonly concentration: OrganizationPerformanceConcentration;
 }
 
 export interface OrganizationPerformanceObjectiveAggregate {
@@ -74,6 +81,7 @@ export interface OrganizationPerformanceObjectiveAggregate {
   readonly achievedCount: number;
   readonly objectiveAchievementRate: number | null;
   readonly evidenceStrength: OrganizationPerformanceEvidenceStrength;
+  readonly concentration: OrganizationPerformanceConcentration;
 }
 
 export interface OrganizationPerformanceCompletionGroup {
@@ -87,8 +95,10 @@ export interface OrganizationPerformanceAggregate {
   readonly dimensionFilter: OrganizationPerformanceDimensionFilter | null;
   readonly activity: {
     readonly attemptCount: number;
+    /** Includes legacy rows with unavailable completion state under existing conclusive-score semantics. */
     readonly conclusiveAttemptCount: number;
     readonly evidenceStrength: OrganizationPerformanceEvidenceStrength;
+    readonly concentration: OrganizationPerformanceConcentration;
   };
   readonly completionGroups: readonly OrganizationPerformanceCompletionGroup[];
   readonly metricGroups: readonly OrganizationPerformanceMetricAggregate[];
@@ -139,19 +149,26 @@ function validateInput(input: AggregateOrganizationPerformanceInput): Organizati
     || Object.hasOwn(runtimeInput, "evidenceAtBefore")
     || Object.hasOwn(runtimeInput, "from")
     || Object.hasOwn(runtimeInput, "before")
+    || Object.hasOwn(runtimeInput, "startAt")
+    || Object.hasOwn(runtimeInput, "endAt")
   ) {
     errors.push("Arbitrary date windows are not supported; provide one calendarMonth.");
   }
   let dimensionFilter: OrganizationPerformanceDimensionFilter | undefined;
   if (input.dimensionFilter !== undefined) {
-    const { dimension, id } = input.dimensionFilter;
-    if (!(["division", "scenario", "training"] as const).includes(dimension)) {
-      errors.push("dimensionFilter.dimension must be division, scenario, or training.");
-    }
-    if (typeof id !== "string" || !id.trim()) {
-      errors.push("dimensionFilter.id must be a non-empty string.");
+    const filter = input.dimensionFilter as unknown;
+    if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
+      errors.push("dimensionFilter must be an object when provided.");
     } else {
-      dimensionFilter = { dimension, id: id.trim() };
+      const { dimension, id } = filter as { dimension?: unknown; id?: unknown };
+      if (!(["division", "scenario", "training"] as const).includes(dimension as OrganizationPerformanceDimension)) {
+        errors.push("dimensionFilter.dimension must be division, scenario, or training.");
+      }
+      if (typeof id !== "string" || !id.trim()) {
+        errors.push("dimensionFilter.id must be a non-empty string.");
+      } else if (["division", "scenario", "training"].includes(dimension as string)) {
+        dimensionFilter = { dimension: dimension as OrganizationPerformanceDimension, id: id.trim() };
+      }
     }
   }
   if (errors.length > 0) throw new OrganizationPerformanceAggregationInputError(errors);
@@ -200,16 +217,29 @@ function isConclusive(candidate: OrganizationEvidenceCandidate): boolean {
   return candidate.completionLevel === undefined || candidate.completionLevel === "complete";
 }
 
+function canonicalWeightUnits(weight: number): number {
+  return Math.round(weight * 1_000_000_000);
+}
+
 function profileIdentity(weights: SimulationScoringWeightsApplied | undefined): string {
   return weights === undefined
     ? "unknown"
-    : `known:${weights.persuasion}:${weights.clarity}:${weights.empathy}:${weights.assertiveness}`;
+    : `known:${canonicalWeightUnits(weights.persuasion)}:${canonicalWeightUnits(weights.clarity)}:${canonicalWeightUnits(weights.empathy)}:${canonicalWeightUnits(weights.assertiveness)}`;
 }
 
 function weightProfile(weights: SimulationScoringWeightsApplied | undefined): OrganizationPerformanceWeightProfile {
   return weights === undefined
-    ? { kind: "unknown" }
-    : { kind: "known", weights: { ...weights } };
+    ? { kind: "unknown", profileKey: "unknown" }
+    : {
+        kind: "known",
+        profileKey: profileIdentity(weights),
+        weights: {
+          persuasion: canonicalWeightUnits(weights.persuasion) / 1_000_000_000,
+          clarity: canonicalWeightUnits(weights.clarity) / 1_000_000_000,
+          empathy: canonicalWeightUnits(weights.empathy) / 1_000_000_000,
+          assertiveness: canonicalWeightUnits(weights.assertiveness) / 1_000_000_000,
+        },
+      };
 }
 
 function matchesDimension(
@@ -240,6 +270,7 @@ function buildCompletionGroups(
         inconclusiveCount: completionRows.filter((candidate) => candidate.completionLevel === "inconclusive").length,
         completionRate: completionRows.length === 0 ? null : completeCount / completionRows.length,
         evidenceStrength: evidenceStrength(completionRows, completionRows.length),
+        concentration: concentration(completionRows),
       },
       objective: {
         availableObservationCount: objectiveRows.length,
@@ -249,6 +280,7 @@ function buildCompletionGroups(
             ? null
             : objectiveRows.filter((candidate) => candidate.objectiveAchieved === true).length / objectiveRows.length,
         evidenceStrength: evidenceStrength(objectiveRows, objectiveRows.length),
+        concentration: concentration(objectiveRows),
       },
     };
   });
@@ -331,6 +363,7 @@ export function aggregateOrganizationPerformance(
       attemptCount: candidates.length,
       conclusiveAttemptCount,
       evidenceStrength: evidenceStrength(candidates, candidates.length),
+      concentration: concentration(candidates),
     },
     completionGroups: buildCompletionGroups(candidates),
     metricGroups: buildMetricGroups(candidates),
