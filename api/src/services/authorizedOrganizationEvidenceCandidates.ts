@@ -35,6 +35,7 @@ type CandidateMetrics = Pick<
   | "metricAvailability"
   | "recordEra"
   | "scoringGeneration"
+  | "scoringWeightsApplied"
 >;
 
 interface CandidateBase extends CandidateMetrics {
@@ -91,7 +92,9 @@ function optionalTime(value: unknown, label: string, errors: string[]): number |
   return Date.parse(value);
 }
 
-function toCandidate(evidence: CanonicalPerformanceEvidence): OrganizationEvidenceCandidate {
+export function projectOrganizationEvidenceCandidate(
+  evidence: CanonicalPerformanceEvidence,
+): OrganizationEvidenceCandidate {
   // This is the only output projection. Never spread a canonical score into an
   // aggregation candidate: it contains session IDs and other person-level data.
   const base: CandidateBase = {
@@ -103,6 +106,9 @@ function toCandidate(evidence: CanonicalPerformanceEvidence): OrganizationEviden
     recordEra: evidence.recordEra,
     scoringGeneration: evidence.scoringGeneration,
     metricAvailability: { ...evidence.metricAvailability },
+    ...(evidence.scoringWeightsApplied === undefined
+      ? {}
+      : { scoringWeightsApplied: { ...evidence.scoringWeightsApplied } }),
     overallScore: evidence.overallScore,
     ...(evidence.communicationScore === undefined ? {} : { communicationScore: evidence.communicationScore }),
     ...(evidence.outcomeScore === undefined ? {} : { outcomeScore: evidence.outcomeScore }),
@@ -158,5 +164,5 @@ export function queryAuthorizedOrganizationEvidenceCandidates(
     .filter((evidence) => trainingId === undefined || evidence.trainingId === trainingId)
     .filter((evidence) => divisionId === undefined || evidence.divisionId === divisionId)
     .sort((left, right) => left.evidenceAt.localeCompare(right.evidenceAt) || left.evidenceId.localeCompare(right.evidenceId))
-    .map(toCandidate);
+    .map(projectOrganizationEvidenceCandidate);
 }

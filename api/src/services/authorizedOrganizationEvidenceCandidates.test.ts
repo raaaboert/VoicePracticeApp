@@ -5,10 +5,12 @@ import type { DashboardViewer, SimulationScoreRecord } from "@voicepractice/shar
 
 import {
   AuthorizedOrganizationEvidenceCandidatesInputError,
+  projectOrganizationEvidenceCandidate,
   queryAuthorizedOrganizationEvidenceCandidates,
   type AuthorizedOrganizationEvidenceCandidatesQuery,
 } from "./authorizedOrganizationEvidenceCandidates.js";
 import { queryAuthorizedPerformanceEvidence } from "./authorizedPerformanceEvidenceQuery.js";
+import { normalizePerformanceEvidence } from "./performanceEvidence.js";
 import type { PerformanceEvidenceSourceSnapshot, PerformanceEvidenceSourceUser } from "./performanceEvidenceSourceSnapshot.js";
 import { SIMULATION_SESSION_COMPLETION_FUTURE_TOLERANCE_MS } from "./simulationSessionLifecycle.js";
 
@@ -60,6 +62,7 @@ function score(id: string, overrides: Partial<SimulationScoreRecord> = {}): Simu
     completionLevel: Object.hasOwn(overrides, "completionLevel") ? overrides.completionLevel : "complete",
     objectiveAchieved: Object.hasOwn(overrides, "objectiveAchieved") ? overrides.objectiveAchieved : true,
     rubricVersion: Object.hasOwn(overrides, "rubricVersion") ? overrides.rubricVersion : "generation_a",
+    scoringWeightsApplied: Object.hasOwn(overrides, "scoringWeightsApplied") ? overrides.scoringWeightsApplied : undefined,
     summary: "Private summary",
   };
 }
@@ -239,18 +242,63 @@ test("preserves scoring generations and unavailable metrics without fabricating 
   assert.equal(result[1]?.communicationScore, 80);
 });
 
+test("preserves distinct applied scoring weights without inventing legacy provenance", () => {
+  const actor = user("actor", { performanceAccess: "organization" });
+  const firstWeights = { persuasion: 0.4, clarity: 0.3, empathy: 0.2, assertiveness: 0.1 };
+  const secondWeights = { persuasion: 0.1, clarity: 0.2, empathy: 0.3, assertiveness: 0.4 };
+  const records = [
+    score("first", { rubricVersion: "same_generation", scoringWeightsApplied: firstWeights }),
+    score("second", { rubricVersion: "same_generation", scoringWeightsApplied: secondWeights }),
+    score("legacy", {
+      rubricVersion: "2026-03-06.v2", communicationScore: undefined, outcomeScore: undefined,
+      completionLevel: undefined, objectiveAchieved: undefined, scoringWeightsApplied: undefined,
+    }),
+    score("deidentified", { userId: "deleted_user", scoringWeightsApplied: firstWeights }),
+  ];
+  const result = candidates(actor, records);
+  const first = result.find((row) => row.subjectKind === "user" && row.subjectKey === "subject" && row.scoringGeneration === "same_generation");
+  const second = result.filter((row) => row.subjectKind === "user" && row.scoringGeneration === "same_generation")[1];
+  const legacy = result.find((row) => row.recordEra === "legacy_sparse");
+  const deidentified = result.find((row) => row.subjectKind === "deidentified");
+
+  assert.deepEqual(first?.scoringWeightsApplied, firstWeights);
+  assert.deepEqual(second?.scoringWeightsApplied, secondWeights);
+  assert.notDeepEqual(first?.scoringWeightsApplied, second?.scoringWeightsApplied);
+  assert.equal(Object.hasOwn(legacy!, "scoringWeightsApplied"), false);
+  assert.deepEqual(deidentified?.scoringWeightsApplied, firstWeights);
+  assert.equal(Object.hasOwn(deidentified!, "subjectKey"), false);
+});
+
+test("copies applied scoring weights so candidates cannot mutate canonical provenance", () => {
+  const sourceWeights = { persuasion: 0.4, clarity: 0.3, empathy: 0.2, assertiveness: 0.1 };
+  const source = score("weighted", { scoringWeightsApplied: sourceWeights });
+  const normalized = normalizePerformanceEvidence(source);
+  assert.equal(normalized.status, "accepted");
+  if (normalized.status !== "accepted") throw new Error("Expected accepted canonical evidence");
+  const candidate = projectOrganizationEvidenceCandidate(normalized.evidence);
+  const returnedWeights = candidate.scoringWeightsApplied;
+  assert.ok(returnedWeights);
+  (returnedWeights as { persuasion: number }).persuasion = 0.9;
+  assert.equal(sourceWeights.persuasion, 0.4);
+  assert.equal(source.scoringWeightsApplied?.persuasion, 0.4);
+  assert.equal(normalized.evidence.scoringWeightsApplied?.persuasion, 0.4);
+});
+
 test("candidate projection has an exact minimal key set and stable order", () => {
   const actor = user("actor", { performanceAccess: "organization" });
   const records = [
     score("z_same", { overallScore: 33 }),
     score("later", { overallScore: 44, endedAt: "2026-09-24T10:06:00.000Z", createdAt: "2026-09-24T10:06:30.000Z" }),
-    score("a_same", { overallScore: 11 }),
+    score("a_same", {
+      overallScore: 11,
+      scoringWeightsApplied: { persuasion: 0.4, clarity: 0.3, empathy: 0.2, assertiveness: 0.1 },
+    }),
   ];
   const result = candidates(actor, records);
   assert.deepEqual(scores(result), [11, 33, 44]);
   assert.deepEqual(Object.keys(result[0]!).sort(), [
     "orgId", "scenarioId", "trainingId", "evidenceAt", "recordEra", "scoringGeneration",
-    "metricAvailability", "overallScore", "communicationScore", "outcomeScore",
+    "metricAvailability", "scoringWeightsApplied", "overallScore", "communicationScore", "outcomeScore",
     "persuasion", "clarity", "empathy", "assertiveness", "completionLevel",
     "objectiveAchieved", "subjectKind", "subjectKey",
   ].sort());
