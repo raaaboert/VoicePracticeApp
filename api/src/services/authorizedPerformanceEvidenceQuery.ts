@@ -109,7 +109,7 @@ function findSourceUser(
   return users.find((user) => user.id === id);
 }
 
-function isCurrentDashboardEligibleActor(params: {
+export function isCurrentDashboardEligibleActor(params: {
   actor: PerformanceEvidenceSourceUser;
   viewer: DashboardViewer;
   organizations: readonly PerformanceEvidenceSourceOrganization[];
