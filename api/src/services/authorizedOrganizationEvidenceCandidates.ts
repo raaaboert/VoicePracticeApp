@@ -14,11 +14,6 @@ export interface AuthorizedOrganizationEvidenceCandidatesQuery {
   readonly snapshot: PerformanceEvidenceSourceSnapshot;
   readonly viewer: DashboardViewer;
   readonly organizationId: string;
-  readonly evidenceAtFrom?: string;
-  readonly evidenceAtBefore?: string;
-  readonly scenarioId?: string;
-  readonly trainingId?: string;
-  readonly divisionId?: string;
 }
 
 type CandidateMetrics = Pick<
@@ -74,25 +69,7 @@ function requiredId(value: unknown, label: string, errors: string[]): string | u
   return value.trim();
 }
 
-function optionalId(value: unknown, label: string, errors: string[]): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || !value.trim()) {
-    errors.push(`${label} must be a non-empty string when provided.`);
-    return undefined;
-  }
-  return value.trim();
-}
-
-function optionalTime(value: unknown, label: string, errors: string[]): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || !value.trim() || !Number.isFinite(Date.parse(value))) {
-    errors.push(`${label} must be a valid ISO timestamp when provided.`);
-    return undefined;
-  }
-  return Date.parse(value);
-}
-
-export function projectOrganizationEvidenceCandidate(
+function projectOrganizationEvidenceCandidate(
   evidence: CanonicalPerformanceEvidence,
 ): OrganizationEvidenceCandidate {
   // This is the only output projection. Never spread a canonical score into an
@@ -133,13 +110,11 @@ export function queryAuthorizedOrganizationEvidenceCandidates(
 ): OrganizationEvidenceCandidate[] {
   const errors: string[] = [];
   const organizationId = requiredId(query.organizationId, "organizationId", errors);
-  const scenarioId = optionalId(query.scenarioId, "scenarioId", errors);
-  const trainingId = optionalId(query.trainingId, "trainingId", errors);
-  const divisionId = optionalId(query.divisionId, "divisionId", errors);
-  const evidenceAtFrom = optionalTime(query.evidenceAtFrom, "evidenceAtFrom", errors);
-  const evidenceAtBefore = optionalTime(query.evidenceAtBefore, "evidenceAtBefore", errors);
-  if (evidenceAtFrom !== undefined && evidenceAtBefore !== undefined && evidenceAtFrom >= evidenceAtBefore) {
-    errors.push("evidenceAtFrom must be earlier than evidenceAtBefore.");
+  const runtimeQuery = query as AuthorizedOrganizationEvidenceCandidatesQuery & Record<string, unknown>;
+  if ([
+    "evidenceAtFrom", "evidenceAtBefore", "scenarioId", "trainingId", "divisionId",
+  ].some((key) => Object.hasOwn(runtimeQuery, key))) {
+    errors.push("Organization evidence candidate prefilters are not supported.");
   }
   if (errors.length > 0) throw new AuthorizedOrganizationEvidenceCandidatesInputError(errors);
 
@@ -158,11 +133,6 @@ export function queryAuthorizedOrganizationEvidenceCandidates(
     .flatMap((result) => result.status === "accepted" ? [result.evidence] : [])
     .filter((evidence) => !isPerformanceEvidenceQuarantined(evidence))
     .filter((evidence) => evidence.orgId !== null && evidence.orgId === organizationId)
-    .filter((evidence) => evidenceAtFrom === undefined || Date.parse(evidence.evidenceAt) >= evidenceAtFrom)
-    .filter((evidence) => evidenceAtBefore === undefined || Date.parse(evidence.evidenceAt) < evidenceAtBefore)
-    .filter((evidence) => scenarioId === undefined || evidence.scenarioId === scenarioId)
-    .filter((evidence) => trainingId === undefined || evidence.trainingId === trainingId)
-    .filter((evidence) => divisionId === undefined || evidence.divisionId === divisionId)
     .sort((left, right) => left.evidenceAt.localeCompare(right.evidenceAt) || left.evidenceId.localeCompare(right.evidenceId))
     .map(projectOrganizationEvidenceCandidate);
 }

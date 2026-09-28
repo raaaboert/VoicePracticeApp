@@ -353,19 +353,28 @@ test("output is deterministic and contains no candidate identity or exact timest
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
-  assert.deepEqual(Object.keys(first).sort(), ["activity", "calendarMonth", "completionGroups", "dimensionFilter", "metricGroups"]);
-  assert.deepEqual(Object.keys(first.activity).sort(), ["attemptCount", "concentration", "conclusiveAttemptCount", "evidenceStrength"]);
+  assert.deepEqual(Object.keys(first).sort(), [
+    "activity", "calendarMonth", "completionGroups", "dimensionFilter",
+    "historicalPrivacyAdjustmentApplied", "metricGroups",
+  ]);
+  assert.deepEqual(Object.keys(first.activity).sort(), [
+    "attemptCount", "concentration", "conclusiveAttemptCount", "evidenceStrength",
+    "historicalPrivacyAdjustmentApplied",
+  ]);
   assert.deepEqual(Object.keys(first.calendarMonth).sort(), ["month", "timeZone", "year"]);
   assert.deepEqual(Object.keys(first.activity.evidenceStrength).sort(), ["conservativeContributorCount", "limitedEvidence"]);
   assert.deepEqual(Object.keys(first.completionGroups[0]!).sort(), ["completion", "objective", "scoringGeneration"]);
   assert.deepEqual(Object.keys(first.completionGroups[0]!.completion).sort(), [
-    "availableObservationCount", "completeCount", "completionRate", "concentration", "evidenceStrength", "inconclusiveCount", "partialCount",
+    "availableObservationCount", "completeCount", "completionRate", "concentration", "evidenceStrength",
+    "historicalPrivacyAdjustmentApplied", "inconclusiveCount", "partialCount",
   ]);
   assert.deepEqual(Object.keys(first.completionGroups[0]!.objective).sort(), [
-    "achievedCount", "availableObservationCount", "concentration", "evidenceStrength", "objectiveAchievementRate",
+    "achievedCount", "availableObservationCount", "concentration", "evidenceStrength",
+    "historicalPrivacyAdjustmentApplied", "objectiveAchievementRate",
   ]);
   assert.deepEqual(Object.keys(first.metricGroups[0]!).sort(), [
-    "concentration", "evidenceStrength", "mean", "metric", "qualifyingObservationCount", "scoringGeneration", "weightProfile",
+    "concentration", "evidenceStrength", "historicalPrivacyAdjustmentApplied", "mean", "metric",
+    "qualifyingObservationCount", "scoringGeneration", "weightProfile",
   ]);
   assert.deepEqual(Object.keys(first.metricGroups[0]!.concentration).sort(), ["concentrationWarning", "largestContributionShare"]);
 });

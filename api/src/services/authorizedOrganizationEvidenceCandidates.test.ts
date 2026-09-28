@@ -5,12 +5,9 @@ import type { DashboardViewer, SimulationScoreRecord } from "@voicepractice/shar
 
 import {
   AuthorizedOrganizationEvidenceCandidatesInputError,
-  projectOrganizationEvidenceCandidate,
   queryAuthorizedOrganizationEvidenceCandidates,
-  type AuthorizedOrganizationEvidenceCandidatesQuery,
 } from "./authorizedOrganizationEvidenceCandidates.js";
 import { queryAuthorizedPerformanceEvidence } from "./authorizedPerformanceEvidenceQuery.js";
-import { normalizePerformanceEvidence } from "./performanceEvidence.js";
 import type { PerformanceEvidenceSourceSnapshot, PerformanceEvidenceSourceUser } from "./performanceEvidenceSourceSnapshot.js";
 import { SIMULATION_SESSION_COMPLETION_FUTURE_TOLERANCE_MS } from "./simulationSessionLifecycle.js";
 
@@ -79,13 +76,11 @@ function candidates(actor: PerformanceEvidenceSourceUser, records: readonly Simu
   users?: readonly PerformanceEvidenceSourceUser[];
   viewer?: DashboardViewer;
   organizationId?: string;
-  filters?: Partial<AuthorizedOrganizationEvidenceCandidatesQuery>;
 } = {}) {
   return queryAuthorizedOrganizationEvidenceCandidates({
     snapshot: snapshot(options.users ?? [actor], records),
     viewer: options.viewer ?? viewer(actor),
     organizationId: options.organizationId ?? "org_a",
-    ...options.filters,
   });
 }
 
@@ -196,7 +191,7 @@ test("rejects malformed and quarantined scores but retains partial and inconclus
   assert.deepEqual(result.map((row) => row.objectiveAchieved), [false, false]);
 });
 
-test("filters exact historical IDs, division, and canonical half-open evidenceAt", () => {
+test("returns the complete authorized organization candidate set for downstream slicing", () => {
   const actor = user("actor", { performanceAccess: "organization" });
   const createdAt = new Date(CREATED_AT);
   const anomalousEnd = new Date(createdAt.getTime() + SIMULATION_SESSION_COMPLETION_FUTURE_TOLERANCE_MS + 1).toISOString();
@@ -207,15 +202,7 @@ test("filters exact historical IDs, division, and canonical half-open evidenceAt
     score("missing_division", { overallScore: 44, divisionId: undefined }),
     score("clamped", { overallScore: 55, endedAt: anomalousEnd, createdAt: CREATED_AT }),
   ];
-  const base = (filters: Partial<AuthorizedOrganizationEvidenceCandidatesQuery>) => candidates(actor, records, { filters });
-  assert.deepEqual(scores(base({ scenarioId: "s1" })), [11]);
-  assert.deepEqual(scores(base({ trainingId: "t1" })), [11]);
-  assert.deepEqual(scores(base({ trainingId: "unknown" })), []);
-  assert.deepEqual(scores(base({ divisionId: "d1" })), [11]);
-  assert.deepEqual(scores(base({ divisionId: "unknown" })), []);
-  assert.deepEqual(scores(base({ evidenceAtFrom: "2026-09-24T10:05:00.000Z", evidenceAtBefore: "2026-09-24T10:10:00.000Z" })), [11, 44, 33, 55]);
-  assert.deepEqual(scores(base({ evidenceAtFrom: CREATED_AT, evidenceAtBefore: "2026-09-24T10:05:31.000Z" })), [55]);
-  assert.deepEqual(scores(base({ evidenceAtFrom: "2026-09-24T10:10:00.000Z" })), [22]);
+  assert.deepEqual(scores(candidates(actor, records)), [11, 44, 33, 55, 22]);
 });
 
 test("preserves scoring generations and unavailable metrics without fabricating zeros", () => {
@@ -270,18 +257,16 @@ test("preserves distinct applied scoring weights without inventing legacy proven
 });
 
 test("copies applied scoring weights so candidates cannot mutate canonical provenance", () => {
+  const actor = user("actor", { performanceAccess: "organization" });
   const sourceWeights = { persuasion: 0.4, clarity: 0.3, empathy: 0.2, assertiveness: 0.1 };
   const source = score("weighted", { scoringWeightsApplied: sourceWeights });
-  const normalized = normalizePerformanceEvidence(source);
-  assert.equal(normalized.status, "accepted");
-  if (normalized.status !== "accepted") throw new Error("Expected accepted canonical evidence");
-  const candidate = projectOrganizationEvidenceCandidate(normalized.evidence);
+  const candidate = candidates(actor, [source])[0]!;
   const returnedWeights = candidate.scoringWeightsApplied;
   assert.ok(returnedWeights);
   (returnedWeights as { persuasion: number }).persuasion = 0.9;
   assert.equal(sourceWeights.persuasion, 0.4);
   assert.equal(source.scoringWeightsApplied?.persuasion, 0.4);
-  assert.equal(normalized.evidence.scoringWeightsApplied?.persuasion, 0.4);
+  assert.equal(candidates(actor, [source])[0]?.scoringWeightsApplied?.persuasion, 0.4);
 });
 
 test("candidate projection has an exact minimal key set and stable order", () => {
@@ -305,13 +290,24 @@ test("candidate projection has an exact minimal key set and stable order", () =>
   assert.equal(result[0]?.subjectKey, "subject");
 });
 
-test("rejects invalid query filters before reading candidates", () => {
+test("rejects invalid organizations and removed candidate prefilters before reading candidates", () => {
   const actor = user("actor", { performanceAccess: "organization" });
-  for (const filters of [
-    { organizationId: " " }, { evidenceAtFrom: "invalid" }, { scenarioId: " " },
-    { trainingId: " " }, { divisionId: " " },
-    { evidenceAtFrom: CREATED_AT, evidenceAtBefore: CREATED_AT },
+  assert.throws(() => candidates(actor, [], { organizationId: " " }), AuthorizedOrganizationEvidenceCandidatesInputError);
+  for (const legacyPrefilter of [
+    { evidenceAtFrom: CREATED_AT },
+    { evidenceAtBefore: CREATED_AT },
+    { scenarioId: "scenario_a" },
+    { trainingId: "training_a" },
+    { divisionId: "division_a" },
   ]) {
-    assert.throws(() => candidates(actor, [], { filters }), AuthorizedOrganizationEvidenceCandidatesInputError);
+    assert.throws(
+      () => queryAuthorizedOrganizationEvidenceCandidates({
+        snapshot: snapshot([actor], []),
+        viewer: viewer(actor),
+        organizationId: "org_a",
+        ...legacyPrefilter,
+      }),
+      AuthorizedOrganizationEvidenceCandidatesInputError,
+    );
   }
 });
