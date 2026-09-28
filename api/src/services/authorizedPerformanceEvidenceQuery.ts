@@ -10,13 +10,13 @@ import {
   type CanonicalPerformanceEvidence,
 } from "./performanceEvidence.js";
 import type {
+  PerformanceEvidenceSourceOrganization,
   PerformanceEvidenceSourceSnapshot,
   PerformanceEvidenceSourceUser,
 } from "./performanceEvidenceSourceSnapshot.js";
 
 export interface AuthorizedPerformanceEvidenceQuery {
   readonly snapshot: PerformanceEvidenceSourceSnapshot;
-  readonly actorUserId: string;
   readonly viewer: DashboardViewer;
   readonly organizationId: string;
   readonly targetUserId?: string;
@@ -81,7 +81,6 @@ function parseOptionalTimestamp(value: unknown, label: string, errors: string[])
 
 function validateQuery(query: AuthorizedPerformanceEvidenceQuery): ValidatedQueryFilters {
   const errors: string[] = [];
-  normalizeRequiredIdentifier(query.actorUserId, "actorUserId", errors);
   normalizeRequiredIdentifier(query.organizationId, "organizationId", errors);
   const targetUserId = normalizeOptionalIdentifier(query.targetUserId, "targetUserId", errors);
   const scenarioId = normalizeOptionalIdentifier(query.scenarioId, "scenarioId", errors);
@@ -110,6 +109,34 @@ function findSourceUser(
   return users.find((user) => user.id === id);
 }
 
+function isCurrentDashboardEligibleActor(params: {
+  actor: PerformanceEvidenceSourceUser;
+  viewer: DashboardViewer;
+  organizations: readonly PerformanceEvidenceSourceOrganization[];
+}): boolean {
+  const { actor, viewer, organizations } = params;
+  if (actor.status !== "active") {
+    return false;
+  }
+
+  if (viewer.accessType === "super_user") {
+    return actor.isSuperUser === true && viewer.isSuperUser === true;
+  }
+
+  if (
+    actor.isSuperUser === true
+    || viewer.isSuperUser === true
+    || actor.accountType !== "enterprise"
+    || !actor.orgId
+    || actor.dashboardAccessEnabled !== true
+    || viewer.orgId !== actor.orgId
+  ) {
+    return false;
+  }
+
+  return organizations.some((organization) => organization.id === actor.orgId && organization.status === "active");
+}
+
 /**
  * Returns current-viewer-authorized, person-scoped canonical evidence for one
  * requested organization. Ordering is chronological ascending by canonical
@@ -119,13 +146,22 @@ export function queryAuthorizedPerformanceEvidence(
   query: AuthorizedPerformanceEvidenceQuery,
 ): CanonicalPerformanceEvidence[] {
   const filters = validateQuery(query);
-  const actorUserId = query.actorUserId.trim();
+  const actorUserId = query.viewer.userId;
   const organizationId = query.organizationId.trim();
   const authorizationUsers = query.snapshot.users.filter((user) => user.id !== "deleted_user");
   const actor = findSourceUser(authorizationUsers, actorUserId);
   const organizationExists = query.snapshot.organizations.some((organization) => organization.id === organizationId);
 
-  if (!actor || !organizationExists || !canDashboardViewerAccessOrg(query.viewer, organizationId)) {
+  if (
+    !actor
+    || !isCurrentDashboardEligibleActor({
+      actor,
+      viewer: query.viewer,
+      organizations: query.snapshot.organizations,
+    })
+    || !organizationExists
+    || !canDashboardViewerAccessOrg(query.viewer, organizationId)
+  ) {
     return [];
   }
 

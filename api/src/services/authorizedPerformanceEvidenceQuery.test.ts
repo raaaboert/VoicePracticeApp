@@ -108,7 +108,6 @@ function query(params: {
 }) {
   return queryAuthorizedPerformanceEvidence({
     snapshot: snapshot({ users: params.users ?? [params.actor], scoreRecords: params.scoreRecords }),
-    actorUserId: params.actor.id,
     viewer: params.viewer ?? viewer(params.actor),
     organizationId: params.organizationId ?? "org_a",
     targetUserId: params.targetUserId,
@@ -123,14 +122,12 @@ function evidenceIds(evidence: ReturnType<typeof queryAuthorizedPerformanceEvide
   return evidence.map((entry) => entry.evidenceId);
 }
 
-test("validates required identifiers and UTC half-open range input", () => {
+test("has no independent actor identity input and validates UTC half-open range input", () => {
   const actor = user("actor", { performanceAccess: "organization" });
   for (const invalid of [
-    { actorUserId: " ", organizationId: "org_a" },
-    { actorUserId: "actor", organizationId: "" },
-    { actorUserId: "actor", organizationId: "org_a", evidenceAtFrom: "invalid" },
+    { organizationId: "" },
+    { organizationId: "org_a", evidenceAtFrom: "invalid" },
     {
-      actorUserId: "actor",
       organizationId: "org_a",
       evidenceAtFrom: "2026-09-24T11:00:00.000Z",
       evidenceAtBefore: "2026-09-24T11:00:00.000Z",
@@ -139,6 +136,79 @@ test("validates required identifiers and UTC half-open range input", () => {
     assert.throws(
       () => queryAuthorizedPerformanceEvidence({ snapshot: snapshot({ users: [actor] }), viewer: viewer(actor), ...invalid }),
       AuthorizedPerformanceEvidenceQueryInputError,
+    );
+  }
+});
+
+test("a team viewer cannot borrow an organization actor identity", () => {
+  const teamViewerUser = user("team_viewer", { performanceAccess: "team" });
+  const direct = user("direct", { managerUserId: teamViewerUser.id });
+  const organizationAdmin = user("organization_admin", {
+    orgRole: "org_admin",
+    performanceAccess: "organization",
+  });
+  const unrelated = user("unrelated");
+  const source = snapshot({
+    users: [teamViewerUser, direct, organizationAdmin, unrelated],
+    scoreRecords: [
+      score({ id: "self", userId: teamViewerUser.id }),
+      score({ id: "direct", userId: direct.id }),
+      score({ id: "admin", userId: organizationAdmin.id }),
+      score({ id: "unrelated", userId: unrelated.id }),
+    ],
+  });
+  // An untyped future caller cannot select a different actor: this excess
+  // property is ignored because the public query contract contains no actor ID.
+  const requestWithBorrowedActorId = {
+    snapshot: source,
+    viewer: viewer(teamViewerUser),
+    organizationId: "org_a",
+    actorUserId: organizationAdmin.id,
+  };
+  const result = queryAuthorizedPerformanceEvidence(requestWithBorrowedActorId);
+
+  assert.deepEqual(evidenceIds(result), ["direct", "self"]);
+});
+
+test("fails closed for inactive, dashboard-disabled, absent, and deleted viewer actors", () => {
+  const activeActor = user("actor", { performanceAccess: "organization" });
+  const records = [score({ id: "evidence", userId: activeActor.id })];
+  const cases = [
+    {
+      viewerActor: user("inactive", { status: "disabled", performanceAccess: "organization" }),
+      users: [
+        user("inactive", { status: "disabled", performanceAccess: "organization" }),
+        activeActor,
+      ],
+    },
+    {
+      viewerActor: user("dashboard_disabled", { dashboardAccessEnabled: false, performanceAccess: "organization" }),
+      users: [
+        user("dashboard_disabled", { dashboardAccessEnabled: false, performanceAccess: "organization" }),
+        activeActor,
+      ],
+    },
+    {
+      viewerActor: user("absent", { performanceAccess: "organization" }),
+      users: [activeActor],
+    },
+    {
+      viewerActor: user("deleted_user", { performanceAccess: "organization" }),
+      users: [
+        user("deleted_user", { performanceAccess: "organization" }),
+        activeActor,
+      ],
+    },
+  ];
+
+  for (const testCase of cases) {
+    assert.deepEqual(
+      evidenceIds(query({
+        actor: testCase.viewerActor,
+        users: testCase.users,
+        scoreRecords: records,
+      })),
+      [],
     );
   }
 });
@@ -284,5 +354,9 @@ test("super users remain constrained to the supplied existing organization", () 
   assert.deepEqual(
     evidenceIds(query({ actor, users: [actor, orgAUser, orgBUser], scoreRecords: records, organizationId: "org_b", viewer: superViewer })),
     ["org_b_score"],
+  );
+  assert.deepEqual(
+    evidenceIds(query({ actor, users: [actor, orgAUser, orgBUser], scoreRecords: records, organizationId: "org_missing", viewer: superViewer })),
+    [],
   );
 });
