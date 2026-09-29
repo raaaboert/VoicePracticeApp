@@ -1,16 +1,19 @@
 import type { DashboardViewer, SimulationScoringWeightsApplied } from "@voicepractice/shared";
 
+import { isCurrentDashboardEligibleActor } from "./authorizedPerformanceEvidenceQuery.js";
 import {
   AuthorizedOrganizationEvidenceCandidatesInputError,
   queryAuthorizedOrganizationEvidenceCandidates,
   type OrganizationEvidenceCandidate,
 } from "./authorizedOrganizationEvidenceCandidates.js";
+import { canDashboardViewerAccessOrg } from "./dashboardAuthorization.js";
 import {
   aggregateOrganizationPerformanceWithHistoricalPrivacy,
   OrganizationPerformanceAggregationInputError,
   validateOrganizationPerformanceSelection,
   type OrganizationPerformanceAggregate,
 } from "./organizationPerformanceAggregation.js";
+import { canViewOrganizationPerformance } from "./performanceAuthorization.js";
 import type { PerformanceEvidenceSourceSnapshot } from "./performanceEvidenceSourceSnapshot.js";
 
 export interface AuthorizedOrganizationPerformanceCalendarMonth {
@@ -23,12 +26,15 @@ export interface AuthorizedOrganizationPerformanceDimensionFilter {
   readonly id: string;
 }
 
-export interface AuthorizedOrganizationPerformanceQuery {
-  readonly snapshot: PerformanceEvidenceSourceSnapshot;
-  readonly viewer: DashboardViewer;
+export interface AuthorizedOrganizationPerformanceRequest {
   readonly organizationId: string;
   readonly calendarMonth: AuthorizedOrganizationPerformanceCalendarMonth;
   readonly dimensionFilter?: AuthorizedOrganizationPerformanceDimensionFilter;
+}
+
+export interface AuthorizedOrganizationPerformanceQuery extends AuthorizedOrganizationPerformanceRequest {
+  readonly snapshot: PerformanceEvidenceSourceSnapshot;
+  readonly viewer: DashboardViewer;
 }
 
 interface RouteSafeEvidenceStrength {
@@ -114,6 +120,22 @@ export class AuthorizedOrganizationPerformanceInputError extends Error {
   }
 }
 
+export type AuthorizedOrganizationPerformanceDenialReason =
+  | "organization_not_found_or_inaccessible"
+  | "performance_scope_denied";
+
+export class AuthorizedOrganizationPerformanceDeniedError extends Error {
+  readonly reason: AuthorizedOrganizationPerformanceDenialReason;
+
+  constructor(reason: AuthorizedOrganizationPerformanceDenialReason) {
+    super(reason === "performance_scope_denied"
+      ? "Organization performance access required."
+      : "Performance workspace not found.");
+    this.name = "AuthorizedOrganizationPerformanceDeniedError";
+    this.reason = reason;
+  }
+}
+
 export class AuthorizedOrganizationPerformanceInvariantError extends Error {
   constructor() {
     super("Authorized organization evidence candidates violated the single-organization invariant.");
@@ -127,6 +149,76 @@ function assertOrganizationPerformanceCandidateOrganization(
 ): void {
   if (candidates.some((candidate) => candidate.orgId !== organizationId)) {
     throw new AuthorizedOrganizationPerformanceInvariantError();
+  }
+}
+
+export function validateAuthorizedOrganizationPerformanceRequest(
+  request: AuthorizedOrganizationPerformanceRequest,
+): AuthorizedOrganizationPerformanceRequest {
+  const allowedInputKeys = new Set(["organizationId", "calendarMonth", "dimensionFilter"]);
+  const errors: string[] = [];
+  if (Object.keys(request).some((key) => !allowedInputKeys.has(key))) {
+    errors.push("Unsupported organization performance query fields are not allowed.");
+  }
+  if (typeof request.organizationId !== "string" || !request.organizationId.trim()) {
+    errors.push("organizationId is required.");
+  }
+
+  let dimensionFilter: AuthorizedOrganizationPerformanceDimensionFilter | undefined;
+  try {
+    dimensionFilter = validateOrganizationPerformanceSelection(request);
+  } catch (error) {
+    if (error instanceof OrganizationPerformanceAggregationInputError) {
+      errors.push(...error.errors);
+    } else {
+      throw error;
+    }
+  }
+  if (errors.length > 0) {
+    throw new AuthorizedOrganizationPerformanceInputError(errors);
+  }
+
+  return {
+    organizationId: request.organizationId.trim(),
+    calendarMonth: { ...request.calendarMonth },
+    ...(dimensionFilter === undefined ? {} : { dimensionFilter }),
+  };
+}
+
+export function precheckAuthorizedOrganizationPerformanceViewerAccess(input: {
+  readonly viewer: DashboardViewer;
+  readonly organizationId: string;
+}): void {
+  if (!canDashboardViewerAccessOrg(input.viewer, input.organizationId)) {
+    throw new AuthorizedOrganizationPerformanceDeniedError("organization_not_found_or_inaccessible");
+  }
+}
+
+function assertAuthorizedOrganizationPerformanceAccess(input: {
+  readonly snapshot: PerformanceEvidenceSourceSnapshot;
+  readonly viewer: DashboardViewer;
+  readonly organizationId: string;
+}): void {
+  const actor = input.snapshot.users.find(
+    (user) => user.id === input.viewer.userId && user.id !== "deleted_user",
+  );
+  if (
+    !actor
+    || !isCurrentDashboardEligibleActor({
+      actor,
+      viewer: input.viewer,
+      organizations: input.snapshot.organizations,
+    })
+    || !input.snapshot.organizations.some((organization) => organization.id === input.organizationId)
+    || !canDashboardViewerAccessOrg(input.viewer, input.organizationId)
+  ) {
+    throw new AuthorizedOrganizationPerformanceDeniedError("organization_not_found_or_inaccessible");
+  }
+  if (
+    input.viewer.accessType !== "super_user"
+    && !canViewOrganizationPerformance({ actor, orgId: input.organizationId })
+  ) {
+    throw new AuthorizedOrganizationPerformanceDeniedError("performance_scope_denied");
   }
 }
 
@@ -219,14 +311,23 @@ export function queryAuthorizedOrganizationPerformance(
       "Unsupported organization performance query fields are not allowed.",
     ]);
   }
-  let dimensionFilter: AuthorizedOrganizationPerformanceDimensionFilter | undefined;
+  const validatedRequest = validateAuthorizedOrganizationPerformanceRequest({
+    organizationId: query.organizationId,
+    calendarMonth: query.calendarMonth,
+    ...(Object.hasOwn(query, "dimensionFilter") ? { dimensionFilter: query.dimensionFilter! } : {}),
+  });
+  assertAuthorizedOrganizationPerformanceAccess({
+    snapshot: query.snapshot,
+    viewer: query.viewer,
+    organizationId: validatedRequest.organizationId,
+  });
+
   let candidates: OrganizationEvidenceCandidate[];
   try {
-    dimensionFilter = validateOrganizationPerformanceSelection(query);
     candidates = queryAuthorizedOrganizationEvidenceCandidates({
       snapshot: query.snapshot,
       viewer: query.viewer,
-      organizationId: query.organizationId,
+      organizationId: validatedRequest.organizationId,
     });
   } catch (error) {
     if (
@@ -237,7 +338,7 @@ export function queryAuthorizedOrganizationPerformance(
     }
     throw error;
   }
-  const organizationId = query.organizationId.trim();
+  const organizationId = validatedRequest.organizationId;
   assertOrganizationPerformanceCandidateOrganization(candidates, organizationId);
 
   const currentSubjectKeys = new Set(
@@ -252,8 +353,10 @@ export function queryAuthorizedOrganizationPerformance(
   const aggregate = aggregateOrganizationPerformanceWithHistoricalPrivacy(
     {
       candidates,
-      calendarMonth: query.calendarMonth,
-      ...(dimensionFilter === undefined ? {} : { dimensionFilter }),
+      calendarMonth: validatedRequest.calendarMonth,
+      ...(validatedRequest.dimensionFilter === undefined
+        ? {}
+        : { dimensionFilter: validatedRequest.dimensionFilter }),
     },
     (candidate) =>
       candidate.subjectKind === "user"

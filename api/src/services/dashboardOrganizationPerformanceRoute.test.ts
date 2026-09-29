@@ -4,6 +4,7 @@ import test from "node:test";
 import type { DashboardViewer } from "@voicepractice/shared";
 
 import {
+  AuthorizedOrganizationPerformanceDeniedError,
   AuthorizedOrganizationPerformanceInputError,
   AuthorizedOrganizationPerformanceInvariantError,
   type AuthorizedOrganizationPerformanceResult,
@@ -75,16 +76,53 @@ test("captures the snapshot before invoking the route-safe facade", async () => 
   assert.deepEqual(events, ["lock:start", "app-state:read-only", "lock:end", "facade"]);
 });
 
-test("rejects repeated and unsupported route query fields as facade input errors", async () => {
+test("rejects every snapshot-independent invalid request before capture", async () => {
   for (const query of [
+    { year: "2026", month: "9" },
+    { orgId: "org_1", month: "9" },
+    { orgId: "org_1", year: "2026" },
+    { orgId: "org_1", year: "1969", month: "9" },
+    { orgId: "org_1", year: "2026", month: "13" },
+    { orgId: "org_1", year: ["2026", "2027"], month: "9" },
+    { orgId: "org_1", year: "2026", month: ["9", "10"] },
+    { orgId: "org_1", year: "2026", month: "9", dimension: "person", dimensionId: "user_1" },
+    { orgId: "org_1", year: "2026", month: "9", dimension: "division" },
+    { orgId: "org_1", year: "2026", month: "9", dimensionId: "division_1" },
     { orgId: "org_1", year: "2026", month: "9", dimension: ["division", "scenario"], dimensionId: "id" },
     { orgId: "org_1", year: "2026", month: "9", from: "2026-09-01" },
   ]) {
+    let captureCalled = false;
     await assert.rejects(
-      queryDashboardOrganizationPerformanceRoute({ query, viewer, captureSnapshot: async () => snapshot }),
+      queryDashboardOrganizationPerformanceRoute({
+        query,
+        viewer,
+        captureSnapshot: async () => {
+          captureCalled = true;
+          return snapshot;
+        },
+      }),
       AuthorizedOrganizationPerformanceInputError,
     );
+    assert.equal(captureCalled, false);
   }
+});
+
+test("rejects an obvious customer cross-organization request before snapshot capture", async () => {
+  let captureCalled = false;
+  await assert.rejects(
+    queryDashboardOrganizationPerformanceRoute({
+      query: { orgId: "org_2", year: "2026", month: "9" },
+      viewer,
+      captureSnapshot: async () => {
+        captureCalled = true;
+        return snapshot;
+      },
+    }),
+    (error) =>
+      error instanceof AuthorizedOrganizationPerformanceDeniedError
+      && error.reason === "organization_not_found_or_inaccessible",
+  );
+  assert.equal(captureCalled, false);
 });
 
 test("propagates mixed-organization invariants as internal errors", async () => {

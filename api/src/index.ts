@@ -361,6 +361,7 @@ import {
   getDashboardPermittedUserIds,
 } from "./services/performanceAuthorization.js";
 import {
+  AuthorizedOrganizationPerformanceDeniedError,
   AuthorizedOrganizationPerformanceInputError,
   AuthorizedOrganizationPerformanceInvariantError,
   queryAuthorizedOrganizationPerformance,
@@ -13088,6 +13089,17 @@ app.get(
     } catch (error) {
       if (error instanceof AuthorizedOrganizationPerformanceInputError) {
         response.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof AuthorizedOrganizationPerformanceDeniedError) {
+        if (error.reason === "performance_scope_denied") {
+          response.status(403).json({
+            error: error.message,
+            code: "dashboard_scope_denied",
+          });
+          return;
+        }
+        response.status(404).json({ error: error.message });
         return;
       }
       if (error instanceof AuthorizedOrganizationPerformanceInvariantError) {

@@ -2,7 +2,9 @@ import type { DashboardViewer } from "@voicepractice/shared";
 
 import {
   AuthorizedOrganizationPerformanceInputError,
+  precheckAuthorizedOrganizationPerformanceViewerAccess,
   queryAuthorizedOrganizationPerformance,
+  validateAuthorizedOrganizationPerformanceRequest,
   type AuthorizedOrganizationPerformanceDimensionFilter,
   type AuthorizedOrganizationPerformanceResult,
 } from "./authorizedOrganizationPerformance.js";
@@ -80,7 +82,11 @@ function parseRouteQuery(query: Readonly<Record<string, unknown>>) {
 export async function queryDashboardOrganizationPerformanceRoute(
   input: DashboardOrganizationPerformanceRouteInput,
 ): Promise<AuthorizedOrganizationPerformanceResult> {
-  const routeQuery = parseRouteQuery(input.query);
+  const routeQuery = validateAuthorizedOrganizationPerformanceRequest(parseRouteQuery(input.query));
+  precheckAuthorizedOrganizationPerformanceViewerAccess({
+    viewer: input.viewer,
+    organizationId: routeQuery.organizationId,
+  });
   const snapshot = await input.captureSnapshot();
   const queryFacade = input.queryOrganizationPerformance ?? queryAuthorizedOrganizationPerformance;
   return queryFacade({

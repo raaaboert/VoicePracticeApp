@@ -2409,13 +2409,35 @@ test("organization performance route returns the facade result without identity 
   }
 });
 
-test("organization performance route preserves facade authorization semantics", async () => {
+test("organization performance route maps facade authorization denials without conflating valid empty data", async () => {
+  const validEmpty = await dashboardRequest(
+    "/dashboard/performance/organization?orgId=org_1&year=2024&month=1",
+    orgAdminToken,
+  );
+  assert.equal(validEmpty.status, 200);
+  assert.equal((validEmpty.body.activity as { attemptCount?: number }).attemptCount, 0);
+  assert.deepEqual(validEmpty.body.metricGroups, []);
+
   for (const token of [regularTeamToken, orgAdminNoneToken]) {
     const denied = await dashboardRequest(organizationPerformancePath(), token);
-    assert.equal(denied.status, 200);
-    assert.equal((denied.body.activity as { attemptCount?: number }).attemptCount, 0);
-    assert.deepEqual(denied.body.metricGroups, []);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error, "Organization performance access required.");
+    assert.equal(denied.body.code, "dashboard_scope_denied");
   }
+
+  const crossOrganization = await dashboardRequest(
+    organizationPerformancePath({ orgId: "org_2", evidenceAt: daysAgo(6) }),
+    orgAdminToken,
+  );
+  assert.equal(crossOrganization.status, 404);
+  assert.equal(crossOrganization.body.error, "Performance workspace not found.");
+
+  const missingCustomerOrganization = await dashboardRequest(
+    organizationPerformancePath({ orgId: "org_missing" }),
+    orgAdminToken,
+  );
+  assert.equal(missingCustomerOrganization.status, 404);
+  assert.equal(missingCustomerOrganization.body.error, "Performance workspace not found.");
 
   const dashboardDisabled = await dashboardRequest(organizationPerformancePath(), dashboardDisabledToken);
   assert.equal(dashboardDisabled.status, 403);
@@ -2429,6 +2451,13 @@ test("organization performance route preserves facade authorization semantics", 
   }), superToken);
   assert.equal(superUser.status, 200);
   assert.ok(superUser.body.activity);
+
+  const missingSuperUserOrganization = await dashboardRequest(
+    organizationPerformancePath({ orgId: "org_missing" }),
+    superToken,
+  );
+  assert.equal(missingSuperUserOrganization.status, 404);
+  assert.equal(missingSuperUserOrganization.body.error, "Performance workspace not found.");
 });
 
 test("organization performance route validates month and single-dimension query input", async () => {

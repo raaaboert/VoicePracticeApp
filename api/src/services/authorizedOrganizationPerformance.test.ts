@@ -4,6 +4,7 @@ import test from "node:test";
 import type { DashboardViewer, SimulationScoreRecord } from "@voicepractice/shared";
 
 import {
+  AuthorizedOrganizationPerformanceDeniedError,
   AuthorizedOrganizationPerformanceInputError,
   AuthorizedOrganizationPerformanceInvariantError,
   queryAuthorizedOrganizationPerformance,
@@ -126,6 +127,61 @@ function metric(
 ) {
   return result.metricGroups.filter((group) => group.metric === name);
 }
+
+test("returns a legitimate empty aggregate for an authorized organization with no evidence", () => {
+  const result = query([]);
+  assert.equal(result.historicalScope, "organization_history");
+  assert.equal(result.activity?.attemptCount, 0);
+  assert.deepEqual(result.completionGroups, []);
+  assert.deepEqual(result.metricGroups, []);
+});
+
+test("distinguishes inaccessible organizations from missing organization performance scope", () => {
+  const teamActor = user("team_actor", {
+    dashboardAccessEnabled: true,
+    performanceAccess: "team",
+  });
+  const teamSnapshot: PerformanceEvidenceSourceSnapshot = {
+    scoreRecords: [],
+    users: [teamActor],
+    organizations: [{ id: "org_a", status: "active" }, { id: "org_b", status: "active" }],
+    trainings: [],
+  };
+
+  assert.throws(
+    () => queryAuthorizedOrganizationPerformance({
+      snapshot: teamSnapshot,
+      viewer: viewer(teamActor),
+      organizationId: "org_a",
+      calendarMonth: MONTH,
+    }),
+    (error) =>
+      error instanceof AuthorizedOrganizationPerformanceDeniedError
+      && error.reason === "performance_scope_denied",
+  );
+  assert.throws(
+    () => queryAuthorizedOrganizationPerformance({
+      snapshot: teamSnapshot,
+      viewer: viewer(teamActor),
+      organizationId: "org_b",
+      calendarMonth: MONTH,
+    }),
+    (error) =>
+      error instanceof AuthorizedOrganizationPerformanceDeniedError
+      && error.reason === "organization_not_found_or_inaccessible",
+  );
+  assert.throws(
+    () => queryAuthorizedOrganizationPerformance({
+      snapshot: teamSnapshot,
+      viewer: viewer(teamActor),
+      organizationId: "org_missing",
+      calendarMonth: MONTH,
+    }),
+    (error) =>
+      error instanceof AuthorizedOrganizationPerformanceDeniedError
+      && error.reason === "organization_not_found_or_inaccessible",
+  );
+});
 
 test("classifies only current same-org enterprise users as current without target access or active-status requirements", () => {
   const result = query(
