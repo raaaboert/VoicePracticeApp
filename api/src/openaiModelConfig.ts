@@ -68,6 +68,8 @@ const RESPONSES_SIMULATION_MODELS = new Set([
   "gpt-5.6",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
+  "gpt-6-sol",
+  "gpt-6-luna",
 ]);
 
 function parseApiFamily(

@@ -186,6 +186,34 @@ test("routes opening and live turns to Luna while independently routing scoring 
   assert.notEqual(score.reasoningEffort, turn.reasoningEffort);
 });
 
+test("routes GPT-6 Luna and Sol through Responses without requiring an API-family override", () => {
+  const config = loadOpenAiModelConfig({
+    OPENAI_SIMULATION_MODEL: "gpt-6-luna",
+    OPENAI_SIMULATION_REASONING_EFFORT: "low",
+    OPENAI_SCORING_MODEL: "gpt-6-sol",
+    OPENAI_SCORING_REASONING_EFFORT: "medium",
+  });
+
+  assert.deepEqual(resolveSimulationRequestConfig(config, "opening"), {
+    model: "gpt-6-luna",
+    apiFamily: "responses",
+    maxOutputTokens: 160,
+    reasoningEffort: "low",
+  });
+  assert.deepEqual(resolveSimulationRequestConfig(config, "turn"), {
+    model: "gpt-6-luna",
+    apiFamily: "responses",
+    maxOutputTokens: 220,
+    reasoningEffort: "low",
+  });
+  assert.deepEqual(resolveSimulationRequestConfig(config, "score"), {
+    model: "gpt-6-sol",
+    apiFamily: "responses",
+    maxOutputTokens: 1200,
+    reasoningEffort: "medium",
+  });
+});
+
 test("explicit scoring config wins without leaking into opening or live turns", () => {
   const config = loadOpenAiModelConfig({
     OPENAI_SIMULATION_MODEL: "live-model",
