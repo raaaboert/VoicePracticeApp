@@ -1,4 +1,5 @@
 import {
+  ActivityIndicator,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -89,8 +90,16 @@ export function ScorecardView({
         </View>
 
         {viewModel.showLoading ? (
-          <View style={styles.card}>
-            <Text style={styles.body}>Generating your scorecard...</Text>
+          <View
+            style={[styles.card, styles.loadingCard]}
+            accessibilityRole="progressbar"
+            accessibilityLabel={viewModel.loadingTitle ?? "Generating your scorecard"}
+            accessibilityState={{ busy: true }}
+            accessibilityLiveRegion="polite"
+          >
+            <ActivityIndicator size="large" color={COLORS.accent} />
+            <Text style={styles.loadingTitle}>{viewModel.loadingTitle}</Text>
+            <Text style={styles.loadingBody}>{viewModel.loadingBody}</Text>
           </View>
         ) : null}
 
@@ -219,9 +228,9 @@ export function ScorecardView({
       </ScrollView>
 
       <View style={styles.footer}>
-        {viewModel.showRunAnother ? (
+        {viewModel.showBackToScenarios ? (
           <Pressable style={styles.button} onPress={onBack}>
-            <Text style={styles.buttonText}>Run Another Simulation</Text>
+            <Text style={styles.buttonText}>{viewModel.footerCtaLabel}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -362,6 +371,25 @@ const styles = StyleSheet.create({
     padding: 15,
     marginBottom: 12,
     gap: 8,
+  },
+  loadingCard: {
+    alignItems: "center",
+    borderColor: "rgba(140, 175, 147, 0.62)",
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+  },
+  loadingTitle: {
+    color: COLORS.text,
+    fontSize: 19,
+    fontWeight: "800",
+    lineHeight: 25,
+    textAlign: "center",
+  },
+  loadingBody: {
+    color: COLORS.textMuted,
+    fontSize: 14.5,
+    lineHeight: 21,
+    textAlign: "center",
   },
   warningCard: {
     borderRadius: 16,

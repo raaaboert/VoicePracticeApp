@@ -8,7 +8,10 @@ export interface ScorecardViewModel {
   showLegacyRubric: boolean;
   showTranscriptActions: boolean;
   showSupportActions: boolean;
-  showRunAnother: boolean;
+  showBackToScenarios: boolean;
+  loadingTitle: string | null;
+  loadingBody: string | null;
+  footerCtaLabel: string;
   scoreUnavailableTitle: string | null;
   scoreUnavailableBody: string | null;
   scoreWarning: string | null;
@@ -55,7 +58,12 @@ export function buildScorecardViewModel(params: {
     showLegacyRubric: showVerifiedScore,
     showTranscriptActions: !showLoading,
     showSupportActions: !showLoading,
-    showRunAnother: true,
+    showBackToScenarios: !showLoading,
+    loadingTitle: showLoading ? "Generating your scorecard…" : null,
+    loadingBody: showLoading
+      ? "We’re reviewing your conversation and preparing your feedback. This may take a moment."
+      : null,
+    footerCtaLabel: "Back to Scenarios",
     scoreUnavailableTitle:
       showScoreUnavailable
         ? showNotScored

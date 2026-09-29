@@ -30,7 +30,8 @@ test("scored state displays verified score content and compatibility rubric", ()
   assert.equal(model.showLegacyRubric, true);
   assert.equal(model.showScoreUnavailable, false);
   assert.equal(model.showSupportActions, true);
-  assert.equal(model.showRunAnother, true);
+  assert.equal(model.showBackToScenarios, true);
+  assert.equal(model.footerCtaLabel, "Back to Scenarios");
 });
 
 test("score unavailable state renders the final review shell without score or legacy rubric cards", () => {
@@ -47,7 +48,8 @@ test("score unavailable state renders the final review shell without score or le
   assert.equal(model.showScoreUnavailable, true);
   assert.equal(model.showTranscriptActions, true);
   assert.equal(model.showSupportActions, true);
-  assert.equal(model.showRunAnother, true);
+  assert.equal(model.showBackToScenarios, true);
+  assert.equal(model.footerCtaLabel, "Back to Scenarios");
   assert.equal(model.scoreUnavailableTitle, "We couldn't generate a score for this session.");
   assert.match(model.scoreUnavailableBody ?? "", /scoring service failed/i);
   assert.doesNotMatch(`${model.scoreUnavailableTitle} ${model.scoreUnavailableBody}`, /fallback score|practice-only|77|50/i);
@@ -66,7 +68,8 @@ test("not scored state uses no-scorecard-created copy without service failure wo
   assert.equal(model.showScoreUnavailable, true);
   assert.equal(model.showTranscriptActions, true);
   assert.equal(model.showSupportActions, true);
-  assert.equal(model.showRunAnother, true);
+  assert.equal(model.showBackToScenarios, true);
+  assert.equal(model.footerCtaLabel, "Back to Scenarios");
   assert.equal(model.scoreUnavailableTitle, "No scorecard created");
   assert.match(model.scoreUnavailableBody ?? "", /at least 3 user responses/i);
   assert.doesNotMatch(`${model.scoreUnavailableTitle} ${model.scoreUnavailableBody}`, /scoring service failed|fallback score|practice-only|77|50/i);
@@ -86,7 +89,12 @@ test("scoring in progress does not expose score, support, or transcript actions 
   assert.equal(model.showScoreUnavailable, false);
   assert.equal(model.showTranscriptActions, false);
   assert.equal(model.showSupportActions, false);
-  assert.equal(model.showRunAnother, true);
+  assert.equal(model.showBackToScenarios, false);
+  assert.equal(model.loadingTitle, "Generating your scorecard…");
+  assert.equal(
+    model.loadingBody,
+    "We’re reviewing your conversation and preparing your feedback. This may take a moment.",
+  );
 });
 
 test("recovered persisted authoritative score uses the scored state", () => {
