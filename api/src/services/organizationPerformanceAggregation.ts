@@ -334,19 +334,17 @@ function metricPopulations(
     || (left.profileId ?? "").localeCompare(right.profileId ?? ""));
 }
 
-function protectedContributorCount(
-  candidates: readonly OrganizationEvidenceCandidate[],
-  isCurrentSubject: CurrentSubjectClassifier,
-): number {
-  return contributorCounts(candidates.filter((candidate) => !isCurrentSubject(candidate))).size;
-}
-
 function protectedPopulationIsSafe(
   candidates: readonly OrganizationEvidenceCandidate[],
   isCurrentSubject: CurrentSubjectClassifier,
 ): boolean {
-  const count = protectedContributorCount(candidates, isCurrentSubject);
-  return count === 0 || count >= ORGANIZATION_PERFORMANCE_PROTECTED_CONTRIBUTOR_THRESHOLD;
+  const protectedCandidates = candidates.filter((candidate) => !isCurrentSubject(candidate));
+  const protectedCounts = contributorCounts(protectedCandidates);
+  if (protectedCounts.size === 0) return true;
+  if (protectedCounts.size < ORGANIZATION_PERFORMANCE_PROTECTED_CONTRIBUTOR_THRESHOLD) return false;
+
+  const largestProtectedContributionShare = Math.max(...protectedCounts.values()) / protectedCandidates.length;
+  return largestProtectedContributionShare <= ORGANIZATION_PERFORMANCE_CONCENTRATION_WARNING_SHARE;
 }
 
 function selectResponsePrivacyMode(

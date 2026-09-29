@@ -1,15 +1,25 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
 
 const sourceRoot = fileURLToPath(new URL("../", import.meta.url));
 const servicesRoot = join(sourceRoot, "services");
-const forbiddenLowerLevelModules = [
+const lowerLevelModules = [
   "authorizedOrganizationEvidenceCandidates",
   "organizationPerformanceAggregation",
-];
+] as const;
+
+const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], ReadonlySet<string>>> = {
+  authorizedOrganizationEvidenceCandidates: new Set([
+    "services/authorizedOrganizationPerformance.ts",
+    "services/organizationPerformanceAggregation.ts",
+  ]),
+  organizationPerformanceAggregation: new Set([
+    "services/authorizedOrganizationPerformance.ts",
+  ]),
+};
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -19,24 +29,41 @@ function sourceFiles(directory: string): string[] {
   });
 }
 
-function isRouteFacing(path: string): boolean {
-  const name = basename(path);
-  if (relative(sourceRoot, path).replaceAll("\\", "/") === "index.ts") return true;
-  return !name.includes(".test") && /(route|controller)/i.test(name);
+function referencedLowerLevelModules(source: string): (typeof lowerLevelModules)[number][] {
+  return lowerLevelModules.filter((moduleName) => {
+    const escapedModuleName = moduleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`[\"'\\x60][^\"'\\x60]*${escapedModuleName}(?:\\.(?:js|ts))?[\"'\\x60]`).test(source);
+  });
 }
 
-test("route-facing modules cannot import lower-level organization intelligence services", () => {
-  const routeFacingFiles = sourceFiles(sourceRoot).filter(isRouteFacing);
-  assert.ok(routeFacingFiles.some((path) => basename(path) === "index.ts"));
-  for (const path of routeFacingFiles) {
+test("only explicitly approved source modules may reference lower-level organization intelligence services", () => {
+  const productionFiles = sourceFiles(sourceRoot).filter((path) => !path.endsWith(".test.ts"));
+  assert.ok(productionFiles.some((path) => relative(sourceRoot, path).replaceAll("\\", "/") === "index.ts"));
+  for (const path of productionFiles) {
+    const importer = relative(sourceRoot, path).replaceAll("\\", "/");
     const source = readFileSync(path, "utf8");
-    for (const forbidden of forbiddenLowerLevelModules) {
+    for (const referencedModule of referencedLowerLevelModules(source)) {
       assert.equal(
-        source.includes(forbidden),
-        false,
-        `${relative(sourceRoot, path)} must use authorizedOrganizationPerformance instead of ${forbidden}`,
+        approvedImporters[referencedModule].has(importer),
+        true,
+        `${importer} must use authorizedOrganizationPerformance instead of ${referencedModule}`,
       );
     }
+  }
+});
+
+test("lower-level reference detection covers unauthorized static, re-export, extension, and dynamic forms", () => {
+  const mutations = [
+    ["index.ts", 'import { aggregateOrganizationPerformance } from "./services/organizationPerformanceAggregation.js";'],
+    ["services/someHelper.ts", 'import { queryAuthorizedOrganizationEvidenceCandidates } from "./authorizedOrganizationEvidenceCandidates";'],
+    ["services/orgPerformanceHttp.ts", 'export * from "./organizationPerformanceAggregation.js";'],
+    ["services/dashboardApi.ts", 'export { queryAuthorizedOrganizationEvidenceCandidates } from "./authorizedOrganizationEvidenceCandidates.ts";'],
+    ["services/dynamicHelper.ts", 'const module = await import("./organizationPerformanceAggregation.js");'],
+  ];
+  for (const [importer, source] of mutations) {
+    const references = referencedLowerLevelModules(source!);
+    assert.equal(references.length, 1, source);
+    assert.equal(approvedImporters[references[0]!].has(importer!), false, importer);
   }
 });
 

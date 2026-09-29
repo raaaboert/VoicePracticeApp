@@ -4,15 +4,16 @@ import test from "node:test";
 import type { DashboardViewer, SimulationScoreRecord } from "@voicepractice/shared";
 
 import {
+  AuthorizedOrganizationPerformanceInputError,
   AuthorizedOrganizationPerformanceInvariantError,
   queryAuthorizedOrganizationPerformance,
 } from "./authorizedOrganizationPerformance.js";
 import type { OrganizationEvidenceCandidate } from "./authorizedOrganizationEvidenceCandidates.js";
 import {
   aggregateOrganizationPerformanceWithHistoricalPrivacy,
-  OrganizationPerformanceAggregationInputError,
   type OrganizationPerformanceMetric,
 } from "./organizationPerformanceAggregation.js";
+import { queryAuthorizedPerformanceEvidence } from "./authorizedPerformanceEvidenceQuery.js";
 import { normalizePerformanceEvidence } from "./performanceEvidence.js";
 import type { PerformanceEvidenceSourceSnapshot, PerformanceEvidenceSourceUser } from "./performanceEvidenceSourceSnapshot.js";
 
@@ -196,7 +197,6 @@ test("uses current-only fallback below the threshold and all evidence at the thr
     limitedEvidence: true,
   });
   assert.deepEqual(fallbackOverall.concentration, {
-    largestContributionShare: 1 / 3,
     concentrationWarning: false,
   });
   assert.equal(fallbackOverall.historicalPrivacyAdjustmentApplied, true);
@@ -225,13 +225,135 @@ test("counts all deidentified history as one protected contributor bucket", () =
   assert.equal(hidden.activity, null);
   assert.deepEqual(hidden.metricGroups, []);
 
+  const current = user("deidentified_current");
   const fourKnown = Array.from({ length: 4 }, (_, index) =>
     score(`known_${index}`, `known_${index}`));
-  const included = query([...fourKnown, ...Array.from({ length: 100 }, (_, index) =>
-    score(`deleted_mixed_${index}`, "deleted_user"))]);
-  assert.equal(included.activity?.attemptCount, 104);
-  assert.equal(included.activity?.evidenceStrength.conservativeContributorCount, 5);
-  assert.equal(included.historicalPrivacyAdjustmentApplied, false);
+  const dominated = query([
+    score("deidentified_current", current.id),
+    ...fourKnown,
+    ...Array.from({ length: 5 }, (_, index) => score(`deleted_mixed_${index}`, "deleted_user")),
+  ], [current]);
+  assert.equal(dominated.activity?.attemptCount, 1);
+  assert.equal(dominated.historicalPrivacyAdjustmentApplied, true);
+});
+
+test("protected dominance treats exactly forty percent as safe and greater than forty percent as unsafe", () => {
+  const rows = (prefix: string, counts: readonly number[]) => counts.flatMap((count, subjectIndex) =>
+    Array.from({ length: count }, (_, observationIndex) =>
+      score(`${prefix}_${subjectIndex}_${observationIndex}`, `${prefix}_${subjectIndex}`)));
+
+  const equal = query(rows("equal", [1, 1, 1, 1, 1]));
+  assert.equal(equal.activity?.attemptCount, 5);
+  assert.equal(equal.historicalPrivacyAdjustmentApplied, false);
+
+  const exact = query(rows("exact", [4, 2, 2, 1, 1]));
+  assert.equal(exact.activity?.attemptCount, 10);
+  assert.equal(exact.historicalPrivacyAdjustmentApplied, false);
+
+  const current = user("dominance_current");
+  const currentRows = Array.from({ length: 100 }, (_, index) =>
+    score(`dominance_current_${index}`, current.id));
+  const unsafe = query([
+    ...currentRows,
+    ...rows("unsafe", [5, 2, 1, 1, 1]),
+  ], [current]);
+  assert.equal(unsafe.activity?.attemptCount, 100);
+  assert.equal(unsafe.historicalPrivacyAdjustmentApplied, true);
+});
+
+test("deidentified protected dominance treats exactly forty percent as safe", () => {
+  const knownRows = [2, 2, 1, 1].flatMap((count, subjectIndex) =>
+    Array.from({ length: count }, (_, observationIndex) =>
+      score(`known_exact_${subjectIndex}_${observationIndex}`, `known_exact_${subjectIndex}`)));
+  const result = query([
+    ...Array.from({ length: 4 }, (_, index) => score(`deleted_exact_${index}`, "deleted_user")),
+    ...knownRows,
+  ]);
+  assert.equal(result.activity?.attemptCount, 10);
+  assert.equal(result.activity?.evidenceStrength.conservativeContributorCount, 5);
+  assert.equal(result.historicalPrivacyAdjustmentApplied, false);
+});
+
+test("a dominant current contributor remains visible when protected history is independently safe", () => {
+  const current = user("power_user");
+  const currentRows = Array.from({ length: 20 }, (_, index) => score(`power_${index}`, current.id));
+  const protectedRows = Array.from({ length: 5 }, (_, index) => score(`protected_power_${index}`, `protected_power_${index}`));
+  const result = query([...currentRows, ...protectedRows], [current]);
+  assert.equal(result.activity?.attemptCount, 25);
+  assert.equal(result.activity?.concentration.concentrationWarning, true);
+  assert.equal(result.historicalPrivacyAdjustmentApplied, false);
+});
+
+test("protected profile dominance forces response-wide current-only fallback even when activity is safe", () => {
+  const current = user("profile_current");
+  const protectedRows = [
+    ...[3, 1, 1, 1, 1].flatMap((count, subjectIndex) =>
+      Array.from({ length: count }, (_, observationIndex) => score(
+        `profile_a_${subjectIndex}_${observationIndex}`,
+        `profile_subject_${subjectIndex}`,
+        { scoringWeightsApplied: WEIGHTS_A },
+      ))),
+    ...[1, 2, 2, 2, 2].flatMap((count, subjectIndex) =>
+      Array.from({ length: count }, (_, observationIndex) => score(
+        `profile_b_${subjectIndex}_${observationIndex}`,
+        `profile_subject_${subjectIndex}`,
+        { scoringWeightsApplied: WEIGHTS_B },
+      ))),
+  ];
+  const result = query([
+    score("profile_current", current.id, { scoringWeightsApplied: WEIGHTS_A }),
+    ...protectedRows,
+  ], [current]);
+  assert.equal(result.activity?.attemptCount, 1);
+  assert.equal(result.historicalPrivacyAdjustmentApplied, true);
+});
+
+test("protected completion dominance forces response-wide fallback when activity and metric populations are safe", () => {
+  const availability = (completion: boolean) => ({
+    overall: false,
+    communication: false,
+    outcome: true,
+    persuasion: false,
+    clarity: false,
+    empathy: false,
+    assertiveness: false,
+    completion,
+    objective: false,
+  });
+  const candidate = (
+    subjectKey: string,
+    observation: number,
+    completion: boolean,
+  ): OrganizationEvidenceCandidate => ({
+    subjectKind: "user",
+    subjectKey,
+    orgId: "org_a",
+    scenarioId: "scenario_a",
+    evidenceAt: "2026-09-15T12:00:00.000Z",
+    recordEra: "outcome_aware",
+    scoringGeneration: "generation_a",
+    metricAvailability: availability(completion),
+    overallScore: 50,
+    outcomeScore: 50,
+    persuasion: 5,
+    clarity: 5,
+    empathy: 5,
+    assertiveness: 5,
+    completionLevel: "complete",
+    objectiveAchieved: true,
+    divisionId: `observation_${observation}`,
+  });
+  const protectedRows = [3, 3, 3, 3, 3].flatMap((count, subjectIndex) =>
+    Array.from({ length: count }, (_, observationIndex) =>
+      candidate(`completion_subject_${subjectIndex}`, observationIndex, subjectIndex === 0 || observationIndex === 0)));
+  const rows = [candidate("current_completion", 0, true), ...protectedRows];
+  const result = aggregateOrganizationPerformanceWithHistoricalPrivacy(
+    { candidates: rows, calendarMonth: MONTH },
+    (row) => row.subjectKind === "user" && row.subjectKey === "current_completion",
+  );
+  assert.equal(result.activity?.attemptCount, 1);
+  assert.equal(result.metricGroups.find((group) => group.metric === "outcome")?.qualifyingObservationCount, 1);
+  assert.equal(result.historicalPrivacyAdjustmentApplied, true);
 });
 
 test("uses current-only response mode when any protected metric/profile population is unsafe", () => {
@@ -435,7 +557,7 @@ test("supports one dimension only and validates before candidate acquisition", (
       { dimension: "training", id: "training_a" },
     ] },
   ]) {
-    assert.throws(() => query([], [], extras), OrganizationPerformanceAggregationInputError);
+    assert.throws(() => query([], [], extras), AuthorizedOrganizationPerformanceInputError);
   }
 
   const inaccessibleSnapshot = {
@@ -451,7 +573,36 @@ test("supports one dimension only and validates before candidate acquisition", (
     viewer: viewer(actor()),
     organizationId: "org_a",
     calendarMonth: { year: 2026, month: 13 },
-  }), OrganizationPerformanceAggregationInputError);
+  }), AuthorizedOrganizationPerformanceInputError);
+
+  assert.throws(
+    () => queryAuthorizedOrganizationPerformance({
+      snapshot: snapshot([]),
+      viewer: viewer(actor()),
+      organizationId: " ",
+      calendarMonth: MONTH,
+    }),
+    AuthorizedOrganizationPerformanceInputError,
+  );
+
+  const unexpected = new Error("unexpected source failure");
+  const failingSnapshot = {
+    get scoreRecords(): readonly SimulationScoreRecord[] {
+      throw unexpected;
+    },
+    users: [actor()],
+    organizations: [{ id: "org_a", status: "active" }],
+    trainings: [],
+  } as PerformanceEvidenceSourceSnapshot;
+  assert.throws(
+    () => queryAuthorizedOrganizationPerformance({
+      snapshot: failingSnapshot,
+      viewer: viewer(actor()),
+      organizationId: "org_a",
+      calendarMonth: MONTH,
+    }),
+    (error) => error === unexpected && !(error instanceof AuthorizedOrganizationPerformanceInputError),
+  );
 });
 
 test("fails closed on a mixed-organization candidate invariant", () => {
@@ -481,8 +632,30 @@ test("fails closed on a mixed-organization candidate invariant", () => {
       organizationId: "org_a",
       calendarMonth: MONTH,
     }),
-    AuthorizedOrganizationPerformanceInvariantError,
+    (error) =>
+      error instanceof AuthorizedOrganizationPerformanceInvariantError
+      && !(error instanceof AuthorizedOrganizationPerformanceInputError),
   );
+});
+
+test("authorized person evidence remains directly visible outside aggregate privacy", () => {
+  const manager = user("manager", { dashboardAccessEnabled: true, performanceAccess: "team" });
+  const report = user("report", { managerUserId: manager.id });
+  const reportScore = score("report_visible", report.id);
+  const result = queryAuthorizedPerformanceEvidence({
+    snapshot: {
+      scoreRecords: [reportScore],
+      users: [manager, report],
+      organizations: [{ id: "org_a", status: "active" }],
+      trainings: [],
+    },
+    viewer: viewer(manager),
+    organizationId: "org_a",
+    targetUserId: report.id,
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.userId, report.id);
+  assert.equal(result[0]?.evidenceId, reportScore.id);
 });
 
 test("controlled output exposes aggregate privacy state without subject or evidence identity", () => {
@@ -496,9 +669,10 @@ test("controlled output exposes aggregate privacy state without subject or evide
   for (const forbidden of [
     "subjectKey", "userId", "evidenceId", "simulationSessionId", "evidenceAt",
     "deleted_user", "secret_former", "secret_evidence", "2026-09-15T12:00:00.000Z",
-    "protectedContributorCount", "subjectKind",
+    "protectedContributorCount", "subjectKind", "largestContributionShare",
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
   assert.equal(typeof result.historicalPrivacyAdjustmentApplied, "boolean");
+  assert.equal(typeof result.activity?.concentration.concentrationWarning, "boolean");
 });
