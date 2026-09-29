@@ -47,7 +47,7 @@ export interface PerformanceEvidenceSourceSnapshotDependencies {
   refreshScoreRecords(): Promise<void>;
   getScoreSnapshot(): readonly SimulationScoreRecord[];
   withDatabaseLock<T>(runner: () => Promise<T>): Promise<T>;
-  loadAppState(): Promise<Pick<ApiDatabase, "users" | "orgs" | "orgTrainings">>;
+  loadAppStateReadOnly(): Promise<Pick<ApiDatabase, "users" | "orgs" | "orgTrainings">>;
 }
 
 function projectUser(user: UserProfile): PerformanceEvidenceSourceUser {
@@ -91,7 +91,7 @@ export async function capturePerformanceEvidenceSourceSnapshot(
 
   return await dependencies.withDatabaseLock(async () => {
     const scoreRecords = dependencies.getScoreSnapshot();
-    const appState = await dependencies.loadAppState();
+    const appState = await dependencies.loadAppStateReadOnly();
 
     return {
       scoreRecords,

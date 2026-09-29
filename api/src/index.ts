@@ -360,6 +360,12 @@ import {
   canViewOrganizationPerformance,
   getDashboardPermittedUserIds,
 } from "./services/performanceAuthorization.js";
+import {
+  AuthorizedOrganizationPerformanceInputError,
+  AuthorizedOrganizationPerformanceInvariantError,
+  queryAuthorizedOrganizationPerformance,
+} from "./services/authorizedOrganizationPerformance.js";
+import { queryDashboardOrganizationPerformanceRoute } from "./services/dashboardOrganizationPerformanceRoute.js";
 import { capturePerformanceEvidenceSourceSnapshot as capturePerformanceEvidenceSourceSnapshotState } from "./services/performanceEvidenceSourceSnapshot.js";
 import {
   completeRecognizedSimulationUsage,
@@ -4260,6 +4266,7 @@ let databaseReadyError: string | null = null;
 let databaseReadyConsecutiveFailures = 0;
 let isReadinessRefreshInFlight = false;
 let lastReadinessLoggedError: string | null = null;
+let dashboardOrganizationPerformanceQueryForTest: typeof queryAuthorizedOrganizationPerformance | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -4278,14 +4285,19 @@ function getOrCreateDatabaseStorage(): DatabaseStorage {
   return databaseStorage;
 }
 
-async function loadDatabase(options?: { forceStorageRead?: boolean }): Promise<ApiDatabase> {
+async function loadDatabase(options?: {
+  forceStorageRead?: boolean;
+  syncEmployeeIdClaims?: boolean;
+}): Promise<ApiDatabase> {
   if (!options?.forceStorageRead && databaseCache) {
     return databaseCache;
   }
 
   const storage = getOrCreateDatabaseStorage();
   const loaded = await storage.load();
-  await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
+  if (options?.syncEmployeeIdClaims !== false) {
+    await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
+  }
   databaseCache = loaded;
   return loaded;
 }
@@ -4374,7 +4386,10 @@ async function capturePerformanceEvidenceSourceSnapshot() {
     },
     getScoreSnapshot: () => scoreRecordStore.getSnapshot(),
     withDatabaseLock,
-    loadAppState: async () => await loadDatabase({ forceStorageRead: true }),
+    loadAppStateReadOnly: async () => await loadDatabase({
+      forceStorageRead: true,
+      syncEmployeeIdClaims: false,
+    }),
   });
 }
 
@@ -13055,6 +13070,33 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
     response.json(payload);
   });
 });
+
+app.get(
+  "/dashboard/performance/organization",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    try {
+      const result = await queryDashboardOrganizationPerformanceRoute({
+        query: request.query,
+        viewer: request.dashboard!.viewer,
+        captureSnapshot: capturePerformanceEvidenceSourceSnapshot,
+        ...(dashboardOrganizationPerformanceQueryForTest === null
+          ? {}
+          : { queryOrganizationPerformance: dashboardOrganizationPerformanceQueryForTest }),
+      });
+      response.json(result);
+    } catch (error) {
+      if (error instanceof AuthorizedOrganizationPerformanceInputError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof AuthorizedOrganizationPerformanceInvariantError) {
+        throw new Error("Organization performance query failed.");
+      }
+      throw error;
+    }
+  },
+);
 
 app.post("/dashboard/performance/preview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const body = request.body as PerformancePlanPreviewRequest;
@@ -23102,6 +23144,15 @@ export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) =
     throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
   }
   dashboardTrainingPackLoaderForTest = loader;
+}
+
+export function setDashboardOrganizationPerformanceQueryForTest(
+  query: typeof queryAuthorizedOrganizationPerformance | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setDashboardOrganizationPerformanceQueryForTest is only available in test.");
+  }
+  dashboardOrganizationPerformanceQueryForTest = query;
 }
 
 export function clearRateLimitsForTest(): void {

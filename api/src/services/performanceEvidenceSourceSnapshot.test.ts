@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type {
@@ -163,8 +164,8 @@ function createDependencies(params: {
         events.push("lock:end");
       }
     },
-    async loadAppState() {
-      events.push("app-state");
+    async loadAppStateReadOnly() {
+      events.push("app-state:read-only");
       return params.appState;
     },
   };
@@ -179,10 +180,23 @@ test("refreshes scores before the global lock and captures only raw sources unde
     events,
   }));
 
-  assert.deepEqual(events, ["refresh", "lock:start", "score-snapshot", "app-state", "lock:end"]);
+  assert.deepEqual(events, ["refresh", "lock:start", "score-snapshot", "app-state:read-only", "lock:end"]);
   assert.strictEqual(snapshot.scoreRecords, rawScores);
   assert.equal(snapshot.scoreRecords[0]?.overallScore, 101);
   assert.equal(Object.hasOwn(snapshot.scoreRecords[0]!, "anomalies"), false);
+});
+
+test("index wiring uses the forced read-only app-state load without employee-ID claim synchronization", () => {
+  const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+  const captureStart = indexSource.indexOf("async function capturePerformanceEvidenceSourceSnapshot()");
+  const captureEnd = indexSource.indexOf("async function withFreshReportingWrite", captureStart);
+  assert.ok(captureStart >= 0 && captureEnd > captureStart);
+
+  const captureSource = indexSource.slice(captureStart, captureEnd);
+  assert.match(captureSource, /loadAppStateReadOnly/);
+  assert.match(captureSource, /forceStorageRead:\s*true/);
+  assert.match(captureSource, /syncEmployeeIdClaims:\s*false/);
+  assert.doesNotMatch(captureSource, /syncFromUsers/);
 });
 
 test("copies minimal app-state projections that remain independent from later and caller mutation", async () => {

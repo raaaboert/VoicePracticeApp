@@ -25,6 +25,11 @@ import {
 } from "@voicepractice/shared";
 
 import { createWebAuthService } from "./services/webAuth.js";
+import {
+  AuthorizedOrganizationPerformanceInvariantError,
+  type AuthorizedOrganizationPerformanceQuery,
+  type AuthorizedOrganizationPerformanceResult,
+} from "./services/authorizedOrganizationPerformance.js";
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
@@ -66,10 +71,15 @@ let regularOrganizationToken: string;
 let orgAdminNoneToken: string;
 let userAdminNoneToken: string;
 let superToken: string;
+let dashboardDisabledToken: string;
+let inactiveDashboardToken: string;
 let adminToken: string | null = null;
 let setSimulationAiBudgetGraceForTest: (userId: string, expiresAtMs: number) => void;
 let ensureDatabaseShapeForTest: (raw: unknown) => ApiDatabase;
 let ensureDemoEnterpriseDataForTest: (db: ApiDatabase, now: string) => void;
+let setDashboardOrganizationPerformanceQueryForTest: (
+  query: ((input: AuthorizedOrganizationPerformanceQuery) => AuthorizedOrganizationPerformanceResult) | null,
+) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -948,6 +958,8 @@ async function seedStores(): Promise<void> {
   orgAdminNoneToken = await issue("org_admin_none", "customer_dashboard_user", "org_1");
   userAdminNoneToken = await issue("user_admin_none", "customer_dashboard_user", "org_1");
   superToken = await issue("super_user", "super_user", null);
+  dashboardDisabledToken = await issue("eligible_user_admin", "customer_dashboard_user", "org_1");
+  inactiveDashboardToken = await issue("disabled_user_admin", "customer_dashboard_user", "org_1");
 }
 
 async function dashboardRequest(pathname: string, token = orgAdminToken, init?: RequestInit) {
@@ -1067,6 +1079,7 @@ before(async () => {
   setSimulationAiBudgetGraceForTest = imported.setSimulationAiBudgetGraceForTest;
   ensureDatabaseShapeForTest = imported.ensureDatabaseShape;
   ensureDemoEnterpriseDataForTest = imported.ensureDemoEnterpriseData;
+  setDashboardOrganizationPerformanceQueryForTest = imported.setDashboardOrganizationPerformanceQueryForTest;
   imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
     [
       buildTrainingPack("pack_scope", "org_1"),
@@ -2359,6 +2372,112 @@ after(async () => {
   }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+function organizationPerformancePath(params: {
+  orgId?: string;
+  evidenceAt?: string;
+  extra?: string;
+} = {}): string {
+  const evidenceDate = new Date(params.evidenceAt ?? daysAgo(10));
+  const query = new URLSearchParams({
+    orgId: params.orgId ?? "org_1",
+    year: String(evidenceDate.getUTCFullYear()),
+    month: String(evidenceDate.getUTCMonth() + 1),
+  });
+  return `/dashboard/performance/organization?${query.toString()}${params.extra ?? ""}`;
+}
+
+test("organization performance route returns the facade result without identity or exact-share fields", async () => {
+  const response = await dashboardRequest(organizationPerformancePath(), orgAdminToken);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.historicalScope, "organization_history");
+  assert.equal((response.body.calendarMonth as { timeZone?: string }).timeZone, "UTC");
+  assert.ok(response.body.activity);
+
+  const serialized = JSON.stringify(response.body);
+  for (const forbiddenField of [
+    "subjectKey",
+    "userId",
+    "evidenceId",
+    "sessionId",
+    "largestContributionShare",
+  ]) {
+    assert.equal(serialized.includes(`\"${forbiddenField}\"`), false);
+  }
+});
+
+test("organization performance route preserves facade authorization semantics", async () => {
+  for (const token of [regularTeamToken, orgAdminNoneToken]) {
+    const denied = await dashboardRequest(organizationPerformancePath(), token);
+    assert.equal(denied.status, 200);
+    assert.equal((denied.body.activity as { attemptCount?: number }).attemptCount, 0);
+    assert.deepEqual(denied.body.metricGroups, []);
+  }
+
+  const dashboardDisabled = await dashboardRequest(organizationPerformancePath(), dashboardDisabledToken);
+  assert.equal(dashboardDisabled.status, 403);
+
+  const inactive = await dashboardRequest(organizationPerformancePath(), inactiveDashboardToken);
+  assert.ok(inactive.status === 401 || inactive.status === 403);
+
+  const superUser = await dashboardRequest(organizationPerformancePath({
+    orgId: "org_2",
+    evidenceAt: daysAgo(6),
+  }), superToken);
+  assert.equal(superUser.status, 200);
+  assert.ok(superUser.body.activity);
+});
+
+test("organization performance route validates month and single-dimension query input", async () => {
+  const invalidMonth = await dashboardRequest(
+    "/dashboard/performance/organization?orgId=org_1&year=2026&month=13",
+    orgAdminToken,
+  );
+  assert.equal(invalidMonth.status, 400);
+
+  const invalidDimension = await dashboardRequest(
+    organizationPerformancePath({ extra: "&dimension=person&dimensionId=user_1" }),
+    orgAdminToken,
+  );
+  assert.equal(invalidDimension.status, 400);
+
+  const repeatedDimension = await dashboardRequest(
+    organizationPerformancePath({ extra: "&dimension=division&dimension=scenario&dimensionId=division_a" }),
+    orgAdminToken,
+  );
+  assert.equal(repeatedDimension.status, 400);
+
+  const unsupportedRange = await dashboardRequest(
+    organizationPerformancePath({ extra: "&from=2026-09-01&to=2026-10-01" }),
+    orgAdminToken,
+  );
+  assert.equal(unsupportedRange.status, 400);
+
+  const filtered = await dashboardRequest(
+    organizationPerformancePath({
+      evidenceAt: daysAgo(9),
+      extra: "&dimension=division&dimensionId=division_a",
+    }),
+    orgAdminToken,
+  );
+  assert.equal(filtered.status, 200);
+  assert.equal(filtered.body.historicalScope, "current_population");
+  assert.deepEqual(filtered.body.dimensionFilter, { dimension: "division", id: "division_a" });
+});
+
+test("organization performance route keeps mixed-organization invariants on the internal-error path", async () => {
+  setDashboardOrganizationPerformanceQueryForTest(() => {
+    throw new AuthorizedOrganizationPerformanceInvariantError();
+  });
+  try {
+    const response = await dashboardRequest(organizationPerformancePath(), orgAdminToken);
+    assert.equal(response.status, 500);
+    assert.equal(response.body.error, "Organization performance query failed.");
+  } finally {
+    setDashboardOrganizationPerformanceQueryForTest(null);
   }
 });
 
