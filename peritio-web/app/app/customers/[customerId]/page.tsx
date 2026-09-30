@@ -72,7 +72,7 @@ export default async function CustomerDetailPage({
           <div className="pill-row">
             <span className="pill">{customer.industryLabels.join(", ") || "General"}</span>
             <span className="pill accent">{customer.orgStatus}</span>
-            <Link className="inline-link" href={`/app/customers/${encodeURIComponent(customer.orgId)}/performance${divisionId ? `?divisionId=${encodeURIComponent(divisionId)}` : ""}`}>
+            <Link className="inline-link" href={`/app/performance?orgId=${encodeURIComponent(customer.orgId)}`}>
               Performance
             </Link>
             <Link className="inline-link" href={`/app/admin?orgId=${encodeURIComponent(customer.orgId)}`}>

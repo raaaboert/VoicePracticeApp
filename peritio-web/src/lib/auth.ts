@@ -65,6 +65,10 @@ import {
   WebAuthSessionResponse,
   WebAuthVerifyCodeResponse,
 } from "@voicepractice/shared";
+import type {
+  OrganizationPerformanceDimension,
+  OrganizationPerformanceResponse,
+} from "@/src/lib/organizationPerformance";
 import { WEB_AUTH_SESSION_COOKIE_NAME } from "@/src/lib/authConstants";
 import {
   isDashboardScopeDeniedStatus,
@@ -366,6 +370,29 @@ export async function getDashboardPerformanceWorkspace(options?: {
 
     throw error;
   }
+}
+
+export async function getDashboardOrganizationPerformance(options: {
+  orgId: string;
+  year: number;
+  month: number;
+  dimension?: OrganizationPerformanceDimension | null;
+  dimensionId?: string | null;
+}): Promise<OrganizationPerformanceResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const params = new URLSearchParams({
+    orgId: options.orgId,
+    year: String(options.year),
+    month: String(options.month),
+  });
+  if (options.dimension && options.dimensionId) {
+    params.set("dimension", options.dimension);
+    params.set("dimensionId", options.dimensionId);
+  }
+  return fetchDashboardApi<OrganizationPerformanceResponse>(
+    `/dashboard/performance/organization?${params.toString()}`,
+    { token }
+  );
 }
 
 export async function previewDashboardPerformancePlan(
