@@ -186,11 +186,11 @@ test("routes opening and live turns to Luna while independently routing scoring 
   assert.notEqual(score.reasoningEffort, turn.reasoningEffort);
 });
 
-test("routes GPT-6 Luna and Sol through Responses without requiring an API-family override", () => {
+test("routes GPT-6 Luna and GPT-6.1 Sol through Responses with supported reasoning and speech defaults unchanged", () => {
   const config = loadOpenAiModelConfig({
     OPENAI_SIMULATION_MODEL: "gpt-6-luna",
     OPENAI_SIMULATION_REASONING_EFFORT: "low",
-    OPENAI_SCORING_MODEL: "gpt-6-sol",
+    OPENAI_SCORING_MODEL: "gpt-6.1-sol",
     OPENAI_SCORING_REASONING_EFFORT: "medium",
   });
 
@@ -207,6 +207,21 @@ test("routes GPT-6 Luna and Sol through Responses without requiring an API-famil
     reasoningEffort: "low",
   });
   assert.deepEqual(resolveSimulationRequestConfig(config, "score"), {
+    model: "gpt-6.1-sol",
+    apiFamily: "responses",
+    maxOutputTokens: 1200,
+    reasoningEffort: "medium",
+  });
+  assert.deepEqual(config.transcription, { model: "whisper-1" });
+  assert.deepEqual(config.speech, { model: "gpt-4o-mini-tts" });
+
+  const rollback = loadOpenAiModelConfig({
+    OPENAI_SIMULATION_MODEL: "gpt-6-luna",
+    OPENAI_SIMULATION_REASONING_EFFORT: "low",
+    OPENAI_SCORING_MODEL: "gpt-6-sol",
+    OPENAI_SCORING_REASONING_EFFORT: "medium",
+  });
+  assert.deepEqual(resolveSimulationRequestConfig(rollback, "score"), {
     model: "gpt-6-sol",
     apiFamily: "responses",
     maxOutputTokens: 1200,

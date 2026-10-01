@@ -54,6 +54,7 @@ export interface CapturedPromptFamily {
 interface ProviderRequestBody {
   model?: string;
   input?: Array<{ role?: string; content?: string }>;
+  reasoning?: { effort?: string };
 }
 
 export interface PromptRouteHarness {
@@ -83,6 +84,9 @@ export interface PromptRouteHarness {
     body: Record<string, unknown>;
     providerCallCount: number;
     evaluationSystemPrompt: string | null;
+    providerModel: string | null;
+    providerReasoningEffort: string | null;
+    usesResponsesShape: boolean;
   }>;
   readPersistedScoreRecords(): Promise<SimulationScoreRecord[]>;
   close(): Promise<void>;
@@ -402,7 +406,12 @@ const deterministicScore = {
   summary: "Handled the conversation well.",
 };
 
-function configureEnvironment(tempDbPath: string, modularEnvironmentEnabled: boolean): void {
+function configureEnvironment(
+  tempDbPath: string,
+  modularEnvironmentEnabled: boolean,
+  scoringModel: string,
+  scoringReasoningEffort: string | undefined,
+): void {
   process.env.NODE_ENV = "test";
   process.env.PERITIO_ENV = "development";
   process.env.STORAGE_PROVIDER = "file";
@@ -415,9 +424,14 @@ function configureEnvironment(tempDbPath: string, modularEnvironmentEnabled: boo
   process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
   process.env.OPENAI_API_KEY = "test-openai-key";
   process.env.OPENAI_SIMULATION_MODEL = "route-simulation-model";
-  process.env.OPENAI_SCORING_MODEL = "route-scoring-model";
+  process.env.OPENAI_SCORING_MODEL = scoringModel;
   process.env.OPENAI_SIMULATION_API_FAMILY = "responses";
   process.env.OPENAI_SCORING_API_FAMILY = "responses";
+  if (scoringReasoningEffort === undefined) {
+    delete process.env.OPENAI_SCORING_REASONING_EFFORT;
+  } else {
+    process.env.OPENAI_SCORING_REASONING_EFFORT = scoringReasoningEffort;
+  }
   process.env.ENABLE_REMOTE_TTS = "false";
   process.env.USE_MODULAR_PROMPT_ARCHITECTURE = modularEnvironmentEnabled ? "true" : "false";
   delete process.env.DATABASE_URL;
@@ -431,6 +445,8 @@ export async function startPromptRouteHarness(params: {
   modularEnvironmentEnabled: boolean;
   learnerOrgModularPromptEnabled?: boolean;
   trainingPacks?: TrainingPack[];
+  scoringModel?: string;
+  scoringReasoningEffort?: string;
 }): Promise<PromptRouteHarness> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "simulation-prompt-routes-"));
   const dbPath = path.join(tempDir, "db.local.json");
@@ -444,7 +460,13 @@ export async function startPromptRouteHarness(params: {
     JSON.stringify(buildDatabase(params.learnerOrgModularPromptEnabled === true), null, 2),
     "utf8",
   );
-  configureEnvironment(dbPath, params.modularEnvironmentEnabled);
+  const scoringModel = params.scoringModel ?? "route-scoring-model";
+  configureEnvironment(
+    dbPath,
+    params.modularEnvironmentEnabled,
+    scoringModel,
+    params.scoringReasoningEffort,
+  );
 
   const imported = await import("./index.js");
   const trainingPacks = params.trainingPacks ?? [];
@@ -475,7 +497,7 @@ export async function startPromptRouteHarness(params: {
     const requestBody = JSON.parse(rawRequestBody) as ProviderRequestBody;
     providerRequests.push(requestBody);
     const outputText =
-      requestBody.model === "route-scoring-model"
+      requestBody.model === scoringModel
         ? JSON.stringify(deterministicScore)
         : "Deterministic route characterization reply.";
     return new Response(
@@ -635,6 +657,9 @@ export async function startPromptRouteHarness(params: {
         body: await response.json() as Record<string, unknown>,
         providerCallCount,
         evaluationSystemPrompt,
+        providerModel: providerRequest?.model ?? null,
+        providerReasoningEffort: providerRequest?.reasoning?.effort ?? null,
+        usesResponsesShape: Array.isArray(providerRequest?.input),
       };
     },
     async readPersistedScoreRecords(): Promise<SimulationScoreRecord[]> {
