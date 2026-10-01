@@ -34,6 +34,10 @@ import type {
   AuthorizedTeamPerformanceQuery,
   AuthorizedTeamPerformanceResult,
 } from "./services/authorizedTeamPerformance.js";
+import type {
+  AuthorizedTeamPerformanceIntelligenceQuery,
+  AuthorizedTeamPerformanceIntelligenceResult,
+} from "./services/authorizedTeamPerformanceIntelligence.js";
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
@@ -86,6 +90,9 @@ let setDashboardOrganizationPerformanceQueryForTest: (
 ) => void;
 let setDashboardTeamPerformanceQueryForTest: (
   query: ((input: AuthorizedTeamPerformanceQuery) => AuthorizedTeamPerformanceResult) | null,
+) => void;
+let setDashboardTeamPerformanceIntelligenceQueryForTest: (
+  query: ((input: AuthorizedTeamPerformanceIntelligenceQuery) => AuthorizedTeamPerformanceIntelligenceResult) | null,
 ) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
@@ -1100,6 +1107,8 @@ before(async () => {
   ensureDemoEnterpriseDataForTest = imported.ensureDemoEnterpriseData;
   setDashboardOrganizationPerformanceQueryForTest = imported.setDashboardOrganizationPerformanceQueryForTest;
   setDashboardTeamPerformanceQueryForTest = imported.setDashboardTeamPerformanceQueryForTest;
+  setDashboardTeamPerformanceIntelligenceQueryForTest =
+    imported.setDashboardTeamPerformanceIntelligenceQueryForTest;
   imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
     [
       buildTrainingPack("pack_scope", "org_1"),
@@ -2575,6 +2584,92 @@ test("team performance HTTP route keeps 400, 403, 404, and generic 500 distinct"
     assert.equal(JSON.stringify(failure.body).includes("internal hierarchy secret"), false);
   } finally {
     setDashboardTeamPerformanceQueryForTest(null);
+  }
+});
+
+test("team intelligence HTTP route returns route-safe facts and signals for authorized Team scopes", async () => {
+  const emptyRoute = "/dashboard/performance/team/intelligence?orgId=org_1&year=2024&month=1";
+  const team = await dashboardRequest(emptyRoute, regularTeamToken);
+  assert.equal(team.status, 200);
+  assert.equal(team.body.scope, "team");
+  assert.equal(typeof team.body.asOf, "string");
+  assert.deepEqual(team.body.population, { currentReportCount: 0, hasCurrentReports: false });
+  assert.ok(team.body.facts);
+  assert.ok(team.body.signals);
+
+  const organization = await dashboardRequest(emptyRoute, regularOrganizationToken);
+  assert.equal(organization.status, 200);
+  assert.deepEqual(organization.body.population, { currentReportCount: 0, hasCurrentReports: false });
+
+  const populatedRoute = organizationPerformancePath({ evidenceAt: daysAgo(9) })
+    .replace("/organization?", "/team/intelligence?");
+  const populated = await dashboardRequest(populatedRoute, userAdminToken);
+  assert.equal(populated.status, 200);
+  assert.equal((populated.body.population as { currentReportCount?: number }).currentReportCount, 4);
+  assert.ok((populated.body.facts as { activity?: unknown }).activity);
+
+  const serialized = JSON.stringify(populated.body);
+  for (const forbidden of [
+    "userId", "subjectKey", "managerUserId", "evidenceId", "simulationSessionId",
+    "scenarioId", "trainingId", "profileKey", "largestContributionShare",
+  ]) {
+    assert.equal(serialized.includes(`\"${forbidden}\"`), false, forbidden);
+  }
+});
+
+test("team intelligence HTTP route enforces input, access, existence hiding, safe 500, and transient 503", async () => {
+  const route = "/dashboard/performance/team/intelligence?orgId=org_1&year=2026&month=9";
+  for (const extra of [
+    "&month=10",
+    "&orgId=org_1",
+    "&asOf=2026-10-01T00:00:00Z",
+    "&managerId=manager",
+    "&userId=report",
+    "&dimension=division",
+    "&trainingId=training_a",
+    "&scenarioId=scenario_a",
+    "&from=2026-09-01",
+  ]) {
+    assert.equal((await dashboardRequest(route + extra, regularTeamToken)).status, 400);
+  }
+
+  for (const token of [orgAdminNoneToken, userAdminNoneToken]) {
+    const denied = await dashboardRequest(route, token);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, "dashboard_scope_denied");
+  }
+  assert.equal(
+    (await dashboardRequest(route.replace("orgId=org_1", "orgId=org_2"), regularTeamToken)).status,
+    404,
+  );
+  assert.equal(
+    (await dashboardRequest(route.replace("orgId=org_1", "orgId=org_missing"), regularTeamToken)).status,
+    404,
+  );
+
+  setDashboardTeamPerformanceIntelligenceQueryForTest(() => {
+    throw new Error("internal intelligence secret");
+  });
+  try {
+    const failure = await dashboardRequest(route, regularTeamToken);
+    assert.equal(failure.status, 500);
+    assert.equal(failure.body.error, "Team performance intelligence query failed.");
+    assert.equal(JSON.stringify(failure.body).includes("internal intelligence secret"), false);
+  } finally {
+    setDashboardTeamPerformanceIntelligenceQueryForTest(null);
+  }
+
+  setDashboardTeamPerformanceIntelligenceQueryForTest(() => {
+    const transient = new Error("connection terminated unexpectedly") as Error & { code: string };
+    transient.code = "57P01";
+    throw transient;
+  });
+  try {
+    const unavailable = await dashboardRequest(route, regularTeamToken);
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.error, "Database temporarily unavailable. Please retry.");
+  } finally {
+    setDashboardTeamPerformanceIntelligenceQueryForTest(null);
   }
 });
 

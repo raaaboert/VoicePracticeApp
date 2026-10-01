@@ -9,12 +9,16 @@ const servicesRoot = join(sourceRoot, "services");
 const workspaceRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const webAppSourceRoots = [
   join(workspaceRoot, "admin-web", "src"),
+  join(workspaceRoot, "admin-web", "app"),
   join(workspaceRoot, "peritio-web", "src"),
+  join(workspaceRoot, "peritio-web", "app"),
 ] as const;
 const lowerLevelModules = [
   "authorizedOrganizationEvidenceCandidates",
   "authorizedTeamPerformanceInternal",
   "organizationPerformanceAggregation",
+  "teamPerformanceIntelligenceFacts",
+  "teamPerformanceIntelligenceSignals",
 ] as const;
 
 const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], ReadonlySet<string>>> = {
@@ -33,6 +37,13 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
     // Internal identity-free two-period facts; authorization and Team population
     // still enter through resolveAuthorizedTeamPerformanceScope.
     "services/teamPerformanceIntelligenceFacts.ts",
+  ]),
+  teamPerformanceIntelligenceFacts: new Set([
+    "services/authorizedTeamPerformanceIntelligence.ts",
+    "services/teamPerformanceIntelligenceSignals.ts",
+  ]),
+  teamPerformanceIntelligenceSignals: new Set([
+    "services/authorizedTeamPerformanceIntelligence.ts",
   ]),
 };
 
@@ -87,12 +98,30 @@ test("lower-level reference detection covers unauthorized static, re-export, ext
     ["services/dashboardApi.ts", 'export { queryAuthorizedOrganizationEvidenceCandidates } from "./authorizedOrganizationEvidenceCandidates.ts";'],
     ["services/dynamicHelper.ts", 'const module = await import("./organizationPerformanceAggregation.js");'],
     ["services/dashboardTeamIntelligenceRoute.ts", 'import { resolveAuthorizedTeamPerformanceScope } from "./authorizedTeamPerformanceInternal.js";'],
+    ["services/intelligenceEscape.ts", 'export * from "./teamPerformanceIntelligenceFacts.js";'],
   ];
   for (const [importer, source] of mutations) {
     const references = referencedLowerLevelModules(source!);
     assert.equal(references.length, 1, source);
     assert.equal(approvedImporters[references[0]!].has(importer!), false, importer);
   }
+});
+
+test("Team intelligence route imports only its route-safe intelligence facade", () => {
+  const routeSource = readFileSync(
+    join(servicesRoot, "dashboardTeamPerformanceIntelligenceRoute.ts"),
+    "utf8",
+  );
+  assert.match(routeSource, /from "\.\/authorizedTeamPerformanceIntelligence\.js"/);
+  assert.doesNotMatch(
+    routeSource,
+    /authorizedTeamPerformanceInternal|teamPerformanceIntelligenceFacts|teamPerformanceIntelligenceSignals|organizationPerformanceAggregation|authorizedOrganizationEvidenceCandidates/,
+  );
+  const facadeSource = readFileSync(
+    join(servicesRoot, "authorizedTeamPerformanceIntelligence.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(facadeSource, /export\s+\*/);
 });
 
 test("route-safe Team facade does not export the raw resolver", async () => {
