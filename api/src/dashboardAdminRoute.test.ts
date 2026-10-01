@@ -828,6 +828,18 @@ function buildDatabase(): ApiDatabase {
         decidedByUserId: "org_admin",
         decisionReason: "Not approved for this organization.",
       },
+      {
+        ...buildJoinRequest("jr_approved_history", "learner", "learner@acme.example"),
+        status: "approved",
+        decidedAt: NOW,
+        decidedByUserId: "org_admin",
+      },
+      {
+        ...buildJoinRequest("jr_expired_history", "gmail_invalid", "gmail.invalid@gmail.com"),
+        createdAt: "2020-01-01T00:00:00.000Z",
+        expiresAt: "2020-01-08T00:00:00.000Z",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      },
     ],
     admin: {
       passwordHash: null,
@@ -4472,6 +4484,28 @@ test("company-code join requests accept Gmail, are duplicate-safe, and still req
   const gmailUser = db.users.find((user) => user.id === "gmail_join");
   assert.equal(gmailUser?.accountType, "individual");
   assert.equal(gmailUser?.orgId, null);
+
+  const dashboardList = await dashboardRequest("/dashboard/admin/access-requests", orgAdminToken);
+  assert.equal(dashboardList.status, 200);
+  const dashboardRows = dashboardList.body.requests as Array<{
+    id: string;
+    status: string;
+    userId: string;
+    orgId: string;
+  }>;
+  assert.equal(dashboardRows.some((request) => request.userId === "gmail_join" && request.status === "pending"), true);
+  assert.equal(dashboardRows.every((request) => request.orgId === "org_1"), true);
+  assert.equal(dashboardRows.some((request) => request.id === "jr_other"), false);
+  assert.equal(dashboardRows.some((request) => request.id === "jr_approved_history" && request.status === "approved"), true);
+  assert.equal(dashboardRows.some((request) => request.id === "jr_rejected_ai" && request.status === "rejected"), true);
+  assert.equal(dashboardRows.some((request) => request.id === "jr_expired_history" && request.status === "expired"), true);
+
+  const unauthenticated = await publicRequest("/dashboard/admin/access-requests");
+  assert.equal(unauthenticated.status, 401);
+  const unauthorizedRole = await dashboardRequest("/dashboard/admin/access-requests", userAdminToken);
+  assert.equal(unauthorizedRole.status, 403);
+  const crossTenant = await dashboardRequest("/dashboard/admin/access-requests?orgId=org_2", orgAdminToken);
+  assert.equal(crossTenant.status, 404);
 });
 
 test("company-code join requests reject invalid codes and rate-limit repeated attempts", async () => {
@@ -4511,6 +4545,13 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   assert.equal(approved.status, 200);
   assert.equal((approved.body.request as { status?: string }).status, "approved");
   assert.equal((await waitForPersistedUserState("pending_user", (user) => user?.orgId === "org_1"))?.performanceAccess, "none");
+
+  const repeatedApproval = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "approve" }),
+  });
+  assert.equal(repeatedApproval.status, 409);
+  assert.equal((await readDb()).enterpriseJoinRequests.find((request) => request.id === "jr_pending")?.status, "approved");
 
   const usersAfterApproval = await dashboardRequest("/dashboard/admin/users", orgAdminToken);
   assert.equal(usersAfterApproval.status, 200);

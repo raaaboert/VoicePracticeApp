@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import type {
+  DashboardAdminAccessRequestsResponse,
   DashboardAdminAccessRequestRow,
   DashboardAdminUserRow,
   DashboardAdminUsersExportResponse,
@@ -10,6 +11,7 @@ import type {
 
 import {
   buildDashboardAdminUsersCsvResponse,
+  handleDashboardAdminAccessRequestsGet,
   handleDashboardAdminAccessRequestPatch,
   handleDashboardAdminUserPatch,
   handleDashboardAdminUsersGet,
@@ -129,6 +131,40 @@ function createExportPayload(overrides: Partial<DashboardAdminUsersExportRespons
     ...overrides,
   };
 }
+
+function createAccessRequestsResponse(
+  requests: DashboardAdminAccessRequestRow[]
+): DashboardAdminAccessRequestsResponse {
+  return {
+    viewer: createViewer(),
+    generatedAt: "2026-07-25T15:00:00.000Z",
+    org: { id: "org_1", name: "Rob's Company" },
+    requests,
+  };
+}
+
+test("dashboard admin proxy refetches authoritative access requests without caching", async () => {
+  let callCount = 0;
+  const getAccessRequests = async () => {
+    callCount += 1;
+    return createAccessRequestsResponse(callCount === 1 ? [] : [createAccessRequestRow()]);
+  };
+
+  const first = await handleDashboardAdminAccessRequestsGet(
+    appRequest("/api/admin/access-requests?orgId=org_1"),
+    { getAccessRequests }
+  );
+  const second = await handleDashboardAdminAccessRequestsGet(
+    appRequest("/api/admin/access-requests?orgId=org_1"),
+    { getAccessRequests }
+  );
+
+  assert.equal(callCount, 2);
+  assert.equal(first.headers.get("Cache-Control"), "no-store");
+  assert.equal(second.headers.get("Cache-Control"), "no-store");
+  assert.equal(((await first.json()) as DashboardAdminAccessRequestsResponse).requests.length, 0);
+  assert.equal(((await second.json()) as DashboardAdminAccessRequestsResponse).requests.length, 1);
+});
 
 test("dashboard admin proxy approves an access request and forwards org context", async () => {
   let captured: unknown = null;

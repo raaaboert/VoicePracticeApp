@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type {
   DashboardAdminAccessRequestRow,
@@ -136,6 +136,10 @@ export function AdminWorkspace({
   const canManageAccessRequests = usersPayload.viewer.capabilities.approveRejectAccessRequests;
   const canManagePerformanceAccess = usersPayload.viewer.capabilities.managePerformanceAccess;
   const managerOptions = usersPayload.managerOptions ?? [];
+
+  useEffect(() => {
+    setRequests(accessRequestsPayload.requests);
+  }, [accessRequestsPayload.requests]);
 
   const filteredUsers = useMemo(() => {
     const query = search.trim().toLowerCase();
