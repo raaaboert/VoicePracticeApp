@@ -20,6 +20,9 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
   organizationPerformanceAggregation: new Set([
     "services/authorizedOrganizationPerformance.ts",
     "services/authorizedTeamPerformance.ts",
+    // Internal identity-free two-period facts; authorization and Team population
+    // still enter through resolveAuthorizedTeamPerformanceScope.
+    "services/teamPerformanceIntelligenceFacts.ts",
   ]),
 };
 

@@ -1,7 +1,10 @@
 import type { DashboardViewer } from "@voicepractice/shared";
 
 import { isCurrentDashboardEligibleActor, queryAuthorizedPerformanceEvidence } from "./authorizedPerformanceEvidenceQuery.js";
-import { projectOrganizationEvidenceCandidate } from "./authorizedOrganizationEvidenceCandidates.js";
+import {
+  projectOrganizationEvidenceCandidate,
+  type OrganizationEvidenceCandidate,
+} from "./authorizedOrganizationEvidenceCandidates.js";
 import {
   AuthorizedOrganizationPerformanceInputError,
   projectRouteSafeResult,
@@ -46,6 +49,85 @@ export class AuthorizedTeamPerformanceInvariantError extends Error {
   }
 }
 
+export interface AuthorizedTeamPerformanceScopeInput {
+  readonly snapshot: PerformanceEvidenceSourceSnapshot;
+  readonly viewer: DashboardViewer;
+  readonly organizationId: string;
+}
+
+export interface AuthorizedTeamPerformanceScope {
+  readonly organizationId: string;
+  readonly currentReportCount: number;
+  /** Current-report evidence across all dates from one authorized snapshot. */
+  readonly candidates: readonly OrganizationEvidenceCandidate[];
+}
+
+/**
+ * INTERNAL - NOT ROUTE-SAFE. Resolves the current one-level Team population
+ * once, then returns only its canonical aggregation candidates. Callers may
+ * evaluate multiple periods from this same candidate set; they must never
+ * accept a caller-supplied person list.
+ */
+export function resolveAuthorizedTeamPerformanceScope(
+  input: AuthorizedTeamPerformanceScopeInput,
+): AuthorizedTeamPerformanceScope {
+  const organizationId = input.organizationId;
+  const users = input.snapshot.users.filter((user) => user.id !== "deleted_user");
+  const actor = users.find((user) => user.id === input.viewer.userId);
+
+  if (
+    !actor
+    || !isCurrentDashboardEligibleActor({
+      actor, viewer: input.viewer, organizations: input.snapshot.organizations,
+    })
+    || actor.accountType !== "enterprise"
+    || actor.orgId !== organizationId
+    || !input.snapshot.organizations.some((org) => org.id === organizationId && org.status === "active")
+    || !canDashboardViewerAccessOrg(input.viewer, organizationId)
+  ) {
+    throw new AuthorizedTeamPerformanceDeniedError("organization_not_found_or_inaccessible");
+  }
+
+  const access = resolvePerformanceAccessLevel(actor, new Set([organizationId]));
+  if (access !== "team" && access !== "organization") {
+    throw new AuthorizedTeamPerformanceDeniedError("performance_scope_denied");
+  }
+
+  const permittedUserIds = getDashboardPermittedUserIds({
+    db: { users },
+    actor,
+    viewer: input.viewer,
+    orgIds: new Set([organizationId]),
+  });
+  const directReportIds = new Set(
+    users
+      .filter((user) => isCurrentDirectPerformanceReport(actor, user) && permittedUserIds.has(user.id))
+      .map((user) => user.id),
+  );
+
+  const candidates = queryAuthorizedPerformanceEvidence({
+    snapshot: input.snapshot,
+    viewer: input.viewer,
+    organizationId,
+  })
+    .filter((evidence) => evidence.subjectKind === "user" && directReportIds.has(evidence.userId))
+    .map(projectOrganizationEvidenceCandidate);
+
+  if (candidates.some((candidate) =>
+    candidate.orgId !== organizationId
+    || candidate.subjectKind !== "user"
+    || !directReportIds.has(candidate.subjectKey)
+  )) {
+    throw new AuthorizedTeamPerformanceInvariantError();
+  }
+
+  return {
+    organizationId,
+    currentReportCount: directReportIds.size,
+    candidates,
+  };
+}
+
 /**
  * Route-safe Team summary for the authenticated viewer's current, one-level
  * direct reports. Disabled same-org reports remain person-viewable under the
@@ -65,58 +147,14 @@ export function queryAuthorizedTeamPerformance(
     organizationId: query.organizationId,
     calendarMonth: query.calendarMonth,
   });
-  const organizationId = request.organizationId;
-  const users = query.snapshot.users.filter((user) => user.id !== "deleted_user");
-  const actor = users.find((user) => user.id === query.viewer.userId);
-
-  if (
-    !actor
-    || !isCurrentDashboardEligibleActor({
-      actor, viewer: query.viewer, organizations: query.snapshot.organizations,
-    })
-    || actor.accountType !== "enterprise"
-    || actor.orgId !== organizationId
-    || !query.snapshot.organizations.some((org) => org.id === organizationId && org.status === "active")
-    || !canDashboardViewerAccessOrg(query.viewer, organizationId)
-  ) {
-    throw new AuthorizedTeamPerformanceDeniedError("organization_not_found_or_inaccessible");
-  }
-
-  const access = resolvePerformanceAccessLevel(actor, new Set([organizationId]));
-  if (access !== "team" && access !== "organization") {
-    throw new AuthorizedTeamPerformanceDeniedError("performance_scope_denied");
-  }
-
-  const permittedUserIds = getDashboardPermittedUserIds({
-    db: { users },
-    actor,
-    viewer: query.viewer,
-    orgIds: new Set([organizationId]),
-  });
-  const directReportIds = new Set(
-    users
-      .filter((user) => isCurrentDirectPerformanceReport(actor, user) && permittedUserIds.has(user.id))
-      .map((user) => user.id),
-  );
-
-  const candidates = queryAuthorizedPerformanceEvidence({
+  const scope = resolveAuthorizedTeamPerformanceScope({
     snapshot: query.snapshot,
     viewer: query.viewer,
-    organizationId,
-  })
-    .filter((evidence) => evidence.subjectKind === "user" && directReportIds.has(evidence.userId))
-    .map(projectOrganizationEvidenceCandidate);
-
-  if (candidates.some((candidate) =>
-    candidate.orgId !== organizationId
-    || candidate.subjectKind !== "user"
-    || !directReportIds.has(candidate.subjectKey)
-  )) {
-    throw new AuthorizedTeamPerformanceInvariantError();
-  }
+    organizationId: request.organizationId,
+  });
 
   return projectRouteSafeResult(aggregateCurrentPopulationPerformance({
-    candidates,
+    candidates: scope.candidates,
     calendarMonth: request.calendarMonth,
   }));
 }

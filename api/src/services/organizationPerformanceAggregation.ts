@@ -13,6 +13,15 @@ export interface OrganizationPerformanceCalendarMonth {
   readonly month: number;
 }
 
+/** Returns the immediately preceding fixed UTC calendar month. */
+export function getPreviousOrganizationPerformanceCalendarMonth(
+  calendarMonth: OrganizationPerformanceCalendarMonth,
+): OrganizationPerformanceCalendarMonth {
+  return calendarMonth.month === 1
+    ? { year: calendarMonth.year - 1, month: 12 }
+    : { year: calendarMonth.year, month: calendarMonth.month - 1 };
+}
+
 export type OrganizationPerformanceDimension = "division" | "scenario" | "training";
 
 export interface OrganizationPerformanceDimensionFilter {
