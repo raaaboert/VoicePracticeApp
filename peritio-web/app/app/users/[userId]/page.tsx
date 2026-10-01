@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import { notFound, redirect } from "next/navigation";
 
 import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSection";
@@ -85,14 +86,6 @@ export default async function UserDetailPage({
 
   return (
     <>
-      {fromPerformance ? (
-        <Link
-          className="inline-link performance-back-link"
-          href={buildPerformanceViewHref("individuals", { orgId: user.orgId, divisionId: appliedDivisionId })}
-        >
-          ← Back to Individuals
-        </Link>
-      ) : null}
       <PageHeader
         eyebrow="User detail"
         title={user.email}
@@ -101,6 +94,18 @@ export default async function UserDetailPage({
 
       {fromPerformance ? (
         <PerformanceNavigation activeView="individuals" orgId={user.orgId} divisionId={appliedDivisionId} />
+      ) : null}
+
+      {fromPerformance ? (
+        <div className="performance-detail-back-row">
+          <Link
+            className="training-content-back-link"
+            href={buildPerformanceViewHref("individuals", { orgId: user.orgId, divisionId: appliedDivisionId })}
+          >
+            <ArrowLeft size={17} aria-hidden="true" />
+            Back to Individuals
+          </Link>
+        </div>
       ) : null}
 
       <DashboardDivisionFilter

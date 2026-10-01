@@ -115,11 +115,10 @@ export function OrganizationPerformanceOverview({
 
   return (
     <div className="performance-stack organization-performance-overview">
-      <section className="section-card organization-performance-toolbar" aria-label="Performance period">
+      <header className="organization-performance-toolbar" aria-label="Performance period">
         <div>
-          <p className="eyebrow">Organization scope</p>
           <h2>{orgName ?? "Organization performance"}</h2>
-          <p className="section-copy">Factual results from scored practice in the selected UTC calendar month.</p>
+          <p className="section-copy">Organization scope · Scored practice for the selected UTC calendar month.</p>
         </div>
         <div className="month-selector" role="group" aria-label="Calendar month selector">
           <button className="ghost-button month-button" type="button" onClick={() => moveMonth(-1)} aria-label="Previous month">
@@ -138,7 +137,7 @@ export function OrganizationPerformanceOverview({
             <ChevronRight size={18} aria-hidden="true" />
           </button>
         </div>
-      </section>
+      </header>
 
       {!selectedMonth || result === null ? <PerformanceLoadingState /> : null}
 
@@ -188,12 +187,12 @@ export function OrganizationPerformanceOverview({
                     </div>
                   </div>
                   <div className="metric-grid organization-activity-grid">
-                    <article className="metric-card accent">
+                    <article className="performance-activity-kpi">
                       <p className="metric-label">Attempts</p>
                       <strong className="metric-value">{data.activity.attemptCount}</strong>
                       <p className="metric-meta">Scored practice attempts</p>
                     </article>
-                    <article className="metric-card">
+                    <article className="performance-activity-kpi">
                       <p className="metric-label">Conclusive attempts</p>
                       <strong className="metric-value">{data.activity.conclusiveAttemptCount}</strong>
                       <p className="metric-meta">Attempts with a conclusive result</p>
@@ -329,20 +328,26 @@ export function PerformanceNotices({
     <section className="performance-context" aria-label="Performance context">
       {evidenceNotices.limitedEvidence ? (
         <div className="performance-context-item">
-          <strong>Limited evidence</strong>
+          <strong className="performance-context-chip">Limited evidence</strong>
           <p>Results are based on a small amount of practice and may change as more sessions are completed.</p>
         </div>
       ) : null}
       {evidenceNotices.concentrationWarning ? (
         <div className="performance-context-item">
-          <strong>Activity concentration</strong>
+          <strong className="performance-context-chip">Activity concentrated</strong>
           <p>A small number of highly active participants account for a large share of this activity.</p>
         </div>
       ) : null}
       {historicalCopy.length > 0 ? (
         <div className="performance-context-item">
-          <strong>Historical data included</strong>
-          {historicalCopy.map((copy) => <p key={copy}>{copy}</p>)}
+          <strong className="performance-context-chip">Historical data included</strong>
+          <p>{historicalCopy[0]}</p>
+        </div>
+      ) : null}
+      {historicalCopy.length > 1 ? (
+        <div className="performance-context-item">
+          <strong className="performance-context-chip">Historical privacy adjustment</strong>
+          <p>{historicalCopy[1]}</p>
         </div>
       ) : null}
     </section>

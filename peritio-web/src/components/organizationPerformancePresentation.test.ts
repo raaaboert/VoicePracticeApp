@@ -108,9 +108,11 @@ test("all applicable notices share one compact context area without changing pri
     evidenceNotices: collectOrganizationPerformanceEvidenceNotices(data),
   }));
   assert.equal((markup.match(/class="performance-context"/g) ?? []).length, 1);
-  assert.equal((markup.match(/class="performance-context-item"/g) ?? []).length, 3);
+  assert.equal((markup.match(/class="performance-context-item"/g) ?? []).length, 4);
   assert.equal(markup.includes("Limited evidence"), true);
-  assert.equal(markup.includes("Activity concentration"), true);
+  assert.equal(markup.includes("Activity concentrated"), true);
+  assert.equal(markup.includes("Historical data included"), true);
+  assert.equal(markup.includes("Historical privacy adjustment"), true);
   assert.equal(markup.includes("This organization view can include eligible historical performance contributions."), true);
   assert.equal(markup.includes("Some historical contributions are excluded from this view to protect participant privacy."), true);
   assert.equal(markup.includes('class="notice"'), false);
@@ -119,6 +121,23 @@ test("all applicable notices share one compact context area without changing pri
     evidenceNotices: { limitedEvidence: false, concentrationWarning: false },
   }));
   assert.equal(current, "");
+});
+
+test("the organization period and Activity KPIs use the flat report hierarchy without changing values", () => {
+  assert.equal(componentSource.includes('<header className="organization-performance-toolbar"'), true);
+  assert.equal(componentSource.includes('className="section-card organization-performance-toolbar"'), false);
+  assert.equal(componentSource.includes('role="group" aria-label="Calendar month selector"'), true);
+  assert.equal(componentSource.includes('onClick={() => moveMonth(-1)}'), true);
+  assert.equal(componentSource.includes('onClick={() => moveMonth(1)}'), true);
+  assert.equal(componentSource.includes("{data.activity.attemptCount}"), true);
+  assert.equal(componentSource.includes("{data.activity.conclusiveAttemptCount}"), true);
+  assert.equal((componentSource.match(/className="performance-activity-kpi"/g) ?? []).length, 2);
+  assert.equal(componentSource.includes("Scored practice attempts"), true);
+  assert.equal(componentSource.includes("Attempts with a conclusive result"), true);
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../app/globals.css"), "utf8");
+  const contextCss = css.slice(css.indexOf(".performance-context {"), css.indexOf(".performance-context-item {"));
+  assert.equal(contextCss.includes("border:"), false);
+  assert.equal(contextCss.includes("flex-wrap: wrap"), true);
 });
 
 test("metric generations and weight profiles remain separate records", () => {

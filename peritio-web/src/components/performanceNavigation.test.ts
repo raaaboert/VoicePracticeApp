@@ -96,9 +96,16 @@ test("Performance person links carry origin and detail offers a scoped back link
     "/app/performance/individuals?orgId=org_1&divisionId=division_2");
   const detail = read("../../app/app/users/[userId]/page.tsx");
   assert.equal(detail.includes('query.performanceOrigin === "individuals"'), true);
-  assert.equal(detail.includes("← Back to Individuals"), true);
+  assert.equal(detail.includes("Back to Individuals"), true);
+  assert.equal(detail.includes("<ArrowLeft size={17}"), true);
   assert.equal(detail.includes('buildPerformanceViewHref("individuals", { orgId: user.orgId, divisionId: appliedDivisionId })'), true);
   assert.equal(detail.includes("{fromPerformance ? (\n        <PerformanceNavigation"), true);
+  const headerAt = detail.indexOf("<PageHeader");
+  const tabsAt = detail.indexOf('<PerformanceNavigation activeView="individuals"');
+  const backAt = detail.indexOf('className="performance-detail-back-row"');
+  const contentAt = detail.indexOf("<DashboardDivisionFilter", backAt);
+  assert.equal(headerAt < tabsAt && tabsAt < backAt && backAt < contentAt, true);
+  assert.equal(detail.includes('className="training-content-back-link"'), true);
 });
 
 test("the Individuals list is a primary section while dashboard reporting keeps its evidence view", () => {
