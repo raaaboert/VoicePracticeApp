@@ -5,7 +5,7 @@ import {
   validateAuthorizedOrganizationPerformanceRequest,
   type AuthorizedOrganizationPerformanceCalendarMonth,
 } from "./authorizedOrganizationPerformance.js";
-import { resolveAuthorizedTeamPerformanceScope } from "./authorizedTeamPerformance.js";
+import { resolveAuthorizedTeamPerformanceScope } from "./authorizedTeamPerformanceInternal.js";
 import {
   aggregateCurrentPopulationPerformance,
   getPreviousOrganizationPerformanceCalendarMonth,

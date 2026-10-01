@@ -6,16 +6,26 @@ import test from "node:test";
 
 const sourceRoot = fileURLToPath(new URL("../", import.meta.url));
 const servicesRoot = join(sourceRoot, "services");
+const workspaceRoot = fileURLToPath(new URL("../../../", import.meta.url));
+const webAppSourceRoots = [
+  join(workspaceRoot, "admin-web", "src"),
+  join(workspaceRoot, "peritio-web", "src"),
+] as const;
 const lowerLevelModules = [
   "authorizedOrganizationEvidenceCandidates",
+  "authorizedTeamPerformanceInternal",
   "organizationPerformanceAggregation",
 ] as const;
 
 const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], ReadonlySet<string>>> = {
   authorizedOrganizationEvidenceCandidates: new Set([
     "services/authorizedOrganizationPerformance.ts",
-    "services/authorizedTeamPerformance.ts",
+    "services/authorizedTeamPerformanceInternal.ts",
     "services/organizationPerformanceAggregation.ts",
+  ]),
+  authorizedTeamPerformanceInternal: new Set([
+    "services/authorizedTeamPerformance.ts",
+    "services/teamPerformanceIntelligenceFacts.ts",
   ]),
   organizationPerformanceAggregation: new Set([
     "services/authorizedOrganizationPerformance.ts",
@@ -30,7 +40,7 @@ function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return entry.isFile() && entry.name.endsWith(".ts") ? [path] : [];
+    return entry.isFile() && /\.tsx?$/.test(entry.name) ? [path] : [];
   });
 }
 
@@ -41,8 +51,8 @@ function referencedLowerLevelModules(source: string): (typeof lowerLevelModules)
   });
 }
 
-test("only explicitly approved source modules may reference lower-level organization intelligence services", () => {
-  const productionFiles = sourceFiles(sourceRoot).filter((path) => !path.endsWith(".test.ts"));
+test("only explicitly approved source modules may reference lower-level performance intelligence services", () => {
+  const productionFiles = sourceFiles(sourceRoot).filter((path) => !/\.test\.tsx?$/.test(path));
   assert.ok(productionFiles.some((path) => relative(sourceRoot, path).replaceAll("\\", "/") === "index.ts"));
   for (const path of productionFiles) {
     const importer = relative(sourceRoot, path).replaceAll("\\", "/");
@@ -51,7 +61,19 @@ test("only explicitly approved source modules may reference lower-level organiza
       assert.equal(
         approvedImporters[referencedModule].has(importer),
         true,
-        `${importer} must use authorizedOrganizationPerformance instead of ${referencedModule}`,
+        `${importer} is not approved to import ${referencedModule}`,
+      );
+    }
+  }
+});
+
+test("web application sources cannot import lower-level performance intelligence modules", () => {
+  for (const root of webAppSourceRoots) {
+    for (const path of sourceFiles(root)) {
+      assert.deepEqual(
+        referencedLowerLevelModules(readFileSync(path, "utf8")),
+        [],
+        `${relative(workspaceRoot, path).replaceAll("\\", "/")} imports a server-internal module`,
       );
     }
   }
@@ -64,6 +86,7 @@ test("lower-level reference detection covers unauthorized static, re-export, ext
     ["services/orgPerformanceHttp.ts", 'export * from "./organizationPerformanceAggregation.js";'],
     ["services/dashboardApi.ts", 'export { queryAuthorizedOrganizationEvidenceCandidates } from "./authorizedOrganizationEvidenceCandidates.ts";'],
     ["services/dynamicHelper.ts", 'const module = await import("./organizationPerformanceAggregation.js");'],
+    ["services/dashboardTeamIntelligenceRoute.ts", 'import { resolveAuthorizedTeamPerformanceScope } from "./authorizedTeamPerformanceInternal.js";'],
   ];
   for (const [importer, source] of mutations) {
     const references = referencedLowerLevelModules(source!);
@@ -72,11 +95,23 @@ test("lower-level reference detection covers unauthorized static, re-export, ext
   }
 });
 
-test("lower-level organization intelligence exports carry explicit route-safety warnings", () => {
+test("route-safe Team facade does not export the raw resolver", async () => {
+  const facade = await import("./authorizedTeamPerformance.js");
+  const facadeSource = readFileSync(join(servicesRoot, "authorizedTeamPerformance.ts"), "utf8");
+  assert.equal("resolveAuthorizedTeamPerformanceScope" in facade, false);
+  assert.doesNotMatch(
+    facadeSource,
+    /export\s+(?:interface|type)\s+AuthorizedTeamPerformanceScope/,
+  );
+});
+
+test("lower-level performance intelligence exports carry explicit route-safety warnings", () => {
   const candidatesSource = readFileSync(join(servicesRoot, "authorizedOrganizationEvidenceCandidates.ts"), "utf8");
   const aggregationSource = readFileSync(join(servicesRoot, "organizationPerformanceAggregation.ts"), "utf8");
+  const teamInternalSource = readFileSync(join(servicesRoot, "authorizedTeamPerformanceInternal.ts"), "utf8");
   assert.match(candidatesSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+queryAuthorizedOrganizationPerformance/);
   assert.equal((aggregationSource.match(/INTERNAL - NOT ROUTE-SAFE/g) ?? []).length, 3);
   assert.equal((aggregationSource.match(/queryAuthorizedOrganizationPerformance/g) ?? []).length >= 2, true);
   assert.match(aggregationSource, /aggregateCurrentPopulationPerformance[\s\S]*queryAuthorizedTeamPerformance|queryAuthorizedTeamPerformance[\s\S]*aggregateCurrentPopulationPerformance/);
+  assert.match(teamInternalSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+subject keys/);
 });

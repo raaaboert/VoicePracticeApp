@@ -9,6 +9,7 @@ import {
   AuthorizedTeamPerformanceDeniedError,
   queryAuthorizedTeamPerformance,
 } from "./authorizedTeamPerformance.js";
+import { resolveAuthorizedTeamPerformanceScope } from "./authorizedTeamPerformanceInternal.js";
 import type { PerformanceEvidenceSourceSnapshot, PerformanceEvidenceSourceUser } from "./performanceEvidenceSourceSnapshot.js";
 
 const MONTH = { year: 2026, month: 9 } as const;
@@ -135,6 +136,41 @@ test("only current direct reports contribute: no self, indirect, former, moved, 
     "simulationSessionId", "evidenceAt", "largestContributionShare",
     "direct_historical", "deleted_user", "@example.test",
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+});
+
+test("internal resolver retains the exact current direct-report target set", () => {
+  const actor = user("manager", { performanceAccess: "team" });
+  const direct = user("direct", { managerUserId: actor.id });
+  const disabledDirect = user("disabled_direct", { managerUserId: actor.id, status: "disabled" });
+  const snapshot = source(actor, [
+    direct,
+    disabledDirect,
+    user("indirect", { managerUserId: direct.id }),
+    user("former"),
+    user("moved", { managerUserId: actor.id, orgId: "org_b" }),
+    user("non_regular", { managerUserId: actor.id, orgRole: "user_admin" }),
+  ], [
+    score("direct", direct.id),
+    score("disabled", disabledDirect.id),
+    score("self", actor.id),
+    score("indirect", "indirect"),
+    score("former", "former"),
+    score("moved", "moved"),
+    score("non_regular", "non_regular"),
+    score("deidentified", "deleted_user"),
+  ]);
+
+  const resolved = resolveAuthorizedTeamPerformanceScope({
+    snapshot,
+    viewer: viewer(actor),
+    organizationId: "org_a",
+  });
+
+  assert.equal(resolved.currentReportCount, 2);
+  assert.deepEqual(
+    [...new Set(resolved.candidates.map((candidate) => candidate.subjectKey))].sort(),
+    ["direct", "disabled_direct"],
+  );
 });
 
 test("a valid team viewer with no reports gets a legitimate empty aggregate", () => {
