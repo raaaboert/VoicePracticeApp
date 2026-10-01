@@ -7,6 +7,7 @@ import {
   type OrganizationPerformanceCalendarMonth,
   type OrganizationPerformanceClientResult,
   type OrganizationPerformanceMetric,
+  type OrganizationPerformanceMetricGroup,
   type OrganizationPerformanceResponse,
   getOrganizationPerformance,
 } from "@/src/lib/organizationPerformance";
@@ -34,14 +35,13 @@ const METRIC_LABELS: Record<OrganizationPerformanceMetric, string> = {
   overall: "Overall",
 };
 
-const METRIC_ORDER: readonly OrganizationPerformanceMetric[] = [
-  "persuasion",
-  "clarity",
-  "empathy",
-  "assertiveness",
-  "communication",
-  "outcome",
-  "overall",
+const METRIC_SECTIONS: readonly {
+  kind: "core" | "composite";
+  title: string;
+  metrics: readonly OrganizationPerformanceMetric[];
+}[] = [
+  { kind: "core", title: "Core dimensions", metrics: ["persuasion", "clarity", "empathy", "assertiveness"] },
+  { kind: "composite", title: "Composite / outcome metrics", metrics: ["communication", "outcome", "overall"] },
 ];
 
 function formatRate(value: number | null): string {
@@ -50,6 +50,39 @@ function formatRate(value: number | null): string {
 
 function readableGeneration(value: string): string {
   return value.replaceAll("_", " ");
+}
+
+export function PerformanceDimensionGroups({ metrics }: { metrics: readonly OrganizationPerformanceMetricGroup[] }) {
+  return (
+    <div className="performance-dimension-groups">
+      {METRIC_SECTIONS.map((section) => {
+        const sectionMetrics = metrics
+          .filter((metric) => section.metrics.includes(metric.metric))
+          .sort((left, right) => section.metrics.indexOf(left.metric) - section.metrics.indexOf(right.metric));
+        return sectionMetrics.length > 0 ? (
+          <section className="performance-dimension-section" aria-label={section.title} key={section.kind}>
+            <h4>{section.title}</h4>
+            <div className={`performance-dimension-grid performance-dimension-grid--${section.kind}`}>
+              {sectionMetrics.map((metric, index) => (
+                <article className="performance-dimension-card" key={`${metric.metric}-${index}`}>
+                  <p className="metric-label">{METRIC_LABELS[metric.metric]}</p>
+                  <strong className="performance-dimension-value">
+                    {formatOrganizationPerformanceScore(metric.metric, metric.mean)}
+                  </strong>
+                  <div className="performance-dimension-meta">
+                    <span>{metric.qualifyingObservationCount} qualifying observation{metric.qualifyingObservationCount === 1 ? "" : "s"}</span>
+                    {metric.metric === "communication" || metric.metric === "overall" ? (
+                      <span>{formatOrganizationPerformanceWeighting(metric.weightProfile)}</span>
+                    ) : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null;
+      })}
+    </div>
+  );
 }
 
 export function OrganizationPerformanceOverview({
@@ -169,8 +202,6 @@ export function OrganizationPerformanceOverview({
 
       {data ? (
         <>
-          <PerformanceNotices data={data} evidenceNotices={evidenceNotices!} />
-
           {isOrganizationPerformanceEmpty(data) ? (
             <PerformanceStatePanel
               title="No performance data for this month yet."
@@ -253,29 +284,7 @@ export function OrganizationPerformanceOverview({
                     {metricGenerations.map((generation) => (
                       <div className="generation-group" key={generation.scoringGeneration}>
                         <h3>Scoring generation: {readableGeneration(generation.scoringGeneration)}</h3>
-                        <div className="performance-dimension-grid">
-                          {[...generation.metrics]
-                            .sort((left, right) => METRIC_ORDER.indexOf(left.metric) - METRIC_ORDER.indexOf(right.metric))
-                            .map((metric, index) => (
-                              <article
-                                className="performance-dimension-card"
-                                key={`${metric.metric}-${index}`}
-                              >
-                                <div>
-                                  <p className="metric-label">{METRIC_LABELS[metric.metric]}</p>
-                                  <strong className="performance-dimension-value">
-                                    {formatOrganizationPerformanceScore(metric.metric, metric.mean)}
-                                  </strong>
-                                </div>
-                                <div className="performance-dimension-meta">
-                                  <span>{metric.qualifyingObservationCount} qualifying observations</span>
-                                  {metric.metric === "communication" || metric.metric === "overall" ? (
-                                    <span>{formatOrganizationPerformanceWeighting(metric.weightProfile)}</span>
-                                  ) : null}
-                                </div>
-                              </article>
-                            ))}
-                        </div>
+                        <PerformanceDimensionGroups metrics={generation.metrics} />
                       </div>
                     ))}
                   </div>
@@ -283,6 +292,7 @@ export function OrganizationPerformanceOverview({
               ) : null}
             </>
           )}
+          <PerformanceNotices data={data} evidenceNotices={evidenceNotices!} />
         </>
       ) : null}
 
@@ -325,31 +335,34 @@ export function PerformanceNotices({
     return null;
   }
   return (
-    <section className="performance-context" aria-label="Performance context">
-      {evidenceNotices.limitedEvidence ? (
-        <div className="performance-context-item">
-          <strong className="performance-context-chip">Limited evidence</strong>
-          <p>Results are based on a small amount of practice and may change as more sessions are completed.</p>
-        </div>
-      ) : null}
-      {evidenceNotices.concentrationWarning ? (
-        <div className="performance-context-item">
-          <strong className="performance-context-chip">Activity concentrated</strong>
-          <p>A small number of highly active participants account for a large share of this activity.</p>
-        </div>
-      ) : null}
-      {historicalCopy.length > 0 ? (
-        <div className="performance-context-item">
-          <strong className="performance-context-chip">Historical data included</strong>
-          <p>{historicalCopy[0]}</p>
-        </div>
-      ) : null}
-      {historicalCopy.length > 1 ? (
-        <div className="performance-context-item">
-          <strong className="performance-context-chip">Historical privacy adjustment</strong>
-          <p>{historicalCopy[1]}</p>
-        </div>
-      ) : null}
+    <section className="performance-summary-notes" aria-labelledby="performance-summary-notes-title">
+      <h2 id="performance-summary-notes-title">Important notes about this summary</h2>
+      <div className="performance-summary-notes-list">
+        {evidenceNotices.limitedEvidence ? (
+          <div className="performance-summary-note">
+            <strong>Limited evidence</strong>
+            <p>Results are based on a small amount of practice and may change as more sessions are completed.</p>
+          </div>
+        ) : null}
+        {evidenceNotices.concentrationWarning ? (
+          <div className="performance-summary-note">
+            <strong>Activity concentration</strong>
+            <p>A small number of highly active participants account for a large share of this activity.</p>
+          </div>
+        ) : null}
+        {historicalCopy.length > 0 ? (
+          <div className="performance-summary-note">
+            <strong>Historical data included</strong>
+            <p>{historicalCopy[0]}</p>
+          </div>
+        ) : null}
+        {historicalCopy.length > 1 ? (
+          <div className="performance-summary-note">
+            <strong>Historical privacy adjustment</strong>
+            <p>{historicalCopy[1]}</p>
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }
