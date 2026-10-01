@@ -314,7 +314,7 @@ function PerformanceStatePanel({ title, copy }: { title: string; copy: string })
   );
 }
 
-function PerformanceNotices({
+export function PerformanceNotices({
   data,
   evidenceNotices,
 }: {
@@ -326,22 +326,25 @@ function PerformanceNotices({
     return null;
   }
   return (
-    <section className="evidence-notice-stack" aria-label="Evidence context">
+    <section className="performance-context" aria-label="Performance context">
       {evidenceNotices.limitedEvidence ? (
-        <div className="notice">
+        <div className="performance-context-item">
           <strong>Limited evidence</strong>
           <p>Results are based on a small amount of practice and may change as more sessions are completed.</p>
         </div>
       ) : null}
       {evidenceNotices.concentrationWarning ? (
-        <div className="notice">
+        <div className="performance-context-item">
           <strong>Activity concentration</strong>
           <p>A small number of highly active participants account for a large share of this activity.</p>
         </div>
       ) : null}
-      {historicalCopy.map((copy) => (
-        <div className="notice" key={copy}><p>{copy}</p></div>
-      ))}
+      {historicalCopy.length > 0 ? (
+        <div className="performance-context-item">
+          <strong>Historical data included</strong>
+          {historicalCopy.map((copy) => <p key={copy}>{copy}</p>)}
+        </div>
+      ) : null}
     </section>
   );
 }

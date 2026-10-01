@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { ReactNode } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { DashboardViewer } from "@voicepractice/shared";
 
 import { DashboardSessionGuard } from "@/src/components/DashboardSessionGuard";
+import { isDashboardSidebarItemActive } from "@/src/components/dashboardSidebarState";
 import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
 
 const BASE_NAV_ITEMS = [
@@ -13,14 +14,6 @@ const BASE_NAV_ITEMS = [
   { href: "/app/performance", label: "Performance" },
   { href: "/app/settings", label: "Settings" },
 ] as const;
-
-function isActivePath(pathname: string, href: string): boolean {
-  if (href === "/app") {
-    return pathname === href;
-  }
-
-  return pathname === href || pathname.startsWith(`${href}/`);
-}
 
 export function DashboardShell({
   children,
@@ -30,6 +23,7 @@ export function DashboardShell({
   viewer: DashboardViewer;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const hasCrossAccountAccess = viewer.accessType === "super_user";
   const hasDemoDashAccess = viewer.accessType === "super_user" && viewer.isSuperUser === true;
@@ -78,7 +72,7 @@ export function DashboardShell({
             <Link
               key={item.href}
               href={item.href}
-              className={isActivePath(pathname, item.href) ? "active" : undefined}
+              className={isDashboardSidebarItemActive(pathname, item.href, searchParams.get("performanceOrigin")) ? "active" : undefined}
             >
               {item.label}
             </Link>

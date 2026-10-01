@@ -3,6 +3,7 @@ import type { DashboardUserReportResponse } from "@voicepractice/shared";
 
 import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { buildDashboardScopedUserDetailHref } from "@/src/components/dashboardDivisionFilterState";
+import { buildPerformanceIndividualDetailHref } from "@/src/components/performanceViewRoutes";
 import { formatDateTime, formatScore } from "@/src/lib/formatters";
 
 function formatOrgRole(orgRole: string): string {
@@ -17,26 +18,24 @@ export function DashboardUsersView({
   divisionId,
   isSuperUser,
   isDemoData = false,
-  defaultOpen = false,
+  primary = false,
 }: {
   users: DashboardUserReportResponse["users"];
   trainingCountByUser: ReadonlyMap<string, number>;
   divisionId: string | null;
   isSuperUser: boolean;
   isDemoData?: boolean;
-  defaultOpen?: boolean;
+  primary?: boolean;
 }) {
-  return (
-    <DashboardProofSection
-      title="User detail"
-      description="Open the full user table for attempts, scores, and latest activity."
-      preview="Full user table"
-      defaultOpen={defaultOpen}
-    >
+  const content = (
       <div className="dashboard-proof-stack">
         <div className="dashboard-proof-block">
-          <h3>User table</h3>
-          <p>All users in scope stay visible here, including learners without enough scored history for comparison.</p>
+          {!primary ? (
+            <>
+              <h3>User table</h3>
+              <p>All users in scope stay visible here, including learners without enough scored history for comparison.</p>
+            </>
+          ) : null}
           {users.length > 0 ? (
             <div className="table-scroll">
               <table className="data-table dashboard-table">
@@ -56,7 +55,12 @@ export function DashboardUsersView({
                         {isDemoData ? (
                           <strong>{user.email}</strong>
                         ) : (
-                          <Link className="inline-link subtle" href={buildDashboardScopedUserDetailHref(user.userId, divisionId)}>
+                          <Link
+                            className="inline-link subtle"
+                            href={primary
+                              ? buildPerformanceIndividualDetailHref(user.userId, divisionId)
+                              : buildDashboardScopedUserDetailHref(user.userId, divisionId)}
+                          >
                             <strong>{user.email}</strong>
                           </Link>
                         )}
@@ -85,6 +89,27 @@ export function DashboardUsersView({
           )}
         </div>
       </div>
+  );
+  if (primary) {
+    return (
+      <section className="section-card" aria-labelledby="people-in-scope-title">
+        <div className="section-header">
+          <div>
+            <h2 id="people-in-scope-title">People in scope</h2>
+            <p className="section-copy">Select a person to review their practice activity and performance.</p>
+          </div>
+        </div>
+        {content}
+      </section>
+    );
+  }
+  return (
+    <DashboardProofSection
+      title="User detail"
+      description="Open the full user table for attempts, scores, and latest activity."
+      preview="Full user table"
+    >
+      {content}
     </DashboardProofSection>
   );
 }

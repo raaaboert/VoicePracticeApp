@@ -94,7 +94,7 @@ export default async function PerformanceIndividualsPage({
         trainingCountByUser={trainingCountByUser}
         divisionId={appliedDivisionId}
         isSuperUser={viewer.accessType === "super_user"}
-        defaultOpen
+        primary
       />
     </>
   );

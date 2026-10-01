@@ -5,9 +5,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { DashboardUserReportRow } from "@voicepractice/shared";
 
 import { PerformanceNavigation } from "./PerformanceNavigation";
-import { buildPerformanceViewHref } from "./performanceViewRoutes";
+import { DashboardUsersView } from "./DashboardUsersView";
+import { isDashboardSidebarItemActive } from "./dashboardSidebarState";
+import { buildPerformanceIndividualDetailHref, buildPerformanceViewHref } from "./performanceViewRoutes";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const read = (path: string) => readFileSync(join(root, path), "utf8");
@@ -73,4 +76,51 @@ test("group and goals retain their existing routes and remove the bottom Goals a
   assert.equal(goals.includes('activeView="goals"'), true);
   assert.equal(goals.includes("<PerformanceWorkspace workspace={workspace} divisionId={divisionId} />"), true);
   assert.equal(overview.includes("Open Performance Goals"), false);
+});
+
+test("only Performance-origin person detail keeps the Performance sidebar active", () => {
+  assert.equal(isDashboardSidebarItemActive("/app/performance/individuals", "/app/performance", null), true);
+  assert.equal(isDashboardSidebarItemActive("/app/users/user_1", "/app/performance", "individuals"), true);
+  assert.equal(isDashboardSidebarItemActive("/app/users/user_1", "/app/performance", null), false);
+  assert.equal(isDashboardSidebarItemActive("/app/users/user_1", "/app/performance", "other"), false);
+  assert.equal(isDashboardSidebarItemActive("/app/dashboard", "/app/dashboard", null), true);
+  assert.equal(isDashboardSidebarItemActive("/app/users/user_1", "/app/dashboard", "individuals"), false);
+});
+
+test("Performance person links carry origin and detail offers a scoped back link", () => {
+  assert.equal(buildPerformanceIndividualDetailHref("user/1", null),
+    "/app/users/user%2F1?performanceOrigin=individuals");
+  assert.equal(buildPerformanceIndividualDetailHref("user_1", "division_2"),
+    "/app/users/user_1?divisionId=division_2&performanceOrigin=individuals");
+  assert.equal(buildPerformanceViewHref("individuals", { orgId: "org_1", divisionId: "division_2" }),
+    "/app/performance/individuals?orgId=org_1&divisionId=division_2");
+  const detail = read("../../app/app/users/[userId]/page.tsx");
+  assert.equal(detail.includes('query.performanceOrigin === "individuals"'), true);
+  assert.equal(detail.includes("← Back to Individuals"), true);
+  assert.equal(detail.includes('buildPerformanceViewHref("individuals", { orgId: user.orgId, divisionId: appliedDivisionId })'), true);
+  assert.equal(detail.includes("{fromPerformance ? (\n        <PerformanceNavigation"), true);
+});
+
+test("the Individuals list is a primary section while dashboard reporting keeps its evidence view", () => {
+  const user: DashboardUserReportRow = {
+    userId: "user_1", email: "person@example.test", employeeId: null,
+    orgId: "org_1", orgName: "Example", status: "active", orgRole: "user",
+    dashboardAccessEnabled: false, simulationsLast30Days: 1, usedMinutesLast30Days: 2,
+    scoredAttemptsLast30Days: 1, averageScoreLast30Days: 80, scoreDeltaLast30Days: null,
+    uniqueScenariosLast30Days: 1, trainingPackAttemptsLast30Days: 0,
+    latestActivityAt: null, latestScenarioTitle: null, latestTrainingPackTitle: null,
+  };
+  const props = { users: [user], trainingCountByUser: new Map<string, number>(), divisionId: "division_2", isSuperUser: false };
+  const individuals = renderToStaticMarkup(createElement(DashboardUsersView, { ...props, primary: true }));
+  const dashboard = renderToStaticMarkup(createElement(DashboardUsersView, props));
+  assert.equal(individuals.includes("People in scope"), true);
+  assert.equal(individuals.includes("Select a person to review their practice activity and performance."), true);
+  for (const old of ["Supporting evidence", "User detail", "User table"]) {
+    assert.equal(individuals.includes(old), false, old);
+  }
+  assert.equal(dashboard.includes("Supporting evidence"), true);
+  assert.equal(dashboard.includes("User detail"), true);
+  assert.equal(individuals.includes("/app/users/user_1?divisionId=division_2&amp;performanceOrigin=individuals"), true);
+  assert.equal(dashboard.includes("performanceOrigin=individuals"), false);
+  assert.equal(read("../../app/app/performance/individuals/page.tsx").includes("primary"), true);
 });

@@ -1,4 +1,11 @@
+import { buildDashboardScopedUserDetailHref } from "@/src/components/dashboardDivisionFilterState";
+
 export type PerformanceView = "group" | "individuals" | "goals";
+
+export function buildPerformanceIndividualDetailHref(userId: string, divisionId: string | null): string {
+  const base = buildDashboardScopedUserDetailHref(userId, divisionId);
+  return `${base}${base.includes("?") ? "&" : "?"}performanceOrigin=individuals`;
+}
 
 export function buildPerformanceViewHref(
   view: PerformanceView,

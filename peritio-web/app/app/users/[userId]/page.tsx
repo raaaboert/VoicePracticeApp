@@ -10,6 +10,7 @@ import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignal
 import { DashboardWhatMattersSection } from "@/src/components/DashboardWhatMattersSection";
 import { PageHeader } from "@/src/components/PageHeader";
 import { PerformanceNavigation } from "@/src/components/PerformanceNavigation";
+import { buildPerformanceViewHref } from "@/src/components/performanceViewRoutes";
 import {
   buildDashboardScopedAttemptDetailHref,
   buildDashboardScopedTrainingPackAssignmentHref,
@@ -53,10 +54,11 @@ export default async function UserDetailPage({
   searchParams,
 }: {
   params: Promise<{ userId: string }>;
-  searchParams: Promise<{ divisionId?: string }>;
+  searchParams: Promise<{ divisionId?: string; performanceOrigin?: string }>;
 }) {
   const { userId } = await params;
-  const rawDivisionId = (await searchParams).divisionId?.trim();
+  const query = await searchParams;
+  const rawDivisionId = query.divisionId?.trim();
   const divisionId = rawDivisionId ? rawDivisionId : null;
   let payload;
   try {
@@ -78,20 +80,28 @@ export default async function UserDetailPage({
 
   const { user, assignments, attempts } = payload;
   const narrative = buildUserDetailNarrative(payload);
+  const fromPerformance = query.performanceOrigin === "individuals";
+  const appliedDivisionId = payload.divisionScope?.appliedDivisionId ?? null;
 
   return (
     <>
+      {fromPerformance ? (
+        <Link
+          className="inline-link performance-back-link"
+          href={buildPerformanceViewHref("individuals", { orgId: user.orgId, divisionId: appliedDivisionId })}
+        >
+          ← Back to Individuals
+        </Link>
+      ) : null}
       <PageHeader
         eyebrow="User detail"
         title={user.email}
         description="Review recent performance signals, coaching themes, and active assignment progress for this user."
       />
 
-      <PerformanceNavigation
-        activeView="individuals"
-        orgId={user.orgId}
-        divisionId={payload.divisionScope?.appliedDivisionId ?? null}
-      />
+      {fromPerformance ? (
+        <PerformanceNavigation activeView="individuals" orgId={user.orgId} divisionId={appliedDivisionId} />
+      ) : null}
 
       <DashboardDivisionFilter
         divisionScope={payload.divisionScope}

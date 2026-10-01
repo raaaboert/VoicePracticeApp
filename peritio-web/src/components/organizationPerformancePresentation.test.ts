@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import type { OrganizationPerformanceResponse } from "../lib/organizationPerformance";
+import { PerformanceNotices } from "./OrganizationPerformanceOverview";
 import {
   calendarMonthFromLocalDate,
   canNavigateToNextMonth,
@@ -87,6 +90,35 @@ test("historical privacy copy is exact and current-population results do not imp
     dimensionFilter: { dimension: "division", id: "division_1" },
     historicalPrivacyAdjustmentApplied: true,
   })), []);
+});
+
+test("all applicable notices share one compact context area without changing privacy copy", () => {
+  const data = response({
+    historicalPrivacyAdjustmentApplied: true,
+    activity: {
+      attemptCount: 3,
+      conclusiveAttemptCount: 2,
+      evidenceStrength: { conservativeContributorCount: 1, limitedEvidence: true },
+      concentration: { concentrationWarning: true },
+      historicalPrivacyAdjustmentApplied: true,
+    },
+  });
+  const markup = renderToStaticMarkup(createElement(PerformanceNotices, {
+    data,
+    evidenceNotices: collectOrganizationPerformanceEvidenceNotices(data),
+  }));
+  assert.equal((markup.match(/class="performance-context"/g) ?? []).length, 1);
+  assert.equal((markup.match(/class="performance-context-item"/g) ?? []).length, 3);
+  assert.equal(markup.includes("Limited evidence"), true);
+  assert.equal(markup.includes("Activity concentration"), true);
+  assert.equal(markup.includes("This organization view can include eligible historical performance contributions."), true);
+  assert.equal(markup.includes("Some historical contributions are excluded from this view to protect participant privacy."), true);
+  assert.equal(markup.includes('class="notice"'), false);
+  const current = renderToStaticMarkup(createElement(PerformanceNotices, {
+    data: response({ historicalScope: "current_population" }),
+    evidenceNotices: { limitedEvidence: false, concentrationWarning: false },
+  }));
+  assert.equal(current, "");
 });
 
 test("metric generations and weight profiles remain separate records", () => {
