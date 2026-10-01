@@ -1,7 +1,6 @@
 import React from "react";
 import { LoaderCircle } from "lucide-react";
 
-import { formatOrganizationPerformanceScore } from "./organizationPerformancePresentation";
 import type {
   TeamPerformanceCompletionComparison,
   TeamPerformanceCompletionMovement,
@@ -185,9 +184,29 @@ function formatNumber(value: number): string {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
+function formatCoreScore(value: number): string {
+  return `${value.toFixed(1)} / 10`;
+}
+
+function formatMovementScore(metric: OrganizationPerformanceMetric, value: number): string {
+  return CORE_METRICS.has(metric) ? value.toFixed(1) : formatNumber(value);
+}
+
+function scoreScale(metric: OrganizationPerformanceMetric): string {
+  return CORE_METRICS.has(metric) ? "/ 10" : "/ 100";
+}
+
 function formatDirection(direction: TeamPerformanceMovementDirection, delta: number, suffix = ""): string {
   if (direction === "unchanged") return "No change";
-  return `${direction === "up" ? "Up" : "Down"} ${formatNumber(Math.abs(delta))}${suffix}`;
+  const magnitude = Math.abs(delta);
+  const displayedMagnitude = Math.round(magnitude * 10) / 10;
+  const value = displayedMagnitude === 0 ? "<0.1" : formatNumber(magnitude);
+  return `${direction === "up" ? "Up" : "Down"} ${value}${suffix}`;
+}
+
+function monthName(month: OrganizationPerformanceIntelligenceResponse["currentMonth"]): string {
+  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC" })
+    .format(new Date(Date.UTC(month.year, month.month - 1, 1)));
 }
 
 function formatWeighting(profile: TeamPerformanceWeightProfile | undefined): string | null {
@@ -203,7 +222,7 @@ function RelativeDimensionGroup({ group, showGeneration }: {
   const valueFor = (dimension: TeamPerformanceRelativeDimensionValueName) =>
     group.dimensions.find((entry) => entry.dimension === dimension)?.mean;
   return (
-    <div className="manager-insight-group">
+    <div className="leadership-relative-group">
       {showGeneration ? <h3>Scoring generation: {readableGeneration(group.scoringGeneration)}</h3> : null}
       {!group.available ? (
         <div className="manager-insight-neutral">
@@ -211,28 +230,29 @@ function RelativeDimensionGroup({ group, showGeneration }: {
           <p>More complete scored evidence is needed across all four communication dimensions.</p>
         </div>
       ) : group.relativePosition === "balanced" ? (
-        <div className="manager-insight-neutral">
+        <div className="leadership-relative-balanced">
           <strong>Balanced across dimensions</strong>
+          <strong className="leadership-balanced-score">{formatCoreScore(group.dimensions[0]!.mean)}</strong>
           <p>The four core dimensions have the same current-member average score.</p>
         </div>
       ) : (
         <div className="manager-relative-grid">
-          <div className="manager-relative-column">
+          <div className="leadership-relative-column">
             <h3>Highest-scoring dimension{group.highestDimensions.length === 1 ? "" : "s"}</h3>
             {group.highestDimensions.map((dimension) => (
-              <p key={dimension}>
+              <div className="leadership-relative-item" key={dimension}>
                 <span>{METRIC_LABELS[dimension]}</span>
-                <strong>{formatOrganizationPerformanceScore(dimension, valueFor(dimension)!)}</strong>
-              </p>
+                <strong>{formatCoreScore(valueFor(dimension)!)}</strong>
+              </div>
             ))}
           </div>
-          <div className="manager-relative-column">
+          <div className="leadership-relative-column">
             <h3>Lowest-scoring dimension{group.lowestDimensions.length === 1 ? "" : "s"}</h3>
             {group.lowestDimensions.map((dimension) => (
-              <p key={dimension}>
+              <div className="leadership-relative-item" key={dimension}>
                 <span>{METRIC_LABELS[dimension]}</span>
-                <strong>{formatOrganizationPerformanceScore(dimension, valueFor(dimension)!)}</strong>
-              </p>
+                <strong>{formatCoreScore(valueFor(dimension)!)}</strong>
+              </div>
             ))}
           </div>
         </div>
@@ -243,34 +263,31 @@ function RelativeDimensionGroup({ group, showGeneration }: {
 
 type TeamPerformanceRelativeDimensionValueName = TeamPerformanceRelativeDimension["dimensions"][number]["dimension"];
 
-function MetricMovementRows({ title, rows }: { title: string; rows: readonly LeadershipMetricMovementRow[] }) {
+function MetricMovementRows({ rows }: { rows: readonly LeadershipMetricMovementRow[] }) {
   if (rows.length === 0) return null;
   const duplicateMetrics = new Set(rows.filter((row, index) =>
     rows.findIndex((candidate) => candidate.metric === row.metric) !== index).map((row) => row.metric));
   return (
-    <div className="manager-movement-group">
-      <h3>{title}</h3>
-      <div className="manager-movement-list">
-        {rows.map((row, index) => (
-          <div className="manager-movement-row" key={`${row.metric}-${row.scoringGeneration}-${index}`}>
-            <div>
-              <strong>{row.label}</strong>
-              {duplicateMetrics.has(row.metric) ? (
-                <span className="manager-movement-context">
-                  Scoring generation: {readableGeneration(row.scoringGeneration)}
-                  {formatWeighting(row.weightProfile) ? ` · ${formatWeighting(row.weightProfile)}` : ""}
-                </span>
-              ) : null}
-            </div>
-            <span className="manager-movement-values">
-              {formatOrganizationPerformanceScore(row.metric, row.previous)} → {formatOrganizationPerformanceScore(row.metric, row.current)}
+    <div className="leadership-movement-list">
+      {rows.map((row, index) => (
+        <div className="leadership-movement-row" key={`${row.metric}-${row.scoringGeneration}-${index}`}>
+          <strong>{row.label}</strong>
+          {duplicateMetrics.has(row.metric) ? (
+            <span className="manager-movement-context">
+              Scoring generation: {readableGeneration(row.scoringGeneration)}
+              {formatWeighting(row.weightProfile) ? ` · ${formatWeighting(row.weightProfile)}` : ""}
             </span>
-            <strong className={`manager-movement-direction manager-movement-direction--${row.direction}`}>
-              {formatDirection(row.direction, row.delta)}
+          ) : null}
+          <div className="leadership-movement-flow">
+            <span className="leadership-movement-previous">{formatMovementScore(row.metric, row.previous)}</span>
+            <span className="leadership-movement-arrow" aria-hidden="true">→</span>
+            <strong className="leadership-movement-current">
+              {formatMovementScore(row.metric, row.current)} {scoreScale(row.metric)}
             </strong>
           </div>
-        ))}
-      </div>
+          <span className="leadership-movement-direction">{formatDirection(row.direction, row.delta)}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -279,24 +296,19 @@ function RateMovementRows({ rows }: { rows: readonly LeadershipRateMovementRow[]
   if (rows.length === 0) return null;
   const showGeneration = new Set(rows.map((row) => row.scoringGeneration)).size > 1;
   return (
-    <div className="manager-movement-group">
-      <h3>Completion &amp; objective movement</h3>
-      <div className="manager-movement-list">
-        {rows.map((row, index) => (
-          <div className="manager-movement-row" key={`${row.label}-${row.scoringGeneration}-${index}`}>
-            <div>
-              <strong>{row.label}</strong>
-              {showGeneration ? <span className="manager-movement-context">Scoring generation: {readableGeneration(row.scoringGeneration)}</span> : null}
-            </div>
-            <span className="manager-movement-values">
-              {Math.round(row.previous * 100)}% → {Math.round(row.current * 100)}%
-            </span>
-            <strong className={`manager-movement-direction manager-movement-direction--${row.direction}`}>
-              {formatDirection(row.direction, row.delta * 100, " pts")}
-            </strong>
+    <div className="leadership-movement-list">
+      {rows.map((row, index) => (
+        <div className="leadership-movement-row" key={`${row.label}-${row.scoringGeneration}-${index}`}>
+          <strong>{row.label}</strong>
+          {showGeneration ? <span className="manager-movement-context">Scoring generation: {readableGeneration(row.scoringGeneration)}</span> : null}
+          <div className="leadership-movement-flow">
+            <span className="leadership-movement-previous">{Math.round(row.previous * 100)}%</span>
+            <span className="leadership-movement-arrow" aria-hidden="true">→</span>
+            <strong className="leadership-movement-current">{Math.round(row.current * 100)}%</strong>
           </div>
-        ))}
-      </div>
+          <span className="leadership-movement-direction">{formatDirection(row.direction, row.delta * 100, " pts")}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -308,17 +320,15 @@ export function LeadershipInsights({ state }: { state: LeadershipInsightsState }
         <div>
           <p className="eyebrow">Organization intelligence</p>
           <h2 id="leadership-insights-title">Leadership insights</h2>
-          <p className="section-copy">Relative score context and month-to-month movement for current organization members.</p>
+          {state.kind === "success" ? (
+            <p className="leadership-insights-basis-copy">
+              Based on current members, including their qualifying earlier activity in this organization. Figures may differ from Group Summary because that view can include eligible historical contributions.
+            </p>
+          ) : (
+            <p className="section-copy">Relative score context and month-to-month movement for current organization members.</p>
+          )}
         </div>
       </div>
-
-      {state.kind === "success" ? (
-        <div className="leadership-insights-basis">
-          <strong>Current members</strong>
-          <p>These insights reflect current organization members, including their qualifying earlier activity in this organization.</p>
-          <p>These figures may differ from the Group Summary above, which can include eligible historical contributions.</p>
-        </div>
-      ) : null}
 
       {state.kind === "loading" ? (
         <div className="manager-insights-status" role="status" aria-live="polite">
@@ -366,6 +376,8 @@ function LeadershipInsightsContent({ data }: { data: OrganizationPerformanceInte
   const rateRows = buildRateMovementRows(data);
   const qualifiers = collectCurrentQualifiers(data);
   const hasComparableMovement = metricRows.length > 0 || rateRows.length > 0;
+  const previousMonth = monthName(data.comparisonMonth);
+  const currentMonth = monthName(data.currentMonth);
   return (
     <div className="manager-insights-content">
       {qualifiers.limitedEvidence || qualifiers.concentrationWarning ? (
@@ -391,21 +403,31 @@ function LeadershipInsightsContent({ data }: { data: OrganizationPerformanceInte
       </div>
 
       <div className="manager-movement" aria-labelledby="leadership-movement-title">
-        <h3 id="leadership-movement-title">Movement vs previous month</h3>
+        <h3 id="leadership-movement-title">Movement vs {previousMonth}</h3>
         {!data.signals.monthCompleteness.complete ? (
           <div className="manager-insight-neutral manager-movement-empty">
-            <p>Month-to-month movement will be available after this month closes.</p>
+            <p>Available after {currentMonth} closes.</p>
           </div>
         ) : !hasComparableMovement ? (
           <div className="manager-insight-neutral manager-movement-empty">
             <p>No comparable prior-month performance data is available.</p>
           </div>
         ) : (
-          <>
-            <MetricMovementRows title="Core dimensions" rows={coreRows} />
-            <MetricMovementRows title="Overall performance" rows={performanceRows} />
-            <RateMovementRows rows={rateRows} />
-          </>
+          <div className="leadership-movement-stories">
+            {coreRows.length > 0 ? (
+              <div className="leadership-movement-group">
+                <h4>Core dimensions</h4>
+                <MetricMovementRows rows={coreRows} />
+              </div>
+            ) : null}
+            {performanceRows.length > 0 || rateRows.length > 0 ? (
+              <div className="leadership-movement-group">
+                <h4>Outcomes</h4>
+                <MetricMovementRows rows={performanceRows} />
+                <RateMovementRows rows={rateRows} />
+              </div>
+            ) : null}
+          </div>
         )}
       </div>
     </div>

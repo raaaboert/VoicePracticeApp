@@ -18,6 +18,7 @@ const componentRoot = dirname(fileURLToPath(import.meta.url));
 const overviewSource = readFileSync(join(componentRoot, "OrganizationPerformanceOverview.tsx"), "utf8");
 const leadershipSource = readFileSync(join(componentRoot, "LeadershipInsights.tsx"), "utf8");
 const pageSource = readFileSync(join(componentRoot, "../../app/app/performance/page.tsx"), "utf8");
+const globalStyles = readFileSync(join(componentRoot, "../../app/globals.css"), "utf8");
 
 const basePeriod = {
   observationCount: 4,
@@ -152,10 +153,11 @@ test("current-members basis and Group Summary population distinction are explici
   const markup = render(response());
   assert.equal(markup.includes("Organization intelligence"), true);
   assert.equal(markup.includes("Leadership insights"), true);
-  assert.equal(markup.includes("Current members"), true);
+  assert.equal(markup.includes("Based on current members"), true);
   assert.equal(markup.includes("including their qualifying earlier activity in this organization"), true);
-  assert.equal(markup.includes("may differ from the Group Summary above"), true);
+  assert.equal(markup.includes("may differ from Group Summary"), true);
   assert.equal(markup.includes("eligible historical contributions"), true);
+  assert.equal(markup.includes('class="leadership-insights-basis"'), false);
   for (const internal of [
     "protected contributors", "five-person", "dominance", "historicalPrivacyAdjustmentApplied",
   ]) {
@@ -172,16 +174,33 @@ test("differentiated dimensions preserve high and low ties using only /10 core m
   assert.equal(markup.includes("Assertiveness</span><strong>7.1 / 10"), true);
   const relative = markup.slice(markup.indexOf('aria-label="Relative core dimensions"'), markup.indexOf('aria-labelledby="leadership-movement-title"'));
   assert.equal(relative.includes("/ 100"), false);
+
+  const lowTie = differentiated({
+    dimensions: differentiated().dimensions.map((entry) =>
+      entry.dimension === "persuasion" ? { ...entry, mean: 7.1 } : entry),
+    lowestDimensions: ["persuasion", "assertiveness"],
+  });
+  const lowTieMarkup = render(response({
+    signals: { ...response().signals, relativeDimensions: [lowTie] },
+  }));
+  assert.equal(lowTieMarkup.includes("Lowest-scoring dimensions"), true);
+  assert.equal(lowTieMarkup.includes("Persuasion</span><strong>7.1 / 10"), true);
+  assert.equal(lowTieMarkup.includes("Assertiveness</span><strong>7.1 / 10"), true);
 });
 
 test("balanced and incomplete dimensions show neutral states without high or low lists", () => {
   const balanced = render(response({ signals: {
     ...response().signals,
     relativeDimensions: [{
-      ...differentiated(), relativePosition: "balanced", highestDimensions: [], lowestDimensions: [],
+      ...differentiated(),
+      relativePosition: "balanced",
+      dimensions: differentiated().dimensions.map((entry) => ({ ...entry, mean: 8 })),
+      highestDimensions: [],
+      lowestDimensions: [],
     } as TeamPerformanceRelativeDimension],
   } }));
   assert.equal(balanced.includes("Balanced across dimensions"), true);
+  assert.equal(balanced.includes('class="leadership-balanced-score">8.0 / 10'), true);
   assert.equal(balanced.includes("Highest-scoring dimensions"), false);
 
   const incomplete = render(response({ signals: {
@@ -203,22 +222,34 @@ test("complete-month movement uses backend direction and factual deltas on the c
     ["assertiveness", "up"], ["communication", "up"], ["outcome", "down"], ["overall", "unchanged"],
   ]);
   const markup = render(data);
-  assert.equal(markup.includes("7.8 / 10 → 8.2 / 10"), true);
-  assert.equal(markup.includes("78 / 100 → 82 / 100"), true);
+  assert.equal(markup.includes("Movement vs August"), true);
+  assert.equal(markup.includes("Core dimensions"), true);
+  assert.equal(markup.includes("Outcomes"), true);
+  assert.equal(markup.includes('class="leadership-movement-previous">7.8'), true);
+  assert.equal(markup.includes('class="leadership-movement-current">8.2 / 10'), true);
+  assert.equal(markup.includes('class="leadership-movement-previous">78'), true);
+  assert.equal(markup.includes('class="leadership-movement-current">82 / 100'), true);
   assert.equal(markup.includes("Up 0.4"), true);
   assert.equal(markup.includes("Down 0.3"), true);
   assert.equal(markup.includes("No change"), true);
-  assert.equal(markup.includes("70% → 80%"), true);
+  assert.equal(markup.includes('class="leadership-movement-previous">70%'), true);
+  assert.equal(markup.includes('class="leadership-movement-current">80%'), true);
   assert.equal(markup.includes("Up 10 pts"), true);
   assert.equal(markup.includes("improved"), false);
   assert.equal(markup.includes("declined"), false);
   assert.equal(markup.includes("significant"), false);
 });
 
-test("incomplete month shows one movement message and non-comparable metrics are omitted", () => {
-  const incomplete = response({ signals: { ...response().signals, monthCompleteness: { complete: false, completesAt: "2026-10-01T00:00:00.000Z" } } });
+test("incomplete month shows one compact contextual message and non-comparable metrics are omitted", () => {
+  const incomplete = response({
+    currentMonth: { year: 2026, month: 10, timeZone: "UTC" },
+    comparisonMonth: { year: 2026, month: 9, timeZone: "UTC" },
+    signals: { ...response().signals, monthCompleteness: { complete: false, completesAt: "2026-11-01T00:00:00.000Z" } },
+  });
   const markup = render(incomplete);
-  assert.equal((markup.match(/Month-to-month movement will be available after this month closes\./g) ?? []).length, 1);
+  assert.equal(markup.includes("Movement vs September"), true);
+  assert.equal((markup.match(/Available after October closes\./g) ?? []).length, 1);
+  assert.equal(markup.includes("leadership-movement-stories"), false);
   assert.equal(markup.includes("Up 0.4"), false);
 
   const base = response();
@@ -233,6 +264,28 @@ test("incomplete month shows one movement message and non-comparable metrics are
   const noComparisonMarkup = render(nonComparable);
   assert.equal(noComparisonMarkup.includes("No comparable prior-month performance data is available."), true);
   assert.equal(noComparisonMarkup.includes("unknown_weight_profile"), false);
+});
+
+test("tiny nonzero movement preserves backend direction without displaying zero", () => {
+  const base = response();
+  const markup = render(response({
+    facts: {
+      ...base.facts,
+      metricComparisons: [
+        metricComparison("persuasion", 8, 8.04),
+        metricComparison("empathy", 8, 7.96),
+      ],
+    },
+    signals: {
+      ...base.signals,
+      metricMovement: [metricMovement("persuasion", "up"), metricMovement("empathy", "down")],
+      completionMovement: [],
+    },
+  }));
+  assert.equal(markup.includes("Up &lt;0.1"), true);
+  assert.equal(markup.includes("Down &lt;0.1"), true);
+  assert.equal(markup.includes("Up 0"), false);
+  assert.equal(markup.includes("Down 0"), false);
 });
 
 test("zero current members and current members without evidence remain distinct", () => {
@@ -360,10 +413,31 @@ test("presentation omits Focus, activity movement, internal keys, identities, an
   const markup = render(response());
   for (const forbidden of [
     "Recent focus", "Focus unavailable", "Practice activity", "profileKey", "unknown_weight_profile",
-    "userId", "email", "recommendation", "Best", "Worst", "Deficient",
+    "userId", "email", "recommendation", "best", "worst", "strongest", "weakest", "good", "bad",
+    "improved", "declined", "better", "worse", "significant", "meaningful improvement", "priority",
   ]) {
-    assert.equal(markup.includes(forbidden), false, forbidden);
+    assert.equal(markup.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
   }
   assert.equal(leadershipSource.includes("signals.activityMovement"), false);
   assert.equal(leadershipSource.includes("signals.focus"), false);
+});
+
+test("Performance summary avoids backdrop-filter layer promotion without repaint hacks", () => {
+  assert.match(globalStyles, /\.organization-performance-overview \.section-card,\s*\.organization-performance-overview \.metric-card\s*{\s*backdrop-filter: none;/);
+  assert.equal(leadershipSource.includes("requestAnimationFrame"), false);
+  assert.equal(leadershipSource.includes("setTimeout"), false);
+  assert.equal(globalStyles.includes("translateZ("), false);
+  assert.equal(globalStyles.includes("will-change:"), false);
+});
+
+test("Leadership movement uses bounded responsive grids without horizontal scrolling", () => {
+  assert.match(globalStyles, /\.leadership-movement-stories\s*{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[^}]*width: min\(100%, 68rem\);/s);
+  assert.match(globalStyles, /\.manager-movement-row,\s*\.leadership-movement-stories\s*{\s*grid-template-columns: 1fr;/);
+  const movementStyles = globalStyles.slice(
+    globalStyles.indexOf(".leadership-movement-stories"),
+    globalStyles.indexOf(".manager-insights-content"),
+  );
+  assert.equal(movementStyles.includes("overflow-x"), false);
+  assert.doesNotMatch(movementStyles, /(^|\n)\s*position:/);
+  assert.doesNotMatch(movementStyles, /(^|\n)\s*transform:/);
 });

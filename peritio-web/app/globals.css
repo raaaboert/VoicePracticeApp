@@ -814,6 +814,14 @@ select.text-input {
   gap: 1rem;
 }
 
+/* Backdrop blur promotes every report card to a compositor surface. On the
+   long Performance summary this can repaint as a page-sized opaque layer
+   after browser zoom changes. Keep this report in normal paint flow. */
+.organization-performance-overview .section-card,
+.organization-performance-overview .metric-card {
+  backdrop-filter: none;
+}
+
 .organization-performance-toolbar,
 .performance-loading-state {
   display: flex;
@@ -975,19 +983,143 @@ select.text-input {
   margin-bottom: 0;
 }
 
-.leadership-insights-basis {
-  min-width: 0;
-  padding: 0.95rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--panel-muted);
+.leadership-insights-basis-copy {
+  max-width: 78ch;
+  margin: 0.35rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.5;
 }
 
-.leadership-insights-basis p {
-  margin: 0.3rem 0 0;
+.leadership-insights .manager-insight-qualifiers {
+  gap: 0.5rem;
+}
+
+.leadership-insights .manager-insight-qualifiers span {
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-muted);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.leadership-insights .manager-insight-qualifiers span::before {
+  content: none;
+}
+
+.leadership-relative-group {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.leadership-relative-group > h3 {
+  margin: 0;
   color: var(--text-muted);
-  font-size: 0.9rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.leadership-relative-balanced {
+  display: grid;
+  gap: 0.35rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border-strong);
+}
+
+.leadership-relative-balanced p {
+  margin: 0;
+  color: var(--text-muted);
   line-height: 1.5;
+}
+
+.leadership-balanced-score {
+  font-size: clamp(1.75rem, 3vw, 2.3rem);
+  line-height: 1.1;
+}
+
+.leadership-relative-column {
+  min-width: 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border-strong);
+}
+
+.leadership-relative-column h3 {
+  margin: 0 0 0.7rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.leadership-relative-item {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: 0.65rem;
+}
+
+.leadership-relative-item strong {
+  font-size: 1.4rem;
+}
+
+.leadership-movement-stories {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.75rem;
+  width: min(100%, 68rem);
+}
+
+.leadership-movement-group {
+  min-width: 0;
+}
+
+.leadership-movement-group > h4 {
+  margin: 0 0 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.leadership-movement-list {
+  display: grid;
+}
+
+.leadership-movement-row {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.leadership-movement-row:first-child {
+  border-top: 1px solid var(--border);
+}
+
+.leadership-movement-flow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.leadership-movement-previous,
+.leadership-movement-arrow {
+  color: var(--text-muted);
+}
+
+.leadership-movement-current {
+  color: var(--text);
+  font-size: 1.12rem;
+}
+
+.leadership-movement-direction {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  font-weight: 600;
 }
 
 .manager-insights-content,
@@ -2958,7 +3090,8 @@ html[data-theme="light"] .progress-track {
   }
 
   .manager-relative-grid,
-  .manager-movement-row {
+  .manager-movement-row,
+  .leadership-movement-stories {
     grid-template-columns: 1fr;
   }
 
