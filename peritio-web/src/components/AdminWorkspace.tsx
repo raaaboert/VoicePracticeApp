@@ -21,6 +21,7 @@ import {
   getDownloadFilenameFromContentDisposition,
 } from "@/src/lib/adminApiClient";
 import { formatDateTime } from "@/src/lib/formatters";
+import { ManagerCombobox } from "@/src/components/ManagerCombobox";
 
 type AdminTab = "users" | "access";
 
@@ -361,9 +362,9 @@ export function AdminWorkspace({
                   <th>Last Name</th>
                   <th>Email</th>
                   <th>Employee ID</th>
-                  <th>Role</th>
-                  <th>Manager</th>
-                  <th>Performance Access</th>
+                  <th className="admin-role-cell">Role</th>
+                  <th className="admin-manager-cell">Manager</th>
+                  <th className="admin-performance-access-cell">Performance Access</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -419,10 +420,11 @@ export function AdminWorkspace({
                           user.employeeId ?? "-"
                         )}
                       </td>
-                      <td>
+                      <td className="admin-role-cell">
                         {isEditing && user.canChangeRole ? (
                           <select
-                            className="text-input compact-input"
+                            className="text-input compact-input admin-role-select"
+                            aria-label={`Role for ${user.email}`}
                             value={draft.orgRole}
                             disabled={savingUserId === user.userId}
                             onChange={(event) =>
@@ -439,29 +441,24 @@ export function AdminWorkspace({
                           roleLabel(user.orgRole)
                         )}
                       </td>
-                      <td>
+                      <td className="admin-manager-cell">
                         {isEditing && user.canAssignManager && draft.orgRole === "user" ? (
-                          <select
-                            className="text-input compact-input"
+                          <ManagerCombobox
                             value={draft.managerUserId}
+                            options={managerOptions}
                             disabled={savingUserId === user.userId}
-                            onChange={(event) => updateDraft(user.userId, { managerUserId: event.target.value })}
-                          >
-                            <option value="">Unassigned</option>
-                            {managerOptions.map((manager) => (
-                              <option key={manager.userId} value={manager.userId}>
-                                {manager.email ? `${manager.displayName} (${manager.email})` : manager.displayName}
-                              </option>
-                            ))}
-                          </select>
+                            ariaLabel={`Manager for ${user.email}`}
+                            fallbackLabel={draft.managerUserId === user.managerUserId ? managerLabel(user) : undefined}
+                            onChange={(managerUserId) => updateDraft(user.userId, { managerUserId })}
+                          />
                         ) : (
                           managerLabel(user)
                         )}
                       </td>
-                      <td>
+                      <td className="admin-performance-access-cell">
                         {isEditing && canEditPerformanceAccess ? (
                           <select
-                            className="text-input compact-input"
+                            className="text-input compact-input admin-performance-access-select"
                             aria-label={`Performance Access for ${user.email}`}
                             value={draft.performanceAccess}
                             disabled={savingUserId === user.userId}
