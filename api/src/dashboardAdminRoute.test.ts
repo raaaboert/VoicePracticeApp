@@ -31,6 +31,10 @@ import {
   type AuthorizedOrganizationPerformanceResult,
 } from "./services/authorizedOrganizationPerformance.js";
 import type {
+  AuthorizedOrganizationPerformanceIntelligenceQuery,
+  AuthorizedOrganizationPerformanceIntelligenceResult,
+} from "./services/authorizedOrganizationPerformanceIntelligence.js";
+import type {
   AuthorizedTeamPerformanceQuery,
   AuthorizedTeamPerformanceResult,
 } from "./services/authorizedTeamPerformance.js";
@@ -87,6 +91,9 @@ let ensureDatabaseShapeForTest: (raw: unknown) => ApiDatabase;
 let ensureDemoEnterpriseDataForTest: (db: ApiDatabase, now: string) => void;
 let setDashboardOrganizationPerformanceQueryForTest: (
   query: ((input: AuthorizedOrganizationPerformanceQuery) => AuthorizedOrganizationPerformanceResult) | null,
+) => void;
+let setDashboardOrganizationPerformanceIntelligenceQueryForTest: (
+  query: ((input: AuthorizedOrganizationPerformanceIntelligenceQuery) => AuthorizedOrganizationPerformanceIntelligenceResult) | null,
 ) => void;
 let setDashboardTeamPerformanceQueryForTest: (
   query: ((input: AuthorizedTeamPerformanceQuery) => AuthorizedTeamPerformanceResult) | null,
@@ -1106,6 +1113,8 @@ before(async () => {
   ensureDatabaseShapeForTest = imported.ensureDatabaseShape;
   ensureDemoEnterpriseDataForTest = imported.ensureDemoEnterpriseData;
   setDashboardOrganizationPerformanceQueryForTest = imported.setDashboardOrganizationPerformanceQueryForTest;
+  setDashboardOrganizationPerformanceIntelligenceQueryForTest =
+    imported.setDashboardOrganizationPerformanceIntelligenceQueryForTest;
   setDashboardTeamPerformanceQueryForTest = imported.setDashboardTeamPerformanceQueryForTest;
   setDashboardTeamPerformanceIntelligenceQueryForTest =
     imported.setDashboardTeamPerformanceIntelligenceQueryForTest;
@@ -2536,6 +2545,94 @@ test("organization performance route keeps mixed-organization invariants on the 
     assert.equal(response.body.error, "Organization performance query failed.");
   } finally {
     setDashboardOrganizationPerformanceQueryForTest(null);
+  }
+});
+
+test("organization intelligence HTTP route returns current-members facts and signals without identity or history metadata", async () => {
+  const emptyRoute = "/dashboard/performance/organization/intelligence?orgId=org_1&year=2024&month=1";
+  const response = await dashboardRequest(emptyRoute, orgAdminToken);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.scope, "organization");
+  assert.equal(response.body.populationBasis, "current_members");
+  assert.equal(typeof response.body.asOf, "string");
+  assert.equal((response.body.population as { currentMemberCount?: number }).currentMemberCount! > 0, true);
+  assert.equal((response.body.facts as { activity?: { current?: { attemptCount?: number } } }).activity?.current?.attemptCount, 0);
+  assert.ok(response.body.signals);
+
+  const serialized = JSON.stringify(response.body);
+  for (const forbidden of [
+    "userId", "subjectKey", "name", "email", "memberIds", "managerUserId",
+    "evidenceId", "sessionId", "scenarioId", "trainingId", "trainingPackId",
+    "profileKey", "largestContributionShare", "organization_history",
+    "historicalPrivacyAdjustmentApplied", "protectedContributor",
+  ]) {
+    assert.equal(serialized.includes(`\"${forbidden}\"`), false, forbidden);
+  }
+
+  const superUser = await dashboardRequest(
+    "/dashboard/performance/organization/intelligence?orgId=org_2&year=2024&month=1",
+    superToken,
+  );
+  assert.equal(superUser.status, 200);
+  assert.equal(superUser.body.populationBasis, "current_members");
+});
+
+test("organization intelligence HTTP route enforces inputs, scope, existence hiding, safe 500, and transient 503", async () => {
+  const route = "/dashboard/performance/organization/intelligence?orgId=org_1&year=2026&month=9";
+  for (const extra of [
+    "&month=10",
+    "&orgId=org_1",
+    "&asOf=2026-10-01T00:00:00Z",
+    "&userId=user",
+    "&managerId=manager",
+    "&memberId=member",
+    "&dimension=division",
+    "&dimensionId=division_a",
+    "&trainingId=training_a",
+    "&scenarioId=scenario_a",
+    "&trainingPackId=pack_a",
+    "&from=2026-09-01",
+    "&to=2026-10-01",
+    "&unexpected=value",
+  ]) {
+    assert.equal((await dashboardRequest(route + extra, orgAdminToken)).status, 400, extra);
+  }
+
+  for (const token of [regularTeamToken, orgAdminNoneToken, userAdminNoneToken]) {
+    const denied = await dashboardRequest(route, token);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, "dashboard_scope_denied");
+  }
+
+  const crossOrg = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_2"), orgAdminToken);
+  const missing = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_missing"), orgAdminToken);
+  assert.equal(crossOrg.status, 404);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(crossOrg.body, missing.body);
+
+  setDashboardOrganizationPerformanceIntelligenceQueryForTest(() => {
+    throw new Error("internal organization intelligence secret");
+  });
+  try {
+    const failure = await dashboardRequest(route, orgAdminToken);
+    assert.equal(failure.status, 500);
+    assert.equal(failure.body.error, "Organization performance intelligence query failed.");
+    assert.equal(JSON.stringify(failure.body).includes("internal organization intelligence secret"), false);
+  } finally {
+    setDashboardOrganizationPerformanceIntelligenceQueryForTest(null);
+  }
+
+  setDashboardOrganizationPerformanceIntelligenceQueryForTest(() => {
+    const transient = new Error("connection terminated unexpectedly") as Error & { code: string };
+    transient.code = "57P01";
+    throw transient;
+  });
+  try {
+    const unavailable = await dashboardRequest(route, orgAdminToken);
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.error, "Database temporarily unavailable. Please retry.");
+  } finally {
+    setDashboardOrganizationPerformanceIntelligenceQueryForTest(null);
   }
 });
 

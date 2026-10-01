@@ -49,15 +49,20 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
     "services/organizationPerformanceIntelligenceFacts.ts",
   ]),
   organizationPerformanceIntelligenceFacts: new Set([
+    "services/authorizedOrganizationPerformanceIntelligence.ts",
     "services/organizationPerformanceIntelligenceSignals.ts",
   ]),
-  organizationPerformanceIntelligenceSignals: new Set(),
+  organizationPerformanceIntelligenceSignals: new Set([
+    "services/authorizedOrganizationPerformanceIntelligence.ts",
+  ]),
   teamPerformanceIntelligenceFacts: new Set([
+    "services/authorizedOrganizationPerformanceIntelligence.ts",
     "services/authorizedTeamPerformanceIntelligence.ts",
     "services/organizationPerformanceIntelligenceFacts.ts",
     "services/teamPerformanceIntelligenceSignals.ts",
   ]),
   teamPerformanceIntelligenceSignals: new Set([
+    "services/authorizedOrganizationPerformanceIntelligence.ts",
     "services/authorizedTeamPerformanceIntelligence.ts",
     "services/organizationPerformanceIntelligenceSignals.ts",
   ]),
@@ -138,6 +143,36 @@ test("Team intelligence route imports only its route-safe intelligence facade", 
     "utf8",
   );
   assert.doesNotMatch(facadeSource, /export\s+\*/);
+});
+
+test("Organization intelligence route imports only its route-safe intelligence facade", () => {
+  const routeSource = readFileSync(
+    join(servicesRoot, "dashboardOrganizationPerformanceIntelligenceRoute.ts"),
+    "utf8",
+  );
+  assert.match(routeSource, /from "\.\/authorizedOrganizationPerformanceIntelligence\.js"/);
+  assert.doesNotMatch(
+    routeSource,
+    /organizationPerformanceIntelligenceFacts|organizationPerformanceIntelligenceSignals|currentOrganizationPerformancePopulation|organizationPerformanceAggregation|authorizedOrganizationEvidenceCandidates/,
+  );
+  const facadeSource = readFileSync(
+    join(servicesRoot, "authorizedOrganizationPerformanceIntelligence.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(facadeSource, /export\s+\*/);
+  assert.equal(
+    (facadeSource.match(/buildOrganizationPerformanceIntelligenceFacts\s*\(/g) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (facadeSource.match(/deriveOrganizationPerformanceIntelligenceSignals\s*\(/g) ?? []).length,
+    1,
+  );
+  assert.match(
+    facadeSource,
+    /deriveOrganizationPerformanceIntelligenceSignals\s*\(\{\s*facts,\s*asOf:\s*query\.asOf\s*\}\)/,
+  );
+  assert.doesNotMatch(facadeSource, /\{\s*\.\.\.(?:facts|signals)\./);
 });
 
 test("route-safe Team facade does not export the raw resolver", async () => {
