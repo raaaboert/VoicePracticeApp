@@ -16,7 +16,9 @@ const webAppSourceRoots = [
 const lowerLevelModules = [
   "authorizedOrganizationEvidenceCandidates",
   "authorizedTeamPerformanceInternal",
+  "currentOrganizationPerformancePopulation",
   "organizationPerformanceAggregation",
+  "organizationPerformanceIntelligenceFacts",
   "teamPerformanceIntelligenceFacts",
   "teamPerformanceIntelligenceSignals",
 ] as const;
@@ -25,11 +27,17 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
   authorizedOrganizationEvidenceCandidates: new Set([
     "services/authorizedOrganizationPerformance.ts",
     "services/authorizedTeamPerformanceInternal.ts",
+    "services/currentOrganizationPerformancePopulation.ts",
     "services/organizationPerformanceAggregation.ts",
+    "services/organizationPerformanceIntelligenceFacts.ts",
   ]),
   authorizedTeamPerformanceInternal: new Set([
     "services/authorizedTeamPerformance.ts",
     "services/teamPerformanceIntelligenceFacts.ts",
+  ]),
+  currentOrganizationPerformancePopulation: new Set([
+    "services/authorizedOrganizationPerformance.ts",
+    "services/organizationPerformanceIntelligenceFacts.ts",
   ]),
   organizationPerformanceAggregation: new Set([
     "services/authorizedOrganizationPerformance.ts",
@@ -37,9 +45,12 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
     // Internal identity-free two-period facts; authorization and Team population
     // still enter through resolveAuthorizedTeamPerformanceScope.
     "services/teamPerformanceIntelligenceFacts.ts",
+    "services/organizationPerformanceIntelligenceFacts.ts",
   ]),
+  organizationPerformanceIntelligenceFacts: new Set(),
   teamPerformanceIntelligenceFacts: new Set([
     "services/authorizedTeamPerformanceIntelligence.ts",
+    "services/organizationPerformanceIntelligenceFacts.ts",
     "services/teamPerformanceIntelligenceSignals.ts",
   ]),
   teamPerformanceIntelligenceSignals: new Set([
@@ -138,9 +149,19 @@ test("lower-level performance intelligence exports carry explicit route-safety w
   const candidatesSource = readFileSync(join(servicesRoot, "authorizedOrganizationEvidenceCandidates.ts"), "utf8");
   const aggregationSource = readFileSync(join(servicesRoot, "organizationPerformanceAggregation.ts"), "utf8");
   const teamInternalSource = readFileSync(join(servicesRoot, "authorizedTeamPerformanceInternal.ts"), "utf8");
+  const currentOrganizationPopulationSource = readFileSync(
+    join(servicesRoot, "currentOrganizationPerformancePopulation.ts"),
+    "utf8",
+  );
+  const organizationFactsSource = readFileSync(
+    join(servicesRoot, "organizationPerformanceIntelligenceFacts.ts"),
+    "utf8",
+  );
   assert.match(candidatesSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+queryAuthorizedOrganizationPerformance/);
   assert.equal((aggregationSource.match(/INTERNAL - NOT ROUTE-SAFE/g) ?? []).length, 3);
   assert.equal((aggregationSource.match(/queryAuthorizedOrganizationPerformance/g) ?? []).length >= 2, true);
-  assert.match(aggregationSource, /aggregateCurrentPopulationPerformance[\s\S]*queryAuthorizedTeamPerformance|queryAuthorizedTeamPerformance[\s\S]*aggregateCurrentPopulationPerformance/);
+  assert.match(aggregationSource, /authorized Team or organization[\s\S]*intelligence service[\s\S]*aggregateCurrentPopulationPerformance/);
   assert.match(teamInternalSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+subject keys/);
+  assert.match(currentOrganizationPopulationSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+canonical current organization/);
+  assert.match(organizationFactsSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+current enterprise organization/);
 });

@@ -510,7 +510,10 @@ export function aggregateOrganizationPerformanceWithHistoricalPrivacy(
   return aggregateOrganizationPerformanceInternal(input, isCurrentSubject);
 }
 
-/** INTERNAL - NOT ROUTE-SAFE. Routes/controllers must use queryAuthorizedTeamPerformance. */
+/**
+ * INTERNAL - NOT ROUTE-SAFE. Use only after an authorized Team or organization
+ * intelligence service has resolved its current population.
+ */
 export function aggregateCurrentPopulationPerformance(
   input: Omit<AggregateOrganizationPerformanceInput, "dimensionFilter">,
 ): OrganizationPerformanceAggregate {

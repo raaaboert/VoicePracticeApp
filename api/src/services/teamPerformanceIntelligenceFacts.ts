@@ -158,7 +158,7 @@ function copyEvidenceStrength(
   };
 }
 
-function projectActivity(
+export function projectPerformanceIntelligenceActivity(
   activity: OrganizationPerformanceActivityAggregate,
 ): TeamPerformanceIntelligencePeriodActivity {
   return {
@@ -221,7 +221,7 @@ function missingMetricReason(
   return missingPeriod === "current" ? "no_current_evidence" : "no_previous_evidence";
 }
 
-function buildMetricComparisons(
+export function buildPerformanceIntelligenceMetricComparisons(
   currentGroups: readonly OrganizationPerformanceMetricAggregate[],
   previousGroups: readonly OrganizationPerformanceMetricAggregate[],
 ): TeamPerformanceIntelligenceMetricComparison[] {
@@ -301,7 +301,7 @@ function missingGenerationReason(params: {
   return params.period === "current" ? "no_current_evidence" : "no_previous_evidence";
 }
 
-function buildCompletionComparisons(
+export function buildPerformanceIntelligenceCompletionComparisons(
   currentGroups: readonly OrganizationPerformanceCompletionGroup[],
   previousGroups: readonly OrganizationPerformanceCompletionGroup[],
 ): TeamPerformanceIntelligenceCompletionComparison[] {
@@ -409,8 +409,8 @@ export function buildTeamPerformanceIntelligenceFacts(
     throw new TeamPerformanceIntelligenceInvariantError();
   }
 
-  const currentActivity = projectActivity(current.activity);
-  const previousActivity = projectActivity(previous.activity);
+  const currentActivity = projectPerformanceIntelligenceActivity(current.activity);
+  const previousActivity = projectPerformanceIntelligenceActivity(previous.activity);
   return {
     scope: "team",
     currentMonth: { ...current.calendarMonth },
@@ -426,8 +426,11 @@ export function buildTeamPerformanceIntelligenceFacts(
       conclusiveAttemptDelta:
         currentActivity.conclusiveAttemptCount - previousActivity.conclusiveAttemptCount,
     },
-    metricComparisons: buildMetricComparisons(current.metricGroups, previous.metricGroups),
-    completionComparisons: buildCompletionComparisons(current.completionGroups, previous.completionGroups),
+    metricComparisons: buildPerformanceIntelligenceMetricComparisons(current.metricGroups, previous.metricGroups),
+    completionComparisons: buildPerformanceIntelligenceCompletionComparisons(
+      current.completionGroups,
+      previous.completionGroups,
+    ),
     focusReadiness: {
       available: false,
       reason: "historical_focus_topic_mapping_unavailable",

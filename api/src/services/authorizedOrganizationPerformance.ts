@@ -15,6 +15,7 @@ import {
 } from "./organizationPerformanceAggregation.js";
 import { canViewOrganizationPerformance } from "./performanceAuthorization.js";
 import type { PerformanceEvidenceSourceSnapshot } from "./performanceEvidenceSourceSnapshot.js";
+import { resolveCurrentOrganizationPerformancePopulation } from "./currentOrganizationPerformancePopulation.js";
 
 export interface AuthorizedOrganizationPerformanceCalendarMonth {
   readonly year: number;
@@ -194,7 +195,7 @@ export function precheckAuthorizedOrganizationPerformanceViewerAccess(input: {
   }
 }
 
-function assertAuthorizedOrganizationPerformanceAccess(input: {
+export function assertAuthorizedOrganizationPerformanceAccess(input: {
   readonly snapshot: PerformanceEvidenceSourceSnapshot;
   readonly viewer: DashboardViewer;
   readonly organizationId: string;
@@ -342,14 +343,10 @@ export function queryAuthorizedOrganizationPerformance(
   const organizationId = validatedRequest.organizationId;
   assertOrganizationPerformanceCandidateOrganization(candidates, organizationId);
 
-  const currentSubjectKeys = new Set(
-    query.snapshot.users
-      .filter((user) =>
-        user.id !== "deleted_user"
-        && user.accountType === "enterprise"
-        && user.orgId === organizationId)
-      .map((user) => user.id),
-  );
+  const currentPopulation = resolveCurrentOrganizationPerformancePopulation({
+    snapshot: query.snapshot,
+    organizationId,
+  });
 
   const aggregate = aggregateOrganizationPerformanceWithHistoricalPrivacy(
     {
@@ -362,7 +359,7 @@ export function queryAuthorizedOrganizationPerformance(
     (candidate) =>
       candidate.subjectKind === "user"
       && candidate.orgId === organizationId
-      && currentSubjectKeys.has(candidate.subjectKey),
+      && currentPopulation.memberIds.has(candidate.subjectKey),
   );
   return projectRouteSafeResult(aggregate);
 }
