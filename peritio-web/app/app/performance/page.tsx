@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 
 import { OrganizationPerformanceOverview } from "@/src/components/OrganizationPerformanceOverview";
 import { PageHeader } from "@/src/components/PageHeader";
-import { buildPerformanceGoalsHref } from "@/src/components/organizationPerformancePresentation";
+import { PerformanceNavigation } from "@/src/components/PerformanceNavigation";
 import { getDashboardViewer } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 import { resolvePerformanceOverviewScope } from "@/src/lib/organizationPerformance";
@@ -19,10 +19,7 @@ export default async function PerformancePage({
     redirect(buildDashboardSessionResetPath());
   }
   const scope = resolvePerformanceOverviewScope(viewer, params.orgId);
-  const teamGoalsHref = buildPerformanceGoalsHref({
-    orgId: viewer.orgId,
-    divisionId: params.divisionId,
-  });
+  const navigationOrgId = viewer.accessType === "super_user" ? params.orgId : viewer.orgId;
 
   return (
     <>
@@ -31,6 +28,10 @@ export default async function PerformancePage({
         title="Performance"
         description="Review practice activity and performance results for your available scope."
       />
+
+      {scope.kind !== "no_access" ? (
+        <PerformanceNavigation activeView="group" orgId={navigationOrgId} divisionId={params.divisionId} />
+      ) : null}
 
       {scope.kind === "organization" ? (
         <OrganizationPerformanceOverview orgId={scope.orgId} orgName={scope.orgName} />
@@ -42,7 +43,6 @@ export default async function PerformancePage({
             <p className="eyebrow">Team scope</p>
             <h2>Team performance is not available yet.</h2>
             <p>Your access is limited to team performance. The team aggregate view will appear here when its dedicated data source is available.</p>
-            <Link className="primary-button" href={teamGoalsHref}>Open Performance Goals</Link>
           </div>
         </section>
       ) : null}

@@ -9,6 +9,7 @@ import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignals";
 import { DashboardWhatMattersSection } from "@/src/components/DashboardWhatMattersSection";
 import { PageHeader } from "@/src/components/PageHeader";
+import { PerformanceNavigation } from "@/src/components/PerformanceNavigation";
 import {
   buildDashboardScopedAttemptDetailHref,
   buildDashboardScopedTrainingPackAssignmentHref,
@@ -84,6 +85,12 @@ export default async function UserDetailPage({
         eyebrow="User detail"
         title={user.email}
         description="Review recent performance signals, coaching themes, and active assignment progress for this user."
+      />
+
+      <PerformanceNavigation
+        activeView="individuals"
+        orgId={user.orgId}
+        divisionId={payload.divisionScope?.appliedDivisionId ?? null}
       />
 
       <DashboardDivisionFilter

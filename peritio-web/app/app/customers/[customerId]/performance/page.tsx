@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { PageHeader } from "@/src/components/PageHeader";
 import { PerformanceWorkspace } from "@/src/components/PerformanceWorkspace";
+import { PerformanceNavigation } from "@/src/components/PerformanceNavigation";
 import {
   DashboardSessionInvalidError,
   getDashboardPerformanceWorkspace,
@@ -48,6 +49,12 @@ export default async function CustomerPerformancePage({
         title={`${workspace.selectedOrg.orgName} Performance`}
         description={`Viewing ${workspace.selectedOrg.orgName} as a Peritio administrator.`}
         actions={<span className="pill accent">Peritio administrator company context</span>}
+      />
+
+      <PerformanceNavigation
+        activeView="goals"
+        orgId={workspace.selectedOrg.orgId}
+        divisionId={workspace.divisionScope?.appliedDivisionId ?? null}
       />
 
       <PerformanceWorkspace workspace={workspace} divisionId={divisionId} />

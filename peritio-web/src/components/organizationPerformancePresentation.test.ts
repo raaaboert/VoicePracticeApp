@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 
 import type { OrganizationPerformanceResponse } from "../lib/organizationPerformance";
 import {
-  buildPerformanceGoalsHref,
   calendarMonthFromLocalDate,
   canNavigateToNextMonth,
   collectOrganizationPerformanceEvidenceNotices,
@@ -167,16 +166,14 @@ test("access, unavailable, and loading states are distinct from the empty state"
   assert.equal(componentSource.includes('role="status"'), true);
 });
 
-test("team-only page branch does not mount the organization overview and retains the Goals route context", () => {
+test("team-only page branch does not mount the organization overview and keeps the primary navigation", () => {
   assert.equal(pageSource.includes('scope.kind === "organization"'), true);
   assert.equal(pageSource.includes('<OrganizationPerformanceOverview orgId={scope.orgId}'), true);
   assert.equal(pageSource.includes('scope.kind === "team_pending"'), true);
   assert.equal(pageSource.includes("Team performance is not available yet."), true);
-  assert.equal(pageSource.includes("Open Performance Goals"), true);
-  assert.equal(
-    buildPerformanceGoalsHref({ orgId: "org_1", divisionId: "division_1" }),
-    "/app/performance/goals?orgId=org_1&divisionId=division_1"
-  );
+  assert.equal(pageSource.includes('<PerformanceNavigation activeView="group"'), true);
+  assert.equal(pageSource.includes("Open Performance Goals"), false);
+  assert.equal(componentSource.includes("Open Performance Goals"), false);
 });
 
 test("limited-evidence copy applies to past and current months without calling evidence recent", () => {

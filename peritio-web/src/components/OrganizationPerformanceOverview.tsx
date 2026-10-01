@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, LoaderCircle } from "lucide-react";
 
@@ -288,15 +287,6 @@ export function OrganizationPerformanceOverview({
         </>
       ) : null}
 
-      <section className="section-card performance-goals-link">
-        <div>
-          <h2>Performance Goals</h2>
-          <p className="section-copy">Assign Focus Topic goals and review goal progress in the existing workspace.</p>
-        </div>
-        <Link className="ghost-button" href={`/app/performance/goals?orgId=${encodeURIComponent(orgId)}`}>
-          Open Performance Goals
-        </Link>
-      </section>
     </div>
   );
 }

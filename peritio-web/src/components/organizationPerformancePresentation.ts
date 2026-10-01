@@ -78,21 +78,6 @@ export function formatOrganizationPerformanceWeighting(
   ].join(" · ");
 }
 
-export function buildPerformanceGoalsHref(input: {
-  orgId?: string | null;
-  divisionId?: string | null;
-}): string {
-  const params = new URLSearchParams();
-  if (input.orgId?.trim()) {
-    params.set("orgId", input.orgId.trim());
-  }
-  if (input.divisionId?.trim()) {
-    params.set("divisionId", input.divisionId.trim());
-  }
-  const query = params.toString();
-  return query ? `/app/performance/goals?${query}` : "/app/performance/goals";
-}
-
 export function isOrganizationPerformanceRequestCurrent(signal: AbortSignal): boolean {
   return !signal.aborted;
 }

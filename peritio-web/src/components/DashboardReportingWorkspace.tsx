@@ -11,6 +11,7 @@ import {
 } from "@voicepractice/shared";
 
 import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
+import { DashboardUsersView } from "@/src/components/DashboardUsersView";
 import { DashboardNarrativePanel } from "@/src/components/DashboardNarrativePanel";
 import { DashboardProofSection } from "@/src/components/DashboardProofSection";
 import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignals";
@@ -370,73 +371,17 @@ export function DashboardReportingWorkspace({
       {activeTab === "users" ? (
         <div className="tab-panel page-stack">
           <DashboardNarrativePanel eyebrow="Story" title="Learner summary" narrative={usersNarrative} />
-
           <DashboardSupportSignals title="User support signals" signals={usersNarrative.signals} />
-
           <DashboardWhatMattersSection items={usersNarrative.priorities} />
-
-          <DashboardProofSection
-            title="User detail"
-            description="Open the full user table for attempts, scores, and latest activity."
-            preview="Full user table"
-          >
-            <div className="dashboard-proof-stack">
-              <div className="dashboard-proof-block">
-                <h3>User table</h3>
-                <p>All users in scope stay visible here, including learners without enough scored history for comparison.</p>
-
-                {users.length > 0 ? (
-                  <div className="table-scroll">
-                    <table className="data-table dashboard-table">
-                      <thead>
-                        <tr>
-                          <th>User</th>
-                          <th>Attempts</th>
-                          <th>Average score</th>
-                          <th>Focus Topics practiced</th>
-                          <th>Latest activity</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {users.map((user) => (
-                          <tr key={user.userId}>
-                            <td>
-                              {isDemoData ? (
-                                <strong>{user.email}</strong>
-                              ) : (
-                                <Link className="inline-link subtle" href={buildUserDetailHref(user.userId)}>
-                                  <strong>{user.email}</strong>
-                                </Link>
-                              )}
-                              <div className="table-subcopy">
-                                {user.orgName ?? "Unknown company"} - {formatOrgRole(user.orgRole)}
-                              </div>
-                            </td>
-                            <td>{user.simulationsLast30Days}</td>
-                            <td>{user.averageScoreLast30Days !== null ? formatScore(user.averageScoreLast30Days) : "-"}</td>
-                            <td>{trainingCountByUser.get(user.userId) ?? 0}</td>
-                            <td>{formatDateTime(user.latestActivityAt)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="empty-state-panel">
-                    <h3>No user reporting yet</h3>
-                    <p>
-                      {isSuperUser
-                        ? "User activity will appear here once attempts are recorded across the customer accounts currently in scope."
-                        : "User activity will appear here once attempts are recorded in your reporting scope."}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </DashboardProofSection>
+          <DashboardUsersView
+            users={users}
+            trainingCountByUser={trainingCountByUser}
+            divisionId={appliedDivisionId}
+            isSuperUser={isSuperUser}
+            isDemoData={isDemoData}
+          />
         </div>
       ) : null}
-
       {activeTab === "company" ? (
         <div className="tab-panel page-stack">
           <DashboardNarrativePanel

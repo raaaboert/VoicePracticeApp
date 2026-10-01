@@ -12,6 +12,10 @@ const dashboardReportingSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "DashboardReportingWorkspace.tsx"),
   "utf8"
 );
+const dashboardUsersSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "DashboardUsersView.tsx"),
+  "utf8"
+);
 const brandMarkBytes = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "../../public/brand/peritio-mark.jpg")
 );
@@ -55,6 +59,6 @@ test("Dashboard reporting uses Focus Topic terminology for the OrgTraining dimen
     "Focus Topic-level aggregate reporting",
     "Focus Topic-level company reporting",
   ]) {
-    assert.equal(dashboardReportingSource.includes(copy), true, copy);
+    assert.equal((dashboardReportingSource + dashboardUsersSource).includes(copy), true, copy);
   }
 });

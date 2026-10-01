@@ -684,6 +684,12 @@ select.text-input {
   margin: -0.1rem 0 0.35rem;
 }
 
+.performance-navigation .tab-button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .tab-button {
   min-height: 2.8rem;
   padding: 0.72rem 1rem;
@@ -711,7 +717,6 @@ select.text-input {
 }
 
 .organization-performance-toolbar,
-.performance-goals-link,
 .performance-loading-state {
   display: flex;
   align-items: center;
@@ -720,7 +725,6 @@ select.text-input {
 }
 
 .organization-performance-toolbar h2,
-.performance-goals-link h2,
 .performance-loading-state h2,
 .generation-group h3,
 .evidence-notice-stack p {
@@ -2543,8 +2547,7 @@ html[data-theme="light"] .progress-track {
   .app-topbar,
   .page-header,
   .section-header,
-  .organization-performance-toolbar,
-  .performance-goals-link {
+  .organization-performance-toolbar {
     flex-direction: column;
     align-items: stretch;
   }
