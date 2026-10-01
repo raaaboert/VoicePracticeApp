@@ -24,6 +24,22 @@ export function resolvePerformanceAccessLevel(
   return normalizePerformanceAccess(actor, validOrganizationIds);
 }
 
+/** One-level current report relationship used by person scope and Team aggregation. */
+export function isCurrentDirectPerformanceReport(
+  actor: PerformanceAuthorizationUser,
+  target: PerformanceAuthorizationUser,
+): boolean {
+  return (
+    actor.accountType === "enterprise"
+    && target.accountType === "enterprise"
+    && Boolean(actor.orgId)
+    && actor.orgId === target.orgId
+    && target.id !== actor.id
+    && target.orgRole === "user"
+    && normalizeManagerUserId(target.managerUserId) === actor.id
+  );
+}
+
 function isDashboardSuperUser(actor: PerformanceAuthorizationUser, viewer: DashboardViewer): boolean {
   return viewer.accessType === "super_user" && actor.isSuperUser === true;
 }
@@ -75,10 +91,7 @@ export function canViewPerformanceTarget(params: {
     return true;
   }
 
-  return (
-    params.target.orgRole === "user" &&
-    normalizeManagerUserId(params.target.managerUserId) === params.actor.id
-  );
+  return isCurrentDirectPerformanceReport(params.actor, params.target);
 }
 
 export function resolvePerformanceScope(params: {

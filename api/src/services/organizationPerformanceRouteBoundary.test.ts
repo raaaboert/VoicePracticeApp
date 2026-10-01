@@ -14,10 +14,12 @@ const lowerLevelModules = [
 const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], ReadonlySet<string>>> = {
   authorizedOrganizationEvidenceCandidates: new Set([
     "services/authorizedOrganizationPerformance.ts",
+    "services/authorizedTeamPerformance.ts",
     "services/organizationPerformanceAggregation.ts",
   ]),
   organizationPerformanceAggregation: new Set([
     "services/authorizedOrganizationPerformance.ts",
+    "services/authorizedTeamPerformance.ts",
   ]),
 };
 
@@ -71,6 +73,7 @@ test("lower-level organization intelligence exports carry explicit route-safety 
   const candidatesSource = readFileSync(join(servicesRoot, "authorizedOrganizationEvidenceCandidates.ts"), "utf8");
   const aggregationSource = readFileSync(join(servicesRoot, "organizationPerformanceAggregation.ts"), "utf8");
   assert.match(candidatesSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+queryAuthorizedOrganizationPerformance/);
-  assert.equal((aggregationSource.match(/INTERNAL - NOT ROUTE-SAFE/g) ?? []).length, 2);
+  assert.equal((aggregationSource.match(/INTERNAL - NOT ROUTE-SAFE/g) ?? []).length, 3);
   assert.equal((aggregationSource.match(/queryAuthorizedOrganizationPerformance/g) ?? []).length >= 2, true);
+  assert.match(aggregationSource, /aggregateCurrentPopulationPerformance[\s\S]*queryAuthorizedTeamPerformance|queryAuthorizedTeamPerformance[\s\S]*aggregateCurrentPopulationPerformance/);
 });

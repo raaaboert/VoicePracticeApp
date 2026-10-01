@@ -427,6 +427,7 @@ function buildMetricGroups(
 function aggregateOrganizationPerformanceInternal(
   input: AggregateOrganizationPerformanceInput,
   isCurrentSubject: CurrentSubjectClassifier | undefined,
+  scopeMode: "organization" | "current_population" = "organization",
 ): OrganizationPerformanceAggregate {
   const dimensionFilter = validateOrganizationPerformanceSelection(input);
   const start = Date.UTC(input.calendarMonth.year, input.calendarMonth.month - 1, 1);
@@ -435,15 +436,19 @@ function aggregateOrganizationPerformanceInternal(
     const evidenceAt = Date.parse(candidate.evidenceAt);
     return evidenceAt >= start && evidenceAt < before && matchesDimension(candidate, dimensionFilter);
   });
-  const historicalScope = dimensionFilter === undefined ? "organization_history" : "current_population";
+  const historicalScope = scopeMode === "current_population" || dimensionFilter !== undefined
+    ? "current_population"
+    : "organization_history";
   let privacyMode: HistoricalPrivacyMode = "all_eligible_history";
   let historicalPrivacyAdjustmentApplied = false;
   let displayedCandidates = candidates;
   let suppressEmptyActivity = false;
-  if (isCurrentSubject && dimensionFilter !== undefined) {
+  // Current-population callers have already limited candidates to authorized people.
+  // No protected historical population enters that mode.
+  if (scopeMode !== "current_population" && isCurrentSubject && dimensionFilter !== undefined) {
     privacyMode = "current_only";
     displayedCandidates = candidates.filter(isCurrentSubject);
-  } else if (isCurrentSubject) {
+  } else if (scopeMode !== "current_population" && isCurrentSubject) {
     privacyMode = selectResponsePrivacyMode(candidates, isCurrentSubject);
     if (privacyMode === "current_only") {
       historicalPrivacyAdjustmentApplied = candidates.some((candidate) => !isCurrentSubject(candidate));
@@ -494,4 +499,14 @@ export function aggregateOrganizationPerformanceWithHistoricalPrivacy(
   isCurrentSubject: CurrentSubjectClassifier,
 ): OrganizationPerformanceAggregate {
   return aggregateOrganizationPerformanceInternal(input, isCurrentSubject);
+}
+
+/** INTERNAL - NOT ROUTE-SAFE. Routes/controllers must use queryAuthorizedTeamPerformance. */
+export function aggregateCurrentPopulationPerformance(
+  input: Omit<AggregateOrganizationPerformanceInput, "dimensionFilter">,
+): OrganizationPerformanceAggregate {
+  if (Object.hasOwn(input, "dimensionFilter")) {
+    throw new OrganizationPerformanceAggregationInputError(["Team performance does not support dimension filtering."]);
+  }
+  return aggregateOrganizationPerformanceInternal(input, undefined, "current_population");
 }

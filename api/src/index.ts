@@ -367,6 +367,11 @@ import {
   queryAuthorizedOrganizationPerformance,
 } from "./services/authorizedOrganizationPerformance.js";
 import { queryDashboardOrganizationPerformanceRoute } from "./services/dashboardOrganizationPerformanceRoute.js";
+import {
+  AuthorizedTeamPerformanceDeniedError,
+  queryAuthorizedTeamPerformance,
+} from "./services/authorizedTeamPerformance.js";
+import { queryDashboardTeamPerformanceRoute } from "./services/dashboardTeamPerformanceRoute.js";
 import { capturePerformanceEvidenceSourceSnapshot as capturePerformanceEvidenceSourceSnapshotState } from "./services/performanceEvidenceSourceSnapshot.js";
 import {
   completeRecognizedSimulationUsage,
@@ -4268,6 +4273,7 @@ let databaseReadyConsecutiveFailures = 0;
 let isReadinessRefreshInFlight = false;
 let lastReadinessLoggedError: string | null = null;
 let dashboardOrganizationPerformanceQueryForTest: typeof queryAuthorizedOrganizationPerformance | null = null;
+let dashboardTeamPerformanceQueryForTest: typeof queryAuthorizedTeamPerformance | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -13106,6 +13112,38 @@ app.get(
         throw new Error("Organization performance query failed.");
       }
       throw error;
+    }
+  },
+);
+
+app.get(
+  "/dashboard/performance/team",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    try {
+      const result = await queryDashboardTeamPerformanceRoute({
+        query: request.query,
+        viewer: request.dashboard!.viewer,
+        captureSnapshot: capturePerformanceEvidenceSourceSnapshot,
+        ...(dashboardTeamPerformanceQueryForTest === null
+          ? {}
+          : { queryTeamPerformance: dashboardTeamPerformanceQueryForTest }),
+      });
+      response.json(result);
+    } catch (error) {
+      if (error instanceof AuthorizedOrganizationPerformanceInputError) {
+        response.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof AuthorizedTeamPerformanceDeniedError) {
+        if (error.reason === "performance_scope_denied") {
+          response.status(403).json({ error: error.message, code: "dashboard_scope_denied" });
+          return;
+        }
+        response.status(404).json({ error: error.message });
+        return;
+      }
+      throw new Error("Team performance query failed.");
     }
   },
 );
@@ -23165,6 +23203,15 @@ export function setDashboardOrganizationPerformanceQueryForTest(
     throw new Error("setDashboardOrganizationPerformanceQueryForTest is only available in test.");
   }
   dashboardOrganizationPerformanceQueryForTest = query;
+}
+
+export function setDashboardTeamPerformanceQueryForTest(
+  query: typeof queryAuthorizedTeamPerformance | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setDashboardTeamPerformanceQueryForTest is only available in test.");
+  }
+  dashboardTeamPerformanceQueryForTest = query;
 }
 
 export function clearRateLimitsForTest(): void {

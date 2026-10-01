@@ -17,6 +17,7 @@ const ALLOWED_QUERY_FIELDS = new Set([
   "dimension",
   "dimensionId",
 ]);
+const TEAM_QUERY_FIELDS = new Set(["orgId", "year", "month"]);
 
 type OrganizationPerformanceFacade = typeof queryAuthorizedOrganizationPerformance;
 
@@ -42,9 +43,13 @@ function optionalSingleQueryValue(
   return value.trim();
 }
 
-function parseRouteQuery(query: Readonly<Record<string, unknown>>) {
+export function parseDashboardPerformanceRouteQuery(
+  query: Readonly<Record<string, unknown>>,
+  allowDimension = true,
+) {
   const errors: string[] = [];
-  if (Object.keys(query).some((key) => !ALLOWED_QUERY_FIELDS.has(key))) {
+  const allowedFields = allowDimension ? ALLOWED_QUERY_FIELDS : TEAM_QUERY_FIELDS;
+  if (Object.keys(query).some((key) => !allowedFields.has(key))) {
     errors.push("Unsupported organization performance query fields are not allowed.");
   }
 
@@ -82,7 +87,7 @@ function parseRouteQuery(query: Readonly<Record<string, unknown>>) {
 export async function queryDashboardOrganizationPerformanceRoute(
   input: DashboardOrganizationPerformanceRouteInput,
 ): Promise<AuthorizedOrganizationPerformanceResult> {
-  const routeQuery = validateAuthorizedOrganizationPerformanceRequest(parseRouteQuery(input.query));
+  const routeQuery = validateAuthorizedOrganizationPerformanceRequest(parseDashboardPerformanceRouteQuery(input.query));
   precheckAuthorizedOrganizationPerformanceViewerAccess({
     viewer: input.viewer,
     organizationId: routeQuery.organizationId,

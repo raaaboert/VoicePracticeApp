@@ -222,7 +222,8 @@ function assertAuthorizedOrganizationPerformanceAccess(input: {
   }
 }
 
-function projectRouteSafeResult(
+/** Shared internal DTO projection for authorized grouped performance facades. */
+export function projectRouteSafeResult(
   aggregate: OrganizationPerformanceAggregate,
 ): AuthorizedOrganizationPerformanceResult {
   const concentration = (value: { readonly concentrationWarning: boolean }): RouteSafeConcentration => ({

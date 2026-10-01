@@ -30,6 +30,10 @@ import {
   type AuthorizedOrganizationPerformanceQuery,
   type AuthorizedOrganizationPerformanceResult,
 } from "./services/authorizedOrganizationPerformance.js";
+import type {
+  AuthorizedTeamPerformanceQuery,
+  AuthorizedTeamPerformanceResult,
+} from "./services/authorizedTeamPerformance.js";
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
@@ -79,6 +83,9 @@ let ensureDatabaseShapeForTest: (raw: unknown) => ApiDatabase;
 let ensureDemoEnterpriseDataForTest: (db: ApiDatabase, now: string) => void;
 let setDashboardOrganizationPerformanceQueryForTest: (
   query: ((input: AuthorizedOrganizationPerformanceQuery) => AuthorizedOrganizationPerformanceResult) | null,
+) => void;
+let setDashboardTeamPerformanceQueryForTest: (
+  query: ((input: AuthorizedTeamPerformanceQuery) => AuthorizedTeamPerformanceResult) | null,
 ) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
@@ -1080,6 +1087,7 @@ before(async () => {
   ensureDatabaseShapeForTest = imported.ensureDatabaseShape;
   ensureDemoEnterpriseDataForTest = imported.ensureDemoEnterpriseData;
   setDashboardOrganizationPerformanceQueryForTest = imported.setDashboardOrganizationPerformanceQueryForTest;
+  setDashboardTeamPerformanceQueryForTest = imported.setDashboardTeamPerformanceQueryForTest;
   imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
     [
       buildTrainingPack("pack_scope", "org_1"),
@@ -2507,6 +2515,54 @@ test("organization performance route keeps mixed-organization invariants on the 
     assert.equal(response.body.error, "Organization performance query failed.");
   } finally {
     setDashboardOrganizationPerformanceQueryForTest(null);
+  }
+});
+
+test("team performance HTTP route returns a current-population, identity-free aggregate", async () => {
+  const route = organizationPerformancePath().replace("/organization?", "/team?");
+  const team = await dashboardRequest(route, regularTeamToken);
+  assert.equal(team.status, 200);
+  assert.equal(team.body.historicalScope, "current_population");
+  assert.equal(team.body.dimensionFilter, null);
+  assert.equal(team.body.historicalPrivacyAdjustmentApplied, false);
+  assert.equal((team.body.calendarMonth as { timeZone?: string }).timeZone, "UTC");
+  assert.equal((team.body.activity as { attemptCount?: number }).attemptCount, 0);
+  for (const forbidden of ["userId", "subjectKey", "managerUserId", "evidenceId", "largestContributionShare"]) {
+    assert.equal(JSON.stringify(team.body).includes(`"${forbidden}"`), false);
+  }
+  const broader = await dashboardRequest(route, regularOrganizationToken);
+  assert.equal(broader.status, 200);
+  assert.equal(broader.body.historicalScope, "current_population");
+
+  const managerRoute = organizationPerformancePath({ evidenceAt: daysAgo(9) })
+    .replace("/organization?", "/team?");
+  const manager = await dashboardRequest(managerRoute, userAdminToken);
+  assert.equal(manager.status, 200);
+  assert.equal(manager.body.historicalScope, "current_population");
+});
+
+test("team performance HTTP route keeps 400, 403, 404, and generic 500 distinct", async () => {
+  const route = organizationPerformancePath().replace("/organization?", "/team?");
+  for (const extra of ["&month=10", "&dimension=division&dimensionId=division_a", "&from=2026-09-01"]) {
+    assert.equal((await dashboardRequest(route + extra, regularTeamToken)).status, 400);
+  }
+  for (const token of [orgAdminNoneToken, userAdminNoneToken]) {
+    const denied = await dashboardRequest(route, token);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, "dashboard_scope_denied");
+  }
+  const crossOrg = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_2"), regularTeamToken);
+  assert.equal(crossOrg.status, 404);
+  const nonexistent = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_missing"), regularTeamToken);
+  assert.equal(nonexistent.status, 404);
+
+  setDashboardTeamPerformanceQueryForTest(() => { throw new Error("internal hierarchy secret"); });
+  try {
+    const failure = await dashboardRequest(route, regularTeamToken);
+    assert.equal(failure.status, 500);
+    assert.equal(JSON.stringify(failure.body).includes("internal hierarchy secret"), false);
+  } finally {
+    setDashboardTeamPerformanceQueryForTest(null);
   }
 });
 

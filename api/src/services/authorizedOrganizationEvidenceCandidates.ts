@@ -69,7 +69,8 @@ function requiredId(value: unknown, label: string, errors: string[]): string | u
   return value.trim();
 }
 
-function projectOrganizationEvidenceCandidate(
+/** INTERNAL - NOT ROUTE-SAFE. Use only after canonical evidence authorization. */
+export function projectOrganizationEvidenceCandidate(
   evidence: CanonicalPerformanceEvidence,
 ): OrganizationEvidenceCandidate {
   // This is the only output projection. Never spread a canonical score into an
@@ -103,7 +104,8 @@ function projectOrganizationEvidenceCandidate(
 
 /**
  * INTERNAL - NOT ROUTE-SAFE.
- * Routes/controllers must use queryAuthorizedOrganizationPerformance.
+ * Routes/controllers must use queryAuthorizedOrganizationPerformance or
+ * queryAuthorizedTeamPerformance.
  *
  * Returns historically org-stamped evidence for future anonymous aggregation.
  * This does not authorize person targets or decide cohort privacy thresholds.
