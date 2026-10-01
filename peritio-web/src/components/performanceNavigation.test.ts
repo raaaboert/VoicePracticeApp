@@ -71,8 +71,10 @@ test("group and goals retain their existing routes and remove the bottom Goals a
   const goals = read("../../app/app/performance/goals/page.tsx");
   const overview = read("OrganizationPerformanceOverview.tsx");
   assert.equal(group.includes('<PerformanceNavigation activeView="group"'), true);
-  assert.equal(group.includes('scope.kind === "team_pending"'), true);
+  assert.equal(group.includes('scope.kind === "team"'), true);
   assert.equal(group.includes('scope.kind === "organization"'), true);
+  assert.equal(group.includes('<PerformanceGroupSummary scope="team"'), true);
+  assert.equal(group.includes('<PerformanceGroupSummary scope="organization"'), true);
   assert.equal(goals.includes('activeView="goals"'), true);
   assert.equal(goals.includes("<PerformanceWorkspace workspace={workspace} divisionId={divisionId} />"), true);
   assert.equal(overview.includes("Open Performance Goals"), false);

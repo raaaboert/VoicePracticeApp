@@ -9,7 +9,8 @@ import {
   type OrganizationPerformanceMetric,
   type OrganizationPerformanceMetricGroup,
   type OrganizationPerformanceResponse,
-  getOrganizationPerformance,
+  type PerformanceGroupScope,
+  getPerformanceGroupSummary,
 } from "@/src/lib/organizationPerformance";
 import {
   calendarMonthFromLocalDate,
@@ -85,10 +86,12 @@ export function PerformanceDimensionGroups({ metrics }: { metrics: readonly Orga
   );
 }
 
-export function OrganizationPerformanceOverview({
+export function PerformanceGroupSummary({
+  scope,
   orgId,
   orgName,
 }: {
+  scope: PerformanceGroupScope;
   orgId: string;
   orgName: string | null;
 }) {
@@ -109,7 +112,8 @@ export function OrganizationPerformanceOverview({
     }
     const controller = new AbortController();
     setResult(null);
-    void getOrganizationPerformance({
+    void getPerformanceGroupSummary({
+      scope,
       orgId,
       year: selectedMonth.year,
       month: selectedMonth.month,
@@ -124,7 +128,7 @@ export function OrganizationPerformanceOverview({
       }
     });
     return () => controller.abort();
-  }, [orgId, requestVersion, selectedMonth]);
+  }, [orgId, requestVersion, scope, selectedMonth]);
 
   const data = result?.kind === "success" ? result.data : null;
   const evidenceNotices = useMemo(
@@ -149,10 +153,7 @@ export function OrganizationPerformanceOverview({
   return (
     <div className="performance-stack organization-performance-overview">
       <header className="organization-performance-toolbar" aria-label="Performance period">
-        <div>
-          <h2>{orgName ?? "Organization performance"}</h2>
-          <p className="section-copy">Organization scope · Scored practice for the selected UTC calendar month.</p>
-        </div>
+        <PerformanceGroupSummaryHeader scope={scope} orgName={orgName} />
         <div className="month-selector" role="group" aria-label="Calendar month selector">
           <button className="ghost-button month-button" type="button" onClick={() => moveMonth(-1)} aria-label="Previous month">
             <ChevronLeft size={18} aria-hidden="true" />
@@ -176,15 +177,17 @@ export function OrganizationPerformanceOverview({
 
       {result?.kind === "access_denied" ? (
         <PerformanceStatePanel
-          title="You don’t have organization performance access."
-          copy="Your dashboard access does not include organization-wide performance results."
+          title={`You don’t have ${scope} performance access.`}
+          copy={scope === "team"
+            ? "Your dashboard access does not include team performance results."
+            : "Your dashboard access does not include organization-wide performance results."}
         />
       ) : null}
 
       {result?.kind === "not_found" ? (
         <PerformanceStatePanel
           title="Performance view unavailable"
-          copy="This organization performance view is unavailable or outside your dashboard scope."
+          copy={`This ${scope} performance view is unavailable or outside your dashboard scope.`}
         />
       ) : null}
 
@@ -204,8 +207,12 @@ export function OrganizationPerformanceOverview({
         <>
           {isOrganizationPerformanceEmpty(data) ? (
             <PerformanceStatePanel
-              title="No performance data for this month yet."
-              copy="Organization results will appear after scored practice sessions are available for this month."
+              title={scope === "team"
+                ? "No team performance data for this month yet."
+                : "No performance data for this month yet."}
+              copy={scope === "team"
+                ? "Results will appear as current direct reports complete scored practice."
+                : "Organization results will appear after scored practice sessions are available for this month."}
             />
           ) : (
             <>
@@ -292,10 +299,36 @@ export function OrganizationPerformanceOverview({
               ) : null}
             </>
           )}
-          <PerformanceNotices data={data} evidenceNotices={evidenceNotices!} />
+          <PerformanceNotices scope={scope} data={data} evidenceNotices={evidenceNotices!} />
         </>
       ) : null}
 
+    </div>
+  );
+}
+
+export function PerformanceGroupSummaryHeader({
+  scope,
+  orgName,
+}: {
+  scope: PerformanceGroupScope;
+  orgName: string | null;
+}) {
+  if (scope === "team") {
+    return (
+      <div>
+        <p className="eyebrow">Team scope</p>
+        <h2>Your team</h2>
+        <p className="section-copy">
+          Current direct reports{orgName ? ` in ${orgName}` : ""} · Scored practice for the selected UTC calendar month.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <h2>{orgName ?? "Organization performance"}</h2>
+      <p className="section-copy">Organization scope · Scored practice for the selected UTC calendar month.</p>
     </div>
   );
 }
@@ -324,13 +357,15 @@ function PerformanceStatePanel({ title, copy }: { title: string; copy: string })
 }
 
 export function PerformanceNotices({
+  scope = "organization",
   data,
   evidenceNotices,
 }: {
+  scope?: PerformanceGroupScope;
   data: OrganizationPerformanceResponse;
   evidenceNotices: { limitedEvidence: boolean; concentrationWarning: boolean };
 }) {
-  const historicalCopy = getHistoricalContextCopy(data);
+  const historicalCopy = scope === "team" ? [] : getHistoricalContextCopy(data);
   if (!evidenceNotices.limitedEvidence && !evidenceNotices.concentrationWarning && historicalCopy.length === 0) {
     return null;
   }

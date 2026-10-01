@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { OrganizationPerformanceOverview } from "@/src/components/OrganizationPerformanceOverview";
+import { PerformanceGroupSummary } from "@/src/components/OrganizationPerformanceOverview";
 import { PageHeader } from "@/src/components/PageHeader";
 import { PerformanceNavigation } from "@/src/components/PerformanceNavigation";
 import { getDashboardViewer } from "@/src/lib/auth";
@@ -34,17 +34,11 @@ export default async function PerformancePage({
       ) : null}
 
       {scope.kind === "organization" ? (
-        <OrganizationPerformanceOverview orgId={scope.orgId} orgName={scope.orgName} />
+        <PerformanceGroupSummary scope="organization" orgId={scope.orgId} orgName={scope.orgName} />
       ) : null}
 
-      {scope.kind === "team_pending" ? (
-        <section className="section-card">
-          <div className="empty-state-panel">
-            <p className="eyebrow">Team scope</p>
-            <h2>Team performance is not available yet.</h2>
-            <p>Your access is limited to team performance. The team aggregate view will appear here when its dedicated data source is available.</p>
-          </div>
-        </section>
+      {scope.kind === "team" ? (
+        <PerformanceGroupSummary scope="team" orgId={scope.orgId} orgName={scope.orgName} />
       ) : null}
 
       {scope.kind === "no_access" ? (

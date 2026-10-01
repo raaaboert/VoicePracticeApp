@@ -99,6 +99,12 @@ export interface OrganizationPerformanceRequest extends OrganizationPerformanceC
   readonly signal?: AbortSignal;
 }
 
+export type PerformanceGroupScope = "organization" | "team";
+
+export interface PerformanceGroupSummaryRequest extends OrganizationPerformanceRequest {
+  readonly scope: PerformanceGroupScope;
+}
+
 export type OrganizationPerformanceClientResult =
   | { readonly kind: "success"; readonly data: OrganizationPerformanceResponse }
   | { readonly kind: "access_denied" }
@@ -107,7 +113,7 @@ export type OrganizationPerformanceClientResult =
 
 export type PerformanceOverviewScope =
   | { readonly kind: "organization"; readonly orgId: string; readonly orgName: string | null }
-  | { readonly kind: "team_pending" }
+  | { readonly kind: "team"; readonly orgId: string; readonly orgName: string | null }
   | { readonly kind: "no_access" }
   | { readonly kind: "select_organization" };
 
@@ -122,8 +128,8 @@ export function resolvePerformanceOverviewScope(
       : { kind: "select_organization" };
   }
 
-  if (viewer.performanceAccess === "team") {
-    return { kind: "team_pending" };
+  if (viewer.performanceAccess === "team" && viewer.orgId) {
+    return { kind: "team", orgId: viewer.orgId, orgName: viewer.orgName };
   }
   if (viewer.performanceAccess !== "organization" || !viewer.orgId) {
     return { kind: "no_access" };
@@ -144,19 +150,44 @@ export async function getOrganizationPerformance(
   input: OrganizationPerformanceRequest,
   fetcher: typeof fetch = fetch
 ): Promise<OrganizationPerformanceClientResult> {
+  return getPerformanceGroupSummary({ ...input, scope: "organization" }, fetcher);
+}
+
+export async function getPerformanceGroupSummary(
+  input: PerformanceGroupSummaryRequest,
+  fetcher: typeof fetch = fetch
+): Promise<OrganizationPerformanceClientResult> {
+  const result = await getPerformanceGroupSummaryFromEndpoint(input, fetcher);
+  if (
+    input.scope === "team"
+    && result.kind === "success"
+    && (
+      result.data.historicalScope !== "current_population"
+      || result.data.historicalPrivacyAdjustmentApplied
+    )
+  ) {
+    return { kind: "error", message: "Team performance data could not be loaded. Please retry." };
+  }
+  return result;
+}
+
+async function getPerformanceGroupSummaryFromEndpoint(
+  input: PerformanceGroupSummaryRequest,
+  fetcher: typeof fetch
+): Promise<OrganizationPerformanceClientResult> {
   const params = new URLSearchParams({
     orgId: input.orgId,
     year: String(input.year),
     month: String(input.month),
   });
-  if (input.dimension && input.dimensionId) {
+  if (input.scope === "organization" && input.dimension && input.dimensionId) {
     params.set("dimension", input.dimension);
     params.set("dimensionId", input.dimensionId);
   }
 
   let response: Response;
   try {
-    response = await fetcher(`/api/performance/organization?${params.toString()}`, {
+    response = await fetcher(`/api/performance/${input.scope}?${params.toString()}`, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",

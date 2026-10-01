@@ -7,7 +7,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { OrganizationPerformanceMetricGroup, OrganizationPerformanceResponse } from "../lib/organizationPerformance";
-import { PerformanceDimensionGroups, PerformanceNotices } from "./OrganizationPerformanceOverview";
+import {
+  PerformanceDimensionGroups,
+  PerformanceGroupSummaryHeader,
+  PerformanceNotices,
+} from "./OrganizationPerformanceOverview";
 import {
   calendarMonthFromLocalDate,
   canNavigateToNextMonth,
@@ -49,8 +53,9 @@ function response(overrides: Partial<OrganizationPerformanceResponse> = {}): Org
   };
 }
 
-function renderNotes(data: OrganizationPerformanceResponse): string {
+function renderNotes(data: OrganizationPerformanceResponse, scope: "organization" | "team" = "organization"): string {
   return renderToStaticMarkup(createElement(PerformanceNotices, {
+    scope,
     data,
     evidenceNotices: collectOrganizationPerformanceEvidenceNotices(data),
   }));
@@ -156,8 +161,42 @@ test("each summary note follows its existing evidence or historical condition", 
   })), "");
 });
 
+test("team notes keep evidence context without implying historical organization data", () => {
+  const data = response({
+    historicalPrivacyAdjustmentApplied: true,
+    activity: {
+      ...response().activity!,
+      evidenceStrength: { conservativeContributorCount: 1, limitedEvidence: true },
+      concentration: { concentrationWarning: true },
+    },
+  });
+  const markup = renderNotes(data, "team");
+  assert.equal(markup.includes("Limited evidence"), true);
+  assert.equal(markup.includes("Activity concentration"), true);
+  assert.equal(markup.includes("Historical data included"), false);
+  assert.equal(markup.includes("Historical privacy adjustment"), false);
+  assert.equal(markup.includes("historical performance contributions"), false);
+});
+
+test("shared header distinguishes Team scope from the preserved organization header", () => {
+  const team = renderToStaticMarkup(createElement(PerformanceGroupSummaryHeader, {
+    scope: "team", orgName: "Rob's Company",
+  }));
+  assert.equal(team.includes("Team scope"), true);
+  assert.equal(team.includes("Your team"), true);
+  assert.equal(team.includes("Current direct reports in Rob&#x27;s Company"), true);
+  assert.equal(team.includes("Organization scope"), false);
+
+  const organization = renderToStaticMarkup(createElement(PerformanceGroupSummaryHeader, {
+    scope: "organization", orgName: "Rob's Company",
+  }));
+  assert.equal(organization.includes("Rob&#x27;s Company"), true);
+  assert.equal(organization.includes("Organization scope"), true);
+  assert.equal(organization.includes("Your team"), false);
+});
+
 test("notes follow the performance content instead of the month header", () => {
-  const footer = componentSource.indexOf("<PerformanceNotices data={data}");
+  const footer = componentSource.indexOf("<PerformanceNotices scope={scope} data={data}");
   assert.ok(footer > componentSource.indexOf("Performance dimensions"));
   assert.ok(footer > componentSource.indexOf("{data.activity ?"));
   assert.ok(footer < componentSource.indexOf("function PerformanceLoadingState"));
@@ -314,17 +353,18 @@ test("month navigation uses local month values, crosses years, and blocks future
 });
 
 test("access, unavailable, and loading states are distinct from the empty state", () => {
-  assert.equal(componentSource.includes("You don’t have organization performance access."), true);
+  assert.equal(componentSource.includes("You don’t have ${scope} performance access."), true);
   assert.equal(componentSource.includes("Performance view unavailable"), true);
   assert.equal(componentSource.includes("Loading performance data…"), true);
   assert.equal(componentSource.includes('role="status"'), true);
 });
 
-test("team-only page branch does not mount the organization overview and keeps the primary navigation", () => {
+test("page selects exactly one shared Group Summary scope and keeps the primary navigation", () => {
   assert.equal(pageSource.includes('scope.kind === "organization"'), true);
-  assert.equal(pageSource.includes('<OrganizationPerformanceOverview orgId={scope.orgId}'), true);
-  assert.equal(pageSource.includes('scope.kind === "team_pending"'), true);
-  assert.equal(pageSource.includes("Team performance is not available yet."), true);
+  assert.equal(pageSource.includes('<PerformanceGroupSummary scope="organization"'), true);
+  assert.equal(pageSource.includes('scope.kind === "team"'), true);
+  assert.equal(pageSource.includes('<PerformanceGroupSummary scope="team"'), true);
+  assert.equal(pageSource.includes("Team performance is not available yet."), false);
   assert.equal(pageSource.includes('<PerformanceNavigation activeView="group"'), true);
   assert.equal(pageSource.includes("Open Performance Goals"), false);
   assert.equal(componentSource.includes("Open Performance Goals"), false);
@@ -341,4 +381,15 @@ test("an aborted superseded request cannot apply either a success or failure sta
   controller.abort();
   assert.equal(isOrganizationPerformanceRequestCurrent(controller.signal), false);
   assert.equal(componentSource.includes("isOrganizationPerformanceRequestCurrent(controller.signal)"), true);
+  assert.equal(componentSource.includes("return () => controller.abort()"), true);
+  assert.equal(componentSource.includes("[orgId, requestVersion, scope, selectedMonth]"), true);
+});
+
+test("team empty and endpoint error states stay distinct from authorization", () => {
+  assert.equal(componentSource.includes("No team performance data for this month yet."), true);
+  assert.equal(componentSource.includes("current direct reports complete scored practice"), true);
+  assert.equal(componentSource.includes("You don’t have ${scope} performance access."), true);
+  assert.equal(componentSource.includes("Performance view unavailable"), true);
+  assert.equal(componentSource.includes("Performance data could not be loaded"), true);
+  assert.equal(componentSource.includes("Retry"), true);
 });

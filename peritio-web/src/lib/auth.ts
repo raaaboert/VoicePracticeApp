@@ -395,6 +395,23 @@ export async function getDashboardOrganizationPerformance(options: {
   );
 }
 
+export async function getDashboardTeamPerformance(options: {
+  orgId: string;
+  year: number;
+  month: number;
+}): Promise<OrganizationPerformanceResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const params = new URLSearchParams({
+    orgId: options.orgId,
+    year: String(options.year),
+    month: String(options.month),
+  });
+  return fetchDashboardApi<OrganizationPerformanceResponse>(
+    `/dashboard/performance/team?${params.toString()}`,
+    { token }
+  );
+}
+
 export async function previewDashboardPerformancePlan(
   input: PerformancePlanPreviewRequest,
   divisionId?: string | null
