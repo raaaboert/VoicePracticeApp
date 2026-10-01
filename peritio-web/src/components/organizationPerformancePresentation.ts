@@ -92,13 +92,26 @@ export function collectOrganizationPerformanceEvidenceNotices(
   data: OrganizationPerformanceResponse
 ): OrganizationPerformanceEvidenceNotices {
   const evidence = [
-    ...(data.activity ? [data.activity] : []),
-    ...data.completionGroups.flatMap((group) => [group.completion, group.objective].filter(Boolean)),
-    ...data.metricGroups,
+    ...(data.activity ? [{ value: data.activity, observationCount: data.activity.attemptCount }] : []),
+    ...data.completionGroups.flatMap((group) => [
+      ...(group.completion ? [{
+        value: group.completion,
+        observationCount: group.completion.availableObservationCount,
+      }] : []),
+      ...(group.objective ? [{
+        value: group.objective,
+        observationCount: group.objective.availableObservationCount,
+      }] : []),
+    ]),
+    ...data.metricGroups.map((metric) => ({
+      value: metric,
+      observationCount: metric.qualifyingObservationCount,
+    })),
   ];
   return {
-    limitedEvidence: evidence.some((value) => value?.evidenceStrength.limitedEvidence === true),
-    concentrationWarning: evidence.some((value) => value?.concentration.concentrationWarning === true),
+    limitedEvidence: evidence.some(({ value, observationCount }) =>
+      observationCount > 0 && value.evidenceStrength.limitedEvidence === true),
+    concentrationWarning: evidence.some(({ value }) => value.concentration.concentrationWarning === true),
   };
 }
 

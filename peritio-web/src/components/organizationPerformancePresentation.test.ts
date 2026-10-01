@@ -90,6 +90,27 @@ test("evidence notices cover limited evidence and participant concentration", ()
   assert.equal(componentSource.includes("A small number of highly active participants"), true);
 });
 
+test("zero observations suppress Limited evidence for Organization and Team summaries", () => {
+  const zero = response({
+    historicalScope: "current_population",
+    activity: {
+      attemptCount: 0,
+      conclusiveAttemptCount: 0,
+      evidenceStrength: { conservativeContributorCount: 0, limitedEvidence: true },
+      concentration: { concentrationWarning: false },
+      historicalPrivacyAdjustmentApplied: false,
+    },
+    completionGroups: [],
+    metricGroups: [],
+  });
+  assert.deepEqual(collectOrganizationPerformanceEvidenceNotices(zero), {
+    limitedEvidence: false,
+    concentrationWarning: false,
+  });
+  assert.equal(renderNotes(zero, "organization").includes("Limited evidence"), false);
+  assert.equal(renderNotes(zero, "team").includes("Limited evidence"), false);
+});
+
 test("historical privacy copy is exact and current-population results do not imply hidden history", () => {
   assert.deepEqual(getHistoricalContextCopy(response({
     historicalPrivacyAdjustmentApplied: true,

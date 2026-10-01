@@ -975,6 +975,21 @@ select.text-input {
   margin-bottom: 0;
 }
 
+.leadership-insights-basis {
+  min-width: 0;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-muted);
+}
+
+.leadership-insights-basis p {
+  margin: 0.3rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
 .manager-insights-content,
 .manager-relative-stack,
 .manager-insight-group,

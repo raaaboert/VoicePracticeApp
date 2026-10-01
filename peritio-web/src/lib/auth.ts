@@ -70,6 +70,7 @@ import type {
   OrganizationPerformanceResponse,
 } from "@/src/lib/organizationPerformance";
 import type { TeamPerformanceIntelligenceResponse } from "@/src/lib/teamPerformanceIntelligence";
+import type { OrganizationPerformanceIntelligenceResponse } from "@/src/lib/organizationPerformanceIntelligence";
 import { WEB_AUTH_SESSION_COOKIE_NAME } from "@/src/lib/authConstants";
 import {
   isDashboardScopeDeniedStatus,
@@ -427,6 +428,24 @@ export async function getDashboardTeamPerformanceIntelligence(options: {
   return fetchDashboardApi<TeamPerformanceIntelligenceResponse>(
     `/dashboard/performance/team/intelligence?${params.toString()}`,
     { token }
+  );
+}
+
+export async function getDashboardOrganizationPerformanceIntelligence(options: {
+  orgId: string;
+  year: number;
+  month: number;
+  signal?: AbortSignal;
+}): Promise<OrganizationPerformanceIntelligenceResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const params = new URLSearchParams({
+    orgId: options.orgId,
+    year: String(options.year),
+    month: String(options.month),
+  });
+  return fetchDashboardApi<OrganizationPerformanceIntelligenceResponse>(
+    `/dashboard/performance/organization/intelligence?${params.toString()}`,
+    { token, signal: options.signal },
   );
 }
 
