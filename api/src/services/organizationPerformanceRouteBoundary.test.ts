@@ -19,6 +19,7 @@ const lowerLevelModules = [
   "currentOrganizationPerformancePopulation",
   "organizationPerformanceAggregation",
   "organizationPerformanceIntelligenceFacts",
+  "organizationPerformanceIntelligenceSignals",
   "teamPerformanceIntelligenceFacts",
   "teamPerformanceIntelligenceSignals",
 ] as const;
@@ -47,7 +48,10 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
     "services/teamPerformanceIntelligenceFacts.ts",
     "services/organizationPerformanceIntelligenceFacts.ts",
   ]),
-  organizationPerformanceIntelligenceFacts: new Set(),
+  organizationPerformanceIntelligenceFacts: new Set([
+    "services/organizationPerformanceIntelligenceSignals.ts",
+  ]),
+  organizationPerformanceIntelligenceSignals: new Set(),
   teamPerformanceIntelligenceFacts: new Set([
     "services/authorizedTeamPerformanceIntelligence.ts",
     "services/organizationPerformanceIntelligenceFacts.ts",
@@ -55,6 +59,7 @@ const approvedImporters: Readonly<Record<(typeof lowerLevelModules)[number], Rea
   ]),
   teamPerformanceIntelligenceSignals: new Set([
     "services/authorizedTeamPerformanceIntelligence.ts",
+    "services/organizationPerformanceIntelligenceSignals.ts",
   ]),
 };
 
@@ -157,6 +162,10 @@ test("lower-level performance intelligence exports carry explicit route-safety w
     join(servicesRoot, "organizationPerformanceIntelligenceFacts.ts"),
     "utf8",
   );
+  const organizationSignalsSource = readFileSync(
+    join(servicesRoot, "organizationPerformanceIntelligenceSignals.ts"),
+    "utf8",
+  );
   assert.match(candidatesSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+queryAuthorizedOrganizationPerformance/);
   assert.equal((aggregationSource.match(/INTERNAL - NOT ROUTE-SAFE/g) ?? []).length, 3);
   assert.equal((aggregationSource.match(/queryAuthorizedOrganizationPerformance/g) ?? []).length >= 2, true);
@@ -164,4 +173,5 @@ test("lower-level performance intelligence exports carry explicit route-safety w
   assert.match(teamInternalSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+subject keys/);
   assert.match(currentOrganizationPopulationSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+canonical current organization/);
   assert.match(organizationFactsSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+current enterprise organization/);
+  assert.match(organizationSignalsSource, /INTERNAL - NOT ROUTE-SAFE[\s\S]+Purely derives deterministic organization signals/);
 });

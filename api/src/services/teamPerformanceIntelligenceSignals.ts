@@ -114,6 +114,21 @@ export interface TeamPerformanceIntelligenceSignals {
   readonly focus: TeamPerformanceIntelligenceFacts["focusReadiness"];
 }
 
+export type PerformanceIntelligenceSignalFacts = Pick<
+  TeamPerformanceIntelligenceFacts,
+  | "currentMonth"
+  | "comparisonMonth"
+  | "activity"
+  | "metricComparisons"
+  | "completionComparisons"
+  | "focusReadiness"
+>;
+
+export type PerformanceIntelligenceSignalCore = Omit<
+  TeamPerformanceIntelligenceSignals,
+  "scope" | "population"
+>;
+
 export interface DeriveTeamPerformanceIntelligenceSignalsInput {
   readonly facts: TeamPerformanceIntelligenceFacts;
   /** An explicit instant. No ambient clock is read by this service. */
@@ -198,7 +213,7 @@ function activityMovement(
 }
 
 function deriveRelativeDimensions(
-  facts: TeamPerformanceIntelligenceFacts,
+  facts: PerformanceIntelligenceSignalFacts,
 ): TeamPerformanceRelativeDimensionSignal[] {
   const currentGenerations = [...new Set(
     facts.metricComparisons
@@ -275,13 +290,11 @@ function deriveRelativeDimensions(
   });
 }
 
-/**
- * Converts identity-free Team facts into deterministic, identity-free signals.
- * Movement is interpreted only after the selected UTC month has completed.
- */
-export function deriveTeamPerformanceIntelligenceSignals(
-  input: DeriveTeamPerformanceIntelligenceSignalsInput,
-): TeamPerformanceIntelligenceSignals {
+/** Scope-neutral deterministic interpretation of identity-free comparison facts. */
+export function derivePerformanceIntelligenceSignalCore(input: {
+  readonly facts: PerformanceIntelligenceSignalFacts;
+  readonly asOf: Date;
+}): PerformanceIntelligenceSignalCore {
   const asOfTime = input.asOf.getTime();
   if (!Number.isFinite(asOfTime)) throw new TeamPerformanceIntelligenceSignalInputError();
 
@@ -297,10 +310,8 @@ export function deriveTeamPerformanceIntelligenceSignals(
   };
 
   return {
-    scope: "team",
     currentMonth: { ...input.facts.currentMonth },
     comparisonMonth: { ...input.facts.comparisonMonth },
-    population: { ...input.facts.population },
     monthCompleteness: {
       complete: currentMonthComplete,
       asOf: input.asOf.toISOString(),
@@ -357,5 +368,27 @@ export function deriveTeamPerformanceIntelligenceSignals(
       },
     })),
     focus: { ...input.facts.focusReadiness },
+  };
+}
+
+/**
+ * Converts identity-free Team facts into deterministic, identity-free signals.
+ * Movement is interpreted only after the selected UTC month has completed.
+ */
+export function deriveTeamPerformanceIntelligenceSignals(
+  input: DeriveTeamPerformanceIntelligenceSignalsInput,
+): TeamPerformanceIntelligenceSignals {
+  const core = derivePerformanceIntelligenceSignalCore(input);
+  return {
+    scope: "team",
+    currentMonth: core.currentMonth,
+    comparisonMonth: core.comparisonMonth,
+    population: { ...input.facts.population },
+    monthCompleteness: core.monthCompleteness,
+    activityMovement: core.activityMovement,
+    metricMovement: core.metricMovement,
+    relativeDimensions: core.relativeDimensions,
+    completionMovement: core.completionMovement,
+    focus: core.focus,
   };
 }
