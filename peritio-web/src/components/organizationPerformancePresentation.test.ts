@@ -314,7 +314,7 @@ test("dimension grid and card styles use responsive columns and a vertical infor
   assert.equal(css.includes(".performance-dimension-grid--composite {\n  grid-template-columns: repeat(3, minmax(0, 1fr));"), true);
   assert.match(css, /@media \(max-width: 1360px\)\s*\{\s*\.performance-dimension-grid--core,\s*\.performance-dimension-grid--composite\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.performance-dimension-grid--core,\s*\.performance-dimension-grid--composite\s*\{\s*grid-template-columns: 1fr/);
-  const cardCss = css.slice(css.indexOf(".performance-dimension-card {"), css.indexOf(".performance-summary-notes {"));
+  const cardCss = css.slice(css.indexOf(".performance-dimension-card {"), css.indexOf(".manager-insights {"));
   assert.equal(cardCss.includes("display: grid"), true);
   assert.equal(cardCss.includes("display: flex"), false);
   assert.equal(cardCss.includes("white-space: nowrap"), true);

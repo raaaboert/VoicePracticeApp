@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, LoaderCircle } from "lucide-react";
 
+import { ManagerInsights, type ManagerInsightsState } from "./ManagerInsights";
+
 import {
   type OrganizationPerformanceCalendarMonth,
   type OrganizationPerformanceClientResult,
@@ -25,6 +27,10 @@ import {
   isOrganizationPerformanceEmpty,
   shiftCalendarMonth,
 } from "@/src/components/organizationPerformancePresentation";
+import {
+  getTeamPerformanceIntelligence,
+  isTeamPerformanceIntelligenceRequestCurrent,
+} from "../lib/teamPerformanceIntelligence";
 
 const METRIC_LABELS: Record<OrganizationPerformanceMetric, string> = {
   persuasion: "Persuasion",
@@ -98,6 +104,7 @@ export function PerformanceGroupSummary({
   const [currentMonth, setCurrentMonth] = useState<OrganizationPerformanceCalendarMonth | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<OrganizationPerformanceCalendarMonth | null>(null);
   const [result, setResult] = useState<OrganizationPerformanceClientResult | null>(null);
+  const [intelligenceState, setIntelligenceState] = useState<ManagerInsightsState | null>(null);
   const [requestVersion, setRequestVersion] = useState(0);
 
   useEffect(() => {
@@ -130,6 +137,31 @@ export function PerformanceGroupSummary({
     return () => controller.abort();
   }, [orgId, requestVersion, scope, selectedMonth]);
 
+  useEffect(() => {
+    if (scope !== "team" || !selectedMonth) {
+      setIntelligenceState(null);
+      return;
+    }
+    const controller = new AbortController();
+    setIntelligenceState({ kind: "loading" });
+    void getTeamPerformanceIntelligence({
+      orgId,
+      year: selectedMonth.year,
+      month: selectedMonth.month,
+      signal: controller.signal,
+    }).then((nextResult) => {
+      if (!isTeamPerformanceIntelligenceRequestCurrent(controller.signal)) return;
+      setIntelligenceState(nextResult.kind === "success"
+        ? { kind: "success", data: nextResult.data }
+        : { kind: "error" });
+    }).catch(() => {
+      if (isTeamPerformanceIntelligenceRequestCurrent(controller.signal)) {
+        setIntelligenceState({ kind: "error" });
+      }
+    });
+    return () => controller.abort();
+  }, [orgId, requestVersion, scope, selectedMonth]);
+
   const data = result?.kind === "success" ? result.data : null;
   const evidenceNotices = useMemo(
     () => data ? collectOrganizationPerformanceEvidenceNotices(data) : null,
@@ -142,6 +174,7 @@ export function PerformanceGroupSummary({
 
   const moveMonth = (offset: -1 | 1) => {
     setResult(null);
+    setIntelligenceState(scope === "team" ? { kind: "loading" } : null);
     setSelectedMonth((value) => value ? shiftCalendarMonth(value, offset) : value);
   };
 
@@ -299,6 +332,7 @@ export function PerformanceGroupSummary({
               ) : null}
             </>
           )}
+          {scope === "team" && intelligenceState ? <ManagerInsights state={intelligenceState} /> : null}
           <PerformanceNotices scope={scope} data={data} evidenceNotices={evidenceNotices!} />
         </>
       ) : null}
