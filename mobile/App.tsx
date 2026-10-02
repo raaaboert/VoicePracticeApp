@@ -154,6 +154,8 @@ import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
 import { RelatedTrainingContentScreen } from "./src/trainingContent/RelatedTrainingContentScreen";
+import { TrainingContentHeader } from "./src/trainingContent/TrainingContentHeader";
+import { getTrainingContentTheme } from "./src/trainingContent/theme";
 import { FocusTopicsScreen } from "./src/focusTopics/FocusTopicsScreen";
 import { canRequestFocusTopicCatalog } from "./src/focusTopics/model";
 import { confirmAndOpenExternalLink } from "./src/trainingContent/externalLinks";
@@ -1465,6 +1467,10 @@ export default function App() {
     [detectedTimezone, timezones],
   );
   const theme = useMemo(() => APP_THEME_TOKENS[colorScheme], [colorScheme]);
+  const setupSurfaceTheme = useMemo(
+    () => getTrainingContentTheme(colorScheme),
+    [colorScheme]
+  );
   const styles = useMemo(() => createStyles(theme), [theme]);
   const useIosCompactHomeLayout = Platform.OS === "ios" && !Platform.isPad && (windowHeight < 860 || windowWidth < 390);
   const statusBarStyle = isBootLoading || colorScheme === "classic_blue" ? "light" : "dark";
@@ -5153,23 +5159,26 @@ export default function App() {
   const renderSetup = () => {
     const orgMaxSimulationMinutes = entitlements?.limits?.maxSimulationMinutes ?? null;
     return (
-      <View style={styles.fill}>
-      <View style={styles.topRow}>
-        <Pressable
-          style={styles.ghostButton}
-          onPress={() => {
+      <View
+        style={[
+          styles.setupSurface,
+          {
+            backgroundColor: setupSurfaceTheme.background,
+            borderColor: setupSurfaceTheme.border,
+          },
+        ]}
+      >
+        <TrainingContentHeader
+          title="Setup"
+          theme={setupSurfaceTheme}
+          onBack={() => {
             setSetupSelectionIntent(null);
             setSetupSelectionFailure(null);
             setScreen(setupBackDestination(setupOrigin));
           }}
-        >
-          <Text style={styles.ghostButtonText}>Back</Text>
-        </Pressable>
-        <Text style={styles.topTitle}>Setup</Text>
-        <View style={styles.spacer} />
-      </View>
+        />
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.setupScrollContent}>
         {setupSelectionFailure ? (
           <View style={styles.errorCard} accessibilityRole="alert">
             <Text style={styles.errorText}>{setupSelectionFailure}</Text>
@@ -5187,7 +5196,7 @@ export default function App() {
             </Pressable>
           </View>
         ) : null}
-        <View style={styles.card}>
+        <View style={[styles.card, styles.setupSessionCard]}>
           <Text style={styles.sectionTitle}>Session Selection</Text>
 
           <Text style={styles.hintText}>Scenario Library</Text>
@@ -5281,33 +5290,46 @@ export default function App() {
           ) : null}
         </View>
 
-        <Text style={styles.sectionTitle}>Difficulty</Text>
-        {(Object.keys(DIFFICULTY_LABELS) as Difficulty[]).map((difficulty) => (
-          <Pressable
-            key={difficulty}
-            style={[styles.optionCard, selectedDifficulty === difficulty ? styles.selectedCard : null]}
-            onPress={() => setSelectedDifficulty(difficulty)}
-          >
-            <Text style={styles.optionTitle}>{DIFFICULTY_LABELS[difficulty]}</Text>
-            <Text style={styles.body}>{DIFFICULTY_HINTS[difficulty]}</Text>
-          </Pressable>
-        ))}
+        <View style={styles.setupSection}>
+          <Text accessibilityRole="header" style={styles.setupSectionTitle}>Difficulty</Text>
+          {(Object.keys(DIFFICULTY_LABELS) as Difficulty[]).map((difficulty) => (
+            <Pressable
+              key={difficulty}
+              style={[styles.optionCard, selectedDifficulty === difficulty ? styles.selectedCard : null]}
+              onPress={() => setSelectedDifficulty(difficulty)}
+            >
+              <Text style={styles.optionTitle}>{DIFFICULTY_LABELS[difficulty]}</Text>
+              <Text style={styles.body}>{DIFFICULTY_HINTS[difficulty]}</Text>
+            </Pressable>
+          ))}
+        </View>
 
-        <Text style={styles.sectionTitle}>Opponent Persona Style</Text>
-        {(Object.keys(PERSONA_LABELS) as PersonaStyle[]).map((personaStyle) => (
-          <Pressable
-            key={personaStyle}
-            style={[styles.optionCard, selectedPersonaStyle === personaStyle ? styles.selectedCard : null]}
-            onPress={() => setSelectedPersonaStyle(personaStyle)}
-          >
-            <Text style={styles.optionTitle}>{PERSONA_LABELS[personaStyle]}</Text>
-            <Text style={styles.body}>{PERSONA_HINTS[personaStyle]}</Text>
-          </Pressable>
-        ))}
+        <View style={styles.setupSection}>
+          <Text accessibilityRole="header" style={styles.setupSectionTitle}>Opponent Persona Style</Text>
+          {(Object.keys(PERSONA_LABELS) as PersonaStyle[]).map((personaStyle) => (
+            <Pressable
+              key={personaStyle}
+              style={[styles.optionCard, selectedPersonaStyle === personaStyle ? styles.selectedCard : null]}
+              onPress={() => setSelectedPersonaStyle(personaStyle)}
+            >
+              <Text style={styles.optionTitle}>{PERSONA_LABELS[personaStyle]}</Text>
+              <Text style={styles.body}>{PERSONA_HINTS[personaStyle]}</Text>
+            </Pressable>
+          ))}
+        </View>
 
       </ScrollView>
 
-      <View style={styles.bottomActionRegion}>
+      <View
+        style={[
+          styles.bottomActionRegion,
+          styles.setupActionRegion,
+          {
+            backgroundColor: setupSurfaceTheme.background,
+            borderTopColor: setupSurfaceTheme.border,
+          },
+        ]}
+      >
         {setupError ? <Text style={styles.bottomActionErrorText}>{setupError}</Text> : null}
         <Pressable
           style={[
@@ -5321,7 +5343,7 @@ export default function App() {
           <Text style={styles.primaryButtonText}>Start Simulation</Text>
         </Pressable>
       </View>
-    </View>
+      </View>
     );
   };
 
@@ -7255,6 +7277,28 @@ function createStyles(theme: ThemeTokens) {
     gradient: { flex: 1 },
     safeArea: { flex: 1, paddingHorizontal: 16, paddingBottom: 12 },
     fill: { flex: 1 },
+    setupSurface: {
+      flex: 1,
+      marginHorizontal: 2,
+      marginVertical: 4,
+      borderWidth: 1,
+      borderRadius: 18,
+      overflow: "hidden",
+    },
+    setupScrollContent: {
+      paddingHorizontal: 16,
+      paddingTop: 18,
+      paddingBottom: 28,
+    },
+    setupSessionCard: { marginBottom: 0 },
+    setupSection: { marginTop: 26 },
+    setupSectionTitle: {
+      color: theme.text,
+      fontSize: 20,
+      lineHeight: 26,
+      fontWeight: "800",
+      marginBottom: 12,
+    },
     homeFillCompact: { justifyContent: "flex-start" },
     homeScrollContent: { paddingBottom: 18 },
     centered: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
@@ -7454,6 +7498,11 @@ function createStyles(theme: ThemeTokens) {
     successCard: { borderRadius: 14, borderWidth: 1, borderColor: "rgba(29, 154, 95, 0.45)", backgroundColor: "rgba(29, 154, 95, 0.12)", padding: 12, marginBottom: 12 },
     errorText: { color: theme.danger, fontSize: 13, marginBottom: 6 },
     bottomActionRegion: { paddingTop: 10 },
+    setupActionRegion: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      paddingHorizontal: 16,
+      paddingBottom: 12,
+    },
     bottomActionErrorText: { color: theme.danger, fontSize: 13, marginBottom: 8 },
     successText: { color: theme.success, fontSize: 13, marginBottom: 6 },
     bootBleed: { flex: 1, marginHorizontal: -16, marginBottom: -12, backgroundColor: APP_SURFACE_COLORS.sage },
