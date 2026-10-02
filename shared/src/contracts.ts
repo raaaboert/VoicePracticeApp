@@ -198,6 +198,23 @@ export interface MobileFocusTopicCatalogResponse {
   topics: MobileFocusTopicCatalogItem[];
 }
 
+export interface MobileFocusTopicScenarioSummary
+  extends MobileRelatedPracticeScenarioSummary {
+  description: string;
+  segmentLabel: string;
+  industryLabel: string;
+}
+
+export interface MobileFocusTopicDetailResponse {
+  topic: {
+    id: string;
+    name: string;
+    description: string;
+  };
+  scenarios: MobileFocusTopicScenarioSummary[];
+  resources: MobileTrainingContentSummary[];
+}
+
 export interface MobileTrainingContentCategory {
   id: string;
   name: string;

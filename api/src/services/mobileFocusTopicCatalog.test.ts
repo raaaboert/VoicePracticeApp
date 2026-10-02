@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type {
   OrgCustomScenario,
+  MobileFocusTopicScenarioSummary,
   OrgTrainingPackAttachmentRecord,
   OrgTrainingRecord,
   OrgTrainingScenarioAttachmentRecord,
@@ -79,6 +80,26 @@ function customScenario(id: string, orgId = ORG_ID, enabled = true): OrgCustomSc
     createdBy: "admin",
     createdAt: NOW,
     updatedAt: NOW,
+  };
+}
+
+function scenarioSummary(
+  id: string,
+  source: "standard" | "custom",
+  trainingId: string | null = source === "custom" ? "topic" : null,
+  overrides: Partial<MobileFocusTopicScenarioSummary> = {}
+): MobileFocusTopicScenarioSummary {
+  return {
+    id,
+    title: id,
+    description: `${id} description`,
+    source,
+    segmentId: "segment",
+    segmentLabel: "Role",
+    industryId: "industry",
+    industryLabel: "Industry",
+    trainingId,
+    ...overrides,
   };
 }
 
@@ -302,7 +323,9 @@ test("catalog uses active authoritative topic IDs, division visibility, and dete
       ],
     },
     isTopicVisible: (entry) => entry.id !== "topic_hidden",
-    resolveScenario: (id) => visibleCustom.includes(id) ? { source: "custom" } : null,
+    resolveScenario: (id, trainingId) => visibleCustom.includes(id)
+      ? scenarioSummary(id, "custom", trainingId ?? null)
+      : null,
   });
 
   const result = await service.getCatalog(context);
@@ -333,7 +356,7 @@ test("direct custom scenarios need no pack and stale, disabled, wrong-org, and d
     },
     resolveScenario: (id, trainingId) => {
       resolvedCalls.push([id, trainingId]);
-      return id === "launchable" ? { source: "custom" } : null;
+      return id === "launchable" ? scenarioSummary(id, "custom", trainingId ?? null) : null;
     },
   });
 
@@ -371,8 +394,8 @@ test("pack scenarios require explicit selection, active assignment intersection,
     ],
     resolveScenario: (id, trainingId) => {
       calls.push([id, trainingId]);
-      if (id === "custom") return { source: "custom" };
-      return { source: "standard" };
+      if (id === "custom") return scenarioSummary(id, "custom", trainingId ?? null);
+      return scenarioSummary(id, "standard");
     },
   });
 
@@ -393,7 +416,7 @@ test("inactive or absent pack assignments and non-launchable selected standards 
     packs: [pack("pack", ["scenario:standard"])],
     packAttachments: [packAttachment("topic", "pack")],
     packAssignments: [assignment("pack", ["standard"], { active: false })],
-    resolveScenario: () => ({ source: "standard" }),
+    resolveScenario: (id) => scenarioSummary(id, "standard"),
   });
   assert.deepEqual(await service.getCatalog(context), { topics: [] });
 
@@ -479,7 +502,7 @@ test("mixed, scenario-only, resource-only, and empty topics project only the nar
       contentRecord({ id: "resource_only", topicId: "resource" }),
       contentRecord({ id: "resource_mixed", topicId: "mixed" }),
     ],
-    resolveScenario: () => ({ source: "custom" }),
+    resolveScenario: (id, trainingId) => scenarioSummary(id, "custom", trainingId ?? null),
   });
   const result = await service.getCatalog(context);
   assert.deepEqual(result.topics.map(({ id, scenarioCount, resourceCount }) => ({ id, scenarioCount, resourceCount })), [
@@ -489,5 +512,210 @@ test("mixed, scenario-only, resource-only, and empty topics project only the nar
   ]);
   for (const projected of result.topics) {
     assert.deepEqual(Object.keys(projected).sort(), ["description", "id", "name", "resourceCount", "scenarioCount"]);
+  }
+});
+
+test("detail reuses catalog membership, returns safe launch metadata, and preserves resource order", async () => {
+  const records = [
+    contentRecord({
+      id: "resource_first",
+      topicId: "topic",
+      content: { title: "First resource", displayOrder: 1 },
+      category: { id: "category_first", name: "First category", displayOrder: 1 },
+    }),
+    contentRecord({
+      id: "resource_second",
+      topicId: "topic",
+      content: { title: "Second resource", displayOrder: 2 },
+      category: { id: "category_second", name: "Second category", displayOrder: 2 },
+    }),
+  ];
+  const { service, context } = harness({
+    topics: [topic("topic", { name: "Authoritative topic" })],
+    scenarioAttachments: [
+      scenarioAttachment("topic", "custom_z"),
+      scenarioAttachment("topic", "custom_a"),
+      scenarioAttachment("topic", "custom_a", { id: "duplicate_custom" }),
+    ],
+    scenarioConfig: {
+      ...emptyScenarioConfig,
+      orgCustomScenarios: [customScenario("custom_z"), customScenario("custom_a")],
+    },
+    records,
+    resolveScenario: (id, trainingId) => scenarioSummary(
+      id,
+      "custom",
+      trainingId ?? null,
+      {
+        title: id === "custom_z" ? "Zulu" : "Alpha",
+        description: `${id} safe summary`,
+      }
+    ),
+  });
+
+  const detail = await service.getDetail(context, "topic");
+  assert.ok(detail);
+  assert.deepEqual(detail.topic, {
+    id: "topic",
+    name: "Authoritative topic",
+    description: "topic description",
+  });
+  assert.deepEqual(detail.scenarios.map((entry) => entry.id), ["custom_a", "custom_z"]);
+  assert.equal(detail.scenarios.every((entry) => entry.trainingId === "topic"), true);
+  assert.deepEqual(detail.resources.map((entry) => entry.id), ["resource_first", "resource_second"]);
+  assert.deepEqual(Object.keys(detail.scenarios[0]!).sort(), [
+    "description",
+    "id",
+    "industryId",
+    "industryLabel",
+    "segmentId",
+    "segmentLabel",
+    "source",
+    "title",
+    "trainingId",
+  ]);
+  assert.deepEqual(Object.keys(detail.resources[0]!).sort(), [
+    "category",
+    "contentType",
+    "description",
+    "id",
+    "relatedFocusTopic",
+    "title",
+  ]);
+  const serialized = JSON.stringify(detail);
+  for (const forbidden of ["trainingPackId", "assignment", "aiRole", "scoringGuidance", "nativeBody"]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+
+  const catalog = await service.getCatalog(context);
+  assert.equal(catalog.topics[0]?.scenarioCount, detail.scenarios.length);
+  assert.equal(catalog.topics[0]?.resourceCount, detail.resources.length);
+});
+
+test("detail keeps standard trainingId null and applies explicit assigned-pack intersection", async () => {
+  const { service, context } = harness({
+    topics: [topic("topic")],
+    packs: [
+      pack("explicit", ["scenario:z", "scenario:a", "scenario:custom", "scenario:not_required"]),
+      pack("wildcard", ["scenario:*"]),
+    ],
+    packAttachments: [
+      packAttachment("topic", "explicit"),
+      packAttachment("topic", "explicit", { id: "duplicate_path" }),
+      packAttachment("topic", "wildcard"),
+    ],
+    packAssignments: [
+      assignment("explicit", ["z", "a", "custom"]),
+      assignment("wildcard", ["wild"]),
+    ],
+    resolveScenario: (id) => id === "custom"
+      ? scenarioSummary(id, "custom", "topic")
+      : scenarioSummary(id, "standard", null, { title: id === "z" ? "Zulu" : "Alpha" }),
+  });
+
+  const detail = await service.getDetail(context, "topic");
+  assert.ok(detail);
+  assert.deepEqual(detail.scenarios.map((entry) => entry.id), ["a", "z"]);
+  assert.equal(detail.scenarios.every((entry) => entry.source === "standard"), true);
+  assert.equal(detail.scenarios.every((entry) => entry.trainingId === null), true);
+});
+
+test("standard topic actionability requires a Setup-reachable role and enabled-industry mapping", async () => {
+  let contextRef: MobileFocusTopicCatalogContext;
+  let recognizedStandardCalls = 0;
+  const { service, context } = harness({
+    topics: [
+      topic("standard_topic", { name: "Standard topic" }),
+      topic("custom_topic", { name: "Custom topic" }),
+    ],
+    packs: [pack("explicit", ["scenario:standard"])],
+    packAttachments: [packAttachment("standard_topic", "explicit")],
+    packAssignments: [assignment("explicit", ["standard"])],
+    scenarioAttachments: [scenarioAttachment("custom_topic", "custom")],
+    scenarioConfig: {
+      industries: [{
+        id: "industry",
+        label: "Industry",
+        enabled: true,
+        aiBaseline: "",
+        standardScoringGuidance: "",
+      }],
+      // A valid mapping elsewhere disables the legacy no-mappings fallback, while
+      // the target role itself remains unavailable in mobile Setup.
+      roleIndustries: [{ roleId: "other_role", industryId: "industry", active: true }],
+      segments: [],
+      orgCustomScenarios: [customScenario("custom")],
+      orgTrainings: [],
+    },
+    resolveScenario: (id, trainingId) => {
+      if (id === "custom") {
+        return scenarioSummary(id, "custom", trainingId ?? null);
+      }
+      if (id !== "standard") {
+        return null;
+      }
+      // The server can identify the standard scenario before Setup reachability
+      // applies the role/industry selection constraint.
+      recognizedStandardCalls += 1;
+      const enabledIndustryIds = new Set(
+        contextRef.scenarioConfig.industries
+          .filter((industry) => industry.enabled)
+          .map((industry) => industry.id)
+      );
+      const setupCanOfferRole = contextRef.scenarioConfig.roleIndustries.some(
+        (mapping) => mapping.active
+          && mapping.roleId === "target_role"
+          && enabledIndustryIds.has(mapping.industryId)
+      );
+      return setupCanOfferRole
+        ? scenarioSummary(id, "standard", null, {
+            segmentId: "target_role",
+            segmentLabel: "Target role",
+          })
+        : null;
+    },
+  });
+  contextRef = context;
+
+  const beforeCatalog = await service.getCatalog(context);
+  assert.equal(recognizedStandardCalls > 0, true);
+  assert.deepEqual(beforeCatalog.topics.map((entry) => entry.id), ["custom_topic"]);
+  assert.equal(await service.getDetail(context, "standard_topic"), null);
+  const customBefore = await service.getDetail(context, "custom_topic");
+  assert.deepEqual(customBefore?.scenarios.map((entry) => entry.id), ["custom"]);
+
+  context.scenarioConfig = {
+    ...context.scenarioConfig,
+    roleIndustries: [
+      ...context.scenarioConfig.roleIndustries,
+      { roleId: "target_role", industryId: "industry", active: true },
+    ],
+  };
+
+  const afterCatalog = await service.getCatalog(context);
+  assert.equal(
+    afterCatalog.topics.find((entry) => entry.id === "standard_topic")?.scenarioCount,
+    1
+  );
+  const standardAfter = await service.getDetail(context, "standard_topic");
+  assert.deepEqual(standardAfter?.scenarios.map((entry) => entry.id), ["standard"]);
+  assert.equal(standardAfter?.scenarios[0]?.trainingId, null);
+  const customAfter = await service.getDetail(context, "custom_topic");
+  assert.deepEqual(customAfter?.scenarios.map((entry) => entry.id), ["custom"]);
+});
+
+test("detail fails closed for missing, inactive, hidden, foreign, malformed, and empty topics", async () => {
+  const { service, context } = harness({
+    topics: [
+      topic("empty"),
+      topic("inactive", { status: "archived" }),
+      topic("hidden"),
+      topic("foreign", { orgId: "org_b" }),
+    ],
+    isTopicVisible: (entry) => entry.id !== "hidden",
+  });
+
+  for (const topicId of ["", "missing", "empty", "inactive", "hidden", "foreign"]) {
+    assert.equal(await service.getDetail(context, topicId), null);
   }
 });

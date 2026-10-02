@@ -92,6 +92,7 @@ import {
   PersonaStyle,
   MobileOnboardRequest,
   MobileOnboardResponse,
+  MobileFocusTopicScenarioSummary,
   MobilePerformancePlanOptionsResponse,
   MobilePerformancePlanDetailResponse,
   MobilePerformancePlanHistoryResponse,
@@ -9184,6 +9185,51 @@ function resolveMobileScenarioForUser(
   };
 }
 
+function resolveMobileFocusTopicScenarioSummary(
+  configForUser: MobileScenarioResolutionConfig & Pick<AppConfig, "industries">,
+  scenarioId: string,
+  trainingId?: string | null,
+): MobileFocusTopicScenarioSummary | null {
+  const resolved = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
+  if (!resolved) {
+    return null;
+  }
+
+  const enabledIndustries = configForUser.industries.filter((industry) => industry.enabled);
+  let industry = enabledIndustries.find((candidate) =>
+    resolved.allowedIndustryIds.includes(candidate.id)
+  ) ?? null;
+  if (!industry && resolved.source === "standard") {
+    const hasMappedStandardOptions = configForUser.roleIndustries.some(
+      (entry) => entry.active
+        && enabledIndustries.some((candidate) => candidate.id === entry.industryId)
+        && configForUser.segments.some(
+          (segment) => segment.id === entry.roleId
+            && segment.enabled
+            && segment.scenarios.some((scenario) => scenario.enabled !== false)
+        )
+    );
+    if (!hasMappedStandardOptions) {
+      industry = enabledIndustries[0] ?? null;
+    }
+  }
+  if (!industry) {
+    return null;
+  }
+
+  return {
+    id: resolved.scenario.id,
+    title: resolved.scenario.title,
+    description: resolved.scenario.summary?.trim() || resolved.scenario.description,
+    source: resolved.source,
+    segmentId: resolved.segment.id,
+    segmentLabel: resolved.segment.label,
+    industryId: industry.id,
+    industryLabel: industry.label,
+    trainingId: resolved.source === "custom" ? trainingId?.trim() || null : null,
+  };
+}
+
 function buildScoringIndustryContextsForIds(configForUser: AppConfig, industryIds: readonly string[]): Array<{
   id: string;
   label: string;
@@ -17419,13 +17465,125 @@ app.get("/mobile/users/:userId/focus-topics", async (request: Request, response:
       ...snapshot.context,
       isTopicVisible: (topic) => visibleTopicIds.has(topic.id),
       resolveScenario: (scenarioId, trainingId) =>
-        resolveMobileScenarioForUser(snapshot.context.scenarioConfig, scenarioId, trainingId),
+        resolveMobileFocusTopicScenarioSummary(
+          snapshot.context.scenarioConfig,
+          scenarioId,
+          trainingId
+        ),
     });
     response.json(result);
   } catch {
     response.status(503).json({
       error: "Focus Topics are temporarily unavailable.",
       code: "focus_topic_catalog_unavailable",
+    });
+  }
+});
+
+app.get("/mobile/users/:userId/focus-topics/:topicId", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  try {
+    // Match the catalog's read-only snapshot boundary: app state is captured while
+    // locked, then extracted-store reads happen after the lock is released.
+    const snapshot = await withDatabaseLock(async () => {
+      const db = await loadDatabase({
+        forceStorageRead: true,
+        syncEmployeeIdClaims: false,
+      });
+      const user = getUserById(db, request.params.userId);
+      if (!user) {
+        response.status(404).json({ error: "User not found." });
+        return null;
+      }
+      if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+        response.status(401).json({ error: "Invalid mobile token." });
+        return null;
+      }
+
+      const accessContext = resolveMobileAccessContext(db, user, request, response, {
+        requireSuperUserOrgSelection: true,
+      });
+      if (!accessContext) {
+        return null;
+      }
+      const org = accessContext.actingOrg;
+      if (!org || !accessContext.actingOrgId) {
+        response.status(403).json({
+          error: "Enterprise account access is required.",
+          code: ORG_ACCESS_REQUIRED_CODE,
+        });
+        return null;
+      }
+
+      const configForUser = resolveConfigForUser(db, user, org.id);
+      const userDivisionId = org.divisionsEnabled === true
+        ? resolveUserActiveDivisionId(db, org.id, user)
+        : null;
+      const visibleTopicIds = db.orgTrainings
+        .filter((topic) => topic.orgId === org.id && isDivisionVisibleToUser({
+          divisionsEnabled: org.divisionsEnabled === true,
+          userDivisionId,
+          contentDivisionId: org.divisionsEnabled === true
+            ? resolveTrainingActiveDivisionId(db, org.id, topic.id)
+            : null,
+        }))
+        .map((topic) => topic.id);
+      const context: Omit<
+        MobileFocusTopicCatalogContext,
+        "isTopicVisible" | "resolveScenario"
+      > = {
+        actingOrgId: org.id,
+        organizationActive: org.status === "active",
+        user,
+        users: db.users,
+        topics: db.orgTrainings,
+        packAttachments: db.orgTrainingPackAttachments,
+        scenarioAttachments: db.orgTrainingScenarioAttachments,
+        packAssignments: db.trainingPackAssignments ?? [],
+        scenarioConfig: {
+          industries: configForUser.industries,
+          roleIndustries: configForUser.roleIndustries,
+          segments: configForUser.segments,
+          orgCustomScenarios: configForUser.orgCustomScenarios,
+          orgTrainings: configForUser.orgTrainings,
+        },
+      };
+      return structuredClone({ context, visibleTopicIds });
+    });
+    if (!snapshot) {
+      return;
+    }
+
+    const visibleTopicIds = new Set(snapshot.visibleTopicIds);
+    const result = await mobileFocusTopicCatalogService.getDetail({
+      ...snapshot.context,
+      isTopicVisible: (topic) => visibleTopicIds.has(topic.id),
+      resolveScenario: (scenarioId, trainingId) =>
+        resolveMobileFocusTopicScenarioSummary(
+          snapshot.context.scenarioConfig,
+          scenarioId,
+          trainingId
+        ),
+    }, request.params.topicId);
+    if (!result) {
+      response.status(404).json({
+        error: "Focus Topic is not available.",
+        code: "focus_topic_not_available",
+      });
+      return;
+    }
+    response.json(result);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("[focus-topic-detail-error]", error);
+    response.status(503).json({
+      error: "Focus Topic is temporarily unavailable.",
+      code: "focus_topic_detail_unavailable",
     });
   }
 });

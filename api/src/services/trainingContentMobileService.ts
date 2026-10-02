@@ -373,12 +373,14 @@ function buildLibrary(
   });
   return {
     categories,
-    items: records.map(toSummary),
+    items: records.map(toMobileTrainingContentSummary),
     truncated,
   };
 }
 
-function toSummary(record: TrainingContentMobileReadRecord): MobileTrainingContentSummary {
+export function toMobileTrainingContentSummary(
+  record: TrainingContentMobileReadRecord
+): MobileTrainingContentSummary {
   return {
     id: record.content.id,
     contentType: record.content.contentType,
@@ -395,7 +397,7 @@ function toSummary(record: TrainingContentMobileReadRecord): MobileTrainingConte
 function toDetail(record: TrainingContentMobileReadRecord): MobileTrainingContentDetail {
   const asset = record.currentAsset;
   return {
-    ...toSummary(record),
+    ...toMobileTrainingContentSummary(record),
     nativeBody: record.content.contentType === "native" ? record.content.nativeBody : null,
     externalUrl:
       record.content.contentType === "external_url" ? record.content.externalUrl : null,

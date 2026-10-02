@@ -448,6 +448,79 @@ test("mobile Focus Topic catalog binds token, acting organization, and the exist
   assert.equal((await stat(dbPath)).mtimeMs, beforeRead.mtimeMs);
 });
 
+test("mobile Focus Topic detail independently authenticates and returns resolver-approved safe fields", async () => {
+  const calls: Array<{ topicId: string; context: Parameters<MobileFocusTopicCatalogService["getDetail"]>[0] }> = [];
+  setMobileFocusTopicCatalogServiceForTest({
+    async getCatalog() {
+      return { topics: [] };
+    },
+    async getDetail(context, topicId) {
+      calls.push({ context, topicId });
+      if (topicId !== "focus_topic") {
+        return null;
+      }
+      const scenario = context.resolveScenario("focus_custom", "focus_topic");
+      assert.ok(scenario);
+      return {
+        topic: { id: "focus_topic", name: "Focus Topic", description: "Focus description" },
+        scenarios: [scenario],
+        resources: [],
+      };
+    },
+  });
+
+  try {
+    const valid = await mobileRequest(
+      "/mobile/users/learner/focus-topics/focus_topic",
+      "token_learner",
+      { headers: { "X-Superuser-Org-Id": "org_b" } }
+    );
+    assert.equal(valid.status, 200);
+    assert.equal(calls[0]?.context.actingOrgId, "org_a");
+    assert.deepEqual(valid.body.scenarios[0], {
+      id: "focus_custom",
+      title: "Focus custom",
+      description: "Actionable custom scenario",
+      source: "custom",
+      segmentId: valid.body.scenarios[0].segmentId,
+      segmentLabel: valid.body.scenarios[0].segmentLabel,
+      industryId: valid.body.scenarios[0].industryId,
+      industryLabel: valid.body.scenarios[0].industryLabel,
+      trainingId: "focus_topic",
+    });
+
+    assert.equal((await mobileRequest(
+      "/mobile/users/learner/focus-topics/focus_topic",
+      null
+    )).status, 401);
+    assert.equal((await mobileRequest(
+      "/mobile/users/learner/focus-topics/focus_topic",
+      "token_other"
+    )).status, 401);
+    assert.equal((await mobileRequest(
+      "/mobile/users/disabled/focus-topics/focus_topic",
+      "token_disabled"
+    )).status, 403);
+    assert.equal((await mobileRequest(
+      "/mobile/users/individual/focus-topics/focus_topic",
+      "token_individual"
+    )).status, 403);
+    assert.equal((await mobileRequest(
+      "/mobile/users/superuser/focus-topics/focus_topic",
+      "token_superuser"
+    )).status, 400);
+
+    const missing = await mobileRequest(
+      "/mobile/users/learner/focus-topics/missing",
+      "token_learner"
+    );
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.code, "focus_topic_not_available");
+  } finally {
+    setMobileFocusTopicCatalogServiceForTest(null);
+  }
+});
+
 test("Focus Topic SQL work does not hold the app-state lock", async () => {
   let markCatalogStarted!: () => void;
   const catalogStarted = new Promise<void>((resolve) => {
@@ -462,6 +535,9 @@ test("Focus Topic SQL work does not hold the app-state lock", async () => {
       markCatalogStarted();
       await catalogRelease;
       return { topics: [] };
+    },
+    async getDetail() {
+      return null;
     },
   });
 
@@ -493,6 +569,59 @@ test("Focus Topic SQL work does not hold the app-state lock", async () => {
     releaseCatalog();
     const focusResult = await focusRequest;
     assert.equal(focusResult.status, 200);
+    setMobileFocusTopicCatalogServiceForTest(null);
+  }
+});
+
+test("Focus Topic detail SQL work does not hold the app-state lock", async () => {
+  let markDetailStarted!: () => void;
+  const detailStarted = new Promise<void>((resolve) => {
+    markDetailStarted = resolve;
+  });
+  let releaseDetail!: () => void;
+  const detailRelease = new Promise<void>((resolve) => {
+    releaseDetail = resolve;
+  });
+  setMobileFocusTopicCatalogServiceForTest({
+    async getCatalog() {
+      return { topics: [] };
+    },
+    async getDetail() {
+      markDetailStarted();
+      await detailRelease;
+      return null;
+    },
+  });
+
+  const detailRequest = mobileRequest(
+    "/mobile/users/learner/focus-topics/focus_topic",
+    "token_learner"
+  );
+  await detailStarted;
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const writeOutcome = await Promise.race([
+      mobileRequest(
+        "/mobile/users/learner/settings",
+        "token_learner",
+        { method: "PATCH", body: JSON.stringify({ timezone: "UTC" }) }
+      ).then((result) => ({ kind: "write" as const, result })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), 1_000);
+      }),
+    ]);
+    assert.equal(writeOutcome.kind, "write");
+    if (writeOutcome.kind === "write") {
+      assert.equal(writeOutcome.result.status, 200);
+    }
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+    releaseDetail();
+    const detailResult = await detailRequest;
+    assert.equal(detailResult.status, 404);
+    assert.equal(detailResult.body.code, "focus_topic_not_available");
     setMobileFocusTopicCatalogServiceForTest(null);
   }
 });
