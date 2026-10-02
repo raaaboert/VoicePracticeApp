@@ -116,7 +116,10 @@ test("normal setup entry from Home clears an old Learning Resource origin", () =
 
 test("switching resources clears stale related state before an independent fetch", () => {
   assert.match(detailSource, /setRelatedScenarios\(\[\]\);[\s\S]*?fetchRelatedPracticeScenarios\(/);
-  assert.match(detailSource, /\[props\.authToken, props\.contentId, props\.userId\]/);
+  assert.match(
+    detailSource,
+    /\[props\.authToken, props\.contentId, props\.showRelatedPracticeScenarios, props\.userId\]/
+  );
   assert.match(detailSource, /relatedGeneration\.current === currentGeneration/);
 });
 

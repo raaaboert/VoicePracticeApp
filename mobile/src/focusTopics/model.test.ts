@@ -8,9 +8,14 @@ import {
   canRequestFocusTopicCatalog,
   createFocusTopicRequestGate,
   FOCUS_TOPICS_EMPTY_MESSAGE,
+  formatFocusTopicDetailCounts,
   formatFocusTopicCounts,
+  isFocusTopicDetailEmpty,
+  isFocusTopicUnavailableError,
   parseFocusTopicCatalogResponse,
+  parseFocusTopicDetailResponse,
 } from "./model";
+import { createMobileApiError } from "../lib/apiError";
 
 const enterpriseMember = {
   id: "learner",
@@ -107,4 +112,76 @@ test("request gate aborts superseded work and rejects stale commits", () => {
   gate.invalidate();
   assert.equal(second.signal.aborted, true);
   assert.equal(gate.isCurrent(second), false);
+});
+
+function validDetail(): any {
+  return {
+    topic: { id: "topic", name: "Discovery", description: "Practice discovery." },
+    scenarios: [{
+      id: "scenario", title: "Discovery call", description: "Ask useful questions.",
+      source: "standard", segmentId: "role", segmentLabel: "Account Executive",
+      industryId: "industry", industryLabel: "Technology", trainingId: null,
+    }],
+    resources: [{
+      id: "resource", contentType: "pdf", title: "Discovery guide", description: "A guide.",
+      category: { id: "category", name: "Guides" }, relatedFocusTopic: "Discovery",
+    }],
+  };
+}
+
+test("detail parser projects safe fields and preserves scenario and resource ordering", () => {
+  const value = validDetail();
+  value.scenarios.push({
+    ...value.scenarios[0],
+    id: "custom",
+    title: "Custom conversation",
+    source: "custom",
+    trainingId: "topic",
+  });
+  value.resources.push({ ...value.resources[0], id: "resource_2", title: "Second guide" });
+  const detail = parseFocusTopicDetailResponse(value);
+
+  assert.deepEqual(detail.scenarios.map((scenario) => scenario.id), ["scenario", "custom"]);
+  assert.deepEqual(detail.resources.map((resource) => resource.id), ["resource", "resource_2"]);
+  assert.equal(formatFocusTopicDetailCounts(detail), "2 scenarios · 2 resources");
+  assert.equal(isFocusTopicDetailEmpty(detail), false);
+});
+
+test("detail parser rejects malformed topics, scenarios, resources, and attribution shapes", () => {
+  const malformedValues: unknown[] = [
+    null,
+    {},
+    { ...validDetail(), topic: { id: "", name: "Topic", description: "" } },
+    { ...validDetail(), scenarios: "invalid" },
+    { ...validDetail(), scenarios: [{ ...validDetail().scenarios[0], id: "" }] },
+    { ...validDetail(), scenarios: [{ ...validDetail().scenarios[0], source: "other" }] },
+    { ...validDetail(), scenarios: [{ ...validDetail().scenarios[0], trainingId: "topic" }] },
+    {
+      ...validDetail(),
+      scenarios: [{ ...validDetail().scenarios[0], source: "custom", trainingId: null }],
+    },
+    { ...validDetail(), resources: [{ ...validDetail().resources[0], contentType: "unknown" }] },
+    { ...validDetail(), resources: [{ ...validDetail().resources[0], category: { id: "", name: "" } }] },
+  ];
+  for (const value of malformedValues) {
+    assert.throws(() => parseFocusTopicDetailResponse(value), /detail response was invalid/);
+  }
+});
+
+test("detail empty and unavailable states fail closed without conflating transient errors", () => {
+  const empty = parseFocusTopicDetailResponse({
+    topic: { id: "topic", name: "Topic", description: "" },
+    scenarios: [],
+    resources: [],
+  });
+  assert.equal(isFocusTopicDetailEmpty(empty), true);
+  assert.equal(formatFocusTopicDetailCounts(empty), "");
+  assert.equal(
+    isFocusTopicUnavailableError(createMobileApiError(404, { code: "focus_topic_not_available" })),
+    true
+  );
+  assert.equal(
+    isFocusTopicUnavailableError(createMobileApiError(503, { code: "focus_topic_detail_unavailable" })),
+    false
+  );
 });

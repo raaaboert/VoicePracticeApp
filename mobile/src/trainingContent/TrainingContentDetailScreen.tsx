@@ -37,6 +37,8 @@ interface TrainingContentDetailScreenProps {
   onModuleRemoved: (message: string) => void;
   onItemRemoved: (message: string) => void;
   onPracticeScenario: (scenario: MobileRelatedPracticeScenarioSummary) => void;
+  showRelatedPracticeScenarios?: boolean;
+  contentHorizontalInset?: boolean;
 }
 
 export function TrainingContentDetailScreen(
@@ -106,6 +108,11 @@ export function TrainingContentDetailScreen(
   }, [load]);
 
   useEffect(() => {
+    if (props.showRelatedPracticeScenarios === false) {
+      relatedGeneration.current += 1;
+      setRelatedScenarios([]);
+      return;
+    }
     const currentGeneration = relatedGeneration.current + 1;
     relatedGeneration.current = currentGeneration;
     setRelatedScenarios([]);
@@ -127,7 +134,7 @@ export function TrainingContentDetailScreen(
     return () => {
       relatedGeneration.current += 1;
     };
-  }, [props.authToken, props.contentId, props.userId]);
+  }, [props.authToken, props.contentId, props.showRelatedPracticeScenarios, props.userId]);
 
   return (
     <View style={styles.fill}>
@@ -158,7 +165,10 @@ export function TrainingContentDetailScreen(
       ) : (
         <ScrollView
           style={styles.fill}
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            props.contentHorizontalInset ? styles.contentHorizontalInset : null,
+          ]}
         >
           <Text style={styles.typeLabel}>
             {TRAINING_CONTENT_TYPE_LABELS[item.contentType]}
@@ -242,6 +252,7 @@ function createStyles(theme: TrainingContentTheme) {
   return StyleSheet.create({
     fill: { flex: 1 },
     content: { paddingTop: 18, paddingBottom: 36 },
+    contentHorizontalInset: { paddingHorizontal: 16 },
     state: {
       flex: 1,
       alignItems: "center",

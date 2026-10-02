@@ -33,7 +33,7 @@ test("screen clears old catalog, retries locally, and guards stale identity requ
 
   assert.match(screen, /const attempt = requestGate\.current\.start\(\);/);
   assert.match(screen, /setTopics\(null\);/);
-  assert.match(screen, /setSelectedTopic\(null\);/);
+  assert.match(screen, /setSelectedTopicId\(null\);/);
   assert.match(screen, /signal: attempt\.signal/);
   assert.match(screen, /requestGate\.current\.isCurrent\(attempt\)/);
   assert.match(screen, /onRetry=\{\(\) => \{ void loadTopics\(\); \}\}/);
@@ -131,20 +131,76 @@ test("eligible enterprise Home renders Learning Resources only in the grouped de
   );
 });
 
-test("4C shell receives safe summary only and cannot launch or mutate scenarios", () => {
+test("Topic Detail refetches authoritative content and keeps scenarios presentation-only", () => {
   const app = source("../../App.tsx");
   const screen = source("./FocusTopicsScreen.tsx");
-  const shell = source("./FocusTopicDetailShell.tsx");
+  const detail = source("./FocusTopicDetailScreen.tsx");
+  const client = source("./client.ts");
   const model = source("./model.ts");
-  const combined = `${screen}\n${shell}\n${model}`;
+  const combined = `${screen}\n${detail}\n${client}\n${model}`;
 
-  assert.match(screen, /buildFocusTopicNavigationSummary\(topic\)/);
-  assert.match(shell, /Practice and Learning Resources/);
-  assert.doesNotMatch(combined, /trainingId|setSimulationConfig|setSelectedScenarioId|launch/i);
-  assert.doesNotMatch(combined, /scenario(?:s)?\s*:/);
-  assert.doesNotMatch(combined, /resource(?:s)?\s*:/);
+  assert.match(screen, /openTopic\(topic\.id\)/);
+  assert.match(detail, /fetchFocusTopicDetail/);
+  assert.match(detail, /setDetail\(null\)/);
+  assert.match(detail, /formatFocusTopicDetailCounts\(detail\)/);
+  assert.match(detail, />Practice<\/Text>/);
+  assert.match(detail, />Learning Resources<\/Text>/);
+  assert.match(detail, /detail\.scenarios\.map/);
+  assert.match(detail, /detail\.resources\.map/);
+  assert.match(detail, /<View[\s\S]*?key=\{scenario\.id\}[\s\S]*?accessible/);
+  assert.match(
+    detail,
+    /accessibilityLabel=\{`\$\{scenario\.title\}[\s\S]*?\$\{scenario\.description\}/
+  );
+  assert.doesNotMatch(detail, /onPress=.*scenario|Set Up Practice|Start Simulation/);
+  assert.doesNotMatch(detail, /Topic activities will be available here in a future update/);
+  assert.doesNotMatch(combined, /setSimulationConfig|setSelectedScenarioId|Start Simulation|setScreen\("setup"\)/i);
   assert.match(app, /fetchMobileConfig\(nextUser\.id, authToken\)/);
   assert.match(app, /fetchAppConfig\(\)/);
+});
+
+test("Topic resources reuse the existing viewer and return to refreshed Topic Detail", () => {
+  const screen = source("./FocusTopicsScreen.tsx");
+  const detail = source("./FocusTopicDetailScreen.tsx");
+  const resourceCard = source("../trainingContent/TrainingContentCard.tsx");
+  const resourceDetail = source("../trainingContent/TrainingContentDetailScreen.tsx");
+
+  assert.match(detail, /<TrainingContentCard/);
+  assert.match(detail, /showRelatedFocusTopic=\{false\}/);
+  assert.match(screen, /<TrainingContentDetailScreen/);
+  assert.match(screen, /showRelatedPracticeScenarios=\{false\}/);
+  assert.match(screen, /contentHorizontalInset/);
+  assert.match(screen, /setDetailRefreshKey\(\(current\) => current \+ 1\)/);
+  assert.match(screen, /const handleTopicResourceBack = useCallback/);
+  assert.match(screen, /const handleTopicResourceRemoved = useCallback/);
+  assert.match(screen, /onBack=\{handleTopicResourceBack\}/);
+  assert.match(screen, /onItemRemoved=\{handleTopicResourceRemoved\}/);
+  assert.match(screen, /onModuleRemoved=\{handleTopicResourceRemoved\}/);
+  assert.doesNotMatch(screen, /on(?:Item|Module)Removed=\{\([^)]*\) =>/);
+  assert.match(resourceCard, /showRelatedFocusTopic && item\.relatedFocusTopic/);
+  assert.match(resourceDetail, /props\.showRelatedPracticeScenarios === false/);
+  assert.match(
+    resourceDetail,
+    /props\.contentHorizontalInset \? styles\.contentHorizontalInset : null/
+  );
+  assert.match(resourceDetail, /contentHorizontalInset: \{ paddingHorizontal: 16 \}/);
+});
+
+test("Topic Detail handles loading, unavailable, retry, empty sections, and stale requests", () => {
+  const detail = source("./FocusTopicDetailScreen.tsx");
+  const screen = source("./FocusTopicsScreen.tsx");
+
+  assert.match(detail, /accessibilityRole="progressbar"/);
+  assert.match(detail, /This Focus Topic is no longer available\./);
+  assert.match(detail, /accessibilityLabel="Retry Focus Topic"/);
+  assert.match(detail, /No practice scenarios are available for this topic right now\./);
+  assert.match(detail, /No learning resources are available for this topic right now\./);
+  assert.match(detail, /requestGate\.current\.isCurrent\(attempt\)/);
+  assert.match(detail, /return \(\) => requestGate\.current\.invalidate\(\)/);
+  assert.match(screen, /<FocusTopicDetailScreen[\s\S]*?key=\{selectedTopicId\}/);
+  assert.ok(screen.includes('key={`${selectedTopicId}:${selectedResourceId}`}'));
+  assert.match(screen, /setRefreshCatalogOnBack\(true\)/);
+  assert.match(screen, /void loadTopics\(\)/);
 });
 
 test("identity key remounts the catalog for user or acting-organization changes", () => {

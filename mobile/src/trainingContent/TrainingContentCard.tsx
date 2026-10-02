@@ -35,6 +35,7 @@ interface TrainingContentCardProps {
   onOpen: () => void;
   theme: TrainingContentTheme;
   showCategory?: boolean;
+  showRelatedFocusTopic?: boolean;
 }
 
 export function TrainingContentCard({
@@ -42,12 +43,13 @@ export function TrainingContentCard({
   onOpen,
   theme,
   showCategory = true,
+  showRelatedFocusTopic = true,
 }: TrainingContentCardProps) {
   const styles = createStyles(theme);
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open ${item.title}`}
+      accessibilityLabel={`Open ${item.title}. ${TYPE_LABELS[item.contentType]}${showCategory ? `. ${item.category.name}` : ""}`}
       onPress={onOpen}
       style={({ pressed }) => [styles.card, pressed ? styles.pressed : null]}
     >
@@ -70,7 +72,7 @@ export function TrainingContentCard({
           {showCategory ? (
             <Text style={styles.metadataText}>{item.category.name}</Text>
           ) : null}
-          {item.relatedFocusTopic ? (
+          {showRelatedFocusTopic && item.relatedFocusTopic ? (
             <Text style={styles.topicText}>{item.relatedFocusTopic}</Text>
           ) : null}
         </View>

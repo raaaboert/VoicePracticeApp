@@ -4,13 +4,12 @@ import { StyleSheet, View } from "react-native";
 
 import type { AppColorScheme } from "../types";
 import { getTrainingContentTheme } from "../trainingContent/theme";
+import { TrainingContentDetailScreen } from "../trainingContent/TrainingContentDetailScreen";
 import { fetchFocusTopicCatalog } from "./api";
-import { FocusTopicDetailShell } from "./FocusTopicDetailShell";
+import { FocusTopicDetailScreen } from "./FocusTopicDetailScreen";
 import { FocusTopicLandingScreen } from "./FocusTopicLandingScreen";
 import {
-  buildFocusTopicNavigationSummary,
   createFocusTopicRequestGate,
-  type FocusTopicNavigationSummary,
 } from "./model";
 
 interface FocusTopicsScreenProps {
@@ -22,7 +21,11 @@ interface FocusTopicsScreenProps {
 
 export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const [topics, setTopics] = useState<MobileFocusTopicCatalogItem[] | null>(null);
-  const [selectedTopic, setSelectedTopic] = useState<FocusTopicNavigationSummary | null>(null);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
+  const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
+  const [detailRefreshKey, setDetailRefreshKey] = useState(0);
+  const [detailNotice, setDetailNotice] = useState<string | null>(null);
+  const [refreshCatalogOnBack, setRefreshCatalogOnBack] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const requestGate = useRef(createFocusTopicRequestGate());
@@ -31,7 +34,8 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const loadTopics = useCallback(async () => {
     const attempt = requestGate.current.start();
     setTopics(null);
-    setSelectedTopic(null);
+    setSelectedTopicId(null);
+    setSelectedResourceId(null);
     setLoading(true);
     setError(null);
     try {
@@ -63,14 +67,72 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
     return () => requestGate.current.invalidate();
   }, [loadTopics]);
 
+  const openTopic = useCallback((topicId: string) => {
+    setSelectedResourceId(null);
+    setDetailNotice(null);
+    setRefreshCatalogOnBack(false);
+    setSelectedTopicId(topicId);
+  }, []);
+
+  const returnToCatalog = useCallback(() => {
+    setSelectedResourceId(null);
+    setSelectedTopicId(null);
+    setDetailNotice(null);
+    if (refreshCatalogOnBack) {
+      setRefreshCatalogOnBack(false);
+      void loadTopics();
+    }
+  }, [loadTopics, refreshCatalogOnBack]);
+
+  const returnFromResource = useCallback((notice?: string) => {
+    setSelectedResourceId(null);
+    setDetailNotice(notice ?? null);
+    setDetailRefreshKey((current) => current + 1);
+  }, []);
+
+  const handleTopicResourceBack = useCallback(() => {
+    returnFromResource();
+  }, [returnFromResource]);
+
+  const handleTopicResourceRemoved = useCallback((message: string) => {
+    returnFromResource(message);
+  }, [returnFromResource]);
+
+  const ignoreTopicResourcePractice = useCallback(() => {}, []);
+
+  const markDetailUnavailable = useCallback(() => {
+    setRefreshCatalogOnBack(true);
+  }, []);
+
   return (
     <View style={styles.fill}>
       <View style={[styles.surface, { backgroundColor: theme.background, borderColor: theme.border }]}>
-        {selectedTopic ? (
-          <FocusTopicDetailShell
-            topic={selectedTopic}
+        {selectedTopicId && selectedResourceId ? (
+          <TrainingContentDetailScreen
+            key={`${selectedTopicId}:${selectedResourceId}`}
+            contentId={selectedResourceId}
+            userId={props.userId}
+            authToken={props.authToken}
             theme={theme}
-            onBack={() => setSelectedTopic(null)}
+            onBack={handleTopicResourceBack}
+            onModuleRemoved={handleTopicResourceRemoved}
+            onItemRemoved={handleTopicResourceRemoved}
+            onPracticeScenario={ignoreTopicResourcePractice}
+            showRelatedPracticeScenarios={false}
+            contentHorizontalInset
+          />
+        ) : selectedTopicId ? (
+          <FocusTopicDetailScreen
+            key={selectedTopicId}
+            topicId={selectedTopicId}
+            userId={props.userId}
+            authToken={props.authToken}
+            theme={theme}
+            refreshKey={detailRefreshKey}
+            notice={detailNotice}
+            onBack={returnToCatalog}
+            onOpenResource={setSelectedResourceId}
+            onUnavailable={markDetailUnavailable}
           />
         ) : (
           <FocusTopicLandingScreen
@@ -80,7 +142,7 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
             theme={theme}
             onBack={props.onBackToHome}
             onRetry={() => { void loadTopics(); }}
-            onOpenTopic={(topic) => setSelectedTopic(buildFocusTopicNavigationSummary(topic))}
+            onOpenTopic={(topic) => openTopic(topic.id)}
           />
         )}
       </View>
