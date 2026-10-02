@@ -596,6 +596,7 @@ interface SelectionDropdownProps {
   placeholder?: string;
   title: string;
   styles: any;
+  triggerStyle?: any;
 }
 
 function SelectionDropdown({
@@ -605,6 +606,7 @@ function SelectionDropdown({
   placeholder,
   title,
   styles,
+  triggerStyle,
 }: SelectionDropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
   const selected = options.find((option) => option.value === value);
@@ -612,7 +614,7 @@ function SelectionDropdown({
 
   return (
     <View style={styles.dropdownWrapper}>
-      <Pressable style={styles.dropdownTrigger} onPress={() => setIsOpen(true)}>
+      <Pressable style={[styles.dropdownTrigger, triggerStyle]} onPress={() => setIsOpen(true)}>
         <Text style={styles.dropdownValue} numberOfLines={1}>
           {selectedLabel}
         </Text>
@@ -5209,13 +5211,29 @@ export default function App() {
           </View>
         ) : null}
         {showScenarioSelectors ? (
-        <View style={[styles.card, styles.setupSessionCard]}>
+        <View
+          style={[
+            styles.card,
+            styles.setupSessionCard,
+            {
+              backgroundColor: setupSurfaceTheme.surface,
+              borderColor: setupSurfaceTheme.border,
+            },
+          ]}
+        >
           <Text style={styles.sectionTitle}>Session Selection</Text>
 
           <Text style={styles.hintText}>Scenario Library</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
             <Pressable
-              style={[styles.timezoneChip, scenarioCatalogTab === "standard" ? styles.selectedChip : null]}
+              style={[
+                styles.timezoneChip,
+                {
+                  backgroundColor: setupSurfaceTheme.background,
+                  borderColor: setupSurfaceTheme.border,
+                },
+                scenarioCatalogTab === "standard" ? styles.selectedChip : null,
+              ]}
               onPress={() => setScenarioCatalogTab("standard")}
             >
               <Text style={styles.chipText}>Standard Scenarios</Text>
@@ -5223,6 +5241,10 @@ export default function App() {
             <Pressable
               style={[
                 styles.timezoneChip,
+                {
+                  backgroundColor: setupSurfaceTheme.background,
+                  borderColor: setupSurfaceTheme.border,
+                },
                 scenarioCatalogTab === "custom" ? styles.selectedChip : null,
                 !hasCustomScenarioOptions ? styles.disabled : null,
               ]}
@@ -5254,6 +5276,10 @@ export default function App() {
                 onChange={setSelectedTrainingId}
                 placeholder="Select Focus Topic"
                 styles={styles}
+                triggerStyle={{
+                  backgroundColor: setupSurfaceTheme.background,
+                  borderColor: setupSurfaceTheme.border,
+                }}
               />
               {activeTraining ? (
                 <Text style={styles.hintText}>
@@ -5274,6 +5300,10 @@ export default function App() {
             onChange={setSelectedIndustryId}
             placeholder="Select industry"
             styles={styles}
+            triggerStyle={{
+              backgroundColor: setupSurfaceTheme.background,
+              borderColor: setupSurfaceTheme.border,
+            }}
           />
 
           <Text style={styles.hintText}>Role</Text>
@@ -5284,6 +5314,10 @@ export default function App() {
             onChange={setSelectedRoleId}
             placeholder="Select role"
             styles={styles}
+            triggerStyle={{
+              backgroundColor: setupSurfaceTheme.background,
+              borderColor: setupSurfaceTheme.border,
+            }}
           />
 
           <Text style={styles.hintText}>Scenario</Text>
@@ -5294,6 +5328,10 @@ export default function App() {
             onChange={setSelectedScenarioId}
             placeholder="Select scenario"
             styles={styles}
+            triggerStyle={{
+              backgroundColor: setupSurfaceTheme.background,
+              borderColor: setupSurfaceTheme.border,
+            }}
           />
 
           {activeSegment ? <Text style={styles.body}>{activeSegment.summary}</Text> : null}
@@ -5376,7 +5414,14 @@ export default function App() {
           {(Object.keys(DIFFICULTY_LABELS) as Difficulty[]).map((difficulty) => (
             <Pressable
               key={difficulty}
-              style={[styles.optionCard, selectedDifficulty === difficulty ? styles.selectedCard : null]}
+              style={[
+                styles.optionCard,
+                {
+                  backgroundColor: setupSurfaceTheme.surface,
+                  borderColor: setupSurfaceTheme.border,
+                },
+                selectedDifficulty === difficulty ? styles.selectedCard : null,
+              ]}
               onPress={() => setSelectedDifficulty(difficulty)}
             >
               <Text style={styles.optionTitle}>{DIFFICULTY_LABELS[difficulty]}</Text>
@@ -5390,7 +5435,14 @@ export default function App() {
           {(Object.keys(PERSONA_LABELS) as PersonaStyle[]).map((personaStyle) => (
             <Pressable
               key={personaStyle}
-              style={[styles.optionCard, selectedPersonaStyle === personaStyle ? styles.selectedCard : null]}
+              style={[
+                styles.optionCard,
+                {
+                  backgroundColor: setupSurfaceTheme.surface,
+                  borderColor: setupSurfaceTheme.border,
+                },
+                selectedPersonaStyle === personaStyle ? styles.selectedCard : null,
+              ]}
               onPress={() => setSelectedPersonaStyle(personaStyle)}
             >
               <Text style={styles.optionTitle}>{PERSONA_LABELS[personaStyle]}</Text>

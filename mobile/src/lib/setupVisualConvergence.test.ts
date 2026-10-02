@@ -66,3 +66,24 @@ test("Setup visual convergence preserves selectors, origins, recovery, and launc
   assert.match(setup, />Browse Scenarios<\/Text>/);
   assert.match(styles, /setupActionRegion:[\s\S]*?borderTopWidth: StyleSheet\.hairlineWidth/);
 });
+
+test("Setup nested surfaces reuse the training-content palette without changing selected accents", () => {
+  assert.match(
+    setup,
+    /styles\.setupSessionCard[\s\S]*?backgroundColor: setupSurfaceTheme\.surface[\s\S]*?borderColor: setupSurfaceTheme\.border/
+  );
+  assert.equal(
+    (setup.match(/triggerStyle=\{\{[\s\S]*?backgroundColor: setupSurfaceTheme\.background[\s\S]*?borderColor: setupSurfaceTheme\.border[\s\S]*?\}\}/g) ?? []).length,
+    4
+  );
+  assert.match(
+    setup,
+    /styles\.optionCard[\s\S]*?backgroundColor: setupSurfaceTheme\.surface[\s\S]*?selectedDifficulty === difficulty \? styles\.selectedCard : null/
+  );
+  assert.match(
+    setup,
+    /styles\.optionCard[\s\S]*?backgroundColor: setupSurfaceTheme\.surface[\s\S]*?selectedPersonaStyle === personaStyle \? styles\.selectedCard : null/
+  );
+  assert.match(setup, /styles\.guidedPracticeCard[\s\S]*?backgroundColor: setupSurfaceTheme\.surface/);
+  assert.match(styles, /selectedCard: \{ borderColor: theme\.accent, backgroundColor: theme\.selectedCardBg \}/);
+});
