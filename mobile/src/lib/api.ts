@@ -33,6 +33,11 @@ import { File } from "expo-file-system";
 import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationEvaluationResult } from "../types";
 import { createMobileApiError } from "./apiError";
+import { buildRemoteTtsAudioResult } from "./ttsAudioOrigin";
+import type { RemoteTtsAudioOrigin } from "./ttsAudioOrigin";
+
+export { buildRemoteTtsAudioResult } from "./ttsAudioOrigin";
+export type { RemoteTtsAudioOrigin } from "./ttsAudioOrigin";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_TURN_HISTORY_MESSAGES = 24;
@@ -128,6 +133,7 @@ export type RemoteTtsPreset =
 export interface PrefetchedRemoteSpeechChunk {
   bytes: Uint8Array;
   contentType: string;
+  audioOrigin?: RemoteTtsAudioOrigin;
   preset?: RemoteTtsPreset | null;
   chunkCount?: number | null;
   firstChunkChars?: number | null;
@@ -253,6 +259,7 @@ function normalizeSpeechPrefetchPayload(value: unknown): PrefetchedRemoteSpeechC
   return {
     bytes: decodeBase64ToBytes(audioBase64),
     contentType,
+    audioOrigin: "server_payload_prefetch",
     preset: preset as RemoteTtsPreset,
     chunkCount,
     firstChunkChars,
@@ -1322,7 +1329,7 @@ export async function fetchAiTtsAudio(params: {
   preset: RemoteTtsPreset;
   signal?: AbortSignal;
   correlationId?: string;
-}): Promise<{ bytes: Uint8Array; contentType: string }> {
+}): Promise<{ bytes: Uint8Array; contentType: string; audioOrigin: RemoteTtsAudioOrigin }> {
   const apiBase = API_BASE_URL.trim();
   if (!apiBase) {
     throw new Error("API base URL is not configured. Set EXPO_PUBLIC_API_BASE_URL for this build.");
@@ -1366,11 +1373,11 @@ export async function fetchAiTtsAudio(params: {
     const arrayBuffer = await response.arrayBuffer();
     const contentType =
       response.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
-
-    return {
+    return buildRemoteTtsAudioResult({
       bytes: new Uint8Array(arrayBuffer),
       contentType,
-    };
+      audioSourceHeader: response.headers.get("x-tts-audio-source"),
+    });
   } catch (error) {
     if (timedOut) {
       throw new Error("Request timed out after 30 seconds.");

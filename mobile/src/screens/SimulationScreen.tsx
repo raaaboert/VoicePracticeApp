@@ -81,6 +81,8 @@ import {
 } from "../lib/simulationAudioGuard";
 import type { SimulationCaptureFailureReason } from "../lib/simulationAudioGuard";
 import { buildNoTranscriptDiagnostics } from "../lib/simulationDiagnostics";
+import { evaluateTurnFinalizeRequest } from "../lib/simulationTurnIntegrity";
+import type { TurnFinalizationReason, TurnRecordingStopReason } from "../lib/simulationTurnIntegrity";
 import {
   getSimulationAudioRecorderOptions,
   getSimulationTranscriptionMimeType,
@@ -575,6 +577,14 @@ export function SimulationScreen({
   const modeRef = useRef<OrbMode>("thinking");
   const messagesRef = useRef<DialogueMessage[]>([]);
   const recordingRef = useRef<AudioRecorder | null>(null);
+  const recordingInstanceSequenceRef = useRef(0);
+  const activeRecordingInstanceRef = useRef<{
+    id: string;
+    correlationId: string;
+    turnNumber: number;
+    startedAtMs: number;
+  } | null>(null);
+  const submittedRecordingInstanceIdsRef = useRef(new Set<string>());
   const scrollRef = useRef<ScrollView>(null);
   const transcriptNearBottomRef = useRef(true);
   const transcriptAutoFollowRef = useRef(true);
@@ -594,6 +604,7 @@ export function SimulationScreen({
   const sessionTrainingPackIdRef = useRef<string | null>(null);
   const pendingOpeningLineRef = useRef<string | null>(null);
   const pendingOpeningSpeechPrefetchRef = useRef<PrefetchedRemoteSpeechChunk | null>(null);
+  const pendingOpeningCorrelationIdRef = useRef<string | null>(null);
   const openingPrefetchPromiseRef = useRef<Promise<OpeningLinePayload> | null>(null);
   const openingPrefetchGenerationRef = useRef<number | null>(null);
   const lastVoiceAtRef = useRef(0);
@@ -818,10 +829,11 @@ export function SimulationScreen({
     speechPrefetch: null,
   }), [config.difficulty, config.personaStyle, config.scenario]);
 
-  const storePendingOpeningPayload = useCallback((payload: OpeningLinePayload) => {
+  const storePendingOpeningPayload = useCallback((payload: OpeningLinePayload, correlationId: string) => {
     pendingOpeningLineRef.current = payload.assistantText;
     sessionTrainingPackIdRef.current = payload.trainingPackId;
     pendingOpeningSpeechPrefetchRef.current = payload.speechPrefetch;
+    pendingOpeningCorrelationIdRef.current = correlationId;
   }, []);
 
   const startOpeningPrefetch = useCallback((params: {
@@ -871,7 +883,7 @@ export function SimulationScreen({
       correlationId: params.correlationId,
     }).then((openingPayload) => {
       if (isStartupGenerationCurrent(params.generation)) {
-        storePendingOpeningPayload(openingPayload);
+        storePendingOpeningPayload(openingPayload, params.correlationId);
         logSimulationTiming({
           correlationId: params.correlationId,
           phase: params.background ? "opening_prefetch_ready" : "opening_response_ready",
@@ -899,7 +911,7 @@ export function SimulationScreen({
         setUseLocalMockMode(true);
         usedMockModeDuringSessionRef.current = true;
         const localPayload = createLocalOpeningPayload();
-        storePendingOpeningPayload(localPayload);
+        storePendingOpeningPayload(localPayload, params.correlationId);
         if (params.background && !startSimulationInProgressRef.current && !sessionActiveRef.current) {
           setMode("idle");
           setStatus("Local test mode ready. Press Start Simulation.");
@@ -1134,6 +1146,7 @@ export function SimulationScreen({
         remoteTtsEnabled: config.remoteTtsEnabled,
         remoteAiConfigured: apiConfigured,
         allowRemoteTts: !useLocalMockMode,
+        allowFallbackSpeech: !config.remoteTtsEnabled || !apiConfigured || useLocalMockMode,
         voiceGender: config.voiceGender,
         voiceProfile: config.voiceProfile,
         selectedVoiceIdentifierRef,
@@ -1154,6 +1167,19 @@ export function SimulationScreen({
         isCancelled: () =>
           ttsRequestGenerationRef.current !== requestGeneration || simulationClosedRef.current || unmountedRef.current,
         onPlaybackStart: (details) => {
+          logSimulationTiming({
+            correlationId:
+              correlationId
+              ?? createSimulationCorrelationId(config.simulationSessionId, "audio-source-selected"),
+            phase: "audio_source_selected",
+            details: {
+              audioOrigin: details.audioOrigin,
+              mode: details.mode,
+              chunkIndex: chunkIndex ?? null,
+              chunkCount: chunkCount ?? null,
+              requestGeneration,
+            },
+          });
           onPlaybackStart?.(details.startedAtMs);
         },
       });
@@ -1198,6 +1224,21 @@ export function SimulationScreen({
           simulationClosedRef.current ||
           unmountedRef.current
         ) {
+          logSimulationTiming({
+            correlationId:
+              correlationId
+              ?? createSimulationCorrelationId(config.simulationSessionId, "stale-audio"),
+            phase: "stale_audio_ignored",
+            details: {
+              audioOrigin: "client_chunk_prefetch",
+              chunkIndex: chunkIndex ?? null,
+              chunkCount: chunkCount ?? null,
+              requestGeneration,
+              currentRequestGeneration: ttsRequestGenerationRef.current,
+              sessionClosed: simulationClosedRef.current,
+              screenChanging: unmountedRef.current,
+            },
+          });
           return null;
         }
         return await preparePrefetchedRemoteAudioSource({
@@ -1213,7 +1254,7 @@ export function SimulationScreen({
         return null;
       }
     },
-    [authToken, shouldUseFastStartRemoteTts, userId],
+    [authToken, config.simulationSessionId, logSimulationTiming, shouldUseFastStartRemoteTts, userId],
   );
 
   const speakAssistantResponse = async (
@@ -1417,6 +1458,7 @@ export function SimulationScreen({
                 timedOut: utteranceResult.timedOut,
                 reason: utteranceResult.reason,
                 sourceKind: utteranceResult.sourceKind ?? null,
+                audioOrigin: utteranceResult.audioOrigin ?? null,
               },
             });
             logSimulationTiming({
@@ -1480,6 +1522,7 @@ export function SimulationScreen({
           timedOut: finalResult.timedOut,
           reason: finalResult.reason,
           sourceKind: finalResult.sourceKind ?? null,
+          audioOrigin: finalResult.audioOrigin ?? null,
         },
       });
       if (completion.status === "cancelled") {
@@ -1552,16 +1595,52 @@ export function SimulationScreen({
     return false;
   };
 
-  const stopRecordingSafely = async () => {
+  const stopRecordingSafely = async (reason: TurnRecordingStopReason) => {
     const recording = recordingRef.current;
+    const recordingInstance = activeRecordingInstanceRef.current;
     recordingRef.current = null;
+    activeRecordingInstanceRef.current = null;
 
     if (recording) {
+      const correlationId =
+        recordingInstance?.correlationId
+        ?? currentTurnCorrelationIdRef.current
+        ?? createSimulationCorrelationId(config.simulationSessionId, "recording-stop");
+      const requestedAtMs = Date.now();
+      logSimulationTiming({
+        correlationId,
+        phase: "recording_stop_requested",
+        details: {
+          recordingInstanceId: recordingInstance?.id ?? null,
+          turnNumber: recordingInstance?.turnNumber ?? null,
+          reason,
+          explicitUserAction: reason === "user_submit",
+          recordingDurationMs: recordingInstance
+            ? Math.max(0, requestedAtMs - recordingInstance.startedAtMs)
+            : null,
+        },
+      });
+      let stopSucceeded = true;
       try {
         await stopAndReleaseRecorder(recording);
       } catch {
+        stopSucceeded = false;
         // Ignore stop errors from already-stopped recordings.
       }
+      logSimulationTiming({
+        correlationId,
+        phase: "recording_stopped",
+        details: {
+          recordingInstanceId: recordingInstance?.id ?? null,
+          turnNumber: recordingInstance?.turnNumber ?? null,
+          reason,
+          explicitUserAction: reason === "user_submit",
+          recordingDurationMs: recordingInstance
+            ? Math.max(0, Date.now() - recordingInstance.startedAtMs)
+            : null,
+          stopSucceeded,
+        },
+      });
     }
 
     try {
@@ -1624,7 +1703,7 @@ export function SimulationScreen({
     startSimulationInProgressRef.current = false;
     recordingPrepareInProgressRef.current = false;
     await cancelPendingTts();
-    await stopRecordingSafely();
+    await stopRecordingSafely("app_background");
 
     if (!sessionActiveRef.current || simulationClosedRef.current || unmountedRef.current) {
       return;
@@ -1666,12 +1745,46 @@ export function SimulationScreen({
     setStatus("Listening... Tap Submit Response when you're done.");
   };
 
-  const requestFinalizeTurn = () => {
-    if (finalizeRequestedRef.current || processingRef.current || !recordingRef.current) {
+  const requestFinalizeTurn = (params: {
+    expectedRecordingInstanceId: string | null;
+    reason: TurnFinalizationReason;
+    explicitUserAction: boolean;
+  }) => {
+    const activeRecordingInstance = activeRecordingInstanceRef.current;
+    const decision = evaluateTurnFinalizeRequest({
+      activeRecordingInstanceId: activeRecordingInstance?.id ?? null,
+      requestedRecordingInstanceId: params.expectedRecordingInstanceId,
+      finalizationReason: params.reason,
+      explicitUserAction: params.explicitUserAction,
+      submissionAlreadyRequested:
+        finalizeRequestedRef.current
+        || Boolean(
+          activeRecordingInstance
+          && submittedRecordingInstanceIdsRef.current.has(activeRecordingInstance.id),
+        ),
+      turnProcessing: processingRef.current,
+    });
+    if (!decision.allowed || !recordingRef.current || !activeRecordingInstance) {
+      const correlationId =
+        activeRecordingInstance?.correlationId
+        ?? currentTurnCorrelationIdRef.current
+        ?? createSimulationCorrelationId(config.simulationSessionId, "turn-finalize-ignored");
+      logSimulationTiming({
+        correlationId,
+        phase: "stale_event_ignored",
+        details: {
+          event: "turn_finalize_requested",
+          rejectionReason: decision.allowed ? "no_active_recorder" : decision.reason,
+          requestedRecordingInstanceId: params.expectedRecordingInstanceId,
+          activeRecordingInstanceId: activeRecordingInstance?.id ?? null,
+          finalizationReason: params.reason,
+          explicitUserAction: params.explicitUserAction,
+        },
+      });
       return;
     }
 
-    const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
+    const correlationId = activeRecordingInstance.correlationId;
     currentTurnCorrelationIdRef.current = correlationId;
     turnSubmitStartedAtRef.current = Date.now();
     const trigger: TurnFinalizeTrigger = "submit";
@@ -1682,10 +1795,32 @@ export function SimulationScreen({
       startedAtMs: turnSubmitStartedAtRef.current,
       details: {
         trigger,
+        finalizationReason: params.reason,
+        explicitUserAction: params.explicitUserAction,
+        recordingInstanceId: activeRecordingInstance.id,
+        turnNumber: activeRecordingInstance.turnNumber,
+        recordingDurationMs: Math.max(0, turnSubmitStartedAtRef.current - activeRecordingInstance.startedAtMs),
+      },
+    });
+    logSimulationTiming({
+      correlationId,
+      phase: "turn_submit_requested",
+      startedAtMs: turnSubmitStartedAtRef.current,
+      details: {
+        finalizationReason: params.reason,
+        explicitUserAction: params.explicitUserAction,
+        recordingInstanceId: activeRecordingInstance.id,
+        turnNumber: activeRecordingInstance.turnNumber,
+        recordingDurationMs: Math.max(0, turnSubmitStartedAtRef.current - activeRecordingInstance.startedAtMs),
       },
     });
     finalizeRequestedRef.current = true;
-    void finalizeTurn();
+    submittedRecordingInstanceIdsRef.current.add(activeRecordingInstance.id);
+    void finalizeTurn({
+      recordingInstanceId: activeRecordingInstance.id,
+      finalizationReason: params.reason,
+      explicitUserAction: params.explicitUserAction,
+    });
   };
 
   const monitorCurrentTurn = async () => {
@@ -1717,7 +1852,7 @@ export function SimulationScreen({
               && !unmountedRef.current,
           },
         });
-        await stopRecordingSafely();
+        await stopRecordingSafely("recording_interruption");
 
         if (!sessionActiveRef.current || simulationClosedRef.current || unmountedRef.current) {
           return;
@@ -1952,6 +2087,14 @@ export function SimulationScreen({
       const turnCorrelationId = requestCorrelationId;
       currentTurnCorrelationIdRef.current = turnCorrelationId;
       turnStartedAtRef.current = Date.now();
+      recordingInstanceSequenceRef.current += 1;
+      const recordingInstanceId = `${turnCorrelationId}-recording-${recordingInstanceSequenceRef.current}`;
+      activeRecordingInstanceRef.current = {
+        id: recordingInstanceId,
+        correlationId: turnCorrelationId,
+        turnNumber,
+        startedAtMs: turnStartedAtRef.current,
+      };
       lastVoiceAtRef.current = turnStartedAtRef.current;
       heardVoiceRef.current = false;
       detectedVoiceRef.current = false;
@@ -1970,6 +2113,8 @@ export function SimulationScreen({
           turnNumber,
           firstTurn: turnNumber === 1,
           turnLoopReady: turnLoopReadyRef.current,
+          recordingInstanceId,
+          explicitUserAction: false,
         },
       });
       if (turnNumber === 1) {
@@ -2041,7 +2186,7 @@ export function SimulationScreen({
           },
         });
       }
-      await stopRecordingSafely();
+      await stopRecordingSafely("audio_error");
 
       if (!sessionActiveRef.current || simulationClosedRef.current || unmountedRef.current) {
         return;
@@ -2063,13 +2208,32 @@ export function SimulationScreen({
     }
   };
 
-  const finalizeTurn = async () => {
+  const finalizeTurn = async (params: {
+    recordingInstanceId: string;
+    finalizationReason: TurnFinalizationReason;
+    explicitUserAction: boolean;
+  }) => {
     if (processingRef.current) {
       return;
     }
 
     const recording = recordingRef.current;
-    if (!recording) {
+    const recordingInstance = activeRecordingInstanceRef.current;
+    if (!recording || !recordingInstance || recordingInstance.id !== params.recordingInstanceId) {
+      logSimulationTiming({
+        correlationId:
+          recordingInstance?.correlationId
+          ?? currentTurnCorrelationIdRef.current
+          ?? createSimulationCorrelationId(config.simulationSessionId, "turn-finalize-stale"),
+        phase: "stale_event_ignored",
+        details: {
+          event: "turn_finalize_started",
+          requestedRecordingInstanceId: params.recordingInstanceId,
+          activeRecordingInstanceId: recordingInstance?.id ?? null,
+          finalizationReason: params.finalizationReason,
+          explicitUserAction: params.explicitUserAction,
+        },
+      });
       return;
     }
 
@@ -2089,7 +2253,7 @@ export function SimulationScreen({
     let captureTransitionReason: "assistant_speech_completed" | "no_clear_speech" | "turn_error_recovery" | null = null;
     let captureFailureReason: SimulationCaptureFailureReason | null = null;
     let captureRetryStatus: string | undefined;
-    const correlationId = currentTurnCorrelationIdRef.current ?? createTurnCorrelationId();
+    const correlationId = recordingInstance.correlationId;
     const turnNumber = messagesRef.current.filter((message) => message.role === "user").length + 1;
     const sessionLifecycleGeneration = sessionLifecycleGenerationRef.current;
     const turnAbortController = new AbortController();
@@ -2178,6 +2342,9 @@ export function SimulationScreen({
         startedAtMs: effectiveSubmitStartedAtMs,
         details: {
           trigger: finalizeTrigger,
+          finalizationReason: params.finalizationReason,
+          explicitUserAction: params.explicitUserAction,
+          recordingInstanceId: recordingInstance.id,
           turnNumber,
           firstTurn: turnNumber === 1,
           turnLoopReady: turnLoopReadyRef.current,
@@ -2192,11 +2359,27 @@ export function SimulationScreen({
           firstTurn: turnNumber === 1,
           mode: modeRef.current,
           sessionActive: sessionActiveRef.current,
+          finalizationReason: params.finalizationReason,
+          explicitUserAction: params.explicitUserAction,
+          recordingInstanceId: recordingInstance.id,
           openingTtsCompleted: openingTtsCompletedRef.current,
           turnLoopReady: turnLoopReadyRef.current,
         },
       });
+      logSimulationTiming({
+        correlationId,
+        phase: "recording_stop_requested",
+        startedAtMs: effectiveSubmitStartedAtMs,
+        details: {
+          recordingInstanceId: recordingInstance.id,
+          turnNumber,
+          reason: params.finalizationReason,
+          explicitUserAction: params.explicitUserAction,
+          recordingDurationMs: Math.max(0, Date.now() - recordingInstance.startedAtMs),
+        },
+      });
       recordingRef.current = null;
+      activeRecordingInstanceRef.current = null;
       const audioUri = (await stopAndReleaseRecorder(recording)) ?? "";
       audioModeResetPromise = setAudioMode(false).catch(() => {
         // Ignore mode reset errors and allow the turn pipeline to continue.
@@ -2227,6 +2410,9 @@ export function SimulationScreen({
             phase: "recording_payload_measured",
             startedAtMs: effectiveSubmitStartedAtMs,
             details: {
+              recordingInstanceId: recordingInstance.id,
+              finalizationReason: params.finalizationReason,
+              explicitUserAction: params.explicitUserAction,
               audioBytes,
             },
           });
@@ -2234,9 +2420,26 @@ export function SimulationScreen({
       };
       logSimulationTiming({
         correlationId,
+        phase: "recording_stopped",
+        startedAtMs: effectiveSubmitStartedAtMs,
+        details: {
+          recordingInstanceId: recordingInstance.id,
+          turnNumber,
+          reason: params.finalizationReason,
+          explicitUserAction: params.explicitUserAction,
+          recordingDurationMs: turnDurationMs,
+          turnDurationSeconds,
+        },
+      });
+      logSimulationTiming({
+        correlationId,
         phase: "recording_finalize_complete",
         startedAtMs: effectiveSubmitStartedAtMs,
         details: {
+          recordingInstanceId: recordingInstance.id,
+          finalizationReason: params.finalizationReason,
+          explicitUserAction: params.explicitUserAction,
+          turnDurationMs,
           turnDurationSeconds,
         },
       });
@@ -2987,6 +3190,7 @@ export function SimulationScreen({
                 timedOut: speechResult.timedOut,
                 reason: speechResult.reason,
                 sourceKind: speechResult.sourceKind ?? null,
+                audioOrigin: speechResult.audioOrigin ?? null,
               },
             });
             commitAssistantMessageIfNeeded();
@@ -3278,7 +3482,7 @@ export function SimulationScreen({
             setStatus("Preparing opening response...");
             if (localTestMode) {
               const localPayload = createLocalOpeningPayload();
-              storePendingOpeningPayload(localPayload);
+              storePendingOpeningPayload(localPayload, openingCorrelationId);
               openingLine = localPayload.assistantText;
             } else {
               try {
@@ -3305,7 +3509,7 @@ export function SimulationScreen({
                   return;
                 }
                 if (!pendingOpeningLineRef.current) {
-                  storePendingOpeningPayload(openingPayload);
+                  storePendingOpeningPayload(openingPayload, openingCorrelationId);
                 }
                 openingLine = pendingOpeningLineRef.current;
               } catch (openingError) {
@@ -3317,7 +3521,7 @@ export function SimulationScreen({
                   setUseLocalMockMode(true);
                   usedMockModeDuringSessionRef.current = true;
                   const localPayload = createLocalOpeningPayload();
-                  storePendingOpeningPayload(localPayload);
+                  storePendingOpeningPayload(localPayload, openingCorrelationId);
                   openingLine = localPayload.assistantText;
                 } else {
                   throw openingError;
@@ -3342,6 +3546,7 @@ export function SimulationScreen({
 
             const assistantTextReceivedAtMs = Date.now();
             const openingSpeechPrefetch = pendingOpeningSpeechPrefetchRef.current;
+            const openingSpeechCorrelationId = pendingOpeningCorrelationIdRef.current ?? openingCorrelationId;
             const openingAssistantMessage = { id: createMessageId(), role: "assistant" as const, content: openingLine };
             const commitOpeningAssistantMessageIfNeeded = () => {
               if (!isCurrentStartupAttempt()) {
@@ -3422,7 +3627,7 @@ export function SimulationScreen({
                       phase: "opening_playback_started",
                     });
                   },
-                  openingCorrelationId,
+                  openingSpeechCorrelationId,
                   openingSpeechPrefetch,
                 );
                 if (!isCurrentStartupAttempt()) {
@@ -3452,6 +3657,7 @@ export function SimulationScreen({
             openingDeliveredRef.current = true;
             pendingOpeningLineRef.current = null;
             pendingOpeningSpeechPrefetchRef.current = null;
+            pendingOpeningCorrelationIdRef.current = null;
           }
         }
       }
@@ -3594,7 +3800,8 @@ export function SimulationScreen({
     openingTtsInProgressRef.current = false;
     abortActiveTurnRequests();
     await cancelPendingTts(true);
-    await stopRecordingSafely();
+    await stopRecordingSafely("session_end");
+    submittedRecordingInstanceIdsRef.current.clear();
 
     if (showEndedText) {
       setMode("idle");
@@ -4010,7 +4217,7 @@ export function SimulationScreen({
     }
   };
 
-  const onPrimaryButton = async () => {
+  const onPrimaryButton = async (renderedRecordingInstanceId: string | null) => {
     const primaryButtonRoute = getSimulationPrimaryButtonRoute({
       lifecycleResumeInProgress: lifecycleResumeInProgressRef.current,
       sessionActive: sessionActiveRef.current,
@@ -4025,7 +4232,11 @@ export function SimulationScreen({
     }
 
     if (primaryButtonRoute === "submit_response") {
-      requestFinalizeTurn();
+      requestFinalizeTurn({
+        expectedRecordingInstanceId: renderedRecordingInstanceId,
+        reason: "user_submit",
+        explicitUserAction: true,
+      });
       return;
     }
     if (primaryButtonRoute === "resume_lifecycle") {
@@ -4151,6 +4362,9 @@ export function SimulationScreen({
     const initialize = async () => {
       setIsInitializing(true);
       messagesRef.current = [];
+      recordingInstanceSequenceRef.current = 0;
+      activeRecordingInstanceRef.current = null;
+      submittedRecordingInstanceIdsRef.current.clear();
       transcriptNearBottomRef.current = true;
       transcriptAutoFollowRef.current = true;
       sessionStartedAtRef.current = null;
@@ -4162,6 +4376,7 @@ export function SimulationScreen({
       localModeConfirmedRef.current = false;
       pendingOpeningLineRef.current = null;
       pendingOpeningSpeechPrefetchRef.current = null;
+      pendingOpeningCorrelationIdRef.current = null;
       openingPrefetchPromiseRef.current = null;
       openingPrefetchGenerationRef.current = null;
       setElapsedSeconds(0);
@@ -4198,7 +4413,10 @@ export function SimulationScreen({
       const initializationGeneration = sessionLifecycleGenerationRef.current;
 
       if (localTestMode) {
-        storePendingOpeningPayload(createLocalOpeningPayload());
+        storePendingOpeningPayload(
+          createLocalOpeningPayload(),
+          createSimulationCorrelationId(config.simulationSessionId, "opening-local"),
+        );
         setMode("idle");
         setStatus("Scenario ready. Press Start Simulation.");
         setIsInitializing(false);
@@ -4269,7 +4487,7 @@ export function SimulationScreen({
       clearTurnMonitoring();
       abortActiveTurnRequests();
       void cancelPendingTts(true);
-      void stopRecordingSafely();
+      void stopRecordingSafely("component_cleanup");
       sessionCompletionInProgressRef.current = false;
     };
   }, [
@@ -4368,6 +4586,7 @@ export function SimulationScreen({
     && resolvedPrimaryAction.kind === "start"
       ? { ...resolvedPrimaryAction, label: "Retry AI Voice" }
       : resolvedPrimaryAction;
+  const renderedRecordingInstanceId = activeRecordingInstanceRef.current?.id ?? null;
   const showUserTurnInstruction = shouldShowUserTurnInstruction({
     sessionActive,
     mode,
@@ -4783,7 +5002,7 @@ export function SimulationScreen({
               primaryAction.disabled && primaryAction.kind !== "busy" ? styles.disabled : null,
             ]}
             onPress={() => {
-              void onPrimaryButton();
+              void onPrimaryButton(renderedRecordingInstanceId);
             }}
             disabled={primaryAction.disabled}
           >

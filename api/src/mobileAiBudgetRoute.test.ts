@@ -24,6 +24,7 @@ let providerCalls = 0;
 let successfulProviderCalls = 0;
 let failNextProviderCall = false;
 let delayProviderCalls = false;
+let speechPrefetchRegistry: typeof import("./index.js")["simulationSpeechPrefetchRegistry"];
 
 function buildOrg(): EnterpriseOrg {
   return {
@@ -124,20 +125,27 @@ function buildDatabase(): ApiDatabase {
   };
 }
 
-async function requestTts(userId: string, token?: string) {
+async function requestTts(userId: string, token?: string, correlationId?: string) {
   const response = await originalFetch(`${baseUrl}/mobile/users/${userId}/ai/tts`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(userId === "individual_budget_user" ? { "X-Superuser-Org-Id": "org_budget" } : {}),
+      ...(correlationId ? { "X-Correlation-Id": correlationId } : {}),
     },
     body: JSON.stringify({ text: "Budget safety test response.", preset: "female-balanced" }),
   });
   const contentType = response.headers.get("content-type") ?? "";
+  const audioSource = response.headers.get("x-tts-audio-source");
+  const audioBytes = contentType.includes("application/json")
+    ? null
+    : new Uint8Array(await response.arrayBuffer());
   return {
     status: response.status,
     body: contentType.includes("application/json") ? await response.json() as Record<string, unknown> : null,
+    audioSource,
+    audioBytes,
   };
 }
 
@@ -166,6 +174,7 @@ before(async () => {
   delete process.env.DATABASE_URL;
 
   const imported = await import("./index.js");
+  speechPrefetchRegistry = imported.simulationSpeechPrefetchRegistry;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -208,13 +217,129 @@ test("global AI safety accounting covers enterprise and TTS while preserving ent
   assert.equal(unauthorized.status, 401);
   assert.equal(providerCalls, 0);
 
+  let resolvePrefetch!: (value: {
+    audioBase64: string;
+    contentType: string;
+    preset: "female-balanced";
+    chunkCount: number;
+    firstChunkChars: number;
+    ttsLatencyMs: number;
+  }) => void;
+  speechPrefetchRegistry.register({
+    correlationId: "budget-prefetch-reuse",
+    userId: "enterprise_budget_user",
+    preset: "female-balanced",
+    text: "Budget safety test response.",
+    promise: new Promise((resolve) => {
+      resolvePrefetch = resolve;
+    }),
+  });
+  setTimeout(() => resolvePrefetch({
+    audioBase64: Buffer.from([9, 8, 7]).toString("base64"),
+    contentType: "audio/mpeg",
+    preset: "female-balanced",
+    chunkCount: 1,
+    firstChunkChars: 28,
+    ttsLatencyMs: 1_520,
+  }), 20);
+  const reusedPrefetch = await requestTts(
+    "enterprise_budget_user",
+    ENTERPRISE_TOKEN,
+    "budget-prefetch-reuse",
+  );
+  assert.equal(reusedPrefetch.status, 200);
+  assert.equal(reusedPrefetch.audioSource, "in_flight_prefetch");
+  assert.deepEqual(reusedPrefetch.audioBytes, new Uint8Array([9, 8, 7]));
+  assert.equal(providerCalls, 0, "reused prefetch unexpectedly invoked the provider again");
+
+  speechPrefetchRegistry.register({
+    correlationId: "budget-prefetch-empty",
+    userId: "enterprise_budget_user",
+    preset: "female-balanced",
+    text: "Budget safety test response.",
+    promise: Promise.resolve(null),
+  });
   failNextProviderCall = true;
-  const failed = await requestTts("enterprise_budget_user", ENTERPRISE_TOKEN);
+  const failed = await requestTts(
+    "enterprise_budget_user",
+    ENTERPRISE_TOKEN,
+    "budget-prefetch-empty",
+  );
   assert.equal(failed.status, 503);
   assert.equal(providerCalls, 1);
   assert.equal(successfulProviderCalls, 0);
 
-  assert.equal((await requestTts("enterprise_budget_user", ENTERPRISE_TOKEN)).status, 200);
+  const slowPrefetch = new Promise<{
+    audioBase64: string;
+    contentType: string;
+    preset: "female-balanced";
+    chunkCount: number;
+    firstChunkChars: number;
+    ttsLatencyMs: number;
+  }>((resolve) => {
+    setTimeout(() => resolve({
+      audioBase64: Buffer.from([6, 6, 6]).toString("base64"),
+      contentType: "audio/mpeg",
+      preset: "female-balanced",
+      chunkCount: 1,
+      firstChunkChars: 28,
+      ttsLatencyMs: 3_600,
+    }), 2_100);
+  });
+  speechPrefetchRegistry.register({
+    correlationId: "budget-prefetch-slow",
+    userId: "enterprise_budget_user",
+    preset: "female-balanced",
+    text: "Budget safety test response.",
+    promise: slowPrefetch,
+  });
+  const slowReuseStartedAtMs = Date.now();
+  const firstForeground = await requestTts(
+    "enterprise_budget_user",
+    ENTERPRISE_TOKEN,
+    "budget-prefetch-slow",
+  );
+  assert.equal(firstForeground.status, 200);
+  assert.equal(firstForeground.audioSource, "foreground_generation");
+  assert.deepEqual(firstForeground.audioBytes, new Uint8Array([1, 2, 3, 4]));
+  assert.ok(Date.now() - slowReuseStartedAtMs >= 1_800, "slow prefetch did not receive its reuse grace");
+  assert.ok(Date.now() - slowReuseStartedAtMs < 5_000, "slow prefetch blocked foreground generation too long");
+  await slowPrefetch;
+
+  const lateSuccessfulPrefetch = new Promise<{
+    audioBase64: string;
+    contentType: string;
+    preset: "female-balanced";
+    chunkCount: number;
+    firstChunkChars: number;
+    ttsLatencyMs: number;
+  }>((resolve) => {
+    setTimeout(() => resolve({
+      audioBase64: Buffer.from([5, 5, 5]).toString("base64"),
+      contentType: "audio/mpeg",
+      preset: "female-balanced",
+      chunkCount: 1,
+      firstChunkChars: 28,
+      ttsLatencyMs: 3_600,
+    }), 2_100);
+  });
+  speechPrefetchRegistry.register({
+    correlationId: "budget-prefetch-late-success",
+    userId: "enterprise_budget_user",
+    preset: "female-balanced",
+    text: "Budget safety test response.",
+    promise: lateSuccessfulPrefetch,
+  });
+  failNextProviderCall = true;
+  const foregroundFailedAfterGrace = await requestTts(
+    "enterprise_budget_user",
+    ENTERPRISE_TOKEN,
+    "budget-prefetch-late-success",
+  );
+  assert.equal(foregroundFailedAfterGrace.status, 503);
+  assert.equal(foregroundFailedAfterGrace.audioSource, null);
+  await lateSuccessfulPrefetch;
+
   assert.equal((await requestTts("enterprise_budget_user", ENTERPRISE_TOKEN)).status, 200);
   assert.equal(successfulProviderCalls, 2, "enterprise user was incorrectly subjected to the per-user cap");
 

@@ -208,6 +208,7 @@ import {
   parseTtsPreset,
 } from "./ttsPresetConfig.js";
 import type { TtsPreset } from "./ttsPresetConfig.js";
+import { SimulationSpeechPrefetchRegistry } from "./services/simulationSpeechPrefetchRegistry.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import {
   authorizeSupportCaseOrigin,
@@ -535,6 +536,7 @@ const OPENAI_TTS_MODEL = OPENAI_MODEL_CONFIG.speech.model;
 const TTS_TEXT_MAX_CHARS = 4_000;
 const SIMULATION_SPEECH_PREFETCH_PAYLOAD_WINDOW_MS = 1_500;
 const SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS = 12_000;
+const SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS = 2_000;
 const MIN_SIMULATION_TRANSCRIPT_CHARS = 2;
 const SIMULATION_MODEL_TIMEOUT_MS_BY_ROUTE: Record<SimulationRoute, number> = {
   opening: 30_000,
@@ -1522,6 +1524,31 @@ interface SimulationSpeechPrefetchPayload {
   ttsLatencyMs: number;
 }
 
+export const simulationSpeechPrefetchRegistry = new SimulationSpeechPrefetchRegistry<SimulationSpeechPrefetchPayload>();
+
+function registerSimulationSpeechPrefetchForForegroundReuse(params: {
+  correlationId: string;
+  userId: string;
+  text: string;
+  request: SimulationSpeechPrefetchRequest | null;
+  promise: Promise<SimulationSpeechPrefetchPayload | null>;
+}): void {
+  if (!params.request) {
+    return;
+  }
+  const firstChunk = splitTextForRemoteTtsFastStart(params.text.trim())[0]?.trim() ?? "";
+  if (!firstChunk) {
+    return;
+  }
+  simulationSpeechPrefetchRegistry.register({
+    correlationId: params.correlationId,
+    userId: params.userId,
+    preset: params.request.preset,
+    text: firstChunk,
+    promise: params.promise,
+  });
+}
+
 function parseSimulationSpeechPrefetchRequest(value: unknown): SimulationSpeechPrefetchRequest | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1990,6 +2017,13 @@ async function generateSimulationTurnReply(params: {
     text: assistantText,
     request: params.requestedSpeechPrefetch,
     budgetContext: params.budgetContext,
+  });
+  registerSimulationSpeechPrefetchForForegroundReuse({
+    correlationId: params.correlationId,
+    userId: params.budgetContext.user.id,
+    text: assistantText,
+    request: params.requestedSpeechPrefetch,
+    promise: speechPrefetchPromise,
   });
   const speechPrefetch = await resolveSpeechPrefetchForAssistantPayload({
     route: "turn",
@@ -19177,6 +19211,52 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     model: OPENAI_TTS_MODEL,
     text,
   });
+  const reusablePrefetch = await simulationSpeechPrefetchRegistry.consume({
+    correlationId,
+    userId,
+    preset,
+    text,
+    waitMs: SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS,
+  });
+  // eslint-disable-next-line no-console
+  console.log("[simulation-speech-prefetch]", {
+    route: "tts",
+    correlationId,
+    stage:
+      reusablePrefetch.status === "hit"
+        ? reusablePrefetch.value
+          ? "speech_prefetch_reused_by_foreground"
+          : "speech_prefetch_reuse_empty"
+        : reusablePrefetch.status === "timeout"
+          ? "speech_prefetch_reuse_timeout"
+        : "speech_prefetch_reuse_miss",
+    ...(reusablePrefetch.status === "miss" ? { reason: reusablePrefetch.reason } : {}),
+    preset,
+    textChars: text.length,
+  });
+  if (reusablePrefetch.status === "hit" && reusablePrefetch.value) {
+    const prefetchedAudio = Buffer.from(reusablePrefetch.value.audioBase64, "base64");
+    response.setHeader("X-Correlation-Id", correlationId);
+    response.setHeader("X-TTS-Audio-Source", "in_flight_prefetch");
+    response.setHeader("Content-Type", reusablePrefetch.value.contentType || "audio/mpeg");
+    response.setHeader("Cache-Control", "no-store");
+    response.status(200).send(prefetchedAudio);
+    // eslint-disable-next-line no-console
+    console.log("[simulation-route]", {
+      route: "tts",
+      correlationId,
+      stage: "response_sent",
+      audioSource: "in_flight_prefetch",
+      elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
+      bytes: prefetchedAudio.byteLength,
+      textChars: text.length,
+      preset,
+      model: ttsConfig.model,
+      voice: ttsConfig.voice,
+      speed: ttsConfig.speed,
+    });
+    return;
+  }
   let ttsCallStartedAtMs: number | null = null;
   try {
     ttsCallStartedAtMs = Date.now();
@@ -19192,6 +19272,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       speed: ttsConfig.speed,
       instructionsIncluded: ttsConfig.instructionsIncluded,
       responseFormat: ttsConfig.responseFormat,
+      audioSource: "foreground_generation",
       stage: "start",
       startedAtMs: ttsCallStartedAtMs
     });
@@ -19222,6 +19303,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       speed: ttsConfig.speed,
       instructionsIncluded: ttsConfig.instructionsIncluded,
       responseFormat: ttsConfig.responseFormat,
+      audioSource: "foreground_generation",
       stage: "end",
       endedAtMs: ttsCallEndedAtMs,
       durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
@@ -19233,6 +19315,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     );
 
     response.setHeader("X-Correlation-Id", correlationId);
+    response.setHeader("X-TTS-Audio-Source", "foreground_generation");
     response.setHeader("Content-Type", "audio/mpeg");
     response.setHeader("Cache-Control", "no-store");
     response.status(200).send(ttsResult.audioBuffer);
@@ -19241,6 +19324,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       route: "tts",
       correlationId,
       stage: "response_sent",
+      audioSource: "foreground_generation",
       elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
       bytes: ttsResult.audioBuffer.byteLength,
       textChars: text.length,
@@ -19266,6 +19350,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
         speed: ttsConfig.speed,
         instructionsIncluded: ttsConfig.instructionsIncluded,
         responseFormat: ttsConfig.responseFormat,
+        audioSource: "foreground_generation",
         stage: "error",
         endedAtMs: ttsCallEndedAtMs,
         durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
@@ -19811,6 +19896,13 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
         scenarioId: context.runtime.scenario.id,
         allowDuringActiveSimulation: true,
       },
+    });
+    registerSimulationSpeechPrefetchForForegroundReuse({
+      correlationId,
+      userId: context.user.id,
+      text: assistantText,
+      request: requestedSpeechPrefetch,
+      promise: speechPrefetchPromise,
     });
     const speechPrefetch = await resolveSpeechPrefetchForAssistantPayload({
       route: "opening",

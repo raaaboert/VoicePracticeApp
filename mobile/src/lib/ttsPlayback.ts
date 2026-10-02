@@ -7,7 +7,7 @@ import { Platform } from "react-native";
 import { getVoiceSpeechTuning, selectSpeechVoiceIdentifier } from "../data/preferences";
 import type { AiVoiceGender, AiVoiceProfile } from "../types";
 import { fetchAiTtsAudio, RemoteTtsPreset } from "./api";
-import type { PrefetchedRemoteSpeechChunk } from "./api";
+import type { PrefetchedRemoteSpeechChunk, RemoteTtsAudioOrigin } from "./api";
 import { isOrganizationAccessRequiredError } from "./apiError";
 import { analyzeTtsCancellation, TtsCancellationAnalysis } from "./simulationDiagnostics";
 import {
@@ -23,6 +23,7 @@ import {
 type TtsSource = "simulation" | "sample";
 type TtsModeReason = "remoteTtsDisabled" | "remoteAiNotConfigured" | "remoteCallStarted" | "backendError";
 export type RemoteAudioSourceKind = "inline" | "file";
+export type TtsAudioOrigin = RemoteTtsAudioOrigin | "device_fallback";
 type TtsDiagnosticEvent =
   | "remote_tts_success"
   | "remote_tts_fetch_failure"
@@ -71,7 +72,12 @@ interface SpeakWithTtsFallbackParams {
     screenChanging?: boolean;
   };
   onRemoteCancellation?: (details: TtsCancellationAnalysis) => void;
-  onPlaybackStart?: (details: { source: TtsSource; mode: "remote" | "fallback"; startedAtMs: number }) => void;
+  onPlaybackStart?: (details: {
+    source: TtsSource;
+    mode: "remote" | "fallback";
+    audioOrigin: TtsAudioOrigin;
+    startedAtMs: number;
+  }) => void;
 }
 
 export interface PreparedRemoteAudioSource {
@@ -93,6 +99,7 @@ export interface TtsPlaybackResult {
   timedOut: boolean;
   reason: string;
   sourceKind?: RemoteAudioSourceKind | null;
+  audioOrigin?: TtsAudioOrigin;
   playbackStarted?: boolean;
   chunkIndex?: number;
   chunkCount?: number;
@@ -356,6 +363,7 @@ function logTtsDiagnosticCounter(
     sourceKind?: RemoteAudioSourceKind | null;
     playbackStarted?: boolean;
     fallbackAttempted?: boolean;
+    audioOrigin?: TtsAudioOrigin;
     chunkIndex?: number;
     chunkCount?: number;
     error?: string;
@@ -375,6 +383,7 @@ function logTtsDiagnosticCounter(
     sourceKind: payload.sourceKind ?? null,
     playbackStarted: payload.playbackStarted ?? null,
     fallbackAttempted: payload.fallbackAttempted ?? null,
+    audioOrigin: payload.audioOrigin ?? null,
     ...(typeof payload.chunkIndex === "number" ? { chunkIndex: payload.chunkIndex } : {}),
     ...(typeof payload.chunkCount === "number" ? { chunkCount: payload.chunkCount } : {}),
     ...(payload.error ? { error: payload.error } : {}),
@@ -566,6 +575,12 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     remoteAllowed &&
     Platform.OS !== "web";
   const remotePlaybackRate = REMOTE_TTS_PLAYBACK_RATE;
+  let remoteAudioOrigin: TtsAudioOrigin =
+    params.preparedRemoteSource?.audio.audioOrigin
+    ?? params.prefetchedRemoteAudio?.audioOrigin
+    ?? (params.preparedRemoteSource || params.prefetchedRemoteAudio
+      ? "server_payload_prefetch"
+      : "foreground_generation");
   const isCancelled = (): boolean => Boolean(params.abortSignal?.aborted) || Boolean(params.isCancelled?.());
   const throwIfCancelled = () => {
     if (isCancelled()) {
@@ -578,6 +593,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     sourceKind?: RemoteAudioSourceKind | null;
     playbackStarted?: boolean;
     fallbackAttempted?: boolean;
+    audioOrigin?: TtsAudioOrigin;
     error?: string;
   }) => {
     logTtsDiagnosticCounter("final_user_visible_outcome", {
@@ -588,6 +604,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       sourceKind: payload.sourceKind,
       playbackStarted: payload.playbackStarted,
       fallbackAttempted: payload.fallbackAttempted,
+      audioOrigin: payload.audioOrigin,
       chunkIndex: params.chunkIndex,
       chunkCount: params.chunkCount,
       error: payload.error,
@@ -656,7 +673,10 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         error: payload.error,
         chunkIndex: params.chunkIndex,
         chunkCount: params.chunkCount,
-        details: payload.details,
+        details: {
+          ...(payload.details ?? {}),
+          audioOrigin: remoteAudioOrigin,
+        },
       });
     };
 
@@ -676,6 +696,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         sourceKind,
         playbackStarted,
         fallbackAttempted: deviceFallbackAttempted,
+        audioOrigin: remoteAudioOrigin,
         chunkIndex: params.chunkIndex,
         chunkCount: params.chunkCount,
         error: errorMessage,
@@ -694,6 +715,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         sourceKind,
         playbackStarted,
         fallbackAttempted: deviceFallbackAttempted,
+        audioOrigin: remoteAudioOrigin,
         chunkIndex: params.chunkIndex,
         chunkCount: params.chunkCount,
       });
@@ -701,6 +723,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         outcome: "remote_tts_completed",
         reason: "remote_completed",
         sourceKind,
+        audioOrigin: remoteAudioOrigin,
         playbackStarted,
         fallbackAttempted: deviceFallbackAttempted,
       });
@@ -801,7 +824,12 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           bytes,
           elapsedMs: startedAtMs - requestStartedAtMs,
         });
-        params.onPlaybackStart?.({ source: params.source, mode: "remote", startedAtMs });
+        params.onPlaybackStart?.({
+          source: params.source,
+          mode: "remote",
+          audioOrigin: remoteAudioOrigin,
+          startedAtMs,
+        });
       };
       const startPlaybackTimeout = (timeoutMs: number) => {
         playbackSession.startPlaybackTimeout(timeoutMs);
@@ -1035,6 +1063,10 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       let ttsAudio = preparedRemoteSource?.audio ?? params.prefetchedRemoteAudio ?? null;
       if (!ttsAudio) {
         remoteStage = "fetch";
+        logLifecycle({
+          phase: "foreground_tts_requested",
+          details: { audioOrigin: "foreground_generation" },
+        });
         logTtsTiming({
           source: params.source,
           preset: params.preset,
@@ -1053,6 +1085,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           signal: params.abortSignal,
           correlationId: params.correlationId,
         });
+        remoteAudioOrigin = ttsAudio.audioOrigin ?? "foreground_generation";
         throwIfCancelled();
         const audioBytesReceivedAtMs = Date.now();
         logTtsTiming({
@@ -1243,6 +1276,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           outcome: "tts_cancelled",
           reason: cancellationDetails.reason,
           sourceKind,
+          audioOrigin: remoteAudioOrigin,
           playbackStarted,
           fallbackAttempted: deviceFallbackAttempted,
         });
@@ -1253,6 +1287,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           timedOut: false,
           reason: cancellationDetails.reason,
           sourceKind,
+          audioOrigin: remoteAudioOrigin,
           playbackStarted,
         });
       }
@@ -1287,6 +1322,14 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           durationMillis: lastPlaybackDurationMillis,
         },
       });
+      if (remoteStage === "fetch") {
+        logLifecycle({
+          phase: "foreground_tts_failed",
+          elapsedMs: Date.now() - requestStartedAtMs,
+          error: errorMessage,
+          details: { audioOrigin: "foreground_generation" },
+        });
+      }
       await stopRemoteTtsPlayback({ remoteTtsSoundRef, remoteTtsFileRef });
 
       if (playbackStarted) {
@@ -1294,6 +1337,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           outcome: "remote_started_then_failed_unblocked",
           reason: remoteStage,
           sourceKind,
+          audioOrigin: remoteAudioOrigin,
           playbackStarted,
           fallbackAttempted: false,
           error: errorMessage,
@@ -1305,11 +1349,12 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           timedOut: remoteTimedOut,
           reason: remoteStage,
           sourceKind,
+          audioOrigin: remoteAudioOrigin,
           playbackStarted,
         });
       }
 
-      deviceFallbackAttempted = true;
+      deviceFallbackAttempted = fallbackSpeechAllowed;
       fallbackReason = remoteStage;
       if (fallbackSpeechAllowed) {
         logTtsMode(params.source, params.preset, "fallback", "backendError");
@@ -1346,7 +1391,20 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       allowRemoteTts: remoteAllowed,
       correlationId: params.correlationId,
     });
-    throw new Error(`Remote voice sample unavailable (${reason}).`);
+    logTtsDiagnosticCounter("final_user_visible_outcome", {
+      source: params.source,
+      preset: params.preset,
+      correlationId: params.correlationId,
+      reason,
+      sourceKind: null,
+      playbackStarted: false,
+      fallbackAttempted: false,
+      audioOrigin: remoteAudioOrigin,
+      chunkIndex: params.chunkIndex,
+      chunkCount: params.chunkCount,
+      outcome: "remote_tts_failed_fallback_blocked",
+    });
+    throw new Error(`Remote AI voice unavailable (${reason}).`);
   }
 
   if (!selectedVoiceIdentifierRef.current) {
@@ -1367,6 +1425,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
     correlationId: params.correlationId,
     reason: fallbackReason ?? "remote_unavailable",
     fallbackAttempted: true,
+    audioOrigin: "device_fallback",
     chunkIndex: params.chunkIndex,
     chunkCount: params.chunkCount,
   });
@@ -1433,7 +1492,12 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           chunkIndex: params.chunkIndex,
           chunkCount: params.chunkCount,
         });
-        params.onPlaybackStart?.({ source: params.source, mode: "fallback", startedAtMs: Date.now() });
+        params.onPlaybackStart?.({
+          source: params.source,
+          mode: "fallback",
+          audioOrigin: "device_fallback",
+          startedAtMs: Date.now(),
+        });
       };
 
       timeoutHandle = setTimeout(() => {
@@ -1532,6 +1596,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       correlationId: params.correlationId,
       reason: fallbackReason ?? "remote_unavailable",
       fallbackAttempted: true,
+      audioOrigin: "device_fallback",
       chunkIndex: params.chunkIndex,
       chunkCount: params.chunkCount,
     });
@@ -1539,6 +1604,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       outcome: "fallback_tts_completed",
       reason: fallbackReason ?? "remote_unavailable",
       fallbackAttempted: true,
+      audioOrigin: "device_fallback",
     });
     return buildResult({
       outcome: "fallback_tts_completed",
@@ -1547,6 +1613,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       timedOut: false,
       reason: fallbackReason ?? "remote_unavailable",
       sourceKind: null,
+      audioOrigin: "device_fallback",
       playbackStarted: true,
     });
   } catch (fallbackError) {
@@ -1559,6 +1626,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
         correlationId: params.correlationId,
         reason: fallbackReason ?? "remote_unavailable",
         fallbackAttempted: true,
+        audioOrigin: "device_fallback",
         chunkIndex: params.chunkIndex,
         chunkCount: params.chunkCount,
         error: errorMessage,
@@ -1568,6 +1636,7 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
       outcome: "fallback_tts_failed",
       reason: fallbackReason ?? "remote_unavailable",
       fallbackAttempted: true,
+      audioOrigin: "device_fallback",
       error: errorMessage,
     });
     throw fallbackError;
