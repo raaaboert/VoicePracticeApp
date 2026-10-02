@@ -1,5 +1,6 @@
 const AUTHENTICATED_SCOPED_CONFIG_SCREENS = new Set([
   "home",
+  "focus_topics",
   "setup",
   "simulation",
   "scorecard",

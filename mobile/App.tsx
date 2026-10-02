@@ -153,6 +153,8 @@ import { SimulationScreen } from "./src/screens/SimulationScreen";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
 import { RelatedTrainingContentScreen } from "./src/trainingContent/RelatedTrainingContentScreen";
+import { FocusTopicsScreen } from "./src/focusTopics/FocusTopicsScreen";
+import { canRequestFocusTopicCatalog } from "./src/focusTopics/model";
 import { confirmAndOpenExternalLink } from "./src/trainingContent/externalLinks";
 import {
   clearAiProcessingConsent,
@@ -217,6 +219,7 @@ type Screen =
   | "simulation"
   | "scorecard"
   | "performance"
+  | "focus_topics"
   | "training_content"
   | "related_training_content"
   | "usage_dashboard"
@@ -4145,6 +4148,7 @@ export default function App() {
   );
   const isOrgAdmin = Boolean(user?.accountType === "enterprise" && user.orgRole === "org_admin");
   const canViewOrganizationPlan = canAccessOrganizationPlan(user);
+  const canOpenFocusTopics = canRequestFocusTopicCatalog(user, Boolean(activeSuperUserOrgId));
   const organizationPlanDetails = useMemo(() => buildOrganizationPlanDetails(entitlements), [entitlements]);
   const canSubmitOrganizationPlanSupportRequest = canSubmitOrganizationPlanSupport(
     organizationPlanSupportDraft,
@@ -4540,15 +4544,50 @@ export default function App() {
           </View>
         ) : null}
 
-        <Pressable
-          style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
-          onPress={() => {
-            setTrainingContentPracticeReturnContentId(null);
-            setScreen("setup");
-          }}
-        >
-          <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
-        </Pressable>
+        {canOpenFocusTopics ? (
+          <>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open Focus Topics"
+              style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
+              onPress={() => setScreen("focus_topics")}
+            >
+              <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Focus Topics</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Continue to scenario setup"
+              style={styles.trainingModuleTile}
+              onPress={() => {
+                setTrainingContentPracticeReturnContentId(null);
+                setScreen("setup");
+              }}
+            >
+              <View style={styles.trainingModuleIconFrame}>
+                <MaterialCommunityIcons
+                  name="microphone-outline"
+                  size={28}
+                  color={APP_SURFACE_COLORS.goldMuted}
+                />
+              </View>
+              <View style={styles.trainingModuleCopy}>
+                <Text style={styles.trainingModuleTitle}>Browse scenarios</Text>
+                <Text style={styles.trainingModuleBody}>Continue to setup for standard or custom practice.</Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
+            </Pressable>
+          </>
+        ) : (
+          <Pressable
+            style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
+            onPress={() => {
+              setTrainingContentPracticeReturnContentId(null);
+              setScreen("setup");
+            }}
+          >
+            <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
+          </Pressable>
+        )}
 
         {activeSegment ? (
           <View style={[styles.card, styles.segmentCard]}>
@@ -6958,6 +6997,19 @@ export default function App() {
           onModuleAvailabilityChange={handleTrainingContentAvailability}
           initialContentId={trainingContentPracticeReturnContentId}
           onPracticeScenario={openRelatedPracticeScenario}
+        />
+      );
+    }
+
+    if (screen === "focus_topics" && user && mobileAuthToken && canOpenFocusTopics) {
+      const focusTopicContextKey = `${user.id}:${activeSuperUserOrgId ?? user.orgId ?? ""}`;
+      return (
+        <FocusTopicsScreen
+          key={focusTopicContextKey}
+          userId={user.id}
+          authToken={mobileAuthToken}
+          colorScheme={colorScheme}
+          onBackToHome={() => setScreen("home")}
         />
       );
     }

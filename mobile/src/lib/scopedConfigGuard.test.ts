@@ -17,6 +17,7 @@ function runTest(name: string, fn: () => void): void {
 
 runTest("marks protected authenticated screens as requiring scoped config", () => {
   assert(requiresAuthenticatedScopedConfig("home"), "home should require scoped config");
+  assert(requiresAuthenticatedScopedConfig("focus_topics"), "Focus Topics should require scoped config");
   assert(requiresAuthenticatedScopedConfig("setup"), "setup should require scoped config");
   assert(requiresAuthenticatedScopedConfig("admin_home"), "admin home should require scoped config");
   assert(requiresAuthenticatedScopedConfig("organization_plan"), "organization plan should require scoped config");
