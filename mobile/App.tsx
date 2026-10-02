@@ -808,6 +808,8 @@ export default function App() {
   const [setupSelectionIntent, setSetupSelectionIntent] =
     useState<ScenarioSetupSelection | null>(null);
   const [setupSelectionFailure, setSetupSelectionFailure] = useState<string | null>(null);
+  const [isSetupScenarioSelectionExpanded, setIsSetupScenarioSelectionExpanded] =
+    useState(true);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
@@ -919,6 +921,7 @@ export default function App() {
     setSetupOrigin(null);
     setSetupSelectionIntent(null);
     setSetupSelectionFailure(null);
+    setIsSetupScenarioSelectionExpanded(true);
     setMyOrgAccessRequests([]);
     setOrgAccessRequestsLoading(false);
     setIsOrgRequestSaving(false);
@@ -4366,6 +4369,7 @@ export default function App() {
     setSetupOrigin(origin);
     setSetupSelectionIntent(selection);
     setSetupSelectionFailure(null);
+    setIsSetupScenarioSelectionExpanded(false);
     setScenarioCatalogTab(selection.scenarioCatalogTab);
     setSelectedTrainingId(selection.selectedTrainingId);
     setSelectedIndustryId(selection.selectedIndustryId);
@@ -4649,6 +4653,7 @@ export default function App() {
                 setSetupOrigin(null);
                 setSetupSelectionIntent(null);
                 setSetupSelectionFailure(null);
+                setIsSetupScenarioSelectionExpanded(true);
                 setScreen("setup");
               }}
             >
@@ -4704,6 +4709,7 @@ export default function App() {
               setSetupOrigin(null);
               setSetupSelectionIntent(null);
               setSetupSelectionFailure(null);
+              setIsSetupScenarioSelectionExpanded(true);
               setScreen("setup");
             }}
           >
@@ -5158,6 +5164,11 @@ export default function App() {
 
   const renderSetup = () => {
     const orgMaxSimulationMinutes = entitlements?.limits?.maxSimulationMinutes ?? null;
+    const isGuidedSetup = setupOrigin !== null;
+    const showScenarioSelectors = !isGuidedSetup || isSetupScenarioSelectionExpanded;
+    const selectedPracticeDescription = activeScenario
+      ? activeScenario.summary ?? activeScenario.description
+      : "";
     return (
       <View
         style={[
@@ -5190,12 +5201,14 @@ export default function App() {
                 setSetupOrigin(null);
                 setSetupSelectionFailure(null);
                 setSetupError(null);
+                setIsSetupScenarioSelectionExpanded(true);
               }}
             >
               <Text style={styles.linkButtonText}>Browse Scenarios</Text>
             </Pressable>
           </View>
         ) : null}
+        {showScenarioSelectors ? (
         <View style={[styles.card, styles.setupSessionCard]}>
           <Text style={styles.sectionTitle}>Session Selection</Text>
 
@@ -5289,6 +5302,74 @@ export default function App() {
             <Text style={styles.hintText}>Max session length for your organization: {orgMaxSimulationMinutes} minute(s).</Text>
           ) : null}
         </View>
+        ) : setupSelectionIntent ? (
+          <View
+            style={[
+              styles.guidedPracticeCard,
+              {
+                backgroundColor: setupSurfaceTheme.surface,
+                borderColor: setupSurfaceTheme.border,
+              },
+            ]}
+            accessibilityRole="progressbar"
+            accessibilityLabel="Preparing selected practice"
+          >
+            <Text style={[styles.guidedPracticeEyebrow, { color: setupSurfaceTheme.accent }]}>Selected Practice</Text>
+            <Text style={styles.guidedPracticePending}>Preparing your practice setup...</Text>
+          </View>
+        ) : !setupSelectionFailure && activeScenario && activeSegment && activeIndustry ? (
+          <View
+            style={[
+              styles.guidedPracticeCard,
+              {
+                backgroundColor: setupSurfaceTheme.surface,
+                borderColor: setupSurfaceTheme.border,
+              },
+            ]}
+          >
+            <View
+              accessible
+              accessibilityLabel={`${activeScenario.title}. ${activeSegment.label}, ${activeIndustry.label}. ${scenarioCatalogTab === "custom" ? "Custom" : "Standard"} scenario.${selectedPracticeDescription ? ` ${selectedPracticeDescription}` : ""}`}
+              style={styles.guidedPracticeSummary}
+            >
+            <View style={styles.guidedPracticeHeading}>
+              <Text style={[styles.guidedPracticeEyebrow, { color: setupSurfaceTheme.accent }]}>Selected Practice</Text>
+              <Text style={styles.guidedPracticeSource}>
+                {scenarioCatalogTab === "custom" ? "Custom" : "Standard"}
+              </Text>
+            </View>
+            <Text style={styles.guidedPracticeTitle}>{activeScenario.title}</Text>
+            <Text style={[styles.guidedPracticeContext, { color: setupSurfaceTheme.accent }]}>
+              {activeSegment.label} · {activeIndustry.label}
+            </Text>
+            {scenarioCatalogTab === "custom" && activeTraining ? (
+              <Text style={styles.guidedPracticeTopic}>Focus Topic: {activeTraining.label}</Text>
+            ) : null}
+            {selectedPracticeDescription ? (
+              <Text style={styles.guidedPracticeDescription}>{selectedPracticeDescription}</Text>
+            ) : null}
+            {orgMaxSimulationMinutes !== null ? (
+              <Text style={styles.guidedPracticeMeta}>
+                Max session length: {orgMaxSimulationMinutes} minute(s)
+              </Text>
+            ) : null}
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Change scenario"
+              accessibilityHint="Shows the full scenario selection controls"
+              onPress={() => setIsSetupScenarioSelectionExpanded(true)}
+              style={({ pressed }) => [
+                styles.guidedPracticeChange,
+                { borderColor: setupSurfaceTheme.border },
+                pressed ? styles.setupPressed : null,
+              ]}
+            >
+              <Text style={[styles.guidedPracticeChangeText, { color: setupSurfaceTheme.accent }]}>Change scenario</Text>
+              <MaterialCommunityIcons name="chevron-down" size={20} color={setupSurfaceTheme.accent} />
+            </Pressable>
+          </View>
+        ) : null}
 
         <View style={styles.setupSection}>
           <Text accessibilityRole="header" style={styles.setupSectionTitle}>Difficulty</Text>
@@ -7291,6 +7372,60 @@ function createStyles(theme: ThemeTokens) {
       paddingBottom: 28,
     },
     setupSessionCard: { marginBottom: 0 },
+    guidedPracticeCard: {
+      borderWidth: 1,
+      borderRadius: 14,
+      padding: 16,
+      gap: 14,
+    },
+    guidedPracticeSummary: { gap: 7 },
+    guidedPracticeHeading: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+    },
+    guidedPracticeEyebrow: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 12,
+      lineHeight: 16,
+      fontWeight: "800",
+      textTransform: "uppercase",
+      letterSpacing: 0.7,
+    },
+    guidedPracticeSource: {
+      flexShrink: 0,
+      color: theme.textMuted,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight: "700",
+      textTransform: "uppercase",
+    },
+    guidedPracticeTitle: {
+      color: theme.text,
+      fontSize: 21,
+      lineHeight: 27,
+      fontWeight: "800",
+    },
+    guidedPracticeContext: { fontSize: 13, lineHeight: 19, fontWeight: "700" },
+    guidedPracticeTopic: { color: theme.textMuted, fontSize: 13, lineHeight: 19, fontWeight: "600" },
+    guidedPracticeDescription: { color: theme.textMuted, fontSize: 14, lineHeight: 21 },
+    guidedPracticeMeta: { color: theme.hint, fontSize: 12, lineHeight: 18, marginTop: 2 },
+    guidedPracticePending: { color: theme.textMuted, fontSize: 14, lineHeight: 21 },
+    guidedPracticeChange: {
+      minHeight: 44,
+      borderWidth: 1,
+      borderRadius: 10,
+      paddingHorizontal: 13,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      backgroundColor: theme.ghostButtonBg,
+    },
+    guidedPracticeChangeText: { flex: 1, fontSize: 14, lineHeight: 20, fontWeight: "700" },
+    setupPressed: { opacity: 0.68 },
     setupSection: { marginTop: 26 },
     setupSectionTitle: {
       color: theme.text,
