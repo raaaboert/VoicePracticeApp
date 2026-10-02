@@ -45,13 +45,14 @@ export function TrainingContentLibraryScreen(
   const searching = props.query.trim().length > 0;
 
   return (
-    <View style={styles.fill}>
-      <TrainingContentHeader
-        title="Learning Resources"
-        onBack={props.onBack}
-        theme={props.theme}
-      />
-      <View style={styles.searchShell}>
+    <View style={styles.backdrop}>
+      <View style={styles.surface}>
+        <TrainingContentHeader
+          title="Learning Resources"
+          onBack={props.onBack}
+          theme={props.theme}
+        />
+        <View style={styles.searchShell}>
         <MaterialCommunityIcons name="magnify" size={21} color={props.theme.muted} />
         <TextInput
           accessibilityLabel="Search Learning Resources"
@@ -77,16 +78,16 @@ export function TrainingContentLibraryScreen(
             />
           </Pressable>
         ) : null}
-      </View>
-      <ScrollView
-        style={styles.fill}
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
-        refreshControl={
-          <RefreshControl refreshing={props.refreshing} onRefresh={props.onRefresh} />
-        }
-      >
+        </View>
+        <ScrollView
+          style={styles.fill}
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+          refreshControl={
+            <RefreshControl refreshing={props.refreshing} onRefresh={props.onRefresh} />
+          }
+        >
         {props.loading ? (
           <View style={styles.state}>
             <ActivityIndicator color={props.theme.accent} />
@@ -200,7 +201,8 @@ export function TrainingContentLibraryScreen(
             ) : null}
           </>
         )}
-      </ScrollView>
+        </ScrollView>
+      </View>
     </View>
   );
 }
@@ -208,12 +210,22 @@ export function TrainingContentLibraryScreen(
 function createStyles(theme: TrainingContentTheme) {
   return StyleSheet.create({
     fill: { flex: 1 },
+    backdrop: { flex: 1, paddingHorizontal: 2, paddingVertical: 4 },
+    surface: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: theme.border,
+      borderRadius: 18,
+      backgroundColor: theme.background,
+      overflow: "hidden",
+    },
     searchShell: {
       height: 46,
       flexDirection: "row",
       alignItems: "center",
       gap: 8,
       marginVertical: 12,
+      marginHorizontal: 16,
       paddingHorizontal: 12,
       borderWidth: 1,
       borderColor: theme.border,
@@ -227,7 +239,7 @@ function createStyles(theme: TrainingContentTheme) {
       fontSize: 16,
       paddingVertical: 0,
     },
-    content: { paddingBottom: 28 },
+    content: { paddingHorizontal: 16, paddingBottom: 28 },
     state: {
       minHeight: 240,
       alignItems: "center",

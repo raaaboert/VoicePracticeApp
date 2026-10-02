@@ -152,7 +152,12 @@ export function TrainingContentScreen(props: TrainingContentScreenProps) {
   }, [loadLibrary]);
 
   return (
-    <View style={[styles.fill, { backgroundColor: theme.background }]}>
+    <View
+      style={[
+        styles.fill,
+        route.type === "library" ? null : { backgroundColor: theme.background },
+      ]}
+    >
       {notice ? (
         <View style={[styles.notice, { borderColor: theme.secondary, backgroundColor: theme.surface }]}>
           <Text style={[styles.noticeText, { color: theme.text }]}>{notice}</Text>

@@ -39,7 +39,7 @@ export function FocusTopicDetailShell({ topic, theme, onBack }: FocusTopicDetail
 function createStyles(theme: TrainingContentTheme) {
   return StyleSheet.create({
     fill: { flex: 1 },
-    content: { paddingTop: 24, paddingBottom: 32 },
+    content: { paddingTop: 24, paddingHorizontal: 16, paddingBottom: 32 },
     iconFrame: {
       width: 50,
       height: 50,

@@ -18,15 +18,32 @@ test("Training Content is a first-class entitlement-controlled home module", () 
   const menu = home.slice(home.indexOf("<Modal"), home.indexOf("</Modal>"));
 
   assert.match(home, /trainingContentEnabled\s*\?\s*\(/);
-  assert.match(home, /Review company resources and learning materials\./);
+  assert.match(home, /Browse all company learning materials\./);
   assert.match(home, /void openTrainingContent\(\)/);
   assert.ok(
-    home.indexOf('accessibilityLabel="Open Learning Resources"') >
+    home.indexOf('accessibilityLabel="Open Learning Resources"') <
+      home.indexOf("activeSegment ? (")
+  );
+  assert.ok(
+    home.lastIndexOf('accessibilityLabel="Open Learning Resources"') >
       home.indexOf("activeSegment ? (")
   );
   assert.doesNotMatch(menu, /Learning Resources/);
   assert.match(app, /screen === "training_content"/);
   assert.match(app, /fetchMobileModules\(user\.id, mobileAuthToken\)/);
+});
+
+test("Learning Resources library uses the rounded padded content surface", () => {
+  const screen = source("./TrainingContentScreen.tsx");
+  const library = source("./TrainingContentLibraryScreen.tsx");
+
+  assert.match(screen, /route\.type === "library" \? null : \{ backgroundColor: theme\.background \}/);
+  assert.match(library, /style=\{styles\.backdrop\}/);
+  assert.match(library, /style=\{styles\.surface\}/);
+  assert.match(library, /borderRadius: 18/);
+  assert.match(library, /overflow: "hidden"/);
+  assert.match(library, /content: \{ paddingHorizontal: 16, paddingBottom: 28 \}/);
+  assert.match(library, /marginHorizontal: 16/);
 });
 
 test("library navigation keeps search, category, detail, and empty states inside the module", () => {

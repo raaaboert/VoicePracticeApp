@@ -64,26 +64,38 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   }, [loadTopics]);
 
   return (
-    <View style={[styles.fill, { backgroundColor: theme.background }]}>
-      {selectedTopic ? (
-        <FocusTopicDetailShell
-          topic={selectedTopic}
-          theme={theme}
-          onBack={() => setSelectedTopic(null)}
-        />
-      ) : (
-        <FocusTopicLandingScreen
-          topics={topics}
-          loading={loading}
-          error={error}
-          theme={theme}
-          onBack={props.onBackToHome}
-          onRetry={() => { void loadTopics(); }}
-          onOpenTopic={(topic) => setSelectedTopic(buildFocusTopicNavigationSummary(topic))}
-        />
-      )}
+    <View style={styles.fill}>
+      <View style={[styles.surface, { backgroundColor: theme.background, borderColor: theme.border }]}>
+        {selectedTopic ? (
+          <FocusTopicDetailShell
+            topic={selectedTopic}
+            theme={theme}
+            onBack={() => setSelectedTopic(null)}
+          />
+        ) : (
+          <FocusTopicLandingScreen
+            topics={topics}
+            loading={loading}
+            error={error}
+            theme={theme}
+            onBack={props.onBackToHome}
+            onRetry={() => { void loadTopics(); }}
+            onOpenTopic={(topic) => setSelectedTopic(buildFocusTopicNavigationSummary(topic))}
+          />
+        )}
+      </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({ fill: { flex: 1 } });
+const styles = StyleSheet.create({
+  fill: { flex: 1 },
+  surface: {
+    flex: 1,
+    marginHorizontal: 2,
+    marginVertical: 4,
+    borderWidth: 1,
+    borderRadius: 18,
+    overflow: "hidden",
+  },
+});

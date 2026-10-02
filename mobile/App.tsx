@@ -4545,18 +4545,31 @@ export default function App() {
         ) : null}
 
         {canOpenFocusTopics ? (
-          <>
+          <View style={styles.homeDestinationGroup}>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Open Focus Topics"
-              style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
+              style={[styles.trainingModuleTile, styles.homeDestinationPrimary]}
               onPress={() => setScreen("focus_topics")}
             >
-              <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Focus Topics</Text>
+              <View style={[styles.trainingModuleIconFrame, styles.homeDestinationPrimaryIcon]}>
+                <MaterialCommunityIcons
+                  name="target"
+                  size={28}
+                  color={APP_SURFACE_COLORS.goldMuted}
+                />
+              </View>
+              <View style={styles.trainingModuleCopy}>
+                <Text style={styles.trainingModuleTitle}>Focus Topics</Text>
+                <Text style={styles.trainingModuleBody}>
+                  Practice scenarios and review resources organized around what you're working on.
+                </Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Continue to scenario setup"
+              accessibilityLabel="Browse Scenarios"
               style={styles.trainingModuleTile}
               onPress={() => {
                 setTrainingContentPracticeReturnContentId(null);
@@ -4571,12 +4584,43 @@ export default function App() {
                 />
               </View>
               <View style={styles.trainingModuleCopy}>
-                <Text style={styles.trainingModuleTitle}>Browse scenarios</Text>
-                <Text style={styles.trainingModuleBody}>Continue to setup for standard or custom practice.</Text>
+                <Text style={styles.trainingModuleTitle}>Browse Scenarios</Text>
+                <Text style={styles.trainingModuleBody}>Explore the full scenario library.</Text>
               </View>
               <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
             </Pressable>
-          </>
+            {trainingContentEnabled ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Open Learning Resources"
+                style={[
+                  styles.trainingModuleTile,
+                  isTrainingContentOpening ? styles.disabled : null,
+                ]}
+                disabled={isTrainingContentOpening}
+                onPress={() => {
+                  void openTrainingContent();
+                }}
+              >
+                <View style={styles.trainingModuleIconFrame}>
+                  <MaterialCommunityIcons
+                    name="bookshelf"
+                    size={28}
+                    color={APP_SURFACE_COLORS.goldMuted}
+                  />
+                </View>
+                <View style={styles.trainingModuleCopy}>
+                  <Text style={styles.trainingModuleTitle}>Learning Resources</Text>
+                  <Text style={styles.trainingModuleBody}>Browse all company learning materials.</Text>
+                </View>
+                {isTrainingContentOpening ? (
+                  <ActivityIndicator size="small" color={theme.accent} />
+                ) : (
+                  <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
+                )}
+              </Pressable>
+            ) : null}
+          </View>
         ) : (
           <Pressable
             style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
@@ -4605,12 +4649,13 @@ export default function App() {
           </View>
         ) : null}
 
-        {trainingContentEnabled ? (
+        {!canOpenFocusTopics && trainingContentEnabled ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Open Learning Resources"
             style={[
               styles.trainingModuleTile,
+              styles.homeStandaloneDestination,
               isTrainingContentOpening ? styles.disabled : null,
             ]}
             disabled={isTrainingContentOpening}
@@ -4627,9 +4672,7 @@ export default function App() {
             </View>
             <View style={styles.trainingModuleCopy}>
               <Text style={styles.trainingModuleTitle}>Learning Resources</Text>
-              <Text style={styles.trainingModuleBody}>
-                Review company resources and learning materials.
-              </Text>
+              <Text style={styles.trainingModuleBody}>Browse all company learning materials.</Text>
             </View>
             {isTrainingContentOpening ? (
               <ActivityIndicator size="small" color={theme.accent} />
@@ -7186,18 +7229,25 @@ function createStyles(theme: ThemeTokens) {
       minHeight: 92,
       borderRadius: 8,
       borderWidth: 1,
-      borderColor: theme.accent,
+      borderColor: theme.border,
       backgroundColor: theme.panel,
       paddingHorizontal: 14,
       paddingVertical: 13,
-      marginBottom: 14,
       flexDirection: "row",
       alignItems: "center",
       gap: 12,
     },
+    homeDestinationGroup: { gap: 10, marginBottom: 14 },
+    homeDestinationPrimary: {
+      borderColor: theme.accent,
+      backgroundColor: theme.currentPlanCardBg,
+    },
+    homeDestinationPrimaryIcon: { borderColor: theme.accent },
+    homeStandaloneDestination: { marginBottom: 14 },
     trainingModuleIconFrame: {
       width: 48,
       height: 48,
+      flexShrink: 0,
       borderRadius: 8,
       borderWidth: 1,
       borderColor: "rgba(181, 146, 76, 0.42)",
@@ -7205,7 +7255,7 @@ function createStyles(theme: ThemeTokens) {
       alignItems: "center",
       justifyContent: "center",
     },
-    trainingModuleCopy: { flex: 1, gap: 4 },
+    trainingModuleCopy: { flex: 1, minWidth: 0, gap: 4 },
     trainingModuleTitle: { color: theme.text, fontSize: 18, lineHeight: 22, fontWeight: "800" },
     trainingModuleBody: { color: theme.textMuted, fontSize: 13.5, lineHeight: 19 },
     segmentCard: {

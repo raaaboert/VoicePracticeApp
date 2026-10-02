@@ -75,7 +75,7 @@ export function FocusTopicLandingScreen(props: FocusTopicLandingScreenProps) {
 function createStyles(theme: TrainingContentTheme) {
   return StyleSheet.create({
     fill: { flex: 1 },
-    content: { paddingTop: 18, paddingBottom: 32 },
+    content: { paddingTop: 18, paddingHorizontal: 16, paddingBottom: 32 },
     intro: {
       color: theme.muted,
       fontSize: 16,
