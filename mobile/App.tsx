@@ -33,6 +33,7 @@ import {
   secondsToWholeMinutes,
 } from "@voicepractice/shared";
 import type {
+  MobileFocusTopicScenarioSummary,
   MobileRelatedPracticeScenarioSummary,
   MobileTrainingContentSummary,
   SuperUserOrgOption,
@@ -168,9 +169,14 @@ import {
   trainingContentErrorMessage,
 } from "./src/trainingContent/model";
 import {
-  buildRelatedPracticeSetupSelection,
-  relatedPracticeSetupBackDestination,
-} from "./src/trainingContent/relatedPracticeNavigation";
+  buildScenarioSetupSelection,
+  isExactScenarioSetupSelection,
+  setupBackDestination,
+  setupOriginContentId,
+  setupOriginTopicId,
+  type ScenarioSetupSelection,
+  type SetupOrigin,
+} from "./src/trainingContent/scenarioSetupNavigation";
 import {
   AiVoiceGender,
   AiVoiceProfile,
@@ -796,8 +802,10 @@ export default function App() {
   const [relatedTrainingContentItems, setRelatedTrainingContentItems] = useState<
     MobileTrainingContentSummary[]
   >([]);
-  const [trainingContentPracticeReturnContentId, setTrainingContentPracticeReturnContentId] =
-    useState<string | null>(null);
+  const [setupOrigin, setSetupOrigin] = useState<SetupOrigin | null>(null);
+  const [setupSelectionIntent, setSetupSelectionIntent] =
+    useState<ScenarioSetupSelection | null>(null);
+  const [setupSelectionFailure, setSetupSelectionFailure] = useState<string | null>(null);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
@@ -906,7 +914,9 @@ export default function App() {
     setTrainingContentNotice(null);
     setIsTrainingContentOpening(false);
     setRelatedTrainingContentItems([]);
-    setTrainingContentPracticeReturnContentId(null);
+    setSetupOrigin(null);
+    setSetupSelectionIntent(null);
+    setSetupSelectionFailure(null);
     setMyOrgAccessRequests([]);
     setOrgAccessRequestsLoading(false);
     setIsOrgRequestSaving(false);
@@ -1419,6 +1429,36 @@ export default function App() {
 
     return activeScenarios.find((scenario) => scenario.id === selectedScenarioId) ?? activeScenarios[0];
   }, [activeScenarios, selectedScenarioId]);
+
+  useEffect(() => {
+    if (screen !== "setup" || !setupSelectionIntent) {
+      return;
+    }
+    const exact = isExactScenarioSetupSelection(setupSelectionIntent, {
+      scenarioCatalogTab,
+      trainingId: scenarioCatalogTab === "custom" ? activeTraining?.id ?? null : null,
+      industryId: activeIndustry?.id ?? null,
+      roleId: activeSegment?.id ?? null,
+      scenarioId: activeScenario?.id ?? null,
+    });
+    setSetupSelectionIntent(null);
+    if (!exact) {
+      setSetupSelectionFailure(
+        setupOrigin?.type === "focus_topic"
+          ? "That practice scenario is no longer available in Setup. Return to the Focus Topic or choose Browse Scenarios."
+          : "That practice scenario is no longer available in Setup. Return to the Learning Resource or choose Browse Scenarios."
+      );
+    }
+  }, [
+    activeIndustry?.id,
+    activeScenario?.id,
+    activeSegment?.id,
+    activeTraining?.id,
+    scenarioCatalogTab,
+    screen,
+    setupOrigin,
+    setupSelectionIntent,
+  ]);
 
   const mergedTimezones = useMemo(
     () => dedupeTimezones([detectedTimezone, ...COMMON_TIMEZONES, ...timezones]),
@@ -4277,7 +4317,9 @@ export default function App() {
     }
     setIsTrainingContentOpening(true);
     setTrainingContentNotice(null);
-    setTrainingContentPracticeReturnContentId(null);
+    setSetupOrigin(null);
+    setSetupSelectionIntent(null);
+    setSetupSelectionFailure(null);
     try {
       const response = await fetchMobileModules(user.id, mobileAuthToken);
       if (!response.modules.trainingContent.enabled) {
@@ -4303,17 +4345,21 @@ export default function App() {
   }, [isTrainingContentOpening, mobileAuthToken, user]);
 
   const returnFromTrainingContent = useCallback((message?: string) => {
-    setTrainingContentPracticeReturnContentId(null);
+    setSetupOrigin(null);
+    setSetupSelectionIntent(null);
+    setSetupSelectionFailure(null);
     setTrainingContentNotice(message ?? null);
     setScreen("home");
   }, []);
 
-  const openRelatedPracticeScenario = useCallback((
-    contentId: string,
+  const applyScenarioSetupSelection = useCallback((
+    origin: SetupOrigin,
     scenario: MobileRelatedPracticeScenarioSummary
   ) => {
-    const selection = buildRelatedPracticeSetupSelection(scenario);
-    setTrainingContentPracticeReturnContentId(contentId);
+    const selection = buildScenarioSetupSelection(scenario);
+    setSetupOrigin(origin);
+    setSetupSelectionIntent(selection);
+    setSetupSelectionFailure(null);
     setScenarioCatalogTab(selection.scenarioCatalogTab);
     setSelectedTrainingId(selection.selectedTrainingId);
     setSelectedIndustryId(selection.selectedIndustryId);
@@ -4322,6 +4368,23 @@ export default function App() {
     setSetupError(null);
     setScreen("setup");
   }, []);
+
+  const openRelatedPracticeScenario = useCallback((
+    contentId: string,
+    scenario: MobileRelatedPracticeScenarioSummary
+  ) => {
+    applyScenarioSetupSelection(
+      { type: "learning_resource", contentId },
+      scenario
+    );
+  }, [applyScenarioSetupSelection]);
+
+  const openFocusTopicPracticeScenario = useCallback((
+    topicId: string,
+    scenario: MobileFocusTopicScenarioSummary
+  ) => {
+    applyScenarioSetupSelection({ type: "focus_topic", topicId }, scenario);
+  }, [applyScenarioSetupSelection]);
 
   const handleTrainingContentAvailability = useCallback((enabled: boolean) => {
     setTrainingContentEnabled(enabled);
@@ -4550,7 +4613,12 @@ export default function App() {
               accessibilityRole="button"
               accessibilityLabel="Open Focus Topics"
               style={[styles.trainingModuleTile, styles.homeDestinationPrimary]}
-              onPress={() => setScreen("focus_topics")}
+              onPress={() => {
+                setSetupOrigin(null);
+                setSetupSelectionIntent(null);
+                setSetupSelectionFailure(null);
+                setScreen("focus_topics");
+              }}
             >
               <View style={[styles.trainingModuleIconFrame, styles.homeDestinationPrimaryIcon]}>
                 <MaterialCommunityIcons
@@ -4572,7 +4640,9 @@ export default function App() {
               accessibilityLabel="Browse Scenarios"
               style={styles.trainingModuleTile}
               onPress={() => {
-                setTrainingContentPracticeReturnContentId(null);
+                setSetupOrigin(null);
+                setSetupSelectionIntent(null);
+                setSetupSelectionFailure(null);
                 setScreen("setup");
               }}
             >
@@ -4625,7 +4695,9 @@ export default function App() {
           <Pressable
             style={[styles.homePrimaryButton, useIosCompactHomeLayout ? styles.homePrimaryButtonCompact : null]}
             onPress={() => {
-              setTrainingContentPracticeReturnContentId(null);
+              setSetupOrigin(null);
+              setSetupSelectionIntent(null);
+              setSetupSelectionFailure(null);
               setScreen("setup");
             }}
           >
@@ -5085,9 +5157,11 @@ export default function App() {
       <View style={styles.topRow}>
         <Pressable
           style={styles.ghostButton}
-          onPress={() => setScreen(relatedPracticeSetupBackDestination(
-            trainingContentPracticeReturnContentId
-          ))}
+          onPress={() => {
+            setSetupSelectionIntent(null);
+            setSetupSelectionFailure(null);
+            setScreen(setupBackDestination(setupOrigin));
+          }}
         >
           <Text style={styles.ghostButtonText}>Back</Text>
         </Pressable>
@@ -5096,6 +5170,23 @@ export default function App() {
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        {setupSelectionFailure ? (
+          <View style={styles.errorCard} accessibilityRole="alert">
+            <Text style={styles.errorText}>{setupSelectionFailure}</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Browse Scenarios"
+              style={styles.linkButton}
+              onPress={() => {
+                setSetupOrigin(null);
+                setSetupSelectionFailure(null);
+                setSetupError(null);
+              }}
+            >
+              <Text style={styles.linkButtonText}>Browse Scenarios</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Session Selection</Text>
 
@@ -5218,7 +5309,15 @@ export default function App() {
 
       <View style={styles.bottomActionRegion}>
         {setupError ? <Text style={styles.bottomActionErrorText}>{setupError}</Text> : null}
-        <Pressable style={[styles.primaryButton, styles.bottomPrimaryButton]} onPress={() => void startSimulation()}>
+        <Pressable
+          style={[
+            styles.primaryButton,
+            styles.bottomPrimaryButton,
+            setupSelectionFailure ? styles.disabled : null,
+          ]}
+          disabled={Boolean(setupSelectionFailure)}
+          onPress={() => void startSimulation()}
+        >
           <Text style={styles.primaryButtonText}>Start Simulation</Text>
         </Pressable>
       </View>
@@ -7038,7 +7137,7 @@ export default function App() {
           colorScheme={colorScheme}
           onBackToHome={returnFromTrainingContent}
           onModuleAvailabilityChange={handleTrainingContentAvailability}
-          initialContentId={trainingContentPracticeReturnContentId}
+          initialContentId={setupOriginContentId(setupOrigin)}
           onPracticeScenario={openRelatedPracticeScenario}
         />
       );
@@ -7052,7 +7151,13 @@ export default function App() {
           userId={user.id}
           authToken={mobileAuthToken}
           colorScheme={colorScheme}
-          onBackToHome={() => setScreen("home")}
+          initialTopicId={setupOriginTopicId(setupOrigin)}
+          onBackToHome={() => {
+            setSetupOrigin(null);
+            setScreen("home");
+          }}
+          onPracticeScenario={openFocusTopicPracticeScenario}
+          onLeaveReturnedTopic={() => setSetupOrigin(null)}
         />
       );
     }

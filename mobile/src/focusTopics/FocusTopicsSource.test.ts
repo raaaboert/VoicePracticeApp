@@ -74,7 +74,7 @@ test("Home makes Focus Topics primary for eligible users while retaining setup a
   assert.match(home, /Browse all company learning materials\./);
   assert.match(home, /setScreen\("focus_topics"\)/);
   assert.match(home, /Browse Scenarios/);
-  assert.match(home, /setTrainingContentPracticeReturnContentId\(null\)/);
+  assert.match(home, /setSetupOrigin\(null\)/);
   assert.match(home, /setScreen\("setup"\)/);
   assert.match(home, /void openTrainingContent\(\)/);
   assert.match(home, />Active role<\/Text>/);
@@ -101,7 +101,7 @@ test("individual Home retains its existing setup-first hierarchy", () => {
   assert.ok(individualBranchStart >= 0);
   assert.match(individualBranch, /styles\.homePrimaryButton/);
   assert.match(individualBranch, /Continue to setup/);
-  assert.match(individualBranch, /setTrainingContentPracticeReturnContentId\(null\)/);
+  assert.match(individualBranch, /setSetupOrigin\(null\)/);
   assert.match(individualBranch, /setScreen\("setup"\)/);
   assert.doesNotMatch(individualBranch, /Focus Topics/);
   assert.doesNotMatch(individualBranch, /homeDestinationGroup/);
@@ -131,7 +131,7 @@ test("eligible enterprise Home renders Learning Resources only in the grouped de
   );
 });
 
-test("Topic Detail refetches authoritative content and keeps scenarios presentation-only", () => {
+test("Topic Detail refetches authoritative content and opens existing Setup intentionally", () => {
   const app = source("../../App.tsx");
   const screen = source("./FocusTopicsScreen.tsx");
   const detail = source("./FocusTopicDetailScreen.tsx");
@@ -147,14 +147,18 @@ test("Topic Detail refetches authoritative content and keeps scenarios presentat
   assert.match(detail, />Learning Resources<\/Text>/);
   assert.match(detail, /detail\.scenarios\.map/);
   assert.match(detail, /detail\.resources\.map/);
-  assert.match(detail, /<View[\s\S]*?key=\{scenario\.id\}[\s\S]*?accessible/);
+  assert.match(detail, /<Pressable[\s\S]*?key=\{scenario\.id\}[\s\S]*?accessibilityRole="button"/);
   assert.match(
     detail,
-    /accessibilityLabel=\{`\$\{scenario\.title\}[\s\S]*?\$\{scenario\.description\}/
+    /accessibilityLabel=\{`Set up practice for \$\{scenario\.title\}[\s\S]*?\$\{scenario\.description\}/
   );
-  assert.doesNotMatch(detail, /onPress=.*scenario|Set Up Practice|Start Simulation/);
+  assert.match(detail, /accessibilityHint="Opens Setup with this scenario selected"/);
+  assert.match(detail, /onPress=\{\(\) => props\.onPracticeScenario\(scenario\)\}/);
+  assert.match(detail, />Set Up Practice<\/Text>/);
+  assert.doesNotMatch(detail, /Start Simulation|setScreen\("simulation"\)|setSimulationConfig/);
   assert.doesNotMatch(detail, /Topic activities will be available here in a future update/);
-  assert.doesNotMatch(combined, /setSimulationConfig|setSelectedScenarioId|Start Simulation|setScreen\("setup"\)/i);
+  assert.doesNotMatch(combined, /setSimulationConfig|Start Simulation|setScreen\("simulation"\)/i);
+  assert.match(screen, /props\.onPracticeScenario\(selectedTopicId, scenario\)/);
   assert.match(app, /fetchMobileConfig\(nextUser\.id, authToken\)/);
   assert.match(app, /fetchAppConfig\(\)/);
 });
@@ -201,6 +205,29 @@ test("Topic Detail handles loading, unavailable, retry, empty sections, and stal
   assert.ok(screen.includes('key={`${selectedTopicId}:${selectedResourceId}`}'));
   assert.match(screen, /setRefreshCatalogOnBack\(true\)/);
   assert.match(screen, /void loadTopics\(\)/);
+  assert.match(screen, /props\.initialTopicId\?\.trim\(\) \|\| null/);
+  assert.doesNotMatch(screen, /const loadTopics[\s\S]*?setSelectedTopicId\(null\);[\s\S]*?setLoading\(true\)/);
+});
+
+test("Focus Topic Setup handoff is typed, exact, refreshable, and training-safe", () => {
+  const app = source("../../App.tsx");
+  const navigation = source("../trainingContent/scenarioSetupNavigation.ts");
+
+  assert.match(app, /applyScenarioSetupSelection\(\{ type: "focus_topic", topicId \}, scenario\)/);
+  assert.match(app, /buildScenarioSetupSelection\(scenario\)/);
+  assert.match(app, /isExactScenarioSetupSelection\(setupSelectionIntent/);
+  assert.match(app, /That practice scenario is no longer available in Setup/);
+  assert.match(app, /disabled=\{Boolean\(setupSelectionFailure\)\}/);
+  assert.match(app, /setScreen\(setupBackDestination\(setupOrigin\)\)/);
+  assert.match(app, /initialTopicId=\{setupOriginTopicId\(setupOrigin\)\}/);
+  assert.match(app, /setSetupOrigin\(null\);[\s\S]*?setSetupSelectionIntent\(null\)/);
+  assert.match(
+    app,
+    /trainingId: scenarioCatalogTab === "custom" \? activeTraining\?\.id \?\? null : null/
+  );
+  assert.doesNotMatch(navigation, /trainingPackId/);
+  assert.match(navigation, /scenario\.source === "custom" \? scenario\.trainingId \?\? "" : ""/);
+  assert.match(navigation, /requested\.scenarioCatalogTab === "custom"[\s\S]*?: null/);
 });
 
 test("identity key remounts the catalog for user or acting-organization changes", () => {

@@ -7,9 +7,12 @@ import { fileURLToPath } from "node:url";
 import type { MobileRelatedPracticeScenarioSummary } from "@voicepractice/shared";
 
 import {
-  buildRelatedPracticeSetupSelection,
-  relatedPracticeSetupBackDestination,
-} from "./relatedPracticeNavigation";
+  buildScenarioSetupSelection,
+  isExactScenarioSetupSelection,
+  setupBackDestination,
+  setupOriginContentId,
+  setupOriginTopicId,
+} from "./scenarioSetupNavigation";
 import {
   normalizeRelatedPracticeScenarios,
   relatedPracticeScenariosPath,
@@ -67,48 +70,76 @@ test("related section is after metadata/file information and before the viewer",
   assert.ok(related < viewer);
 });
 
-test("standard and custom Practice select the existing setup context", () => {
-  assert.deepEqual(buildRelatedPracticeSetupSelection(scenario("standard_a")), {
+test("standard and custom Practice share the exact existing setup selection", () => {
+  const standard = buildScenarioSetupSelection(scenario("standard_a"));
+  const custom = buildScenarioSetupSelection(scenario("custom_a", "custom"));
+  assert.deepEqual(standard, {
     scenarioCatalogTab: "standard",
     selectedTrainingId: "",
     selectedIndustryId: "software",
     selectedRoleId: "sales",
     selectedScenarioId: "standard_a",
   });
-  assert.deepEqual(buildRelatedPracticeSetupSelection(scenario("custom_a", "custom")), {
+  assert.deepEqual(custom, {
     scenarioCatalogTab: "custom",
     selectedTrainingId: "focus_topic_a",
     selectedIndustryId: "software",
     selectedRoleId: "sales",
     selectedScenarioId: "custom_a",
   });
-  const handlerStart = appSource.indexOf("const openRelatedPracticeScenario");
+  assert.equal(isExactScenarioSetupSelection(standard, {
+    scenarioCatalogTab: "standard",
+    trainingId: null,
+    industryId: "software",
+    roleId: "sales",
+    scenarioId: "standard_a",
+  }), true);
+  assert.equal(isExactScenarioSetupSelection(custom, {
+    scenarioCatalogTab: "custom",
+    trainingId: "focus_topic_a",
+    industryId: "software",
+    roleId: "sales",
+    scenarioId: "custom_a",
+  }), true);
+  assert.equal(isExactScenarioSetupSelection(standard, {
+    scenarioCatalogTab: "standard",
+    trainingId: null,
+    industryId: "software",
+    roleId: "sales",
+    scenarioId: "different",
+  }), false);
+  const handlerStart = appSource.indexOf("const applyScenarioSetupSelection");
   const handlerEnd = appSource.indexOf("const handleTrainingContentAvailability", handlerStart);
   const handler = appSource.slice(handlerStart, handlerEnd);
-  assert.match(handler, /buildRelatedPracticeSetupSelection\(scenario\)/);
+  assert.match(handler, /buildScenarioSetupSelection\(scenario\)/);
   assert.match(handler, /setScreen\("setup"\)/);
   assert.doesNotMatch(handler, /startSimulation|setSimulationConfig|fetch\(/);
 });
 
-test("Back from setup restores the same Learning Resource detail", () => {
-  assert.equal(relatedPracticeSetupBackDestination("resource_a"), "training_content");
-  assert.equal(relatedPracticeSetupBackDestination(null), "home");
-  assert.match(appSource, /setTrainingContentPracticeReturnContentId\(contentId\)/);
-  assert.match(appSource, /initialContentId=\{trainingContentPracticeReturnContentId\}/);
+test("typed Setup origins restore the same source without crossing destinations", () => {
+  const resourceOrigin = { type: "learning_resource" as const, contentId: "resource_a" };
+  const topicOrigin = { type: "focus_topic" as const, topicId: "topic_a" };
+  assert.equal(setupBackDestination(resourceOrigin), "training_content");
+  assert.equal(setupBackDestination(topicOrigin), "focus_topics");
+  assert.equal(setupBackDestination(null), "home");
+  assert.equal(setupOriginContentId(resourceOrigin), "resource_a");
+  assert.equal(setupOriginTopicId(topicOrigin), "topic_a");
+  assert.equal(setupOriginContentId(topicOrigin), null);
+  assert.equal(setupOriginTopicId(resourceOrigin), null);
+  assert.match(
+    appSource,
+    /applyScenarioSetupSelection\([\s\S]*?\{ type: "learning_resource", contentId \}/
+  );
+  assert.match(appSource, /initialContentId=\{setupOriginContentId\(setupOrigin\)\}/);
   assert.match(screenSource, /props\.initialContentId\?\.trim\(\)/);
   assert.match(screenSource, /\{ type: "detail", contentId, returnRoute: \{ type: "library" \} \}/);
 });
 
 test("normal setup entry from Home clears an old Learning Resource origin", () => {
-  let returnContentId: string | null = "resource_a";
-  assert.equal(relatedPracticeSetupBackDestination(returnContentId), "training_content");
-  returnContentId = null;
-  assert.equal(relatedPracticeSetupBackDestination(returnContentId), "home");
-
   const label = appSource.indexOf("Continue to setup");
   const handlerStart = appSource.lastIndexOf("<Pressable", label);
   const handler = appSource.slice(handlerStart, label);
-  const clearOrigin = handler.indexOf("setTrainingContentPracticeReturnContentId(null)");
+  const clearOrigin = handler.indexOf("setSetupOrigin(null)");
   const enterSetup = handler.indexOf('setScreen("setup")');
   assert.ok(clearOrigin >= 0);
   assert.ok(clearOrigin < enterSetup);

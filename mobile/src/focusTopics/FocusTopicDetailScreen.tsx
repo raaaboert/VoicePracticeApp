@@ -1,5 +1,8 @@
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
-import type { MobileFocusTopicDetailResponse } from "@voicepractice/shared";
+import type {
+  MobileFocusTopicDetailResponse,
+  MobileFocusTopicScenarioSummary,
+} from "@voicepractice/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -30,6 +33,7 @@ interface FocusTopicDetailScreenProps {
   notice: string | null;
   onBack: () => void;
   onOpenResource: (contentId: string) => void;
+  onPracticeScenario: (scenario: MobileFocusTopicScenarioSummary) => void;
   onUnavailable: () => void;
 }
 
@@ -152,11 +156,16 @@ export function FocusTopicDetailScreen(props: FocusTopicDetailScreenProps) {
             ) : (
               <View style={styles.cardList}>
                 {detail.scenarios.map((scenario) => (
-                  <View
+                  <Pressable
                     key={scenario.id}
-                    accessible
-                    accessibilityLabel={`${scenario.title}. ${scenario.segmentLabel}, ${scenario.industryLabel}. ${scenario.source === "custom" ? "Custom" : "Standard"} scenario.${scenario.description ? ` ${scenario.description}` : ""}`}
-                    style={styles.scenarioCard}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Set up practice for ${scenario.title}. ${scenario.segmentLabel}, ${scenario.industryLabel}. ${scenario.source === "custom" ? "Custom" : "Standard"} scenario.${scenario.description ? ` ${scenario.description}` : ""}`}
+                    accessibilityHint="Opens Setup with this scenario selected"
+                    onPress={() => props.onPracticeScenario(scenario)}
+                    style={({ pressed }) => [
+                      styles.scenarioCard,
+                      pressed ? styles.pressed : null,
+                    ]}
                   >
                     <View style={styles.scenarioHeading}>
                       <View style={styles.scenarioCopy}>
@@ -172,7 +181,15 @@ export function FocusTopicDetailScreen(props: FocusTopicDetailScreenProps) {
                     {scenario.description ? (
                       <Text style={styles.scenarioDescription}>{scenario.description}</Text>
                     ) : null}
-                  </View>
+                    <View style={styles.scenarioAction}>
+                      <Text style={styles.scenarioActionText}>Set Up Practice</Text>
+                      <MaterialCommunityIcons
+                        name="chevron-right"
+                        size={20}
+                        color={props.theme.accent}
+                      />
+                    </View>
+                  </Pressable>
                 ))}
               </View>
             )}
@@ -297,5 +314,13 @@ function createStyles(theme: TrainingContentTheme) {
       textTransform: "uppercase",
     },
     scenarioDescription: { color: theme.muted, fontSize: 14, lineHeight: 21 },
+    scenarioAction: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      gap: 2,
+      marginTop: 2,
+    },
+    scenarioActionText: { color: theme.accent, fontSize: 13, lineHeight: 18, fontWeight: "700" },
   });
 }

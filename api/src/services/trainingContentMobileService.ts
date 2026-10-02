@@ -23,6 +23,7 @@ import type {
 import { resolveTrainingContentEligibility } from "./trainingContentEligibility.js";
 import type { TrainingContentScenarioLinkService } from "./trainingContentScenarioLinks.js";
 import type { TrainingContentStorageReadinessService } from "./trainingContentStorageReadiness.js";
+import { resolveCanonicalMobileScenarioSetupSelection } from "./mobileScenarioSetupSelection.js";
 
 export interface MobileTrainingContentRequestContext {
   user: UserProfile;
@@ -449,7 +450,6 @@ function resolveMobileScenarioLaunchContext(
   scenarioId: string,
   trainingId?: string | null
 ): MobileRelatedPracticeScenarioSummary | null {
-  const enabledIndustries = config.industries.filter((industry) => industry.enabled);
   for (const segment of config.segments) {
     if (!segment.enabled) {
       continue;
@@ -460,33 +460,16 @@ function resolveMobileScenarioLaunchContext(
     if (!scenario) {
       continue;
     }
-    const linkedIndustryId = config.roleIndustries.find(
-      (entry) => entry.active
-        && entry.roleId === segment.id
-        && enabledIndustries.some((industry) => industry.id === entry.industryId)
-    )?.industryId;
-    const hasMappedStandardOptions = config.roleIndustries.some(
-      (entry) => entry.active
-        && enabledIndustries.some((industry) => industry.id === entry.industryId)
-        && config.segments.some(
-          (candidate) => candidate.id === entry.roleId
-            && candidate.enabled
-            && candidate.scenarios.some((item) => item.enabled !== false)
-        )
-    );
-    const industryId = linkedIndustryId
-      ?? (!hasMappedStandardOptions ? enabledIndustries[0]?.id : null)
-      ?? null;
-    return industryId
-      ? {
-        id: scenario.id,
-        title: scenario.title,
-        source: "standard",
-        segmentId: segment.id,
-        industryId,
-        trainingId: null,
-      }
-      : null;
+    return resolveCanonicalMobileScenarioSetupSelection(config, {
+      id: scenario.id,
+      title: scenario.title,
+      source: "standard",
+      segmentId: segment.id,
+      allowedIndustryIds: config.roleIndustries
+        .filter((entry) => entry.active && entry.roleId === segment.id)
+        .map((entry) => entry.industryId),
+      trainingId: null,
+    });
   }
 
   const customScenario = (config.orgCustomScenarios ?? []).find(
@@ -512,18 +495,15 @@ function resolveMobileScenarioLaunchContext(
   const training = normalizedTrainingId
     ? validTrainings.find((candidate) => candidate.id === normalizedTrainingId) ?? null
     : validTrainings[0] ?? null;
-  const industry = enabledIndustries.find(
-    (candidate) => customScenario.applicableIndustryIds.includes(candidate.id)
-  ) ?? null;
-  return training && industry
-    ? {
+  return training
+    ? resolveCanonicalMobileScenarioSetupSelection(config, {
       id: customScenario.id,
       title: customScenario.title,
       source: "custom",
       segmentId: segment.id,
-      industryId: industry.id,
+      allowedIndustryIds: customScenario.applicableIndustryIds,
       trainingId: training.id,
-    }
+    })
     : null;
 }
 

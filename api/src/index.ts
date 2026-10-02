@@ -288,6 +288,7 @@ import {
   MobileFocusTopicCatalogContext,
   MobileFocusTopicCatalogService,
 } from "./services/mobileFocusTopicCatalog.js";
+import { resolveCanonicalMobileScenarioSetupSelection } from "./services/mobileScenarioSetupSelection.js";
 import {
   parseTrainingPackScenarioSelection,
   TRAINING_PACK_SCENARIO_OPT_IN_PREFIX,
@@ -9195,38 +9196,26 @@ function resolveMobileFocusTopicScenarioSummary(
     return null;
   }
 
-  const enabledIndustries = configForUser.industries.filter((industry) => industry.enabled);
-  let industry = enabledIndustries.find((candidate) =>
-    resolved.allowedIndustryIds.includes(candidate.id)
-  ) ?? null;
-  if (!industry && resolved.source === "standard") {
-    const hasMappedStandardOptions = configForUser.roleIndustries.some(
-      (entry) => entry.active
-        && enabledIndustries.some((candidate) => candidate.id === entry.industryId)
-        && configForUser.segments.some(
-          (segment) => segment.id === entry.roleId
-            && segment.enabled
-            && segment.scenarios.some((scenario) => scenario.enabled !== false)
-        )
-    );
-    if (!hasMappedStandardOptions) {
-      industry = enabledIndustries[0] ?? null;
-    }
-  }
-  if (!industry) {
+  const selection = resolveCanonicalMobileScenarioSetupSelection(configForUser, {
+    id: resolved.scenario.id,
+    title: resolved.scenario.title,
+    source: resolved.source,
+    segmentId: resolved.segment.id,
+    allowedIndustryIds: resolved.allowedIndustryIds,
+    trainingId: resolved.source === "custom" ? trainingId?.trim() || null : null,
+  });
+  const industry = selection
+    ? configForUser.industries.find((candidate) => candidate.id === selection.industryId) ?? null
+    : null;
+  if (!selection || !industry) {
     return null;
   }
 
   return {
-    id: resolved.scenario.id,
-    title: resolved.scenario.title,
+    ...selection,
     description: resolved.scenario.summary?.trim() || resolved.scenario.description,
-    source: resolved.source,
-    segmentId: resolved.segment.id,
     segmentLabel: resolved.segment.label,
-    industryId: industry.id,
     industryLabel: industry.label,
-    trainingId: resolved.source === "custom" ? trainingId?.trim() || null : null,
   };
 }
 

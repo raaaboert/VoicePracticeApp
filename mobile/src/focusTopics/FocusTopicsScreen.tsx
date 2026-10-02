@@ -1,4 +1,7 @@
-import type { MobileFocusTopicCatalogItem } from "@voicepractice/shared";
+import type {
+  MobileFocusTopicCatalogItem,
+  MobileFocusTopicScenarioSummary,
+} from "@voicepractice/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 
@@ -16,12 +19,20 @@ interface FocusTopicsScreenProps {
   userId: string;
   authToken: string;
   colorScheme: AppColorScheme;
+  initialTopicId?: string | null;
   onBackToHome: () => void;
+  onPracticeScenario: (
+    topicId: string,
+    scenario: MobileFocusTopicScenarioSummary
+  ) => void;
+  onLeaveReturnedTopic: () => void;
 }
 
 export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const [topics, setTopics] = useState<MobileFocusTopicCatalogItem[] | null>(null);
-  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(
+    () => props.initialTopicId?.trim() || null
+  );
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const [detailNotice, setDetailNotice] = useState<string | null>(null);
@@ -34,8 +45,6 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const loadTopics = useCallback(async () => {
     const attempt = requestGate.current.start();
     setTopics(null);
-    setSelectedTopicId(null);
-    setSelectedResourceId(null);
     setLoading(true);
     setError(null);
     try {
@@ -78,11 +87,12 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
     setSelectedResourceId(null);
     setSelectedTopicId(null);
     setDetailNotice(null);
+    props.onLeaveReturnedTopic();
     if (refreshCatalogOnBack) {
       setRefreshCatalogOnBack(false);
       void loadTopics();
     }
-  }, [loadTopics, refreshCatalogOnBack]);
+  }, [loadTopics, props.onLeaveReturnedTopic, refreshCatalogOnBack]);
 
   const returnFromResource = useCallback((notice?: string) => {
     setSelectedResourceId(null);
@@ -132,6 +142,9 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
             notice={detailNotice}
             onBack={returnToCatalog}
             onOpenResource={setSelectedResourceId}
+            onPracticeScenario={(scenario) =>
+              props.onPracticeScenario(selectedTopicId, scenario)
+            }
             onUnavailable={markDetailUnavailable}
           />
         ) : (
