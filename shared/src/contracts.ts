@@ -186,6 +186,18 @@ export interface MobileModuleAvailabilityResponse {
   };
 }
 
+export interface MobileFocusTopicCatalogItem {
+  id: string;
+  name: string;
+  description: string;
+  scenarioCount: number;
+  resourceCount: number;
+}
+
+export interface MobileFocusTopicCatalogResponse {
+  topics: MobileFocusTopicCatalogItem[];
+}
+
 export interface MobileTrainingContentCategory {
   id: string;
   name: string;

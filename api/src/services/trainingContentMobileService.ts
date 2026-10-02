@@ -126,7 +126,7 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
       MOBILE_LIBRARY_LIMIT
     );
     return buildLibrary(
-      result.items.filter((record) => isEligible(record, context, orgId)),
+      result.items.filter((record) => isMobileTrainingContentRecordEligible(record, context, orgId)),
       result.truncated
     );
   }
@@ -167,7 +167,7 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
     return buildLibrary(
       candidateRecords.filter(
         (record): record is TrainingContentMobileReadRecord =>
-          record !== null && isEligible(record, context, orgId)
+          record !== null && isMobileTrainingContentRecordEligible(record, context, orgId)
       ),
       false
     );
@@ -283,14 +283,16 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
       orgId,
       normalizedContentId
     );
-    if (!record || !isEligible(record, context, orgId)) {
+    if (!record || !isMobileTrainingContentRecordEligible(record, context, orgId)) {
       throw unavailableContentError();
     }
     return record;
   }
 }
 
-function requireActiveMembership(context: MobileTrainingContentRequestContext): string {
+export function resolveActiveMobileTrainingContentMembershipOrgId(
+  context: MobileTrainingContentRequestContext
+): string | null {
   const user = context.user;
   const orgId = user.orgId?.trim() ?? "";
   if (
@@ -302,6 +304,14 @@ function requireActiveMembership(context: MobileTrainingContentRequestContext): 
     || !user.lastName?.trim()
     || !context.organizationActive
   ) {
+    return null;
+  }
+  return orgId;
+}
+
+function requireActiveMembership(context: MobileTrainingContentRequestContext): string {
+  const orgId = resolveActiveMobileTrainingContentMembershipOrgId(context);
+  if (!orgId) {
     throw new TrainingContentMobileServiceError(
       "Training Content is not available for this account.",
       403,
@@ -311,7 +321,7 @@ function requireActiveMembership(context: MobileTrainingContentRequestContext): 
   return orgId;
 }
 
-function isEligible(
+export function isMobileTrainingContentRecordEligible(
   record: TrainingContentMobileReadRecord,
   context: MobileTrainingContentRequestContext,
   orgId: string

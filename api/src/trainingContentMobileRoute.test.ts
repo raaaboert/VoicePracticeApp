@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -18,6 +18,7 @@ import {
   type MobileTrainingContentRequestContext,
   type TrainingContentMobileService,
 } from "./services/trainingContentMobileService.js";
+import type { MobileFocusTopicCatalogService } from "./services/mobileFocusTopicCatalog.js";
 
 const NOW = "2026-07-28T16:00:00.000Z";
 const MOBILE_TOKEN_SECRET = "mobile_token_secret_for_training_content_routes";
@@ -27,6 +28,9 @@ let dbPath: string;
 let baseUrl: string;
 let server: Server;
 let service: FakeMobileTrainingContentService;
+let setMobileFocusTopicCatalogServiceForTest: (
+  service: MobileFocusTopicCatalogService | null
+) => void;
 
 function buildOrg(id: string, status: EnterpriseOrg["status"] = "active"): EnterpriseOrg {
   return {
@@ -259,20 +263,83 @@ before(async () => {
   delete process.env.DATABASE_URL;
 
   const imported = await import("./index.js");
+  setMobileFocusTopicCatalogServiceForTest = imported.setMobileFocusTopicCatalogServiceForTest;
   const database = imported.createDefaultDatabase();
   database.orgs = [buildOrg("org_a"), buildOrg("org_b")];
   database.users = [
     buildUser("learner", "org_a"),
     buildUser("other", "org_b"),
+    buildUser("disabled", "org_a", { status: "disabled" }),
+    buildUser("individual", null),
+    buildUser("superuser", null, { isSuperUser: true, isPlatformAdmin: true }),
     buildUser("interim", "org_a", { firstName: null, lastName: null }),
     buildUser("reonboard", "org_a", { mobileProfileReonboardingRequired: true }),
   ];
   database.mobileAuthTokens = [
     mobileToken("learner", "token_learner"),
     mobileToken("other", "token_other"),
+    mobileToken("disabled", "token_disabled"),
+    mobileToken("individual", "token_individual"),
+    mobileToken("superuser", "token_superuser"),
     mobileToken("interim", "token_interim"),
     mobileToken("reonboard", "token_reonboard"),
   ];
+  const industry = database.config.industries.find((entry) => entry.enabled);
+  const roleIndustry = database.config.roleIndustries.find(
+    (entry) => entry.active
+      && entry.industryId === industry?.id
+      && database.config.segments.some((segment) => segment.id === entry.roleId && segment.enabled)
+  );
+  assert.ok(industry && roleIndustry);
+  database.orgs[0]!.activeIndustries = [industry.id];
+  database.orgs[0]!.customScenarios = [{
+    id: "focus_custom",
+    orgId: "org_a",
+    segmentId: roleIndustry.roleId,
+    title: "Focus custom",
+    description: "Actionable custom scenario",
+    aiRole: "Buyer",
+    scoringGuidance: "",
+    applicableIndustryIds: [industry.id],
+    enabled: true,
+    provenance: { sourceMode: "scratch", creationMethod: "manual" },
+    createdBy: "admin",
+    createdAt: NOW,
+    updatedAt: NOW,
+  }];
+  database.orgs[1]!.activeIndustries = [industry.id];
+  database.orgs[1]!.customScenarios = [{
+    id: "unattached_legacy_custom",
+    orgId: "org_b",
+    segmentId: roleIndustry.roleId,
+    title: "Unattached legacy custom",
+    description: "Must not manufacture a Focus Topic on read",
+    aiRole: "Buyer",
+    scoringGuidance: "",
+    applicableIndustryIds: [industry.id],
+    enabled: true,
+    provenance: { sourceMode: "scratch", creationMethod: "manual" },
+    createdBy: "admin",
+    createdAt: NOW,
+    updatedAt: NOW,
+  }];
+  database.orgTrainings = [{
+    id: "focus_topic",
+    orgId: "org_a",
+    name: "Focus Topic",
+    status: "active",
+    description: "Focus description",
+    createdAt: NOW,
+    updatedAt: NOW,
+  }];
+  database.orgTrainingScenarioAttachments = [{
+    id: "focus_attachment",
+    orgId: "org_a",
+    trainingId: "focus_topic",
+    scenarioId: "focus_custom",
+    createdAt: NOW,
+    updatedAt: NOW,
+  }];
   await writeFile(dbPath, `${JSON.stringify(database, null, 2)}\n`, "utf8");
 
   service = new FakeMobileTrainingContentService();
@@ -312,6 +379,122 @@ test("mobile module and library routes derive current user and organization cont
   assert.equal(calls[0]?.context.user.orgId, "org_a");
   assert.equal(calls[0]?.context.organizationActive, true);
   assert.equal(calls[0]?.context.users.some((user) => user.id === "other"), true);
+});
+
+test("mobile Focus Topic catalog binds token, acting organization, and the existing scenario resolver", async () => {
+  const sentinelTime = new Date("2001-01-01T00:00:00.000Z");
+  await utimes(dbPath, sentinelTime, sentinelTime);
+  const beforeRead = await stat(dbPath);
+  const result = await mobileRequest(
+    "/mobile/users/learner/focus-topics",
+    "token_learner",
+    { headers: { "X-Superuser-Org-Id": "org_b" } }
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, {
+    topics: [{
+      id: "focus_topic",
+      name: "Focus Topic",
+      description: "Focus description",
+      scenarioCount: 1,
+      resourceCount: 0,
+    }],
+  });
+  assert.deepEqual(Object.keys(result.body.topics[0]).sort(), [
+    "description",
+    "id",
+    "name",
+    "resourceCount",
+    "scenarioCount",
+  ]);
+  const afterRead = await stat(dbPath);
+  assert.equal(afterRead.mtimeMs, beforeRead.mtimeMs);
+
+  const wrongToken = await mobileRequest(
+    "/mobile/users/learner/focus-topics",
+    "token_other"
+  );
+  assert.equal(wrongToken.status, 401);
+
+  const disabled = await mobileRequest(
+    "/mobile/users/disabled/focus-topics",
+    "token_disabled"
+  );
+  assert.equal(disabled.status, 403);
+
+  const individual = await mobileRequest(
+    "/mobile/users/individual/focus-topics",
+    "token_individual"
+  );
+  assert.equal(individual.status, 403);
+
+  const superuserNeedsActingOrg = await mobileRequest(
+    "/mobile/users/superuser/focus-topics",
+    "token_superuser"
+  );
+  assert.equal(superuserNeedsActingOrg.status, 400);
+
+  const otherOrg = await mobileRequest(
+    "/mobile/users/superuser/focus-topics",
+    "token_superuser",
+    { headers: { "X-Superuser-Org-Id": "org_b" } }
+  );
+  assert.equal(otherOrg.status, 200);
+  assert.deepEqual(otherOrg.body, { topics: [] });
+  const persisted = JSON.parse(await readFile(dbPath, "utf8")) as {
+    orgTrainings?: Array<{ orgId: string }>;
+  };
+  assert.equal(persisted.orgTrainings?.some((topic) => topic.orgId === "org_b"), false);
+  assert.equal((await stat(dbPath)).mtimeMs, beforeRead.mtimeMs);
+});
+
+test("Focus Topic SQL work does not hold the app-state lock", async () => {
+  let markCatalogStarted!: () => void;
+  const catalogStarted = new Promise<void>((resolve) => {
+    markCatalogStarted = resolve;
+  });
+  let releaseCatalog!: () => void;
+  const catalogRelease = new Promise<void>((resolve) => {
+    releaseCatalog = resolve;
+  });
+  setMobileFocusTopicCatalogServiceForTest({
+    async getCatalog() {
+      markCatalogStarted();
+      await catalogRelease;
+      return { topics: [] };
+    },
+  });
+
+  const focusRequest = mobileRequest(
+    "/mobile/users/learner/focus-topics",
+    "token_learner"
+  );
+  await catalogStarted;
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const writeOutcome = await Promise.race([
+      mobileRequest(
+        "/mobile/users/learner/settings",
+        "token_learner",
+        { method: "PATCH", body: JSON.stringify({ timezone: "America/Denver" }) }
+      ).then((result) => ({ kind: "write" as const, result })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), 1_000);
+      }),
+    ]);
+    assert.equal(writeOutcome.kind, "write");
+    if (writeOutcome.kind === "write") {
+      assert.equal(writeOutcome.result.status, 200);
+    }
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+    releaseCatalog();
+    const focusResult = await focusRequest;
+    assert.equal(focusResult.status, 200);
+    setMobileFocusTopicCatalogServiceForTest(null);
+  }
 });
 
 test("mobile related-resource route forwards only authenticated scenario context", async () => {

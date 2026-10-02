@@ -222,6 +222,10 @@ export interface TrainingContentStore {
     orgId: string,
     maximumItems?: number
   ): Promise<TrainingContentMobileReadResult>;
+  listPublishedContentForMobileFocusTopics(
+    orgId: string,
+    focusTopicIds: readonly string[]
+  ): Promise<TrainingContentMobileReadRecord[]>;
   getPublishedContentForMobile(
     orgId: string,
     contentId: string
@@ -493,6 +497,10 @@ class NullTrainingContentStore implements TrainingContentStore {
 
   async listPublishedContentForMobile(): Promise<TrainingContentMobileReadResult> {
     return { items: [], truncated: false };
+  }
+
+  async listPublishedContentForMobileFocusTopics(): Promise<TrainingContentMobileReadRecord[]> {
+    return [];
   }
 
   async getPublishedContentForMobile(): Promise<TrainingContentMobileReadRecord | null> {
@@ -838,6 +846,30 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       items: selectedRows.map((row) => mapMobileReadRow(row, assignments.get(row.id) ?? [])),
       truncated: result.rows.length > limit,
     };
+  }
+
+  async listPublishedContentForMobileFocusTopics(
+    orgId: string,
+    focusTopicIds: readonly string[]
+  ): Promise<TrainingContentMobileReadRecord[]> {
+    await this.initialize();
+    const normalizedOrgId = requiredId(orgId, "Organization id");
+    const normalizedFocusTopicIds = Array.from(
+      new Set(focusTopicIds.map((id) => id.trim()).filter(Boolean))
+    );
+    if (normalizedFocusTopicIds.length === 0) {
+      return [];
+    }
+    const result = await this.pool.query<TrainingContentMobileRow>(
+      mobilePublishedContentQuery("AND c.focus_topic_id = ANY($2::text[])", ""),
+      [normalizedOrgId, normalizedFocusTopicIds]
+    );
+    const assignments = await listActiveAssignments(
+      this.pool,
+      normalizedOrgId,
+      result.rows.map((row) => row.id)
+    );
+    return result.rows.map((row) => mapMobileReadRow(row, assignments.get(row.id) ?? []));
   }
 
   async getPublishedContentForMobile(

@@ -322,7 +322,8 @@ test("mobile Training Content reads are bounded, published-only, ordered, and te
         const correctContent =
           values?.length !== 2
           || typeof values?.[1] === "number"
-          || values?.[1] === CONTENT_ROW.id;
+          || values?.[1] === CONTENT_ROW.id
+          || (Array.isArray(values?.[1]) && values[1].includes("training_1"));
         return { rows: correctOrg && correctContent ? [publishedRow] : [], rowCount: 1 };
       }
       if (text.includes("FROM org_content_assignments")) {
@@ -351,6 +352,10 @@ test("mobile Training Content reads are bounded, published-only, ordered, and te
   const library = await store.listPublishedContentForMobile("org_1", 25);
   const detail = await store.getPublishedContentForMobile("org_1", CONTENT_ROW.id);
   const crossTenant = await store.getPublishedContentForMobile("org_2", CONTENT_ROW.id);
+  const focusTopicItems = await store.listPublishedContentForMobileFocusTopics(
+    "org_1",
+    ["training_1", "training_1", ""]
+  );
 
   assert.equal(library.items.length, 1);
   assert.equal(library.items[0]?.content.publicationState, "published");
@@ -358,6 +363,7 @@ test("mobile Training Content reads are bounded, published-only, ordered, and te
   assert.equal(library.items[0]?.assignments[0]?.assignmentType, "organization");
   assert.equal(detail?.content.id, CONTENT_ROW.id);
   assert.equal(crossTenant, null);
+  assert.equal(focusTopicItems.length, 1);
   const listQuery = queries.find(
     (query) => query.text.includes("FROM org_content_items c") && query.values?.[1] === 26
   );
@@ -371,4 +377,10 @@ test("mobile Training Content reads are bounded, published-only, ordered, and te
     query.text.includes("content_id = ANY($2::uuid[])")
     && query.values?.[0] === "org_1"
   ));
+  const focusTopicQuery = queries.find((query) =>
+    query.text.includes("c.focus_topic_id = ANY($2::text[])")
+  );
+  assert.ok(focusTopicQuery);
+  assert.deepEqual(focusTopicQuery.values, ["org_1", ["training_1"]]);
+  assert.doesNotMatch(focusTopicQuery.text, /LIMIT \$\d+/);
 });

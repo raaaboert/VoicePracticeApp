@@ -283,6 +283,15 @@ import {
   TrainingContentMobileService,
 } from "./services/trainingContentMobileService.js";
 import {
+  createMobileFocusTopicCatalogService,
+  MobileFocusTopicCatalogContext,
+  MobileFocusTopicCatalogService,
+} from "./services/mobileFocusTopicCatalog.js";
+import {
+  parseTrainingPackScenarioSelection,
+  TRAINING_PACK_SCENARIO_OPT_IN_PREFIX,
+} from "./services/trainingPackScenarioSelection.js";
+import {
   buildEvaluationPromptWithOrchestrator,
   buildRoleplayPromptsWithOrchestrator
 } from "./services/promptOrchestrator.js";
@@ -558,7 +567,6 @@ const GIT_SHA =
 const READINESS_REFRESH_MS = 15_000;
 const READINESS_FAILURE_THRESHOLD = 3;
 const WARNING_LOG_THROTTLE_MS = 60_000;
-const TRAINING_PACK_SCENARIO_OPT_IN_PREFIX = "scenario:";
 const SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES = 5;
 const SIMULATION_AI_BUDGET_GRACE_FALLBACK_MINUTES = DEFAULT_MAX_SIMULATION_MINUTES + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES;
 const SIMULATION_AI_BUDGET_GRACE_MAX_MINUTES = MAX_MAX_SIMULATION_MINUTES + SIMULATION_AI_BUDGET_GRACE_BUFFER_MINUTES;
@@ -671,6 +679,13 @@ const defaultTrainingContentMobileService = createTrainingContentMobileService({
 });
 let trainingContentMobileService: TrainingContentMobileService =
   defaultTrainingContentMobileService;
+const defaultMobileFocusTopicCatalogService = createMobileFocusTopicCatalogService({
+  trainingPackStore,
+  trainingContentStore,
+  entitlementStore: orgModuleEntitlementStore,
+});
+let mobileFocusTopicCatalogService: MobileFocusTopicCatalogService =
+  defaultMobileFocusTopicCatalogService;
 const auditEventStore = createAuditEventStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -5717,40 +5732,6 @@ function formatDashboardMonthLabel(date: Date): string {
   return date.toLocaleDateString("en-US", { month: "short" });
 }
 
-function parseTrainingPackScenarioSelection(triggers: string[]): {
-  mode: "all" | "selected" | "none";
-  selectedScenarioIds: string[];
-} {
-  let mode: "all" | "selected" | "none" = "none";
-  const selectedScenarioIds = new Set<string>();
-
-  for (const trigger of triggers) {
-    const lower = trigger.trim().toLowerCase();
-    if (!lower.startsWith(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX)) {
-      continue;
-    }
-
-    const scenarioId = trigger.slice(TRAINING_PACK_SCENARIO_OPT_IN_PREFIX.length).trim();
-    if (!scenarioId) {
-      continue;
-    }
-
-    if (scenarioId === "*") {
-      mode = "all";
-      selectedScenarioIds.clear();
-      break;
-    }
-
-    mode = "selected";
-    selectedScenarioIds.add(scenarioId);
-  }
-
-  return {
-    mode,
-    selectedScenarioIds: Array.from(selectedScenarioIds)
-  };
-}
-
 function isTrainingPackScopedToScenario(pack: TrainingPack, scenarioId: string): boolean {
   const selection = parseTrainingPackScenarioSelection(pack.requiredBehavioralTriggers ?? []);
   if (selection.mode === "all") {
@@ -9132,8 +9113,13 @@ interface ResolvedMobileScenarioContext {
   scoringGuidance: string | null;
 }
 
+type MobileScenarioResolutionConfig = Pick<
+  AppConfig,
+  "roleIndustries" | "segments" | "orgCustomScenarios" | "orgTrainings"
+>;
+
 function resolveMobileScenarioForUser(
-  configForUser: AppConfig,
+  configForUser: MobileScenarioResolutionConfig,
   scenarioId: string,
   trainingId?: string | null,
 ): ResolvedMobileScenarioContext | null {
@@ -17346,6 +17332,104 @@ app.delete("/mobile/users/:userId", async (request: Request, response: Response)
   response.status(outcome.status).json(outcome.body);
 });
 
+app.get("/mobile/users/:userId/focus-topics", async (request: Request, response: Response) => {
+  const authToken = getIncomingMobileToken(request);
+  if (!authToken) {
+    response.status(401).json({ error: "Missing mobile token." });
+    return;
+  }
+
+  try {
+    // Capture a stable app-state view without syncing claims or saving. Extracted-store
+    // reads must remain outside this process-wide lock.
+    const snapshot = await withDatabaseLock(async () => {
+      const db = await loadDatabase({
+        forceStorageRead: true,
+        syncEmployeeIdClaims: false,
+      });
+      const user = getUserById(db, request.params.userId);
+      if (!user) {
+        response.status(404).json({ error: "User not found." });
+        return null;
+      }
+      if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
+        response.status(401).json({ error: "Invalid mobile token." });
+        return null;
+      }
+
+      const accessContext = resolveMobileAccessContext(db, user, request, response, {
+        requireSuperUserOrgSelection: true,
+      });
+      if (!accessContext) {
+        return null;
+      }
+      const org = accessContext.actingOrg;
+      if (!org || !accessContext.actingOrgId) {
+        response.status(403).json({
+          error: "Enterprise account access is required.",
+          code: ORG_ACCESS_REQUIRED_CODE,
+        });
+        return null;
+      }
+
+      const configForUser = resolveConfigForUser(db, user, org.id);
+      const userDivisionId = org.divisionsEnabled === true
+        ? resolveUserActiveDivisionId(db, org.id, user)
+        : null;
+      const visibleTopicIds = db.orgTrainings
+        .filter((topic) => topic.orgId === org.id && isDivisionVisibleToUser({
+          divisionsEnabled: org.divisionsEnabled === true,
+          userDivisionId,
+          contentDivisionId: org.divisionsEnabled === true
+            ? resolveTrainingActiveDivisionId(db, org.id, topic.id)
+            : null,
+        }))
+        .map((topic) => topic.id);
+      const context: Omit<
+        MobileFocusTopicCatalogContext,
+        "isTopicVisible" | "resolveScenario"
+      > = {
+        actingOrgId: org.id,
+        organizationActive: org.status === "active",
+        user,
+        users: db.users,
+        topics: db.orgTrainings,
+        packAttachments: db.orgTrainingPackAttachments,
+        scenarioAttachments: db.orgTrainingScenarioAttachments,
+        packAssignments: db.trainingPackAssignments ?? [],
+        scenarioConfig: {
+          industries: configForUser.industries,
+          roleIndustries: configForUser.roleIndustries,
+          segments: configForUser.segments,
+          orgCustomScenarios: configForUser.orgCustomScenarios,
+          orgTrainings: configForUser.orgTrainings,
+        },
+      };
+      return structuredClone({ context, visibleTopicIds });
+    });
+    if (!snapshot) {
+      return;
+    }
+
+    const visibleTopicIds = new Set(snapshot.visibleTopicIds);
+    // The facade combines app-state authority at T1 with extracted-store rows at T2.
+    // Its same-org/live-reference checks omit inconsistent rows, while object launch
+    // and resource detail paths independently re-authorize on their later requests.
+    const result = await mobileFocusTopicCatalogService.getCatalog({
+      ...snapshot.context,
+      isTopicVisible: (topic) => visibleTopicIds.has(topic.id),
+      resolveScenario: (scenarioId, trainingId) =>
+        resolveMobileScenarioForUser(snapshot.context.scenarioConfig, scenarioId, trainingId),
+    });
+    response.json(result);
+  } catch {
+    response.status(503).json({
+      error: "Focus Topics are temporarily unavailable.",
+      code: "focus_topic_catalog_unavailable",
+    });
+  }
+});
+
 app.get("/mobile/users/:userId/modules", async (request: Request, response: Response) => {
   try {
     const result = await withMobileTrainingContentContext(request, response, (context) =>
@@ -23453,6 +23537,15 @@ export function setTrainingContentMobileServiceForTest(
     throw new Error("setTrainingContentMobileServiceForTest is only available in test.");
   }
   trainingContentMobileService = service ?? defaultTrainingContentMobileService;
+}
+
+export function setMobileFocusTopicCatalogServiceForTest(
+  service: MobileFocusTopicCatalogService | null
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setMobileFocusTopicCatalogServiceForTest is only available in test.");
+  }
+  mobileFocusTopicCatalogService = service ?? defaultMobileFocusTopicCatalogService;
 }
 
 export { app, createDefaultDatabase, ensureDatabaseShape, ensureDemoEnterpriseData };

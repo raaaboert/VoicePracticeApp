@@ -263,6 +263,17 @@ class FakeStore implements TrainingContentStore {
       truncated: this.truncated,
     };
   }
+  async listPublishedContentForMobileFocusTopics(
+    orgId: string,
+    focusTopicIds: readonly string[]
+  ) {
+    const selectedTopicIds = new Set(focusTopicIds);
+    return this.records.filter(
+      (entry) => entry.content.orgId === orgId
+        && entry.content.focusTopicId !== null
+        && selectedTopicIds.has(entry.content.focusTopicId)
+    );
+  }
   async getPublishedContentForMobile(orgId: string, contentId: string) {
     return this.records.find(
       (entry) => entry.content.orgId === orgId && entry.content.id === contentId
