@@ -83,6 +83,19 @@ test("custom scenario setup uses the locked Focus Topic copy", () => {
   );
 });
 
+test("Custom Scenario Focus Topic options preserve server company order", () => {
+  const app = source("../../App.tsx");
+  const optionsStart = app.indexOf("const activeCustomTrainingOptions");
+  const optionsEnd = app.indexOf("const hasCustomScenarioOptions", optionsStart);
+  const options = app.slice(optionsStart, optionsEnd);
+
+  assert.ok(optionsStart >= 0 && optionsEnd > optionsStart);
+  assert.match(options, /return \(config\?\.orgTrainings \?\? \[\]\)/);
+  assert.match(options, /\.filter\(\(training\) => training\.status === "active"\)/);
+  assert.doesNotMatch(options, /orgTrainings[^;]*\.sort\(|\.sort\([^)]*training/);
+  assert.ok(options.indexOf(".filter((training)") < options.indexOf(".map((training)"));
+});
+
 test("legacy Focus Topic migration copy is suppressed by exact description match only", () => {
   const app = source("../../App.tsx");
 
