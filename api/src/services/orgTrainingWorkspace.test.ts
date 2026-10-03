@@ -1,20 +1,224 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ApiDatabase } from "@voicepractice/shared";
+import { ApiDatabase, OrgTrainingRecord } from "@voicepractice/shared";
 
 import {
   buildOrgTrainingSummaries,
+  buildOrgTrainingSummariesInCompanyOrder,
+  compareOrgTrainingCompanyOrder,
   ensureOrgTrainingCollections,
+  getOrgTrainingOrderRevision,
   LEGACY_TEST_TRAINING_DESCRIPTION,
   LEGACY_TEST_TRAINING_NAME,
+  listActiveOrgTrainingsInCompanyOrder,
+  listOrgTrainingRecords,
+  materializeActiveOrgTrainingOrderWithAppendedTopic,
+  normalizeOrgTrainingDisplayOrder,
   normalizeOrgTrainingPackAttachments,
   normalizeOrgTrainingRecords,
   normalizeOrgTrainingScenarioAttachments,
   replaceOrgTrainingPackAttachments,
   replaceOrgTrainingScenarioAttachments,
+  reorderActiveOrgTrainings,
   seedLegacyOrgTraining,
 } from "./orgTrainingWorkspace.js";
+
+const ORDER_NOW = "2026-10-02T12:00:00.000Z";
+
+function orderedTraining(
+  id: string,
+  name: string,
+  overrides: Partial<OrgTrainingRecord> = {},
+): OrgTrainingRecord {
+  return {
+    id,
+    orgId: "org_123",
+    name,
+    status: "active" as const,
+    description: "",
+    createdAt: ORDER_NOW,
+    updatedAt: ORDER_NOW,
+    ...overrides,
+  };
+}
+
+test("display order normalization accepts only nonnegative safe integers", () => {
+  assert.equal(normalizeOrgTrainingDisplayOrder(undefined), undefined);
+  assert.equal(normalizeOrgTrainingDisplayOrder(0), 0);
+  assert.equal(normalizeOrgTrainingDisplayOrder(17), 17);
+  for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "1"]) {
+    assert.equal(normalizeOrgTrainingDisplayOrder(invalid), undefined);
+  }
+
+  const normalized = normalizeOrgTrainingRecords([
+    orderedTraining("zero", "Zero", { displayOrder: 0 }),
+    orderedTraining("positive", "Positive", { displayOrder: 4 }),
+    orderedTraining("negative", "Negative", { displayOrder: -1 }),
+    orderedTraining("fraction", "Fraction", { displayOrder: 1.5 }),
+    orderedTraining("unsafe", "Unsafe", { displayOrder: Number.MAX_SAFE_INTEGER + 1 }),
+    orderedTraining("string", "String", { displayOrder: "1" as unknown as number }),
+    orderedTraining("missing", "Missing"),
+  ], new Set(["org_123"]), ORDER_NOW);
+  assert.deepEqual(
+    normalized.map((training) => [training.id, training.displayOrder]),
+    [
+      ["zero", 0], ["positive", 4], ["negative", undefined],
+      ["fraction", undefined], ["unsafe", undefined], ["string", undefined], ["missing", undefined],
+    ],
+  );
+});
+
+test("company comparator orders explicit topics first with deterministic legacy and duplicate fallbacks", () => {
+  const topics = [
+    orderedTraining("legacy_z", "Zulu"),
+    orderedTraining("ordered_b", "Beta", { displayOrder: 2 }),
+    orderedTraining("duplicate_z", "Zulu", { displayOrder: 1 }),
+    orderedTraining("legacy_a2", "alpha"),
+    orderedTraining("duplicate_a2", "alpha", { displayOrder: 1 }),
+    orderedTraining("duplicate_a1", "Alpha", { displayOrder: 1 }),
+    orderedTraining("ordered_a", "First", { displayOrder: 0 }),
+    orderedTraining("legacy_a1", "Alpha"),
+  ];
+  assert.deepEqual(topics.sort(compareOrgTrainingCompanyOrder).map((topic) => topic.id), [
+    "ordered_a", "duplicate_a1", "duplicate_a2", "duplicate_z", "ordered_b",
+    "legacy_a1", "legacy_a2", "legacy_z",
+  ]);
+});
+
+test("company-order summaries are explicit while the shared list retains its prior dashboard ordering", () => {
+  const db = {
+    orgTrainings: [
+      orderedTraining("topic_a", "Topic A", { displayOrder: 1, updatedAt: "2026-10-02T11:00:00.000Z" }),
+      orderedTraining("topic_b", "Topic B", { displayOrder: 2, updatedAt: "2026-10-02T13:00:00.000Z" }),
+      orderedTraining("topic_c", "Topic C", { displayOrder: 0, updatedAt: "2026-10-02T12:00:00.000Z" }),
+    ],
+    orgTrainingPackAttachments: [],
+    orgTrainingScenarioAttachments: [],
+  };
+  assert.deepEqual(listOrgTrainingRecords(db, "org_123").map((topic) => topic.id), [
+    "topic_b", "topic_c", "topic_a",
+  ]);
+  assert.deepEqual(buildOrgTrainingSummariesInCompanyOrder({ db, orgId: "org_123" }).map((topic) => topic.id), [
+    "topic_c", "topic_a", "topic_b",
+  ]);
+  assert.deepEqual(buildOrgTrainingSummaries({ db, orgId: "org_123" }).map((topic) => topic.id), [
+    "topic_b", "topic_c", "topic_a",
+  ]);
+});
+
+test("active append materializes mixed legacy order and places creation or restoration last", () => {
+  const db = {
+    orgTrainings: [
+      orderedTraining("explicit", "Zulu", { displayOrder: 2 }),
+      orderedTraining("legacy_a", "Alpha"),
+      orderedTraining("legacy_b", "Beta"),
+      orderedTraining("restored", "Restored", { displayOrder: 0 }),
+      orderedTraining("draft", "Draft", { status: "draft" }),
+      orderedTraining("foreign", "Foreign", { orgId: "org_other", displayOrder: 0 }),
+    ],
+  };
+  materializeActiveOrgTrainingOrderWithAppendedTopic({
+    db,
+    orgId: "org_123",
+    trainingId: "restored",
+    updatedAt: "2026-10-02T13:00:00.000Z",
+  });
+  assert.deepEqual(
+    listActiveOrgTrainingsInCompanyOrder(db, "org_123").map((topic) => [topic.id, topic.displayOrder]),
+    [["explicit", 0], ["legacy_a", 1], ["legacy_b", 2], ["restored", 3]],
+  );
+  assert.equal(db.orgTrainings.find((topic) => topic.id === "draft")?.displayOrder, undefined);
+  assert.equal(db.orgTrainings.find((topic) => topic.id === "foreign")?.displayOrder, 0);
+});
+
+test("atomic reorder validates revision and the complete active same-org set before mutation", () => {
+  const db = {
+    orgTrainings: [
+      orderedTraining("a", "A", { displayOrder: 0 }),
+      orderedTraining("b", "B", { displayOrder: 1 }),
+      orderedTraining("draft", "Draft", { status: "draft" }),
+      orderedTraining("foreign", "Foreign", { orgId: "org_other", displayOrder: 0 }),
+    ],
+  };
+  const revision = getOrgTrainingOrderRevision(db, "org_123");
+  const before = structuredClone(db.orgTrainings);
+  for (const trainingIds of [
+    ["a", "a"], ["a"], ["a", "draft"], ["a", "foreign"], ["a", "deleted"], ["a", " b "], ["a", ""],
+  ]) {
+    assert.throws(() => reorderActiveOrgTrainings({
+      db,
+      orgId: "org_123",
+      trainingIds,
+      expectedOrderRevision: revision,
+      updatedAt: "2026-10-02T14:00:00.000Z",
+    }));
+    assert.deepEqual(db.orgTrainings, before);
+  }
+  assert.throws(() => reorderActiveOrgTrainings({
+    db,
+    orgId: "org_123",
+    trainingIds: ["b", "a"],
+    expectedOrderRevision: "stale",
+    updatedAt: "2026-10-02T14:00:00.000Z",
+  }), /changed in another session/);
+  assert.throws(() => reorderActiveOrgTrainings({
+    db,
+    orgId: "org_123",
+    trainingIds: ["b", "a"],
+    expectedOrderRevision: ` ${revision}`,
+    updatedAt: "2026-10-02T14:00:00.000Z",
+  }), /changed in another session/);
+  assert.deepEqual(db.orgTrainings, before);
+
+  const nextRevision = reorderActiveOrgTrainings({
+    db,
+    orgId: "org_123",
+    trainingIds: ["b", "a"],
+    expectedOrderRevision: revision,
+    updatedAt: "2026-10-02T14:00:00.000Z",
+  });
+  assert.deepEqual(
+    listActiveOrgTrainingsInCompanyOrder(db, "org_123").map((topic) => [topic.id, topic.displayOrder]),
+    [["b", 0], ["a", 1]],
+  );
+  assert.notEqual(nextRevision, revision);
+  assert.equal(db.orgTrainings.find((topic) => topic.id === "draft")?.displayOrder, undefined);
+  assert.equal(db.orgTrainings.find((topic) => topic.id === "foreign")?.displayOrder, 0);
+});
+
+test("active membership changes are stale conflicts before submitted-list validation", () => {
+  const original = [
+    orderedTraining("a", "A", { displayOrder: 0 }),
+    orderedTraining("b", "B", { displayOrder: 1 }),
+    orderedTraining("c", "C", { status: "draft" }),
+    orderedTraining("d", "D", { status: "archived", displayOrder: 0 }),
+  ];
+  const revision = getOrgTrainingOrderRevision({ orgTrainings: original }, "org_123");
+  const membershipChanges: Array<(rows: OrgTrainingRecord[]) => void> = [
+    (rows) => rows.push(orderedTraining("e", "E", { displayOrder: 2 })),
+    (rows) => { rows.find((row) => row.id === "c")!.status = "active"; },
+    (rows) => { rows[1]!.status = "archived"; },
+    (rows) => { rows.find((row) => row.id === "d")!.status = "active"; },
+    (rows) => { rows.splice(1, 1); },
+  ];
+
+  for (const changeMembership of membershipChanges) {
+    const db = { orgTrainings: structuredClone(original) };
+    changeMembership(db.orgTrainings);
+    const stateAfterConcurrentChange = structuredClone(db.orgTrainings);
+    assert.throws(() => reorderActiveOrgTrainings({
+      db,
+      orgId: "org_123",
+      trainingIds: ["a"],
+      expectedOrderRevision: revision,
+      updatedAt: "2026-10-02T15:00:00.000Z",
+    }), (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "org_training_order_conflict");
+    assert.deepEqual(db.orgTrainings, stateAfterConcurrentChange);
+  }
+});
 
 test("seedLegacyOrgTraining creates active Test Training with attached packs and scenarios", () => {
   const db = {

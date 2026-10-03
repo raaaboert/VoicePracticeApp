@@ -858,6 +858,7 @@ export interface OrgTrainingRecord {
   status: OrgTrainingStatus;
   description: string;
   divisionId?: string | null;
+  displayOrder?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -2226,6 +2227,7 @@ export interface OrgTrainingListResponse {
   generatedAt: string;
   orgId: string;
   trainings: OrgTrainingSummary[];
+  orderRevision: string;
 }
 
 export interface OrgDivisionListResponse {
@@ -2542,6 +2544,11 @@ export interface DashboardAdminUpdateUserRequest {
   orgRole?: OrgUserRole;
   managerUserId?: string | null;
   performanceAccess?: PerformanceAccessLevel;
+}
+
+export interface ReorderOrgTrainingsRequest {
+  expectedOrderRevision: string;
+  trainingIds: string[];
 }
 
 export interface DashboardAdminUpdateUserResponse {

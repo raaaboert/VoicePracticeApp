@@ -9,11 +9,17 @@ import {
   OrgTrainingListResponse,
   OrgTrainingStatus,
   OrgTrainingSummary,
+  ReorderOrgTrainingsRequest,
   SetOrgTrainingPackAttachmentsRequest,
   SetOrgTrainingScenarioAttachmentsRequest,
   UpdateOrgTrainingRequest,
 } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";
+import {
+  activeFocusTopicIds,
+  focusTopicOrderChanged,
+  moveActiveFocusTopic,
+} from "../focusTopicOrder";
 import { EnterpriseCustomScenariosCard } from "./EnterpriseCustomScenariosCard";
 import { EnterpriseTrainingPacksCard } from "./EnterpriseTrainingPacksCard";
 
@@ -91,25 +97,6 @@ function editorFromTraining(training: OrgTrainingSummary): TrainingEditorState {
   };
 }
 
-function sortTrainings(rows: OrgTrainingSummary[]): OrgTrainingSummary[] {
-  const order: Record<OrgTrainingStatus, number> = {
-    active: 0,
-    draft: 1,
-    archived: 2,
-  };
-
-  return [...rows].sort((left, right) => {
-    if (order[left.status] !== order[right.status]) {
-      return order[left.status] - order[right.status];
-    }
-    const updatedAtDelta = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-    if (Number.isFinite(updatedAtDelta) && updatedAtDelta !== 0) {
-      return updatedAtDelta;
-    }
-    return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
-  });
-}
-
 export function EnterpriseTrainingsWorkspace({
   orgId,
   orgName,
@@ -120,6 +107,8 @@ export function EnterpriseTrainingsWorkspace({
 }: EnterpriseTrainingsWorkspaceProps) {
   const [trainings, setTrainings] = useState<OrgTrainingSummary[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [orderRevision, setOrderRevision] = useState("");
+  const [savedActiveTrainingIds, setSavedActiveTrainingIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -127,6 +116,7 @@ export function EnterpriseTrainingsWorkspace({
   const [editorTargetId, setEditorTargetId] = useState<string | null>(null);
   const [editorState, setEditorState] = useState<TrainingEditorState>(() => createEmptyTrainingEditor());
   const [trainingSaving, setTrainingSaving] = useState(false);
+  const [orderSaving, setOrderSaving] = useState(false);
   const [deletingTrainingId, setDeletingTrainingId] = useState<string | null>(null);
   const activeDivisions = useMemo(() => divisions.filter((division) => division.active), [divisions]);
   const divisionLabelById = useMemo(() => {
@@ -150,7 +140,10 @@ export function EnterpriseTrainingsWorkspace({
 
     try {
       const payload = await adminFetch<OrgTrainingListResponse>(`/orgs/${orgId}/trainings`);
-      setTrainings(sortTrainings(payload.trainings ?? []));
+      const nextTrainings = payload.trainings ?? [];
+      setTrainings(nextTrainings);
+      setSavedActiveTrainingIds(activeFocusTopicIds(nextTrainings));
+      setOrderRevision(payload.orderRevision);
       setGeneratedAt(payload.generatedAt ?? null);
 
       const preferredTargetId =
@@ -173,7 +166,7 @@ export function EnterpriseTrainingsWorkspace({
     if (!next) {
       return;
     }
-    setTrainings((prev) => sortTrainings([...prev.filter((entry) => entry.id !== next.id), next]));
+    setTrainings((prev) => prev.map((entry) => entry.id === next.id ? next : entry));
     if (options?.select) {
       setEditorTargetId(next.id);
     }
@@ -207,6 +200,16 @@ export function EnterpriseTrainingsWorkspace({
     }
     return trainings.filter((training) => training.name.toLowerCase().includes(needle));
   }, [trainingSearch, trainings]);
+  const activeTrainingIds = useMemo(() => activeFocusTopicIds(trainings), [trainings]);
+  const activeTrainingPositionById = useMemo(
+    () => new Map(activeTrainingIds.map((trainingId, index) => [trainingId, index] as const)),
+    [activeTrainingIds],
+  );
+  const orderDirty = useMemo(
+    () => focusTopicOrderChanged(trainings, savedActiveTrainingIds),
+    [savedActiveTrainingIds, trainings],
+  );
+  const reorderBlockedBySearch = Boolean(trainingSearch.trim());
 
   const startCreateTraining = () => {
     setEditorTargetId(NEW_TRAINING_ID);
@@ -243,8 +246,8 @@ export function EnterpriseTrainingsWorkspace({
             divisionId: editorState.divisionId || null,
           } satisfies CreateOrgTrainingRequest),
         });
-        replaceTrainingSummary(created, { select: true });
         setNotice(`Created Focus Topic "${created.name}".`);
+        await refreshWorkspace({ preserveTargetId: created.id, preserveNotice: true });
       } else if (selectedTraining) {
         const updated = await adminFetch<OrgTrainingSummary>(`/orgs/${orgId}/trainings/${selectedTraining.id}`, {
           method: "PATCH",
@@ -255,8 +258,8 @@ export function EnterpriseTrainingsWorkspace({
             divisionId: editorState.divisionId || null,
           } satisfies UpdateOrgTrainingRequest),
         });
-        replaceTrainingSummary(updated, { select: true });
         setNotice(`Saved Focus Topic "${updated.name}".`);
+        await refreshWorkspace({ preserveTargetId: updated.id, preserveNotice: true });
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save Focus Topic.");
@@ -288,9 +291,8 @@ export function EnterpriseTrainingsWorkspace({
       await adminFetch<{ deleted: boolean; trainingId: string }>(`/orgs/${orgId}/trainings/${selectedTraining.id}`, {
         method: "DELETE",
       });
-      setTrainings((prev) => prev.filter((entry) => entry.id !== selectedTraining.id));
-      setEditorTargetId(null);
       setNotice(`Deleted Focus Topic "${selectedTraining.name}".`);
+      await refreshWorkspace({ preserveTargetId: null, preserveNotice: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete Focus Topic.");
     } finally {
@@ -318,6 +320,48 @@ export function EnterpriseTrainingsWorkspace({
     replaceTrainingSummary(updated, { select: true });
   };
 
+  const moveTraining = (trainingId: string, direction: -1 | 1) => {
+    if (reorderBlockedBySearch || orderSaving) {
+      return;
+    }
+    setTrainings((current) => moveActiveFocusTopic(current, trainingId, direction));
+    setNotice(null);
+    setError(null);
+  };
+
+  const saveCompanyOrder = async () => {
+    if (!orderDirty || reorderBlockedBySearch || orderSaving) {
+      return;
+    }
+    setOrderSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload = await adminFetch<OrgTrainingListResponse>(`/orgs/${orgId}/trainings/order`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expectedOrderRevision: orderRevision,
+          trainingIds: activeFocusTopicIds(trainings),
+        } satisfies ReorderOrgTrainingsRequest),
+      });
+      setTrainings(payload.trainings);
+      setSavedActiveTrainingIds(activeFocusTopicIds(payload.trainings));
+      setOrderRevision(payload.orderRevision);
+      setGeneratedAt(payload.generatedAt);
+      setNotice("Focus Topic company order saved.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Could not save Focus Topic company order.";
+      if (message.includes("(409")) {
+        await refreshWorkspace({ preserveTargetId: editorTargetId, preserveNotice: true });
+        setError("Focus Topic order changed in another session. The current company order has been reloaded.");
+      } else {
+        setError(message);
+      }
+    } finally {
+      setOrderSaving(false);
+    }
+  };
+
   return (
     <div className="enterprise-tab-panel">
       {error ? (
@@ -340,6 +384,14 @@ export function EnterpriseTrainingsWorkspace({
           <div className="card-actions">
             <button
               type="button"
+              className="primary"
+              onClick={() => void saveCompanyOrder()}
+              disabled={!orderDirty || reorderBlockedBySearch || orderSaving || loading}
+            >
+              {orderSaving ? "Saving Order..." : "Save Company Order"}
+            </button>
+            <button
+              type="button"
               onClick={() => void refreshWorkspace({ preserveTargetId: editorTargetId, preserveNotice: true })}
               disabled={loading}
             >
@@ -350,6 +402,9 @@ export function EnterpriseTrainingsWorkspace({
             </button>
           </div>
         </div>
+        {reorderBlockedBySearch ? (
+          <p className="small enterprise-note">Clear the Focus Topic search to change company order.</p>
+        ) : null}
         <div className="enterprise-search-row">
           <div className="enterprise-search-field">
             <label>Search Focus Topics</label>
@@ -374,6 +429,7 @@ export function EnterpriseTrainingsWorkspace({
               <thead>
                 <tr>
                   <th>Focus Topic Name</th>
+                  <th>Company Order</th>
                   <th>Division</th>
                   <th>Created</th>
                   <th>Status</th>
@@ -386,7 +442,7 @@ export function EnterpriseTrainingsWorkspace({
               <tbody>
                 {filteredTrainings.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="small">
+                    <td colSpan={9} className="small">
                       No Focus Topics match your search.
                     </td>
                   </tr>
@@ -419,6 +475,47 @@ export function EnterpriseTrainingsWorkspace({
                           {training.name}
                         </button>
                         <div className="small">{training.id}</div>
+                      </td>
+                      <td>
+                        {training.status === "active" ? (
+                          <div className="card-actions">
+                            <span>{(activeTrainingPositionById.get(training.id) ?? 0) + 1}</span>
+                            <button
+                              type="button"
+                              aria-label={`Move ${training.name} up`}
+                              title={`Move ${training.name} up`}
+                              disabled={
+                                reorderBlockedBySearch
+                                || orderSaving
+                                || activeTrainingPositionById.get(training.id) === 0
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                moveTraining(training.id, -1);
+                              }}
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Move ${training.name} down`}
+                              title={`Move ${training.name} down`}
+                              disabled={
+                                reorderBlockedBySearch
+                                || orderSaving
+                                || activeTrainingPositionById.get(training.id) === activeTrainingIds.length - 1
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                moveTraining(training.id, 1);
+                              }}
+                            >
+                              Down
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="small">Not active</span>
+                        )}
                       </td>
                       <td>{divisionLabelById.get(training.divisionId ?? "") ?? "General / Unassigned"}</td>
                       <td>{formatDateTime(training.createdAt)}</td>

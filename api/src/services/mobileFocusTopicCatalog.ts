@@ -25,6 +25,7 @@ import {
 } from "./trainingContentMobileService.js";
 import { isTrainingPackAssignmentValidForUser } from "./trainingPackAssignments.js";
 import { parseTrainingPackScenarioSelection } from "./trainingPackScenarioSelection.js";
+import { compareOrgTrainingCompanyOrder } from "./orgTrainingWorkspace.js";
 
 type MobileScenarioConfig = Pick<
   AppConfig,
@@ -204,10 +205,7 @@ function selectVisibleActiveTopics(
     }
     topicsById.set(topic.id, topic);
   }
-  return Array.from(topicsById.values()).sort((left, right) => {
-    const nameOrder = TOPIC_COLLATOR.compare(left.name, right.name);
-    return nameOrder !== 0 ? nameOrder : TOPIC_COLLATOR.compare(left.id, right.id);
-  });
+  return Array.from(topicsById.values()).sort(compareOrgTrainingCompanyOrder);
 }
 
 function addDirectCustomScenarios(

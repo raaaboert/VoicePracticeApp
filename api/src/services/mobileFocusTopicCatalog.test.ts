@@ -335,6 +335,42 @@ test("catalog uses active authoritative topic IDs, division visibility, and dete
   assert.equal(JSON.stringify(result).includes("trainingTopic"), false);
 });
 
+test("catalog preserves company order across an actionable learner subset without exposing displayOrder", async () => {
+  const { service, context } = harness({
+    topics: [
+      topic("topic_a", { name: "Alpha", displayOrder: 2 }),
+      topic("topic_b", { name: "Beta", displayOrder: 0 }),
+      topic("topic_c", { name: "Charlie", displayOrder: 1 }),
+      topic("legacy_z", { name: "Zulu" }),
+      topic("legacy_a", { name: "Able" }),
+    ],
+    scenarioAttachments: [
+      scenarioAttachment("topic_a", "custom_a"),
+      scenarioAttachment("topic_b", "custom_b"),
+      scenarioAttachment("legacy_z", "custom_z"),
+      scenarioAttachment("legacy_a", "custom_legacy_a"),
+    ],
+    scenarioConfig: {
+      ...emptyScenarioConfig,
+      orgCustomScenarios: [
+        customScenario("custom_a"),
+        customScenario("custom_b"),
+        customScenario("custom_z"),
+        customScenario("custom_legacy_a"),
+      ],
+    },
+    resolveScenario: (id, trainingId) => scenarioSummary(id, "custom", trainingId ?? null),
+  });
+
+  const result = await service.getCatalog(context);
+  assert.deepEqual(result.topics.map((entry) => entry.id), [
+    "topic_b", "topic_a", "legacy_a", "legacy_z",
+  ]);
+  assert.equal(result.topics.some((entry) => "displayOrder" in entry), false);
+  assert.equal(result.topics.every((entry) => entry.scenarioCount === 1 && entry.resourceCount === 0), true);
+  assert.equal(await service.getDetail(context, "topic_c"), null);
+});
+
 test("direct custom scenarios need no pack and stale, disabled, wrong-org, and duplicate paths stay safe", async () => {
   const resolvedCalls: Array<[string, string | null | undefined]> = [];
   const { service, context } = harness({

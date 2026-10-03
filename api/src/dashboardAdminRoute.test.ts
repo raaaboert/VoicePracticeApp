@@ -4819,3 +4819,114 @@ test(
   "same-domain users request and receive the organizations represented by different company codes",
   verifySameDomainUsersCanJoinDifferentOrganizations,
 );
+
+test("platform admin Focus Topic reorder is atomic, revision-guarded, and organization-scoped", async () => {
+  const createdAlpha = await adminRequest("/orgs/org_2/trainings", {
+    method: "POST",
+    body: JSON.stringify({ name: "Alpha Order Topic", status: "active" }),
+  });
+  const createdZulu = await adminRequest("/orgs/org_2/trainings", {
+    method: "POST",
+    body: JSON.stringify({ name: "Zulu Order Topic", status: "active" }),
+  });
+  const createdDraft = await adminRequest("/orgs/org_2/trainings", {
+    method: "POST",
+    body: JSON.stringify({ name: "Draft Order Topic", status: "draft" }),
+  });
+  assert.equal(createdAlpha.status, 201);
+  assert.equal(createdZulu.status, 201);
+  assert.equal(createdDraft.status, 201);
+
+  const before = await adminRequest("/orgs/org_2/trainings");
+  assert.equal(before.status, 200);
+  const beforeTrainings = before.body.trainings as OrgTrainingRecord[];
+  const activeIds = beforeTrainings.filter((topic) => topic.status === "active").map((topic) => topic.id);
+  const draftId = (createdDraft.body as unknown as OrgTrainingRecord).id;
+  const revision = before.body.orderRevision as string;
+  assert.equal(typeof revision, "string");
+  assert.equal(new Set(activeIds).size, activeIds.length);
+  assert.equal(activeIds.at(-2), (createdAlpha.body as unknown as OrgTrainingRecord).id);
+  assert.equal(activeIds.at(-1), (createdZulu.body as unknown as OrgTrainingRecord).id);
+
+  const persistedBeforeFailures = (await readDb()).orgTrainings
+    .filter((topic) => topic.orgId === "org_2")
+    .map((topic) => ({ id: topic.id, displayOrder: topic.displayOrder }));
+  const invalidLists = [
+    [...activeIds.slice(0, -1), activeIds[0]!],
+    activeIds.slice(0, -1),
+    [...activeIds.slice(0, -1), draftId],
+    [...activeIds.slice(0, -1), "training_scope"],
+    [...activeIds.slice(0, -1), "deleted_topic"],
+  ];
+  for (const trainingIds of invalidLists) {
+    const invalid = await adminRequest("/orgs/org_2/trainings/order", {
+      method: "PUT",
+      body: JSON.stringify({ expectedOrderRevision: revision, trainingIds }),
+    });
+    assert.equal(invalid.status, 400);
+  }
+  assert.deepEqual(
+    (await readDb()).orgTrainings
+      .filter((topic) => topic.orgId === "org_2")
+      .map((topic) => ({ id: topic.id, displayOrder: topic.displayOrder })),
+    persistedBeforeFailures,
+  );
+
+  const desired = [...activeIds].reverse();
+  const stale = await adminRequest("/orgs/org_2/trainings/order", {
+    method: "PUT",
+    body: JSON.stringify({ expectedOrderRevision: "stale", trainingIds: desired }),
+  });
+  assert.equal(stale.status, 409);
+
+  const auditCountBefore = (await readPlatformAuditEvents())
+    .filter((event) => event.action === "org.training.order_updated").length;
+  const reordered = await adminRequest("/orgs/org_2/trainings/order", {
+    method: "PUT",
+    body: JSON.stringify({ expectedOrderRevision: revision, trainingIds: desired }),
+  });
+  assert.equal(reordered.status, 200);
+  assert.deepEqual(
+    (reordered.body.trainings as OrgTrainingRecord[])
+      .filter((topic) => topic.status === "active")
+      .map((topic) => [topic.id, topic.displayOrder]),
+    desired.map((id, displayOrder) => [id, displayOrder]),
+  );
+  assert.notEqual(reordered.body.orderRevision, revision);
+  const persisted = (await readDb()).orgTrainings;
+  assert.equal(persisted.find((topic) => topic.id === "training_scope")?.displayOrder, undefined);
+  assert.deepEqual(
+    desired.map((id) => persisted.find((topic) => topic.id === id)?.displayOrder),
+    desired.map((_, index) => index),
+  );
+  const auditEvents = await readPlatformAuditEvents();
+  const orderAudits = auditEvents.filter((event) => event.action === "org.training.order_updated");
+  assert.equal(orderAudits.length, auditCountBefore + 1);
+  assert.deepEqual(orderAudits.at(-1)?.metadata?.orderedTrainingIds, desired);
+
+  const revisionBeforeMembershipChange = reordered.body.orderRevision as string;
+  const concurrentCreate = await adminRequest("/orgs/org_2/trainings", {
+    method: "POST",
+    body: JSON.stringify({ name: "Concurrent Active Topic", status: "active" }),
+  });
+  assert.equal(concurrentCreate.status, 201);
+  await waitForWriteToSettle();
+  const stateAfterMembershipChange = (await readDb()).orgTrainings
+    .filter((topic) => topic.orgId === "org_2")
+    .map((topic) => ({ id: topic.id, displayOrder: topic.displayOrder }));
+  const staleMembership = await adminRequest("/orgs/org_2/trainings/order", {
+    method: "PUT",
+    body: JSON.stringify({ expectedOrderRevision: revisionBeforeMembershipChange, trainingIds: desired }),
+  });
+  assert.equal(staleMembership.status, 409);
+  assert.deepEqual(
+    (await readDb()).orgTrainings
+      .filter((topic) => topic.orgId === "org_2")
+      .map((topic) => ({ id: topic.id, displayOrder: topic.displayOrder })),
+    stateAfterMembershipChange,
+  );
+  assert.equal(
+    (await readPlatformAuditEvents()).filter((event) => event.action === "org.training.order_updated").length,
+    orderAudits.length,
+  );
+});

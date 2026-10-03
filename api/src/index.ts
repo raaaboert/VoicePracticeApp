@@ -123,6 +123,7 @@ import {
   RecordUsageSessionRequest,
   StartSimulationSessionRequest,
   RecordSimulationScoreRequest,
+  ReorderOrgTrainingsRequest,
   Scenario,
   SegmentDefinition,
   SetOrgStandardScenarioDivisionRequest,
@@ -448,15 +449,20 @@ import { normalizeDesiredOutcomeText } from "./services/scenarioTextNormalizatio
 import { getDefaultScoringWeights } from "./services/trainingPackRuntime.js";
 import {
   buildOrgTrainingSummaries,
+  buildOrgTrainingSummariesInCompanyOrder,
   ensureOrgTrainingCollections,
   findOrgTrainingRecord,
+  getOrgTrainingOrderRevision,
   listOrgTrainingRecords,
+  materializeActiveOrgTrainingOrderWithAppendedTopic,
   normalizeOrgTrainingPackAttachments,
   normalizeOrgTrainingRecords,
   normalizeOrgTrainingScenarioAttachments,
   normalizeOrgTrainingStatus,
   replaceOrgTrainingPackAttachments,
   replaceOrgTrainingScenarioAttachments,
+  reorderActiveOrgTrainings,
+  OrgTrainingOrderError,
   seedLegacyOrgTraining,
 } from "./services/orgTrainingWorkspace.js";
 import {
@@ -9005,7 +9011,7 @@ function getMobileReadyOrgTrainings(
   ensureOrgTrainingCollections(db);
   const mobileScenarioIds = new Set(getMobileReadyOrgCustomScenarios(org, config).map((scenario) => scenario.id));
 
-  return buildOrgTrainingSummaries({
+  return buildOrgTrainingSummariesInCompanyOrder({
     db,
     orgId: org.id,
     validScenarioIds: mobileScenarioIds,
@@ -15480,11 +15486,12 @@ app.get("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respons
     const payload: OrgTrainingListResponse = {
       generatedAt: nowIso(),
       orgId: org.id,
-      trainings: buildOrgTrainingSummaries({
+      trainings: buildOrgTrainingSummariesInCompanyOrder({
         db,
         orgId: org.id,
         validScenarioIds: scenarioIds,
       }),
+      orderRevision: getOrgTrainingOrderRevision(db, org.id),
     };
     response.json(payload);
   });
@@ -15525,6 +15532,14 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
       updatedAt: now,
     };
     db.orgTrainings.push(training);
+    if (training.status === "active") {
+      materializeActiveOrgTrainingOrderWithAppendedTopic({
+        db,
+        orgId: org.id,
+        trainingId: training.id,
+        updatedAt: now,
+      });
+    }
     emitMobileUpdateForOrg(db, org.id, "org");
     appendPlatformAuditEvent(db, {
       action: "org.training.created",
@@ -15546,6 +15561,68 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
       },
     );
   });
+});
+
+app.put("/orgs/:orgId/trainings/order", requireAdmin, async (request: Request, response: Response) => {
+  const orgId = request.params.orgId;
+  const body = (request.body ?? {}) as Partial<ReorderOrgTrainingsRequest>;
+  if (typeof body.expectedOrderRevision !== "string" || !Array.isArray(body.trainingIds)) {
+    response.status(400).json({ error: "expectedOrderRevision and trainingIds are required." });
+    return;
+  }
+  if (!body.trainingIds.every((trainingId): trainingId is string => typeof trainingId === "string")) {
+    response.status(400).json({ error: "trainingIds must be a string array." });
+    return;
+  }
+  const trainingIds = body.trainingIds as string[];
+  const expectedOrderRevision = body.expectedOrderRevision;
+
+  const result = await withDatabase(async (db) => {
+    const org = getOrgById(db, orgId);
+    if (!org) {
+      return { status: 404 as const, body: { error: "Organization not found." } };
+    }
+
+    ensureOrgTrainingCollections(db);
+    try {
+      reorderActiveOrgTrainings({
+        db,
+        orgId: org.id,
+        trainingIds,
+        expectedOrderRevision,
+        updatedAt: nowIso(),
+      });
+    } catch (error) {
+      if (error instanceof OrgTrainingOrderError) {
+        return {
+          status: error.code === "org_training_order_conflict" ? 409 as const : 400 as const,
+          body: { error: error.message, code: error.code },
+        };
+      }
+      throw error;
+    }
+
+    emitMobileUpdateForOrg(db, org.id, "org");
+    appendPlatformAuditEvent(db, {
+      action: "org.training.order_updated",
+      orgId: org.id,
+      message: `Updated Focus Topic order for ${org.name}.`,
+      metadata: {
+        orderedTrainingIds: trainingIds,
+        activeTrainingCount: trainingIds.length,
+      },
+    });
+    return {
+      status: 200 as const,
+      body: {
+        generatedAt: nowIso(),
+        orgId: org.id,
+        trainings: buildOrgTrainingSummariesInCompanyOrder({ db, orgId: org.id }),
+        orderRevision: getOrgTrainingOrderRevision(db, org.id),
+      } satisfies OrgTrainingListResponse,
+    };
+  });
+  response.status(result.status).json(result.body);
 });
 
 app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
@@ -15577,6 +15654,7 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
       return;
     }
 
+    const previousStatus = training.status;
     if (patch.name !== undefined) {
       const nextName = typeof patch.name === "string" ? patch.name.trim() : "";
       if (!nextName) {
@@ -15606,7 +15684,16 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
       training.divisionId = null;
     }
 
-    touchOrgTrainingRecord(training, nowIso());
+    const updatedAt = nowIso();
+    touchOrgTrainingRecord(training, updatedAt);
+    if (previousStatus !== "active" && training.status === "active") {
+      materializeActiveOrgTrainingOrderWithAppendedTopic({
+        db,
+        orgId: org.id,
+        trainingId: training.id,
+        updatedAt,
+      });
+    }
     emitMobileUpdateForOrg(db, org.id, "org");
     appendPlatformAuditEvent(db, {
       action: "org.training.updated",
