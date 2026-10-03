@@ -10,12 +10,12 @@ function source(relativePath: string): string {
   return readFileSync(resolve(sourceDirectory, relativePath), "utf8");
 }
 
-test("landing renders every server-ordered topic as an accessible scalable card", () => {
+test("landing derives discovery results from the server catalog and renders accessible scalable cards", () => {
   const landing = source("./FocusTopicLandingScreen.tsx");
   const card = source("./FocusTopicCard.tsx");
 
-  assert.match(landing, /props\.topics\.map\(\(topic\)/);
-  assert.doesNotMatch(landing, /\.sort\(/);
+  assert.match(landing, /applyFocusTopicDiscovery\(catalogTopics, props\.learnerSort, props\.query\)/);
+  assert.match(landing, /visibleTopics\.map\(\(topic\)/);
   assert.match(landing, /Choose a topic to focus your practice and learning\./);
   assert.match(landing, /FOCUS_TOPICS_EMPTY_MESSAGE/);
   assert.match(landing, /accessibilityRole="progressbar"/);
@@ -25,6 +25,37 @@ test("landing renders every server-ordered topic as an accessible scalable card"
   assert.match(card, /minWidth: 0/);
   assert.doesNotMatch(`${landing}${card}`, /numberOfLines=/);
   assert.doesNotMatch(`${landing}${card}`, /Training Pack/);
+});
+
+test("catalog discovery controls are local, accessible, compact, and preserve navigation state", () => {
+  const screen = source("./FocusTopicsScreen.tsx");
+  const landing = source("./FocusTopicLandingScreen.tsx");
+
+  assert.match(screen, /useState\(""\)/);
+  assert.match(screen, /useState<FocusTopicLearnerSort>\("company"\)/);
+  assert.match(screen, /query=\{query\}/);
+  assert.match(screen, /learnerSort=\{learnerSort\}/);
+  assert.match(screen, /onChangeQuery=\{setQuery\}/);
+  assert.match(screen, /onChangeLearnerSort=\{setLearnerSort\}/);
+  assert.doesNotMatch(screen, /AsyncStorage|SecureStore/);
+  assert.match(landing, /accessibilityLabel="Search Focus Topics"/);
+  assert.match(landing, /accessibilityLabel="Clear Focus Topic search"/);
+  assert.match(landing, /accessibilityState=\{\{ selected \}\}/);
+  assert.match(landing, /Sort Focus Topics by \$\{label\}/);
+  assert.match(landing, /No Focus Topics match “\{displayedQuery\}”\./);
+  assert.match(landing, />Clear Search<\/Text>/);
+  assert.match(landing, /keyboardShouldPersistTaps="handled"/);
+  assert.match(landing, /keyboardDismissMode=\{Platform\.OS === "ios" \? "interactive" : "none"\}/);
+
+  const returnToCatalog = screen.slice(
+    screen.indexOf("const returnToCatalog"),
+    screen.indexOf("const returnFromResource"),
+  );
+  const returnFromResource = screen.slice(
+    screen.indexOf("const returnFromResource"),
+    screen.indexOf("const handleTopicResourceBack"),
+  );
+  assert.doesNotMatch(`${returnToCatalog}${returnFromResource}`, /setQuery|setLearnerSort/);
 });
 
 test("screen clears old catalog, retries locally, and guards stale identity requests", () => {
@@ -247,6 +278,10 @@ test("landing uses shared light/dark tokens and width-safe text layout", () => {
   assert.match(screen, /overflow: "hidden"/);
   assert.match(landing, /<ScrollView/);
   assert.match(landing, /paddingHorizontal: 16/);
+  assert.match(landing, /backgroundColor: theme\.input/);
+  assert.match(landing, /flexWrap: "wrap"/);
+  assert.match(landing, /minWidth: 0/);
+  assert.match(landing, /flexBasis: 120/);
   assert.match(card, /copy: \{ flex: 1, minWidth: 0 \}/);
   assert.match(card, /flexShrink: 0/);
   assert.doesNotMatch(card, /width:\s*[3-9]\d\d/);

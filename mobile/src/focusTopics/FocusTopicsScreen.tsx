@@ -11,6 +11,7 @@ import { TrainingContentDetailScreen } from "../trainingContent/TrainingContentD
 import { fetchFocusTopicCatalog } from "./api";
 import { FocusTopicDetailScreen } from "./FocusTopicDetailScreen";
 import { FocusTopicLandingScreen } from "./FocusTopicLandingScreen";
+import type { FocusTopicLearnerSort } from "./discovery";
 import {
   createFocusTopicRequestGate,
 } from "./model";
@@ -30,6 +31,8 @@ interface FocusTopicsScreenProps {
 
 export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const [topics, setTopics] = useState<MobileFocusTopicCatalogItem[] | null>(null);
+  const [query, setQuery] = useState("");
+  const [learnerSort, setLearnerSort] = useState<FocusTopicLearnerSort>("company");
   const [selectedTopicId, setSelectedTopicId] = useState<string | null>(
     () => props.initialTopicId?.trim() || null
   );
@@ -150,11 +153,15 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
         ) : (
           <FocusTopicLandingScreen
             topics={topics}
+            query={query}
+            learnerSort={learnerSort}
             loading={loading}
             error={error}
             theme={theme}
             onBack={props.onBackToHome}
             onRetry={() => { void loadTopics(); }}
+            onChangeQuery={setQuery}
+            onChangeLearnerSort={setLearnerSort}
             onOpenTopic={(topic) => openTopic(topic.id)}
           />
         )}
