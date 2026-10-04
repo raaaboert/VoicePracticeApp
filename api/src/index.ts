@@ -4353,6 +4353,7 @@ let databaseSaveBarrierForTest: (() => Promise<void>) | null = null;
 let focusTopicDeleteResponseObserverForTest: (() => void) | null = null;
 let authenticationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let identityAdministrationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
+let organizationConfigurationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -13985,7 +13986,7 @@ app.get("/config", async (_request: Request, response: Response) => {
 app.patch("/config", requireAdmin, async (request: Request, response: Response) => {
   const patch = request.body as UpdateConfigRequest;
 
-  await withDatabase(async (db) => {
+  const config = await withDatabase(async (db) => {
     const nextConfig = sanitizeConfigPatch(db.config, patch);
     const deleteIssues = validateContentDeletes(db, db.config, nextConfig);
     if (deleteIssues.length > 0) {
@@ -14005,8 +14006,11 @@ app.patch("/config", requireAdmin, async (request: Request, response: Response) 
         fields: Object.keys(patch ?? {}).slice(0, 25)
       }
     });
-    response.json(db.config);
+    return db.config;
   });
+  if (!config) return;
+  organizationConfigurationResponseObserverForTest?.("PATCH /config", 200);
+  response.json(config);
 });
 
 app.get("/orgs", requireAdmin, async (_request: Request, response: Response) => {
@@ -14096,7 +14100,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     return;
   }
 
-  await withDatabase(async (db) => {
+  const createdOrg = await withDatabase(async (db) => {
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     const contactEmail = normalizeContactEmail(body.contactEmail);
@@ -14154,8 +14158,11 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
         joinCode: org.joinCode
       }
     });
-    response.status(201).json(org);
+    return org;
   });
+  if (!createdOrg) return;
+  organizationConfigurationResponseObserverForTest?.("POST /orgs", 201);
+  response.status(201).json(createdOrg);
 });
 
 app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Response) => {
@@ -14166,7 +14173,7 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
   };
   const applyPerUserDailySecondsCapNextCycle = patch.applyPerUserDailySecondsCapNextCycle === true;
   const clearPendingPerUserDailySecondsCap = patch.clearPendingPerUserDailySecondsCap === true;
-  await withDatabase(async (db) => {
+  const updatedOrg = await withDatabase(async (db) => {
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     const org = db.orgs.find((entry) => entry.id === orgId);
@@ -14314,8 +14321,11 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
         joinCode: org.joinCode
       }
     });
-    response.json(org);
+    return org;
   });
+  if (!updatedOrg) return;
+  organizationConfigurationResponseObserverForTest?.("PATCH /orgs/:orgId", 200);
+  response.json(updatedOrg);
 });
 
 app.get("/orgs/:orgId/divisions", requireAdmin, async (request: Request, response: Response) => {
@@ -14342,7 +14352,7 @@ app.patch("/orgs/:orgId/divisions/settings", requireAdmin, async (request: Reque
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     ensureOrgDivisionCollections(db);
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -14368,15 +14378,18 @@ app.patch("/orgs/:orgId/divisions/settings", requireAdmin, async (request: Reque
       },
     });
 
-    response.json(buildOrgDivisionListPayload(db, org));
+    return buildOrgDivisionListPayload(db, org);
   });
+  if (!payload) return;
+  organizationConfigurationResponseObserverForTest?.("PATCH /orgs/:orgId/divisions/settings", 200);
+  response.json(payload);
 });
 
 app.post("/orgs/:orgId/divisions", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
   const body = request.body as CreateOrgDivisionRequest;
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     ensureOrgDivisionCollections(db);
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -14417,8 +14430,11 @@ app.post("/orgs/:orgId/divisions", requireAdmin, async (request: Request, respon
       metadata: { divisionName: name },
     });
 
-    response.status(201).json(buildOrgDivisionListPayload(db, org));
+    return buildOrgDivisionListPayload(db, org);
   });
+  if (!payload) return;
+  organizationConfigurationResponseObserverForTest?.("POST /orgs/:orgId/divisions", 201);
+  response.status(201).json(payload);
 });
 
 app.patch("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: Request, response: Response) => {
@@ -14431,7 +14447,7 @@ app.patch("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: Re
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     ensureOrgDivisionCollections(db);
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -14474,8 +14490,11 @@ app.patch("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: Re
       metadata: { divisionId: division.id, active: division.active },
     });
 
-    response.json(buildOrgDivisionListPayload(db, org));
+    return buildOrgDivisionListPayload(db, org);
   });
+  if (!payload) return;
+  organizationConfigurationResponseObserverForTest?.("PATCH /orgs/:orgId/divisions/:divisionId", 200);
+  response.json(payload);
 });
 
 app.delete("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: Request, response: Response) => {
@@ -14487,7 +14506,7 @@ app.delete("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: R
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     ensureOrgDivisionCollections(db);
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -14531,8 +14550,11 @@ app.delete("/orgs/:orgId/divisions/:divisionId", requireAdmin, async (request: R
       },
     });
 
-    response.json(buildOrgDivisionListPayload(db, org));
+    return buildOrgDivisionListPayload(db, org);
   });
+  if (!payload) return;
+  organizationConfigurationResponseObserverForTest?.("DELETE /orgs/:orgId/divisions/:divisionId", 200);
+  response.json(payload);
 });
 
 app.get("/orgs/:orgId/standard-scenarios/divisions", requireAdmin, async (request: Request, response: Response) => {
@@ -14560,7 +14582,7 @@ app.put("/orgs/:orgId/standard-scenarios/:scenarioId/division", requireAdmin, as
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     ensureOrgDivisionCollections(db);
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -14621,11 +14643,14 @@ app.put("/orgs/:orgId/standard-scenarios/:scenarioId/division", requireAdmin, as
       },
     });
 
-    response.json({
+    return {
       scenarioId,
       divisionId: selection.divisionId,
-    });
+    };
   });
+  if (!payload) return;
+  organizationConfigurationResponseObserverForTest?.("PUT /orgs/:orgId/standard-scenarios/:scenarioId/division", 200);
+  response.json(payload);
 });
 
 app.get(
@@ -22252,7 +22277,7 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const actor = getUserById(db, actorUserId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -22319,7 +22344,7 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
       }
     });
 
-    response.json({
+    return {
       ok: true,
       org: {
         id: org.id,
@@ -22328,8 +22353,11 @@ app.patch("/mobile/users/:userId/admin/org/settings", async (request: Request, r
         pendingPerUserDailySecondsCapEffectiveAt: org.pendingPerUserDailySecondsCapEffectiveAt,
         updatedAt: org.updatedAt
       }
-    });
+    };
   });
+  if (!payload) return;
+  organizationConfigurationResponseObserverForTest?.("PATCH /mobile/users/:userId/admin/org/settings", 200);
+  response.json(payload);
 });
 
 app.get("/mobile/users/:userId/admin/org/users", async (request: Request, response: Response) => {
@@ -23954,6 +23982,15 @@ export function setIdentityAdministrationResponseObserverForTest(
     throw new Error("setIdentityAdministrationResponseObserverForTest is only available in test.");
   }
   identityAdministrationResponseObserverForTest = observer;
+}
+
+export function setOrganizationConfigurationResponseObserverForTest(
+  observer: ((route: string, status: number) => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setOrganizationConfigurationResponseObserverForTest is only available in test.");
+  }
+  organizationConfigurationResponseObserverForTest = observer;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(

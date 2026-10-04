@@ -109,6 +109,9 @@ let setFocusTopicDeleteResponseObserverForTest: (observer: (() => void) | null) 
 let setIdentityAdministrationResponseObserverForTest: (
   observer: ((route: string, status: number) => void) | null,
 ) => void;
+let setOrganizationConfigurationResponseObserverForTest: (
+  observer: ((route: string, status: number) => void) | null,
+) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -933,6 +936,36 @@ async function requestWhileIdentityPersistenceHeld<T>(route: string, runner: () 
   }
 }
 
+async function requestWhileOrganizationPersistenceHeld<T>(route: string, runner: () => Promise<T>): Promise<T> {
+  let markSaveStarted!: () => void;
+  const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+  let releaseSave!: () => void;
+  const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let observedStatus: number | null = null;
+
+  setDatabaseSaveBarrierForTest(async () => {
+    markSaveStarted();
+    await saveRelease;
+  });
+  setOrganizationConfigurationResponseObserverForTest((observedRoute, status) => {
+    if (observedRoute === route) observedStatus = status;
+  });
+
+  const pending = runner();
+  try {
+    await saveStarted;
+    assert.equal(observedStatus, null);
+    releaseSave();
+    const result = await pending;
+    assert.ok(observedStatus !== null && observedStatus >= 200 && observedStatus < 300);
+    return result;
+  } finally {
+    releaseSave();
+    setDatabaseSaveBarrierForTest(null);
+    setOrganizationConfigurationResponseObserverForTest(null);
+  }
+}
+
 async function loadTrainingPacksForRouteTest(orgId: string): Promise<TrainingPack[]> {
   return [
     buildTrainingPack("pack_scope", "org_1", {
@@ -1182,6 +1215,7 @@ before(async () => {
   setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
   setFocusTopicDeleteResponseObserverForTest = imported.setFocusTopicDeleteResponseObserverForTest;
   setIdentityAdministrationResponseObserverForTest = imported.setIdentityAdministrationResponseObserverForTest;
+  setOrganizationConfigurationResponseObserverForTest = imported.setOrganizationConfigurationResponseObserverForTest;
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
       // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
@@ -5356,5 +5390,246 @@ test("identity administration successes wait for durable persistence and save fa
   } finally {
     setDatabaseSaveBarrierForTest(null);
     setIdentityAdministrationResponseObserverForTest(null);
+  }
+});
+
+test("organization and division configuration success waits for durable persistence", async () => {
+  const initialConfig = await adminRequest("/config");
+  assert.equal(initialConfig.status, 200);
+  const originalDifficulty = String(initialConfig.body.defaultDifficulty);
+  const nextDifficulty = originalDifficulty === "hard" ? "easy" : "hard";
+
+  const configUpdated = await requestWhileOrganizationPersistenceHeld("PATCH /config", () =>
+    adminRequest("/config", {
+      method: "PATCH",
+      body: JSON.stringify({ defaultDifficulty: nextDifficulty }),
+    })
+  );
+  assert.equal(configUpdated.status, 200);
+  assert.equal((await readDurableDbOnce()).config.defaultDifficulty, nextDifficulty);
+
+  const created = await requestWhileOrganizationPersistenceHeld("POST /orgs", () =>
+    adminRequest("/orgs", {
+      method: "POST",
+      body: JSON.stringify({ name: "Durability Batch 3 Organization" }),
+    })
+  );
+  assert.equal(created.status, 201);
+  const orgId = String(created.body.id);
+  assert.ok(orgId);
+  assert.equal((await readDurableDbOnce()).orgs.find((org) => org.id === orgId)?.name, "Durability Batch 3 Organization");
+
+  const orgUpdated = await requestWhileOrganizationPersistenceHeld("PATCH /orgs/:orgId", () =>
+    adminRequest(`/orgs/${orgId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ contactName: "Durability Contact" }),
+    })
+  );
+  assert.equal(orgUpdated.status, 200);
+  assert.equal((await readDurableDbOnce()).orgs.find((org) => org.id === orgId)?.contactName, "Durability Contact");
+
+  const divisionCreated = await requestWhileOrganizationPersistenceHeld("POST /orgs/:orgId/divisions", () =>
+    adminRequest(`/orgs/${orgId}/divisions`, {
+      method: "POST",
+      body: JSON.stringify({ name: "Durability Division" }),
+    })
+  );
+  assert.equal(divisionCreated.status, 201);
+  const createdDivisions = divisionCreated.body.divisions as Array<{ id: string; name: string; active: boolean }>;
+  const divisionId = createdDivisions.find((division) => division.name === "Durability Division")?.id;
+  assert.ok(divisionId);
+  assert.equal((await readDurableDbOnce()).orgDivisions.find((division) => division.id === divisionId)?.active, true);
+
+  const divisionUpdated = await requestWhileOrganizationPersistenceHeld(
+    "PATCH /orgs/:orgId/divisions/:divisionId",
+    () => adminRequest(`/orgs/${orgId}/divisions/${divisionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Durability Division Updated" }),
+    }),
+  );
+  assert.equal(divisionUpdated.status, 200);
+  assert.equal(
+    (await readDurableDbOnce()).orgDivisions.find((division) => division.id === divisionId)?.name,
+    "Durability Division Updated",
+  );
+
+  const wrongOrgDivisionUpdate = await adminRequest(`/orgs/org_2/divisions/${divisionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: "Wrong Organization Rename" }),
+  });
+  assert.equal(wrongOrgDivisionUpdate.status, 404);
+  const afterWrongOrgDivisionUpdate = await adminRequest(`/orgs/${orgId}/divisions`);
+  assert.equal(afterWrongOrgDivisionUpdate.status, 200);
+  assert.equal(
+    (afterWrongOrgDivisionUpdate.body.divisions as Array<{ id: string; name: string }>).find(
+      (division) => division.id === divisionId,
+    )?.name,
+    "Durability Division Updated",
+  );
+
+  const divisionsEnabled = await requestWhileOrganizationPersistenceHeld(
+    "PATCH /orgs/:orgId/divisions/settings",
+    () => adminRequest(`/orgs/${orgId}/divisions/settings`, {
+      method: "PATCH",
+      body: JSON.stringify({ divisionsEnabled: true }),
+    }),
+  );
+  assert.equal(divisionsEnabled.status, 200);
+  assert.equal((await readDurableDbOnce()).orgs.find((org) => org.id === orgId)?.divisionsEnabled, true);
+
+  const protectedLastDivision = await adminRequest(`/orgs/${orgId}/divisions/${divisionId}`, { method: "DELETE" });
+  assert.equal(protectedLastDivision.status, 409);
+  const afterProtectedDelete = await adminRequest(`/orgs/${orgId}/divisions`);
+  assert.equal(afterProtectedDelete.status, 200);
+  assert.equal(
+    (afterProtectedDelete.body.divisions as Array<{ id: string; active: boolean }>).find(
+      (division) => division.id === divisionId,
+    )?.active,
+    true,
+  );
+
+  const scenarioList = await adminRequest("/orgs/org_1/standard-scenarios/divisions");
+  assert.equal(scenarioList.status, 200);
+  const scenarioRows = scenarioList.body.rows as Array<{ scenarioId: string; divisionId: string | null }>;
+  const scenario = scenarioRows[0];
+  assert.ok(scenario);
+  const wrongOrgScenarioDivision = await adminRequest(
+    `/orgs/org_1/standard-scenarios/${scenario.scenarioId}/division`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ divisionId: "division_other_org" }),
+    },
+  );
+  assert.equal(wrongOrgScenarioDivision.status, 400);
+  const routedScenario = await requestWhileOrganizationPersistenceHeld(
+    "PUT /orgs/:orgId/standard-scenarios/:scenarioId/division",
+    () => adminRequest(`/orgs/org_1/standard-scenarios/${scenario.scenarioId}/division`, {
+      method: "PUT",
+      body: JSON.stringify({ divisionId: "division_a" }),
+    }),
+  );
+  assert.equal(routedScenario.status, 200);
+  assert.equal(
+    (await readDurableDbOnce()).orgStandardScenarioDivisionAssignments.find(
+      (assignment) => assignment.orgId === "org_1" && assignment.scenarioId === scenario.scenarioId,
+    )?.divisionId,
+    "division_a",
+  );
+
+  const durableBeforeMobileSettings = await readDurableDbOnce();
+  const originalDailyCap = durableBeforeMobileSettings.orgs.find((org) => org.id === "org_1")?.perUserDailySecondsCap;
+  assert.ok(originalDailyCap !== undefined);
+  const nextDailyCap = originalDailyCap + 1;
+  const unauthorizedMobileSettings = await mobileRequest(
+    "/mobile/users/user_admin/admin/org/settings",
+    "token_user_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ perUserDailySecondsCap: nextDailyCap }),
+    },
+  );
+  assert.equal(unauthorizedMobileSettings.status, 403);
+  const mobileSettingsUpdated = await requestWhileOrganizationPersistenceHeld(
+    "PATCH /mobile/users/:userId/admin/org/settings",
+    () => mobileRequest("/mobile/users/org_admin/admin/org/settings", "token_org_admin", {
+      method: "PATCH",
+      body: JSON.stringify({ perUserDailySecondsCap: nextDailyCap }),
+    }),
+  );
+  assert.equal(mobileSettingsUpdated.status, 200);
+  assert.equal((await readDurableDbOnce()).orgs.find((org) => org.id === "org_1")?.perUserDailySecondsCap, nextDailyCap);
+
+  const divisionsDisabled = await requestWhileOrganizationPersistenceHeld(
+    "PATCH /orgs/:orgId/divisions/settings",
+    () => adminRequest(`/orgs/${orgId}/divisions/settings`, {
+      method: "PATCH",
+      body: JSON.stringify({ divisionsEnabled: false }),
+    }),
+  );
+  assert.equal(divisionsDisabled.status, 200);
+
+  const divisionDeleted = await requestWhileOrganizationPersistenceHeld(
+    "DELETE /orgs/:orgId/divisions/:divisionId",
+    () => adminRequest(`/orgs/${orgId}/divisions/${divisionId}`, { method: "DELETE" }),
+  );
+  assert.equal(divisionDeleted.status, 200);
+  const durableDeletedDivision = (await readDurableDbOnce()).orgDivisions.find((division) => division.id === divisionId);
+  assert.equal(durableDeletedDivision?.active, false);
+  assert.ok(durableDeletedDivision?.deletedAt);
+
+  const restoredScenario = await adminRequest(`/orgs/org_1/standard-scenarios/${scenario.scenarioId}/division`, {
+    method: "PUT",
+    body: JSON.stringify({ divisionId: scenario.divisionId }),
+  });
+  assert.equal(restoredScenario.status, 200);
+  const restoredMobileSettings = await mobileRequest(
+    "/mobile/users/org_admin/admin/org/settings",
+    "token_org_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ perUserDailySecondsCap: originalDailyCap }),
+    },
+  );
+  assert.equal(restoredMobileSettings.status, 200);
+  const restoredConfig = await adminRequest("/config", {
+    method: "PATCH",
+    body: JSON.stringify({ defaultDifficulty: originalDifficulty }),
+  });
+  assert.equal(restoredConfig.status, 200);
+  const unauthorizedConfig = await publicRequest("/config", {
+    method: "PATCH",
+    body: JSON.stringify({ defaultDifficulty: nextDifficulty }),
+  });
+  assert.equal(unauthorizedConfig.status, 401);
+  assert.equal((await readDurableDbOnce()).config.defaultDifficulty, originalDifficulty);
+
+  const auditEvents = await readPlatformAuditEvents();
+  const orgActions = new Set(
+    auditEvents.filter((event) => event.orgId === orgId).map((event) => event.action),
+  );
+  for (const action of [
+    "org.created",
+    "org.updated",
+    "org.divisions.created",
+    "org.divisions.updated",
+    "org.divisions.settings.updated",
+    "org.divisions.deleted",
+  ]) {
+    assert.equal(orgActions.has(action), true, `missing audit action ${action}`);
+  }
+  assert.equal(
+    auditEvents.some((event) =>
+      event.action === "org.standard_scenario_division.updated" && event.orgId === "org_1"
+    ),
+    true,
+  );
+  assert.equal(
+    auditEvents.some((event) =>
+      event.action === "org.settings_updated" && event.orgId === "org_1" && event.actorId === "org_admin"
+    ),
+    true,
+  );
+
+  let successObserved = false;
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error("controlled organization configuration persistence failure");
+  });
+  setOrganizationConfigurationResponseObserverForTest((route, status) => {
+    if (route === "POST /orgs" && status === 201) successObserved = true;
+  });
+  try {
+    const failed = await adminRequest("/orgs", {
+      method: "POST",
+      body: JSON.stringify({ name: "Durability Batch 3 Failed Organization" }),
+    });
+    assert.equal(failed.status, 500);
+    assert.equal(successObserved, false);
+    assert.equal(
+      (await readDurableDbOnce()).orgs.some((org) => org.name === "Durability Batch 3 Failed Organization"),
+      false,
+    );
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+    setOrganizationConfigurationResponseObserverForTest(null);
   }
 });
