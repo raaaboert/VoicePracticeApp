@@ -1,6 +1,6 @@
 import type { MobileFocusTopicCatalogItem } from "@voicepractice/shared";
 
-export type FocusTopicLearnerSort = "company" | "alphabetical";
+export type FocusTopicLearnerSort = "company" | "az" | "za" | "oldest" | "newest";
 
 const FOCUS_TOPIC_NAME_COLLATOR = new Intl.Collator("en-US", {
   sensitivity: "base",
@@ -36,10 +36,25 @@ export function sortFocusTopicsForLearner(
   if (sort === "company") {
     return copy;
   }
-  return copy.sort((left, right) => {
-    const nameOrder = FOCUS_TOPIC_NAME_COLLATOR.compare(left.name, right.name);
-    return nameOrder !== 0 ? nameOrder : left.id.localeCompare(right.id);
-  });
+  return copy.sort((left, right) => compareFocusTopics(left, right, sort));
+}
+
+function compareFocusTopics(
+  left: MobileFocusTopicCatalogItem,
+  right: MobileFocusTopicCatalogItem,
+  sort: Exclude<FocusTopicLearnerSort, "company">,
+): number {
+  if (sort === "oldest" || sort === "newest") {
+    const dateOrder = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    if (dateOrder !== 0) {
+      return sort === "oldest" ? dateOrder : -dateOrder;
+    }
+  }
+  const nameOrder = FOCUS_TOPIC_NAME_COLLATOR.compare(left.name.trim(), right.name.trim());
+  if (nameOrder !== 0) {
+    return sort === "za" ? -nameOrder : nameOrder;
+  }
+  return left.id.localeCompare(right.id);
 }
 
 export function applyFocusTopicDiscovery(

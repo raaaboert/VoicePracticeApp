@@ -90,6 +90,7 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
         id: topic.id,
         name: topic.name,
         description: topic.description,
+        createdAt: topic.createdAt,
         scenarioCount: scenarios.length,
         resourceCount: resources.length,
       })),

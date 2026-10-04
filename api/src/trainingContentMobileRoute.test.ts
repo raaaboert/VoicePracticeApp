@@ -396,11 +396,13 @@ test("mobile Focus Topic catalog binds token, acting organization, and the exist
       id: "focus_topic",
       name: "Focus Topic",
       description: "Focus description",
+      createdAt: NOW,
       scenarioCount: 1,
       resourceCount: 0,
     }],
   });
   assert.deepEqual(Object.keys(result.body.topics[0]).sort(), [
+    "createdAt",
     "description",
     "id",
     "name",

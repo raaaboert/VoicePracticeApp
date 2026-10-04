@@ -57,6 +57,7 @@ export function parseFocusTopicCatalogResponse(
       || typeof topic.name !== "string"
       || !topic.name.trim()
       || typeof topic.description !== "string"
+      || !isNormalizedTimestamp(topic.createdAt)
       || !isNonNegativeInteger(topic.scenarioCount)
       || !isNonNegativeInteger(topic.resourceCount)
     ) {
@@ -66,6 +67,7 @@ export function parseFocusTopicCatalogResponse(
       id: topic.id,
       name: topic.name,
       description: topic.description,
+      createdAt: topic.createdAt,
       scenarioCount: topic.scenarioCount,
       resourceCount: topic.resourceCount,
     } satisfies MobileFocusTopicCatalogItem;
@@ -207,6 +209,14 @@ function parseDetailResource(value: unknown): MobileTrainingContentSummary {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
+}
+
+function isNormalizedTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !value.trim()) {
+    return false;
+  }
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
 
 export function buildFocusTopicNavigationSummary(

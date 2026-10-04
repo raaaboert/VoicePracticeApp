@@ -14,7 +14,7 @@ test("client requests the authenticated user catalog and forwards cancellation",
     async <T>(path: string, init?: RequestInit, token?: string, options?: { signal?: AbortSignal }) => {
       calls.push({ path, method: init?.method, token, signal: options?.signal });
       return {
-        topics: [{ id: "topic_1", name: "Discovery", description: "Ask better questions.", scenarioCount: 1, resourceCount: 2 }],
+        topics: [{ id: "topic_1", name: "Discovery", description: "Ask better questions.", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: 1, resourceCount: 2 }],
       } as T;
     }
   );

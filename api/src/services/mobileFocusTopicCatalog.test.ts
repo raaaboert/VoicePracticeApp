@@ -330,7 +330,9 @@ test("catalog uses active authoritative topic IDs, division visibility, and dete
 
   const result = await service.getCatalog(context);
   assert.deepEqual(result.topics.map((entry) => entry.id), ["topic_a", "topic_z", "topic_beta"]);
+  assert.equal(result.topics.every((entry) => entry.createdAt === NOW), true);
   assert.deepEqual(result.topics.map((entry) => entry.scenarioCount), [1, 1, 1]);
+  assert.equal(result.topics.some((entry) => "displayOrder" in entry || "updatedAt" in entry), false);
   assert.equal(JSON.stringify(result).includes("focusTopicNameSnapshot"), false);
   assert.equal(JSON.stringify(result).includes("trainingTopic"), false);
 });
@@ -498,6 +500,7 @@ test("resource eligibility supports all existing grants and exact uncapped disti
       id: "resources",
       name: "resources",
       description: "resources description",
+      createdAt: NOW,
       scenarioCount: 0,
       resourceCount: 504,
     }],
@@ -547,7 +550,7 @@ test("mixed, scenario-only, resource-only, and empty topics project only the nar
     { id: "scenario", scenarioCount: 1, resourceCount: 0 },
   ]);
   for (const projected of result.topics) {
-    assert.deepEqual(Object.keys(projected).sort(), ["description", "id", "name", "resourceCount", "scenarioCount"]);
+    assert.deepEqual(Object.keys(projected).sort(), ["createdAt", "description", "id", "name", "resourceCount", "scenarioCount"]);
   }
 });
 

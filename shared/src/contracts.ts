@@ -190,6 +190,7 @@ export interface MobileFocusTopicCatalogItem {
   id: string;
   name: string;
   description: string;
+  createdAt: string;
   scenarioCount: number;
   resourceCount: number;
 }

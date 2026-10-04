@@ -52,11 +52,13 @@ test("catalog eligibility is limited to ready enterprise or acting-org super-use
 test("catalog parser accepts valid and empty responses while preserving server order", () => {
   const response = parseFocusTopicCatalogResponse({
     topics: [
-      { id: "topic_b", name: "Second", description: "B", scenarioCount: 1, resourceCount: 0 },
-      { id: "topic_a", name: "First", description: "A", scenarioCount: 0, resourceCount: 2 },
+      { id: "topic_b", name: "Second", description: "B", createdAt: "2026-02-01T00:00:00.000Z", scenarioCount: 1, resourceCount: 0, displayOrder: 9, updatedAt: "2026-03-01T00:00:00.000Z" },
+      { id: "topic_a", name: "First", description: "A", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: 0, resourceCount: 2 },
     ],
   });
   assert.deepEqual(response.topics.map((topic) => topic.id), ["topic_b", "topic_a"]);
+  assert.equal("displayOrder" in response.topics[0]!, false);
+  assert.equal("updatedAt" in response.topics[0]!, false);
   assert.deepEqual(parseFocusTopicCatalogResponse({ topics: [] }), { topics: [] });
 });
 
@@ -65,9 +67,12 @@ test("catalog parser rejects malformed summaries safely", () => {
     null,
     {},
     { topics: "invalid" },
-    { topics: [{ id: "", name: "Name", description: "", scenarioCount: 1, resourceCount: 0 }] },
-    { topics: [{ id: "a", name: "Name", description: "", scenarioCount: -1, resourceCount: 0 }] },
-    { topics: [{ id: "a", name: "Name", description: "", scenarioCount: 1, resourceCount: 0.5 }] },
+    { topics: [{ id: "a", name: "Name", description: "", scenarioCount: 1, resourceCount: 0 }] },
+    { topics: [{ id: "", name: "Name", description: "", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: 1, resourceCount: 0 }] },
+    { topics: [{ id: "a", name: "Name", description: "", createdAt: "invalid", scenarioCount: 1, resourceCount: 0 }] },
+    { topics: [{ id: "a", name: "Name", description: "", createdAt: "2026-01-01", scenarioCount: 1, resourceCount: 0 }] },
+    { topics: [{ id: "a", name: "Name", description: "", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: -1, resourceCount: 0 }] },
+    { topics: [{ id: "a", name: "Name", description: "", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: 1, resourceCount: 0.5 }] },
   ]) {
     assert.throws(() => parseFocusTopicCatalogResponse(value), /catalog response was invalid/);
   }
@@ -86,6 +91,7 @@ test("navigation summary carries only the authoritative id and safe catalog summ
     id: "topic_a",
     name: "Difficult Conversations",
     description: "Practice direct and respectful conversations.",
+    createdAt: "2026-01-01T00:00:00.000Z",
     scenarioCount: 4,
     resourceCount: 2,
   });

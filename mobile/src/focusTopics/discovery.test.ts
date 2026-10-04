@@ -11,22 +11,41 @@ import {
   sortFocusTopicsForLearner,
 } from "./discovery";
 
-function topic(id: string, name: string, description = ""): MobileFocusTopicCatalogItem {
-  return { id, name, description, scenarioCount: 1, resourceCount: 0 };
+function topic(
+  id: string,
+  name: string,
+  description = "",
+  createdAt = "2026-01-01T00:00:00.000Z",
+): MobileFocusTopicCatalogItem {
+  return { id, name, description, createdAt, scenarioCount: 1, resourceCount: 0 };
 }
 
-test("Company Order preserves the server sequence through sort changes without mutation", () => {
+test("Default preserves the server sequence through sort changes without mutation", () => {
   const serverTopics = [topic("c", "C"), topic("a", "A"), topic("b", "B")];
   const original = [...serverTopics];
   assert.deepEqual(sortFocusTopicsForLearner(serverTopics, "company").map((entry) => entry.id), ["c", "a", "b"]);
-  assert.deepEqual(sortFocusTopicsForLearner(serverTopics, "alphabetical").map((entry) => entry.id), ["a", "b", "c"]);
+  assert.deepEqual(sortFocusTopicsForLearner(serverTopics, "az").map((entry) => entry.id), ["a", "b", "c"]);
   assert.deepEqual(sortFocusTopicsForLearner(serverTopics, "company").map((entry) => entry.id), ["c", "a", "b"]);
   assert.deepEqual(serverTopics, original);
 });
 
-test("A-Z is case-insensitive and uses ID as the deterministic name tie-break", () => {
+test("A-Z and Z-A are case-insensitive and use ID as the deterministic name tie-break", () => {
   const topics = [topic("z", "sales"), topic("a", "Sales"), topic("m", "Accounting")];
-  assert.deepEqual(sortFocusTopicsForLearner(topics, "alphabetical").map((entry) => entry.id), ["m", "a", "z"]);
+  assert.deepEqual(sortFocusTopicsForLearner(topics, "az").map((entry) => entry.id), ["m", "a", "z"]);
+  assert.deepEqual(sortFocusTopicsForLearner(topics, "za").map((entry) => entry.id), ["a", "z", "m"]);
+});
+
+test("date sorts use createdAt and deterministically tie by normalized name then ID", () => {
+  const topics = [
+    topic("z", "Beta", "", "2026-02-01T00:00:00.000Z"),
+    topic("b", "alpha", "", "2026-01-01T00:00:00.000Z"),
+    topic("a", "Alpha", "", "2026-01-01T00:00:00.000Z"),
+    topic("m", "Middle", "", "2026-03-01T00:00:00.000Z"),
+  ];
+  const original = structuredClone(topics);
+  assert.deepEqual(sortFocusTopicsForLearner(topics, "oldest").map((entry) => entry.id), ["a", "b", "z", "m"]);
+  assert.deepEqual(sortFocusTopicsForLearner(topics, "newest").map((entry) => entry.id), ["m", "z", "a", "b"]);
+  assert.deepEqual(topics, original);
 });
 
 test("search normalizes case and whitespace and matches only name plus description with all tokens", () => {
@@ -49,17 +68,26 @@ test("search applies after the selected sort and clearing restores that sort", (
     topic("b", "Building Trust", "Leadership"),
   ];
   assert.deepEqual(applyFocusTopicDiscovery(topics, "company", "sales").map((entry) => entry.id), ["c", "a"]);
-  assert.deepEqual(applyFocusTopicDiscovery(topics, "alphabetical", "sales").map((entry) => entry.id), ["a", "c"]);
-  assert.deepEqual(applyFocusTopicDiscovery(topics, "alphabetical", "").map((entry) => entry.id), ["a", "b", "c"]);
+  assert.deepEqual(applyFocusTopicDiscovery(topics, "az", "sales").map((entry) => entry.id), ["a", "c"]);
+  assert.deepEqual(applyFocusTopicDiscovery(topics, "za", "sales").map((entry) => entry.id), ["c", "a"]);
+  assert.deepEqual(applyFocusTopicDiscovery(topics, "az", "").map((entry) => entry.id), ["a", "b", "c"]);
   assert.deepEqual(applyFocusTopicDiscovery(topics, "company", "no match"), []);
 });
 
-test("catalog refresh reapplies active controls to the replacement server array", () => {
-  const initial = [topic("c", "Coaching", "Sales"), topic("a", "Account Planning", "Sales")];
-  const refreshed = [topic("d", "Discovery", "Sales"), topic("b", "Budgeting", "Finance")];
-  assert.deepEqual(applyFocusTopicDiscovery(initial, "alphabetical", "sales").map((entry) => entry.id), ["a", "c"]);
-  assert.deepEqual(applyFocusTopicDiscovery(refreshed, "alphabetical", "sales").map((entry) => entry.id), ["d"]);
-  assert.deepEqual(applyFocusTopicDiscovery(refreshed, "company", "").map((entry) => entry.id), ["d", "b"]);
+test("catalog refresh reapplies active date sort and query to the replacement server array", () => {
+  const initial = [
+    topic("c", "Coaching", "Sales", "2026-01-01T00:00:00.000Z"),
+    topic("a", "Account Planning", "Sales", "2026-02-01T00:00:00.000Z"),
+  ];
+  const refreshed = [
+    topic("d", "Discovery", "Sales", "2026-04-01T00:00:00.000Z"),
+    topic("e", "Enterprise Sales", "Sales", "2026-03-01T00:00:00.000Z"),
+    topic("b", "Budgeting", "Finance", "2026-05-01T00:00:00.000Z"),
+  ];
+  assert.deepEqual(applyFocusTopicDiscovery(initial, "newest", "sales").map((entry) => entry.id), ["a", "c"]);
+  assert.deepEqual(applyFocusTopicDiscovery(refreshed, "newest", "sales").map((entry) => entry.id), ["d", "e"]);
+  assert.deepEqual(applyFocusTopicDiscovery(refreshed, "newest", "").map((entry) => entry.id), ["b", "d", "e"]);
+  assert.deepEqual(applyFocusTopicDiscovery(refreshed, "company", "").map((entry) => entry.id), ["d", "e", "b"]);
 });
 
 test("discovery controls follow the locked catalog-size thresholds", () => {
