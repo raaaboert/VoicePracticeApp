@@ -4351,6 +4351,7 @@ let dashboardTeamPerformanceQueryForTest: typeof queryAuthorizedTeamPerformance 
 let dashboardTeamPerformanceIntelligenceQueryForTest: typeof queryAuthorizedTeamPerformanceIntelligence | null = null;
 let databaseSaveBarrierForTest: (() => Promise<void>) | null = null;
 let focusTopicDeleteResponseObserverForTest: (() => void) | null = null;
+let authenticationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -11352,14 +11353,13 @@ app.post("/auth/login", authLoginRateLimiter, async (request: Request, response:
     return;
   }
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
     const valid = db.admin.passwordHash
       ? verifyScryptPassword(password, db.admin.passwordHash)
       : password === ADMIN_BOOTSTRAP_PASSWORD;
 
     if (!valid) {
-      response.status(401).json({ error: "Invalid admin password." });
-      return;
+      return { status: 401, body: { error: "Invalid admin password." } };
     }
 
     const expiresAtMs = Date.now() + ADMIN_TOKEN_TTL_MINUTES * 60 * 1000;
@@ -11367,8 +11367,10 @@ app.post("/auth/login", authLoginRateLimiter, async (request: Request, response:
     addActiveAdminSession(db, sid);
     const token = signAdminToken({ role: "admin", exp: expiresAtMs, sid });
 
-    response.json({ token, expiresAt: new Date(expiresAtMs).toISOString() });
+    return { status: 200, body: { token, expiresAt: new Date(expiresAtMs).toISOString() } };
   });
+  authenticationResponseObserverForTest?.("POST /auth/login", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.post("/auth/logout", requireAdmin, async (request: AdminAuthRequest, response: Response) => {
@@ -11378,7 +11380,7 @@ app.post("/auth/logout", requireAdmin, async (request: AdminAuthRequest, respons
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     removeActiveAdminSession(db, sid);
     appendPlatformAuditEvent(db, {
       action: "admin.logout",
@@ -11387,8 +11389,10 @@ app.post("/auth/logout", requireAdmin, async (request: AdminAuthRequest, respons
         sid
       }
     });
-    response.json({ ok: true });
+    return { ok: true };
   });
+  authenticationResponseObserverForTest?.("POST /auth/logout", 200);
+  response.json(payload);
 });
 
 app.post("/auth/change-password", requireAdmin, async (request: Request, response: Response) => {
@@ -11406,14 +11410,13 @@ app.post("/auth/change-password", requireAdmin, async (request: Request, respons
     return;
   }
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
     const valid = db.admin.passwordHash
       ? verifyScryptPassword(currentPassword, db.admin.passwordHash)
       : currentPassword === ADMIN_BOOTSTRAP_PASSWORD;
 
     if (!valid) {
-      response.status(401).json({ error: "Current password is incorrect." });
-      return;
+      return { status: 401, body: { error: "Current password is incorrect." } };
     }
 
     db.admin.passwordHash = hashScryptPassword(newPassword);
@@ -11421,8 +11424,10 @@ app.post("/auth/change-password", requireAdmin, async (request: Request, respons
       action: "admin.password_changed",
       message: "Platform admin password was changed."
     });
-    response.json({ ok: true });
+    return { status: 200, body: { ok: true } };
   });
+  authenticationResponseObserverForTest?.("POST /auth/change-password", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request: Request, response: Response) => {
@@ -11434,7 +11439,7 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const result = await handleDashboardWebAuthCodeRequest({
       db,
       email,
@@ -11465,7 +11470,7 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
           delivery: result.delivery,
         }
       });
-      response.json(result.response);
+      return result.response;
     } else if (result.outcome === "delivery_failed") {
       logWarnThrottled(
         `web-auth-request:delivery-failed:${result.user.id}`,
@@ -11482,12 +11487,14 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
           error: result.error.message,
         }
       });
-      response.json(result.response);
+      return result.response;
     } else {
       logDashboardWebAuthRequestIgnored(email, result.reason);
-      response.json(result.response);
+      return result.response;
     }
   });
+  authenticationResponseObserverForTest?.("POST /web/auth/request-code", 200);
+  response.json(payload);
 });
 
 app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: Request, response: Response) => {
@@ -11500,17 +11507,19 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     return;
   }
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
+    const failure = () => ({
+      status: 400,
+      body: { error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE },
+    });
     const user = db.users.find((entry) => entry.email.toLowerCase() === email);
     if (!user) {
-      response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-      return;
+      return failure();
     }
 
     const dashboardEligibility = resolveDashboardAccessEligibility(db, user);
     if (!dashboardEligibility.eligible) {
-      response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-      return;
+      return failure();
     }
 
     const now = new Date();
@@ -11518,16 +11527,13 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     if (user.emailVerifiedAt) {
       const result = webAuthService.verifyLatestSignInChallenge(db, user, code, now);
       if (result === "missing") {
-        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-        return;
+        return failure();
       }
       if (result === "expired") {
-        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-        return;
+        return failure();
       }
       if (result === "invalid") {
-        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-        return;
+        return failure();
       }
 
       challengeType = "sign_in";
@@ -11540,16 +11546,13 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
         codeSecret: MOBILE_TOKEN_SECRET,
       });
       if (result === "missing") {
-        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-        return;
+        return failure();
       }
       if (result === "expired") {
-        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-        return;
+        return failure();
       }
       if (result === "invalid") {
-        response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-        return;
+        return failure();
       }
 
       const nowIsoValue = now.toISOString();
@@ -11566,8 +11569,7 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
 
     const viewer = resolveDashboardViewer(db, user);
     if (!viewer) {
-      response.status(400).json({ error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE });
-      return;
+      return failure();
     }
 
     const sessionRequestMetadata = buildWebAuthSessionRequestMetadata(request);
@@ -11605,8 +11607,10 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
       session: buildWebAuthSessionUser(user),
       dashboardViewer: viewer
     };
-    response.json(payload);
+    return { status: 200, body: payload };
   });
+  authenticationResponseObserverForTest?.("POST /web/auth/verify-code", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.get("/web/auth/session", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
@@ -17087,35 +17091,30 @@ app.post(
   }
   const timezone = resolveTimeZone(body.timezone);
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
     const requestedOrg = joinCode ? findActiveOrgByJoinCode(db, joinCode) : null;
     if (joinCode && !requestedOrg) {
-      response.status(404).json({ error: "Company code not found." });
-      return;
+      return { status: 404, body: { error: "Company code not found." } };
     }
     const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
       if (existing.status !== "active") {
-        response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
-        return;
+        return { status: 403, body: { error: "Your account is deactivated. Contact your organization admin." } };
       }
 
       if (existing.accountType === "enterprise" && !isSuperUser(existing)) {
         const existingOrg = getOrgById(db, existing.orgId);
         if (!existingOrg || existingOrg.status !== "active") {
-          response.status(403).json({ error: "Enterprise account is not active." });
-          return;
+          return { status: 403, body: { error: "Enterprise account is not active." } };
         }
 
         if (existing.mobileProfileReonboardingRequired === true && !joinCode) {
-          response.status(400).json({ error: "Company code is required to confirm your organization." });
-          return;
+          return { status: 400, body: { error: "Company code is required to confirm your organization." } };
         }
 
         if (requestedOrg && existingOrg.id !== requestedOrg.id) {
-          response.status(403).json({ error: "Company code does not match your active organization." });
-          return;
+          return { status: 403, body: { error: "Company code does not match your active organization." } };
         }
       }
 
@@ -17148,8 +17147,7 @@ app.post(
           verificationExpiresAt: verification.expiresAt
         }
       });
-      response.json(payload);
-      return;
+      return { status: 200, body: payload };
     }
 
     const now = nowIso();
@@ -17199,8 +17197,10 @@ app.post(
       verificationExpiresAt: verification.expiresAt,
       domainMatch
     };
-    response.status(201).json(payload);
+    return { status: 201, body: payload };
   });
+  authenticationResponseObserverForTest?.("POST /mobile/onboard", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, async (request: Request, response: Response) => {
@@ -17217,11 +17217,10 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
     return;
   }
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return;
+      return { status: 404, body: { error: "User not found." } };
     }
 
     const now = new Date();
@@ -17230,18 +17229,15 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       allowReonboardingToken: true,
       allowIncompleteProfile: true,
     })) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return;
+      return { status: 401, body: { error: "Invalid mobile token." } };
     }
 
     if (user.status !== "active") {
-      response.status(403).json({ error: "This account has been deactivated." });
-      return;
+      return { status: 403, body: { error: "This account has been deactivated." } };
     }
 
     if (!onboardingToken && user.emailVerifiedAt && user.mobileProfileReonboardingRequired !== true) {
-      response.status(409).json({ error: "Email already verified." });
-      return;
+      return { status: 409, body: { error: "Email already verified." } };
     }
 
     const verification = await issueEmailVerification(db, user, now, "mobile");
@@ -17253,11 +17249,16 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
         verificationExpiresAt: verification.expiresAt
       }
     });
-    response.json({
-      ok: true,
-      verificationExpiresAt: verification.expiresAt
-    });
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        verificationExpiresAt: verification.expiresAt
+      },
+    };
   });
+  authenticationResponseObserverForTest?.("POST /mobile/onboard/resend-verification", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (request: Request, response: Response) => {
@@ -17281,11 +17282,10 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
     return;
   }
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return;
+      return { status: 404, body: { error: "User not found." } };
     }
 
     if (
@@ -17293,7 +17293,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
       && !consumeRateLimit(mobileReviewerVerificationRateLimitOptions, request, response, user.id)
     ) {
-      return;
+      return null;
     }
 
     const now = new Date();
@@ -17302,8 +17302,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       allowReonboardingToken: true,
       allowIncompleteProfile: true,
     })) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return;
+      return { status: 401, body: { error: "Invalid mobile token." } };
     }
 
     const needsCodeVerification = Boolean(onboardingToken) || !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
@@ -17320,37 +17319,31 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
         verificationExpiresAt: null,
         domainMatch: buildDomainMatchForEmail(db, user.email)
       };
-      response.json(payload);
-      return;
+      return { status: 200, body: payload };
     }
 
     const firstName = normalizeRequiredUserNameInput(onboardingToken?.firstName ?? body.firstName, "firstName");
     if (!firstName.ok) {
-      response.status(400).json({ error: firstName.error, code: firstName.code });
-      return;
+      return { status: 400, body: { error: firstName.error, code: firstName.code } };
     }
     const lastName = normalizeRequiredUserNameInput(onboardingToken?.lastName ?? body.lastName, "lastName");
     if (!lastName.ok) {
-      response.status(400).json({ error: lastName.error, code: lastName.code });
-      return;
+      return { status: 400, body: { error: lastName.error, code: lastName.code } };
     }
     const joinCode = normalizeJoinCode(onboardingToken?.joinCode ?? body.joinCode);
     const wasReonboarding = user.mobileProfileReonboardingRequired === true;
 
     if (wasReonboarding && user.accountType === "enterprise" && !isSuperUser(user) && !joinCode) {
-      response.status(400).json({ error: "Company code is required to confirm your organization." });
-      return;
+      return { status: 400, body: { error: "Company code is required to confirm your organization." } };
     }
 
     if (joinCode) {
       const requestedOrg = findActiveOrgByJoinCode(db, joinCode);
       if (!requestedOrg) {
-        response.status(404).json({ error: "Company code not found." });
-        return;
+        return { status: 404, body: { error: "Company code not found." } };
       }
       if (user.accountType === "enterprise" && !isSuperUser(user) && user.orgId !== requestedOrg.id) {
-        response.status(403).json({ error: "Company code does not match your active organization." });
-        return;
+        return { status: 403, body: { error: "Company code does not match your active organization." } };
       }
     }
 
@@ -17364,16 +17357,13 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
         appReviewCredential: APP_REVIEW_CREDENTIAL,
       });
       if (verificationResult === "missing") {
-        response.status(400).json({ error: "No pending verification code. Please resend verification email." });
-        return;
+        return { status: 400, body: { error: "No pending verification code. Please resend verification email." } };
       }
       if (verificationResult === "expired") {
-        response.status(400).json({ error: "Verification code expired. Please request a new code." });
-        return;
+        return { status: 400, body: { error: "Verification code expired. Please request a new code." } };
       }
       if (verificationResult === "invalid") {
-        response.status(400).json({ error: "Invalid verification code." });
-        return;
+        return { status: 400, body: { error: "Invalid verification code." } };
       }
 
       const nowIsoValue = now.toISOString();
@@ -17408,8 +17398,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
           now,
         });
     if (!completion.ok) {
-      response.status(completion.status).json({ error: completion.error });
-      return;
+      return { status: completion.status, body: { error: completion.error } };
     }
     appendMobileAuditEvent(db, user, {
       action: wasReonboarding ? "mobile.profile_reonboarding_completed" : "mobile.profile_completed",
@@ -17448,8 +17437,13 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       verificationExpiresAt: null,
       domainMatch: buildDomainMatchForEmail(db, user.email)
     };
-    response.json(payload);
+    return { status: 200, body: payload };
   });
+  if (!outcome) {
+    return;
+  }
+  authenticationResponseObserverForTest?.("POST /mobile/onboard/verify-email", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.get("/mobile/users/:userId", async (request: Request, response: Response) => {
@@ -23905,6 +23899,15 @@ export function setFocusTopicDeleteResponseObserverForTest(observer: (() => void
     throw new Error("setFocusTopicDeleteResponseObserverForTest is only available in test.");
   }
   focusTopicDeleteResponseObserverForTest = observer;
+}
+
+export function setAuthenticationResponseObserverForTest(
+  observer: ((route: string, status: number) => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setAuthenticationResponseObserverForTest is only available in test.");
+  }
+  authenticationResponseObserverForTest = observer;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(

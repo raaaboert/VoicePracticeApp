@@ -26,6 +26,10 @@ let dbPath: string;
 let baseUrl: string;
 let server: Server;
 let clearRateLimitsForTest: () => void;
+let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => void;
+let setAuthenticationResponseObserverForTest: (
+  observer: ((route: string, status: number) => void) | null,
+) => void;
 let normalResponseKeys: string[];
 let reviewerUserId: string;
 let reviewerNormalToken: string;
@@ -89,7 +93,17 @@ function buildApprovedEnterpriseUser(): UserProfile {
 function buildDatabase(): ApiDatabase {
   return {
     config: createDefaultConfig(NOW),
-    users: [buildApprovedEnterpriseUser()],
+    users: [
+      buildApprovedEnterpriseUser(),
+      {
+        ...buildApprovedEnterpriseUser(),
+        id: "dashboard_auth_user",
+        email: "dashboard-auth@example.test",
+        firstName: "Dashboard",
+        lastName: "Auth",
+        dashboardAccessEnabled: true,
+      },
+    ],
     orgs: [buildOrg()],
     orgDivisions: [],
     orgTrainings: [],
@@ -186,6 +200,36 @@ async function readDb(): Promise<ApiDatabase> {
   return JSON.parse(await readFile(dbPath, "utf8")) as ApiDatabase;
 }
 
+async function requestWhilePersistenceHeld<T>(route: string, runner: () => Promise<T>): Promise<T> {
+  let markSaveStarted!: () => void;
+  const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+  let releaseSave!: () => void;
+  const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let responseObserved = false;
+
+  setDatabaseSaveBarrierForTest(async () => {
+    markSaveStarted();
+    await saveRelease;
+  });
+  setAuthenticationResponseObserverForTest((observedRoute) => {
+    if (observedRoute === route) responseObserved = true;
+  });
+
+  const pending = runner();
+  try {
+    await saveStarted;
+    assert.equal(responseObserved, false);
+    releaseSave();
+    const result = await pending;
+    assert.equal(responseObserved, true);
+    return result;
+  } finally {
+    releaseSave();
+    setDatabaseSaveBarrierForTest(null);
+    setAuthenticationResponseObserverForTest(null);
+  }
+}
+
 before(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "mobile-reviewer-auth-route-"));
   dbPath = path.join(tempDir, "db.local.json");
@@ -209,6 +253,8 @@ before(async () => {
 
   const imported = await import("./index.js");
   clearRateLimitsForTest = imported.clearRateLimitsForTest;
+  setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
+  setAuthenticationResponseObserverForTest = imported.setAuthenticationResponseObserverForTest;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -231,6 +277,113 @@ test("normal OTP establishes the baseline mobile verification response", async (
   const verified = await verify(onboarded.body.user.id, code, onboarded.body.authToken);
   assert.equal(verified.status, 200);
   normalResponseKeys = Object.keys(verified.body).sort();
+});
+
+test("authentication successes wait for durable persistence and persistence failure never reports success", async () => {
+  clearRateLimitsForTest();
+
+  const login = await requestWhilePersistenceHeld("POST /auth/login", () =>
+    apiRequest("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+    })
+  );
+  assert.equal(login.status, 200);
+  assert.equal(typeof login.body.token, "string");
+  assert.ok(Date.parse(login.body.expiresAt as string) > Date.now());
+
+  const logout = await requestWhilePersistenceHeld("POST /auth/logout", () =>
+    apiRequest("/auth/logout", { method: "POST" }, login.body.token as string)
+  );
+  assert.equal(logout.status, 200);
+  assert.deepEqual(logout.body, { ok: true });
+  assert.equal((await apiRequest("/orgs", undefined, login.body.token as string)).status, 401);
+
+  const webChallenge = await captureVerificationCode(() =>
+    apiRequest("/web/auth/request-code", {
+      method: "POST",
+      body: JSON.stringify({ email: "dashboard-auth@example.test" }),
+    })
+  );
+  assert.equal(webChallenge.result.status, 200);
+  const webVerified = await requestWhilePersistenceHeld("POST /web/auth/verify-code", () =>
+    apiRequest("/web/auth/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ email: "dashboard-auth@example.test", code: webChallenge.code }),
+    })
+  );
+  assert.equal(webVerified.status, 200);
+  assert.equal(typeof webVerified.body.token, "string");
+  assert.ok(Date.parse(webVerified.body.expiresAt as string) > Date.now());
+  assert.equal((await apiRequest("/web/auth/session", undefined, webVerified.body.token as string)).status, 200);
+
+  const originalLog = console.log;
+  const onboardingLogs: string[] = [];
+  console.log = (...args: unknown[]) => {
+    onboardingLogs.push(args.map(String).join(" "));
+  };
+  let mobileOnboarded: Awaited<ReturnType<typeof onboard>>;
+  try {
+    mobileOnboarded = await requestWhilePersistenceHeld("POST /mobile/onboard", () =>
+      onboard("durability-mobile@example.test")
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(mobileOnboarded.status, 201);
+  const mobileCode = onboardingLogs.join("\n").match(/code=(\d{6})/)?.[1];
+  assert.ok(mobileCode);
+  const mobileUserId = mobileOnboarded.body.user.id as string;
+  const mobileVerified = await requestWhilePersistenceHeld("POST /mobile/onboard/verify-email", () =>
+    verify(mobileUserId, mobileCode, mobileOnboarded.body.authToken as string)
+  );
+  assert.equal(mobileVerified.status, 200);
+  assert.equal(mobileVerified.body.verificationRequired, false);
+  assert.equal(
+    (await apiRequest(`/mobile/users/${mobileUserId}/entitlements`, undefined, mobileVerified.body.authToken as string)).status,
+    200,
+  );
+
+  const secondLogin = await apiRequest("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ password: ADMIN_PASSWORD }),
+  });
+  assert.equal(secondLogin.status, 200);
+  const changedPassword = "durability-admin-password";
+  const passwordChange = await requestWhilePersistenceHeld("POST /auth/change-password", () =>
+    apiRequest("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword: ADMIN_PASSWORD, newPassword: changedPassword }),
+    }, secondLogin.body.token as string)
+  );
+  assert.equal(passwordChange.status, 200);
+  assert.equal((await apiRequest("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ password: ADMIN_PASSWORD }),
+  })).status, 401);
+  assert.equal((await apiRequest("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ password: changedPassword }),
+  })).status, 200);
+
+  let successObserved = false;
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error("controlled authentication persistence failure");
+  });
+  setAuthenticationResponseObserverForTest((route, status) => {
+    if (route === "POST /auth/login" && status === 200) successObserved = true;
+  });
+  try {
+    const failedLogin = await apiRequest("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ password: changedPassword }),
+    });
+    assert.equal(failedLogin.status, 500);
+    assert.equal(successObserved, false);
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+    setAuthenticationResponseObserverForTest(null);
+  }
 });
 
 test("hostile existing-user onboarding leaves durable account state and the current token unchanged until OTP succeeds", async () => {
