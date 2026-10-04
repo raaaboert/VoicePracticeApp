@@ -254,6 +254,7 @@ import { loadRuntimeConfig } from "./runtimeConfig.js";
 import {
   createTrainingPackStore,
   getTrainingPackOrderRevision,
+  type TrainingPackStore,
   TrainingPackOrderError,
 } from "./storage/trainingPackStore.js";
 import {
@@ -609,7 +610,7 @@ const simulationAiBudgetGraceByUserId = new Map<string, number>();
 const simulationOrgMonthlyOverrunGraceByUserId = new Map<string, number>();
 const simulationRuntimeCache = createSimulationRuntimeCache();
 const PLACEHOLDER_USER_TEXT_PATTERN = /^voice input captured/i;
-const trainingPackStore = createTrainingPackStore({
+const defaultTrainingPackStore = createTrainingPackStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
@@ -617,6 +618,7 @@ const trainingPackStore = createTrainingPackStore({
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
   logWarn: (message) => logWarnThrottled("training-pack:store", message, 5 * 60 * 1000)
 });
+let trainingPackStore = defaultTrainingPackStore;
 let dashboardTrainingPackLoaderForTest: ((orgId: string) => Promise<TrainingPack[]>) | null = null;
 let mobileAccountDeletionFailureForTest: Error | null = null;
 let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitlementStore({
@@ -4354,6 +4356,7 @@ let focusTopicDeleteResponseObserverForTest: (() => void) | null = null;
 let authenticationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let identityAdministrationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let organizationConfigurationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
+let contentManagementResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -14809,7 +14812,7 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -14905,12 +14908,15 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
         assignments,
         deactivatedInvalidAssignmentCount,
       };
-      response.json(payload);
+      return payload;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not update training pack assignments.";
       response.status(503).json({ error: message });
     }
   });
+  if (payload === undefined) return;
+  contentManagementResponseObserverForTest?.("PUT /orgs/:orgId/training-packs/:trainingPackId/assignments", 200);
+  response.json(payload);
 });
 
 app.post("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, response: Response) => {
@@ -15093,7 +15099,7 @@ app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (r
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -15125,12 +15131,15 @@ app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (r
         }
       });
 
-      response.json({ deleted: true, trainingPackId });
+      return { deleted: true, trainingPackId };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not delete training pack.";
       response.status(503).json({ error: message });
     }
   });
+  if (payload === undefined) return;
+  contentManagementResponseObserverForTest?.("DELETE /orgs/:orgId/training-packs/:trainingPackId", 200);
+  response.json(payload);
 });
 
 app.get("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, response: Response) => {
@@ -15369,7 +15378,7 @@ app.post("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request,
   const orgId = request.params.orgId;
   const body = request.body as CreateOrgCustomScenarioRequest;
 
-  await withDatabase(async (db) => {
+  const createdScenario = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -15484,8 +15493,11 @@ app.post("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request,
       },
     });
 
-    response.status(201).json(customScenario);
+    return customScenario;
   });
+  if (createdScenario === undefined) return;
+  contentManagementResponseObserverForTest?.("POST /orgs/:orgId/custom-scenarios", 201);
+  response.status(201).json(createdScenario);
 });
 
 app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (request: Request, response: Response) => {
@@ -15498,7 +15510,7 @@ app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (requ
     return;
   }
 
-  await withDatabase(async (db) => {
+  const updatedScenario = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -15642,8 +15654,11 @@ app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (requ
       },
     });
 
-    response.json(current);
+    return current;
   });
+  if (updatedScenario === undefined) return;
+  contentManagementResponseObserverForTest?.("PATCH /orgs/:orgId/custom-scenarios/:scenarioId", 200);
+  response.json(updatedScenario);
 });
 
 app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (request: Request, response: Response) => {
@@ -15654,7 +15669,7 @@ app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (req
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -15685,12 +15700,15 @@ app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (req
       },
     });
 
-    response.json({
+    return {
       deleted: true,
       id: existing.id,
       title: existing.title,
-    });
+    };
   });
+  if (payload === undefined) return;
+  contentManagementResponseObserverForTest?.("DELETE /orgs/:orgId/custom-scenarios/:scenarioId", 200);
+  response.json(payload);
 });
 
 app.get(
@@ -15727,7 +15745,7 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
   const orgId = request.params.orgId;
   const body = request.body as CreateOrgTrainingRequest;
 
-  await withDatabase(async (db) => {
+  const createdTraining = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -15777,16 +15795,19 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
       },
     });
 
-    response.status(201).json(
+    return (
       buildOrgTrainingSummaryForResponse(db, org.id, training.id) ?? {
         ...training,
         attachedTrainingPackIds: [],
         attachedCustomScenarioIds: [],
         attachedTrainingPackCount: 0,
         attachedCustomScenarioCount: 0,
-      },
+      }
     );
   });
+  if (createdTraining === undefined) return;
+  contentManagementResponseObserverForTest?.("POST /orgs/:orgId/trainings", 201);
+  response.status(201).json(createdTraining);
 });
 
 app.put(
@@ -15873,7 +15894,7 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
     return;
   }
 
-  await withDatabase(async (db) => {
+  const updatedTraining = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -15944,8 +15965,11 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
       },
     });
 
-    response.json(buildOrgTrainingSummaryForResponse(db, org.id, training.id));
+    return buildOrgTrainingSummaryForResponse(db, org.id, training.id);
   });
+  if (updatedTraining === undefined) return;
+  contentManagementResponseObserverForTest?.("PATCH /orgs/:orgId/trainings/:trainingId", 200);
+  response.json(updatedTraining);
 });
 
 app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
@@ -16021,7 +16045,7 @@ app.put("/orgs/:orgId/trainings/:trainingId/training-packs", requireAdmin, async
     return;
   }
 
-  await withDatabase(async (db) => {
+  const updatedTraining = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
       response.status(404).json({ error: "Organization not found." });
@@ -16078,12 +16102,15 @@ app.put("/orgs/:orgId/trainings/:trainingId/training-packs", requireAdmin, async
       },
     });
 
-    response.json(
+    return (
       buildOrgTrainingSummaryForResponse(db, org.id, training.id, {
         validTrainingPackIds: validPackIds,
       })
     );
   });
+  if (updatedTraining === undefined) return;
+  contentManagementResponseObserverForTest?.("PUT /orgs/:orgId/trainings/:trainingId/training-packs", 200);
+  response.json(updatedTraining);
 });
 
 app.put(
@@ -16103,7 +16130,7 @@ app.put(
       return;
     }
 
-    await withDatabase(async (db) => {
+    const updatedTraining = await withDatabase(async (db) => {
       const org = getOrgById(db, orgId);
       if (!org) {
         response.status(404).json({ error: "Organization not found." });
@@ -16153,12 +16180,15 @@ app.put(
         },
       });
 
-      response.json(
+      return (
         buildOrgTrainingSummaryForResponse(db, org.id, training.id, {
           validScenarioIds,
         })
       );
     });
+    if (updatedTraining === undefined) return;
+    contentManagementResponseObserverForTest?.("PUT /orgs/:orgId/trainings/:trainingId/custom-scenarios", 200);
+    response.json(updatedTraining);
   }
 );
 
@@ -23991,6 +24021,22 @@ export function setOrganizationConfigurationResponseObserverForTest(
     throw new Error("setOrganizationConfigurationResponseObserverForTest is only available in test.");
   }
   organizationConfigurationResponseObserverForTest = observer;
+}
+
+export function setContentManagementResponseObserverForTest(
+  observer: ((route: string, status: number) => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setContentManagementResponseObserverForTest is only available in test.");
+  }
+  contentManagementResponseObserverForTest = observer;
+}
+
+export function setContentManagementTrainingPackStoreForTest(store: TrainingPackStore | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setContentManagementTrainingPackStoreForTest is only available in test.");
+  }
+  trainingPackStore = store ?? defaultTrainingPackStore;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(

@@ -45,6 +45,7 @@ import type {
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import type { TrainingPackStore } from "./storage/trainingPackStore.js";
 
 const NOW = "2026-07-25T15:00:00.000Z";
 const RECENT_ACTIVITY_ANCHOR_MS = Date.now();
@@ -112,6 +113,10 @@ let setIdentityAdministrationResponseObserverForTest: (
 let setOrganizationConfigurationResponseObserverForTest: (
   observer: ((route: string, status: number) => void) | null,
 ) => void;
+let setContentManagementResponseObserverForTest: (
+  observer: ((route: string, status: number) => void) | null,
+) => void;
+let setContentManagementTrainingPackStoreForTest: (store: TrainingPackStore | null) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -278,6 +283,58 @@ function buildTrainingPack(id: string, orgId = "org_1", overrides: Partial<Train
     displayOrder: overrides.displayOrder ?? 0,
     createdAt: overrides.createdAt ?? NOW,
     updatedAt: overrides.updatedAt ?? NOW,
+  };
+}
+
+function createContentManagementTrainingPackStore(rows: TrainingPack[]): TrainingPackStore {
+  return {
+    async initialize() {},
+    async getActiveTrainingPackForOrg(orgId) {
+      return rows.find((pack) => pack.organizationId === orgId && pack.active) ?? null;
+    },
+    async listTrainingPacksForOrg(orgId) {
+      return rows.filter((pack) => pack.organizationId === orgId);
+    },
+    async listTrainingPacksForOrgInCompanyOrder(orgId) {
+      return rows
+        .filter((pack) => pack.organizationId === orgId)
+        .sort((left, right) => (left.displayOrder ?? 0) - (right.displayOrder ?? 0));
+    },
+    async reorderTrainingPacksForOrg(orgId, trainingPackIds) {
+      const matchingRows = rows.filter((pack) => pack.organizationId === orgId);
+      for (const [displayOrder, trainingPackId] of trainingPackIds.entries()) {
+        const pack = matchingRows.find((entry) => entry.id === trainingPackId);
+        if (pack) pack.displayOrder = displayOrder;
+      }
+      return {
+        trainingPacks: matchingRows.sort((left, right) => (left.displayOrder ?? 0) - (right.displayOrder ?? 0)),
+        orderRevision: "content-management-test-revision",
+      };
+    },
+    async createTrainingPackForOrg(orgId, input) {
+      if (!orgId) throw new Error("organization is required");
+      const created = buildTrainingPack(`pack_${crypto.randomUUID()}`, orgId, {
+        title: input.title,
+        trainingTopic: input.trainingTopic,
+        requiredBehavioralTriggers: input.requiredBehavioralTriggers,
+        active: input.active,
+        displayOrder: rows.filter((pack) => pack.organizationId === orgId).length,
+      });
+      rows.push(created);
+      return created;
+    },
+    async updateTrainingPackForOrg(orgId, trainingPackId, patch) {
+      const pack = rows.find((entry) => entry.organizationId === orgId && entry.id === trainingPackId);
+      if (!pack) return null;
+      Object.assign(pack, patch, { updatedAt: new Date().toISOString() });
+      return pack;
+    },
+    async deleteTrainingPackForOrg(orgId, trainingPackId) {
+      const index = rows.findIndex((entry) => entry.organizationId === orgId && entry.id === trainingPackId);
+      if (index < 0) return false;
+      rows.splice(index, 1);
+      return true;
+    },
   };
 }
 
@@ -966,6 +1023,39 @@ async function requestWhileOrganizationPersistenceHeld<T>(route: string, runner:
   }
 }
 
+async function requestWhileContentPersistenceHeld<T>(route: string, runner: () => Promise<T>): Promise<T> {
+  let markSaveStarted!: () => void;
+  const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+  let releaseSave!: () => void;
+  const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let observedStatus: number | null = null;
+
+  setDatabaseSaveBarrierForTest(async () => {
+    markSaveStarted();
+    await saveRelease;
+  });
+  setContentManagementResponseObserverForTest((observedRoute, status) => {
+    if (observedRoute === route) observedStatus = status;
+  });
+
+  const pending = runner();
+  try {
+    await saveStarted;
+    assert.equal(observedStatus, null);
+    releaseSave();
+    const result = await pending;
+    assert.ok(
+      observedStatus !== null && observedStatus >= 200 && observedStatus < 300,
+      `content response observer was not reached: ${JSON.stringify(result)}`,
+    );
+    return result;
+  } finally {
+    releaseSave();
+    setDatabaseSaveBarrierForTest(null);
+    setContentManagementResponseObserverForTest(null);
+  }
+}
+
 async function loadTrainingPacksForRouteTest(orgId: string): Promise<TrainingPack[]> {
   return [
     buildTrainingPack("pack_scope", "org_1", {
@@ -1216,6 +1306,8 @@ before(async () => {
   setFocusTopicDeleteResponseObserverForTest = imported.setFocusTopicDeleteResponseObserverForTest;
   setIdentityAdministrationResponseObserverForTest = imported.setIdentityAdministrationResponseObserverForTest;
   setOrganizationConfigurationResponseObserverForTest = imported.setOrganizationConfigurationResponseObserverForTest;
+  setContentManagementResponseObserverForTest = imported.setContentManagementResponseObserverForTest;
+  setContentManagementTrainingPackStoreForTest = imported.setContentManagementTrainingPackStoreForTest;
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
       // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
@@ -5631,5 +5723,321 @@ test("organization and division configuration success waits for durable persiste
   } finally {
     setDatabaseSaveBarrierForTest(null);
     setOrganizationConfigurationResponseObserverForTest(null);
+  }
+});
+
+test("content management successes wait for durable persistence and preserve cross-store behavior", async () => {
+  const packAssignmentId = "pack_batch4_assignment";
+  const packAttachId = "pack_batch4_attach";
+  const packDeleteId = "pack_batch4_delete";
+  const packPartialFailureId = "pack_batch4_partial_failure";
+  const fakePacks = [
+    buildTrainingPack(packAssignmentId, "org_1", {
+      title: "Batch 4 Assignment Pack",
+      requiredBehavioralTriggers: ["scenario:scenario_scope"],
+    }),
+    buildTrainingPack(packAttachId, "org_1", { title: "Batch 4 Attachment Pack" }),
+    buildTrainingPack(packDeleteId, "org_1", { title: "Batch 4 Delete Pack" }),
+    buildTrainingPack(packPartialFailureId, "org_1", { title: "Batch 4 Partial Failure Pack" }),
+    buildTrainingPack("pack_batch4_other", "org_2", { title: "Batch 4 Other Organization Pack" }),
+  ];
+  setContentManagementTrainingPackStoreForTest(createContentManagementTrainingPackStore(fakePacks));
+
+  try {
+    const config = await adminRequest("/config");
+    assert.equal(config.status, 200);
+    const startingDb = await readDurableDbOnce();
+    const org = startingDb.orgs.find((entry) => entry.id === "org_1");
+    assert.ok(org);
+    const assignmentUserIds = startingDb.users
+      .filter((user) => user.accountType === "enterprise" && user.orgId === "org_1" && user.status === "active")
+      .map((user) => user.id)
+      .slice(0, 2);
+    assert.equal(assignmentUserIds.length, 2);
+    const roleIndustries = config.body.roleIndustries as Array<{
+      roleId: string;
+      industryId: string;
+      active: boolean;
+    }>;
+    const actionableMapping = roleIndustries.find(
+      (mapping) => mapping.active && org.activeIndustries.includes(mapping.industryId as never),
+    );
+    assert.ok(actionableMapping);
+
+    const assignments = await requestWhileContentPersistenceHeld(
+      "PUT /orgs/:orgId/training-packs/:trainingPackId/assignments",
+      () => adminRequest(`/orgs/org_1/training-packs/${packAssignmentId}/assignments`, {
+        method: "PUT",
+        body: JSON.stringify({ userIds: [...assignmentUserIds, assignmentUserIds[0]] }),
+      }),
+    );
+    assert.equal(assignments.status, 200);
+    const durableAssignments = (await readDurableDbOnce()).trainingPackAssignments
+      .filter((assignment) => assignment.trainingPackId === packAssignmentId && assignment.active);
+    assert.deepEqual(durableAssignments.map((assignment) => assignment.userId).sort(), assignmentUserIds.slice().sort());
+    assert.deepEqual(
+      durableAssignments.map((assignment) => assignment.requiredScenarioIds),
+      [["scenario_scope"], ["scenario_scope"]],
+    );
+
+    const invalidAssignment = await adminRequest(`/orgs/org_1/training-packs/${packAssignmentId}/assignments`, {
+      method: "PUT",
+      body: JSON.stringify({ userIds: ["other_org_user"] }),
+    });
+    assert.equal(invalidAssignment.status, 400);
+    const wrongOrgAssignment = await adminRequest("/orgs/org_1/training-packs/pack_batch4_other/assignments", {
+      method: "PUT",
+      body: JSON.stringify({ userIds: ["learner"] }),
+    });
+    assert.equal(wrongOrgAssignment.status, 404);
+
+    const beforeTopicCreate = await adminRequest("/orgs/org_1/trainings");
+    assert.equal(beforeTopicCreate.status, 200);
+    const createdTopic = await requestWhileContentPersistenceHeld("POST /orgs/:orgId/trainings", () =>
+      adminRequest("/orgs/org_1/trainings", {
+        method: "POST",
+        body: JSON.stringify({
+          name: "Batch 4 Durable Focus Topic",
+          description: "Durability and actionability coverage.",
+          status: "active",
+        }),
+      })
+    );
+    assert.equal(createdTopic.status, 201);
+    const trainingId = String(createdTopic.body.id);
+    assert.ok(trainingId);
+    const afterTopicCreate = await adminRequest("/orgs/org_1/trainings");
+    const activeAfterCreate = (afterTopicCreate.body.trainings as OrgTrainingRecord[])
+      .filter((topic) => topic.status === "active");
+    assert.equal(activeAfterCreate.at(-1)?.id, trainingId);
+    const createdDisplayOrder = activeAfterCreate.at(-1)?.displayOrder;
+    assert.equal(typeof createdDisplayOrder, "number");
+    assert.notEqual(afterTopicCreate.body.orderRevision, beforeTopicCreate.body.orderRevision);
+
+    const createdScenario = await requestWhileContentPersistenceHeld(
+      "POST /orgs/:orgId/custom-scenarios",
+      () => adminRequest("/orgs/org_1/custom-scenarios", {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Batch 4 Durable Scenario",
+          description: "A manager must resolve a realistic team concern.",
+          desiredOutcome: "Reach a clear shared next step.",
+          aiRole: "A concerned team member",
+          scoringGuidance: "Assess clarity and empathy.",
+          segmentId: actionableMapping.roleId,
+          applicableIndustryIds: [actionableMapping.industryId],
+          enabled: false,
+        }),
+      }),
+    );
+    assert.equal(createdScenario.status, 201);
+    const scenarioId = String(createdScenario.body.id);
+    assert.ok(scenarioId);
+    assert.equal((await readDurableDbOnce()).orgs.find((entry) => entry.id === "org_1")
+      ?.customScenarios?.some((scenario) => scenario.id === scenarioId && scenario.enabled === false), true);
+
+    const scenarioAttached = await requestWhileContentPersistenceHeld(
+      "PUT /orgs/:orgId/trainings/:trainingId/custom-scenarios",
+      () => adminRequest(`/orgs/org_1/trainings/${trainingId}/custom-scenarios`, {
+        method: "PUT",
+        body: JSON.stringify({ scenarioIds: [scenarioId] }),
+      }),
+    );
+    assert.equal(scenarioAttached.status, 200);
+    assert.equal((await readDurableDbOnce()).orgTrainingScenarioAttachments.some((attachment) =>
+      attachment.orgId === "org_1" && attachment.trainingId === trainingId && attachment.scenarioId === scenarioId
+    ), true);
+
+    const disabledCatalog = await mobileRequest(
+      "/mobile/users/user_admin/focus-topics",
+      "token_user_admin",
+    );
+    assert.equal(disabledCatalog.status, 200);
+    assert.equal(
+      (disabledCatalog.body.topics as Array<{ id: string }>).some((topic) => topic.id === trainingId),
+      false,
+    );
+
+    const scenarioUpdated = await requestWhileContentPersistenceHeld(
+      "PATCH /orgs/:orgId/custom-scenarios/:scenarioId",
+      () => adminRequest(`/orgs/org_1/custom-scenarios/${scenarioId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: true, title: "Batch 4 Actionable Scenario" }),
+      }),
+    );
+    assert.equal(scenarioUpdated.status, 200);
+    assert.equal(scenarioUpdated.body.enabled, true);
+
+    const enabledCatalog = await mobileRequest(
+      "/mobile/users/user_admin/focus-topics",
+      "token_user_admin",
+    );
+    assert.equal(enabledCatalog.status, 200);
+    const catalogTopic = (enabledCatalog.body.topics as Array<{ id: string; scenarioCount: number }>)
+      .find((topic) => topic.id === trainingId);
+    assert.equal(catalogTopic?.scenarioCount, 1);
+    const topicDetail = await mobileRequest(
+      `/mobile/users/user_admin/focus-topics/${trainingId}`,
+      "token_user_admin",
+    );
+    assert.equal(topicDetail.status, 200);
+    assert.equal(
+      (topicDetail.body.scenarios as Array<{ id: string; trainingId: string | null }>).find(
+        (scenario) => scenario.id === scenarioId,
+      )?.trainingId,
+      trainingId,
+    );
+
+    const packsAttached = await requestWhileContentPersistenceHeld(
+      "PUT /orgs/:orgId/trainings/:trainingId/training-packs",
+      () => adminRequest(`/orgs/org_1/trainings/${trainingId}/training-packs`, {
+        method: "PUT",
+        body: JSON.stringify({ trainingPackIds: [packAttachId, packDeleteId, packPartialFailureId] }),
+      }),
+    );
+    assert.equal(packsAttached.status, 200);
+    assert.deepEqual(
+      ((packsAttached.body.attachedTrainingPackIds as string[]) ?? []).slice().sort(),
+      [packAttachId, packDeleteId, packPartialFailureId].sort(),
+    );
+
+    const assignedDeletePack = await adminRequest(`/orgs/org_1/training-packs/${packDeleteId}/assignments`, {
+      method: "PUT",
+      body: JSON.stringify({ userIds: [assignmentUserIds[0]] }),
+    });
+    assert.equal(assignedDeletePack.status, 200);
+
+    const archivedTopic = await requestWhileContentPersistenceHeld(
+      "PATCH /orgs/:orgId/trainings/:trainingId",
+      () => adminRequest(`/orgs/org_1/trainings/${trainingId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "archived" }),
+      }),
+    );
+    assert.equal(archivedTopic.status, 200);
+    assert.equal(archivedTopic.body.status, "archived");
+    const afterArchive = await adminRequest("/orgs/org_1/trainings");
+    const archivedRecord = (afterArchive.body.trainings as OrgTrainingRecord[])
+      .find((topic) => topic.id === trainingId);
+    assert.equal(archivedRecord?.status, "archived");
+    assert.equal(
+      archivedRecord?.displayOrder,
+      createdDisplayOrder,
+    );
+    assert.equal(
+      (afterArchive.body.trainings as OrgTrainingRecord[])
+        .filter((topic) => topic.status === "active")
+        .some((topic) => topic.id === trainingId),
+      false,
+    );
+
+    const reactivatedTopic = await requestWhileContentPersistenceHeld(
+      "PATCH /orgs/:orgId/trainings/:trainingId",
+      () => adminRequest(`/orgs/org_1/trainings/${trainingId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+      }),
+    );
+    assert.equal(reactivatedTopic.status, 200);
+    const afterReactivate = await adminRequest("/orgs/org_1/trainings");
+    const activeAfterReactivate = (afterReactivate.body.trainings as OrgTrainingRecord[])
+      .filter((topic) => topic.status === "active");
+    assert.equal(activeAfterReactivate.at(-1)?.id, trainingId);
+    assert.equal(activeAfterReactivate.at(-1)?.displayOrder, activeAfterReactivate.length - 1);
+    assert.notEqual(afterReactivate.body.orderRevision, afterArchive.body.orderRevision);
+
+    const wrongOrgPackAttachment = await adminRequest(
+      "/orgs/org_2/trainings/training_other_org/training-packs",
+      {
+        method: "PUT",
+        body: JSON.stringify({ trainingPackIds: [packAttachId] }),
+      },
+    );
+    assert.equal(wrongOrgPackAttachment.status, 400);
+    const staleScenarioAttachment = await adminRequest(
+      `/orgs/org_1/trainings/${trainingId}/custom-scenarios`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ scenarioIds: ["scenario_missing_batch4"] }),
+      },
+    );
+    assert.equal(staleScenarioAttachment.status, 400);
+    const wrongOrgScenarioUpdate = await adminRequest(`/orgs/org_2/custom-scenarios/${scenarioId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(wrongOrgScenarioUpdate.status, 404);
+    const unauthorizedCreate = await dashboardRequest("/orgs/org_1/trainings", orgAdminToken, {
+      method: "POST",
+      body: JSON.stringify({ name: "Unauthorized Topic", status: "active" }),
+    });
+    assert.equal(unauthorizedCreate.status, 401);
+
+    const scenarioDeleted = await requestWhileContentPersistenceHeld(
+      "DELETE /orgs/:orgId/custom-scenarios/:scenarioId",
+      () => adminRequest(`/orgs/org_1/custom-scenarios/${scenarioId}`, { method: "DELETE" }),
+    );
+    assert.equal(scenarioDeleted.status, 200);
+    let durableDb = await readDurableDbOnce();
+    assert.equal(durableDb.orgs.find((entry) => entry.id === "org_1")
+      ?.customScenarios?.some((scenario) => scenario.id === scenarioId), false);
+    assert.equal(durableDb.orgTrainingScenarioAttachments.some((attachment) =>
+      attachment.orgId === "org_1" && attachment.scenarioId === scenarioId
+    ), false);
+
+    const packDeleted = await requestWhileContentPersistenceHeld(
+      "DELETE /orgs/:orgId/training-packs/:trainingPackId",
+      () => adminRequest(`/orgs/org_1/training-packs/${packDeleteId}`, { method: "DELETE" }),
+    );
+    assert.equal(packDeleted.status, 200);
+    durableDb = await readDurableDbOnce();
+    assert.equal(durableDb.orgTrainingPackAttachments.some((attachment) =>
+      attachment.orgId === "org_1" && attachment.trainingPackId === packDeleteId
+    ), false);
+    assert.equal(durableDb.trainingPackAssignments.some((assignment) =>
+      assignment.orgId === "org_1" && assignment.trainingPackId === packDeleteId && assignment.active
+    ), false);
+    assert.equal(fakePacks.some((pack) => pack.id === packDeleteId), false);
+
+    const auditEvents = await readPlatformAuditEvents();
+    for (const action of [
+      "org.training_pack.assignments.updated",
+      "org.training_pack.deleted",
+      "org.custom_scenario.created",
+      "org.custom_scenario.updated",
+      "org.custom_scenario.deleted",
+      "org.training.created",
+      "org.training.updated",
+      "org.training.pack_attachments.updated",
+      "org.training.scenario_attachments.updated",
+    ]) {
+      assert.equal(auditEvents.some((event) => event.action === action && event.orgId === "org_1"), true, action);
+    }
+
+    let successObserved = false;
+    setDatabaseSaveBarrierForTest(async () => {
+      throw new Error("controlled content management app-state persistence failure");
+    });
+    setContentManagementResponseObserverForTest((route, status) => {
+      if (route === "DELETE /orgs/:orgId/training-packs/:trainingPackId" && status === 200) {
+        successObserved = true;
+      }
+    });
+    try {
+      const failedDelete = await adminRequest(`/orgs/org_1/training-packs/${packPartialFailureId}`, {
+        method: "DELETE",
+      });
+      assert.equal(failedDelete.status, 500);
+      assert.equal(successObserved, false);
+      assert.equal(fakePacks.some((pack) => pack.id === packPartialFailureId), false);
+      assert.equal((await readDurableDbOnce()).orgTrainingPackAttachments.some((attachment) =>
+        attachment.orgId === "org_1" && attachment.trainingPackId === packPartialFailureId
+      ), true);
+    } finally {
+      setDatabaseSaveBarrierForTest(null);
+      setContentManagementResponseObserverForTest(null);
+    }
+  } finally {
+    setContentManagementTrainingPackStoreForTest(null);
   }
 });
