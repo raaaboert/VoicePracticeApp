@@ -4352,6 +4352,7 @@ let dashboardTeamPerformanceIntelligenceQueryForTest: typeof queryAuthorizedTeam
 let databaseSaveBarrierForTest: (() => Promise<void>) | null = null;
 let focusTopicDeleteResponseObserverForTest: (() => void) | null = null;
 let authenticationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
+let identityAdministrationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -12640,7 +12641,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const adminContext = resolveDashboardAdminOrgContext(
       db,
       request.dashboard!,
@@ -13025,8 +13026,11 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         orgUsers: nextOrgUsers,
       }),
     };
-    response.json(payload);
+    return payload;
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("PATCH /dashboard/admin/users/:userId", 200);
+  response.json(payload);
 });
 
 app.get("/dashboard/admin/access-requests", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
@@ -13085,7 +13089,7 @@ app.patch(
       return;
     }
 
-    await withDatabase(async (db) => {
+    const payload = await withDatabase(async (db) => {
       const adminContext = resolveDashboardAdminOrgContext(
         db,
         request.dashboard!,
@@ -13118,8 +13122,11 @@ app.patch(
         ok: true,
         request: buildDashboardAdminAccessRequestRow(db, adminContext.org, decision.requestRecord),
       };
-      response.json(payload);
+      return payload;
     });
+    if (!payload) return;
+    identityAdministrationResponseObserverForTest?.("PATCH /dashboard/admin/access-requests/:requestId", 200);
+    response.json(payload);
   }
 );
 
@@ -16361,7 +16368,7 @@ app.post("/admin/settings/superusers", requireAdmin, async (request: Request, re
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
       if (existing.accountType === "enterprise") {
@@ -16429,8 +16436,11 @@ app.post("/admin/settings/superusers", requireAdmin, async (request: Request, re
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };
-    response.status(201).json(payload);
+    return payload;
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("POST /admin/settings/superusers", 201);
+  response.status(201).json(payload);
 });
 
 app.delete("/admin/settings/superusers/:userId", requireAdmin, async (request: Request, response: Response) => {
@@ -16440,7 +16450,7 @@ app.delete("/admin/settings/superusers/:userId", requireAdmin, async (request: R
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user || user.isSuperUser !== true) {
       response.status(404).json({ error: "Super user not found." });
@@ -16468,12 +16478,15 @@ app.delete("/admin/settings/superusers/:userId", requireAdmin, async (request: R
       },
     });
 
-    response.json({
+    return {
       deleted: true,
       userId: user.id,
       email: user.email,
-    });
+    };
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("DELETE /admin/settings/superusers/:userId", 200);
+  response.json(payload);
 });
 
 app.get("/users", requireAdmin, async (_request: Request, response: Response) => {
@@ -16526,7 +16539,7 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
 
   const timezone = resolveTimeZone(body.timezone);
 
-  await withDatabase(async (db) => {
+  const user = await withDatabase(async (db) => {
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
       response.status(409).json({ error: "Email already exists." });
@@ -16613,8 +16626,11 @@ app.post("/users", requireAdmin, async (request: Request, response: Response) =>
         performanceAccess: user.performanceAccess
       }
     });
-    response.status(201).json(user);
+    return user;
   });
+  if (!user) return;
+  identityAdministrationResponseObserverForTest?.("POST /users", 201);
+  response.status(201).json(user);
 });
 
 app.patch("/users/:userId", requireAdmin, async (request: Request, response: Response) => {
@@ -16626,7 +16642,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
     return;
   }
 
-  await withDatabase(async (db) => {
+  const updatedUser = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -16972,14 +16988,17 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
         }
       });
     }
-    response.json(user);
+    return user;
   });
+  if (!updatedUser) return;
+  identityAdministrationResponseObserverForTest?.("PATCH /users/:userId", 200);
+  response.json(updatedUser);
 });
 
 app.delete("/users/:userId", requireAdmin, async (request: Request, response: Response) => {
   const userId = request.params.userId;
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const userIndex = db.users.findIndex((entry) => entry.id === userId);
     if (userIndex === -1) {
       response.status(404).json({ error: "User not found." });
@@ -17058,12 +17077,15 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
       }
     });
 
-    response.json({
+    return {
       deleted: true,
       userId: user.id,
       email: user.email
-    });
+    };
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("DELETE /users/:userId", 200);
+  response.json(payload);
 });
 
 app.post(
@@ -18118,7 +18140,7 @@ app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLi
     return;
   }
 
-  await withDatabase(async (db) => {
+  const outcome = await withDatabase(async (db) => {
     const user = getUserById(db, request.params.userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -18174,20 +18196,26 @@ app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLi
       }
     });
 
-    response.status(requestResult.created ? 201 : 200).json({
-      created: requestResult.created,
-      request: {
-        id: record.id,
-        status: record.status,
-        orgId: record.orgId,
-        orgName: org.name,
-        emailDomain: record.emailDomain,
-        createdAt: record.createdAt,
-        expiresAt: record.expiresAt,
-        updatedAt: record.updatedAt
-      }
-    });
+    return {
+      status: requestResult.created ? 201 : 200,
+      body: {
+        created: requestResult.created,
+        request: {
+          id: record.id,
+          status: record.status,
+          orgId: record.orgId,
+          orgName: org.name,
+          emailDomain: record.emailDomain,
+          createdAt: record.createdAt,
+          expiresAt: record.expiresAt,
+          updatedAt: record.updatedAt
+        }
+      },
+    };
   });
+  if (!outcome) return;
+  identityAdministrationResponseObserverForTest?.("POST /mobile/users/:userId/org-access-requests", outcome.status);
+  response.status(outcome.status).json(outcome.body);
 });
 
 app.get("/mobile/users/:userId/admin/org/access-requests", async (request: Request, response: Response) => {
@@ -18278,7 +18306,7 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
   }
   const action = body.action;
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const actor = getUserById(db, request.params.userId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -18321,7 +18349,7 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       return;
     }
 
-    response.json({
+    return {
       ok: true,
       request: {
         id: decision.requestRecord.id,
@@ -18335,8 +18363,11 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
         decidedAt: decision.requestRecord.decidedAt,
         decisionReason: decision.requestRecord.decisionReason
       }
-    });
+    };
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("PATCH /mobile/users/:userId/admin/org/access-requests/:requestId", 200);
+  response.json(payload);
 });
 
 app.post("/mobile/users/:userId/support/cases", async (request: Request, response: Response) => {
@@ -22513,7 +22544,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
   const hasOveragePatch = typeof body.allowDailyOverageThisCycle === "boolean";
   const hasDailyCapOverridePatch = body.dailySecondsCapOverride !== undefined;
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const actor = getUserById(db, actorUserId);
     if (!actor) {
       response.status(404).json({ error: "User not found." });
@@ -22697,7 +22728,7 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
         dailyOverageExtraSecondsGranted: target.dailyOverageExtraSecondsGranted ?? null,
       }
     });
-    response.json({
+    return {
       userId: target.id,
       email: target.email,
       employeeId: target.employeeId ?? null,
@@ -22707,8 +22738,11 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       dailyOverageExpiresAt: target.dailyOverageExpiresAt,
       dailyOverageMode: target.dailyOverageMode ?? null,
       dailyOverageExtraSecondsGranted: target.dailyOverageExtraSecondsGranted ?? null,
-    });
+    };
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("PATCH /mobile/users/:userId/admin/org/users/:targetUserId", 200);
+  response.json(payload);
 });
 
 app.get("/mobile/users/:userId/admin/org/analytics", async (request: Request, response: Response) => {
@@ -23278,7 +23312,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     expireOrgJoinRequests(db, new Date());
     const requestRecord = db.enterpriseJoinRequests.find((row) => row.id === request.params.requestId);
     if (!requestRecord) {
@@ -23371,7 +23405,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       });
     }
 
-    response.json({
+    return {
       ok: true,
       request: {
         id: requestRecord.id,
@@ -23385,8 +23419,11 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
         decidedAt: requestRecord.decidedAt,
         decisionReason: requestRecord.decisionReason
       }
-    });
+    };
   });
+  if (!payload) return;
+  identityAdministrationResponseObserverForTest?.("PATCH /org-join-requests/:requestId", 200);
+  response.json(payload);
 });
 
 app.get("/support/cases", requireAdmin, async (_request: Request, response: Response) => {
@@ -23908,6 +23945,15 @@ export function setAuthenticationResponseObserverForTest(
     throw new Error("setAuthenticationResponseObserverForTest is only available in test.");
   }
   authenticationResponseObserverForTest = observer;
+}
+
+export function setIdentityAdministrationResponseObserverForTest(
+  observer: ((route: string, status: number) => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setIdentityAdministrationResponseObserverForTest is only available in test.");
+  }
+  identityAdministrationResponseObserverForTest = observer;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(

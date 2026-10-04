@@ -106,6 +106,9 @@ let setDashboardTrainingPackLoaderForTest: (
 ) => void;
 let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => void;
 let setFocusTopicDeleteResponseObserverForTest: (observer: (() => void) | null) => void;
+let setIdentityAdministrationResponseObserverForTest: (
+  observer: ((route: string, status: number) => void) | null,
+) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -896,6 +899,40 @@ async function readAuditMetadataJson(): Promise<string> {
   return JSON.stringify((payload.events ?? []).map((event) => event.metadata ?? null));
 }
 
+async function readDurableDbOnce(): Promise<ApiDatabase> {
+  return JSON.parse(await readFile(dbPath, "utf8")) as ApiDatabase;
+}
+
+async function requestWhileIdentityPersistenceHeld<T>(route: string, runner: () => Promise<T>): Promise<T> {
+  let markSaveStarted!: () => void;
+  const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+  let releaseSave!: () => void;
+  const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let observedStatus: number | null = null;
+
+  setDatabaseSaveBarrierForTest(async () => {
+    markSaveStarted();
+    await saveRelease;
+  });
+  setIdentityAdministrationResponseObserverForTest((observedRoute, status) => {
+    if (observedRoute === route) observedStatus = status;
+  });
+
+  const pending = runner();
+  try {
+    await saveStarted;
+    assert.equal(observedStatus, null);
+    releaseSave();
+    const result = await pending;
+    assert.ok(observedStatus !== null && observedStatus >= 200 && observedStatus < 300);
+    return result;
+  } finally {
+    releaseSave();
+    setDatabaseSaveBarrierForTest(null);
+    setIdentityAdministrationResponseObserverForTest(null);
+  }
+}
+
 async function loadTrainingPacksForRouteTest(orgId: string): Promise<TrainingPack[]> {
   return [
     buildTrainingPack("pack_scope", "org_1", {
@@ -1144,6 +1181,7 @@ before(async () => {
   setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
   setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
   setFocusTopicDeleteResponseObserverForTest = imported.setFocusTopicDeleteResponseObserverForTest;
+  setIdentityAdministrationResponseObserverForTest = imported.setIdentityAdministrationResponseObserverForTest;
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
       // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
@@ -5217,4 +5255,106 @@ test("Focus Topic DELETE does not complete its HTTP response before required per
   // Refresh the in-memory cache from the unchanged durable state, then clean up normally.
   assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
   assert.equal((await adminRequest(`/orgs/org_1/trainings/${failureTrainingId}`, { method: "DELETE" })).status, 200);
+});
+
+test("identity administration successes wait for durable persistence and save failure never reports success", async () => {
+  const email = "durability-batch-2@acme.example";
+  const created = await requestWhileIdentityPersistenceHeld("POST /users", () =>
+    adminRequest("/users", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        tier: "enterprise",
+        accountType: "enterprise",
+        orgId: "org_1",
+        orgRole: "user",
+        performanceAccess: "none",
+      }),
+    })
+  );
+  assert.equal(created.status, 201);
+  const createdUserId = created.body.id as string;
+  assert.ok(createdUserId);
+  assert.equal((await readDurableDbOnce()).users.some((user) => user.id === createdUserId), true);
+
+  const updated = await requestWhileIdentityPersistenceHeld("PATCH /users/:userId", () =>
+    adminRequest(`/users/${createdUserId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ performanceAccess: "team" }),
+    })
+  );
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.performanceAccess, "team");
+  assert.equal(
+    (await readDurableDbOnce()).users.find((user) => user.id === createdUserId)?.performanceAccess,
+    "team",
+  );
+
+  const submitted = await requestWhileIdentityPersistenceHeld(
+    "POST /mobile/users/:userId/org-access-requests",
+    () => mobileRequest("/mobile/users/gmail_invalid/org-access-requests", "token_gmail_invalid", {
+      method: "POST",
+      body: JSON.stringify({ joinCode: "ACME2026" }),
+    }),
+  );
+  assert.equal(submitted.status, 201);
+  const submittedRequestId = (submitted.body.request as { id: string }).id;
+  assert.ok(submittedRequestId);
+
+  const approved = await requestWhileIdentityPersistenceHeld(
+    "PATCH /dashboard/admin/access-requests/:requestId",
+    () => dashboardRequest(`/dashboard/admin/access-requests/${submittedRequestId}`, orgAdminToken, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "approve" }),
+    }),
+  );
+  assert.equal(approved.status, 200);
+  let durableDb = await readDurableDbOnce();
+  assert.equal(durableDb.enterpriseJoinRequests.find((entry) => entry.id === submittedRequestId)?.status, "approved");
+  assert.equal(durableDb.users.find((user) => user.id === "gmail_invalid")?.orgId, "org_1");
+
+  const platformApproved = await requestWhileIdentityPersistenceHeld(
+    "PATCH /org-join-requests/:requestId",
+    () => adminRequest("/org-join-requests/jr_other", {
+      method: "PATCH",
+      body: JSON.stringify({ action: "approve" }),
+    }),
+  );
+  assert.equal(platformApproved.status, 200);
+  durableDb = await readDurableDbOnce();
+  assert.equal(durableDb.enterpriseJoinRequests.find((entry) => entry.id === "jr_other")?.status, "approved");
+  assert.equal(durableDb.users.find((user) => user.id === "other_pending")?.orgId, "org_2");
+
+  const deleted = await requestWhileIdentityPersistenceHeld("DELETE /users/:userId", () =>
+    adminRequest(`/users/${createdUserId}`, { method: "DELETE" })
+  );
+  assert.equal(deleted.status, 200);
+  assert.equal((await readDurableDbOnce()).users.some((user) => user.id === createdUserId), false);
+
+  let successObserved = false;
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error("controlled identity administration persistence failure");
+  });
+  setIdentityAdministrationResponseObserverForTest((route, status) => {
+    if (route === "POST /users" && status === 201) successObserved = true;
+  });
+  try {
+    const failed = await adminRequest("/users", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "durability-batch-2-failure@example.test",
+        tier: "free",
+        accountType: "individual",
+      }),
+    });
+    assert.equal(failed.status, 500);
+    assert.equal(successObserved, false);
+    assert.equal(
+      (await readDurableDbOnce()).users.some((user) => user.email === "durability-batch-2-failure@example.test"),
+      false,
+    );
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+    setIdentityAdministrationResponseObserverForTest(null);
+  }
 });
