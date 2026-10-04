@@ -5,15 +5,17 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const indexSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8");
-const routeStart = indexSource.indexOf('app.put("/orgs/:orgId/trainings/order"');
+const routeStart = indexSource.indexOf('"/orgs/:orgId/trainings/order",');
 const routeEnd = indexSource.indexOf('app.patch("/orgs/:orgId/trainings/:trainingId"', routeStart);
 const route = indexSource.slice(routeStart, routeEnd);
 
-test("Focus Topic reorder uses one serialized app-state write and no extracted-store or seeding work", () => {
+test("Focus Topic reorder uses one serialized app-state write and shared platform/customer authority", () => {
   assert.ok(routeStart >= 0 && routeEnd > routeStart);
   assert.equal((route.match(/await withDatabase\(/g) ?? []).length, 1);
   assert.equal((route.match(/emitMobileUpdateForOrg\(/g) ?? []).length, 1);
   assert.equal((route.match(/appendPlatformAuditEvent\(/g) ?? []).length, 1);
+  assert.equal((route.match(/appendWebAuditEvent\(/g) ?? []).length, 1);
+  assert.match(route, /requireContentOrganizationAuth/);
   assert.doesNotMatch(route, /ensureOrgTrainingWorkspace|trainingPackStore|trainingContentStore/);
 });
 
@@ -39,7 +41,7 @@ test("Focus Topic reorder checks the revision before validating current active m
   assert.ok(service.indexOf("org_training_order_conflict") < service.indexOf("org_training_order_invalid"));
 });
 
-test("company order is wired only to admin ordering and mobile Setup/catalog paths", () => {
+test("company order is wired to controlled ordering and mobile Setup/catalog paths", () => {
   const mobileStart = indexSource.indexOf("function getMobileReadyOrgTrainings");
   const mobileEnd = indexSource.indexOf("function touchOrgTrainingRecord", mobileStart);
   const mobileConfig = indexSource.slice(mobileStart, mobileEnd);
@@ -51,7 +53,45 @@ test("company order is wired only to admin ordering and mobile Setup/catalog pat
   assert.match(dashboard, /buildOrgTrainingSummaries\(/);
   assert.doesNotMatch(dashboard, /buildOrgTrainingSummariesInCompanyOrder/);
 
-  const adminListStart = indexSource.indexOf('app.get("/orgs/:orgId/trainings"');
+  const adminListStart = indexSource.indexOf('"/orgs/:orgId/trainings",');
   const adminListEnd = indexSource.indexOf('app.post("/orgs/:orgId/trainings"', adminListStart);
   assert.match(indexSource.slice(adminListStart, adminListEnd), /buildOrgTrainingSummariesInCompanyOrder/);
+});
+
+test("customer Training Pack ordering projects summaries without shrinking platform configuration routes", () => {
+  const customerStart = indexSource.indexOf('"/orgs/:orgId/training-packs",');
+  const customerEnd = indexSource.indexOf('app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments"', customerStart);
+  const customerRoutes = indexSource.slice(customerStart, customerEnd);
+  assert.ok(customerStart >= 0 && customerEnd > customerStart);
+  assert.match(customerRoutes, /request\.admin\s*\? authoritativePacks\s*:\s*buildCustomerTrainingPackOrderSummaries\(authoritativePacks\)/);
+  assert.match(customerRoutes, /request\.admin\s*\? result\.trainingPacks\s*:\s*buildCustomerTrainingPackOrderSummaries\(result\.trainingPacks\)/);
+
+  const createStart = indexSource.indexOf('app.post("/orgs/:orgId/training-packs"');
+  const updateStart = indexSource.indexOf('app.patch("/orgs/:orgId/training-packs/:trainingPackId"', createStart);
+  const deleteStart = indexSource.indexOf('app.delete("/orgs/:orgId/training-packs/:trainingPackId"', updateStart);
+  const createRoute = indexSource.slice(createStart, updateStart);
+  const updateRoute = indexSource.slice(updateStart, deleteStart);
+  assert.match(createRoute, /response\.status\(201\)\.json\(created\)/);
+  assert.match(updateRoute, /response\.json\(updated\)/);
+  assert.doesNotMatch(createRoute, /buildCustomerTrainingPackOrderSummaries/);
+  assert.doesNotMatch(updateRoute, /buildCustomerTrainingPackOrderSummaries/);
+});
+
+test("Focus Topic list is a fresh side-effect-free app-state read with no extracted-store work", () => {
+  const listStart = indexSource.indexOf('"/orgs/:orgId/trainings",');
+  const listEnd = indexSource.indexOf('app.post("/orgs/:orgId/trainings"', listStart);
+  const listRoute = indexSource.slice(listStart, listEnd);
+  assert.ok(listStart >= 0 && listEnd > listStart);
+  assert.match(listRoute, /withFreshDatabaseSnapshotRead/);
+  assert.doesNotMatch(listRoute, /withDatabase\(|withDatabaseWrite|ensureOrgTrainingWorkspace/);
+  assert.doesNotMatch(listRoute, /trainingPackStore|seedLegacyOrgTraining|saveDatabase/);
+  assert.doesNotMatch(listRoute, /appendPlatformAuditEvent|appendWebAuditEvent|emitMobileUpdateForOrg/);
+
+  const helperStart = indexSource.indexOf("async function withFreshDatabaseSnapshotRead");
+  const helperEnd = indexSource.indexOf("async function refreshReportingSnapshots", helperStart);
+  const helper = indexSource.slice(helperStart, helperEnd);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  assert.match(helper, /forceStorageRead: true/);
+  assert.match(helper, /syncEmployeeIdClaims: false/);
+  assert.doesNotMatch(helper, /saveDatabase|trainingPackStore/);
 });

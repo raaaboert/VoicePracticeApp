@@ -211,11 +211,22 @@ export function DashboardReportingWorkspace({
       {activeTab === "training" ? (
         <div className="tab-panel page-stack">
           <section className="section-card">
-            <div className="dashboard-selector-grid">
+            <div className="dashboard-training-selector-grid">
+              <label className="field-label dashboard-training-selector-label" htmlFor="training-selector">
+                Focus Topic
+              </label>
+
+              <div className="pill-row dashboard-training-selector-status">
+                {selectedTraining ? (
+                  <>
+                    <span className="pill accent">{formatTrainingStatus(selectedTraining.status)}</span>
+                    {multipleOrgsInScope ? <span className="pill">{selectedTraining.orgName}</span> : null}
+                    <span className="pill">Updated {formatDateTime(selectedTraining.updatedAt)}</span>
+                  </>
+                ) : null}
+              </div>
+
               <div className="dashboard-selector-field">
-                <label className="field-label" htmlFor="training-selector">
-                  Focus Topic
-                </label>
                 <select
                   id="training-selector"
                   className="text-input"
@@ -233,19 +244,12 @@ export function DashboardReportingWorkspace({
               </div>
 
               {selectedTraining ? (
-                <div className="dashboard-training-meta">
-                  <div className="pill-row">
-                    <span className="pill accent">{formatTrainingStatus(selectedTraining.status)}</span>
-                    {multipleOrgsInScope ? <span className="pill">{selectedTraining.orgName}</span> : null}
-                    <span className="pill">Updated {formatDateTime(selectedTraining.updatedAt)}</span>
-                  </div>
-                  <p className="small-copy">
-                    {formatCountLabel(selectedTraining.attachedTrainingPackCount, "attached pack")} and{" "}
-                    {formatCountLabel(selectedTraining.attachedCustomScenarioCount, "attached custom scenario")}.
-                  </p>
-                </div>
+                <p className="small-copy dashboard-training-selector-summary">
+                  {formatCountLabel(selectedTraining.attachedTrainingPackCount, "attached pack")} and{" "}
+                  {formatCountLabel(selectedTraining.attachedCustomScenarioCount, "attached custom scenario")}.
+                </p>
               ) : (
-                <div className="empty-state-panel">
+                <div className="empty-state-panel dashboard-training-selector-empty">
                   <h3>No Focus Topics available</h3>
                   <p>
                     {isSuperUser

@@ -1473,6 +1473,42 @@ select.text-input {
   min-width: 0;
 }
 
+.dashboard-training-selector-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  grid-template-areas:
+    "label status"
+    "select summary";
+  gap: 0.65rem 1rem;
+  align-items: center;
+}
+
+.dashboard-training-selector-label {
+  grid-area: label;
+  align-self: end;
+}
+
+.dashboard-training-selector-status {
+  grid-area: status;
+  min-width: 0;
+  align-self: end;
+}
+
+.dashboard-training-selector-grid > .dashboard-selector-field {
+  grid-area: select;
+}
+
+.dashboard-training-selector-summary {
+  grid-area: summary;
+  align-self: center;
+  margin: 0;
+}
+
+.dashboard-training-selector-empty {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
 .customer-directory-controls {
   display: grid;
   grid-template-columns: minmax(260px, 2.2fr) repeat(2, minmax(180px, 1fr)) auto;
@@ -2830,6 +2866,19 @@ html[data-theme="light"] .progress-track {
   gap: 0.6rem;
 }
 
+.content-organization-inactive-topics {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1.25rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.content-organization-inactive-topics h3,
+.content-organization-inactive-topics p {
+  margin: 0;
+}
+
 .training-content-order-row {
   display: flex;
   align-items: center;
@@ -3017,6 +3066,24 @@ html[data-theme="light"] .progress-track {
 
   .dashboard-selector-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-training-selector-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "label"
+      "select"
+      "status"
+      "summary";
+  }
+
+  .dashboard-training-selector-status {
+    margin-top: 0.35rem;
+  }
+
+  .dashboard-training-selector-empty {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .customer-directory-controls {

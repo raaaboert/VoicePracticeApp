@@ -121,7 +121,7 @@ export function FocusTopicLandingScreen(props: FocusTopicLandingScreenProps) {
                 style={({ pressed }) => [styles.sortButton, pressed ? styles.pressed : null]}
               >
                 <MaterialCommunityIcons name="sort" size={18} color={props.theme.accent} />
-                <Text style={styles.sortButtonText}>{currentSort.compactLabel}</Text>
+                <Text style={styles.sortButtonText}>Sort</Text>
                 <MaterialCommunityIcons name="chevron-down" size={18} color={props.theme.muted} />
               </Pressable>
             ) : null}
@@ -238,6 +238,7 @@ function createStyles(theme: TrainingContentTheme) {
     },
     controls: {
       flexDirection: "row",
+      flexWrap: "wrap",
       alignItems: "center",
       gap: 8,
       marginBottom: 18,
@@ -245,6 +246,9 @@ function createStyles(theme: TrainingContentTheme) {
     sortOnlyControls: { justifyContent: "flex-end" },
     searchShell: {
       minHeight: 44,
+      minWidth: 180,
+      flex: 1,
+      flexBasis: 220,
       flexDirection: "row",
       alignItems: "center",
       gap: 8,
@@ -264,7 +268,7 @@ function createStyles(theme: TrainingContentTheme) {
     clearIcon: { flexShrink: 0 },
     sortButton: {
       minHeight: 44,
-      width: 112,
+      minWidth: 96,
       flexShrink: 0,
       flexDirection: "row",
       alignItems: "center",

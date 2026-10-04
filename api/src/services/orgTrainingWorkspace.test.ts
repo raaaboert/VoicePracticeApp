@@ -138,13 +138,14 @@ test("atomic reorder validates revision and the complete active same-org set bef
       orderedTraining("a", "A", { displayOrder: 0 }),
       orderedTraining("b", "B", { displayOrder: 1 }),
       orderedTraining("draft", "Draft", { status: "draft" }),
+      orderedTraining("archived", "Archived", { status: "archived" }),
       orderedTraining("foreign", "Foreign", { orgId: "org_other", displayOrder: 0 }),
     ],
   };
   const revision = getOrgTrainingOrderRevision(db, "org_123");
   const before = structuredClone(db.orgTrainings);
   for (const trainingIds of [
-    ["a", "a"], ["a"], ["a", "draft"], ["a", "foreign"], ["a", "deleted"], ["a", " b "], ["a", ""],
+    ["a", "a"], ["a"], ["a", "draft"], ["a", "archived"], ["a", "foreign"], ["a", "deleted"], ["a", " b "], ["a", ""],
   ]) {
     assert.throws(() => reorderActiveOrgTrainings({
       db,

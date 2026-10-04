@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Pool, PoolClient } from "pg";
 import { TrainingPack, TrainingPackScoringWeightOverrides } from "@voicepractice/shared";
 import { StorageProvider } from "../runtimeConfig.js";
@@ -21,6 +21,12 @@ export interface TrainingPackStore {
   initialize(): Promise<void>;
   getActiveTrainingPackForOrg(orgId: string | null | undefined): Promise<TrainingPack | null>;
   listTrainingPacksForOrg(orgId: string | null | undefined): Promise<TrainingPack[]>;
+  listTrainingPacksForOrgInCompanyOrder(orgId: string | null | undefined): Promise<TrainingPack[]>;
+  reorderTrainingPacksForOrg(
+    orgId: string | null | undefined,
+    trainingPackIds: readonly string[],
+    expectedOrderRevision: string
+  ): Promise<{ trainingPacks: TrainingPack[]; orderRevision: string }>;
   createTrainingPackForOrg(orgId: string | null | undefined, input: CreateTrainingPackInput): Promise<TrainingPack>;
   updateTrainingPackForOrg(
     orgId: string | null | undefined,
@@ -48,6 +54,7 @@ interface TrainingPackColumnMapping {
   orgId: string;
   title: string;
   active: string;
+  displayOrder: string;
   trainingTopic: string;
   requiredBehavioralTriggers: string;
   createdAt: string | null;
@@ -71,6 +78,18 @@ class NullTrainingPackStore implements TrainingPackStore {
 
   async listTrainingPacksForOrg(_orgId: string | null | undefined): Promise<TrainingPack[]> {
     return [];
+  }
+
+  async listTrainingPacksForOrgInCompanyOrder(_orgId: string | null | undefined): Promise<TrainingPack[]> {
+    return [];
+  }
+
+  async reorderTrainingPacksForOrg(
+    _orgId: string | null | undefined,
+    _trainingPackIds: readonly string[],
+    _expectedOrderRevision: string
+  ): Promise<{ trainingPacks: TrainingPack[]; orderRevision: string }> {
+    throw new Error("Training packs require postgres storage.");
   }
 
   async createTrainingPackForOrg(_orgId: string | null | undefined, _input: CreateTrainingPackInput): Promise<TrainingPack> {
@@ -148,12 +167,8 @@ class PostgresTrainingPackStore implements TrainingPackStore {
     const existing = await this.pool.query<{ exists: boolean }>(
       "SELECT to_regclass('training_packs') IS NOT NULL AS exists"
     );
-    if (existing.rows[0]?.exists) {
-      return;
-    }
-
-    await this.pool.query(
-      `
+    if (!existing.rows[0]?.exists) {
+      await this.pool.query(`
         CREATE TABLE IF NOT EXISTS training_packs (
           id UUID PRIMARY KEY,
           organization_id TEXT NOT NULL,
@@ -167,6 +182,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
           compliance_constraints TEXT NOT NULL DEFAULT '',
           audience_level TEXT NOT NULL DEFAULT '',
           active BOOLEAN NOT NULL DEFAULT FALSE,
+          display_order INTEGER NOT NULL DEFAULT 0 CHECK (display_order >= 0),
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -174,11 +190,48 @@ class PostgresTrainingPackStore implements TrainingPackStore {
         CREATE INDEX IF NOT EXISTS training_packs_org_idx
           ON training_packs (organization_id);
 
+        CREATE INDEX IF NOT EXISTS training_packs_org_display_order_idx
+          ON training_packs (organization_id, display_order, id);
+
         CREATE UNIQUE INDEX IF NOT EXISTS training_packs_one_active_per_org_idx
           ON training_packs (organization_id)
           WHERE active IS TRUE;
-      `
+      `);
+      return;
+    }
+
+    await this.pool.query("ALTER TABLE training_packs ADD COLUMN IF NOT EXISTS display_order INTEGER");
+    const columnsResult = await this.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = ANY(current_schemas(false)) AND table_name = 'training_packs'`
     );
+    const columns = new Set(columnsResult.rows.map((row) => row.column_name));
+    const orgColumn = pickColumn(columns, ["organization_id", "org_id"], "organization id");
+    const idColumn = pickColumn(columns, ["id"], "id");
+    const createdColumn = pickOptionalColumn(columns, ["created_at", "createdat"]);
+    const stableOrder = createdColumn
+      ? `${quoteIdentifier(createdColumn)} ASC, ${quoteIdentifier(idColumn)} ASC`
+      : `${quoteIdentifier(idColumn)} ASC`;
+    await this.pool.query(`
+      WITH ranked AS (
+        SELECT ${quoteIdentifier(idColumn)} AS pack_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY ${quoteIdentifier(orgColumn)}
+            ORDER BY ${stableOrder}
+          ) - 1 AS next_order
+        FROM training_packs
+        WHERE display_order IS NULL
+      )
+      UPDATE training_packs AS packs
+      SET display_order = ranked.next_order
+      FROM ranked
+      WHERE packs.${quoteIdentifier(idColumn)} = ranked.pack_id;
+
+      ALTER TABLE training_packs ALTER COLUMN display_order SET DEFAULT 0;
+      ALTER TABLE training_packs ALTER COLUMN display_order SET NOT NULL;
+      CREATE INDEX IF NOT EXISTS training_packs_org_display_order_idx
+        ON training_packs (${quoteIdentifier(orgColumn)}, display_order, ${quoteIdentifier(idColumn)});
+    `);
   }
 
   async getActiveTrainingPackForOrg(orgId: string | null | undefined): Promise<TrainingPack | null> {
@@ -200,7 +253,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
         FROM training_packs
         WHERE ${quoteIdentifier(mapping.orgId)} = $1
           AND ${quoteIdentifier(mapping.active)} IS TRUE
-        ${buildOrderByClause(mapping)}
+        ${buildLegacyOrderByClause(mapping)}
         LIMIT 1
       `;
       const result = await this.pool.query<TrainingPackRow>(query, [normalizedOrgId]);
@@ -235,7 +288,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
         SELECT *
         FROM training_packs
         WHERE ${quoteIdentifier(mapping.orgId)} = $1
-        ${buildOrderByClause(mapping)}
+        ${buildLegacyOrderByClause(mapping)}
       `;
       const result = await this.pool.query<TrainingPackRow>(query, [normalizedOrgId]);
       return result.rows.map((row) => mapTrainingPackRow(row, mapping));
@@ -247,6 +300,69 @@ class PostgresTrainingPackStore implements TrainingPackStore {
         );
       }
       throw error;
+    }
+  }
+
+  async listTrainingPacksForOrgInCompanyOrder(orgId: string | null | undefined): Promise<TrainingPack[]> {
+    const normalizedOrgId = normalizeOrgId(orgId);
+    if (!normalizedOrgId) {
+      return [];
+    }
+    const mapping = await this.getColumnMapping();
+    const result = await this.pool.query<TrainingPackRow>(
+      `SELECT * FROM training_packs
+       WHERE ${quoteIdentifier(mapping.orgId)} = $1
+       ${buildCompanyOrderByClause(mapping)}`,
+      [normalizedOrgId]
+    );
+    return result.rows.map((row) => mapTrainingPackRow(row, mapping));
+  }
+
+  async reorderTrainingPacksForOrg(
+    orgId: string | null | undefined,
+    trainingPackIds: readonly string[],
+    expectedOrderRevision: string
+  ): Promise<{ trainingPacks: TrainingPack[]; orderRevision: string }> {
+    const normalizedOrgId = normalizeOrgId(orgId);
+    if (!normalizedOrgId) {
+      throw new TrainingPackOrderError("Organization id is required.", "training_pack_order_invalid");
+    }
+    const mapping = await this.getColumnMapping();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`training-pack-order:${normalizedOrgId}`]);
+      const currentResult = await client.query<TrainingPackRow>(
+        `SELECT * FROM training_packs
+         WHERE ${quoteIdentifier(mapping.orgId)} = $1
+         ${buildCompanyOrderByClause(mapping)}
+         FOR UPDATE`,
+        [normalizedOrgId]
+      );
+      const current = currentResult.rows.map((row) => mapTrainingPackRow(row, mapping));
+      const requestedIds = validateTrainingPackOrder(current, trainingPackIds, expectedOrderRevision);
+      for (const [displayOrder, id] of requestedIds.entries()) {
+        await client.query(
+          `UPDATE training_packs SET ${quoteIdentifier(mapping.displayOrder)} = $1
+           WHERE ${quoteIdentifier(mapping.orgId)} = $2 AND ${quoteIdentifier(mapping.id)} = $3`,
+          [displayOrder, normalizedOrgId, id]
+        );
+      }
+      const orderedResult = await client.query<TrainingPackRow>(
+        `SELECT * FROM training_packs
+         WHERE ${quoteIdentifier(mapping.orgId)} = $1
+         ${buildCompanyOrderByClause(mapping)}`,
+        [normalizedOrgId]
+      );
+      const trainingPacks = orderedResult.rows.map((row) => mapTrainingPackRow(row, mapping));
+      await client.query("COMMIT");
+      this.invalidateOrgCache(normalizedOrgId);
+      return { trainingPacks, orderRevision: getTrainingPackOrderRevision(trainingPacks) };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -269,6 +385,13 @@ class PostgresTrainingPackStore implements TrainingPackStore {
 
     try {
       await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`training-pack-order:${normalizedOrgId}`]);
+
+      const maxOrder = await client.query<{ next_order: number | string }>(
+        `SELECT COALESCE(MAX(${quoteIdentifier(mapping.displayOrder)}), -1) + 1 AS next_order
+         FROM training_packs WHERE ${quoteIdentifier(mapping.orgId)} = $1`,
+        [normalizedOrgId]
+      );
 
       if (active) {
         await this.deactivateOtherPacks(client, mapping, normalizedOrgId, id, now);
@@ -281,6 +404,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
         mapping.trainingTopic,
         mapping.requiredBehavioralTriggers,
         mapping.active,
+        mapping.displayOrder,
         ...optionalColumns.columns
       ];
       const insertValues: unknown[] = [
@@ -290,6 +414,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
         trainingTopic,
         JSON.stringify(requiredBehavioralTriggers),
         active,
+        Number(maxOrder.rows[0]?.next_order ?? 0),
         ...optionalColumns.values
       ];
       const placeholders = insertValues.map((_entry, index) => `$${index + 1}`);
@@ -525,6 +650,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
     const orgId = pickColumn(columns, ["organization_id", "org_id"], "organization id");
     const title = pickColumn(columns, ["title"], "title");
     const active = pickColumn(columns, ["active"], "active flag");
+    const displayOrder = pickColumn(columns, ["display_order"], "display order");
     const trainingTopic = pickColumn(columns, ["training_topic", "training_pack_brief", "brief"], "training pack brief");
     const requiredBehavioralTriggers = pickColumn(
       columns,
@@ -540,6 +666,7 @@ class PostgresTrainingPackStore implements TrainingPackStore {
       orgId,
       title,
       active,
+      displayOrder,
       trainingTopic,
       requiredBehavioralTriggers,
       createdAt,
@@ -593,15 +720,11 @@ function quoteIdentifier(value: string): string {
   return `"${value}"`;
 }
 
-function buildOrderByClause(mapping: TrainingPackColumnMapping): string {
-  const clauses: string[] = [`${quoteIdentifier(mapping.active)} DESC`];
-  if (mapping.updatedAt) {
-    clauses.push(`${quoteIdentifier(mapping.updatedAt)} DESC`);
-  }
-  if (mapping.createdAt) {
-    clauses.push(`${quoteIdentifier(mapping.createdAt)} DESC`);
-  }
-  clauses.push(`${quoteIdentifier(mapping.id)} DESC`);
+function buildCompanyOrderByClause(mapping: TrainingPackColumnMapping): string {
+  const clauses: string[] = [
+    `${quoteIdentifier(mapping.displayOrder)} ASC`,
+    `${quoteIdentifier(mapping.id)} ASC`
+  ];
   return `ORDER BY ${clauses.join(", ")}`;
 }
 
@@ -759,6 +882,19 @@ function asBoolean(value: unknown): boolean {
   return value === true;
 }
 
+function buildLegacyOrderByClause(mapping: TrainingPackColumnMapping): string {
+  const clauses: string[] = [`${quoteIdentifier(mapping.active)} DESC`];
+  if (mapping.updatedAt) clauses.push(`${quoteIdentifier(mapping.updatedAt)} DESC`);
+  if (mapping.createdAt) clauses.push(`${quoteIdentifier(mapping.createdAt)} DESC`);
+  clauses.push(`${quoteIdentifier(mapping.id)} DESC`);
+  return `ORDER BY ${clauses.join(", ")}`;
+}
+
+function asNonNegativeInteger(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 function mapTrainingPackRow(row: TrainingPackRow, mapping: TrainingPackColumnMapping): TrainingPack {
   const learningObjectives = mapping.hasLearningObjectives ? toStringArray(row.learning_objectives) : [];
   const successBehaviors = mapping.hasSuccessBehaviors ? toStringArray(row.success_behaviors) : [];
@@ -784,9 +920,64 @@ function mapTrainingPackRow(row: TrainingPackRow, mapping: TrainingPackColumnMap
     complianceConstraints,
     audienceLevel,
     active: asBoolean(getRowValue(row, mapping.active)),
+    displayOrder: asNonNegativeInteger(getRowValue(row, mapping.displayOrder)),
     createdAt,
     updatedAt
   };
+}
+
+export function getTrainingPackOrderRevision(
+  trainingPacks: readonly Pick<TrainingPack, "id" | "displayOrder">[]
+): string {
+  const orderedIds = trainingPacks
+    .slice()
+    .sort((left, right) =>
+      asNonNegativeInteger(left.displayOrder) - asNonNegativeInteger(right.displayOrder)
+      || left.id.localeCompare(right.id)
+    )
+    .map((pack) => pack.id);
+  return createHash("sha256").update(JSON.stringify(orderedIds)).digest("hex");
+}
+
+export class TrainingPackOrderError extends Error {
+  constructor(
+    message: string,
+    readonly code: "training_pack_order_invalid" | "training_pack_order_conflict"
+  ) {
+    super(message);
+    this.name = "TrainingPackOrderError";
+  }
+}
+
+export function validateTrainingPackOrder(
+  current: readonly Pick<TrainingPack, "id" | "displayOrder">[],
+  trainingPackIds: readonly string[],
+  expectedOrderRevision: string
+): string[] {
+  const requestedIds = trainingPackIds.map((id) => id.trim());
+  if (
+    requestedIds.some((id, index) => !id || id !== trainingPackIds[index])
+    || new Set(requestedIds).size !== requestedIds.length
+  ) {
+    throw new TrainingPackOrderError(
+      "Training Pack order must contain unique, non-empty IDs.",
+      "training_pack_order_invalid"
+    );
+  }
+  if (expectedOrderRevision !== getTrainingPackOrderRevision(current)) {
+    throw new TrainingPackOrderError(
+      "Training Pack order changed in another session. Refresh before saving.",
+      "training_pack_order_conflict"
+    );
+  }
+  const currentIds = new Set(current.map((pack) => pack.id));
+  if (requestedIds.length !== current.length || requestedIds.some((id) => !currentIds.has(id))) {
+    throw new TrainingPackOrderError(
+      "Training Pack order must contain every Training Pack for this organization exactly once.",
+      "training_pack_order_invalid"
+    );
+  }
+  return requestedIds;
 }
 
 function cryptoRandomUuid(): string {

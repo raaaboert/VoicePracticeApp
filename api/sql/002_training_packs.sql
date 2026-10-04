@@ -13,12 +13,16 @@ CREATE TABLE IF NOT EXISTS training_packs (
   compliance_constraints TEXT NOT NULL DEFAULT '',
   audience_level TEXT NOT NULL DEFAULT '',
   active BOOLEAN NOT NULL DEFAULT FALSE,
+  display_order INTEGER NOT NULL DEFAULT 0 CHECK (display_order >= 0),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS training_packs_org_idx
   ON training_packs (organization_id);
+
+CREATE INDEX IF NOT EXISTS training_packs_org_display_order_idx
+  ON training_packs (organization_id, display_order, id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS training_packs_one_active_per_org_idx
   ON training_packs (organization_id)

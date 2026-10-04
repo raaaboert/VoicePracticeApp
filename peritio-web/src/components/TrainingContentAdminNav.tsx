@@ -7,7 +7,7 @@ export function TrainingContentAdminNav({
   active,
 }: {
   orgId: string | null;
-  active: "admin" | "training-content";
+  active: "admin" | "training-content" | "content-organization";
 }) {
   const query = trainingContentOrgQuery(orgId);
   return (
@@ -17,6 +17,12 @@ export function TrainingContentAdminNav({
         href={`/app/admin${query}`}
       >
         Users &amp; Access
+      </Link>
+      <Link
+        className={`tab-button${active === "content-organization" ? " active" : ""}`}
+        href={`/app/admin/content-organization${query}`}
+      >
+        Content Organization
       </Link>
       <Link
         className={`tab-button${active === "training-content" ? " active" : ""}`}

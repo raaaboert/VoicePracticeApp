@@ -101,6 +101,11 @@ let setDashboardTeamPerformanceQueryForTest: (
 let setDashboardTeamPerformanceIntelligenceQueryForTest: (
   query: ((input: AuthorizedTeamPerformanceIntelligenceQuery) => AuthorizedTeamPerformanceIntelligenceResult) | null,
 ) => void;
+let setDashboardTrainingPackLoaderForTest: (
+  loader: ((orgId: string) => Promise<TrainingPack[]>) | null,
+) => void;
+let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => void;
+let setFocusTopicDeleteResponseObserverForTest: (observer: (() => void) | null) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -264,6 +269,7 @@ function buildTrainingPack(id: string, orgId = "org_1", overrides: Partial<Train
     complianceConstraints: overrides.complianceConstraints ?? "",
     audienceLevel: overrides.audienceLevel ?? "trial",
     active: overrides.active ?? true,
+    displayOrder: overrides.displayOrder ?? 0,
     createdAt: overrides.createdAt ?? NOW,
     updatedAt: overrides.updatedAt ?? NOW,
   };
@@ -281,6 +287,7 @@ function buildOrgTrainingRecord(
     status: overrides.status ?? "active",
     description: overrides.description ?? "Training workspace row for scope tests.",
     divisionId: overrides.divisionId ?? null,
+    displayOrder: overrides.displayOrder,
     createdAt: overrides.createdAt ?? NOW,
     updatedAt: overrides.updatedAt ?? NOW,
   };
@@ -889,6 +896,21 @@ async function readAuditMetadataJson(): Promise<string> {
   return JSON.stringify((payload.events ?? []).map((event) => event.metadata ?? null));
 }
 
+async function loadTrainingPacksForRouteTest(orgId: string): Promise<TrainingPack[]> {
+  return [
+    buildTrainingPack("pack_scope", "org_1", {
+      successBehaviors: ["Confirm the customer objective"],
+      failurePatterns: ["Skip discovery"],
+      requiredBehavioralTriggers: ["scenario:scenario_scope"],
+      scoringWeightOverrides: { persuasion: 0.4, clarity: 0.3 },
+      complianceConstraints: "Do not reveal internal evaluation guidance.",
+      audienceLevel: "Internal manager cohort",
+      displayOrder: 0,
+    }),
+    buildTrainingPack("pack_other", "org_2"),
+  ].filter((pack) => pack.organizationId === orgId);
+}
+
 async function readPlatformAuditEvents(): Promise<AuditEvent[]> {
   const payload = JSON.parse(await readFile(auditEventsPath(), "utf8")) as {
     events?: AuditEvent[];
@@ -1118,12 +1140,10 @@ before(async () => {
   setDashboardTeamPerformanceQueryForTest = imported.setDashboardTeamPerformanceQueryForTest;
   setDashboardTeamPerformanceIntelligenceQueryForTest =
     imported.setDashboardTeamPerformanceIntelligenceQueryForTest;
-  imported.setDashboardTrainingPackLoaderForTest(async (orgId: string) =>
-    [
-      buildTrainingPack("pack_scope", "org_1"),
-      buildTrainingPack("pack_other", "org_2"),
-    ].filter((pack) => pack.organizationId === orgId)
-  );
+  setDashboardTrainingPackLoaderForTest = imported.setDashboardTrainingPackLoaderForTest;
+  setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
+  setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
+  setFocusTopicDeleteResponseObserverForTest = imported.setFocusTopicDeleteResponseObserverForTest;
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
       // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
@@ -4929,4 +4949,272 @@ test("platform admin Focus Topic reorder is atomic, revision-guarded, and organi
     (await readPlatformAuditEvents()).filter((event) => event.action === "org.training.order_updated").length,
     orderAudits.length,
   );
+});
+
+test("customer org admin reuses authoritative Focus Topic company order while lesser roles and other orgs are denied", async () => {
+  let before = await dashboardRequest("/orgs/org_1/trainings", orgAdminToken);
+  assert.equal(before.status, 200);
+  let activeTopics = (before.body.trainings as OrgTrainingRecord[])
+    .filter((topic) => topic.status === "active")
+  let createdTopicId: string | null = null;
+  if (activeTopics.length < 2) {
+    const created = await adminRequest("/orgs/org_1/trainings", {
+      method: "POST",
+      body: JSON.stringify({ name: "Customer Order Test Topic", status: "active" }),
+    });
+    assert.equal(created.status, 201);
+    createdTopicId = (created.body as unknown as OrgTrainingRecord).id;
+    before = await dashboardRequest("/orgs/org_1/trainings", orgAdminToken);
+    activeTopics = (before.body.trainings as OrgTrainingRecord[]).filter((topic) => topic.status === "active");
+  }
+  const originalIds = activeTopics.map((topic) => topic.id);
+  const requestedIds = originalIds.slice().reverse();
+  const body = JSON.stringify({
+    expectedOrderRevision: before.body.orderRevision,
+    trainingIds: requestedIds,
+  });
+
+  assert.equal((await dashboardRequest("/orgs/org_1/trainings/order", userAdminToken, { method: "PUT", body })).status, 403);
+  assert.equal((await dashboardRequest("/orgs/org_2/trainings/order", orgAdminToken, { method: "PUT", body })).status, 404);
+
+  const reordered = await dashboardRequest("/orgs/org_1/trainings/order", orgAdminToken, { method: "PUT", body });
+  assert.equal(reordered.status, 200);
+  assert.deepEqual(
+    (reordered.body.trainings as OrgTrainingRecord[])
+      .filter((topic) => topic.status === "active")
+      .map((topic) => topic.id),
+    requestedIds,
+  );
+  const audit = (await readPlatformAuditEvents())
+    .filter((event) => event.action === "dashboard.training.order_updated")
+    .at(-1);
+  assert.equal(audit?.actorType, "web_user");
+  assert.equal(audit?.orgId, "org_1");
+
+  const restored = await dashboardRequest("/orgs/org_1/trainings/order", orgAdminToken, {
+    method: "PUT",
+    body: JSON.stringify({
+      expectedOrderRevision: reordered.body.orderRevision,
+      trainingIds: originalIds,
+    }),
+  });
+  assert.equal(restored.status, 200);
+  if (createdTopicId) {
+    assert.equal((await adminRequest(`/orgs/org_1/trainings/${createdTopicId}`, { method: "DELETE" })).status, 200);
+  }
+});
+
+test("customer Content Organization Training Pack reads serialize ordering-safe fields only", async () => {
+  const response = await dashboardRequest("/orgs/org_1/training-packs", orgAdminToken);
+  assert.equal(response.status, 200);
+  const packs = response.body.packs as Array<Record<string, unknown>>;
+  assert.equal(packs.length, 1);
+  assert.deepEqual(packs[0], {
+    id: "pack_scope",
+    title: "Manager Scope Pack",
+    active: true,
+    displayOrder: 0,
+  });
+  assert.deepEqual(Object.keys(packs[0]!).sort(), ["active", "displayOrder", "id", "title"]);
+  for (const internalField of [
+    "organizationId",
+    "trainingTopic",
+    "learningObjectives",
+    "successBehaviors",
+    "failurePatterns",
+    "requiredBehavioralTriggers",
+    "scoringWeightOverrides",
+    "complianceConstraints",
+    "audienceLevel",
+    "createdAt",
+    "updatedAt",
+  ]) {
+    assert.equal(internalField in packs[0]!, false, `${internalField} crossed the customer boundary`);
+  }
+
+  assert.equal((await dashboardRequest("/orgs/org_1/training-packs", userAdminToken)).status, 403);
+  assert.equal((await dashboardRequest("/orgs/org_2/training-packs", orgAdminToken)).status, 404);
+
+  const platformResponse = await adminRequest("/orgs/org_1/training-packs");
+  assert.equal(platformResponse.status, 200);
+  const platformPack = (platformResponse.body.packs as Array<Record<string, unknown>>)[0]!;
+  assert.deepEqual(platformPack.scoringWeightOverrides, { persuasion: 0.4, clarity: 0.3 });
+  assert.deepEqual(platformPack.successBehaviors, ["Confirm the customer objective"]);
+  assert.deepEqual(platformPack.failurePatterns, ["Skip discovery"]);
+  assert.deepEqual(platformPack.requiredBehavioralTriggers, ["scenario:scenario_scope"]);
+  assert.equal(platformPack.complianceConstraints, "Do not reveal internal evaluation guidance.");
+});
+
+test("Focus Topic GET leaves an empty organization empty and performs no persistence or pack query", async () => {
+  const originalRaw = await readFile(dbPath, "utf8");
+  const state = JSON.parse(originalRaw) as ApiDatabase;
+  state.orgTrainings = state.orgTrainings.filter((topic) => topic.orgId !== "org_1");
+  state.orgTrainingPackAttachments = state.orgTrainingPackAttachments.filter((entry) => entry.orgId !== "org_1");
+  state.orgTrainingScenarioAttachments = state.orgTrainingScenarioAttachments.filter((entry) => entry.orgId !== "org_1");
+  const emptyRaw = JSON.stringify(state, null, 2);
+  await writeFile(dbPath, emptyRaw, "utf8");
+  const auditsBefore = JSON.stringify(await readPlatformAuditEvents());
+  let trainingPackQueries = 0;
+  setDashboardTrainingPackLoaderForTest(async () => {
+    trainingPackQueries += 1;
+    throw new Error("Focus Topic GET must not query Training Packs.");
+  });
+
+  try {
+    const first = await dashboardRequest("/orgs/org_1/trainings", orgAdminToken);
+    const second = await dashboardRequest("/orgs/org_1/trainings", orgAdminToken);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.deepEqual(first.body.trainings, []);
+    assert.deepEqual(second.body.trainings, []);
+    const emptyRevision = crypto.createHash("sha256").update("[]").digest("hex");
+    assert.equal(first.body.orderRevision, emptyRevision);
+    assert.equal(second.body.orderRevision, emptyRevision);
+    assert.equal(trainingPackQueries, 0);
+    assert.equal(await readFile(dbPath, "utf8"), emptyRaw);
+    assert.equal(JSON.stringify(await readPlatformAuditEvents()), auditsBefore);
+    assert.equal((await readDb()).orgTrainings.some((topic) => topic.name === "Test Training"), false);
+
+    assert.equal((await dashboardRequest("/orgs/org_1/trainings", userAdminToken)).status, 403);
+    assert.equal((await dashboardRequest("/orgs/org_1/trainings", regularDashboardToken)).status, 403);
+    assert.equal((await dashboardRequest("/orgs/org_2/trainings", orgAdminToken)).status, 404);
+    assert.equal((await dashboardRequest("/orgs/org_2/trainings", superToken)).status, 200);
+    assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+    assert.equal(trainingPackQueries, 0);
+    assert.equal(await readFile(dbPath, "utf8"), emptyRaw);
+  } finally {
+    setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
+    await writeFile(dbPath, originalRaw, "utf8");
+    assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+  }
+});
+
+test("Focus Topic GET preserves active, draft, and archived records without mutation", async () => {
+  const originalRaw = await readFile(dbPath, "utf8");
+  const state = JSON.parse(originalRaw) as ApiDatabase;
+  state.orgTrainings = [
+    ...state.orgTrainings.filter((topic) => topic.orgId !== "org_1"),
+    buildOrgTrainingRecord("topic_active_second", "org_1", {
+      name: "Active Second",
+      status: "active",
+      displayOrder: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    }),
+    buildOrgTrainingRecord("topic_draft", "org_1", {
+      name: "Draft Topic",
+      status: "draft",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-02-02T00:00:00.000Z",
+    }),
+    buildOrgTrainingRecord("topic_active_first", "org_1", {
+      name: "Active First",
+      status: "active",
+      displayOrder: 0,
+      createdAt: "2026-01-03T00:00:00.000Z",
+      updatedAt: "2026-02-03T00:00:00.000Z",
+    }),
+    buildOrgTrainingRecord("topic_archived", "org_1", {
+      name: "Archived Topic",
+      status: "archived",
+      createdAt: "2026-01-04T00:00:00.000Z",
+      updatedAt: "2026-02-04T00:00:00.000Z",
+    }),
+  ];
+  state.orgTrainingPackAttachments = state.orgTrainingPackAttachments.filter((entry) => entry.orgId !== "org_1");
+  state.orgTrainingScenarioAttachments = state.orgTrainingScenarioAttachments.filter((entry) => entry.orgId !== "org_1");
+  const mixedRaw = JSON.stringify(state, null, 2);
+  await writeFile(dbPath, mixedRaw, "utf8");
+
+  try {
+    const customer = await dashboardRequest("/orgs/org_1/trainings", orgAdminToken);
+    const platform = await adminRequest("/orgs/org_1/trainings");
+    assert.equal(customer.status, 200);
+    assert.equal(platform.status, 200);
+    const expected = [
+      ["topic_active_first", "active", 0, "2026-02-03T00:00:00.000Z"],
+      ["topic_active_second", "active", 1, "2026-02-01T00:00:00.000Z"],
+      ["topic_draft", "draft", undefined, "2026-02-02T00:00:00.000Z"],
+      ["topic_archived", "archived", undefined, "2026-02-04T00:00:00.000Z"],
+    ];
+    const project = (payload: Record<string, unknown>) =>
+      (payload.trainings as OrgTrainingRecord[]).map((topic) => [
+        topic.id,
+        topic.status,
+        topic.displayOrder,
+        topic.updatedAt,
+      ]);
+    assert.deepEqual(project(customer.body), expected);
+    assert.deepEqual(project(platform.body), expected);
+    assert.equal(await readFile(dbPath, "utf8"), mixedRaw);
+  } finally {
+    await writeFile(dbPath, originalRaw, "utf8");
+    assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+  }
+});
+
+test("Focus Topic DELETE does not complete its HTTP response before required persistence", async () => {
+  const created = await adminRequest("/orgs/org_1/trainings", {
+    method: "POST",
+    body: JSON.stringify({ name: "Persistence Barrier Topic", status: "draft" }),
+  });
+  assert.equal(created.status, 201);
+  const trainingId = (created.body as unknown as OrgTrainingRecord).id;
+  // A fresh read also proves the preceding create has drained through persistence.
+  assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+
+  let markSaveStarted!: () => void;
+  const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+  let releaseSave!: () => void;
+  const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let responseObserved = false;
+  setDatabaseSaveBarrierForTest(async () => {
+    markSaveStarted();
+    await saveRelease;
+  });
+  setFocusTopicDeleteResponseObserverForTest(() => {
+    responseObserved = true;
+  });
+
+  const deletion = adminRequest(`/orgs/org_1/trainings/${trainingId}`, { method: "DELETE" });
+  let result: Awaited<typeof deletion> | null = null;
+  try {
+    await saveStarted;
+    assert.equal(responseObserved, false);
+  } finally {
+    releaseSave();
+    result = await deletion;
+    setDatabaseSaveBarrierForTest(null);
+    setFocusTopicDeleteResponseObserverForTest(null);
+  }
+  assert.equal(responseObserved, true);
+  assert.equal(result?.status, 200);
+  assert.equal((await readDb()).orgTrainings.some((topic) => topic.id === trainingId), false);
+
+  const failureCreated = await adminRequest("/orgs/org_1/trainings", {
+    method: "POST",
+    body: JSON.stringify({ name: "Persistence Failure Topic", status: "draft" }),
+  });
+  assert.equal(failureCreated.status, 201);
+  const failureTrainingId = (failureCreated.body as unknown as OrgTrainingRecord).id;
+  assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+  responseObserved = false;
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error("controlled app-state persistence failure");
+  });
+  setFocusTopicDeleteResponseObserverForTest(() => {
+    responseObserved = true;
+  });
+  try {
+    const failedDeletion = await adminRequest(`/orgs/org_1/trainings/${failureTrainingId}`, { method: "DELETE" });
+    assert.equal(failedDeletion.status, 500);
+    assert.equal(responseObserved, false);
+    assert.equal((await readDb()).orgTrainings.some((topic) => topic.id === failureTrainingId), true);
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+    setFocusTopicDeleteResponseObserverForTest(null);
+  }
+  // Refresh the in-memory cache from the unchanged durable state, then clean up normally.
+  assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+  assert.equal((await adminRequest(`/orgs/org_1/trainings/${failureTrainingId}`, { method: "DELETE" })).status, 200);
 });

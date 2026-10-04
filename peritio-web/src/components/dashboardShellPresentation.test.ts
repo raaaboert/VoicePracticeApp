@@ -16,6 +16,10 @@ const dashboardUsersSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "DashboardUsersView.tsx"),
   "utf8"
 );
+const globalStyles = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "../../app/globals.css"),
+  "utf8"
+);
 const brandMarkBytes = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "../../public/brand/peritio-mark.jpg")
 );
@@ -61,4 +65,15 @@ test("Dashboard reporting uses Focus Topic terminology for the OrgTraining dimen
   ]) {
     assert.equal((dashboardReportingSource + dashboardUsersSource).includes(copy), true, copy);
   }
+});
+
+test("Focus Topic reporting selector uses an aligned wide grid and a natural narrow stack", () => {
+  assert.equal(dashboardReportingSource.includes('className="dashboard-training-selector-grid"'), true);
+  assert.equal(dashboardReportingSource.includes("dashboard-training-selector-label"), true);
+  assert.equal(dashboardReportingSource.includes("dashboard-training-selector-status"), true);
+  assert.equal(dashboardReportingSource.includes("dashboard-training-selector-summary"), true);
+  assert.match(globalStyles, /grid-template-areas:\s*"label status"\s*"select summary"/);
+  assert.match(globalStyles, /@media \(max-width: 1040px\)[\s\S]*?dashboard-training-selector-grid[\s\S]*?"label"\s*"select"\s*"status"\s*"summary"/);
+  assert.equal(dashboardReportingSource.includes('formatCountLabel(selectedTraining.attachedTrainingPackCount, "attached pack")'), true);
+  assert.equal(dashboardReportingSource.includes('formatCountLabel(selectedTraining.attachedCustomScenarioCount, "attached custom scenario")'), true);
 });

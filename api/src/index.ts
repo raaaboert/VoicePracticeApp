@@ -71,6 +71,7 @@ import {
   COMMON_TIMEZONES,
   CreateUserRequest,
   CreateOrgCustomScenarioRequest,
+  CustomerTrainingPackOrderSummary,
   DEFAULT_INDUSTRIES,
   DEFAULT_ROLE_INDUSTRIES,
   DEFAULT_SEGMENTS,
@@ -124,6 +125,7 @@ import {
   StartSimulationSessionRequest,
   RecordSimulationScoreRequest,
   ReorderOrgTrainingsRequest,
+  ReorderTrainingPacksRequest,
   Scenario,
   SegmentDefinition,
   SetOrgStandardScenarioDivisionRequest,
@@ -249,7 +251,11 @@ import {
   verifyLatestEmailVerification,
 } from "./services/emailVerification.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
-import { createTrainingPackStore } from "./storage/trainingPackStore.js";
+import {
+  createTrainingPackStore,
+  getTrainingPackOrderRevision,
+  TrainingPackOrderError,
+} from "./storage/trainingPackStore.js";
 import {
   createOrgModuleEntitlementStore,
   OrgModuleEntitlementStore,
@@ -804,6 +810,12 @@ interface DashboardRequestPrincipal {
 }
 
 interface DashboardAuthRequest extends Request {
+  dashboard?: DashboardRequestPrincipal;
+}
+
+interface ContentOrganizationAuthRequest extends Request {
+  admin?: AdminTokenPayload;
+  adminToken?: string;
   dashboard?: DashboardRequestPrincipal;
 }
 
@@ -4337,6 +4349,8 @@ let dashboardOrganizationPerformanceQueryForTest: typeof queryAuthorizedOrganiza
 let dashboardOrganizationPerformanceIntelligenceQueryForTest: typeof queryAuthorizedOrganizationPerformanceIntelligence | null = null;
 let dashboardTeamPerformanceQueryForTest: typeof queryAuthorizedTeamPerformance | null = null;
 let dashboardTeamPerformanceIntelligenceQueryForTest: typeof queryAuthorizedTeamPerformanceIntelligence | null = null;
+let databaseSaveBarrierForTest: (() => Promise<void>) | null = null;
+let focusTopicDeleteResponseObserverForTest: (() => void) | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -4386,6 +4400,9 @@ function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
 async function saveDatabase(db: ApiDatabase): Promise<void> {
   const storage = getOrCreateDatabaseStorage();
   await userEmployeeIdClaimStore.syncFromUsers(db.users);
+  if (databaseSaveBarrierForTest) {
+    await databaseSaveBarrierForTest();
+  }
   await storage.save(buildPersistedDatabaseSnapshot(db));
   databaseCache = db;
 }
@@ -4433,6 +4450,16 @@ async function withFreshDatabaseRead<T>(handler: (db: ApiDatabase) => Promise<T>
   return await withDatabaseLock(async () => {
     const db = await loadDatabase({ forceStorageRead: true });
     return await handler(db);
+  });
+}
+
+async function withFreshDatabaseSnapshotRead<T>(handler: (db: ApiDatabase) => T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    const db = await loadDatabase({
+      forceStorageRead: true,
+      syncEmployeeIdClaims: false,
+    });
+    return handler(db);
   });
 }
 
@@ -5442,6 +5469,42 @@ async function requireDashboardAuth(
     return;
   }
 
+  request.dashboard = { token: context.token, user: context.user, viewer };
+  next();
+}
+
+async function requireContentOrganizationAuth(
+  request: ContentOrganizationAuthRequest,
+  response: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = getIncomingAdminToken(request);
+  const adminPayload = token ? verifyAdminToken(token) : null;
+  if (adminPayload) {
+    const hasActiveSession = await withDatabaseRead(async (db) =>
+      (db.admin.activeSessionIds ?? []).includes(adminPayload.sid)
+    );
+    if (hasActiveSession) {
+      request.admin = adminPayload;
+      request.adminToken = token ?? undefined;
+      next();
+      return;
+    }
+  }
+
+  const context = await loadAuthenticatedWebSessionContext(request, response);
+  if (!context) {
+    return;
+  }
+  const viewer = resolveDashboardViewer(context.db, context.user);
+  if (!viewer) {
+    await revokeWebAuthSessionById(context.sessionId);
+    response.status(403).json({
+      error: "Dashboard access is not enabled for this account.",
+      code: "dashboard_session_invalid",
+    });
+    return;
+  }
   request.dashboard = { token: context.token, user: context.user, viewer };
   next();
 }
@@ -7828,6 +7891,56 @@ function rejectMissingDashboardAdminCapability(
     code: "dashboard_scope_denied",
   });
   return true;
+}
+
+async function listTrainingPacksForContentOrganization(orgId: string): Promise<TrainingPack[]> {
+  if (dashboardTrainingPackLoaderForTest) {
+    return dashboardTrainingPackLoaderForTest(orgId);
+  }
+  return trainingPackStore.listTrainingPacksForOrgInCompanyOrder(orgId);
+}
+
+function buildCustomerTrainingPackOrderSummaries(
+  trainingPacks: readonly TrainingPack[]
+): CustomerTrainingPackOrderSummary[] {
+  return trainingPacks.map((pack, index) => ({
+    id: pack.id,
+    title: pack.title,
+    active: pack.active,
+    displayOrder: Number.isSafeInteger(pack.displayOrder) && (pack.displayOrder ?? -1) >= 0
+      ? pack.displayOrder!
+      : index,
+  }));
+}
+
+function resolveContentOrganizationOrg(
+  db: ApiDatabase,
+  request: ContentOrganizationAuthRequest,
+  requestedOrgId: string,
+  response: Response
+): EnterpriseOrg | null {
+  if (request.admin) {
+    const org = getOrgById(db, requestedOrgId);
+    if (!org) {
+      response.status(404).json({ error: "Organization not found." });
+      return null;
+    }
+    return org;
+  }
+
+  const principal = request.dashboard;
+  if (!principal) {
+    response.status(401).json({ error: "Authentication is required." });
+    return null;
+  }
+  const context = resolveDashboardAdminOrgContext(db, principal, requestedOrgId, response);
+  if (!context) {
+    return null;
+  }
+  if (rejectMissingDashboardAdminCapability(context.capabilities, "manageOrganizationContent", response)) {
+    return null;
+  }
+  return context.org;
 }
 
 const TRAINING_CONTENT_CLIENT_OWNED_FIELDS = new Set([
@@ -14504,28 +14617,101 @@ app.put("/orgs/:orgId/standard-scenarios/:scenarioId/division", requireAdmin, as
   });
 });
 
-app.get("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, response: Response) => {
+app.get(
+  "/orgs/:orgId/training-packs",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
   const orgId = request.params.orgId;
   await withDatabaseRead(async (db) => {
-    const org = getOrgById(db, orgId);
+    const org = resolveContentOrganizationOrg(db, request, orgId, response);
     if (!org) {
-      response.status(404).json({ error: "Organization not found." });
       return;
     }
 
     try {
-      const packs = await trainingPackStore.listTrainingPacksForOrg(org.id);
+      const authoritativePacks = await listTrainingPacksForContentOrganization(org.id);
       response.json({
         generatedAt: nowIso(),
         orgId: org.id,
-        packs
+        packs: request.admin
+          ? authoritativePacks
+          : buildCustomerTrainingPackOrderSummaries(authoritativePacks),
+        orderRevision: getTrainingPackOrderRevision(authoritativePacks)
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not load training packs.";
       response.status(503).json({ error: message });
     }
   });
-});
+  }
+);
+
+app.put(
+  "/orgs/:orgId/training-packs/order",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const orgId = request.params.orgId;
+    const body = (request.body ?? {}) as Partial<ReorderTrainingPacksRequest>;
+    if (typeof body.expectedOrderRevision !== "string" || !Array.isArray(body.trainingPackIds)) {
+      response.status(400).json({ error: "expectedOrderRevision and trainingPackIds are required." });
+      return;
+    }
+    if (!body.trainingPackIds.every((id): id is string => typeof id === "string")) {
+      response.status(400).json({ error: "trainingPackIds must be a string array." });
+      return;
+    }
+
+    const org = await withDatabaseRead(async (db) =>
+      resolveContentOrganizationOrg(db, request, orgId, response)
+    );
+    if (!org) {
+      return;
+    }
+
+    try {
+      const result = await trainingPackStore.reorderTrainingPacksForOrg(
+        org.id,
+        body.trainingPackIds,
+        body.expectedOrderRevision
+      );
+      await withDatabase(async (db) => {
+        if (request.dashboard) {
+          appendWebAuditEvent(db, request.dashboard.user, {
+            action: "dashboard.training_pack.order_updated",
+            orgId: org.id,
+            message: `Updated Training Pack order for ${org.name}.`,
+            metadata: { orderedTrainingPackIds: body.trainingPackIds },
+          });
+        } else {
+          appendPlatformAuditEvent(db, {
+            action: "org.training_pack.order_updated",
+            orgId: org.id,
+            message: `Updated Training Pack order for ${org.name}.`,
+            metadata: { orderedTrainingPackIds: body.trainingPackIds },
+          });
+        }
+      });
+      response.json({
+        generatedAt: nowIso(),
+        orgId: org.id,
+        packs: request.admin
+          ? result.trainingPacks
+          : buildCustomerTrainingPackOrderSummaries(result.trainingPacks),
+        orderRevision: result.orderRevision,
+      });
+    } catch (error) {
+      if (error instanceof TrainingPackOrderError) {
+        response.status(error.code === "training_pack_order_conflict" ? 409 : 400).json({
+          error: error.message,
+          code: error.code,
+        });
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Could not update Training Pack order.";
+      response.status(503).json({ error: message });
+    }
+  }
+);
 
 app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
@@ -15471,19 +15657,20 @@ app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (req
   });
 });
 
-app.get("/orgs/:orgId/trainings", requireAdmin, async (request: Request, response: Response) => {
+app.get(
+  "/orgs/:orgId/trainings",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
   const orgId = request.params.orgId;
 
-  await withDatabase(async (db) => {
-    const org = getOrgById(db, orgId);
+  const payload = await withFreshDatabaseSnapshotRead((db) => {
+    const org = resolveContentOrganizationOrg(db, request, orgId, response);
     if (!org) {
-      response.status(404).json({ error: "Organization not found." });
-      return;
+      return null;
     }
 
-    await ensureOrgTrainingWorkspace(db, org);
-    const scenarioIds = new Set(ensureOrgCustomScenarioCollection(org).map((scenario) => scenario.id));
-    const payload: OrgTrainingListResponse = {
+    const scenarioIds = new Set((org.customScenarios ?? []).map((scenario) => scenario.id));
+    return {
       generatedAt: nowIso(),
       orgId: org.id,
       trainings: buildOrgTrainingSummariesInCompanyOrder({
@@ -15492,10 +15679,13 @@ app.get("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respons
         validScenarioIds: scenarioIds,
       }),
       orderRevision: getOrgTrainingOrderRevision(db, org.id),
-    };
-    response.json(payload);
+    } satisfies OrgTrainingListResponse;
   });
-});
+  if (payload) {
+    response.json(payload);
+  }
+  }
+);
 
 app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
@@ -15563,7 +15753,10 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
   });
 });
 
-app.put("/orgs/:orgId/trainings/order", requireAdmin, async (request: Request, response: Response) => {
+app.put(
+  "/orgs/:orgId/trainings/order",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
   const orgId = request.params.orgId;
   const body = (request.body ?? {}) as Partial<ReorderOrgTrainingsRequest>;
   if (typeof body.expectedOrderRevision !== "string" || !Array.isArray(body.trainingIds)) {
@@ -15578,9 +15771,9 @@ app.put("/orgs/:orgId/trainings/order", requireAdmin, async (request: Request, r
   const expectedOrderRevision = body.expectedOrderRevision;
 
   const result = await withDatabase(async (db) => {
-    const org = getOrgById(db, orgId);
+    const org = resolveContentOrganizationOrg(db, request, orgId, response);
     if (!org) {
-      return { status: 404 as const, body: { error: "Organization not found." } };
+      return null;
     }
 
     ensureOrgTrainingCollections(db);
@@ -15603,15 +15796,20 @@ app.put("/orgs/:orgId/trainings/order", requireAdmin, async (request: Request, r
     }
 
     emitMobileUpdateForOrg(db, org.id, "org");
-    appendPlatformAuditEvent(db, {
-      action: "org.training.order_updated",
+    const auditInput = {
+      action: request.dashboard ? "dashboard.training.order_updated" : "org.training.order_updated",
       orgId: org.id,
       message: `Updated Focus Topic order for ${org.name}.`,
       metadata: {
         orderedTrainingIds: trainingIds,
         activeTrainingCount: trainingIds.length,
       },
-    });
+    };
+    if (request.dashboard) {
+      appendWebAuditEvent(db, request.dashboard.user, auditInput);
+    } else {
+      appendPlatformAuditEvent(db, auditInput);
+    }
     return {
       status: 200 as const,
       body: {
@@ -15622,8 +15820,12 @@ app.put("/orgs/:orgId/trainings/order", requireAdmin, async (request: Request, r
       } satisfies OrgTrainingListResponse,
     };
   });
+  if (!result) {
+    return;
+  }
   response.status(result.status).json(result.body);
-});
+  }
+);
 
 app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
   const orgId = request.params.orgId;
@@ -15719,18 +15921,16 @@ app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: R
     return;
   }
 
-  await withDatabase(async (db) => {
+  const result = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
-      response.status(404).json({ error: "Organization not found." });
-      return;
+      return { status: 404 as const, body: { error: "Organization not found." } };
     }
 
     await ensureOrgTrainingWorkspace(db, org);
     const training = findOrgTrainingRecord(db, org.id, trainingId);
     if (!training) {
-      response.status(404).json({ error: "Training not found." });
-      return;
+      return { status: 404 as const, body: { error: "Training not found." } };
     }
     const attachedTrainingPackCount = db.orgTrainingPackAttachments.filter(
       (entry) => entry.orgId === org.id && entry.trainingId === training.id
@@ -15739,10 +15939,10 @@ app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: R
       (entry) => entry.orgId === org.id && entry.trainingId === training.id
     ).length;
     if (attachedTrainingPackCount > 0 || attachedScenarioCount > 0) {
-      response.status(400).json({
-        error: "Remove or delete the training's packs and custom scenarios before deleting the training.",
-      });
-      return;
+      return {
+        status: 400 as const,
+        body: { error: "Remove or delete the training's packs and custom scenarios before deleting the training." },
+      };
     }
 
     db.orgTrainings = db.orgTrainings.filter((entry) => !(entry.orgId === org.id && entry.id === trainingId));
@@ -15762,8 +15962,13 @@ app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: R
       },
     });
 
-    response.json({ deleted: true, trainingId: training.id });
+    return {
+      status: 200 as const,
+      body: { deleted: true, trainingId: training.id },
+    };
   });
+  focusTopicDeleteResponseObserverForTest?.();
+  response.status(result.status).json(result.body);
 });
 
 app.put("/orgs/:orgId/trainings/:trainingId/training-packs", requireAdmin, async (request: Request, response: Response) => {
@@ -18379,31 +18584,30 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
     return;
   }
 
-  await withDatabase(async (db) => {
+  const result = await withDatabase(async (db) => {
     const user = getUserById(db, request.params.userId);
     if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return;
+      return { status: 404, body: { error: "User not found." } };
     }
 
     if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return;
+      return { status: 401, body: { error: "Invalid mobile token." } };
     }
 
     if (typeof patch.email === "string") {
       const email = patch.email.trim().toLowerCase();
       if (!isEmailLike(email)) {
-        response.status(400).json({ error: "Invalid email format." });
-        return;
+        return { status: 400, body: { error: "Invalid email format." } };
       }
 
       if (email !== user.email.trim().toLowerCase()) {
-        response.status(409).json({
-          error: "Mobile email changes are temporarily unavailable. Contact support or an administrator.",
-          code: "mobile_email_change_disabled"
-        });
-        return;
+        return {
+          status: 409,
+          body: {
+            error: "Mobile email changes are temporarily unavailable. Contact support or an administrator.",
+            code: "mobile_email_change_disabled"
+          }
+        };
       }
     }
 
@@ -18428,8 +18632,9 @@ app.patch("/mobile/users/:userId/settings", async (request: Request, response: R
         timezoneChanged: typeof patch.timezone === "string" && resolveTimeZone(patch.timezone) !== user.timezone
       }
     });
-    response.json(buildMobileUserProfile(user));
+    return { status: 200, body: buildMobileUserProfile(user) };
   });
+  response.status(result.status).json(result.body);
 });
 
 app.get("/users/:userId/entitlements", requireAdmin, async (request: Request, response: Response) => {
@@ -23686,6 +23891,20 @@ export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) =
     throw new Error("setDashboardTrainingPackLoaderForTest is only available in test.");
   }
   dashboardTrainingPackLoaderForTest = loader;
+}
+
+export function setDatabaseSaveBarrierForTest(barrier: (() => Promise<void>) | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setDatabaseSaveBarrierForTest is only available in test.");
+  }
+  databaseSaveBarrierForTest = barrier;
+}
+
+export function setFocusTopicDeleteResponseObserverForTest(observer: (() => void) | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setFocusTopicDeleteResponseObserverForTest is only available in test.");
+  }
+  focusTopicDeleteResponseObserverForTest = observer;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(

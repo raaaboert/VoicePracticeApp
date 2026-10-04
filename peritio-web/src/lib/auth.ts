@@ -56,6 +56,10 @@ import {
   PerformancePlanPreviewResponse,
   ReorderDashboardTrainingContentCategoriesRequest,
   ReorderDashboardTrainingContentRequest,
+  ReorderOrgTrainingsRequest,
+  ReorderTrainingPacksRequest,
+  OrgTrainingListResponse,
+  CustomerTrainingPackOrderListResponse,
   UpdatePerformancePlanRequest,
   UpdatePerformancePlanResponse,
   UpdateDashboardTrainingContentAssignmentsRequest,
@@ -65,6 +69,8 @@ import {
   WebAuthSessionResponse,
   WebAuthVerifyCodeResponse,
 } from "@voicepractice/shared";
+
+import { minimizeCustomerTrainingPackOrderResponse } from "./contentOrganizationTrainingPackProjection";
 import type {
   OrganizationPerformanceDimension,
   OrganizationPerformanceResponse,
@@ -767,6 +773,46 @@ export async function decideDashboardAdminAccessRequest(
       token,
     }
   );
+}
+
+export async function getDashboardFocusTopicOrder(orgId: string): Promise<OrgTrainingListResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<OrgTrainingListResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings`,
+    { token }
+  );
+}
+
+export async function reorderDashboardFocusTopics(
+  orgId: string,
+  input: ReorderOrgTrainingsRequest
+): Promise<OrgTrainingListResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<OrgTrainingListResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/order`,
+    { method: "PUT", body: JSON.stringify(input), token }
+  );
+}
+
+export async function getDashboardTrainingPackOrder(orgId: string): Promise<CustomerTrainingPackOrderListResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const response = await fetchDashboardApi<CustomerTrainingPackOrderListResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/training-packs`,
+    { token }
+  );
+  return minimizeCustomerTrainingPackOrderResponse(response);
+}
+
+export async function reorderDashboardTrainingPacks(
+  orgId: string,
+  input: ReorderTrainingPacksRequest
+): Promise<CustomerTrainingPackOrderListResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const response = await fetchDashboardApi<CustomerTrainingPackOrderListResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/training-packs/order`,
+    { method: "PUT", body: JSON.stringify(input), token }
+  );
+  return minimizeCustomerTrainingPackOrderResponse(response);
 }
 
 function appendTrainingContentQuery(

@@ -291,7 +291,11 @@ test("landing uses shared light/dark tokens and width-safe text layout", () => {
   assert.match(landing, /backgroundColor: theme\.input/);
   assert.match(landing, /flexDirection: "row"/);
   assert.match(landing, /minWidth: 0/);
-  assert.match(landing, /sortButton:[\s\S]*?width: 112,[\s\S]*?flexShrink: 0/);
+  assert.match(landing, /controls:[\s\S]*?flexDirection: "row",[\s\S]*?flexWrap: "wrap"/);
+  assert.match(landing, /searchShell:[\s\S]*?minWidth: 180,[\s\S]*?flex: 1,[\s\S]*?flexBasis: 220/);
+  assert.match(landing, /searchInput:[\s\S]*?flex: 1,[\s\S]*?minWidth: 0/);
+  assert.match(landing, /sortButton:[\s\S]*?minWidth: 96,[\s\S]*?flexShrink: 0/);
+  assert.match(landing, /<Text style=\{styles\.sortButtonText\}>Sort<\/Text>/);
   assert.match(landing, /sortModalCard:[\s\S]*?width: "100%",[\s\S]*?maxWidth: 360/);
   assert.match(landing, /sortMenuOption:[\s\S]*?minHeight: 44/);
   assert.match(card, /copy: \{ flex: 1, minWidth: 0 \}/);

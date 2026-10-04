@@ -811,6 +811,7 @@ export interface TrainingPack {
   complianceConstraints: string;
   audienceLevel: string;
   active: boolean;
+  displayOrder?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -2550,6 +2551,25 @@ export interface DashboardAdminUpdateUserRequest {
 export interface ReorderOrgTrainingsRequest {
   expectedOrderRevision: string;
   trainingIds: string[];
+}
+
+export interface ReorderTrainingPacksRequest {
+  expectedOrderRevision: string;
+  trainingPackIds: string[];
+}
+
+export interface CustomerTrainingPackOrderSummary {
+  id: string;
+  title: string;
+  active: boolean;
+  displayOrder: number;
+}
+
+export interface CustomerTrainingPackOrderListResponse {
+  generatedAt: string;
+  orgId: string;
+  packs: CustomerTrainingPackOrderSummary[];
+  orderRevision: string;
 }
 
 export interface DashboardAdminUpdateUserResponse {

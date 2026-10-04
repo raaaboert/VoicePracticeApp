@@ -328,6 +328,14 @@ export function AdminWorkspace({
             Learning Resources
           </Link>
         ) : null}
+        {usersPayload.viewer.capabilities.manageOrganizationContent ? (
+          <Link
+            className="tab-button"
+            href={`/app/admin/content-organization${encodeOrgQuery(orgId)}`}
+          >
+            Content Organization
+          </Link>
+        ) : null}
       </div>
 
       {actionMessage ? <div className="notice success">{actionMessage}</div> : null}
