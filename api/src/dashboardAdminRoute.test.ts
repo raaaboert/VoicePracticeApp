@@ -116,6 +116,9 @@ let setOrganizationConfigurationResponseObserverForTest: (
 let setContentManagementResponseObserverForTest: (
   observer: ((route: string, status: number) => void) | null,
 ) => void;
+let setRuntimeDurabilityResponseObserverForTest: (
+  observer: ((route: string, status: number) => void) | null,
+) => void;
 let setContentManagementTrainingPackStoreForTest: (store: TrainingPackStore | null) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
@@ -1056,6 +1059,75 @@ async function requestWhileContentPersistenceHeld<T>(route: string, runner: () =
   }
 }
 
+async function requestWhileRuntimePersistenceHeld<T>(route: string, runner: () => Promise<T>): Promise<T> {
+  let markSaveStarted!: () => void;
+  const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+  let releaseSave!: () => void;
+  const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let observedStatus: number | null = null;
+
+  setDatabaseSaveBarrierForTest(async () => {
+    markSaveStarted();
+    await saveRelease;
+  });
+  setRuntimeDurabilityResponseObserverForTest((observedRoute, status) => {
+    if (observedRoute === route) observedStatus = status;
+  });
+
+  const pending = runner();
+  try {
+    await saveStarted;
+    assert.equal(observedStatus, null);
+    releaseSave();
+    const result = await pending;
+    assert.ok(
+      observedStatus !== null && observedStatus >= 200 && observedStatus < 300,
+      `runtime response observer was not reached: ${JSON.stringify(result)}`,
+    );
+    return result;
+  } finally {
+    releaseSave();
+    setDatabaseSaveBarrierForTest(null);
+    setRuntimeDurabilityResponseObserverForTest(null);
+  }
+}
+
+async function requestWithRuntimePersistenceFailure<T>(route: string, runner: () => Promise<T>): Promise<T> {
+  let successObserved = false;
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error(`controlled runtime persistence failure for ${route}`);
+  });
+  setRuntimeDurabilityResponseObserverForTest((observedRoute, status) => {
+    if (observedRoute === route && status >= 200 && status < 300) successObserved = true;
+  });
+  try {
+    const result = await runner();
+    assert.equal(successObserved, false);
+    return result;
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+    setRuntimeDurabilityResponseObserverForTest(null);
+  }
+}
+
+function extractedStorePath(domain: "score-records" | "simulation-sessions" | "usage-sessions"): string {
+  const parsed = path.parse(dbPath);
+  const extension = parsed.ext || ".json";
+  return path.join(parsed.dir, `${parsed.name}.${domain}${extension}`);
+}
+
+async function readExtractedStoreRecords<T>(
+  domain: "score-records" | "simulation-sessions" | "usage-sessions",
+): Promise<T[]> {
+  const payload = JSON.parse(await readFile(extractedStorePath(domain), "utf8")) as { records?: T[] };
+  return Array.isArray(payload.records) ? payload.records : [];
+}
+
+function usageRecordIdForSimulationSession(simulationSessionId: string): string {
+  const digest = crypto.createHash("sha256").update(simulationSessionId.trim()).digest("hex").slice(0, 24);
+  return `usagesim_${digest}`;
+}
+
 async function loadTrainingPacksForRouteTest(orgId: string): Promise<TrainingPack[]> {
   return [
     buildTrainingPack("pack_scope", "org_1", {
@@ -1285,6 +1357,7 @@ before(async () => {
   process.env.SUPPORT_TRANSCRIPT_SECRET = "support_transcript_secret_for_dashboard_admin_route_tests";
   process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
   process.env.ENABLE_REMOTE_TTS = "true";
+  process.env.ENABLE_INTERNAL_DEBUG_ENDPOINTS = "true";
   process.env.OPENAI_API_KEY = "test-openai-key";
   delete process.env.DATABASE_URL;
 
@@ -1307,6 +1380,7 @@ before(async () => {
   setIdentityAdministrationResponseObserverForTest = imported.setIdentityAdministrationResponseObserverForTest;
   setOrganizationConfigurationResponseObserverForTest = imported.setOrganizationConfigurationResponseObserverForTest;
   setContentManagementResponseObserverForTest = imported.setContentManagementResponseObserverForTest;
+  setRuntimeDurabilityResponseObserverForTest = imported.setRuntimeDurabilityResponseObserverForTest;
   setContentManagementTrainingPackStoreForTest = imported.setContentManagementTrainingPackStoreForTest;
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
@@ -6040,4 +6114,197 @@ test("content management successes wait for durable persistence and preserve cro
   } finally {
     setContentManagementTrainingPackStoreForTest(null);
   }
+});
+
+test("score, simulation-start, and usage successes wait for app-state persistence", async () => {
+  const config = await adminRequest("/config");
+  assert.equal(config.status, 200);
+  const segment = (config.body.segments as Array<{
+    id: string;
+    scenarios: Array<{ id: string; enabled?: boolean }>;
+  }>).find((entry) => entry.scenarios.some((scenario) => scenario.enabled !== false));
+  const scenario = segment?.scenarios.find((entry) => entry.enabled !== false);
+  assert.ok(segment && scenario);
+
+  const completedAt = new Date();
+  const startedAt = new Date(completedAt.getTime() - 60_000);
+  const simulationSessionId = "sim_batch5_runtime_success";
+  const startBody = {
+    simulationSessionId,
+    segmentId: segment.id,
+    scenarioId: scenario.id,
+    clientStartedAt: startedAt.toISOString(),
+  };
+
+  const started = await requestWhileRuntimePersistenceHeld(
+    "POST /mobile/users/:userId/simulation-sessions/start",
+    () => mobileRequest("/mobile/users/org_admin/simulation-sessions/start", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify(startBody),
+    }),
+  );
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+  assert.equal(started.body.recognized, true);
+  assert.equal(started.body.simulationSessionId, simulationSessionId);
+  assert.equal(started.body.status, "started");
+
+  const duplicateStart = await mobileRequest(
+    "/mobile/users/org_admin/simulation-sessions/start",
+    "token_org_admin",
+    { method: "POST", body: JSON.stringify(startBody) },
+  );
+  assert.equal(duplicateStart.status, 201, JSON.stringify(duplicateStart.body));
+  assert.equal(
+    (await readExtractedStoreRecords<{ simulationSessionId: string }>("simulation-sessions"))
+      .filter((record) => record.simulationSessionId === simulationSessionId).length,
+    1,
+  );
+
+  const invalidStart = await mobileRequest(
+    "/mobile/users/org_admin/simulation-sessions/start",
+    "token_org_admin",
+    {
+      method: "POST",
+      body: JSON.stringify({ ...startBody, simulationSessionId: "sim_batch5_invalid", scenarioId: "missing" }),
+    },
+  );
+  assert.equal(invalidStart.status, 400);
+
+  const scoreBody = {
+    userId: "org_admin",
+    segmentId: segment.id,
+    scenarioId: scenario.id,
+    simulationSessionId,
+    startedAt: startedAt.toISOString(),
+    endedAt: completedAt.toISOString(),
+    communicationScore: 80,
+    outcomeScore: 75,
+    overallScore: 78,
+    completionLevel: "complete",
+    objectiveAchieved: true,
+    persuasion: 8,
+    clarity: 7,
+    empathy: 9,
+    assertiveness: 8,
+    summary: "Durability lifecycle score.",
+  };
+  const scored = await requestWhileRuntimePersistenceHeld(
+    "POST /mobile/users/:userId/scores",
+    () => mobileRequest("/mobile/users/org_admin/scores", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify(scoreBody),
+    }),
+  );
+  assert.equal(scored.status, 201, JSON.stringify(scored.body));
+  assert.equal(scored.body.simulationSessionId, simulationSessionId);
+  assert.equal(scored.body.objectiveAchieved, true);
+  assert.equal(scored.body.completionLevel, "complete");
+  assert.deepEqual(scored.body.scoringWeightsApplied, {
+    persuasion: 0.25,
+    clarity: 0.25,
+    empathy: 0.25,
+    assertiveness: 0.25,
+  });
+  const durableScore = (await readExtractedStoreRecords<SimulationScoreRecord>("score-records"))
+    .find((record) => record.simulationSessionId === simulationSessionId);
+  assert.ok(durableScore);
+  assert.deepEqual(
+    [durableScore.persuasion, durableScore.clarity, durableScore.empathy, durableScore.assertiveness],
+    [8, 7, 9, 8],
+  );
+
+  const usageBody = {
+    simulationSessionId,
+    userId: "org_admin",
+    segmentId: segment.id,
+    scenarioId: scenario.id,
+    startedAt: startedAt.toISOString(),
+    endedAt: completedAt.toISOString(),
+    rawDurationSeconds: 60,
+  };
+  const usage = await requestWhileRuntimePersistenceHeld(
+    "POST /usage/sessions",
+    () => mobileRequest("/usage/sessions", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify(usageBody),
+    }),
+  );
+  assert.equal(usage.status, 201, JSON.stringify(usage.body));
+  assert.equal(usage.body.recorded, true);
+  assert.equal(typeof usage.body.billedSecondsAdded, "number");
+
+  const replay = await mobileRequest("/usage/sessions", "token_org_admin", {
+    method: "POST",
+    body: JSON.stringify(usageBody),
+  });
+  assert.equal(replay.status, 201, JSON.stringify(replay.body));
+  const usageRecords = await readExtractedStoreRecords<UsageSessionRecord>("usage-sessions");
+  assert.equal(
+    usageRecords.filter((record) => record.id === usageRecordIdForSimulationSession(simulationSessionId)).length,
+    1,
+  );
+  assert.equal(
+    (await readExtractedStoreRecords<{ simulationSessionId: string; status: string }>("simulation-sessions"))
+      .find((record) => record.simulationSessionId === simulationSessionId)?.status,
+    "usage_recorded",
+  );
+
+  const failedScoreSessionId = "sim_batch5_score_save_failure";
+  const failedScore = await requestWithRuntimePersistenceFailure(
+    "POST /mobile/users/:userId/scores",
+    () => mobileRequest("/mobile/users/org_admin/scores", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify({ ...scoreBody, simulationSessionId: failedScoreSessionId }),
+    }),
+  );
+  assert.equal(failedScore.status, 500);
+  assert.equal(
+    (await readExtractedStoreRecords<SimulationScoreRecord>("score-records"))
+      .some((record) => record.simulationSessionId === failedScoreSessionId),
+    true,
+  );
+
+  const failedStartSessionId = "sim_batch5_start_save_failure";
+  const failedStart = await requestWithRuntimePersistenceFailure(
+    "POST /mobile/users/:userId/simulation-sessions/start",
+    () => mobileRequest("/mobile/users/org_admin/simulation-sessions/start", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify({ ...startBody, simulationSessionId: failedStartSessionId }),
+    }),
+  );
+  assert.equal(failedStart.status, 500);
+  assert.equal(
+    (await readExtractedStoreRecords<{ simulationSessionId: string }>("simulation-sessions"))
+      .some((record) => record.simulationSessionId === failedStartSessionId),
+    true,
+  );
+
+  const failedUsageSessionId = "sim_batch5_usage_save_failure";
+  const usageFailureStart = await mobileRequest(
+    "/mobile/users/org_admin/simulation-sessions/start",
+    "token_org_admin",
+    {
+      method: "POST",
+      body: JSON.stringify({ ...startBody, simulationSessionId: failedUsageSessionId }),
+    },
+  );
+  assert.equal(usageFailureStart.status, 201, JSON.stringify(usageFailureStart.body));
+  const failedUsage = await requestWithRuntimePersistenceFailure(
+    "POST /usage/sessions",
+    () => mobileRequest("/usage/sessions", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify({ ...usageBody, simulationSessionId: failedUsageSessionId }),
+    }),
+  );
+  assert.equal(failedUsage.status, 500);
+  assert.equal(
+    (await readExtractedStoreRecords<UsageSessionRecord>("usage-sessions"))
+      .some((record) => record.id === usageRecordIdForSimulationSession(failedUsageSessionId)),
+    true,
+  );
+  assert.equal(
+    (await readExtractedStoreRecords<{ simulationSessionId: string; status: string }>("simulation-sessions"))
+      .find((record) => record.simulationSessionId === failedUsageSessionId)?.status,
+    "usage_recorded",
+  );
 });

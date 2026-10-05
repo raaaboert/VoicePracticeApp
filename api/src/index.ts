@@ -4357,6 +4357,7 @@ let authenticationResponseObserverForTest: ((route: string, status: number) => v
 let identityAdministrationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let organizationConfigurationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let contentManagementResponseObserverForTest: ((route: string, status: number) => void) | null = null;
+let runtimeDurabilityResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -21525,7 +21526,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
     return;
   }
 
-  await withDatabase(async (db) => {
+  const createdRecord = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -21641,8 +21642,11 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       await scoreRecordAccess.append(db, record);
       syncTrainingPackAssignmentsForUserPack(db, accessContext.actingOrgId, user.id, record.trainingPackId ?? null);
     }
-    response.status(201).json(record);
+    return record;
   });
+  if (createdRecord === undefined) return;
+  runtimeDurabilityResponseObserverForTest?.("POST /mobile/users/:userId/scores", 201);
+  response.status(201).json(createdRecord);
 });
 
 app.get("/mobile/users/:userId/scores/summary", async (request: Request, response: Response) => {
@@ -22903,7 +22907,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
     return;
   }
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -22963,13 +22967,12 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
     });
 
     if (accessContext.isSuperUser) {
-      response.status(201).json({
+      return {
         recognized: false,
         simulationSessionId,
         status: null,
         serverStartedAt: null
-      });
-      return;
+      };
     }
 
     let session;
@@ -22998,13 +23001,16 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       throw error;
     }
 
-    response.status(201).json({
+    return {
       recognized: true,
       simulationSessionId,
       status: session.status,
       serverStartedAt: session.serverStartedAt
-    });
+    };
   });
+  if (payload === undefined) return;
+  runtimeDurabilityResponseObserverForTest?.("POST /mobile/users/:userId/simulation-sessions/start", 201);
+  response.status(201).json(payload);
 });
 
 app.post("/usage/sessions", async (request: Request, response: Response) => {
@@ -23056,7 +23062,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
   const requiredSegmentId = segmentId as string;
   const requiredScenarioId = scenarioId as string;
 
-  await withDatabase(async (db) => {
+  const payload = await withDatabase(async (db) => {
     const user = getUserById(db, requiredUserId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -23197,12 +23203,15 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
             refreshed.usage.billedSecondsToday - entitlements.usage.billedSecondsToday
           )
         : Math.max(0, refreshed.usage.billedSecondsToday - entitlements.usage.billedSecondsToday);
-    response.status(201).json({
+    return {
       recorded: !accessContext.isSuperUser,
       billedSecondsAdded,
       entitlements: refreshed
-    });
+    };
   });
+  if (payload === undefined) return;
+  runtimeDurabilityResponseObserverForTest?.("POST /usage/sessions", 201);
+  response.status(201).json(payload);
 });
 
 app.get("/usage", requireAdmin, async (_request: Request, response: Response) => {
@@ -24030,6 +24039,15 @@ export function setContentManagementResponseObserverForTest(
     throw new Error("setContentManagementResponseObserverForTest is only available in test.");
   }
   contentManagementResponseObserverForTest = observer;
+}
+
+export function setRuntimeDurabilityResponseObserverForTest(
+  observer: ((route: string, status: number) => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setRuntimeDurabilityResponseObserverForTest is only available in test.");
+  }
+  runtimeDurabilityResponseObserverForTest = observer;
 }
 
 export function setContentManagementTrainingPackStoreForTest(store: TrainingPackStore | null): void {
