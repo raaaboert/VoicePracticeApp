@@ -3016,8 +3016,8 @@ async function runDatabasePostCommitEffects(effects: readonly PostCommitEffect[]
   });
 }
 
-function appendAuditEvent(db: ApiDatabase, input: AppendAuditEventInput): void {
-  const event: AuditEvent = {
+function buildAuditEvent(input: AppendAuditEventInput): AuditEvent {
+  return {
     id: `audit_${uuid()}`,
     actorType: input.actorType,
     actorId: input.actorId ?? null,
@@ -3028,6 +3028,25 @@ function appendAuditEvent(db: ApiDatabase, input: AppendAuditEventInput): void {
     metadata: input.metadata ?? null,
     createdAt: nowIso()
   };
+}
+
+async function deliverPostCommitAuditEventBestEffort(
+  input: AppendAuditEventInput,
+  operation: string,
+): Promise<void> {
+  try {
+    if (trainingPackOrderAuditFailureForTest) {
+      throw trainingPackOrderAuditFailureForTest;
+    }
+    await auditEventStore.appendEvents([buildAuditEvent(input)], { maxRecords: MAX_AUDIT_EVENTS });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarn(`[cross-store][audit] ${operation} audit delivery failed after primary SQL commit: ${message}`);
+  }
+}
+
+function appendAuditEvent(db: ApiDatabase, input: AppendAuditEventInput): void {
+  const event = buildAuditEvent(input);
 
   queuePendingAuditEvent(db, event);
 }
@@ -4358,6 +4377,7 @@ let identityAdministrationResponseObserverForTest: ((route: string, status: numb
 let organizationConfigurationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let contentManagementResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let runtimeDurabilityResponseObserverForTest: ((route: string, status: number) => void) | null = null;
+let trainingPackOrderAuditFailureForTest: Error | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -5909,6 +5929,44 @@ function listTrainingPackAssignments(
     }
     return true;
   });
+}
+
+interface TrainingPackDeleteCleanupResult {
+  removedAttachmentCount: number;
+  deactivatedAssignmentCount: number;
+}
+
+function hasRecoverableTrainingPackReferences(
+  db: ApiDatabase,
+  orgId: string,
+  trainingPackId: string,
+): boolean {
+  return (db.orgTrainingPackAttachments ?? []).some(
+    (entry) => entry.orgId === orgId && entry.trainingPackId === trainingPackId,
+  ) || listTrainingPackAssignments(db, orgId, trainingPackId).length > 0;
+}
+
+function cleanUpDeletedTrainingPackReferences(
+  db: ApiDatabase,
+  orgId: string,
+  trainingPackId: string,
+  updatedAt: string,
+): TrainingPackDeleteCleanupResult {
+  ensureOrgTrainingCollections(db);
+  const attachmentCountBefore = db.orgTrainingPackAttachments.length;
+  db.orgTrainingPackAttachments = db.orgTrainingPackAttachments.filter(
+    (entry) => !(entry.orgId === orgId && entry.trainingPackId === trainingPackId),
+  );
+  let deactivatedAssignmentCount = 0;
+  for (const assignment of listTrainingPackAssignments(db, orgId, trainingPackId)) {
+    assignment.active = false;
+    assignment.updatedAt = updatedAt;
+    deactivatedAssignmentCount += 1;
+  }
+  return {
+    removedAttachmentCount: attachmentCountBefore - db.orgTrainingPackAttachments.length,
+    deactivatedAssignmentCount,
+  };
 }
 
 function listVisibleTrainingPackAssignments(
@@ -14772,23 +14830,26 @@ app.put(
         body.trainingPackIds,
         body.expectedOrderRevision
       );
-      await withDatabase(async (db) => {
-        if (request.dashboard) {
-          appendWebAuditEvent(db, request.dashboard.user, {
-            action: "dashboard.training_pack.order_updated",
-            orgId: org.id,
-            message: `Updated Training Pack order for ${org.name}.`,
-            metadata: { orderedTrainingPackIds: body.trainingPackIds },
-          });
-        } else {
-          appendPlatformAuditEvent(db, {
-            action: "org.training_pack.order_updated",
-            orgId: org.id,
-            message: `Updated Training Pack order for ${org.name}.`,
-            metadata: { orderedTrainingPackIds: body.trainingPackIds },
-          });
-        }
-      });
+      await deliverPostCommitAuditEventBestEffort(
+        request.dashboard
+          ? {
+              actorType: "web_user",
+              actorId: request.dashboard.user.id,
+              action: "dashboard.training_pack.order_updated",
+              orgId: org.id,
+              message: `Updated Training Pack order for ${org.name}.`,
+              metadata: { orderedTrainingPackIds: body.trainingPackIds },
+            }
+          : {
+              actorType: "platform_admin",
+              actorId: PLATFORM_ADMIN_ACTOR_ID,
+              action: "org.training_pack.order_updated",
+              orgId: org.id,
+              message: `Updated Training Pack order for ${org.name}.`,
+              metadata: { orderedTrainingPackIds: body.trainingPackIds },
+            },
+        "training-pack-order",
+      );
       response.json({
         generatedAt: nowIso(),
         orgId: org.id,
@@ -15167,26 +15228,24 @@ app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (r
 
     try {
       const deleted = await trainingPackStore.deleteTrainingPackForOrg(org.id, trainingPackId);
-      if (!deleted) {
+      const recoverableReferences = hasRecoverableTrainingPackReferences(db, org.id, trainingPackId);
+      if (!deleted && !recoverableReferences) {
         response.status(404).json({ error: "Training pack not found." });
         return;
       }
-      ensureOrgTrainingCollections(db);
-      db.orgTrainingPackAttachments = db.orgTrainingPackAttachments.filter(
-        (entry) => !(entry.orgId === org.id && entry.trainingPackId === trainingPackId)
-      );
-      const now = nowIso();
-      for (const assignment of listTrainingPackAssignments(db, org.id, trainingPackId)) {
-        assignment.active = false;
-        assignment.updatedAt = now;
-      }
+      const cleanup = cleanUpDeletedTrainingPackReferences(db, org.id, trainingPackId, nowIso());
 
       appendPlatformAuditEvent(db, {
-        action: "org.training_pack.deleted",
+        action: deleted ? "org.training_pack.deleted" : "org.training_pack.delete_recovered",
         orgId: org.id,
-        message: `Deleted training pack ${trainingPackId} for ${org.name}.`,
+        message: deleted
+          ? `Deleted training pack ${trainingPackId} for ${org.name}.`
+          : `Recovered incomplete deletion of training pack ${trainingPackId} for ${org.name}.`,
         metadata: {
-          trainingPackId
+          trainingPackId,
+          sqlRowDeleted: deleted,
+          removedAttachmentCount: cleanup.removedAttachmentCount,
+          deactivatedAssignmentCount: cleanup.deactivatedAssignmentCount,
         }
       });
 
@@ -24167,6 +24226,13 @@ export function setContentManagementTrainingPackStoreForTest(store: TrainingPack
     throw new Error("setContentManagementTrainingPackStoreForTest is only available in test.");
   }
   trainingPackStore = store ?? defaultTrainingPackStore;
+}
+
+export function setTrainingPackOrderAuditFailureForTest(error: Error | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setTrainingPackOrderAuditFailureForTest is only available in test.");
+  }
+  trainingPackOrderAuditFailureForTest = error;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(

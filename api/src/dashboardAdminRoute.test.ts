@@ -45,7 +45,11 @@ import type {
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
-import type { TrainingPackStore } from "./storage/trainingPackStore.js";
+import {
+  getTrainingPackOrderRevision,
+  type TrainingPackStore,
+  validateTrainingPackOrder,
+} from "./storage/trainingPackStore.js";
 
 const NOW = "2026-07-25T15:00:00.000Z";
 const RECENT_ACTIVITY_ANCHOR_MS = Date.now();
@@ -120,6 +124,7 @@ let setRuntimeDurabilityResponseObserverForTest: (
   observer: ((route: string, status: number) => void) | null,
 ) => void;
 let setContentManagementTrainingPackStoreForTest: (store: TrainingPackStore | null) => void;
+let setTrainingPackOrderAuditFailureForTest: (error: Error | null) => void;
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -303,15 +308,23 @@ function createContentManagementTrainingPackStore(rows: TrainingPack[]): Trainin
         .filter((pack) => pack.organizationId === orgId)
         .sort((left, right) => (left.displayOrder ?? 0) - (right.displayOrder ?? 0));
     },
-    async reorderTrainingPacksForOrg(orgId, trainingPackIds) {
+    async reorderTrainingPacksForOrg(orgId, trainingPackIds, expectedOrderRevision) {
       const matchingRows = rows.filter((pack) => pack.organizationId === orgId);
-      for (const [displayOrder, trainingPackId] of trainingPackIds.entries()) {
+      const requestedIds = validateTrainingPackOrder(
+        matchingRows,
+        trainingPackIds,
+        expectedOrderRevision,
+      );
+      for (const [displayOrder, trainingPackId] of requestedIds.entries()) {
         const pack = matchingRows.find((entry) => entry.id === trainingPackId);
         if (pack) pack.displayOrder = displayOrder;
       }
+      const orderedPacks = matchingRows.sort(
+        (left, right) => (left.displayOrder ?? 0) - (right.displayOrder ?? 0) || left.id.localeCompare(right.id),
+      );
       return {
-        trainingPacks: matchingRows.sort((left, right) => (left.displayOrder ?? 0) - (right.displayOrder ?? 0)),
-        orderRevision: "content-management-test-revision",
+        trainingPacks: orderedPacks,
+        orderRevision: getTrainingPackOrderRevision(orderedPacks),
       };
     },
     async createTrainingPackForOrg(orgId, input) {
@@ -1382,6 +1395,7 @@ before(async () => {
   setContentManagementResponseObserverForTest = imported.setContentManagementResponseObserverForTest;
   setRuntimeDurabilityResponseObserverForTest = imported.setRuntimeDurabilityResponseObserverForTest;
   setContentManagementTrainingPackStoreForTest = imported.setContentManagementTrainingPackStoreForTest;
+  setTrainingPackOrderAuditFailureForTest = imported.setTrainingPackOrderAuditFailureForTest;
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
       // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
@@ -5958,11 +5972,98 @@ test("failed app-state writes stay out of cache and cannot leak into a later com
   assert.equal(durableAfterRetry.orgs.filter((org) => org.joinCode === failedJoinCode).length, 1);
 });
 
+test("Training Pack ordering reports committed SQL state when post-commit audit delivery fails", async () => {
+  const orderRows = [
+    buildTrainingPack("pack_order_a", "org_1", { title: "Order A", displayOrder: 0 }),
+    buildTrainingPack("pack_order_b", "org_1", { title: "Order B", displayOrder: 1 }),
+  ];
+  setContentManagementTrainingPackStoreForTest(createContentManagementTrainingPackStore(orderRows));
+  setDashboardTrainingPackLoaderForTest(null);
+
+  try {
+    const initial = await adminRequest("/orgs/org_1/training-packs");
+    assert.equal(initial.status, 200);
+    const initialRevision = String(initial.body.orderRevision);
+
+    setTrainingPackOrderAuditFailureForTest(new Error("controlled post-commit audit failure"));
+    const committed = await adminRequest("/orgs/org_1/training-packs/order", {
+      method: "PUT",
+      body: JSON.stringify({
+        trainingPackIds: ["pack_order_b", "pack_order_a"],
+        expectedOrderRevision: initialRevision,
+      }),
+    });
+    assert.equal(committed.status, 200);
+    const committedRevision = String(committed.body.orderRevision);
+    assert.notEqual(committedRevision, initialRevision);
+    assert.deepEqual(
+      (committed.body.packs as TrainingPack[]).map((pack) => pack.id),
+      ["pack_order_b", "pack_order_a"],
+    );
+
+    const durable = await adminRequest("/orgs/org_1/training-packs");
+    assert.equal(durable.status, 200);
+    assert.equal(durable.body.orderRevision, committedRevision);
+    assert.deepEqual(
+      (durable.body.packs as TrainingPack[]).map((pack) => pack.id),
+      ["pack_order_b", "pack_order_a"],
+    );
+
+    const staleRetry = await adminRequest("/orgs/org_1/training-packs/order", {
+      method: "PUT",
+      body: JSON.stringify({
+        trainingPackIds: ["pack_order_b", "pack_order_a"],
+        expectedOrderRevision: initialRevision,
+      }),
+    });
+    assert.equal(staleRetry.status, 409);
+
+    setTrainingPackOrderAuditFailureForTest(null);
+    const currentRetry = await adminRequest("/orgs/org_1/training-packs/order", {
+      method: "PUT",
+      body: JSON.stringify({
+        trainingPackIds: ["pack_order_b", "pack_order_a"],
+        expectedOrderRevision: committedRevision,
+      }),
+    });
+    assert.equal(currentRetry.status, 200);
+    assert.equal(currentRetry.body.orderRevision, committedRevision);
+
+    const customerReorder = await dashboardRequest("/orgs/org_1/training-packs/order", orgAdminToken, {
+      method: "PUT",
+      body: JSON.stringify({
+        trainingPackIds: ["pack_order_a", "pack_order_b"],
+        expectedOrderRevision: committedRevision,
+      }),
+    });
+    assert.equal(customerReorder.status, 200);
+    const customerRevision = String(customerReorder.body.orderRevision);
+    assert.notEqual(customerRevision, committedRevision);
+    assert.deepEqual(
+      (customerReorder.body.packs as Array<{ id: string }>).map((pack) => pack.id),
+      ["pack_order_a", "pack_order_b"],
+    );
+
+    const platformRead = await adminRequest("/orgs/org_1/training-packs");
+    assert.equal(platformRead.status, 200);
+    assert.equal(platformRead.body.orderRevision, customerRevision);
+    assert.deepEqual(
+      (platformRead.body.packs as TrainingPack[]).map((pack) => pack.id),
+      ["pack_order_a", "pack_order_b"],
+    );
+  } finally {
+    setTrainingPackOrderAuditFailureForTest(null);
+    setContentManagementTrainingPackStoreForTest(null);
+    setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
+  }
+});
+
 test("content management successes wait for durable persistence and preserve cross-store behavior", async () => {
   const packAssignmentId = "pack_batch4_assignment";
   const packAttachId = "pack_batch4_attach";
   const packDeleteId = "pack_batch4_delete";
   const packPartialFailureId = "pack_batch4_partial_failure";
+  const packConcurrentDeleteId = "pack_batch4_concurrent_delete";
   const fakePacks = [
     buildTrainingPack(packAssignmentId, "org_1", {
       title: "Batch 4 Assignment Pack",
@@ -5971,7 +6072,8 @@ test("content management successes wait for durable persistence and preserve cro
     buildTrainingPack(packAttachId, "org_1", { title: "Batch 4 Attachment Pack" }),
     buildTrainingPack(packDeleteId, "org_1", { title: "Batch 4 Delete Pack" }),
     buildTrainingPack(packPartialFailureId, "org_1", { title: "Batch 4 Partial Failure Pack" }),
-    buildTrainingPack("pack_batch4_other", "org_2", { title: "Batch 4 Other Organization Pack" }),
+    buildTrainingPack(packConcurrentDeleteId, "org_1", { title: "Batch 4 Concurrent Delete Pack" }),
+    buildTrainingPack("pack_other", "org_2", { title: "Batch 4 Other Organization Pack" }),
   ];
   setContentManagementTrainingPackStoreForTest(createContentManagementTrainingPackStore(fakePacks));
 
@@ -6017,7 +6119,7 @@ test("content management successes wait for durable persistence and preserve cro
       body: JSON.stringify({ userIds: ["other_org_user"] }),
     });
     assert.equal(invalidAssignment.status, 400);
-    const wrongOrgAssignment = await adminRequest("/orgs/org_1/training-packs/pack_batch4_other/assignments", {
+    const wrongOrgAssignment = await adminRequest("/orgs/org_1/training-packs/pack_other/assignments", {
       method: "PUT",
       body: JSON.stringify({ userIds: ["learner"] }),
     });
@@ -6124,13 +6226,15 @@ test("content management successes wait for durable persistence and preserve cro
       "PUT /orgs/:orgId/trainings/:trainingId/training-packs",
       () => adminRequest(`/orgs/org_1/trainings/${trainingId}/training-packs`, {
         method: "PUT",
-        body: JSON.stringify({ trainingPackIds: [packAttachId, packDeleteId, packPartialFailureId] }),
+        body: JSON.stringify({
+          trainingPackIds: [packAttachId, packDeleteId, packPartialFailureId, packConcurrentDeleteId],
+        }),
       }),
     );
     assert.equal(packsAttached.status, 200);
     assert.deepEqual(
       ((packsAttached.body.attachedTrainingPackIds as string[]) ?? []).slice().sort(),
-      [packAttachId, packDeleteId, packPartialFailureId].sort(),
+      [packAttachId, packDeleteId, packPartialFailureId, packConcurrentDeleteId].sort(),
     );
 
     const assignedDeletePack = await adminRequest(`/orgs/org_1/training-packs/${packDeleteId}/assignments`, {
@@ -6138,6 +6242,22 @@ test("content management successes wait for durable persistence and preserve cro
       body: JSON.stringify({ userIds: [assignmentUserIds[0]] }),
     });
     assert.equal(assignedDeletePack.status, 200);
+    const assignedPartialFailurePack = await adminRequest(
+      `/orgs/org_1/training-packs/${packPartialFailureId}/assignments`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ userIds: [assignmentUserIds[0]] }),
+      },
+    );
+    assert.equal(assignedPartialFailurePack.status, 200);
+    const assignedConcurrentDeletePack = await adminRequest(
+      `/orgs/org_1/training-packs/${packConcurrentDeleteId}/assignments`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ userIds: [assignmentUserIds[1]] }),
+      },
+    );
+    assert.equal(assignedConcurrentDeletePack.status, 200);
 
     const archivedTopic = await requestWhileContentPersistenceHeld(
       "PATCH /orgs/:orgId/trainings/:trainingId",
@@ -6262,13 +6382,90 @@ test("content management successes wait for durable persistence and preserve cro
       assert.equal(failedDelete.status, 500);
       assert.equal(successObserved, false);
       assert.equal(fakePacks.some((pack) => pack.id === packPartialFailureId), false);
-      assert.equal((await readDurableDbOnce()).orgTrainingPackAttachments.some((attachment) =>
+      const durableAfterPartialFailure = await readDurableDbOnce();
+      assert.equal(durableAfterPartialFailure.orgTrainingPackAttachments.some((attachment) =>
         attachment.orgId === "org_1" && attachment.trainingPackId === packPartialFailureId
+      ), true);
+      assert.equal(durableAfterPartialFailure.trainingPackAssignments.some((assignment) =>
+        assignment.orgId === "org_1"
+        && assignment.trainingPackId === packPartialFailureId
+        && assignment.active
+      ), true);
+
+      const failedRecovery = await adminRequest(`/orgs/org_1/training-packs/${packPartialFailureId}`, {
+        method: "DELETE",
+      });
+      assert.equal(failedRecovery.status, 500);
+      assert.equal(successObserved, false);
+      const durableAfterFailedRecovery = await readDurableDbOnce();
+      assert.equal(durableAfterFailedRecovery.orgTrainingPackAttachments.some((attachment) =>
+        attachment.orgId === "org_1" && attachment.trainingPackId === packPartialFailureId
+      ), true);
+      assert.equal(durableAfterFailedRecovery.trainingPackAssignments.some((assignment) =>
+        assignment.orgId === "org_1"
+        && assignment.trainingPackId === packPartialFailureId
+        && assignment.active
       ), true);
     } finally {
       setDatabaseSaveBarrierForTest(null);
       setContentManagementResponseObserverForTest(null);
     }
+
+    const recoveredDelete = await adminRequest(`/orgs/org_1/training-packs/${packPartialFailureId}`, {
+      method: "DELETE",
+    });
+    assert.equal(recoveredDelete.status, 200);
+    const durableAfterRecovery = await readDurableDbOnce();
+    assert.equal(durableAfterRecovery.orgTrainingPackAttachments.some((attachment) =>
+      attachment.orgId === "org_1" && attachment.trainingPackId === packPartialFailureId
+    ), false);
+    assert.equal(durableAfterRecovery.trainingPackAssignments.some((assignment) =>
+      assignment.orgId === "org_1"
+      && assignment.trainingPackId === packPartialFailureId
+      && assignment.active
+    ), false);
+    assert.equal(fakePacks.some((pack) => pack.id === packPartialFailureId), false);
+
+    const fullyDeletedRetry = await adminRequest(`/orgs/org_1/training-packs/${packPartialFailureId}`, {
+      method: "DELETE",
+    });
+    assert.equal(fullyDeletedRetry.status, 404);
+
+    const wrongOrgRecovery = await adminRequest("/orgs/org_1/training-packs/pack_other", {
+      method: "DELETE",
+    });
+    assert.equal(wrongOrgRecovery.status, 404);
+    const durableAfterWrongOrgAttempt = await readDurableDbOnce();
+    assert.equal(fakePacks.some((pack) => pack.id === "pack_other" && pack.organizationId === "org_2"), true);
+    assert.equal(durableAfterWrongOrgAttempt.orgTrainingPackAttachments.some((attachment) =>
+      attachment.orgId === "org_2" && attachment.trainingPackId === "pack_other"
+    ), true);
+    assert.equal(durableAfterWrongOrgAttempt.trainingPackAssignments.some((assignment) =>
+      assignment.orgId === "org_2" && assignment.trainingPackId === "pack_other" && assignment.active
+    ), true);
+
+    const concurrentDeletes = await Promise.all([
+      adminRequest(`/orgs/org_1/training-packs/${packConcurrentDeleteId}`, { method: "DELETE" }),
+      adminRequest(`/orgs/org_1/training-packs/${packConcurrentDeleteId}`, { method: "DELETE" }),
+    ]);
+    assert.deepEqual(concurrentDeletes.map((result) => result.status).sort(), [200, 404]);
+    const durableAfterConcurrentDeletes = await readDurableDbOnce();
+    assert.equal(fakePacks.some((pack) => pack.id === packConcurrentDeleteId), false);
+    assert.equal(durableAfterConcurrentDeletes.orgTrainingPackAttachments.some((attachment) =>
+      attachment.orgId === "org_1" && attachment.trainingPackId === packConcurrentDeleteId
+    ), false);
+    assert.equal(durableAfterConcurrentDeletes.trainingPackAssignments.some((assignment) =>
+      assignment.orgId === "org_1"
+      && assignment.trainingPackId === packConcurrentDeleteId
+      && assignment.active
+    ), false);
+
+    const recoveryAuditEvents = await readPlatformAuditEvents();
+    assert.equal(recoveryAuditEvents.some((event) =>
+      event.action === "org.training_pack.delete_recovered"
+      && event.orgId === "org_1"
+      && event.metadata?.trainingPackId === packPartialFailureId
+    ), true);
   } finally {
     setContentManagementTrainingPackStoreForTest(null);
   }
