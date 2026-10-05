@@ -5327,6 +5327,112 @@ test("Focus Topic GET leaves an empty organization empty and performs no persist
   }
 });
 
+test("high-frequency mobile config, performance scope, and reporting reads leave an empty organization unchanged", async () => {
+  const originalRaw = await readFile(dbPath, "utf8");
+  const state = JSON.parse(originalRaw) as ApiDatabase;
+  state.orgTrainings = state.orgTrainings.filter((topic) => topic.orgId !== "org_1");
+  state.orgTrainingPackAttachments = state.orgTrainingPackAttachments.filter((entry) => entry.orgId !== "org_1");
+  state.orgTrainingScenarioAttachments = state.orgTrainingScenarioAttachments.filter((entry) => entry.orgId !== "org_1");
+  const emptyRaw = JSON.stringify(state, null, 2);
+  await writeFile(dbPath, emptyRaw, "utf8");
+  const auditsBefore = JSON.stringify(await readPlatformAuditEvents());
+  let trainingPackQueries = 0;
+  setDashboardTrainingPackLoaderForTest(async (orgId) => {
+    trainingPackQueries += 1;
+    return loadTrainingPacksForRouteTest(orgId);
+  });
+
+  try {
+    for (let pass = 0; pass < 2; pass += 1) {
+      const config = await mobileRequest("/mobile/users/org_admin/config", "token_org_admin");
+      assert.equal(config.status, 200);
+      assert.deepEqual(config.body.orgTrainings, []);
+      assert.equal(trainingPackQueries, pass * 2, "mobile config must not query Training Packs");
+
+      const performance = await mobileRequest(
+        "/mobile/users/org_admin/performance/options",
+        "token_org_admin",
+      );
+      assert.equal(performance.status, 200);
+
+      const reporting = await dashboardRequest("/dashboard/reporting/trainings", orgAdminToken);
+      assert.equal(reporting.status, 200);
+      assert.deepEqual(reporting.body.trainings, []);
+      assert.equal(trainingPackQueries, (pass + 1) * 2);
+
+      assert.equal(await readFile(dbPath, "utf8"), emptyRaw);
+      assert.equal(JSON.stringify(await readPlatformAuditEvents()), auditsBefore);
+      assert.equal((await readDb()).orgTrainings.some((topic) => topic.name === "Test Training"), false);
+    }
+  } finally {
+    setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
+    await writeFile(dbPath, originalRaw, "utf8");
+    assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
+  }
+});
+
+test("performance and reporting Training Pack reads release the app-state lock before awaiting the store", async () => {
+  async function proveLockReleasedWhilePackReadIsBlocked(
+    runRead: () => Promise<{ status: number }>,
+  ): Promise<void> {
+    let markPackReadStarted!: () => void;
+    const packReadStarted = new Promise<void>((resolve) => { markPackReadStarted = resolve; });
+    let releasePackRead!: () => void;
+    const packReadRelease = new Promise<void>((resolve) => { releasePackRead = resolve; });
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    let releaseSave!: () => void;
+    const saveRelease = new Promise<void>((resolve) => { releaseSave = resolve; });
+
+    setDashboardTrainingPackLoaderForTest(async (orgId) => {
+      markPackReadStarted();
+      await packReadRelease;
+      return loadTrainingPacksForRouteTest(orgId);
+    });
+    setDatabaseSaveBarrierForTest(async () => {
+      markSaveStarted();
+      await saveRelease;
+    });
+
+    const pendingRead = runRead();
+    let createdTrainingId: string | null = null;
+    try {
+      await packReadStarted;
+      const pendingWrite = adminRequest("/orgs/org_1/trainings", {
+        method: "POST",
+        body: JSON.stringify({ name: "Read Lock Probe", status: "draft" }),
+      });
+      await saveStarted;
+      releaseSave();
+      const write = await pendingWrite;
+      assert.equal(write.status, 201);
+      createdTrainingId = (write.body as unknown as OrgTrainingRecord).id;
+    } finally {
+      setDatabaseSaveBarrierForTest(null);
+      releasePackRead();
+    }
+
+    try {
+      assert.equal((await pendingRead).status, 200);
+    } finally {
+      setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
+      if (createdTrainingId) {
+        assert.equal((await adminRequest(`/orgs/org_1/trainings/${createdTrainingId}`, { method: "DELETE" })).status, 200);
+      }
+    }
+  }
+
+  await proveLockReleasedWhilePackReadIsBlocked(() =>
+    mobileRequest("/mobile/users/org_admin/performance/options", "token_org_admin")
+  );
+  await proveLockReleasedWhilePackReadIsBlocked(() =>
+    dashboardRequest("/dashboard/reporting/trainings", orgAdminToken)
+  );
+  await proveLockReleasedWhilePackReadIsBlocked(() =>
+    dashboardRequest("/orgs/org_1/training-packs", orgAdminToken)
+  );
+});
+
 test("Focus Topic GET preserves active, draft, and archived records without mutation", async () => {
   const originalRaw = await readFile(dbPath, "utf8");
   const state = JSON.parse(originalRaw) as ApiDatabase;
