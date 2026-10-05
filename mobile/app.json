@@ -28,6 +28,11 @@
         "MODIFY_AUDIO_SETTINGS",
         "INTERNET"
       ],
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
       "package": "com.peritio.practice"
     },
     "web": {
@@ -39,6 +44,12 @@
       }
     },
     "plugins": [
+      "expo-asset",
+      "expo-audio",
+      "expo-font",
+      "expo-sharing",
+      "expo-status-bar",
+      "expo-video",
       "expo-secure-store",
       [
         "expo-splash-screen",

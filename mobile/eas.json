@@ -7,7 +7,14 @@
     "development": {
       "environment": "development",
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "PERITIO_MOBILE_ENV": "staging",
+        "PERITIO_MOBILE_APP_VARIANT": "staging",
+        "EXPO_PUBLIC_REMOTE_AI_ENABLED": "true",
+        "EXPO_PUBLIC_REMOTE_TTS_ENABLED": "true",
+        "EXPO_PUBLIC_API_BASE_URL": "https://voicepractice-api-dev.onrender.com"
+      }
     },
     "preview": {
       "environment": "preview",
@@ -27,6 +34,9 @@
       "environment": "preview",
       "distribution": "store",
       "autoIncrement": true,
+      "ios": {
+        "image": "macos-tahoe-26.5-xcode-26.6"
+      },
       "env": {
         "PERITIO_MOBILE_ENV": "staging",
         "PERITIO_MOBILE_APP_VARIANT": "staging",
@@ -39,6 +49,9 @@
       "environment": "production",
       "distribution": "store",
       "autoIncrement": true,
+      "ios": {
+        "image": "macos-tahoe-26.5-xcode-26.6"
+      },
       "env": {
         "PERITIO_MOBILE_ENV": "production",
         "PERITIO_MOBILE_APP_VARIANT": "production",
@@ -50,6 +63,9 @@
     "production": {
       "environment": "production",
       "autoIncrement": true,
+      "ios": {
+        "image": "macos-tahoe-26.5-xcode-26.6"
+      },
       "env": {
         "PERITIO_MOBILE_ENV": "production",
         "PERITIO_MOBILE_APP_VARIANT": "production",

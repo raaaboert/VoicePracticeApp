@@ -28,7 +28,7 @@ const submitTurnSource = sourceBetween(
   "export async function awaitSimulationTurnResultViaApi"
 );
 
-test("native audio multipart uploads use SDK56 Expo File parts", () => {
+test("native audio multipart uploads use SDK57 Expo File parts", () => {
   assert.match(apiSource, /import \{ File \} from "expo-file-system";/);
 
   for (const source of [transcribeSource, submitTurnSource]) {

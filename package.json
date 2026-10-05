@@ -9,6 +9,10 @@
     "api",
     "shared"
   ],
+  "overrides": {
+    "expo": "57.0.26",
+    "react-native": "0.86.3"
+  },
   "scripts": {
     "start:mobile": "npm run build --workspace shared && npm run start --workspace mobile",
     "start:api": "npm run build --workspace shared && npm run dev --workspace api",

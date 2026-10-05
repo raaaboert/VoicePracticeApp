@@ -78,6 +78,15 @@ test("preview resolves the staging identity and API without changing production 
   assert.equal(config.extra.peritio.apiBaseUrl, "https://voicepractice-api-dev.onrender.com");
 });
 
+test("development resolves the staging identity and API", () => {
+  const config = resolveAppConfig("development");
+  assert.equal(config.name, "Peritio Staging");
+  assert.equal(config.android.package, "com.peritio.practice.staging");
+  assert.equal(config.ios.bundleIdentifier, "com.peritio.practice.staging");
+  assert.equal(config.extra.peritio.mobileEnvironment, "staging");
+  assert.equal(config.extra.peritio.apiBaseUrl, "https://voicepractice-api-dev.onrender.com");
+});
+
 test("iOS store profiles retain their production and staging identities and APIs", () => {
   const production = resolveAppConfig("production-ios");
   assert.equal(production.name, "Peritio");
