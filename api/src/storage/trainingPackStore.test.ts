@@ -8,7 +8,43 @@ import {
   validateTrainingPackOrder,
 } from "./trainingPackStore.js";
 
-test("training pack store initializes schema and resolves mapping against a clean postgres database", async () => {
+function currentSchemaInspectionResult(text: string, columns: string[]) {
+  if (text.includes("to_regclass('training_packs')")) {
+    return { rows: [{ exists: true }], rowCount: 1 };
+  }
+  if (text.includes("information_schema.columns") && text.includes("data_type")) {
+    const rows = columns.map((column_name) => ({
+      column_name,
+      data_type: column_name === "display_order" ? "integer" : "text",
+      is_nullable: "NO",
+      column_default: column_name === "display_order" ? "0" : null,
+    }));
+    return { rows, rowCount: rows.length };
+  }
+  if (text.includes("FROM pg_constraint")) {
+    return {
+      rows: [{
+        constraint_name: "training_packs_display_order_nonnegative",
+        definition: "CHECK ((display_order >= 0))",
+        validated: true,
+      }],
+      rowCount: 1,
+    };
+  }
+  if (text.includes("FROM pg_indexes")) {
+    return {
+      rows: [{
+        index_name: "training_packs_org_display_order_idx",
+        definition:
+          "CREATE INDEX training_packs_org_display_order_idx ON training_packs USING btree (organization_id, display_order, id)",
+      }],
+      rowCount: 1,
+    };
+  }
+  return null;
+}
+
+test("training pack store verifies a current schema without executing migration DDL", async () => {
   const queries: string[] = [];
   const columns = [
     "id",
@@ -31,9 +67,8 @@ test("training pack store initializes schema and resolves mapping against a clea
   const queryPool = {
     async query(text: string) {
       queries.push(text);
-      if (text.includes("to_regclass('training_packs')")) {
-        return { rows: [{ exists: false }], rowCount: 1 };
-      }
+      const schemaResult = currentSchemaInspectionResult(text, columns);
+      if (schemaResult) return schemaResult;
       if (text.includes("information_schema.columns")) {
         return { rows: columns.map((column_name) => ({ column_name })), rowCount: columns.length };
       }
@@ -57,9 +92,29 @@ test("training pack store initializes schema and resolves mapping against a clea
 
   await store.initialize();
 
-  assert(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS training_packs")));
-  assert(queries.some((query) => query.includes("CREATE UNIQUE INDEX IF NOT EXISTS training_packs_one_active_per_org_idx")));
+  assert.equal(queries.some((query) => /\b(?:ALTER|CREATE|UPDATE)\b/.test(query)), false);
   assert(warnings.some((message) => message.includes("[training-pack] resolved schema mapping")));
+});
+
+test("training pack store fails startup explicitly when the schema migration is missing", async () => {
+  const queries: string[] = [];
+  const store = createTrainingPackStore({
+    provider: "postgres",
+    databaseUrl: "postgres://user:pass@example.com/db",
+    pgPoolMax: 1,
+    pgConnectTimeoutMs: 1,
+    pgIdleTimeoutMs: 1,
+    queryPool: {
+      async query(text: string) {
+        queries.push(text);
+        return { rows: [{ exists: false }], rowCount: 1 };
+      },
+      async connect() { throw new Error("connect should not be used during initialize."); },
+    } as any,
+  });
+
+  await assert.rejects(() => store.initialize(), /db:migrate-training-packs/);
+  assert.equal(queries.some((query) => /\b(?:ALTER|CREATE|UPDATE)\b/.test(query)), false);
 });
 
 test("training pack order requires the complete same-organization list and a current revision", () => {
@@ -117,7 +172,8 @@ test("authoritative Training Pack reads retain internal configuration fields", a
   };
   const queryPool = {
     async query(text: string) {
-      if (text.includes("to_regclass('training_packs')")) return { rows: [{ exists: true }], rowCount: 1 };
+      const schemaResult = currentSchemaInspectionResult(text, columns);
+      if (schemaResult) return schemaResult;
       if (text.includes("information_schema.columns")) {
         return { rows: columns.map((column_name) => ({ column_name })), rowCount: columns.length };
       }
@@ -153,7 +209,7 @@ test("authoritative Training Pack reads retain internal configuration fields", a
   });
 });
 
-test("existing training pack schemas receive a stable authoritative display order", async () => {
+test("current training pack schema initialization is inspection-only", async () => {
   const queries: string[] = [];
   const columns = [
     "id", "organization_id", "title", "training_topic", "required_behavioral_triggers",
@@ -162,7 +218,8 @@ test("existing training pack schemas receive a stable authoritative display orde
   const queryPool = {
     async query(text: string) {
       queries.push(text);
-      if (text.includes("to_regclass('training_packs')")) return { rows: [{ exists: true }], rowCount: 1 };
+      const schemaResult = currentSchemaInspectionResult(text, columns);
+      if (schemaResult) return schemaResult;
       if (text.includes("information_schema.columns")) {
         return { rows: columns.map((column_name) => ({ column_name })), rowCount: columns.length };
       }
@@ -181,9 +238,7 @@ test("existing training pack schemas receive a stable authoritative display orde
 
   await store.initialize();
 
-  assert(queries.some((query) => query.includes("ADD COLUMN IF NOT EXISTS display_order")));
-  assert(queries.some((query) => query.includes("ROW_NUMBER() OVER")));
-  assert(queries.some((query) => query.includes("training_packs_org_display_order_idx")));
+  assert.equal(queries.some((query) => /\b(?:ALTER|CREATE|UPDATE)\b/.test(query)), false);
 });
 
 test("new Training Packs append under the organization lock without changing delivery semantics", async () => {
@@ -213,7 +268,8 @@ test("new Training Packs append under the organization lock without changing del
   const queryPool = {
     async query(text: string) {
       poolQueries.push(text);
-      if (text.includes("to_regclass('training_packs')")) return { rows: [{ exists: true }], rowCount: 1 };
+      const schemaResult = currentSchemaInspectionResult(text, columns);
+      if (schemaResult) return schemaResult;
       if (text.includes("information_schema.columns")) {
         return { rows: columns.map((column_name) => ({ column_name })), rowCount: columns.length };
       }
@@ -236,7 +292,7 @@ test("new Training Packs append under the organization lock without changing del
   assert(transactionQueries.some((query) => query.includes("COALESCE(MAX")));
   assert.equal(transactionQueries.at(0), "BEGIN");
   assert.equal(transactionQueries.at(-1), "COMMIT");
-  assert(poolQueries.some((query) => query.includes("ADD COLUMN IF NOT EXISTS display_order")));
+  assert.equal(poolQueries.some((query) => /\b(?:ALTER|CREATE|UPDATE)\b/.test(query)), false);
 });
 
 test("Training Pack reorder persists one complete revision-guarded transaction", async () => {
@@ -270,7 +326,8 @@ test("Training Pack reorder persists one complete revision-guarded transaction",
   };
   const queryPool = {
     async query(text: string) {
-      if (text.includes("to_regclass('training_packs')")) return { rows: [{ exists: true }], rowCount: 1 };
+      const schemaResult = currentSchemaInspectionResult(text, columns);
+      if (schemaResult) return schemaResult;
       if (text.includes("information_schema.columns")) {
         return { rows: columns.map((column_name) => ({ column_name })), rowCount: columns.length };
       }

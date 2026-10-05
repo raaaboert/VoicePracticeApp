@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS training_packs (
   compliance_constraints TEXT NOT NULL DEFAULT '',
   audience_level TEXT NOT NULL DEFAULT '',
   active BOOLEAN NOT NULL DEFAULT FALSE,
-  display_order INTEGER NOT NULL DEFAULT 0 CHECK (display_order >= 0),
+  display_order INTEGER NOT NULL DEFAULT 0
+    CONSTRAINT training_packs_display_order_nonnegative CHECK (display_order >= 0),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Pool, PoolClient } from "pg";
 import { TrainingPack, TrainingPackScoringWeightOverrides } from "@voicepractice/shared";
 import { StorageProvider } from "../runtimeConfig.js";
+import { assertTrainingPackSchemaReady } from "./trainingPackMigrations.js";
 
 export interface CreateTrainingPackInput {
   title: string;
@@ -157,81 +158,14 @@ class PostgresTrainingPackStore implements TrainingPackStore {
 
   private async ensureSchema(): Promise<void> {
     if (!this.ensureSchemaPromise) {
-      this.ensureSchemaPromise = this.loadOrCreateSchema();
+      this.ensureSchemaPromise = this.verifySchema();
     }
 
     await this.ensureSchemaPromise;
   }
 
-  private async loadOrCreateSchema(): Promise<void> {
-    const existing = await this.pool.query<{ exists: boolean }>(
-      "SELECT to_regclass('training_packs') IS NOT NULL AS exists"
-    );
-    if (!existing.rows[0]?.exists) {
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS training_packs (
-          id UUID PRIMARY KEY,
-          organization_id TEXT NOT NULL,
-          title TEXT NOT NULL,
-          training_topic TEXT NOT NULL,
-          learning_objectives JSONB NOT NULL DEFAULT '[]'::jsonb,
-          success_behaviors JSONB NOT NULL DEFAULT '[]'::jsonb,
-          failure_patterns JSONB NOT NULL DEFAULT '[]'::jsonb,
-          required_behavioral_triggers JSONB NOT NULL DEFAULT '[]'::jsonb,
-          scoring_weight_overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
-          compliance_constraints TEXT NOT NULL DEFAULT '',
-          audience_level TEXT NOT NULL DEFAULT '',
-          active BOOLEAN NOT NULL DEFAULT FALSE,
-          display_order INTEGER NOT NULL DEFAULT 0 CHECK (display_order >= 0),
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE INDEX IF NOT EXISTS training_packs_org_idx
-          ON training_packs (organization_id);
-
-        CREATE INDEX IF NOT EXISTS training_packs_org_display_order_idx
-          ON training_packs (organization_id, display_order, id);
-
-        CREATE UNIQUE INDEX IF NOT EXISTS training_packs_one_active_per_org_idx
-          ON training_packs (organization_id)
-          WHERE active IS TRUE;
-      `);
-      return;
-    }
-
-    await this.pool.query("ALTER TABLE training_packs ADD COLUMN IF NOT EXISTS display_order INTEGER");
-    const columnsResult = await this.pool.query<{ column_name: string }>(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_schema = ANY(current_schemas(false)) AND table_name = 'training_packs'`
-    );
-    const columns = new Set(columnsResult.rows.map((row) => row.column_name));
-    const orgColumn = pickColumn(columns, ["organization_id", "org_id"], "organization id");
-    const idColumn = pickColumn(columns, ["id"], "id");
-    const createdColumn = pickOptionalColumn(columns, ["created_at", "createdat"]);
-    const stableOrder = createdColumn
-      ? `${quoteIdentifier(createdColumn)} ASC, ${quoteIdentifier(idColumn)} ASC`
-      : `${quoteIdentifier(idColumn)} ASC`;
-    await this.pool.query(`
-      WITH ranked AS (
-        SELECT ${quoteIdentifier(idColumn)} AS pack_id,
-          ROW_NUMBER() OVER (
-            PARTITION BY ${quoteIdentifier(orgColumn)}
-            ORDER BY ${stableOrder}
-          ) - 1 AS next_order
-        FROM training_packs
-        WHERE display_order IS NULL
-      )
-      UPDATE training_packs AS packs
-      SET display_order = ranked.next_order
-      FROM ranked
-      WHERE packs.${quoteIdentifier(idColumn)} = ranked.pack_id;
-
-      ALTER TABLE training_packs ALTER COLUMN display_order SET DEFAULT 0;
-      ALTER TABLE training_packs ALTER COLUMN display_order SET NOT NULL;
-      CREATE INDEX IF NOT EXISTS training_packs_org_display_order_idx
-        ON training_packs (${quoteIdentifier(orgColumn)}, display_order, ${quoteIdentifier(idColumn)});
-    `);
+  private async verifySchema(): Promise<void> {
+    await assertTrainingPackSchemaReady(this.pool);
   }
 
   async getActiveTrainingPackForOrg(orgId: string | null | undefined): Promise<TrainingPack | null> {
