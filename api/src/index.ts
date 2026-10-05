@@ -4406,11 +4406,19 @@ function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
 
 async function saveDatabase(db: ApiDatabase): Promise<void> {
   const storage = getOrCreateDatabaseStorage();
-  await userEmployeeIdClaimStore.syncFromUsers(db.users);
-  if (databaseSaveBarrierForTest) {
-    await databaseSaveBarrierForTest();
+  try {
+    await userEmployeeIdClaimStore.syncFromUsers(db.users);
+    if (databaseSaveBarrierForTest) {
+      await databaseSaveBarrierForTest();
+    }
+    await storage.save(buildPersistedDatabaseSnapshot(db));
+  } catch (error) {
+    // A caller outside the copy-on-write helpers may have mutated the cached
+    // object directly. Force the next read to reload the durable state rather
+    // than exposing or later persisting an uncommitted mutation.
+    databaseCache = null;
+    throw error;
   }
-  await storage.save(buildPersistedDatabaseSnapshot(db));
   databaseCache = db;
 }
 
@@ -4500,7 +4508,7 @@ async function capturePerformanceEvidenceSourceSnapshot() {
 async function withFreshReportingWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
   const completed = await withDatabaseLock(async () => {
     await refreshReportingSnapshots();
-    const db = await loadDatabase({ forceStorageRead: true });
+    const db = structuredClone(await loadDatabase({ forceStorageRead: true }));
     try {
       const result = await handler(db);
       const pendingAuditEvents = drainPendingAuditEvents(db);
@@ -4525,7 +4533,7 @@ async function withFreshReportingWrite<T>(handler: (db: ApiDatabase) => Promise<
 
 async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
   const completed = await withDatabaseLock(async () => {
-    const db = await loadDatabase();
+    const db = structuredClone(await loadDatabase());
     try {
       const result = await handler(db);
       const pendingAuditEvents = drainPendingAuditEvents(db);

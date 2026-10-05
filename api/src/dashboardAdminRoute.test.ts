@@ -5800,6 +5800,58 @@ test("organization and division configuration success waits for durable persiste
   }
 });
 
+test("failed app-state writes stay out of cache and cannot leak into a later commit", async () => {
+  const failedName = "Failed Cache Isolation Organization";
+  const failedJoinCode = "CACHEFAIL";
+  const unrelatedName = "Cache Isolation Unrelated Organization";
+  const durableBefore = await readDurableDbOnce();
+  const durableBeforeIds = new Set(durableBefore.orgs.map((org) => org.id));
+
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error("controlled cache-isolation persistence failure");
+  });
+  try {
+    const failed = await adminRequest("/orgs", {
+      method: "POST",
+      body: JSON.stringify({ name: failedName, joinCode: failedJoinCode }),
+    });
+    assert.equal(failed.status, 500);
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+  }
+
+  const immediateRead = await adminRequest("/orgs");
+  assert.equal(immediateRead.status, 200);
+  const inMemoryOrganizations = immediateRead.body as unknown as EnterpriseOrg[];
+  assert.equal(inMemoryOrganizations.some((org) => org.name === failedName), false);
+  assert.equal(inMemoryOrganizations.some((org) => org.joinCode === failedJoinCode), false);
+
+  const unrelated = await adminRequest("/orgs", {
+    method: "POST",
+    body: JSON.stringify({ name: unrelatedName }),
+  });
+  assert.equal(unrelated.status, 201);
+  const unrelatedId = String(unrelated.body.id);
+
+  const durableAfterUnrelatedWrite = await readDurableDbOnce();
+  assert.equal(durableAfterUnrelatedWrite.orgs.every((org) => (
+    durableBeforeIds.has(org.id) || org.id === unrelatedId
+  )), true);
+  assert.equal(durableAfterUnrelatedWrite.orgs.some((org) => org.id === unrelatedId), true);
+  assert.equal(durableAfterUnrelatedWrite.orgs.some((org) => org.name === failedName), false);
+  assert.equal(durableAfterUnrelatedWrite.orgs.some((org) => org.joinCode === failedJoinCode), false);
+
+  const retry = await adminRequest("/orgs", {
+    method: "POST",
+    body: JSON.stringify({ name: failedName, joinCode: failedJoinCode }),
+  });
+  assert.equal(retry.status, 201);
+
+  const durableAfterRetry = await readDurableDbOnce();
+  assert.equal(durableAfterRetry.orgs.filter((org) => org.name === failedName).length, 1);
+  assert.equal(durableAfterRetry.orgs.filter((org) => org.joinCode === failedJoinCode).length, 1);
+});
+
 test("content management successes wait for durable persistence and preserve cross-store behavior", async () => {
   const packAssignmentId = "pack_batch4_assignment";
   const packAttachId = "pack_batch4_attach";
