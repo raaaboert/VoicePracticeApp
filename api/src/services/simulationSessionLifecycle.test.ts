@@ -331,6 +331,49 @@ test("simulation session lifecycle preserves local/mock-style completion without
 
     await simulationSessionStore.upsertStartedSession(
       buildSimulationSessionStartRecord({
+        simulationSessionId: "sim_training_context",
+        userId: "user_1",
+        orgId: "org_1",
+        segmentId: "segment_1",
+        scenarioId: "scenario_1",
+        trainingId: "training_original",
+        trainingPackId: null,
+        clientStartedAt: "2026-04-01T10:10:00.000Z",
+        now: new Date("2026-04-01T10:10:00.000Z")
+      })
+    );
+
+    await assert.rejects(
+      completeRecognizedSimulationUsage({
+        simulationSessionStore,
+        usageSessionAccess,
+        db,
+        simulationSessionId: "sim_training_context",
+        userId: "user_1",
+        orgId: "org_1",
+        segmentId: "segment_1",
+        scenarioId: "scenario_1",
+        trainingId: "training_override",
+        submittedTrainingPackId: null,
+        resolvedTrainingPackId: null,
+        startedAt: "2026-04-01T10:10:00.000Z",
+        endedAt: "2026-04-01T10:11:00.000Z",
+        rawDurationSeconds: 60,
+        beforeUsage: createBeforeUsage(),
+        maxSimulationMinutes: 20,
+        timeZone: "UTC",
+        now: new Date("2026-04-01T10:11:01.000Z")
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SimulationSessionValidationError);
+        assert.equal(error.code, "session_context_mismatch");
+        return true;
+      }
+    );
+    assert.equal(usageStore.listRecords().length, 1);
+
+    await simulationSessionStore.upsertStartedSession(
+      buildSimulationSessionStartRecord({
         simulationSessionId: "sim_server_backdated",
         userId: "user_1",
         orgId: "org_1",

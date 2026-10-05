@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url";
 import type { SimulationScoreRecord, TrainingPack } from "@voicepractice/shared";
 
 import {
+  CUSTOM_SCENARIO_ID,
+  CUSTOM_TRAINING_ID,
   LEARNER_USER_ID,
+  OTHER_ORG_TRAINING_ID,
+  SECOND_CUSTOM_TRAINING_ID,
+  STANDARD_SCENARIO_ID,
+  WRONG_CUSTOM_TRAINING_ID,
   type PromptRouteHarness,
   startPromptRouteHarness,
 } from "./simulationPromptRoutes.testSupport.js";
@@ -93,6 +99,70 @@ test("learner score route persists the current recognized-session score contract
   assert.equal(Object.hasOwn(record, "trainingPackId"), false);
   assert.equal(record.divisionId, undefined);
   assert.equal(Object.hasOwn(record, "divisionId"), false);
+});
+
+test("standard AI score persistence canonicalizes submitted Focus Topic IDs to null", async () => {
+  const simulationSessionId = "sim_standard_forged_training";
+  await harness.startLearnerSession(simulationSessionId, {
+    segmentId: "account_executive",
+    scenarioId: STANDARD_SCENARIO_ID,
+    trainingId: CUSTOM_TRAINING_ID,
+  });
+
+  const result = await harness.scoreLearnerSession({
+    simulationSessionId,
+    userTurnCount: 3,
+    scenarioId: STANDARD_SCENARIO_ID,
+    trainingId: CUSTOM_TRAINING_ID,
+  });
+  assert.equal(result.status, 201, JSON.stringify(result.body));
+  assert.equal(result.providerCallCount, 1);
+
+  const record = (await harness.readPersistedScoreRecords())
+    .find((entry) => entry.simulationSessionId === simulationSessionId);
+  assert.ok(record);
+  assert.equal(record.trainingId ?? null, null);
+});
+
+test("custom AI score persistence rejects unvalidated and cross-organization Focus Topics", async () => {
+  for (const [simulationSessionId, trainingId] of [
+    ["sim_custom_wrong_same_org_training", WRONG_CUSTOM_TRAINING_ID],
+    ["sim_custom_other_org_training", OTHER_ORG_TRAINING_ID],
+  ] as const) {
+    const result = await harness.scoreLearnerSession({
+      simulationSessionId,
+      userTurnCount: 3,
+      scenarioId: CUSTOM_SCENARIO_ID,
+      trainingId,
+    });
+    assert.equal(result.status, 400, JSON.stringify(result.body));
+    assert.equal(result.providerCallCount, 0);
+    assert.equal(
+      (await harness.readPersistedScoreRecords())
+        .some((entry) => entry.simulationSessionId === simulationSessionId),
+      false,
+    );
+  }
+});
+
+test("recognized custom session attribution cannot be overridden by another valid Focus Topic", async () => {
+  const simulationSessionId = "sim_custom_training_override";
+  await harness.startLearnerSession(simulationSessionId, { trainingId: CUSTOM_TRAINING_ID });
+
+  const result = await harness.scoreLearnerSession({
+    simulationSessionId,
+    userTurnCount: 3,
+    scenarioId: CUSTOM_SCENARIO_ID,
+    trainingId: SECOND_CUSTOM_TRAINING_ID,
+  });
+  assert.equal(result.status, 409, JSON.stringify(result.body));
+  assert.equal(result.body.code, "session_context_mismatch");
+  assert.equal(result.providerCallCount, 0);
+  assert.equal(
+    (await harness.readPersistedScoreRecords())
+      .some((entry) => entry.simulationSessionId === simulationSessionId),
+    false,
+  );
 });
 
 test("learner score route persists the non-default normalized weights actually applied", async () => {

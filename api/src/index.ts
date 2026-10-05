@@ -1933,7 +1933,7 @@ async function resolveSimulationRuntimeBundle(params: {
       db: params.db,
       user: params.user,
       org: params.org,
-      trainingId: params.trainingId,
+      trainingId: resolvedScenario.canonicalTrainingId,
       resolvedScenario,
     }),
     counterpartBehaviorGuidance,
@@ -9245,6 +9245,7 @@ interface ResolvedMobileScenarioContext {
   source: "standard" | "custom";
   segment: SegmentDefinition;
   scenario: Scenario;
+  canonicalTrainingId: string | null;
   allowedIndustryIds: IndustryId[];
   scoringGuidance: string | null;
 }
@@ -9279,6 +9280,7 @@ function resolveMobileScenarioForUser(
       source: "standard",
       segment,
       scenario,
+      canonicalTrainingId: null,
       allowedIndustryIds,
       scoringGuidance: null,
     };
@@ -9315,6 +9317,7 @@ function resolveMobileScenarioForUser(
     source: "custom",
     segment,
     scenario: buildRuntimeScenarioFromOrgCustomScenario(customScenario, segment.label),
+    canonicalTrainingId: normalizedTrainingId || null,
     allowedIndustryIds: uniqueStrings(customScenario.applicableIndustryIds) as IndustryId[],
     scoringGuidance: customScenario.scoringGuidance?.trim() || null,
   };
@@ -9336,7 +9339,7 @@ function resolveMobileFocusTopicScenarioSummary(
     source: resolved.source,
     segmentId: resolved.segment.id,
     allowedIndustryIds: resolved.allowedIndustryIds,
-    trainingId: resolved.source === "custom" ? trainingId?.trim() || null : null,
+    trainingId: resolved.canonicalTrainingId,
   });
   const industry = selection
     ? configForUser.industries.find((candidate) => candidate.id === selection.industryId) ?? null
@@ -21179,6 +21182,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       resolvedScenarioSource: resolvedScenario.source,
+      canonicalTrainingId: resolvedScenario.canonicalTrainingId,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
@@ -21189,7 +21193,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         db,
         user,
         org,
-        trainingId,
+        trainingId: resolvedScenario.canonicalTrainingId,
         resolvedScenario,
       }),
       useModularPromptArchitecture
@@ -21223,6 +21227,21 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       recognizedSessionId && !context.isSuperUser
         ? await simulationSessionStore.getById(recognizedSessionId)
         : null;
+    if (
+      recognizedSession &&
+      !doesRecognizedSimulationSessionMatchContext(recognizedSession, {
+        userId: context.user.id,
+        orgId: context.actingOrgId,
+        scenarioId: context.scenario.id,
+        trainingId: context.canonicalTrainingId,
+      })
+    ) {
+      response.status(409).json({
+        error: "Simulation session does not match the submitted scenario context.",
+        code: "session_context_mismatch",
+      });
+      return;
+    }
     const evaluationConfig = context.useModularPromptArchitecture
       ? buildEvaluationPromptWithOrchestrator({
           scenario: context.scenario,
@@ -21287,7 +21306,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       userId: context.user.id,
       orgId: context.actingOrgId,
       scenarioId: context.scenario.id,
-      trainingId,
+      trainingId: context.canonicalTrainingId,
       fallbackDivisionId: context.divisionId ?? null,
     });
     const record: SimulationScoreRecord = {
@@ -21298,7 +21317,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       divisionId,
       segmentId: context.segment.id,
       scenarioId: context.scenario.id,
-      trainingId,
+      trainingId: context.canonicalTrainingId,
       trainingPackId: activeTrainingPack?.id ?? null,
       industryId: context.industryId,
       startedAt: parsedStart.toISOString(),
@@ -21572,6 +21591,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       response.status(400).json({ error: "Scenario does not match the submitted segment." });
       return;
     }
+    const canonicalTrainingId = resolvedScenario.canonicalTrainingId;
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
@@ -21584,17 +21604,32 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       recognizedSessionId && !accessContext.isSuperUser
         ? await simulationSessionStore.getById(recognizedSessionId)
         : null;
+    if (
+      recognizedSession &&
+      !doesRecognizedSimulationSessionMatchContext(recognizedSession, {
+        userId: user.id,
+        orgId: accessContext.actingOrgId,
+        scenarioId: resolvedScenario.scenario.id,
+        trainingId: canonicalTrainingId,
+      })
+    ) {
+      response.status(409).json({
+        error: "Simulation session does not match the submitted scenario context.",
+        code: "session_context_mismatch",
+      });
+      return;
+    }
     const divisionId = resolvePreferredSimulationDivisionId({
       recognizedSession,
       userId: user.id,
       orgId: accessContext.actingOrgId,
       scenarioId: resolvedScenario.scenario.id,
-      trainingId,
+      trainingId: canonicalTrainingId,
       fallbackDivisionId: resolveSimulationDivisionIdForContext({
         db,
         user,
         org,
-        trainingId,
+        trainingId: canonicalTrainingId,
         resolvedScenario,
       }),
     });
@@ -21626,7 +21661,7 @@ app.post("/mobile/users/:userId/scores", async (request: Request, response: Resp
       divisionId,
       segmentId,
       scenarioId,
-      trainingId,
+      trainingId: canonicalTrainingId,
       trainingPackId: persistedTrainingPack?.id ?? null,
       startedAt: parsedStart.toISOString(),
       endedAt: parsedEnd.toISOString(),
@@ -22949,6 +22984,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       response.status(400).json({ error: "Invalid segment for simulation session start." });
       return;
     }
+    const canonicalTrainingId = resolvedScenario.canonicalTrainingId;
 
     const entitlements = computeEntitlements(db, user, new Date(), {
       actingOrgId: accessContext.actingOrgId,
@@ -22970,7 +23006,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       db,
       user,
       org,
-      trainingId,
+      trainingId: canonicalTrainingId,
       resolvedScenario,
     });
 
@@ -22992,7 +23028,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         divisionId,
         segmentId: body.segmentId,
         scenarioId: body.scenarioId,
-        trainingId,
+        trainingId: canonicalTrainingId,
         trainingPackId: persistedTrainingPack?.id ?? submittedTrainingPackId,
         clientStartedAt: parsedClientStartedAt?.toISOString() ?? null,
         now: new Date()
@@ -23104,6 +23140,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
+    const canonicalTrainingId = resolvedScenario.canonicalTrainingId;
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
@@ -23116,7 +23153,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       db,
       user,
       org,
-      trainingId,
+      trainingId: canonicalTrainingId,
       resolvedScenario,
     });
 
@@ -23167,7 +23204,7 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
           divisionId,
           segmentId: requiredSegmentId,
           scenarioId: requiredScenarioId,
-          trainingId,
+          trainingId: canonicalTrainingId,
           submittedTrainingPackId,
           resolvedTrainingPackId: persistedTrainingPack?.id ?? null,
           startedAt: normalizedStartedAt,

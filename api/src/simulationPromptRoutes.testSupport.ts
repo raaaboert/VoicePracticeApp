@@ -28,6 +28,8 @@ export const LEARNER_USER_ID = "prompt_route_learner";
 export const STANDARD_SCENARIO_ID = "standard_renewal";
 export const CUSTOM_SCENARIO_ID = "custom_recovery_route";
 export const CUSTOM_TRAINING_ID = "training_custom_recovery";
+export const SECOND_CUSTOM_TRAINING_ID = "training_custom_recovery_secondary";
+export const OTHER_ORG_TRAINING_ID = "training_other_org";
 export const LONG_GUIDANCE_SCENARIO_ID = "custom_long_guidance_route";
 export const WRONG_CUSTOM_TRAINING_ID = "training_unrelated_active";
 export const INACTIVE_CUSTOM_TRAINING_ID = "training_custom_archived";
@@ -73,12 +75,19 @@ export interface PromptRouteHarness {
   }): Promise<{ status: number; body: Record<string, unknown>; providerCallCount: number }>;
   startLearnerSession(
     simulationSessionId: string,
-    options?: { trainingPackId?: string },
+    options?: {
+      trainingPackId?: string;
+      scenarioId?: string;
+      segmentId?: string;
+      trainingId?: string | null;
+    },
   ): Promise<Record<string, unknown>>;
   scoreLearnerSession(params: {
     simulationSessionId: string;
     userTurnCount: 1 | 2 | 3;
     trainingPackId?: string;
+    scenarioId?: string;
+    trainingId?: string | null;
   }): Promise<{
     status: number;
     body: Record<string, unknown>;
@@ -320,6 +329,26 @@ function buildDatabase(learnerOrgModularPromptEnabled: boolean): ApiDatabase {
         updatedAt: NOW,
       },
       {
+        id: SECOND_CUSTOM_TRAINING_ID,
+        orgId: STANDARD_ORG_ID,
+        name: "Secondary Customer Recovery",
+        status: "active",
+        description: "A second valid Focus Topic for session-attribution tests.",
+        divisionId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        id: OTHER_ORG_TRAINING_ID,
+        orgId: MODULAR_ORG_ID,
+        name: "Other Organization Topic",
+        status: "active",
+        description: "A Focus Topic outside the learner's organization.",
+        divisionId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
         id: INACTIVE_CUSTOM_TRAINING_ID,
         orgId: STANDARD_ORG_ID,
         name: "Archived Recovery Topic",
@@ -345,6 +374,14 @@ function buildDatabase(learnerOrgModularPromptEnabled: boolean): ApiDatabase {
         orgId: STANDARD_ORG_ID,
         trainingId: CUSTOM_TRAINING_ID,
         scenarioId: LONG_GUIDANCE_SCENARIO_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        id: "attachment_custom_recovery_secondary",
+        orgId: STANDARD_ORG_ID,
+        trainingId: SECOND_CUSTOM_TRAINING_ID,
+        scenarioId: CUSTOM_SCENARIO_ID,
         createdAt: NOW,
         updatedAt: NOW,
       },
@@ -598,6 +635,10 @@ export async function startPromptRouteHarness(params: {
       };
     },
     async startLearnerSession(simulationSessionId, options): Promise<Record<string, unknown>> {
+      const scenarioId = options?.scenarioId ?? CUSTOM_SCENARIO_ID;
+      const trainingId = options && Object.hasOwn(options, "trainingId")
+        ? options.trainingId ?? null
+        : CUSTOM_TRAINING_ID;
       const response = await originalFetch(
         `${baseUrl}/mobile/users/${LEARNER_USER_ID}/simulation-sessions/start`,
         {
@@ -608,9 +649,9 @@ export async function startPromptRouteHarness(params: {
           },
           body: JSON.stringify({
             simulationSessionId,
-            segmentId: "customer_success",
-            scenarioId: CUSTOM_SCENARIO_ID,
-            trainingId: CUSTOM_TRAINING_ID,
+            segmentId: options?.segmentId ?? "customer_success",
+            scenarioId,
+            trainingId,
             ...(options?.trainingPackId ? { trainingPackId: options.trainingPackId } : {}),
             clientStartedAt: new Date().toISOString(),
           }),
@@ -627,7 +668,12 @@ export async function startPromptRouteHarness(params: {
       assert.equal(typeof body.serverStartedAt, "string");
       return body;
     },
-    async scoreLearnerSession({ simulationSessionId, userTurnCount, trainingPackId }) {
+    async scoreLearnerSession(params) {
+      const { simulationSessionId, userTurnCount, trainingPackId } = params;
+      const scenarioId = params.scenarioId ?? CUSTOM_SCENARIO_ID;
+      const trainingId = Object.hasOwn(params, "trainingId")
+        ? params.trainingId ?? null
+        : CUSTOM_TRAINING_ID;
       const requestCountBefore = providerRequests.length;
       const response = await originalFetch(`${baseUrl}/mobile/users/${LEARNER_USER_ID}/ai/score`, {
         method: "POST",
@@ -636,12 +682,12 @@ export async function startPromptRouteHarness(params: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          scenarioId: CUSTOM_SCENARIO_ID,
-          trainingId: CUSTOM_TRAINING_ID,
+          scenarioId,
+          trainingId,
           ...(trainingPackId ? { trainingPackId } : {}),
           difficulty: "hard",
           personaStyle: "frustrated",
-          industryId: "healthcare",
+          industryId: scenarioId === STANDARD_SCENARIO_ID ? "technology" : "healthcare",
           industryBaseline: CLIENT_BASELINE_SENTINEL,
           simulationSessionId,
           startedAt: "2026-09-21T11:55:00.000Z",

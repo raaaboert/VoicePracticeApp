@@ -6300,6 +6300,62 @@ test("score, simulation-start, and usage successes wait for app-state persistenc
       .find((record) => record.simulationSessionId === simulationSessionId)?.status,
     "usage_recorded",
   );
+  assert.equal(
+    (await readExtractedStoreRecords<{ simulationSessionId: string; trainingId?: string | null }>("simulation-sessions"))
+      .find((record) => record.simulationSessionId === simulationSessionId)?.trainingId ?? null,
+    null,
+  );
+  assert.equal(durableScore.trainingId ?? null, null);
+  assert.equal(
+    usageRecords.find((record) => record.id === usageRecordIdForSimulationSession(simulationSessionId))?.trainingId ?? null,
+    null,
+  );
+
+  const sameOrgTrainingId = (await readDurableDbOnce()).orgTrainings
+    .find((training) => training.orgId === "org_1" && training.status === "active")?.id;
+  assert.ok(sameOrgTrainingId);
+
+  for (const [forgedSessionId, forgedTrainingId] of [
+    ["sim_standard_same_org_training", sameOrgTrainingId],
+    ["sim_standard_arbitrary_training", "training_crafted_arbitrary"],
+  ] as const) {
+    const forgedStart = await mobileRequest(
+      "/mobile/users/org_admin/simulation-sessions/start",
+      "token_org_admin",
+      {
+        method: "POST",
+        body: JSON.stringify({ ...startBody, simulationSessionId: forgedSessionId, trainingId: forgedTrainingId }),
+      },
+    );
+    assert.equal(forgedStart.status, 201, JSON.stringify(forgedStart.body));
+
+    const forgedScore = await mobileRequest("/mobile/users/org_admin/scores", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify({ ...scoreBody, simulationSessionId: forgedSessionId, trainingId: forgedTrainingId }),
+    });
+    assert.equal(forgedScore.status, 201, JSON.stringify(forgedScore.body));
+
+    const forgedUsage = await mobileRequest("/usage/sessions", "token_org_admin", {
+      method: "POST",
+      body: JSON.stringify({ ...usageBody, simulationSessionId: forgedSessionId, trainingId: forgedTrainingId }),
+    });
+    assert.equal(forgedUsage.status, 201, JSON.stringify(forgedUsage.body));
+
+    const storedSession = (await readExtractedStoreRecords<{
+      simulationSessionId: string;
+      trainingId?: string | null;
+    }>("simulation-sessions")).find((record) => record.simulationSessionId === forgedSessionId);
+    const storedScore = (await readExtractedStoreRecords<SimulationScoreRecord>("score-records"))
+      .find((record) => record.simulationSessionId === forgedSessionId);
+    const storedUsage = (await readExtractedStoreRecords<UsageSessionRecord>("usage-sessions"))
+      .find((record) => record.id === usageRecordIdForSimulationSession(forgedSessionId));
+    assert.ok(storedSession);
+    assert.ok(storedScore);
+    assert.ok(storedUsage);
+    assert.equal(storedSession.trainingId ?? null, null);
+    assert.equal(storedScore.trainingId ?? null, null);
+    assert.equal(storedUsage.trainingId ?? null, null);
+  }
 
   const failedScoreSessionId = "sim_batch5_score_save_failure";
   const failedScore = await requestWithRuntimePersistenceFailure(
