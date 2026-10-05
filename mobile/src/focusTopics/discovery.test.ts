@@ -48,6 +48,24 @@ test("date sorts use createdAt and deterministically tie by normalized name then
   assert.deepEqual(topics, original);
 });
 
+test("unknown legacy creation times sort consistently as old Topics", () => {
+  const topics = [
+    topic("legacy_z", "Zulu", "", "1970-01-01T00:00:00.000Z"),
+    topic("modern", "Modern", "", "2026-01-01T00:00:00.000Z"),
+    topic("legacy_a", "alpha", "", "1970-01-01T00:00:00.000Z"),
+  ];
+  const original = structuredClone(topics);
+  assert.deepEqual(
+    sortFocusTopicsForLearner(topics, "oldest").map((entry) => entry.id),
+    ["legacy_a", "legacy_z", "modern"],
+  );
+  assert.deepEqual(
+    sortFocusTopicsForLearner(topics, "newest").map((entry) => entry.id),
+    ["modern", "legacy_a", "legacy_z"],
+  );
+  assert.deepEqual(topics, original);
+});
+
 test("search normalizes case and whitespace and matches only name plus description with all tokens", () => {
   const sales = topic("sales", "Sales Coaching", "Navigate a difficult conversation constructively");
   assert.equal(compactFocusTopicQuery("  SALES   coaching  "), "SALES coaching");

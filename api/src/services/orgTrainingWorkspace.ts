@@ -12,6 +12,8 @@ import { createHash } from "node:crypto";
 export const LEGACY_TEST_TRAINING_NAME = "Test Training";
 export const LEGACY_TEST_TRAINING_DESCRIPTION =
   "Auto-created to preserve existing enterprise training assets during the training-first workspace migration.";
+// Unknown legacy creation times sort as old records without inventing historical precision.
+export const LEGACY_ORG_TRAINING_CREATED_AT = "1970-01-01T00:00:00.000Z";
 
 type OrgTrainingCollections = Pick<
   ApiDatabase,
@@ -36,6 +38,23 @@ export function normalizeOrgTrainingDisplayOrder(value: unknown): number | undef
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
     : undefined;
+}
+
+function canonicalizePersistedTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  const parsed = new Date(value.trim());
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+export function resolveOrgTrainingCreatedAt(
+  createdAt: unknown,
+  updatedAt: unknown,
+): string {
+  return canonicalizePersistedTimestamp(createdAt)
+    ?? canonicalizePersistedTimestamp(updatedAt)
+    ?? LEGACY_ORG_TRAINING_CREATED_AT;
 }
 
 const ORG_TRAINING_STATUS_ORDER: Record<OrgTrainingStatus, number> = {
@@ -188,7 +207,7 @@ export function ensureOrgTrainingCollections(db: Partial<OrgTrainingCollections>
 export function normalizeOrgTrainingRecords(
   entries: unknown,
   validOrgIds: ReadonlySet<string>,
-  now: string,
+  _readAt: string,
 ): OrgTrainingRecord[] {
   if (!Array.isArray(entries)) {
     return [];
@@ -204,10 +223,8 @@ export function normalizeOrgTrainingRecords(
       continue;
     }
 
-    const createdAt =
-      typeof candidate.createdAt === "string" && candidate.createdAt.trim() ? candidate.createdAt : now;
-    const updatedAt =
-      typeof candidate.updatedAt === "string" && candidate.updatedAt.trim() ? candidate.updatedAt : createdAt;
+    const createdAt = resolveOrgTrainingCreatedAt(candidate.createdAt, candidate.updatedAt);
+    const updatedAt = canonicalizePersistedTimestamp(candidate.updatedAt) ?? createdAt;
 
     const displayOrder = normalizeOrgTrainingDisplayOrder(candidate.displayOrder);
     normalized.push({

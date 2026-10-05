@@ -6133,13 +6133,25 @@ test("content management successes wait for durable persistence and preserve cro
         body: JSON.stringify({
           name: "Batch 4 Durable Focus Topic",
           description: "Durability and actionability coverage.",
-          status: "active",
+          status: "draft",
         }),
       })
     );
     assert.equal(createdTopic.status, 201);
     const trainingId = String(createdTopic.body.id);
     assert.ok(trainingId);
+    assert.equal(createdTopic.body.status, "draft");
+    const persistedTopicCreatedAt = String(createdTopic.body.createdAt);
+    assert.equal(new Date(persistedTopicCreatedAt).toISOString(), persistedTopicCreatedAt);
+    const activatedTopic = await requestWhileContentPersistenceHeld(
+      "PATCH /orgs/:orgId/trainings/:trainingId",
+      () => adminRequest(`/orgs/org_1/trainings/${trainingId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+      }),
+    );
+    assert.equal(activatedTopic.status, 200);
+    assert.equal(activatedTopic.body.createdAt, persistedTopicCreatedAt);
     const afterTopicCreate = await adminRequest("/orgs/org_1/trainings");
     const activeAfterCreate = (afterTopicCreate.body.trainings as OrgTrainingRecord[])
       .filter((topic) => topic.status === "active");
@@ -6263,15 +6275,18 @@ test("content management successes wait for durable persistence and preserve cro
       "PATCH /orgs/:orgId/trainings/:trainingId",
       () => adminRequest(`/orgs/org_1/trainings/${trainingId}`, {
         method: "PATCH",
-        body: JSON.stringify({ status: "archived" }),
+        body: JSON.stringify({ status: "archived", name: "Batch 4 Renamed Focus Topic" }),
       }),
     );
     assert.equal(archivedTopic.status, 200);
     assert.equal(archivedTopic.body.status, "archived");
+    assert.equal(archivedTopic.body.createdAt, persistedTopicCreatedAt);
     const afterArchive = await adminRequest("/orgs/org_1/trainings");
     const archivedRecord = (afterArchive.body.trainings as OrgTrainingRecord[])
       .find((topic) => topic.id === trainingId);
     assert.equal(archivedRecord?.status, "archived");
+    assert.equal(archivedRecord?.name, "Batch 4 Renamed Focus Topic");
+    assert.equal(archivedRecord?.createdAt, persistedTopicCreatedAt);
     assert.equal(
       archivedRecord?.displayOrder,
       createdDisplayOrder,
@@ -6291,11 +6306,13 @@ test("content management successes wait for durable persistence and preserve cro
       }),
     );
     assert.equal(reactivatedTopic.status, 200);
+    assert.equal(reactivatedTopic.body.createdAt, persistedTopicCreatedAt);
     const afterReactivate = await adminRequest("/orgs/org_1/trainings");
     const activeAfterReactivate = (afterReactivate.body.trainings as OrgTrainingRecord[])
       .filter((topic) => topic.status === "active");
     assert.equal(activeAfterReactivate.at(-1)?.id, trainingId);
     assert.equal(activeAfterReactivate.at(-1)?.displayOrder, activeAfterReactivate.length - 1);
+    assert.equal(activeAfterReactivate.at(-1)?.createdAt, persistedTopicCreatedAt);
     assert.notEqual(afterReactivate.body.orderRevision, afterArchive.body.orderRevision);
 
     const wrongOrgPackAttachment = await adminRequest(
@@ -6435,6 +6452,7 @@ test("content management successes wait for durable persistence and preserve cro
       method: "DELETE",
     });
     assert.equal(wrongOrgRecovery.status, 404);
+    assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
     const durableAfterWrongOrgAttempt = await readDurableDbOnce();
     assert.equal(fakePacks.some((pack) => pack.id === "pack_other" && pack.organizationId === "org_2"), true);
     assert.equal(durableAfterWrongOrgAttempt.orgTrainingPackAttachments.some((attachment) =>
@@ -6449,6 +6467,7 @@ test("content management successes wait for durable persistence and preserve cro
       adminRequest(`/orgs/org_1/training-packs/${packConcurrentDeleteId}`, { method: "DELETE" }),
     ]);
     assert.deepEqual(concurrentDeletes.map((result) => result.status).sort(), [200, 404]);
+    assert.equal((await adminRequest("/orgs/org_1/trainings")).status, 200);
     const durableAfterConcurrentDeletes = await readDurableDbOnce();
     assert.equal(fakePacks.some((pack) => pack.id === packConcurrentDeleteId), false);
     assert.equal(durableAfterConcurrentDeletes.orgTrainingPackAttachments.some((attachment) =>

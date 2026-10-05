@@ -25,7 +25,10 @@ import {
 } from "./trainingContentMobileService.js";
 import { isTrainingPackAssignmentValidForUser } from "./trainingPackAssignments.js";
 import { parseTrainingPackScenarioSelection } from "./trainingPackScenarioSelection.js";
-import { compareOrgTrainingCompanyOrder } from "./orgTrainingWorkspace.js";
+import {
+  compareOrgTrainingCompanyOrder,
+  resolveOrgTrainingCreatedAt,
+} from "./orgTrainingWorkspace.js";
 
 type MobileScenarioConfig = Pick<
   AppConfig,
@@ -90,7 +93,7 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
         id: topic.id,
         name: topic.name,
         description: topic.description,
-        createdAt: topic.createdAt,
+        createdAt: resolveOrgTrainingCreatedAt(topic.createdAt, topic.updatedAt),
         scenarioCount: scenarios.length,
         resourceCount: resources.length,
       })),

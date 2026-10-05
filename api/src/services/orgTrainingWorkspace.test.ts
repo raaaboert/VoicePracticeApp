@@ -9,6 +9,7 @@ import {
   compareOrgTrainingCompanyOrder,
   ensureOrgTrainingCollections,
   getOrgTrainingOrderRevision,
+  LEGACY_ORG_TRAINING_CREATED_AT,
   LEGACY_TEST_TRAINING_DESCRIPTION,
   LEGACY_TEST_TRAINING_NAME,
   listActiveOrgTrainingsInCompanyOrder,
@@ -21,6 +22,7 @@ import {
   replaceOrgTrainingPackAttachments,
   replaceOrgTrainingScenarioAttachments,
   reorderActiveOrgTrainings,
+  resolveOrgTrainingCreatedAt,
   seedLegacyOrgTraining,
 } from "./orgTrainingWorkspace.js";
 
@@ -67,6 +69,38 @@ test("display order normalization accepts only nonnegative safe integers", () =>
       ["fraction", undefined], ["unsafe", undefined], ["string", undefined], ["missing", undefined],
     ],
   );
+});
+
+test("Focus Topic creation timestamps use persisted canonical values and deterministic legacy fallbacks", () => {
+  const validOrgIds = new Set(["org_123"]);
+  const entries = [
+    orderedTraining("canonical", "Canonical", {
+      createdAt: "2026-02-03T04:05:06.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    }),
+    orderedTraining("parseable", "Parseable", {
+      createdAt: "2026-02-03T04:05:06Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    }),
+    { ...orderedTraining("missing", "Missing"), createdAt: undefined, updatedAt: "2025-03-04T05:06:07Z" },
+    { ...orderedTraining("malformed", "Malformed"), createdAt: "not-a-date", updatedAt: "2024-04-05T06:07:08Z" },
+    { ...orderedTraining("unknown", "Unknown"), createdAt: "bad", updatedAt: "also-bad" },
+  ];
+
+  const first = normalizeOrgTrainingRecords(entries, validOrgIds, "2026-01-01T00:00:00.000Z");
+  const second = normalizeOrgTrainingRecords(entries, validOrgIds, "2036-12-31T23:59:59.999Z");
+  assert.deepEqual(
+    first.map((entry) => [entry.id, entry.createdAt, entry.updatedAt]),
+    [
+      ["canonical", "2026-02-03T04:05:06.000Z", "2026-09-01T00:00:00.000Z"],
+      ["parseable", "2026-02-03T04:05:06.000Z", "2026-09-01T00:00:00.000Z"],
+      ["missing", "2025-03-04T05:06:07.000Z", "2025-03-04T05:06:07.000Z"],
+      ["malformed", "2024-04-05T06:07:08.000Z", "2024-04-05T06:07:08.000Z"],
+      ["unknown", LEGACY_ORG_TRAINING_CREATED_AT, LEGACY_ORG_TRAINING_CREATED_AT],
+    ],
+  );
+  assert.deepEqual(second, first);
+  assert.equal(resolveOrgTrainingCreatedAt("invalid", "invalid"), LEGACY_ORG_TRAINING_CREATED_AT);
 });
 
 test("company comparator orders explicit topics first with deterministic legacy and duplicate fallbacks", () => {
@@ -118,6 +152,7 @@ test("active append materializes mixed legacy order and places creation or resto
       orderedTraining("foreign", "Foreign", { orgId: "org_other", displayOrder: 0 }),
     ],
   };
+  const createdAtById = new Map(db.orgTrainings.map((topic) => [topic.id, topic.createdAt]));
   materializeActiveOrgTrainingOrderWithAppendedTopic({
     db,
     orgId: "org_123",
@@ -130,6 +165,7 @@ test("active append materializes mixed legacy order and places creation or resto
   );
   assert.equal(db.orgTrainings.find((topic) => topic.id === "draft")?.displayOrder, undefined);
   assert.equal(db.orgTrainings.find((topic) => topic.id === "foreign")?.displayOrder, 0);
+  assert.equal(db.orgTrainings.every((topic) => topic.createdAt === createdAtById.get(topic.id)), true);
 });
 
 test("atomic reorder validates revision and the complete active same-org set before mutation", () => {
@@ -186,6 +222,10 @@ test("atomic reorder validates revision and the complete active same-org set bef
   assert.notEqual(nextRevision, revision);
   assert.equal(db.orgTrainings.find((topic) => topic.id === "draft")?.displayOrder, undefined);
   assert.equal(db.orgTrainings.find((topic) => topic.id === "foreign")?.displayOrder, 0);
+  assert.deepEqual(
+    db.orgTrainings.map((topic) => topic.createdAt),
+    before.map((topic) => topic.createdAt),
+  );
 });
 
 test("active membership changes are stale conflicts before submitted-list validation", () => {

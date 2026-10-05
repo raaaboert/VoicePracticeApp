@@ -20,6 +20,7 @@ import {
   createMobileFocusTopicCatalogService,
   type MobileFocusTopicCatalogContext,
 } from "./mobileFocusTopicCatalog.js";
+import { LEGACY_ORG_TRAINING_CREATED_AT } from "./orgTrainingWorkspace.js";
 
 const NOW = "2026-10-01T12:00:00.000Z";
 const ORG_ID = "org_a";
@@ -335,6 +336,36 @@ test("catalog uses active authoritative topic IDs, division visibility, and dete
   assert.equal(result.topics.some((entry) => "displayOrder" in entry || "updatedAt" in entry), false);
   assert.equal(JSON.stringify(result).includes("focusTopicNameSnapshot"), false);
   assert.equal(JSON.stringify(result).includes("trainingTopic"), false);
+});
+
+test("catalog isolates malformed legacy timestamps and keeps valid Topic creation times", async () => {
+  const { service, context } = harness({
+    topics: [
+      topic("valid", { createdAt: "2026-02-03T04:05:06.000Z" }),
+      topic("missing", { createdAt: undefined as unknown as string, updatedAt: "2025-03-04T05:06:07Z" }),
+      topic("malformed", { createdAt: "not-a-date", updatedAt: "also-not-a-date" }),
+    ],
+    scenarioAttachments: [
+      scenarioAttachment("valid", "custom_valid"),
+      scenarioAttachment("missing", "custom_missing"),
+      scenarioAttachment("malformed", "custom_malformed"),
+    ],
+    scenarioConfig: {
+      ...emptyScenarioConfig,
+      orgCustomScenarios: [
+        customScenario("custom_valid"),
+        customScenario("custom_missing"),
+        customScenario("custom_malformed"),
+      ],
+    },
+    resolveScenario: (id, trainingId) => scenarioSummary(id, "custom", trainingId ?? null),
+  });
+
+  const result = await service.getCatalog(context);
+  assert.equal(result.topics.length, 3);
+  assert.equal(result.topics.find((entry) => entry.id === "valid")?.createdAt, "2026-02-03T04:05:06.000Z");
+  assert.equal(result.topics.find((entry) => entry.id === "missing")?.createdAt, "2025-03-04T05:06:07.000Z");
+  assert.equal(result.topics.find((entry) => entry.id === "malformed")?.createdAt, LEGACY_ORG_TRAINING_CREATED_AT);
 });
 
 test("catalog preserves company order across an actionable learner subset without exposing displayOrder", async () => {
