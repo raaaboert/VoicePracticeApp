@@ -1485,13 +1485,13 @@ select.text-input {
 
 .dashboard-training-selector-label {
   grid-area: label;
-  align-self: end;
+  align-self: baseline;
 }
 
 .dashboard-training-selector-status {
   grid-area: status;
   min-width: 0;
-  align-self: end;
+  align-self: baseline;
 }
 
 .dashboard-training-selector-grid > .dashboard-selector-field {

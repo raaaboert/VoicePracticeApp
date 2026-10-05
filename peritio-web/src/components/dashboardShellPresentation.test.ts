@@ -73,6 +73,9 @@ test("Focus Topic reporting selector uses an aligned wide grid and a natural nar
   assert.equal(dashboardReportingSource.includes("dashboard-training-selector-status"), true);
   assert.equal(dashboardReportingSource.includes("dashboard-training-selector-summary"), true);
   assert.match(globalStyles, /grid-template-areas:\s*"label status"\s*"select summary"/);
+  assert.match(globalStyles, /\.dashboard-training-selector-label\s*{[^}]*align-self: baseline;/s);
+  assert.match(globalStyles, /\.dashboard-training-selector-status\s*{[^}]*align-self: baseline;/s);
+  assert.match(globalStyles, /\.dashboard-training-selector-summary\s*{[^}]*align-self: center;/s);
   assert.match(globalStyles, /@media \(max-width: 1040px\)[\s\S]*?dashboard-training-selector-grid[\s\S]*?"label"\s*"select"\s*"status"\s*"summary"/);
   assert.equal(dashboardReportingSource.includes('formatCountLabel(selectedTraining.attachedTrainingPackCount, "attached pack")'), true);
   assert.equal(dashboardReportingSource.includes('formatCountLabel(selectedTraining.attachedCustomScenarioCount, "attached custom scenario")'), true);
