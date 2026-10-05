@@ -45,6 +45,7 @@ let dashboardRegularOrganizationToken: string;
 let dashboardOrgAdminNoneToken: string;
 let dashboardUserAdminNoneToken: string;
 let platformDashboardToken: string;
+let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => void;
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
@@ -764,6 +765,7 @@ before(async () => {
 
   await seedStores();
   const imported = await import("./index.js");
+  setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -2014,4 +2016,78 @@ test("dashboard Performance cancellation finalizes expired active plans instead 
 
   const finalized = await planStore.getPlanById("perf_plan_expired_cancel_late");
   assert.equal(finalized?.auditEvents.filter((event) => event.action === "completed").length, 1);
+});
+
+test("performance plan mutations do not depend on incidental app-state persistence after primary commit", async () => {
+  setDatabaseSaveBarrierForTest(async () => {
+    throw new Error("controlled incidental app-state persistence failure");
+  });
+
+  try {
+    const dashboardCreated = await dashboardRequest("/dashboard/performance/plans", {
+      method: "POST",
+      body: JSON.stringify(buildCreatePlanRequest({
+        startDate: "2099-10-01",
+        endDate: "2099-11-01",
+      })),
+    });
+    assert.equal(dashboardCreated.status, 201);
+    const dashboardPlanId = String((dashboardCreated.body.plan as { id?: string }).id);
+    assert.equal((await planStore.getPlanById(dashboardPlanId))?.plan.id, dashboardPlanId);
+
+    const dashboardUpdated = await dashboardRequest(`/dashboard/performance/plans/${dashboardPlanId}`, {
+      method: "PATCH",
+      body: JSON.stringify(buildCreatePlanRequest({
+        startDate: "2099-10-01",
+        endDate: "2099-11-15",
+      })),
+    });
+    assert.equal(dashboardUpdated.status, 200);
+    assert.equal((await planStore.getPlanById(dashboardPlanId))?.plan.endDate, "2099-11-15");
+
+    const dashboardComment = await dashboardRequest(`/dashboard/performance/plans/${dashboardPlanId}/updates`, {
+      method: "POST",
+      body: JSON.stringify({ body: "Dashboard post-commit lifecycle check." }),
+    });
+    assert.equal(dashboardComment.status, 201);
+
+    const mobileComment = await mobileRequest(
+      `/mobile/users/user_manage/performance/plans/${dashboardPlanId}/updates`,
+      "token_manage",
+      {
+        method: "POST",
+        body: JSON.stringify({ body: "Mobile post-commit lifecycle check." }),
+      },
+    );
+    assert.equal(mobileComment.status, 201);
+    assert.equal((await planStore.listPlanUpdates(dashboardPlanId)).length, 2);
+
+    const dashboardCancelled = await dashboardRequest(`/dashboard/performance/plans/${dashboardPlanId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "B-class lifecycle verification." }),
+    });
+    assert.equal(dashboardCancelled.status, 200);
+    assert.equal(dashboardCancelled.body.cancelled, true);
+    assert.equal((await planStore.getPlanById(dashboardPlanId))?.plan.status, "cancelled");
+
+    const mobileCreated = await mobileRequest(
+      "/mobile/users/user_other/performance/plans",
+      "token_other",
+      {
+        method: "POST",
+        body: JSON.stringify(buildCreatePlanRequest({
+          userId: "user_other",
+          startDate: "2099-12-01",
+          endDate: "2100-01-01",
+        })),
+      },
+    );
+    assert.equal(mobileCreated.status, 201);
+    const mobilePlanId = String((mobileCreated.body.plan as { id?: string }).id);
+    const durableMobilePlan = await planStore.getPlanById(mobilePlanId);
+    assert.equal(durableMobilePlan?.plan.id, mobilePlanId);
+    assert.equal(durableMobilePlan?.plan.userId, "user_other");
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+  }
 });

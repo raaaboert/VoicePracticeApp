@@ -6058,6 +6058,52 @@ test("Training Pack ordering reports committed SQL state when post-commit audit 
   }
 });
 
+test("Training Pack create and update return committed rows when post-commit audit delivery fails", async () => {
+  setContentManagementTrainingPackStoreForTest(createContentManagementTrainingPackStore([]));
+  setDashboardTrainingPackLoaderForTest(null);
+  setTrainingPackOrderAuditFailureForTest(new Error("controlled post-commit audit failure"));
+
+  try {
+    const created = await adminRequest("/orgs/org_1/training-packs", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Committed Training Pack",
+        trainingPackBrief: "Primary SQL create remains authoritative.",
+        requiredBehavioralTriggers: ["confirm next step"],
+        active: true,
+      }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.title, "Committed Training Pack");
+    const trainingPackId = String(created.body.id);
+
+    const afterCreate = await adminRequest("/orgs/org_1/training-packs");
+    assert.equal(afterCreate.status, 200);
+    const durableCreated = (afterCreate.body.packs as TrainingPack[]).find((pack) => pack.id === trainingPackId);
+    assert.deepEqual(durableCreated, created.body);
+
+    const updated = await adminRequest(`/orgs/org_1/training-packs/${trainingPackId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        title: "Committed Training Pack Updated",
+        active: false,
+      }),
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.title, "Committed Training Pack Updated");
+    assert.equal(updated.body.active, false);
+
+    const afterUpdate = await adminRequest("/orgs/org_1/training-packs");
+    assert.equal(afterUpdate.status, 200);
+    const durableUpdated = (afterUpdate.body.packs as TrainingPack[]).find((pack) => pack.id === trainingPackId);
+    assert.deepEqual(durableUpdated, updated.body);
+  } finally {
+    setTrainingPackOrderAuditFailureForTest(null);
+    setContentManagementTrainingPackStoreForTest(null);
+    setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
+  }
+});
+
 test("content management successes wait for durable persistence and preserve cross-store behavior", async () => {
   const packAssignmentId = "pack_batch4_assignment";
   const packAttachId = "pack_batch4_attach";

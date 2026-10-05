@@ -30,6 +30,7 @@ let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => vo
 let setAuthenticationResponseObserverForTest: (
   observer: ((route: string, status: number) => void) | null,
 ) => void;
+let setPostCommitAuditFailureForTest: (error: Error | null) => void;
 let normalResponseKeys: string[];
 let reviewerUserId: string;
 let reviewerNormalToken: string;
@@ -255,6 +256,7 @@ before(async () => {
   clearRateLimitsForTest = imported.clearRateLimitsForTest;
   setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
   setAuthenticationResponseObserverForTest = imported.setAuthenticationResponseObserverForTest;
+  setPostCommitAuditFailureForTest = imported.setPostCommitAuditFailureForTest;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -383,6 +385,68 @@ test("authentication successes wait for durable persistence and persistence fail
   } finally {
     setDatabaseSaveBarrierForTest(null);
     setAuthenticationResponseObserverForTest(null);
+  }
+});
+
+test("committed support cases and revoked web sessions remain successful when post-commit audit delivery fails", async () => {
+  clearRateLimitsForTest();
+
+  const webChallenge = await captureVerificationCode(() =>
+    apiRequest("/web/auth/request-code", {
+      method: "POST",
+      body: JSON.stringify({ email: "dashboard-auth@example.test" }),
+    })
+  );
+  assert.equal(webChallenge.result.status, 200);
+  const webVerified = await apiRequest("/web/auth/verify-code", {
+    method: "POST",
+    body: JSON.stringify({ email: "dashboard-auth@example.test", code: webChallenge.code }),
+  });
+  assert.equal(webVerified.status, 200);
+  const webToken = webVerified.body.token as string;
+
+  setPostCommitAuditFailureForTest(new Error("controlled post-commit audit failure"));
+  try {
+    const publicSupport = await apiRequest("/mobile/public/support/errors", {
+      method: "POST",
+      body: JSON.stringify({
+        message: "[AUTO-ERROR] controlled public support failure",
+        context: "b-class-test",
+      }),
+    });
+    assert.equal(publicSupport.status, 201);
+    assert.equal(typeof publicSupport.body.caseId, "string");
+
+    const authenticatedSupport = await apiRequest(
+      "/mobile/users/approved_enterprise_user/support/cases",
+      {
+        method: "POST",
+        body: JSON.stringify({ message: "Controlled authenticated support failure" }),
+      },
+      APPROVED_EXISTING_TOKEN,
+    );
+    assert.equal(authenticatedSupport.status, 201);
+    assert.equal(typeof authenticatedSupport.body.caseId, "string");
+
+    const supportPath = path.join(tempDir, "db.local.support-cases.json");
+    const supportPayload = JSON.parse(await readFile(supportPath, "utf8")) as {
+      cases: Array<{ id: string; userId: string; message: string }>;
+    };
+    assert.equal(supportPayload.cases.some((entry) => entry.id === publicSupport.body.caseId), true);
+    assert.equal(
+      supportPayload.cases.some(
+        (entry) => entry.id === authenticatedSupport.body.caseId && entry.userId === "approved_enterprise_user",
+      ),
+      true,
+    );
+
+    const logout = await apiRequest("/web/auth/logout", { method: "POST" }, webToken);
+    assert.equal(logout.status, 200);
+    assert.deepEqual(logout.body, { ok: true });
+    assert.equal((await apiRequest("/web/auth/session", undefined, webToken)).status, 401);
+    assert.equal((await apiRequest("/web/auth/logout", { method: "POST" }, webToken)).status, 401);
+  } finally {
+    setPostCommitAuditFailureForTest(null);
   }
 });
 

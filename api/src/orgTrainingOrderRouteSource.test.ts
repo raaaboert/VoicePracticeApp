@@ -71,8 +71,8 @@ test("customer Training Pack ordering projects summaries without shrinking platf
   const deleteStart = indexSource.indexOf('app.delete("/orgs/:orgId/training-packs/:trainingPackId"', updateStart);
   const createRoute = indexSource.slice(createStart, updateStart);
   const updateRoute = indexSource.slice(updateStart, deleteStart);
-  assert.match(createRoute, /response\.status\(201\)\.json\(created\)/);
-  assert.match(updateRoute, /response\.json\(updated\)/);
+  assert.match(createRoute, /response\.status\(201\)\.json\(outcome\.trainingPack\)/);
+  assert.match(updateRoute, /response\.json\(outcome\.trainingPack\)/);
   assert.doesNotMatch(createRoute, /buildCustomerTrainingPackOrderSummaries/);
   assert.doesNotMatch(updateRoute, /buildCustomerTrainingPackOrderSummaries/);
 });

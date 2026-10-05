@@ -58,7 +58,7 @@ test("dashboard reporting trainings snapshots app-state before extracted-store r
 test("Training Pack GET authorizes under a snapshot lock and queries afterward", () => {
   const route = sourceBetween(
     '"/orgs/:orgId/training-packs",',
-    'app.put(\n  "/orgs/:orgId/training-packs/order"',
+    '"/orgs/:orgId/training-packs/order",',
   );
   const snapshotEnd = route.indexOf("if (!org)");
   const packRead = route.indexOf("listTrainingPacksForContentOrganization");

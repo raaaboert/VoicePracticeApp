@@ -3035,13 +3035,13 @@ async function deliverPostCommitAuditEventBestEffort(
   operation: string,
 ): Promise<void> {
   try {
-    if (trainingPackOrderAuditFailureForTest) {
-      throw trainingPackOrderAuditFailureForTest;
+    if (postCommitAuditFailureForTest) {
+      throw postCommitAuditFailureForTest;
     }
     await auditEventStore.appendEvents([buildAuditEvent(input)], { maxRecords: MAX_AUDIT_EVENTS });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logWarn(`[cross-store][audit] ${operation} audit delivery failed after primary SQL commit: ${message}`);
+    logWarn(`[cross-store][audit] ${operation} audit delivery failed after primary domain commit: ${message}`);
   }
 }
 
@@ -4377,7 +4377,7 @@ let identityAdministrationResponseObserverForTest: ((route: string, status: numb
 let organizationConfigurationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let contentManagementResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let runtimeDurabilityResponseObserverForTest: ((route: string, status: number) => void) | null = null;
-let trainingPackOrderAuditFailureForTest: Error | null = null;
+let postCommitAuditFailureForTest: Error | null = null;
 
 function getOrCreateDatabaseStorage(): DatabaseStorage {
   if (!databaseStorage) {
@@ -4507,6 +4507,14 @@ async function withFreshReportingRead<T>(handler: (db: ApiDatabase) => Promise<T
   return await withDatabaseLock(async () => {
     await refreshReportingSnapshots();
     const db = await loadDatabase({ forceStorageRead: true });
+    return await handler(db);
+  });
+}
+
+async function withFreshReportingSnapshotRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await withDatabaseLock(async () => {
+    await refreshReportingSnapshots();
+    const db = structuredClone(await loadDatabase({ forceStorageRead: true }));
     return await handler(db);
   });
 }
@@ -11392,41 +11400,39 @@ app.post("/mobile/public/support/errors", mobilePublicErrorReportRateLimiter, as
   const formattedMessage = [message, ...supplementalLines].join("\n").slice(0, SUPPORT_MESSAGE_MAX_LENGTH);
   const now = nowIso();
 
-  await withDatabase(async (db) => {
-    const record: SupportCaseRecord = {
-      id: `case_${uuid()}`,
-      status: "open",
-      userId: "public_mobile_reporter",
-      orgId: null,
-      segmentId: null,
-      scenarioId: null,
-      message: formattedMessage,
-      transcriptEncrypted: null,
-      transcriptExpiresAt: null,
-      transcriptFileName: null,
-      transcriptMeta: null,
-      createdAt: now,
-      updatedAt: now
-    };
+  const record: SupportCaseRecord = {
+    id: `case_${uuid()}`,
+    status: "open",
+    userId: "public_mobile_reporter",
+    orgId: null,
+    segmentId: null,
+    scenarioId: null,
+    message: formattedMessage,
+    transcriptEncrypted: null,
+    transcriptExpiresAt: null,
+    transcriptFileName: null,
+    transcriptMeta: null,
+    createdAt: now,
+    updatedAt: now
+  };
 
-    await supportCaseStore.saveCase(record, { now: new Date(now) });
-    appendAuditEvent(db, {
-      actorType: "system",
-      actorId: null,
-      action: "support.public_auto_error_created",
-      orgId: null,
-      userId: null,
-      message: "Captured public mobile auto-error report.",
-      metadata: {
-        caseId: record.id,
-        context: context || null,
-        screen: screen || null,
-        platform: platform || null
-      }
-    });
+  await supportCaseStore.saveCase(record, { now: new Date(now) });
+  await deliverPostCommitAuditEventBestEffort({
+    actorType: "system",
+    actorId: null,
+    action: "support.public_auto_error_created",
+    orgId: null,
+    userId: null,
+    message: "Captured public mobile auto-error report.",
+    metadata: {
+      caseId: record.id,
+      context: context || null,
+      screen: screen || null,
+      platform: platform || null
+    }
+  }, "public-support-case-create");
 
-    response.status(201).json({ caseId: record.id });
-  });
+  response.status(201).json({ caseId: record.id });
 });
 
 app.use((request: Request, response: Response, next: NextFunction) => {
@@ -11715,18 +11721,18 @@ app.get("/web/auth/session", requireDashboardAuth, async (request: DashboardAuth
 
 app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, response: Response) => {
   await revokeWebAuthSessionById(request.webAuth!.sessionId);
-  await withDatabase(async (db) => {
-    appendWebAuditEvent(db, request.webAuth!.user, {
-      action: "web_auth.logout",
-      orgId: request.webAuth!.user.orgId,
-      userId: request.webAuth!.user.id,
-      message: `Signed out shared web session for ${request.webAuth!.user.email}.`,
-      metadata: {
-        sessionId: request.webAuth!.sessionId
-      }
-    });
-    response.json({ ok: true });
-  });
+  await deliverPostCommitAuditEventBestEffort({
+    actorType: "web_user",
+    actorId: request.webAuth!.user.id,
+    action: "web_auth.logout",
+    orgId: request.webAuth!.user.orgId,
+    userId: request.webAuth!.user.id,
+    message: `Signed out shared web session for ${request.webAuth!.user.email}.`,
+    metadata: {
+      sessionId: request.webAuth!.sessionId
+    }
+  }, "web-auth-logout");
+  response.json({ ok: true });
 });
 
 app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
@@ -13624,7 +13630,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
     ? await listTrainingPacksForDashboardOrg(candidatePackSnapshot)
     : [];
 
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const target = getUserById(db, body.userId);
     if (!target || !target.orgId || target.accountType !== "enterprise") {
       response.status(404).json({ error: "Dashboard user not found." });
@@ -13745,7 +13751,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
     canDashboardViewerAccessOrg(request.dashboard!.viewer, candidatePlan.plan.orgId)
     ? await listTrainingPacksForDashboardOrg(candidatePlan.plan.orgId)
     : [];
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
       response.status(404).json({ error: "Performance goal not found." });
@@ -13960,7 +13966,7 @@ app.get("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, as
 
 app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const body = request.body as CreatePerformancePlanUpdateRequest;
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
       response.status(404).json({ error: "Performance goal not found." });
@@ -14039,7 +14045,7 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
 
 app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const body = request.body as CancelPerformancePlanRequest;
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const loaded = await performancePlanStore.getPlanById(request.params.planId);
     if (!loaded || !canDashboardViewerAccessOrg(request.dashboard!.viewer, loaded.plan.orgId)) {
       response.status(404).json({ error: "Performance goal not found." });
@@ -15075,38 +15081,44 @@ app.post("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, r
   const requiredBehavioralTriggers = normalizeTrainingPackTriggers(body.requiredBehavioralTriggers);
   const active = body.active === true;
 
-  await withDatabase(async (db) => {
-    const org = getOrgById(db, orgId);
-    if (!org) {
-      response.status(404).json({ error: "Organization not found." });
-      return;
-    }
+  try {
+    const outcome = await withDatabaseRead(async (db) => {
+      const org = getOrgById(db, orgId);
+      if (!org) {
+        response.status(404).json({ error: "Organization not found." });
+        return null;
+      }
 
-    try {
-      const created = await trainingPackStore.createTrainingPackForOrg(org.id, {
+      const trainingPack = await trainingPackStore.createTrainingPackForOrg(org.id, {
         title,
         trainingTopic: trainingPackBrief,
         requiredBehavioralTriggers,
         active
       });
-
-      appendPlatformAuditEvent(db, {
-        action: "org.training_pack.created",
-        orgId: org.id,
-        message: `Created training pack "${created.title}" for ${org.name}.`,
-        metadata: {
-          trainingPackId: created.id,
-          active: created.active,
-          requiredBehavioralTriggers: created.requiredBehavioralTriggers
-        }
-      });
-
-      response.status(201).json(created);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not create training pack.";
-      response.status(503).json({ error: message });
+      return { trainingPack, orgName: org.name };
+    });
+    if (!outcome) {
+      return;
     }
-  });
+
+    await deliverPostCommitAuditEventBestEffort({
+      actorType: "platform_admin",
+      actorId: PLATFORM_ADMIN_ACTOR_ID,
+      action: "org.training_pack.created",
+      orgId,
+      message: `Created training pack "${outcome.trainingPack.title}" for ${outcome.orgName}.`,
+      metadata: {
+        trainingPackId: outcome.trainingPack.id,
+        active: outcome.trainingPack.active,
+        requiredBehavioralTriggers: outcome.trainingPack.requiredBehavioralTriggers
+      }
+    }, "training-pack-create");
+
+    response.status(201).json(outcome.trainingPack);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not create training pack.";
+    response.status(503).json({ error: message });
+  }
 });
 
 app.patch("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (request: Request, response: Response) => {
@@ -15178,37 +15190,43 @@ app.patch("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (re
     return;
   }
 
-  await withDatabase(async (db) => {
-    const org = getOrgById(db, orgId);
-    if (!org) {
-      response.status(404).json({ error: "Organization not found." });
+  try {
+    const outcome = await withDatabaseRead(async (db) => {
+      const org = getOrgById(db, orgId);
+      if (!org) {
+        response.status(404).json({ error: "Organization not found." });
+        return null;
+      }
+
+      const trainingPack = await trainingPackStore.updateTrainingPackForOrg(org.id, trainingPackId, patch);
+      if (!trainingPack) {
+        response.status(404).json({ error: "Training pack not found." });
+        return null;
+      }
+      return { trainingPack, orgName: org.name };
+    });
+    if (!outcome) {
       return;
     }
 
-    try {
-      const updated = await trainingPackStore.updateTrainingPackForOrg(org.id, trainingPackId, patch);
-      if (!updated) {
-        response.status(404).json({ error: "Training pack not found." });
-        return;
+    await deliverPostCommitAuditEventBestEffort({
+      actorType: "platform_admin",
+      actorId: PLATFORM_ADMIN_ACTOR_ID,
+      action: "org.training_pack.updated",
+      orgId,
+      message: `Updated training pack "${outcome.trainingPack.title}" for ${outcome.orgName}.`,
+      metadata: {
+        trainingPackId: outcome.trainingPack.id,
+        active: outcome.trainingPack.active,
+        fields: Object.keys(patch)
       }
+    }, "training-pack-update");
 
-      appendPlatformAuditEvent(db, {
-        action: "org.training_pack.updated",
-        orgId: org.id,
-        message: `Updated training pack "${updated.title}" for ${org.name}.`,
-        metadata: {
-          trainingPackId: updated.id,
-          active: updated.active,
-          fields: Object.keys(patch)
-        }
-      });
-
-      response.json(updated);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not update training pack.";
-      response.status(503).json({ error: message });
-    }
-  });
+    response.json(outcome.trainingPack);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not update training pack.";
+    response.status(503).json({ error: message });
+  }
 });
 
 app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (request: Request, response: Response) => {
@@ -18625,16 +18643,16 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
     };
   })();
 
-  await withDatabase(async (db) => {
+  const supportCase = await withDatabaseRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
-      return;
+      return null;
     }
 
     if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
       response.status(401).json({ error: "Invalid mobile token." });
-      return;
+      return null;
     }
 
     const source = authorizeSupportCaseOrigin(requestedSource, user);
@@ -18675,20 +18693,28 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
     }
 
     await supportCaseStore.saveCase(record, { now: new Date(now) });
-    appendMobileAuditEvent(db, user, {
-      action: "support.case_created",
-      userId: user.id,
-      message: "Submitted support case.",
-      metadata: {
-        caseId: record.id,
-        includeTranscript,
-        source
-      }
-    });
-    response.status(201).json({
-      caseId: record.id,
-      transcriptRetainedUntil: record.transcriptExpiresAt
-    });
+    return { record, source };
+  });
+  if (!supportCase) {
+    return;
+  }
+
+  await deliverPostCommitAuditEventBestEffort({
+    actorType: "mobile_user",
+    actorId: supportCase.record.userId,
+    action: "support.case_created",
+    orgId: supportCase.record.orgId,
+    userId: supportCase.record.userId,
+    message: "Submitted support case.",
+    metadata: {
+      caseId: supportCase.record.id,
+      includeTranscript,
+      source: supportCase.source
+    }
+  }, "mobile-support-case-create");
+  response.status(201).json({
+    caseId: supportCase.record.id,
+    transcriptRetainedUntil: supportCase.record.transcriptExpiresAt
   });
 });
 
@@ -22026,7 +22052,7 @@ app.post("/mobile/users/:userId/performance/plans", async (request: Request, res
     ? await listTrainingPacksForDashboardOrg(candidateOrgId)
     : [];
 
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -22257,7 +22283,7 @@ app.post("/mobile/users/:userId/performance/plans/:planId/updates", async (reque
 
   const userId = request.params.userId;
 
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -24232,7 +24258,14 @@ export function setTrainingPackOrderAuditFailureForTest(error: Error | null): vo
   if (runtimeConfig.nodeEnv !== "test") {
     throw new Error("setTrainingPackOrderAuditFailureForTest is only available in test.");
   }
-  trainingPackOrderAuditFailureForTest = error;
+  postCommitAuditFailureForTest = error;
+}
+
+export function setPostCommitAuditFailureForTest(error: Error | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setPostCommitAuditFailureForTest is only available in test.");
+  }
+  postCommitAuditFailureForTest = error;
 }
 
 export function setDashboardOrganizationPerformanceQueryForTest(
