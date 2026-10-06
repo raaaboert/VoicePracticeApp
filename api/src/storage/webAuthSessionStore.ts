@@ -1,6 +1,6 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 import {
   DASHBOARD_ACCESS_TYPES,
@@ -16,11 +16,12 @@ export interface WebAuthSessionStore {
     records: WebAuthSessionRecord[],
     options?: { now?: Date }
   ): Promise<{ importedCount: number; skippedExpiredCount: number }>;
-  saveSession(record: WebAuthSessionRecord): Promise<void>;
+  saveSession(record: WebAuthSessionRecord, client?: Pick<PoolClient, "query"> | null): Promise<void>;
+  touchSessionIfPresent(record: WebAuthSessionRecord): Promise<boolean>;
   getActiveSession(sessionId: string, userId: string, now?: Date): Promise<WebAuthSessionRecord | null>;
   revokeSession(sessionId: string): Promise<void>;
-  revokeUserSessions(userId: string): Promise<number>;
-  revokeSessionsForUsers(userIds: string[]): Promise<number>;
+  revokeUserSessions(userId: string, client?: Pick<PoolClient, "query"> | null): Promise<number>;
+  revokeSessionsForUsers(userIds: string[], client?: Pick<PoolClient, "query"> | null): Promise<number>;
 }
 
 interface CreateWebAuthSessionStoreParams {
@@ -215,6 +216,19 @@ class FileWebAuthSessionStore implements WebAuthSessionStore {
     });
   }
 
+  async touchSessionIfPresent(record: WebAuthSessionRecord): Promise<boolean> {
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      const existingIndex = payload.sessions.findIndex((entry) =>
+        entry.sessionId === record.sessionId && entry.userId === record.userId
+      );
+      if (existingIndex < 0) return false;
+      payload.sessions[existingIndex] = record;
+      await this.savePayload(payload);
+      return true;
+    });
+  }
+
   async getActiveSession(sessionId: string, userId: string, now = new Date()): Promise<WebAuthSessionRecord | null> {
     return await this.withLock(async () => {
       const payload = await this.loadPayload();
@@ -369,9 +383,24 @@ class PostgresWebAuthSessionStore implements WebAuthSessionStore {
     }
   }
 
-  async saveSession(record: WebAuthSessionRecord): Promise<void> {
+  async saveSession(record: WebAuthSessionRecord, client?: Pick<PoolClient, "query"> | null): Promise<void> {
     await this.ensureTable();
-    await upsertSessionRow(this.pool, record);
+    await upsertSessionRow(client ?? this.pool, record);
+  }
+
+  async touchSessionIfPresent(record: WebAuthSessionRecord): Promise<boolean> {
+    await this.ensureTable();
+    const result = await this.pool.query(
+      `UPDATE web_auth_sessions
+       SET updated_at = $3::timestamptz,
+           last_seen_at = $4::timestamptz,
+           last_seen_user_agent = $5,
+           last_seen_ip = $6
+       WHERE session_id = $1 AND user_id = $2`,
+      [record.sessionId, record.userId, record.updatedAt, record.lastSeenAt,
+        record.lastSeenUserAgent, record.lastSeenIp]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getActiveSession(sessionId: string, userId: string, now = new Date()): Promise<WebAuthSessionRecord | null> {
@@ -417,11 +446,11 @@ class PostgresWebAuthSessionStore implements WebAuthSessionStore {
     await this.pool.query("DELETE FROM web_auth_sessions WHERE session_id = $1", [sessionId]);
   }
 
-  async revokeUserSessions(userId: string): Promise<number> {
-    return await this.revokeSessionsForUsers([userId]);
+  async revokeUserSessions(userId: string, client?: Pick<PoolClient, "query"> | null): Promise<number> {
+    return await this.revokeSessionsForUsers([userId], client);
   }
 
-  async revokeSessionsForUsers(userIds: string[]): Promise<number> {
+  async revokeSessionsForUsers(userIds: string[], client?: Pick<PoolClient, "query"> | null): Promise<number> {
     const normalizedUserIds = Array.from(
       new Set(
         userIds
@@ -434,7 +463,7 @@ class PostgresWebAuthSessionStore implements WebAuthSessionStore {
     }
 
     await this.ensureTable();
-    const result = await this.pool.query(
+    const result = await (client ?? this.pool).query(
       "DELETE FROM web_auth_sessions WHERE user_id = ANY($1::text[])",
       [normalizedUserIds]
     );

@@ -5,7 +5,7 @@ import { Server } from "node:http";
 import { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import test, { after, before } from "node:test";
+import test, { after, before, beforeEach } from "node:test";
 
 import {
   AuditEvent,
@@ -110,6 +110,7 @@ let setDashboardTrainingPackLoaderForTest: (
   loader: ((orgId: string) => Promise<TrainingPack[]>) | null,
 ) => void;
 let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => void;
+let setWebSessionRevocationFailureForTest: (error: Error | null) => void;
 let setFocusTopicDeleteResponseObserverForTest: (observer: (() => void) | null) => void;
 let setIdentityAdministrationResponseObserverForTest: (
   observer: ((route: string, status: number) => void) | null,
@@ -1227,6 +1228,10 @@ async function seedStores(): Promise<void> {
     "utf8"
   );
 
+  await refreshWebAuthTokens(db);
+}
+
+async function refreshWebAuthTokens(db: ApiDatabase): Promise<void> {
   const webAuthService = createWebAuthService({
     tokenSecret: WEB_AUTH_TOKEN_SECRET,
     codeSecret: WEB_AUTH_CODE_SECRET,
@@ -1261,6 +1266,15 @@ async function seedStores(): Promise<void> {
   dashboardDisabledToken = await issue("eligible_user_admin", "customer_dashboard_user", "org_1");
   inactiveDashboardToken = await issue("disabled_user_admin", "customer_dashboard_user", "org_1");
 }
+
+beforeEach(async () => {
+  // These stateful route tests deliberately mutate roles and permissions. Each
+  // test starts with newly authenticated fixture sessions; a mutation within a
+  // test must still invalidate that test's original token.
+  if (dbPath) {
+    await refreshWebAuthTokens(await readDb());
+  }
+});
 
 async function dashboardRequest(pathname: string, token = orgAdminToken, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${pathname}`, {
@@ -1389,6 +1403,7 @@ before(async () => {
   setDashboardTrainingPackLoaderForTest = imported.setDashboardTrainingPackLoaderForTest;
   setDashboardTrainingPackLoaderForTest(loadTrainingPacksForRouteTest);
   setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
+  setWebSessionRevocationFailureForTest = imported.setWebSessionRevocationFailureForTest;
   setFocusTopicDeleteResponseObserverForTest = imported.setFocusTopicDeleteResponseObserverForTest;
   setIdentityAdministrationResponseObserverForTest = imported.setIdentityAdministrationResponseObserverForTest;
   setOrganizationConfigurationResponseObserverForTest = imported.setOrganizationConfigurationResponseObserverForTest;
@@ -3127,6 +3142,7 @@ test("dashboard performance-access mutation is authorized, audited, isolated, an
     body: JSON.stringify({ performanceAccess: "organization" }),
   });
   assert.equal(userAdminElevated.status, 200);
+  await refreshWebAuthTokens(await readDb());
   const userAdminDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ performanceAccess: "team" }),
@@ -3182,6 +3198,7 @@ test("dashboard performance-access mutation is authorized, audited, isolated, an
   assert.equal(changedRow.status, targetBefore.status);
   assert.equal((await readUser("unassigned_learner"))?.managerUserId, reportBefore.managerUserId);
 
+  await refreshWebAuthTokens(await readDb());
   const nextRequestTeamScope = await dashboardRequest("/dashboard/users", userAdminNoneToken);
   assert.equal(nextRequestTeamScope.status, 200);
   assert.deepEqual(
@@ -3225,6 +3242,7 @@ test("dashboard performance-access mutation is authorized, audited, isolated, an
     body: JSON.stringify({ performanceAccess: "none" }),
   });
   assert.equal(changedBackToNone.status, 200);
+  await refreshWebAuthTokens(await readDb());
   const nextRequestNoneScope = await dashboardRequest("/dashboard/users", userAdminNoneToken);
   assert.equal(nextRequestNoneScope.status, 200);
   assert.deepEqual(nextRequestNoneScope.body.users, []);
@@ -4929,6 +4947,32 @@ test("re-onboarding resend remains rate-limited", async () => {
   assert.equal(latestStatus, 429);
 });
 
+test("failed web-session deletion leaves dashboard disable uncommitted and the old session active", async () => {
+  const oldToken = orgAdminNoneToken;
+  assert.equal((await readUser("org_admin_none"))?.status, "active");
+  assert.equal((await dashboardRequest("/dashboard/admin/users", oldToken)).status, 200);
+  const readAudit = async (): Promise<{ events?: AuditEvent[] }> =>
+    JSON.parse(await readFile(auditEventsPath(), "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "{}";
+      throw error;
+    })) as { events?: AuditEvent[] };
+  const beforeAudit = await readAudit();
+  setWebSessionRevocationFailureForTest(new Error("injected session delete failure"));
+  try {
+    const failed = await mobileRequest("/mobile/users/org_admin/admin/org/users/org_admin_none", "token_org_admin", {
+      method: "PATCH",
+      body: JSON.stringify({ status: "disabled" }),
+    });
+    assert.equal(failed.status, 500);
+  } finally {
+    setWebSessionRevocationFailureForTest(null);
+  }
+  assert.equal((await readUser("org_admin_none"))?.status, "active");
+  assert.equal((await dashboardRequest("/dashboard/admin/users", oldToken)).status, 200);
+  const afterAudit = await readAudit();
+  assert.deepEqual(afterAudit.events, beforeAudit.events);
+});
+
 test("mobile admin deactivation invalidates existing mobile and dashboard credentials", async () => {
   const active = await mobileRequest("/mobile/users/org_admin_none/admin/org/dashboard", "token_org_admin_none");
   assert.equal(active.status, 200);
@@ -4945,6 +4989,10 @@ test("mobile admin deactivation invalidates existing mobile and dashboard creden
   }
   assert.equal((await readUser("org_admin_none"))?.status, "active");
   assert.equal((await mobileRequest("/mobile/users/org_admin_none/admin/org/dashboard", "token_org_admin_none")).status, 200);
+  // File-backed development storage has no cross-file rollback: the safe
+  // session purge may finish before an injected app-state save failure.
+  assert.equal((await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken)).status, 401);
+  await refreshWebAuthTokens(await readDb());
   assert.equal((await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken)).status, 200);
 
   const disabled = await mobileRequest("/mobile/users/org_admin/admin/org/users/org_admin_none", "token_org_admin", {
@@ -4981,6 +5029,9 @@ test("mobile admin deactivation invalidates existing mobile and dashboard creden
   assert.equal(restored.status, 200);
   assert.equal((await readUser("org_admin_none"))?.status, "active");
   assert.equal((await mobileRequest("/mobile/users/org_admin_none/admin/org/dashboard", "token_org_admin_none")).status, 401);
+  assert.equal((await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken)).status, 401);
+  await refreshWebAuthTokens(await readDb());
+  assert.equal((await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken)).status, 200);
 });
 
 test("company-code join requests accept Gmail, are duplicate-safe, and still require approval", async () => {
@@ -5048,7 +5099,7 @@ test("company-code join requests reject invalid codes and rate-limit repeated at
   assert.equal((await readUser("rate_limited"))?.orgId, null);
 });
 
-test("failed join approval save leaves membership, request, and approval audit unchanged", async () => {
+test("file-backed failed join approval never publishes membership or request state", async () => {
   const before = await readDurableDbOnce();
   const targetBefore = before.users.find((user) => user.id === "pending_user");
   const requestBefore = before.enterpriseJoinRequests.find((entry) => entry.id === "jr_pending");
@@ -5070,7 +5121,10 @@ test("failed join approval save leaves membership, request, and approval audit u
   const approvalsForRequest = (events: AuditEvent[] | undefined) => (events ?? []).filter((event) =>
     event.action === "org_join.approved_by_dashboard_admin" && event.metadata?.requestId === "jr_pending"
   ).length;
-  assert.equal(approvalsForRequest(auditAfter.events), approvalsForRequest(auditBefore.events));
+  // Separate development files cannot roll back a completed audit write when
+  // a later app-state file save fails. PostgreSQL transaction tests cover the
+  // production guarantee that this audit row rolls back with app_state.
+  assert.equal(approvalsForRequest(auditAfter.events), approvalsForRequest(auditBefore.events) + 1);
 });
 
 test("dashboard and mobile approvals use the same pending-request transition", async () => {

@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { ApiDatabase } from "@voicepractice/shared";
 import { StorageProvider } from "./runtimeConfig.js";
 
@@ -8,11 +8,13 @@ export type LockedAppStateUpdate<T> =
   | { result: T; shouldSave: true; state: ApiDatabase };
 
 export type LockedAppStateUpdateHandler<T> = (raw: unknown) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>;
+export type AppStateTransactionClient = Pick<PoolClient, "query">;
 
 export interface DatabaseStorage {
   loadRaw(): Promise<unknown>;
   load(): Promise<ApiDatabase>;
-  save(db: ApiDatabase): Promise<void>;
+  save(db: ApiDatabase, client?: AppStateTransactionClient | null): Promise<void>;
+  runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T>;
   updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T>;
 }
 
@@ -73,6 +75,12 @@ class FileDatabaseStorage implements DatabaseStorage {
     await fs.writeFile(this.dbPath, JSON.stringify(db, null, 2), "utf8");
   }
 
+  async runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T> {
+    // Local file storage has no SQL transaction. The caller must finish required
+    // side-writes before saving and publish its cache only after all writes pass.
+    return await handler(null);
+  }
+
   async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T> {
     const update = await handler(await this.loadRaw());
     if (update.shouldSave) {
@@ -122,8 +130,8 @@ class PostgresDatabaseStorage implements DatabaseStorage {
     await this.ensureTablePromise;
   }
 
-  private async writeRow(payload: unknown): Promise<void> {
-    await this.pool.query(
+  private async writeRow(payload: unknown, client: AppStateTransactionClient = this.pool): Promise<void> {
+    await client.query(
       `
         INSERT INTO app_state (id, state_json, updated_at)
         VALUES ($1, $2::jsonb, NOW())
@@ -157,9 +165,28 @@ class PostgresDatabaseStorage implements DatabaseStorage {
     return this.ensureDatabaseShape(await this.loadRaw());
   }
 
-  async save(db: ApiDatabase): Promise<void> {
+  async save(db: ApiDatabase, client?: AppStateTransactionClient | null): Promise<void> {
     await this.ensureTable();
-    await this.writeRow(db);
+    await this.writeRow(db, client ?? this.pool);
+  }
+
+  async runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T> {
+    await this.ensureTable();
+    if (!this.pool.connect) {
+      throw new Error("PostgreSQL app-state writes require a transaction-capable query pool.");
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await handler(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T> {

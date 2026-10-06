@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { AuditEvent } from "@voicepractice/shared";
 
-import { createAuditEventStore } from "./auditEventStore.js";
+import { createAuditEventStore, isBoundedAuditTelemetryAction } from "./auditEventStore.js";
 
 function createEvent(overrides?: Partial<AuditEvent>): AuditEvent {
   return {
@@ -92,7 +92,7 @@ test("file audit event store appends, filters, and preserves web_user events", a
   }
 });
 
-test("file audit event store imports legacy events and trims oldest records beyond max", async () => {
+test("file audit store trims only explicit AI telemetry and retains governance history", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-audit-store-"));
   try {
     const store = createAuditEventStore({
@@ -106,19 +106,23 @@ test("file audit event store imports legacy events and trims oldest records beyo
     await store.initialize();
 
     const migration = await store.importLegacyEvents([
-      createEvent({ id: "audit_old", createdAt: "2026-03-29T12:00:00.000Z" }),
-      createEvent({ id: "audit_mid", createdAt: "2026-03-30T12:00:00.000Z" }),
-      createEvent({ id: "audit_new", createdAt: "2026-03-31T12:00:00.000Z" }),
+      createEvent({ id: "audit_old", action: "user.disabled", createdAt: "2026-03-28T12:00:00.000Z" }),
+      createEvent({ id: "telemetry_old", action: "ai.simulation.turn.details", createdAt: "2026-03-29T12:00:00.000Z" }),
+      createEvent({ id: "telemetry_mid", action: "ai.simulation.opening.details", createdAt: "2026-03-30T12:00:00.000Z" }),
+      createEvent({ id: "telemetry_new", action: "ai.simulation.score.details", createdAt: "2026-03-31T12:00:00.000Z" }),
+      createEvent({ id: "audit_new", action: "future.unknown.governance", createdAt: "2026-04-01T12:00:00.000Z" }),
     ], { maxRecords: 2 });
 
-    assert.equal(migration.importedCount, 3);
+    assert.equal(migration.importedCount, 5);
     assert.equal(migration.trimmedCount, 1);
 
     const rows = await store.listEvents({ limit: 10 });
     assert.deepEqual(
       rows.map((entry) => entry.id),
-      ["audit_new", "audit_mid"]
+      ["audit_new", "telemetry_new", "telemetry_mid", "audit_old"]
     );
+    assert.equal(isBoundedAuditTelemetryAction("ai.simulation.turn.details"), true);
+    assert.equal(isBoundedAuditTelemetryAction("future.unknown.governance"), false);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

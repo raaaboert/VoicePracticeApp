@@ -334,6 +334,10 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const deploymentEnvironment = parseDeploymentEnvironment(env.PERITIO_ENV);
   const isProduction = nodeEnv === "production";
   const isProductionDeployment = deploymentEnvironment === "production";
+  const enableInternalDebugEndpoints = toBoolean(env.ENABLE_INTERNAL_DEBUG_ENDPOINTS, false);
+  if ((isProduction || isProductionDeployment) && enableInternalDebugEndpoints) {
+    throw new Error("ENABLE_INTERNAL_DEBUG_ENDPOINTS must be disabled in production.");
+  }
   const hasOpenAiApiKey = Boolean(env.OPENAI_API_KEY?.trim());
   const trainingContentStorage = loadTrainingContentStorageConfig(env, deploymentEnvironment);
 
@@ -525,7 +529,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     ),
     supportTranscriptSecret,
     useModularPromptArchitecture: toBoolean(env.USE_MODULAR_PROMPT_ARCHITECTURE, false),
-    enableInternalDebugEndpoints: toBoolean(env.ENABLE_INTERNAL_DEBUG_ENDPOINTS, false),
+    enableInternalDebugEndpoints,
     trainingContentStorage,
   };
 }

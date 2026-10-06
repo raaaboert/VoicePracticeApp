@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { UserProfile } from "@voicepractice/shared";
 
 import { StorageProvider } from "../runtimeConfig.js";
@@ -6,7 +6,7 @@ import { assertNoEmployeeIdConflicts, normalizeEmployeeIdForUniqueness } from ".
 
 export interface UserEmployeeIdClaimStore {
   initialize(): Promise<void>;
-  syncFromUsers(users: readonly UserProfile[]): Promise<void>;
+  syncFromUsers(users: readonly UserProfile[], client?: Pick<PoolClient, "query"> | null): Promise<void>;
 }
 
 interface CreateUserEmployeeIdClaimStoreParams {
@@ -79,7 +79,7 @@ class PostgresUserEmployeeIdClaimStore implements UserEmployeeIdClaimStore {
     await this.ensureSchemaPromise;
   }
 
-  async syncFromUsers(users: readonly UserProfile[]): Promise<void> {
+  async syncFromUsers(users: readonly UserProfile[], transactionClient?: Pick<PoolClient, "query"> | null): Promise<void> {
     assertNoEmployeeIdConflicts(users);
     await this.ensureSchema();
 
@@ -98,9 +98,11 @@ class PostgresUserEmployeeIdClaimStore implements UserEmployeeIdClaimStore {
       })
       .filter((row): row is { userId: string; orgId: string; employeeId: string; normalized: string } => row !== null);
 
-    const client = await this.pool.connect();
+    const client = transactionClient ?? await this.pool.connect();
     try {
-      await client.query("BEGIN");
+      if (!transactionClient) {
+        await client.query("BEGIN");
+      }
       await client.query("LOCK TABLE user_employee_id_claims IN SHARE ROW EXCLUSIVE MODE");
       await client.query("DELETE FROM user_employee_id_claims");
       for (const row of rows) {
@@ -113,12 +115,18 @@ class PostgresUserEmployeeIdClaimStore implements UserEmployeeIdClaimStore {
           [row.userId, row.orgId, row.employeeId, row.normalized]
         );
       }
-      await client.query("COMMIT");
+      if (!transactionClient) {
+        await client.query("COMMIT");
+      }
     } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      if (!transactionClient) {
+        await client.query("ROLLBACK").catch(() => undefined);
+      }
       throw error;
     } finally {
-      client.release();
+      if (!transactionClient) {
+        (client as PoolClient).release();
+      }
     }
   }
 }

@@ -26,7 +26,8 @@ export interface AuditEventStore {
     events: AuditEvent[],
     options?: { maxRecords?: number | null }
   ): Promise<{ importedCount: number; trimmedCount: number }>;
-  appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null }): Promise<void>;
+  appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null; client?: Pick<PoolClient, "query"> | null }): Promise<void>;
+  trimTelemetry(maxRecords: number): Promise<number>;
   listEvents(query?: AuditEventQuery): Promise<AuditEvent[]>;
   deleteEventsForUser(userId: string): Promise<number>;
 }
@@ -57,6 +58,18 @@ interface AuditEventRow {
 }
 
 const AUDIT_ACTOR_TYPE_SET = new Set<AuditActorType>(AUDIT_ACTOR_TYPES);
+// Unclassified actions are governance history. Only explicit diagnostic
+// details may be removed by the count-based telemetry cap.
+const BOUNDED_TELEMETRY_ACTIONS = [
+  "ai.simulation.opening.details",
+  "ai.simulation.turn.details",
+  "ai.simulation.score.details",
+] as const;
+const BOUNDED_TELEMETRY_ACTION_SET = new Set<string>(BOUNDED_TELEMETRY_ACTIONS);
+
+export function isBoundedAuditTelemetryAction(action: string): boolean {
+  return BOUNDED_TELEMETRY_ACTION_SET.has(action);
+}
 
 function buildAuditEventFilePath(dbPath: string): string {
   const parsed = path.parse(dbPath);
@@ -157,13 +170,17 @@ function normalizeAuditEventCollection(events: AuditEvent[], maxRecords: number 
   }
 
   const sorted = Array.from(deduped.values()).sort(compareAuditEventsAscending);
-  if (!maxRecords || maxRecords <= 0 || sorted.length <= maxRecords) {
+  if (!maxRecords || maxRecords <= 0) {
     return { events: sorted, trimmedCount: 0 };
   }
-
+  const telemetry = sorted.filter((event) => isBoundedAuditTelemetryAction(event.action));
+  if (telemetry.length <= maxRecords) {
+    return { events: sorted, trimmedCount: 0 };
+  }
+  const retainedTelemetryIds = new Set(telemetry.slice(-maxRecords).map((event) => event.id));
   return {
-    events: sorted.slice(sorted.length - maxRecords),
-    trimmedCount: sorted.length - maxRecords
+    events: sorted.filter((event) => !isBoundedAuditTelemetryAction(event.action) || retainedTelemetryIds.has(event.id)),
+    trimmedCount: telemetry.length - maxRecords
   };
 }
 
@@ -240,7 +257,7 @@ class FileAuditEventStore implements AuditEventStore {
     });
   }
 
-  async appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null }): Promise<void> {
+  async appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null; client?: Pick<PoolClient, "query"> | null }): Promise<void> {
     const normalizedIncoming = events
       .map((entry) => normalizeAuditEvent(entry))
       .filter((entry): entry is AuditEvent => entry !== null);
@@ -255,6 +272,17 @@ class FileAuditEventStore implements AuditEventStore {
         options?.maxRecords ?? null
       );
       await this.savePayload({ events: normalized.events });
+    });
+  }
+
+  async trimTelemetry(maxRecords: number): Promise<number> {
+    return await this.withLock(async () => {
+      const payload = await this.loadPayload();
+      const normalized = normalizeAuditEventCollection(payload.events, maxRecords);
+      if (normalized.trimmedCount > 0) {
+        await this.savePayload({ events: normalized.events });
+      }
+      return normalized.trimmedCount;
     });
   }
 
@@ -387,7 +415,7 @@ class PostgresAuditEventStore implements AuditEventStore {
     }
   }
 
-  async appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null }): Promise<void> {
+  async appendEvents(events: AuditEvent[], options?: { maxRecords?: number | null; client?: Pick<PoolClient, "query"> | null }): Promise<void> {
     const normalizedEvents = events
       .map((entry) => normalizeAuditEvent(entry))
       .filter((entry): entry is AuditEvent => entry !== null);
@@ -396,6 +424,12 @@ class PostgresAuditEventStore implements AuditEventStore {
     }
 
     await this.ensureTable();
+    if (options?.client) {
+      for (const event of normalizedEvents) {
+        await upsertAuditEventRow(options.client, event);
+      }
+      return;
+    }
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -410,6 +444,11 @@ class PostgresAuditEventStore implements AuditEventStore {
     } finally {
       client.release();
     }
+  }
+
+  async trimTelemetry(maxRecords: number): Promise<number> {
+    await this.ensureTable();
+    return await trimAuditEventRows(this.pool, maxRecords);
   }
 
   async listEvents(query: AuditEventQuery = {}): Promise<AuditEvent[]> {
@@ -575,7 +614,7 @@ async function upsertAuditEventRow(
   );
 }
 
-async function trimAuditEventRows(client: Pick<PoolClient, "query">, maxRecords: number | null): Promise<number> {
+async function trimAuditEventRows(client: Pick<PoolClient, "query"> | Pick<Pool, "query">, maxRecords: number | null): Promise<number> {
   if (!maxRecords || maxRecords <= 0) {
     return 0;
   }
@@ -587,6 +626,7 @@ async function trimAuditEventRows(client: Pick<PoolClient, "query">, maxRecords:
           id,
           ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS row_num
         FROM audit_events
+        WHERE action = ANY($2::text[])
       ),
       deleted AS (
         DELETE FROM audit_events
@@ -600,7 +640,7 @@ async function trimAuditEventRows(client: Pick<PoolClient, "query">, maxRecords:
       SELECT COUNT(*)::text AS trimmed_count
       FROM deleted
     `,
-    [maxRecords]
+    [maxRecords, BOUNDED_TELEMETRY_ACTIONS]
   );
 
   const row = result.rows[0];

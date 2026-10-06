@@ -47,6 +47,19 @@ test("auth code delivery overrides default to null when unset", () => {
   assert.equal(config.mobileEmailVerificationDeliveryProvider, null);
 });
 
+test("production refuses internal debug endpoints while safe production and non-production configurations load", () => {
+  assert.throws(
+    () => loadRuntimeConfig(makeProductionEnv({ ENABLE_INTERNAL_DEBUG_ENDPOINTS: "true" })),
+    /ENABLE_INTERNAL_DEBUG_ENDPOINTS must be disabled in production/,
+  );
+  assert.throws(
+    () => loadRuntimeConfig(makeProductionEnv({ NODE_ENV: "test", ENABLE_INTERNAL_DEBUG_ENDPOINTS: "true" })),
+    /ENABLE_INTERNAL_DEBUG_ENDPOINTS must be disabled in production/,
+  );
+  assert.equal(loadRuntimeConfig(makeProductionEnv({ ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false" })).enableInternalDebugEndpoints, false);
+  assert.equal(loadRuntimeConfig(makeEnv({ ENABLE_INTERNAL_DEBUG_ENDPOINTS: "true" })).enableInternalDebugEndpoints, true);
+});
+
 test("app review authentication is disabled when both values are absent", () => {
   const config = loadRuntimeConfig(makeEnv());
 

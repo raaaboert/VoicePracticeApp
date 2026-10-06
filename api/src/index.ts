@@ -169,6 +169,7 @@ import {
   WebAuthSessionResponse,
   WebAuthVerifyCodeRequest,
   WebAuthVerifyCodeResponse,
+  WebAuthSessionRecord,
   calculateBilledSecondsFromRaw,
   createDefaultConfig,
   getRoleSegmentIdsForIndustries,
@@ -342,6 +343,7 @@ import {
 } from "./services/dashboardAttemptDetails.js";
 import { createPostCommitEffectRegistry, runPostCommitEffects } from "./services/postCommitEffects.js";
 import type { PostCommitEffect } from "./services/postCommitEffects.js";
+import { commitAuthoritativeAppState } from "./services/authoritativeAppStateCommit.js";
 import {
   buildRecoveredSimulationEvaluationResult,
   isRecoverableSimulationScoreRecord,
@@ -2971,7 +2973,9 @@ interface AppendAuditEventInput {
 }
 
 const pendingAuditEventsByDb = new WeakMap<ApiDatabase, AuditEvent[]>();
+const pendingWebAuthSessionsByDb = new WeakMap<ApiDatabase, WebAuthSessionRecord[]>();
 const pendingPostCommitEffectsByDb = createPostCommitEffectRegistry<ApiDatabase>();
+const activeMutationDatabases = new WeakSet<ApiDatabase>();
 
 function getPendingAuditEvents(db: ApiDatabase): AuditEvent[] {
   return pendingAuditEventsByDb.get(db) ?? [];
@@ -4371,6 +4375,7 @@ let dashboardOrganizationPerformanceIntelligenceQueryForTest: typeof queryAuthor
 let dashboardTeamPerformanceQueryForTest: typeof queryAuthorizedTeamPerformance | null = null;
 let dashboardTeamPerformanceIntelligenceQueryForTest: typeof queryAuthorizedTeamPerformanceIntelligence | null = null;
 let databaseSaveBarrierForTest: (() => Promise<void>) | null = null;
+let webSessionRevocationFailureForTest: Error | null = null;
 let focusTopicDeleteResponseObserverForTest: (() => void) | null = null;
 let authenticationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
 let identityAdministrationResponseObserverForTest: ((route: string, status: number) => void) | null = null;
@@ -4511,6 +4516,18 @@ async function withFreshReportingRead<T>(handler: (db: ApiDatabase) => Promise<T
   });
 }
 
+function queuePendingWebAuthSession(db: ApiDatabase, session: WebAuthSessionRecord): void {
+  const pending = pendingWebAuthSessionsByDb.get(db) ?? [];
+  pending.push(session);
+  pendingWebAuthSessionsByDb.set(db, pending);
+}
+
+function drainPendingWebAuthSessions(db: ApiDatabase): WebAuthSessionRecord[] {
+  const pending = pendingWebAuthSessionsByDb.get(db) ?? [];
+  pendingWebAuthSessionsByDb.delete(db);
+  return pending;
+}
+
 async function withFreshReportingSnapshotRead<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
   return await withDatabaseLock(async () => {
     await refreshReportingSnapshots();
@@ -4539,61 +4556,69 @@ async function capturePerformanceEvidenceSourceSnapshot() {
   });
 }
 
-async function withFreshReportingWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+async function commitDatabaseWrite<T>(
+  handler: (db: ApiDatabase) => Promise<T> | T,
+  options?: { fresh?: boolean; reporting?: boolean },
+): Promise<T> {
   const completed = await withDatabaseLock(async () => {
-    await refreshReportingSnapshots();
-    const db = structuredClone(await loadDatabase({ forceStorageRead: true }));
+    if (options?.reporting) {
+      await refreshReportingSnapshots();
+    }
+    const before = await loadDatabase(options?.fresh ? { forceStorageRead: true } : undefined);
+    const db = structuredClone(before);
+    activeMutationDatabases.add(db);
     try {
       const result = await handler(db);
       const pendingAuditEvents = drainPendingAuditEvents(db);
-      if (pendingAuditEvents.length > 0) {
-        await auditEventStore.appendEvents(pendingAuditEvents, { maxRecords: MAX_AUDIT_EVENTS });
-      }
-      await saveDatabase(db);
+      const pendingWebAuthSessions = drainPendingWebAuthSessions(db);
+      await commitAuthoritativeAppState({
+        storage: getOrCreateDatabaseStorage(),
+        claimStore: userEmployeeIdClaimStore,
+        sessionStore: webAuthSessionStore,
+        auditStore: auditEventStore,
+        before,
+        working: db,
+        auditEvents: pendingAuditEvents,
+        newWebSessions: pendingWebAuthSessions,
+        buildPersistedSnapshot: buildPersistedDatabaseSnapshot,
+        beforeSessionRevocation: webSessionRevocationFailureForTest
+          ? async () => { throw webSessionRevocationFailureForTest; }
+          : undefined,
+        beforeAppStateSave: databaseSaveBarrierForTest ?? undefined,
+        onCommitted: (committed) => { databaseCache = committed; },
+      });
+      activeMutationDatabases.delete(db);
       return {
         result,
-        postCommitEffects: pendingPostCommitEffectsByDb.drain(db)
+        postCommitEffects: pendingPostCommitEffectsByDb.drain(db),
+        shouldTrimTelemetry: pendingAuditEvents.length > 0,
       };
     } catch (error) {
+      databaseCache = null;
+      activeMutationDatabases.delete(db);
       drainPendingAuditEvents(db);
+      drainPendingWebAuthSessions(db);
       pendingPostCommitEffectsByDb.discard(db);
       throw error;
     }
   });
-
+  // Waiter wakeups and update nudges are process-local hints, not security or
+  // governance truth. Telemetry retention runs after COMMIT and can be retried.
   await runDatabasePostCommitEffects(completed.postCommitEffects);
+  if (completed.shouldTrimTelemetry) {
+    await auditEventStore.trimTelemetry(MAX_AUDIT_EVENTS).catch((error) => {
+      logWarn(`[audit][telemetry] retention trim failed after committed app_state save: ${String(error)}`);
+    });
+  }
   return completed.result;
 }
 
-async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
-  const completed = await withDatabaseLock(async () => {
-    const db = structuredClone(await loadDatabase());
-    try {
-      const result = await handler(db);
-      const pendingAuditEvents = drainPendingAuditEvents(db);
-      if (pendingAuditEvents.length > 0) {
-        await auditEventStore.appendEvents(pendingAuditEvents, { maxRecords: MAX_AUDIT_EVENTS });
-      }
-      await saveDatabase(db);
-      return {
-        result,
-        postCommitEffects: pendingPostCommitEffectsByDb.drain(db)
-      };
-    } catch (error) {
-      drainPendingAuditEvents(db);
-      pendingPostCommitEffectsByDb.discard(db);
-      throw error;
-    }
-  });
+async function withFreshReportingWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await commitDatabaseWrite(handler, { fresh: true, reporting: true });
+}
 
-  /**
-   * Cross-store sequencing policy:
-   * 1. Primary app-state mutations and authoritative extracted-store writes happen inside the handler.
-   * 2. Secondary audit events are flushed before the monolithic app-state save.
-   * 3. Fail-closed revocations and orphan cleanup run only after the primary save succeeds, outside the lock.
-   */
-  await runDatabasePostCommitEffects(completed.postCommitEffects);
-  return completed.result;
+async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  return await commitDatabaseWrite(handler);
 }
 
 const withDatabase = withDatabaseWrite;
@@ -4769,19 +4794,6 @@ async function revokeWebAuthSessionById(sessionId: string): Promise<void> {
   }
 
   await webAuthSessionStore.revokeSession(normalizedSessionId);
-}
-
-async function revokeWebAuthSessionsForUserId(userId: string): Promise<void> {
-  const normalizedUserId = userId.trim();
-  if (!normalizedUserId) {
-    return;
-  }
-
-  await webAuthSessionStore.revokeUserSessions(normalizedUserId);
-}
-
-async function revokeWebAuthSessionsForUserIds(userIds: string[]): Promise<void> {
-  await webAuthSessionStore.revokeSessionsForUsers(userIds);
 }
 
 async function refreshDatabaseReadiness(): Promise<void> {
@@ -4972,25 +4984,7 @@ function hashMobileToken(token: string): string {
 }
 
 async function withIsolatedDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
-  const completed = await withDatabaseLock(async () => {
-    const db = structuredClone(await loadDatabase());
-    try {
-      const result = await handler(db);
-      const pendingAuditEvents = drainPendingAuditEvents(db);
-      if (pendingAuditEvents.length > 0) {
-        await auditEventStore.appendEvents(pendingAuditEvents, { maxRecords: MAX_AUDIT_EVENTS });
-      }
-      await saveDatabase(db);
-      return { result, postCommitEffects: pendingPostCommitEffectsByDb.drain(db) };
-    } catch (error) {
-      drainPendingAuditEvents(db);
-      pendingPostCommitEffectsByDb.discard(db);
-      throw error;
-    }
-  });
-
-  await runDatabasePostCommitEffects(completed.postCommitEffects);
-  return completed.result;
+  return await commitDatabaseWrite(handler);
 }
 
 const DEIDENTIFIED_ACCOUNT_USER_ID = "deleted_user";
@@ -5452,7 +5446,10 @@ async function loadAuthenticatedWebSessionContext(
     buildWebAuthSessionRequestMetadata(request)
   );
   if (touched) {
-    await webAuthSessionStore.saveSession(sessionRecord);
+    if (!await webAuthSessionStore.touchSessionIfPresent(sessionRecord)) {
+      response.status(401).json({ error: "Web auth session is no longer valid.", code: "web_auth_invalid" });
+      return null;
+    }
   }
 
   return {
@@ -8403,13 +8400,7 @@ function queueCommittedOrgJoinUpdates(db: ApiDatabase, userId: string, orgIds: S
 }
 
 function queueCommittedOrgJoinAudit(db: ApiDatabase, input: AppendAuditEventInput): void {
-  queueDatabasePostCommitEffect(db, {
-    category: "post_commit_cleanup",
-    description: `Record committed ${input.action} decision.`,
-    run: async () => {
-      await deliverPostCommitAuditEventBestEffort(input, input.action);
-    }
-  });
+  queuePendingAuditEvent(db, buildAuditEvent(input));
 }
 
 function decideEnterpriseJoinRequest(params: {
@@ -11110,6 +11101,14 @@ function revokeEnterpriseOrgUserAccess(db: ApiDatabase, orgId: string, reason: s
 }
 
 function emitMobileUpdateForUser(db: ApiDatabase, userId: string, reason: MobileUpdateReason): void {
+  if (activeMutationDatabases.has(db)) {
+    queueDatabasePostCommitEffect(db, {
+      category: "post_commit_cleanup",
+      description: `Notify mobile user ${userId} of a committed update.`,
+      run: async () => { emitMobileUpdateForUser(db, userId, reason); },
+    });
+    return;
+  }
   const user = getUserById(db, userId);
   if (!user) {
     return;
@@ -11757,7 +11756,7 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
         userAgent: sessionRequestMetadata.userAgent
       }
     });
-    await webAuthSessionStore.saveSession(record);
+    queuePendingWebAuthSession(db, record);
 
     const payload: WebAuthVerifyCodeResponse = {
       token,
@@ -13064,13 +13063,6 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
     }
     if (shouldRevokeDashboardSessions) {
       db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
-      queueDatabasePostCommitEffect(db, {
-        category: "security_cleanup",
-        description: `Revoke dashboard sessions for updated dashboard user ${target.id}.`,
-        run: async () => {
-          await revokeWebAuthSessionsForUserId(target.id);
-        }
-      });
     }
     if (target.status === "active") {
       emitMobileUpdateForUser(db, target.id, "user");
@@ -14475,20 +14467,12 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
     }
 
     if (previousStatus !== org.status && org.status === "disabled") {
-      const revokedDashboardUserIds = revokeEnterpriseOrgUserAccess(
+      revokeEnterpriseOrgUserAccess(
         db,
         org.id,
         "Enterprise account access was deactivated."
       );
-      if (revokedDashboardUserIds.length > 0) {
-        queueDatabasePostCommitEffect(db, {
-          category: "security_cleanup",
-          description: `Revoke dashboard sessions for disabled organization ${org.id}.`,
-          run: async () => {
-            await revokeWebAuthSessionsForUserIds(revokedDashboardUserIds);
-          }
-        });
-      }
+      // The mutation wrapper purges web sessions in the app_state transaction.
     }
 
     org.updatedAt = nowIso();
@@ -16713,13 +16697,6 @@ app.delete("/admin/settings/superusers/:userId", requireAdmin, async (request: R
     db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
     db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
     db.users = db.users.filter((entry) => entry.id !== user.id);
-    queueDatabasePostCommitEffect(db, {
-      category: "security_cleanup",
-      description: `Revoke dashboard sessions for removed super user ${user.id}.`,
-      run: async () => {
-        await revokeWebAuthSessionsForUserId(user.id);
-      }
-    });
 
     appendPlatformAuditEvent(db, {
       action: "settings.super_user.deleted",
@@ -17181,13 +17158,7 @@ app.patch("/users/:userId", requireAdmin, async (request: Request, response: Res
       db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
     }
     if (revokeDashboardSessions) {
-      queueDatabasePostCommitEffect(db, {
-        category: "security_cleanup",
-        description: `Revoke dashboard sessions for updated user ${user.id}.`,
-        run: async () => {
-          await revokeWebAuthSessionsForUserId(user.id);
-        }
-      });
+      db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== user.id);
     }
 
     user.updatedAt = now.toISOString();
@@ -17276,13 +17247,6 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     db.enterpriseJoinRequests = db.enterpriseJoinRequests
       .filter((record) => record.userId !== user.id)
       .map((record) => (record.decidedByUserId === user.id ? { ...record, decidedByUserId: null } : record));
-    queueDatabasePostCommitEffect(db, {
-      category: "security_cleanup",
-      description: `Revoke dashboard sessions for deleted user ${user.id}.`,
-      run: async () => {
-        await revokeWebAuthSessionsForUserId(user.id);
-      }
-    });
     queueDatabasePostCommitEffect(db, {
       category: "post_commit_cleanup",
       description: `Delete recognized simulation sessions for removed user ${user.id}.`,
@@ -17816,7 +17780,6 @@ app.delete("/mobile/users/:userId", async (request: Request, response: Response)
       DEIDENTIFIED_ACCOUNT_USER_ID
     );
     const deletedAuditEvents = await auditEventStore.deleteEventsForUser(user.id);
-    await revokeWebAuthSessionsForUserId(user.id);
 
     db.users = db.users
       .filter((entry) => entry.id !== user.id)
@@ -23023,13 +22986,6 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     if (hasStatusPatch && nextStatus !== "active") {
       revokeMobileAccessForUser(db, target.id, "User access was disabled.");
       db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
-      queueDatabasePostCommitEffect(db, {
-        category: "security_cleanup",
-        description: `Revoke dashboard sessions for disabled mobile-admin target ${target.id}.`,
-        run: async () => {
-          await revokeWebAuthSessionsForUserId(target.id);
-        }
-      });
     }
     const clearedAssignmentUserIds = beforeEligibleAsManager && !canBeAssignedAsManager(target, org.id)
       ? clearAssignmentsForManager({
@@ -24343,6 +24299,13 @@ export function setTrainingPackOrderAuditFailureForTest(error: Error | null): vo
     throw new Error("setTrainingPackOrderAuditFailureForTest is only available in test.");
   }
   postCommitAuditFailureForTest = error;
+}
+
+export function setWebSessionRevocationFailureForTest(error: Error | null): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setWebSessionRevocationFailureForTest is only available in test.");
+  }
+  webSessionRevocationFailureForTest = error;
 }
 
 export function setPostCommitAuditFailureForTest(error: Error | null): void {

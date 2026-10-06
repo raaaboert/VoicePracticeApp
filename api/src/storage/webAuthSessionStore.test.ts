@@ -67,8 +67,11 @@ test("file web auth session store persists, loads, and revokes sessions independ
     assert.ok(active);
     assert.equal(active.sessionId, issued.sessionId);
     assert.equal(active.lastSeenUserAgent, "Mozilla/5.0");
+    const touched = { ...active, lastSeenAt: "2099-03-30T12:30:00.000Z" };
+    assert.equal(await store.touchSessionIfPresent(touched), true);
 
     await store.revokeSession(issued.sessionId);
+    assert.equal(await store.touchSessionIfPresent(touched), false);
     const missing = await store.getActiveSession(issued.sessionId, issued.record.userId, new Date("2099-03-30T12:30:00.000Z"));
     assert.equal(missing, null);
   } finally {
