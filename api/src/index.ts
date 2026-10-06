@@ -5157,6 +5157,11 @@ function hasValidMobileTokenForUser(
   token: string,
   options?: { allowReonboardingToken?: boolean; allowIncompleteProfile?: boolean }
 ): boolean {
+  const user = getUserById(db, userId);
+  if (!user || user.status !== "active") {
+    return false;
+  }
+
   const authRecord = db.mobileAuthTokens.find((entry) => entry.userId === userId);
   if (!authRecord || !authRecord.tokenHash) {
     return false;
@@ -5172,7 +5177,6 @@ function hasValidMobileTokenForUser(
     return false;
   }
 
-  const user = getUserById(db, userId);
   if (user?.mobileProfileReonboardingRequired === true && options?.allowReonboardingToken !== true) {
     return false;
   }
@@ -8358,6 +8362,56 @@ type OrgJoinDecisionResult =
   | { ok: true; requestRecord: EnterpriseJoinRequestRecord }
   | { ok: false; status: number; error: string };
 
+function canApproveCurrentOrgJoinTarget(user: UserProfile): boolean {
+  return user.status === "active" && user.accountType === "individual" && user.orgId === null;
+}
+
+function supersedeOtherPendingOrgJoinRequests(
+  db: ApiDatabase,
+  approvedRequest: EnterpriseJoinRequestRecord,
+  decidedAt: string,
+): { orgIds: Set<string>; count: number } {
+  const affectedOrgIds = new Set<string>();
+  let count = 0;
+  for (const request of db.enterpriseJoinRequests) {
+    if (request.id === approvedRequest.id || request.userId !== approvedRequest.userId || request.status !== "pending") {
+      continue;
+    }
+    request.status = "rejected";
+    request.updatedAt = decidedAt;
+    request.decidedAt = decidedAt;
+    request.decidedByUserId = null;
+    request.decisionReason = "Superseded by an approved organization membership.";
+    affectedOrgIds.add(request.orgId);
+    count += 1;
+  }
+  return { orgIds: affectedOrgIds, count };
+}
+
+function queueCommittedOrgJoinUpdates(db: ApiDatabase, userId: string, orgIds: Set<string>): void {
+  const affectedOrgIds = [...orgIds];
+  queueDatabasePostCommitEffect(db, {
+    category: "post_commit_cleanup",
+    description: `Notify mobile clients of committed organization join decision for ${userId}.`,
+    run: async () => {
+      emitMobileUpdateForUser(db, userId, "user");
+      for (const orgId of affectedOrgIds) {
+        emitMobileUpdateForOrg(db, orgId, "org");
+      }
+    }
+  });
+}
+
+function queueCommittedOrgJoinAudit(db: ApiDatabase, input: AppendAuditEventInput): void {
+  queueDatabasePostCommitEffect(db, {
+    category: "post_commit_cleanup",
+    description: `Record committed ${input.action} decision.`,
+    run: async () => {
+      await deliverPostCommitAuditEventBestEffort(input, input.action);
+    }
+  });
+}
+
 function decideEnterpriseJoinRequest(params: {
   db: ApiDatabase;
   actor: UserProfile;
@@ -8389,21 +8443,21 @@ function decideEnterpriseJoinRequest(params: {
 
   const nowValue = nowIso();
   const appendDecisionAudit = (action: string, message: string, metadata: Record<string, unknown>) => {
-    const input = {
+    queueCommittedOrgJoinAudit(params.db, {
+      actorType: params.channel === "mobile" ? "mobile_user" : "web_user",
+      actorId: params.actor.id,
       action,
       orgId: params.org.id,
       userId: targetUser.id,
       message,
       metadata,
-    };
-    if (params.channel === "mobile") {
-      appendMobileAuditEvent(params.db, params.actor, input);
-    } else {
-      appendWebAuditEvent(params.db, params.actor, input);
-    }
+    });
   };
 
   if (params.action === "approve") {
+    if (!canApproveCurrentOrgJoinTarget(targetUser)) {
+      return { ok: false, status: 409, error: "User is no longer eligible to join this organization." };
+    }
     targetUser.accountType = "enterprise";
     targetUser.tier = "enterprise";
     targetUser.orgId = params.org.id;
@@ -8425,14 +8479,15 @@ function decideEnterpriseJoinRequest(params: {
     requestRecord.decidedAt = nowValue;
     requestRecord.decidedByUserId = params.actor.id;
     requestRecord.decisionReason = params.reason?.trim() || null;
-    emitMobileUpdateForUser(params.db, targetUser.id, "user");
-    emitMobileUpdateForOrg(params.db, params.org.id, "org");
+    const superseded = supersedeOtherPendingOrgJoinRequests(params.db, requestRecord, nowValue);
+    queueCommittedOrgJoinUpdates(params.db, targetUser.id, new Set([params.org.id, ...superseded.orgIds]));
     appendDecisionAudit(
       params.channel === "mobile" ? "org_join.approved_by_org_admin" : "org_join.approved_by_dashboard_admin",
       `Approved org join request for ${targetUser.email}.`,
       {
         requestId: requestRecord.id,
-        deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
+        deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount,
+        supersededPendingRequestCount: superseded.count
       }
     );
   } else {
@@ -8441,8 +8496,7 @@ function decideEnterpriseJoinRequest(params: {
     requestRecord.decidedAt = nowValue;
     requestRecord.decidedByUserId = params.actor.id;
     requestRecord.decisionReason = params.reason?.trim() || "Rejected by organization admin.";
-    emitMobileUpdateForUser(params.db, targetUser.id, "user");
-    emitMobileUpdateForOrg(params.db, params.org.id, "org");
+    queueCommittedOrgJoinUpdates(params.db, targetUser.id, new Set([params.org.id]));
     appendDecisionAudit(
       params.channel === "mobile" ? "org_join.rejected_by_org_admin" : "org_join.rejected_by_dashboard_admin",
       `Rejected org join request for ${targetUser.email}.`,
@@ -11016,27 +11070,32 @@ function resolveWaiter(userId: string, waiter: MobileUpdateWaiter, payload: Mobi
 
 function revokeMobileAccessForUser(db: ApiDatabase, userId: string, reason: string): void {
   db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== userId);
+  queueDatabasePostCommitEffect(db, {
+    category: "security_cleanup",
+    description: `Close mobile update waiters for revoked user ${userId}.`,
+    run: async () => {
+      const waiters = mobileUpdateWaitersByUserId.get(userId);
+      if (waiters && waiters.size > 0) {
+        for (const waiter of Array.from(waiters)) {
+          if (waiter.resolved) {
+            continue;
+          }
+          waiter.resolved = true;
+          clearTimeout(waiter.timeoutHandle);
+          try {
+            waiter.response.status(410).json({ error: reason });
+          } catch {
+            // Ignore disconnected clients.
+          }
+        }
+      }
 
-  const waiters = mobileUpdateWaitersByUserId.get(userId);
-  if (waiters && waiters.size > 0) {
-    for (const waiter of Array.from(waiters)) {
-      if (waiter.resolved) {
-        continue;
-      }
-      waiter.resolved = true;
-      clearTimeout(waiter.timeoutHandle);
-      try {
-        waiter.response.status(410).json({ error: reason });
-      } catch {
-        // Ignore disconnected clients.
-      }
+      mobileUpdateWaitersByUserId.delete(userId);
+      mobileUpdatePayloadByUserId.delete(userId);
+      mobileUpdateCursorByUserId.delete(userId);
+      mobileUpdateReasonByUserId.delete(userId);
     }
-  }
-
-  mobileUpdateWaitersByUserId.delete(userId);
-  mobileUpdatePayloadByUserId.delete(userId);
-  mobileUpdateCursorByUserId.delete(userId);
-  mobileUpdateReasonByUserId.delete(userId);
+  });
 }
 
 function revokeEnterpriseOrgUserAccess(db: ApiDatabase, orgId: string, reason: string): string[] {
@@ -13013,7 +13072,9 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
         }
       });
     }
-    emitMobileUpdateForUser(db, target.id, "user");
+    if (target.status === "active") {
+      emitMobileUpdateForUser(db, target.id, "user");
+    }
     for (const userId of clearedAssignmentUserIds) {
       emitMobileUpdateForUser(db, userId, "user");
     }
@@ -22959,6 +23020,17 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     target.dailyOverageBaseSecondsCap = nextDailyOverageBaseSecondsCap;
     target.dailyOverageExtraSecondsGranted = nextDailyOverageExtraSecondsGranted;
     target.updatedAt = nowIso();
+    if (hasStatusPatch && nextStatus !== "active") {
+      revokeMobileAccessForUser(db, target.id, "User access was disabled.");
+      db.webAuthChallenges = (db.webAuthChallenges ?? []).filter((record) => record.userId !== target.id);
+      queueDatabasePostCommitEffect(db, {
+        category: "security_cleanup",
+        description: `Revoke dashboard sessions for disabled mobile-admin target ${target.id}.`,
+        run: async () => {
+          await revokeWebAuthSessionsForUserId(target.id);
+        }
+      });
+    }
     const clearedAssignmentUserIds = beforeEligibleAsManager && !canBeAssignedAsManager(target, org.id)
       ? clearAssignmentsForManager({
           users: db.users,
@@ -22966,7 +23038,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
           updatedAt: target.updatedAt,
         })
       : [];
-    emitMobileUpdateForUser(db, target.id, "user");
+    if (target.status === "active") {
+      emitMobileUpdateForUser(db, target.id, "user");
+    }
     for (const clearedUserId of clearedAssignmentUserIds) {
       emitMobileUpdateForUser(db, clearedUserId, "user");
     }
@@ -23613,6 +23687,10 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
         response.status(400).json({ error: "Organization is not active." });
         return;
       }
+      if (!canApproveCurrentOrgJoinTarget(targetUser)) {
+        response.status(409).json({ error: "User is no longer eligible to join this organization." });
+        return;
+      }
 
       const assignOrgAdmin = Boolean(body.assignOrgAdmin);
       targetUser.accountType = "enterprise";
@@ -23620,6 +23698,8 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       targetUser.orgId = org.id;
       targetUser.orgRole = assignOrgAdmin ? "org_admin" : "user";
       targetUser.performanceAccess = "none";
+      targetUser.managerUserId = null;
+      targetUser.dashboardAccessEnabled = false;
       targetUser.status = "active";
       targetUser.updatedAt = nowValue;
       const deactivatedInvalidAssignmentCount = deactivateInvalidTrainingPackAssignmentsForUser({
@@ -23635,9 +23715,11 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       requestRecord.decidedByUserId = null;
       requestRecord.decisionReason = body.reason?.trim() || (assignOrgAdmin ? "Approved as org admin." : null);
 
-      emitMobileUpdateForUser(db, targetUser.id, "user");
-      emitMobileUpdateForOrg(db, org.id, "org");
-      appendPlatformAuditEvent(db, {
+      const superseded = supersedeOtherPendingOrgJoinRequests(db, requestRecord, nowValue);
+      queueCommittedOrgJoinUpdates(db, targetUser.id, new Set([org.id, ...superseded.orgIds]));
+      queueCommittedOrgJoinAudit(db, {
+        actorType: "platform_admin",
+        actorId: PLATFORM_ADMIN_ACTOR_ID,
         action: "org_join.approved_by_platform_admin",
         orgId: org.id,
         userId: targetUser.id,
@@ -23645,7 +23727,8 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
         metadata: {
           requestId: requestRecord.id,
           assignOrgAdmin,
-          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount
+          deactivatedInvalidTrainingPackAssignments: deactivatedInvalidAssignmentCount,
+          supersededPendingRequestCount: superseded.count
         }
       });
     } else {
@@ -23655,9 +23738,10 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       requestRecord.decidedByUserId = null;
       requestRecord.decisionReason = body.reason?.trim() || "Rejected by platform admin.";
 
-      emitMobileUpdateForUser(db, targetUser.id, "user");
-      emitMobileUpdateForOrg(db, org.id, "org");
-      appendPlatformAuditEvent(db, {
+      queueCommittedOrgJoinUpdates(db, targetUser.id, new Set([org.id]));
+      queueCommittedOrgJoinAudit(db, {
+        actorType: "platform_admin",
+        actorId: PLATFORM_ADMIN_ACTOR_ID,
         action: "org_join.rejected_by_platform_admin",
         orgId: org.id,
         userId: targetUser.id,

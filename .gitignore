@@ -7,6 +7,8 @@
 **/web-build/
 **/.next/
 **/expo-env.d.ts
+/eas.json
+/app.json
 
 # Native
 .kotlin/

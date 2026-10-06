@@ -1948,8 +1948,7 @@ test("paid mobile AI requires approved organization access before quota grace or
     "/mobile/users/disabled_ai_user/entitlements",
     "token_disabled_ai",
   );
-  assert.equal(disabledUser.status, 403);
-  assert.match(String(disabledUser.body.error), /disabled/i);
+  assert.equal(disabledUser.status, 401);
 
   const approved = await mobileRequest("/mobile/users/org_admin/entitlements", "token_org_admin");
   assert.equal(approved.status, 200);
@@ -4816,7 +4815,7 @@ test("mobile onboarding collects names and company code without granting immedia
     method: "POST",
     body: JSON.stringify({ userId: "disabled_resend" }),
   });
-  assert.equal(disabledResend.status, 403);
+  assert.equal(disabledResend.status, 401);
   const disabledResendEntitlements = await mobileRequest("/mobile/users/disabled_resend/entitlements", "token_disabled_resend");
   assert.equal(disabledResendEntitlements.status, 401);
 
@@ -4930,6 +4929,60 @@ test("re-onboarding resend remains rate-limited", async () => {
   assert.equal(latestStatus, 429);
 });
 
+test("mobile admin deactivation invalidates existing mobile and dashboard credentials", async () => {
+  const active = await mobileRequest("/mobile/users/org_admin_none/admin/org/dashboard", "token_org_admin_none");
+  assert.equal(active.status, 200);
+
+  setDatabaseSaveBarrierForTest(async () => { throw new Error("injected mobile disable save failure"); });
+  try {
+    const failed = await mobileRequest("/mobile/users/org_admin/admin/org/users/org_admin_none", "token_org_admin", {
+      method: "PATCH",
+      body: JSON.stringify({ status: "disabled" }),
+    });
+    assert.equal(failed.status, 500);
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+  }
+  assert.equal((await readUser("org_admin_none"))?.status, "active");
+  assert.equal((await mobileRequest("/mobile/users/org_admin_none/admin/org/dashboard", "token_org_admin_none")).status, 200);
+  assert.equal((await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken)).status, 200);
+
+  const disabled = await mobileRequest("/mobile/users/org_admin/admin/org/users/org_admin_none", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "disabled" }),
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal((await readUser("org_admin_none"))?.status, "disabled");
+  assert.equal((await readDb()).mobileAuthTokens.some((record) => record.userId === "org_admin_none"), false);
+  assert.equal((await dashboardRequest("/dashboard/admin/users", orgAdminNoneToken)).status, 401);
+
+  for (const pathname of [
+    "/mobile/users/org_admin_none/entitlements",
+    "/mobile/users/org_admin_none/admin/org/dashboard",
+    "/mobile/users/org_admin_none/admin/org/users",
+  ]) {
+    assert.equal((await mobileRequest(pathname, "token_org_admin_none")).status, 401);
+  }
+  assert.equal((await mobileRequest("/mobile/users/org_admin_none/admin/org/settings", "token_org_admin_none", {
+    method: "PATCH",
+    body: JSON.stringify({ perUserDailySecondsCap: 600 }),
+  })).status, 401);
+  assert.equal((await mobileRequest(
+    "/mobile/users/org_admin_none/admin/org/access-requests/jr_pending",
+    "token_org_admin_none",
+    { method: "PATCH", body: JSON.stringify({ action: "approve" }) },
+  )).status, 401);
+  assert.equal((await readDb()).enterpriseJoinRequests.find((record) => record.id === "jr_pending")?.status, "pending");
+
+  const restored = await mobileRequest("/mobile/users/org_admin/admin/org/users/org_admin_none", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "active" }),
+  });
+  assert.equal(restored.status, 200);
+  assert.equal((await readUser("org_admin_none"))?.status, "active");
+  assert.equal((await mobileRequest("/mobile/users/org_admin_none/admin/org/dashboard", "token_org_admin_none")).status, 401);
+});
+
 test("company-code join requests accept Gmail, are duplicate-safe, and still require approval", async () => {
   const created = await mobileRequest("/mobile/users/gmail_join/org-access-requests", "token_gmail", {
     method: "POST",
@@ -4995,6 +5048,31 @@ test("company-code join requests reject invalid codes and rate-limit repeated at
   assert.equal((await readUser("rate_limited"))?.orgId, null);
 });
 
+test("failed join approval save leaves membership, request, and approval audit unchanged", async () => {
+  const before = await readDurableDbOnce();
+  const targetBefore = before.users.find((user) => user.id === "pending_user");
+  const requestBefore = before.enterpriseJoinRequests.find((entry) => entry.id === "jr_pending");
+  const auditBefore = JSON.parse(await readFile(auditEventsPath(), "utf8")) as { events?: AuditEvent[] };
+  setDatabaseSaveBarrierForTest(async () => { throw new Error("injected join approval save failure"); });
+  try {
+    const failed = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", orgAdminToken, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "approve" }),
+    });
+    assert.equal(failed.status, 500);
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+  }
+  const after = await readDurableDbOnce();
+  assert.deepEqual(after.users.find((user) => user.id === "pending_user"), targetBefore);
+  assert.deepEqual(after.enterpriseJoinRequests.find((entry) => entry.id === "jr_pending"), requestBefore);
+  const auditAfter = JSON.parse(await readFile(auditEventsPath(), "utf8")) as { events?: AuditEvent[] };
+  const approvalsForRequest = (events: AuditEvent[] | undefined) => (events ?? []).filter((event) =>
+    event.action === "org_join.approved_by_dashboard_admin" && event.metadata?.requestId === "jr_pending"
+  ).length;
+  assert.equal(approvalsForRequest(auditAfter.events), approvalsForRequest(auditBefore.events));
+});
+
 test("dashboard and mobile approvals use the same pending-request transition", async () => {
   const userAdminDenied = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", userAdminToken, {
     method: "PATCH",
@@ -5037,6 +5115,12 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   assert.equal(rejected.status, 200);
   assert.equal((rejected.body.request as { status?: string }).status, "rejected");
   assert.equal((await readUser("reject_user"))?.orgId, null);
+  const repeatedRejection = await dashboardRequest("/dashboard/admin/access-requests/jr_reject", orgAdminToken, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "reject" }),
+  });
+  assert.equal(repeatedRejection.status, 409);
+  assert.equal((await readDb()).enterpriseJoinRequests.find((request) => request.id === "jr_reject")?.status, "rejected");
 
   const mobileApproved = await mobileRequest(
     "/mobile/users/org_admin/admin/org/access-requests/jr_mobile",
@@ -5064,6 +5148,87 @@ test("dashboard and mobile approvals use the same pending-request transition", a
 
   await waitForPersistedUserOrg("pending_user", "org_1");
   await waitForPersistedUserOrg("gmail_join_2", "org_1");
+});
+
+test("stale pending requests cannot transfer a current member through any approval route", async () => {
+  const request = (await readDb()).enterpriseJoinRequests.find((entry) =>
+    entry.userId === "gmail_join" && entry.orgId === "org_1" && entry.status === "pending"
+  );
+  assert.ok(request);
+  const moved = await adminRequest("/users/gmail_join", {
+    method: "PATCH",
+    body: JSON.stringify({ accountType: "enterprise", tier: "enterprise", orgId: "org_2", orgRole: "user", performanceAccess: "team", dashboardAccessEnabled: true }),
+  });
+  assert.equal(moved.status, 200);
+  const before = await readUser("gmail_join");
+  assert.equal(before?.orgId, "org_2");
+
+  const attempts = [
+    () => dashboardRequest(`/dashboard/admin/access-requests/${request.id}`, orgAdminToken, {
+      method: "PATCH", body: JSON.stringify({ action: "approve" }),
+    }),
+    () => mobileRequest(`/mobile/users/org_admin/admin/org/access-requests/${request.id}`, "token_org_admin", {
+      method: "PATCH", body: JSON.stringify({ action: "approve" }),
+    }),
+    () => adminRequest(`/org-join-requests/${request.id}`, {
+      method: "PATCH", body: JSON.stringify({ action: "approve", assignOrgAdmin: true }),
+    }),
+  ];
+  for (const attempt of attempts) {
+    assert.equal((await attempt()).status, 409);
+    assert.deepEqual(await readUser("gmail_join"), before);
+    assert.equal((await readDb()).enterpriseJoinRequests.find((entry) => entry.id === request.id)?.status, "pending");
+  }
+  assert.equal((await dashboardRequest(`/dashboard/admin/access-requests/${request.id}?orgId=org_2`, orgAdminToken, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  })).status, 404);
+
+  const restored = await adminRequest("/users/gmail_join", {
+    method: "PATCH", body: JSON.stringify({ accountType: "individual" }),
+  });
+  assert.equal(restored.status, 200);
+  assert.equal((await readUser("gmail_join"))?.orgId, null);
+});
+
+test("successful approval terminalizes the same user's other pending organization requests", async () => {
+  const first = await mobileRequest("/mobile/users/rejected_ai/org-access-requests", "token_rejected_ai", {
+    method: "POST", body: JSON.stringify({ joinCode: "ACME2026" }),
+  });
+  const second = await mobileRequest("/mobile/users/rejected_ai/org-access-requests", "token_rejected_ai", {
+    method: "POST", body: JSON.stringify({ joinCode: "OTHER2026" }),
+  });
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 201);
+  const requests = (await readDb()).enterpriseJoinRequests.filter((entry) =>
+    entry.userId === "rejected_ai" && entry.status === "pending"
+  );
+  const orgOne = requests.find((entry) => entry.orgId === "org_1");
+  const orgTwo = requests.find((entry) => entry.orgId === "org_2");
+  assert.ok(orgOne);
+  assert.ok(orgTwo);
+
+  const crossOrgDenied = await dashboardRequest(`/dashboard/admin/access-requests/${orgTwo.id}`, orgAdminToken, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  });
+  assert.equal(crossOrgDenied.status, 404);
+  const approved = await adminRequest(`/org-join-requests/${orgOne.id}`, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  });
+  assert.equal(approved.status, 200);
+  assert.equal((await readUser("rejected_ai"))?.orgId, "org_1");
+  const after = await readDb();
+  assert.equal(after.enterpriseJoinRequests.find((entry) => entry.id === orgOne.id)?.status, "approved");
+  const superseded = after.enterpriseJoinRequests.find((entry) => entry.id === orgTwo.id);
+  assert.equal(superseded?.status, "rejected");
+  assert.equal(superseded?.decidedByUserId, null);
+  assert.match(superseded?.decisionReason ?? "", /superseded/i);
+  assert.equal((await adminRequest(`/org-join-requests/${orgTwo.id}`, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  })).status, 409);
+  assert.equal((await adminRequest(`/org-join-requests/${orgOne.id}`, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  })).status, 409);
+  assert.equal((await readUser("rejected_ai"))?.orgId, "org_1");
 });
 
 test("super users need explicit organization context and final active org-admin deactivation is blocked", async () => {

@@ -422,7 +422,7 @@ test("mobile Focus Topic catalog binds token, acting organization, and the exist
     "/mobile/users/disabled/focus-topics",
     "token_disabled"
   );
-  assert.equal(disabled.status, 403);
+  assert.equal(disabled.status, 401);
 
   const individual = await mobileRequest(
     "/mobile/users/individual/focus-topics",
@@ -502,7 +502,7 @@ test("mobile Focus Topic detail independently authenticates and returns resolver
     assert.equal((await mobileRequest(
       "/mobile/users/disabled/focus-topics/focus_topic",
       "token_disabled"
-    )).status, 403);
+    )).status, 401);
     assert.equal((await mobileRequest(
       "/mobile/users/individual/focus-topics/focus_topic",
       "token_individual"

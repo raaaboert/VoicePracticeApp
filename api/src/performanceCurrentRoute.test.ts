@@ -952,8 +952,7 @@ test("mobile Performance create rejects inactive users and unavailable scenario 
     method: "POST",
     body: JSON.stringify(buildCreatePlanRequest({ userId: "user_inactive", orgId: null }))
   });
-  assert.equal(inactive.status, 403);
-  assert.equal(inactive.body.error, "User account is disabled.");
+  assert.equal(inactive.status, 401);
 
   const unavailable = await mobileRequest("/mobile/users/user_manage/performance/plans", "token_manage", {
     method: "POST",
