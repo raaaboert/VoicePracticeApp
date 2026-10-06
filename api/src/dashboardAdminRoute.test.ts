@@ -5122,8 +5122,8 @@ test("file-backed failed join approval never publishes membership or request sta
     event.action === "org_join.approved_by_dashboard_admin" && event.metadata?.requestId === "jr_pending"
   ).length;
   // Separate development files cannot roll back a completed audit write when
-  // a later app-state file save fails. PostgreSQL transaction tests cover the
-  // production guarantee that this audit row rolls back with app_state.
+  // a later app-state file save fails. The real PostgreSQL coverage in
+  // appStateTransaction.integration.test.ts proves the production rollback.
   assert.equal(approvalsForRequest(auditAfter.events), approvalsForRequest(auditBefore.events) + 1);
 });
 

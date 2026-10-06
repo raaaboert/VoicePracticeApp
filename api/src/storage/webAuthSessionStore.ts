@@ -31,7 +31,10 @@ interface CreateWebAuthSessionStoreParams {
   pgPoolMax: number;
   pgConnectTimeoutMs: number;
   pgIdleTimeoutMs: number;
+  queryPool?: WebAuthSessionQueryPool;
 }
+
+type WebAuthSessionQueryPool = Pick<Pool, "query" | "connect">;
 
 interface WebAuthSessionFilePayload {
   sessions: WebAuthSessionRecord[];
@@ -322,14 +325,15 @@ class FileWebAuthSessionStore implements WebAuthSessionStore {
 }
 
 class PostgresWebAuthSessionStore implements WebAuthSessionStore {
-  private readonly pool: Pool;
+  private readonly pool: WebAuthSessionQueryPool;
   private ensureTablePromise: Promise<void> | null = null;
 
   constructor(
     databaseUrl: string,
-    options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number }
+    options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number },
+    queryPool?: WebAuthSessionQueryPool,
   ) {
-    this.pool = new Pool({
+    this.pool = queryPool ?? new Pool({
       connectionString: databaseUrl,
       max: options.pgPoolMax,
       connectionTimeoutMillis: options.pgConnectTimeoutMs,
@@ -578,11 +582,15 @@ export function createWebAuthSessionStore(params: CreateWebAuthSessionStoreParam
       throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
     }
 
-    return new PostgresWebAuthSessionStore(params.databaseUrl, {
-      pgPoolMax: params.pgPoolMax,
-      pgConnectTimeoutMs: params.pgConnectTimeoutMs,
-      pgIdleTimeoutMs: params.pgIdleTimeoutMs
-    });
+    return new PostgresWebAuthSessionStore(
+      params.databaseUrl,
+      {
+        pgPoolMax: params.pgPoolMax,
+        pgConnectTimeoutMs: params.pgConnectTimeoutMs,
+        pgIdleTimeoutMs: params.pgIdleTimeoutMs
+      },
+      params.queryPool,
+    );
   }
 
   return new FileWebAuthSessionStore(params.dbPath);

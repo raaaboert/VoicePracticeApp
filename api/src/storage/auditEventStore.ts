@@ -39,7 +39,10 @@ interface CreateAuditEventStoreParams {
   pgPoolMax: number;
   pgConnectTimeoutMs: number;
   pgIdleTimeoutMs: number;
+  queryPool?: AuditEventQueryPool;
 }
+
+type AuditEventQueryPool = Pick<Pool, "query" | "connect">;
 
 interface AuditEventFilePayload {
   events: AuditEvent[];
@@ -357,14 +360,15 @@ class FileAuditEventStore implements AuditEventStore {
 }
 
 class PostgresAuditEventStore implements AuditEventStore {
-  private readonly pool: Pool;
+  private readonly pool: AuditEventQueryPool;
   private ensureTablePromise: Promise<void> | null = null;
 
   constructor(
     databaseUrl: string,
-    options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number }
+    options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number },
+    queryPool?: AuditEventQueryPool,
   ) {
-    this.pool = new Pool({
+    this.pool = queryPool ?? new Pool({
       connectionString: databaseUrl,
       max: options.pgPoolMax,
       connectionTimeoutMillis: options.pgConnectTimeoutMs,
@@ -653,11 +657,15 @@ export function createAuditEventStore(params: CreateAuditEventStoreParams): Audi
       throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
     }
 
-    return new PostgresAuditEventStore(params.databaseUrl, {
-      pgPoolMax: params.pgPoolMax,
-      pgConnectTimeoutMs: params.pgConnectTimeoutMs,
-      pgIdleTimeoutMs: params.pgIdleTimeoutMs
-    });
+    return new PostgresAuditEventStore(
+      params.databaseUrl,
+      {
+        pgPoolMax: params.pgPoolMax,
+        pgConnectTimeoutMs: params.pgConnectTimeoutMs,
+        pgIdleTimeoutMs: params.pgIdleTimeoutMs
+      },
+      params.queryPool,
+    );
   }
 
   return new FileAuditEventStore(params.dbPath);

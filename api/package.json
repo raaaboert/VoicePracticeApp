@@ -18,6 +18,7 @@
     "smoke:training-content-r2": "tsx ./scripts/smoke-training-content-r2.ts",
     "test:postgres:training-content": "tsx --test src/storage/trainingContentPostgres.integration.test.ts",
     "test:postgres:training-packs": "tsx --test src/storage/trainingPackMigrations.integration.test.ts",
+    "test:postgres:app-state": "tsx --test src/storage/appStateTransaction.integration.test.ts",
     "reset:simulation-baseline": "tsx ./scripts/reset-simulation-baseline.ts",
     "reset:pretester-history": "tsx ./scripts/reset-pretester-history.ts --local-file",
     "test": "node ../scripts/run-tsx-tests.mjs src=.test.ts scripts=.test.ts"
