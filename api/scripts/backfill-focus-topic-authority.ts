@@ -23,6 +23,7 @@ import {
 import { canFutureLearnerAccessFocusTopic } from "../src/services/focusTopicAuthority.js";
 import {
   compareFocusTopicAuthorityProjections,
+  projectPublishedFocusTopicContentIds,
   type FocusTopicProjection,
 } from "../src/services/focusTopicAuthorityShadow.js";
 import {
@@ -143,6 +144,8 @@ async function buildDatabaseInventory(pool: Pool, databaseUrl: string): Promise<
   const contentModuleEnabledByOrg = new Map(moduleResult.rows.map((row)=>[row.org_id,row.enabled]));
   const contentItems = contentResult.rows.map((row) => ({
     id: row.id, orgId: row.org_id, focusTopicId: row.focus_topic_id,
+    publicationState: row.publication_state,
+    archivedAt: row.archived_at,
   })) as TrainingContentItem[];
   const trainingPackStore = createTrainingPackStore({
     provider: "postgres", dbPath: "", databaseUrl,
@@ -251,7 +254,12 @@ function buildShadowReport(
         orgId:organization.id,userId:user.id,topicId:topic.id,topicOrgId:topic.orgId,
         standardScenarioIds:plan.scenarioAttachments.filter((row)=>row.orgId===organization.id&&row.topicId===topic.id&&row.scenarioKind==="standard").map((row)=>row.scenarioId),
         orgScenarioIds:plan.scenarioAttachments.filter((row)=>row.orgId===organization.id&&row.topicId===topic.id&&row.scenarioKind==="org").map((row)=>row.scenarioId),
-        contentIds:plan.contentAttachments.filter((row)=>row.orgId===organization.id&&row.topicId===topic.id).map((row)=>row.contentId),
+        contentIds:projectPublishedFocusTopicContentIds({
+          orgId:organization.id,
+          topicId:topic.id,
+          contentItems:inventory.contentItems,
+          attachments:plan.contentAttachments,
+        }),
       });
     }
   }

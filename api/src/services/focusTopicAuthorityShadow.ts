@@ -1,3 +1,7 @@
+import type { TrainingContentItem } from "@voicepractice/shared";
+
+import type { FocusTopicContentAttachment } from "./focusTopicAuthorityBackfill.js";
+
 export interface FocusTopicProjection {
   orgId: string;
   userId: string;
@@ -24,6 +28,36 @@ export interface FocusTopicShadowDifference {
   topicId: string;
   legacyIds: string[];
   futureIds: string[];
+}
+
+export function projectPublishedFocusTopicContentIds(params: {
+  orgId: string;
+  topicId: string;
+  contentItems: readonly Pick<
+    TrainingContentItem,
+    "id" | "orgId" | "publicationState" | "archivedAt"
+  >[];
+  attachments: readonly FocusTopicContentAttachment[];
+}): string[] {
+  const publishedContentIds = new Set(
+    params.contentItems
+      .filter((content) =>
+        content.orgId === params.orgId
+        && content.publicationState === "published"
+        && content.archivedAt === null
+      )
+      .map((content) => content.id)
+  );
+  return [...new Set(
+    params.attachments
+      .filter((attachment) =>
+        attachment.orgId === params.orgId
+        && attachment.topicId === params.topicId
+        && attachment.detachedAt === null
+        && publishedContentIds.has(attachment.contentId)
+      )
+      .map((attachment) => attachment.contentId)
+  )].sort();
 }
 
 export function compareFocusTopicAuthorityProjections(params: {
