@@ -1,5 +1,6 @@
 import { ApiDatabase, DashboardAdminCapabilities, DashboardViewer, EnterpriseOrg, OrgUserRole, UserProfile } from "@voicepractice/shared";
 import { normalizePerformanceAccess } from "./userProfiles.js";
+import { buildCustomerUserAdministrationCapabilities } from "./customerUserAdministrationPolicy.js";
 
 export type DashboardAccessEligibilityReason =
   | "inactive_user"
@@ -16,60 +17,17 @@ export interface DashboardAccessEligibility {
   org: EnterpriseOrg | null;
 }
 
+export function hasDashboardEntryAuthority(
+  user: Pick<UserProfile, "orgRole" | "dashboardAccessEnabled">,
+  options?: { hasEffectiveFocusTopicManagementGrant?: boolean },
+): boolean {
+  return user.orgRole === "org_admin"
+    || user.dashboardAccessEnabled === true
+    || options?.hasEffectiveFocusTopicManagementGrant === true;
+}
+
 export function buildDashboardAdminCapabilities(role: OrgUserRole | null, options?: { superUserOrgContext?: boolean }): DashboardAdminCapabilities {
-  if (options?.superUserOrgContext === true) {
-    return {
-      viewOrganizationUsers: true,
-      manageRegularOrganizationUsers: true,
-      approveRejectAccessRequests: true,
-      editEmployeeIds: true,
-      editUserNames: true,
-      manageUserRoles: true,
-      assignUserManagers: true,
-      managePerformanceAccess: true,
-      manageOrganizationContent: true,
-    };
-  }
-
-  if (role === "org_admin") {
-    return {
-      viewOrganizationUsers: true,
-      manageRegularOrganizationUsers: true,
-      approveRejectAccessRequests: true,
-      editEmployeeIds: true,
-      editUserNames: true,
-      manageUserRoles: true,
-      assignUserManagers: true,
-      managePerformanceAccess: true,
-      manageOrganizationContent: true,
-    };
-  }
-
-  if (role === "user_admin") {
-    return {
-      viewOrganizationUsers: true,
-      manageRegularOrganizationUsers: true,
-      approveRejectAccessRequests: false,
-      editEmployeeIds: true,
-      editUserNames: false,
-      manageUserRoles: false,
-      assignUserManagers: false,
-      managePerformanceAccess: false,
-      manageOrganizationContent: false,
-    };
-  }
-
-  return {
-    viewOrganizationUsers: false,
-    manageRegularOrganizationUsers: false,
-    approveRejectAccessRequests: false,
-    editEmployeeIds: false,
-    editUserNames: false,
-    manageUserRoles: false,
-    assignUserManagers: false,
-    managePerformanceAccess: false,
-    manageOrganizationContent: false,
-  };
+  return buildCustomerUserAdministrationCapabilities(role, options);
 }
 
 // Durable dashboard authorization projection. Keep this even after authn is replaced.
@@ -85,7 +43,11 @@ export function canDashboardViewerAccessCustomerDirectory(viewer: DashboardViewe
   return viewer.accessType === "super_user";
 }
 
-export function resolveDashboardAccessEligibility(db: ApiDatabase, user: UserProfile): DashboardAccessEligibility {
+export function resolveDashboardAccessEligibility(
+  db: ApiDatabase,
+  user: UserProfile,
+  options?: { hasEffectiveFocusTopicManagementGrant?: boolean },
+): DashboardAccessEligibility {
   if (user.status !== "active") {
     return {
       eligible: false,
@@ -110,7 +72,7 @@ export function resolveDashboardAccessEligibility(db: ApiDatabase, user: UserPro
     };
   }
 
-  if (user.dashboardAccessEnabled !== true) {
+  if (!hasDashboardEntryAuthority(user, options)) {
     return {
       eligible: false,
       reason: "dashboard_access_disabled",
@@ -141,12 +103,16 @@ export function resolveDashboardAccessEligibility(db: ApiDatabase, user: UserPro
   };
 }
 
-export function resolveDashboardViewer(db: ApiDatabase, user: UserProfile): DashboardViewer | null {
+export function resolveDashboardViewer(
+  db: ApiDatabase,
+  user: UserProfile,
+  options?: { hasEffectiveFocusTopicManagementGrant?: boolean },
+): DashboardViewer | null {
   if (!user.emailVerifiedAt) {
     return null;
   }
 
-  const eligibility = resolveDashboardAccessEligibility(db, user);
+  const eligibility = resolveDashboardAccessEligibility(db, user, options);
   if (!eligibility.eligible) {
     return null;
   }

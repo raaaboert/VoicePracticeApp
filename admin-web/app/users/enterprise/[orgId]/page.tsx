@@ -9,6 +9,9 @@ import {
   ORG_USER_ROLES,
   OrgDivisionListResponse,
   OrgModuleEntitlementsResponse,
+  OrganizationProductSettingsResponse,
+  OrganizationProductSwitchKey,
+  UpdateOrganizationProductSwitchResponse,
   OrgUserRole,
   PerformanceAccessLevel,
   EnterpriseOrg,
@@ -23,6 +26,7 @@ import { EnterpriseCompanyDivisionsCard } from "../../../../src/components/Enter
 import { EnterpriseStandardScenarioDivisionCard } from "../../../../src/components/EnterpriseStandardScenarioDivisionCard";
 import { EnterpriseTrainingsWorkspace } from "../../../../src/components/EnterpriseTrainingsWorkspace";
 import { EnterpriseModuleEntitlementsCard } from "../../../../src/components/EnterpriseModuleEntitlementsCard";
+import { EnterpriseProductSettingsCard } from "../../../../src/components/EnterpriseProductSettingsCard";
 import { EnterpriseAccountContactCard } from "../../../../src/components/EnterpriseAccountContactCard";
 import type { OrganizationContactUpdatePayload, OrganizationContactValues } from "../../../../src/components/enterpriseAccountContact";
 import { useRequireAdminToken } from "../../../../src/components/useRequireAdminToken";
@@ -181,6 +185,7 @@ export default function EnterpriseOrgPage() {
   const [dashboard, setDashboard] = useState<OrgDashboardResponse | null>(null);
   const [divisionPayload, setDivisionPayload] = useState<OrgDivisionListResponse | null>(null);
   const [moduleEntitlements, setModuleEntitlements] = useState<OrgModuleEntitlementsResponse | null>(null);
+  const [productSettings, setProductSettings] = useState<OrganizationProductSettingsResponse | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [industries, setIndustries] = useState<AppConfig["industries"]>([]);
   const [selectedIndustryId, setSelectedIndustryId] = useState("");
@@ -195,6 +200,7 @@ export default function EnterpriseOrgPage() {
   const [savingOrgIdentity, setSavingOrgIdentity] = useState(false);
   const [savingOrgStatus, setSavingOrgStatus] = useState(false);
   const [savingTrainingContentModule, setSavingTrainingContentModule] = useState(false);
+  const [savingProductSwitch, setSavingProductSwitch] = useState<OrganizationProductSwitchKey | null>(null);
   const [orgJoinCodeInput, setOrgJoinCodeInput] = useState("");
   const [monthlyMinutesAllottedInput, setMonthlyMinutesAllottedInput] = useState("0");
   const [defaultPerUserDailyMinutesInput, setDefaultPerUserDailyMinutesInput] = useState("0");
@@ -229,16 +235,18 @@ export default function EnterpriseOrgPage() {
       setSuccessMessage(null);
     }
     try {
-      const [payload, configPayload, joinRequestsPayload, divisionsPayload, moduleEntitlementsPayload] = await Promise.all([
+      const [payload, configPayload, joinRequestsPayload, divisionsPayload, moduleEntitlementsPayload, productSettingsPayload] = await Promise.all([
         adminFetch<OrgDashboardResponse>(`/orgs/${orgId}/dashboard`),
         adminFetch<AppConfig>("/config"),
         adminFetch<OrgJoinRequestsResponse>("/org-join-requests?status=pending"),
         adminFetch<OrgDivisionListResponse>(`/orgs/${orgId}/divisions`),
         adminFetch<OrgModuleEntitlementsResponse>(`/orgs/${orgId}/modules`),
+        adminFetch<OrganizationProductSettingsResponse>(`/orgs/${orgId}/product-settings`),
       ]);
       setDashboard(payload);
       setDivisionPayload(divisionsPayload);
       setModuleEntitlements(moduleEntitlementsPayload);
+      setProductSettings(productSettingsPayload);
       setConfig(configPayload);
       setIndustries(configPayload.industries ?? []);
       setOrgJoinCodeInput(payload.org.joinCode ?? "");
@@ -804,6 +812,28 @@ export default function EnterpriseOrgPage() {
     }
   };
 
+  const setOrganizationProductSwitch = async (
+    switchKey: OrganizationProductSwitchKey,
+    enabled: boolean,
+  ) => {
+    if (!dashboard || savingProductSwitch) return;
+    setSavingProductSwitch(switchKey);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const updated = await adminFetch<UpdateOrganizationProductSwitchResponse>(
+        `/orgs/${dashboard.org.id}/product-settings/${switchKey}`,
+        { method: "PATCH", body: JSON.stringify({ enabled }) },
+      );
+      setProductSettings({ orgId: updated.orgId, settings: updated.settings });
+      setSuccessMessage("Organization product control saved.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update organization product controls.");
+    } finally {
+      setSavingProductSwitch(null);
+    }
+  };
+
   const deleteEnterpriseUser = async (userId: string, email: string) => {
     const firstConfirm = window.confirm("Are you sure? This can not be reversed!");
     if (!firstConfirm) {
@@ -1042,6 +1072,12 @@ export default function EnterpriseOrgPage() {
                 trainingContent={moduleEntitlements?.modules.training_content ?? null}
                 saving={savingTrainingContentModule}
                 onTrainingContentChange={(enabled) => void setTrainingContentModuleEnabled(enabled)}
+              />
+
+              <EnterpriseProductSettingsCard
+                settings={productSettings?.settings ?? null}
+                savingSwitch={savingProductSwitch}
+                onChange={(switchKey, enabled) => void setOrganizationProductSwitch(switchKey, enabled)}
               />
 
               <div className="enterprise-two-column">

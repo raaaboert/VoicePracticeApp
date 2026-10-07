@@ -53,6 +53,36 @@ export interface UpdateOrgModuleEntitlementResponse extends OrgModuleEntitlement
   changed: boolean;
 }
 
+export const ORGANIZATION_PRODUCT_SWITCH_KEYS = [
+  "allowCustomerScenarioCreation",
+  "requireOrgAdminScenarioApproval",
+  "allowUserAdminFocusTopicManagement",
+  "allowManagerFocusTopicManagement",
+] as const;
+export type OrganizationProductSwitchKey = (typeof ORGANIZATION_PRODUCT_SWITCH_KEYS)[number];
+
+export interface OrganizationProductSettings {
+  allowCustomerScenarioCreation: boolean;
+  requireOrgAdminScenarioApproval: boolean;
+  allowUserAdminFocusTopicManagement: boolean;
+  allowManagerFocusTopicManagement: boolean;
+  updatedAt: string | null;
+}
+
+export interface OrganizationProductSettingsResponse {
+  orgId: string;
+  settings: OrganizationProductSettings;
+}
+
+export interface UpdateOrganizationProductSwitchRequest {
+  enabled: boolean;
+}
+
+export interface UpdateOrganizationProductSwitchResponse extends OrganizationProductSettingsResponse {
+  switchKey: OrganizationProductSwitchKey;
+  changed: boolean;
+}
+
 export const ORGANIZATION_MODULE_DISABLED_CODE = "module_disabled" as const;
 
 export interface OrganizationModuleDisabledErrorResponse {

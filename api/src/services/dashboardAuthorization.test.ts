@@ -158,6 +158,18 @@ test("super users retain cross-account dashboard access", () => {
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_b"), true);
 });
 
+test("org admin has inherent dashboard entry and the resolver accepts a future management grant", () => {
+  const orgAdmin = createUser({ id: "org_admin_inherent", orgRole: "org_admin", dashboardAccessEnabled: false });
+  const manager = createUser({ id: "future_manager", orgRole: "user", dashboardAccessEnabled: false });
+  const db = createDb({ users: [orgAdmin, manager], orgs: [{ id: "org_a", name: "Org A", status: "active" }] });
+  assert.equal(resolveDashboardAccessEligibility(db, orgAdmin).eligible, true);
+  assert.equal(resolveDashboardViewer(db, orgAdmin)?.userId, orgAdmin.id);
+  assert.equal(resolveDashboardAccessEligibility(db, manager).eligible, false);
+  assert.equal(resolveDashboardAccessEligibility(db, manager, { hasEffectiveFocusTopicManagementGrant: true }).eligible, true);
+  assert.equal(resolveDashboardViewer(db, manager), null);
+  assert.equal(resolveDashboardViewer(db, manager, { hasEffectiveFocusTopicManagementGrant: true })?.userId, manager.id);
+});
+
 test("legacy platform_admin alone no longer resolves to a dashboard viewer", () => {
   const user = createUser({
     id: "user_platform_admin",
@@ -248,6 +260,7 @@ test("enterprise user without dashboard access does not resolve a dashboard view
     id: "user_dashboard_disabled",
     email: "no-dashboard@example.com",
     dashboardAccessEnabled: false,
+    orgRole: "user",
   });
   const db = createDb({
     users: [user],
@@ -285,11 +298,11 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
   assert.deepEqual(buildDashboardAdminCapabilities("user_admin"), {
     viewOrganizationUsers: true,
     manageRegularOrganizationUsers: true,
-    approveRejectAccessRequests: false,
+    approveRejectAccessRequests: true,
     editEmployeeIds: true,
-    editUserNames: false,
+    editUserNames: true,
     manageUserRoles: false,
-    assignUserManagers: false,
+    assignUserManagers: true,
     managePerformanceAccess: false,
     manageOrganizationContent: false,
   });

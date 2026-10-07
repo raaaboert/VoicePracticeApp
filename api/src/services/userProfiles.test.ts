@@ -11,6 +11,7 @@ import {
   canBeAssignedAsManager,
   isContentManagerSubject,
   normalizePerformanceAccess,
+  isCurrentOrganizationManager,
   repairInvalidManagerAssignments,
   validateManagerAssignment,
 } from "./userProfiles.js";
@@ -197,6 +198,15 @@ test("manager assignment validation accepts every eligible role and rejects inva
   }
 });
 
+test("manager assignment validation rejects direct and indirect reporting cycles", () => {
+  const target = user("target", { managerUserId: null });
+  const report = user("report", { managerUserId: target.id });
+  const indirectReport = user("indirect_report", { managerUserId: report.id });
+  const orgUsers = [target, report, indirectReport];
+  assert.equal(validateManagerAssignment({ orgUsers, target, managerUserId: report.id }).ok, false);
+  assert.equal(validateManagerAssignment({ orgUsers, target, managerUserId: indirectReport.id }).ok, false);
+});
+
 test("repairInvalidManagerAssignments preserves every eligible manager role and clears stale relationships", () => {
   const regularManager = user("regular_manager");
   const userAdminManager = user("user_admin_manager", { orgRole: "user_admin" });
@@ -256,4 +266,13 @@ test("manager repair is independent from performance access changes", () => {
     assert.equal(report.managerUserId, manager.id);
     assert.equal(manager.managerUserId, null);
   }
+});
+
+test("manager status derives from an active same-organization direct report", () => {
+  const manager = user("manager");
+  const activeReport = user("active_report", { managerUserId: manager.id });
+  const disabledReport = user("disabled_report", { managerUserId: manager.id, status: "disabled" });
+  assert.equal(isCurrentOrganizationManager({ user: manager, orgUsers: [manager, disabledReport] }), false);
+  assert.equal(isCurrentOrganizationManager({ user: manager, orgUsers: [manager, activeReport, disabledReport] }), true);
+  assert.equal(isCurrentOrganizationManager({ user: user("other", { orgId: "org_2" }), orgUsers: [activeReport] }), false);
 });

@@ -115,6 +115,11 @@ import {
   OrgTrainingStatus,
   ORG_USER_ROLE_LABELS,
   OrgUsageBillingResponse,
+  OrganizationProductSettingsResponse,
+  OrganizationProductSwitchKey,
+  ORGANIZATION_PRODUCT_SWITCH_KEYS,
+  UpdateOrganizationProductSwitchRequest,
+  UpdateOrganizationProductSwitchResponse,
   MobileResendVerificationRequest,
   MobileSubmitOrgJoinRequest,
   MobileUpdateSettingsRequest,
@@ -262,6 +267,10 @@ import {
   createOrgModuleEntitlementStore,
   OrgModuleEntitlementStore,
 } from "./storage/orgModuleEntitlementStore.js";
+import {
+  createOrganizationProductSettingsStore,
+  OrganizationProductSettingsStore,
+} from "./storage/organizationProductSettingsStore.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
 import { createTrainingContentScenarioLinkService } from "./services/trainingContentScenarioLinks.js";
 import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
@@ -358,7 +367,6 @@ import {
 import {
   canActorManageRegularUser,
   canActorSeeOrganizationUser,
-  canEnterpriseActorManageRegularUser,
   canEnterpriseActorSeeOrganizationUser,
   canManagerAssignmentTargetBeManaged,
   canOrgAdminManageRole,
@@ -376,6 +384,12 @@ import {
   resolveStoredUserDisplayName,
   validateManagerAssignment,
 } from "./services/userProfiles.js";
+import {
+  canAdministerOrganizationUsers,
+  canChangeCustomerUserStatus,
+  canDecideCustomerAccessRequests,
+  canEditCustomerUserField,
+} from "./services/customerUserAdministrationPolicy.js";
 import {
   canActorManagePerformanceUser,
   canViewPerformanceTarget,
@@ -624,6 +638,13 @@ let trainingPackStore = defaultTrainingPackStore;
 let dashboardTrainingPackLoaderForTest: ((orgId: string) => Promise<TrainingPack[]>) | null = null;
 let mobileAccountDeletionFailureForTest: Error | null = null;
 let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitlementStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+let organizationProductSettingsStore: OrganizationProductSettingsStore = createOrganizationProductSettingsStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
@@ -4811,6 +4832,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
         performancePlanStore,
         userEmployeeIdClaimStore,
         orgModuleEntitlementStore,
+        organizationProductSettingsStore,
         trainingContentStore,
         trainingContentAssetStore
       },
@@ -8155,13 +8177,10 @@ function canDashboardAdminEditEmployeeId(params: {
   if (!params.capabilities.editEmployeeIds) {
     return false;
   }
-  if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
-    return true;
-  }
-  return params.actor.orgRole === "user_admin" && canActorManageRegularUser({
-    actor: params.actor,
-    viewer: params.viewer,
+  return canEditCustomerUserField({
+    context: { actor: params.actor, viewer: params.viewer },
     target: params.target,
+    field: "employeeId",
   });
 }
 
@@ -8174,10 +8193,11 @@ function canDashboardAdminEditNames(params: {
   if (!params.capabilities.editUserNames) {
     return false;
   }
-  if (!canActorSeeOrganizationUser({ actor: params.actor, viewer: params.viewer, target: params.target })) {
-    return false;
-  }
-  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+  return canEditCustomerUserField({
+    context: { actor: params.actor, viewer: params.viewer },
+    target: params.target,
+    field: "firstName",
+  });
 }
 
 function canDashboardAdminChangeUserRole(params: {
@@ -8192,7 +8212,11 @@ function canDashboardAdminChangeUserRole(params: {
   if (!canOrgAdminManageRole(params.target.orgRole)) {
     return false;
   }
-  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+  return canEditCustomerUserField({
+    context: { actor: params.actor, viewer: params.viewer },
+    target: params.target,
+    field: "orgRole",
+  });
 }
 
 function canDashboardAdminAssignManager(params: {
@@ -8204,10 +8228,11 @@ function canDashboardAdminAssignManager(params: {
   if (!params.capabilities.assignUserManagers) {
     return false;
   }
-  if (!canManagerAssignmentTargetBeManaged(params.target)) {
-    return false;
-  }
-  return params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin";
+  return canEditCustomerUserField({
+    context: { actor: params.actor, viewer: params.viewer },
+    target: params.target,
+    field: "managerUserId",
+  });
 }
 
 function canDashboardAdminChangeUserStatus(params: {
@@ -8218,25 +8243,14 @@ function canDashboardAdminChangeUserStatus(params: {
   nextStatus: UserStatus;
   orgUsers: readonly UserProfile[];
 }): boolean {
-  if (!params.capabilities.manageRegularOrganizationUsers || params.target.id === params.actor.id) {
+  if (!params.capabilities.manageRegularOrganizationUsers) {
     return false;
   }
-  if (params.target.orgRole === "org_admin") {
-    if (params.viewer.accessType !== "super_user" && params.actor.orgRole !== "org_admin") {
-      return false;
-    }
-    const activeOrgAdminCount = params.orgUsers.filter(
-      (user) => user.orgRole === "org_admin" && user.status === "active"
-    ).length;
-    return params.nextStatus !== "disabled" || activeOrgAdminCount > 1;
-  }
-  if (params.viewer.accessType === "super_user" || params.actor.orgRole === "org_admin") {
-    return params.target.orgRole === "user" || params.target.orgRole === "user_admin";
-  }
-  return params.actor.orgRole === "user_admin" && canActorManageRegularUser({
-    actor: params.actor,
-    viewer: params.viewer,
+  return canChangeCustomerUserStatus({
+    context: { actor: params.actor, viewer: params.viewer },
     target: params.target,
+    nextStatus: params.nextStatus,
+    orgUsers: params.orgUsers,
   });
 }
 
@@ -12677,6 +12691,25 @@ app.post(
   }
 );
 
+app.get("/dashboard/admin/product-settings", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const orgId = await withDatabaseRead(async (db) => {
+    const context = resolveDashboardAdminOrgContext(
+      db,
+      request.dashboard!,
+      getSingleQueryParam(request.query.orgId),
+      response,
+    );
+    if (!context) return null;
+    if (request.dashboard!.viewer.accessType !== "super_user" && request.dashboard!.user.orgRole !== "org_admin") {
+      response.status(403).json({ error: "Org admin access required." });
+      return null;
+    }
+    return context.org.id;
+  });
+  if (!orgId) return;
+  response.json(await buildOrganizationProductSettingsResponse(orgId));
+});
+
 app.get("/dashboard/admin/users", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withDatabaseRead(async (db) => {
     const adminContext = resolveDashboardAdminOrgContext(
@@ -12781,6 +12814,14 @@ app.get("/dashboard/admin/users/export", requireDashboardAuth, async (request: D
 
 app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const body = request.body as DashboardAdminUpdateUserRequest;
+  const allowedPatchFields = new Set(["firstName", "lastName", "employeeId", "status", "orgRole", "managerUserId", "performanceAccess"]);
+  const unknownPatchFields = body && typeof body === "object"
+    ? Object.keys(body).filter((field) => !allowedPatchFields.has(field))
+    : [];
+  if (unknownPatchFields.length > 0) {
+    response.status(400).json({ error: `Unsupported user patch field: ${unknownPatchFields[0]}.` });
+    return;
+  }
   const hasFirstNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "firstName");
   const hasLastNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "lastName");
   const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
@@ -12841,6 +12882,17 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
 
     if (hasPerformanceAccessPatch) {
       if (rejectMissingDashboardAdminCapability(adminContext.capabilities, "managePerformanceAccess", response)) {
+        return;
+      }
+      if (!canEditCustomerUserField({
+        context: { actor: request.dashboard!.user, viewer: request.dashboard!.viewer },
+        target,
+        field: "performanceAccess",
+      })) {
+        response.status(403).json({
+          error: "You cannot change performance access for this user.",
+          code: "dashboard_scope_denied",
+        });
         return;
       }
       if (target.id === request.dashboard!.user.id) {
@@ -14203,6 +14255,88 @@ app.get("/orgs/:orgId/modules", requireAdmin, async (request: Request, response:
   }
 
   response.json(await buildOrgModuleEntitlementsResponse(orgModuleEntitlementStore, orgId));
+});
+
+function isOrganizationProductSwitchKey(value: string): value is OrganizationProductSwitchKey {
+  return (ORGANIZATION_PRODUCT_SWITCH_KEYS as readonly string[]).includes(value);
+}
+
+async function buildOrganizationProductSettingsResponse(orgId: string): Promise<OrganizationProductSettingsResponse> {
+  const stored = await organizationProductSettingsStore.get(orgId);
+  return {
+    orgId,
+    settings: {
+      allowCustomerScenarioCreation: stored.allowCustomerScenarioCreation,
+      requireOrgAdminScenarioApproval: stored.requireOrgAdminScenarioApproval,
+      allowUserAdminFocusTopicManagement: stored.allowUserAdminFocusTopicManagement,
+      allowManagerFocusTopicManagement: stored.allowManagerFocusTopicManagement,
+      updatedAt: stored.updatedAt,
+    },
+  };
+}
+
+app.get("/orgs/:orgId/product-settings", requireAdmin, async (request: AdminAuthRequest, response: Response) => {
+  const orgId = request.params.orgId.trim();
+  const orgExists = await withDatabaseRead(async (db) => db.orgs.some((entry) => entry.id === orgId));
+  if (!orgExists) {
+    response.status(404).json({ error: "Organization not found." });
+    return;
+  }
+  response.json(await buildOrganizationProductSettingsResponse(orgId));
+});
+
+app.patch("/orgs/:orgId/product-settings/:switchKey", requireAdmin, async (request: AdminAuthRequest, response: Response) => {
+  const orgId = request.params.orgId.trim();
+  const switchKey = request.params.switchKey.trim();
+  const body = request.body as UpdateOrganizationProductSwitchRequest;
+  if (!isOrganizationProductSwitchKey(switchKey)) {
+    response.status(400).json({ error: "Organization product switch is not recognized." });
+    return;
+  }
+  if (!body || typeof body.enabled !== "boolean" || Object.keys(body).some((field) => field !== "enabled")) {
+    response.status(400).json({ error: "enabled must be the only patch field and must be a boolean." });
+    return;
+  }
+  const orgExists = await withDatabaseRead(async (db) => db.orgs.some((entry) => entry.id === orgId));
+  if (!orgExists) {
+    response.status(404).json({ error: "Organization not found." });
+    return;
+  }
+  const adminSessionId = request.admin?.sid;
+  if (!adminSessionId) {
+    response.status(401).json({ error: "Admin session not found." });
+    return;
+  }
+  const changedAt = new Date();
+  const change = await organizationProductSettingsStore.setSwitch({
+    orgId,
+    switchKey,
+    enabled: body.enabled,
+    adminSessionId,
+    updatedAt: changedAt,
+    auditEvent: {
+      id: `audit_${uuid()}`,
+      actorType: "platform_admin",
+      actorId: PLATFORM_ADMIN_ACTOR_ID,
+      action: "organization_product_switch.changed",
+      orgId,
+      userId: null,
+      message: "Changed an organization product switch.",
+      metadata: {
+        adminSessionId,
+        ipAddress: getClientIp(request),
+        userAgent: request.get("user-agent")?.slice(0, 500) ?? null,
+        switchKey,
+      },
+      createdAt: changedAt.toISOString(),
+    },
+  });
+  const payload: UpdateOrganizationProductSwitchResponse = {
+    ...(await buildOrganizationProductSettingsResponse(orgId)),
+    switchKey,
+    changed: change.changed,
+  };
+  response.json(payload);
 });
 
 app.patch("/orgs/:orgId/modules/training-content", requireAdmin, async (request: Request, response: Response) => {
@@ -18456,8 +18590,8 @@ app.get("/mobile/users/:userId/admin/org/access-requests", async (request: Reque
       return;
     }
 
-    if (actor.orgRole !== "org_admin") {
-      response.status(403).json({ error: "Org admin access required." });
+    if (!canDecideCustomerAccessRequests(actor)) {
+      response.status(403).json({ error: "Organization user administration access required." });
       return;
     }
 
@@ -18537,8 +18671,8 @@ app.patch("/mobile/users/:userId/admin/org/access-requests/:requestId", async (r
       return;
     }
 
-    if (actor.orgRole !== "org_admin") {
-      response.status(403).json({ error: "Org admin access required." });
+    if (!canDecideCustomerAccessRequests(actor)) {
+      response.status(403).json({ error: "Organization user administration access required." });
       return;
     }
 
@@ -22639,7 +22773,7 @@ app.get("/mobile/users/:userId/admin/org/users", async (request: Request, respon
       return;
     }
 
-    if (actor.orgRole !== "org_admin" && actor.orgRole !== "user_admin") {
+    if (!canAdministerOrganizationUsers(actor)) {
       response.status(403).json({ error: "Admin access required." });
       return;
     }
@@ -22812,8 +22946,11 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
   const actorUserId = request.params.userId;
   const targetUserId = request.params.targetUserId;
   const body = request.body as {
+    firstName?: unknown;
+    lastName?: unknown;
     status?: UserStatus;
     employeeId?: unknown;
+    managerUserId?: unknown;
     allowDailyOverageThisCycle?: unknown;
     dailySecondsCapOverride?: unknown;
     dailyOverageMode?: unknown;
@@ -22821,9 +22958,24 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     dailyOverageExtraMinutes?: unknown;
   };
   const hasStatusPatch = body.status !== undefined;
+  const hasFirstNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "firstName");
+  const hasLastNamePatch = Object.prototype.hasOwnProperty.call(body ?? {}, "lastName");
   const hasEmployeeIdPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "employeeId");
+  const hasManagerPatch = Object.prototype.hasOwnProperty.call(body ?? {}, "managerUserId");
   const hasOveragePatch = typeof body.allowDailyOverageThisCycle === "boolean";
   const hasDailyCapOverridePatch = body.dailySecondsCapOverride !== undefined;
+  const allowedPatchFields = new Set([
+    "firstName", "lastName", "status", "employeeId", "managerUserId",
+    "allowDailyOverageThisCycle", "dailySecondsCapOverride", "dailyOverageMode",
+    "dailyOverageDurationDays", "dailyOverageExtraMinutes",
+  ]);
+  const unknownPatchFields = body && typeof body === "object"
+    ? Object.keys(body).filter((field) => !allowedPatchFields.has(field))
+    : [];
+  if (unknownPatchFields.length > 0) {
+    response.status(400).json({ error: `Unsupported user patch field: ${unknownPatchFields[0]}.` });
+    return;
+  }
 
   const payload = await withDatabase(async (db) => {
     const actor = getUserById(db, actorUserId);
@@ -22847,9 +22999,9 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
-    if (!hasStatusPatch && !hasEmployeeIdPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
+    if (!hasFirstNamePatch && !hasLastNamePatch && !hasStatusPatch && !hasEmployeeIdPatch && !hasManagerPatch && !hasOveragePatch && !hasDailyCapOverridePatch) {
       response.status(400).json({
-        error: "Provide at least one patch field: status, employeeId, allowDailyOverageThisCycle, or dailySecondsCapOverride."
+        error: "Provide at least one supported organization-user patch field."
       });
       return;
     }
@@ -22878,19 +23030,11 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       return;
     }
 
-    const actorCanManageRegularTarget = canEnterpriseActorManageRegularUser({ actor, target });
-    if (actor.orgRole === "user_admin" && !actorCanManageRegularTarget) {
-      response.status(404).json({ error: "Target user not found in organization." });
-      return;
-    }
-
-    if (actor.orgRole === "user_admin" && (hasDailyCapOverridePatch || hasOveragePatch)) {
-      response.status(403).json({ error: "User admins cannot modify organization usage controls." });
-      return;
-    }
-
     let nextStatus = target.status;
+    let nextFirstName = getUserFirstName(target);
+    let nextLastName = getUserLastName(target);
     let nextEmployeeId = target.employeeId ?? null;
+    let nextManagerUserId = normalizeManagerUserId(target.managerUserId);
     let nextDailySecondsCapOverride = target.dailySecondsCapOverride;
     let nextAllowDailyOverageThisCycle = target.allowDailyOverageThisCycle;
     let nextDailyOverageExpiresAt = target.dailyOverageExpiresAt;
@@ -22899,25 +23043,48 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     let nextDailyOverageBaseSecondsCap = target.dailyOverageBaseSecondsCap ?? null;
     let nextDailyOverageExtraSecondsGranted = target.dailyOverageExtraSecondsGranted ?? null;
 
+    if (hasFirstNamePatch || hasLastNamePatch) {
+      if (!canEditCustomerUserField({ context: { actor }, target, field: "firstName" })) {
+        response.status(403).json({ error: "You cannot edit names for this user." });
+        return;
+      }
+      if (hasFirstNamePatch) {
+        const normalized = normalizeRequiredUserNameInput(body.firstName, "firstName");
+        if (!normalized.ok) {
+          response.status(400).json({ error: normalized.error, code: normalized.code });
+          return;
+        }
+        nextFirstName = normalized.value;
+      }
+      if (hasLastNamePatch) {
+        const normalized = normalizeRequiredUserNameInput(body.lastName, "lastName");
+        if (!normalized.ok) {
+          response.status(400).json({ error: normalized.error, code: normalized.code });
+          return;
+        }
+        nextLastName = normalized.value;
+      }
+    }
+
     if (hasStatusPatch) {
       if (!body.status || !isUserStatus(body.status)) {
         response.status(400).json({ error: "Valid status is required." });
         return;
       }
-      if (target.orgRole === "org_admin" && body.status === "disabled") {
-        const activeOrgAdminCount = db.users.filter(
-          (user) => user.accountType === "enterprise" && user.orgId === org.id && user.orgRole === "org_admin" && user.status === "active"
-        ).length;
-        if (activeOrgAdminCount <= 1) {
-          response.status(403).json({ error: "At least one active org admin is required." });
-          return;
-        }
+      if (!canChangeCustomerUserStatus({
+        context: { actor },
+        target,
+        nextStatus: body.status,
+        orgUsers: db.users.filter((user) => user.accountType === "enterprise" && user.orgId === org.id),
+      })) {
+        response.status(403).json({ error: "You cannot change status for this user." });
+        return;
       }
       nextStatus = body.status;
     }
 
     if (hasEmployeeIdPatch) {
-      if (actor.orgRole === "user_admin" && !actorCanManageRegularTarget) {
+      if (!canEditCustomerUserField({ context: { actor }, target, field: "employeeId" })) {
         response.status(403).json({ error: "You cannot edit Employee ID for this user." });
         return;
       }
@@ -22942,7 +23109,29 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       nextEmployeeId = normalizedEmployeeId.value;
     }
 
+    if (hasManagerPatch) {
+      if (!canEditCustomerUserField({ context: { actor }, target, field: "managerUserId" })) {
+        response.status(403).json({ error: "You cannot assign a manager for this user." });
+        return;
+      }
+      const requestedManagerUserId = normalizeManagerUserId(body.managerUserId);
+      const managerValidation = validateManagerAssignment({
+        orgUsers: db.users.filter((user) => user.accountType === "enterprise" && user.orgId === org.id),
+        target,
+        managerUserId: requestedManagerUserId,
+      });
+      if (!managerValidation.ok) {
+        response.status(400).json({ error: managerValidation.error, code: managerValidation.code });
+        return;
+      }
+      nextManagerUserId = managerValidation.manager?.id ?? null;
+    }
+
     if (hasDailyCapOverridePatch) {
+      if (!canEditCustomerUserField({ context: { actor }, target, field: "usageControls" })) {
+        response.status(403).json({ error: "You cannot modify usage controls for this user." });
+        return;
+      }
       if (
         body.dailySecondsCapOverride !== null &&
         (!Number.isSafeInteger(body.dailySecondsCapOverride) || Number(body.dailySecondsCapOverride) < 0)
@@ -22954,6 +23143,10 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
     }
 
     if (hasOveragePatch) {
+      if (!canEditCustomerUserField({ context: { actor }, target, field: "usageControls" })) {
+        response.status(403).json({ error: "You cannot modify usage controls for this user." });
+        return;
+      }
       const now = new Date();
       const grant = buildTemporaryDailyOverageGrant({
         patch: body,
@@ -22973,8 +23166,14 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       nextDailyOverageExtraSecondsGranted = grant.values.dailyOverageExtraSecondsGranted ?? null;
     }
 
+    const beforeFirstName = getUserFirstName(target);
+    const beforeLastName = getUserLastName(target);
+    const beforeManagerUserId = normalizeManagerUserId(target.managerUserId);
+    target.firstName = nextFirstName;
+    target.lastName = nextLastName;
     target.status = nextStatus;
     target.employeeId = nextEmployeeId;
+    target.managerUserId = nextManagerUserId;
     target.dailySecondsCapOverride = nextDailySecondsCapOverride;
     target.allowDailyOverageThisCycle = nextAllowDailyOverageThisCycle;
     target.dailyOverageExpiresAt = nextDailyOverageExpiresAt;
@@ -23007,7 +23206,10 @@ app.patch("/mobile/users/:userId/admin/org/users/:targetUserId", async (request:
       message: `Updated org-user controls for ${target.email}.`,
       metadata: {
         status: target.status,
+        firstNameChanged: beforeFirstName !== getUserFirstName(target),
+        lastNameChanged: beforeLastName !== getUserLastName(target),
         employeeIdChanged: hasEmployeeIdPatch,
+        managerChanged: beforeManagerUserId !== normalizeManagerUserId(target.managerUserId),
         dailySecondsCapOverride: target.dailySecondsCapOverride,
         allowDailyOverageThisCycle: target.allowDailyOverageThisCycle,
         dailyOverageExpiresAt: target.dailyOverageExpiresAt,
@@ -24182,6 +24384,7 @@ export async function startApiServer(): Promise<void> {
       performancePlanStore,
       userEmployeeIdClaimStore,
       orgModuleEntitlementStore,
+      organizationProductSettingsStore,
       trainingContentStore,
       trainingContentAssetStore,
       trainingPackStore
@@ -24371,6 +24574,13 @@ export function setOrgModuleEntitlementStoreForTest(store: OrgModuleEntitlementS
     throw new Error("setOrgModuleEntitlementStoreForTest is only available in test.");
   }
   orgModuleEntitlementStore = store;
+}
+
+export function setOrganizationProductSettingsStoreForTest(store: OrganizationProductSettingsStore): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setOrganizationProductSettingsStoreForTest is only available in test.");
+  }
+  organizationProductSettingsStore = store;
 }
 
 export function setTrainingContentAssetServiceForTest(

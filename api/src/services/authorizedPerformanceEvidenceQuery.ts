@@ -1,6 +1,6 @@
 import type { DashboardViewer } from "@voicepractice/shared";
 
-import { canDashboardViewerAccessOrg } from "./dashboardAuthorization.js";
+import { canDashboardViewerAccessOrg, hasDashboardEntryAuthority } from "./dashboardAuthorization.js";
 import {
   getDashboardPermittedUserIds,
 } from "./performanceAuthorization.js";
@@ -128,7 +128,7 @@ export function isCurrentDashboardEligibleActor(params: {
     || viewer.isSuperUser === true
     || actor.accountType !== "enterprise"
     || !actor.orgId
-    || actor.dashboardAccessEnabled !== true
+    || !hasDashboardEntryAuthority(actor)
     || viewer.orgId !== actor.orgId
   ) {
     return false;

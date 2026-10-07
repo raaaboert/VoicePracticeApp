@@ -5,6 +5,10 @@ import {
   type PerformanceAccessLevel,
   type UserProfile,
 } from "@voicepractice/shared";
+import {
+  canManageCustomerRegularUser,
+  canViewCustomerOrganizationUser,
+} from "./customerUserAdministrationPolicy.js";
 
 export const USER_PROFILE_NAME_MAX_LENGTH = 80;
 export const USER_PROFILE_NAME_NOT_PROVIDED = "Not provided";
@@ -142,23 +146,7 @@ export function canEnterpriseActorSeeOrganizationUser(params: {
   actor: UserProfile;
   target: UserProfile;
 }): boolean {
-  if (params.actor.accountType !== "enterprise" || params.target.accountType !== "enterprise") {
-    return false;
-  }
-  if (!params.actor.orgId || params.actor.orgId !== params.target.orgId) {
-    return false;
-  }
-  if (params.actor.orgRole === "org_admin") {
-    return true;
-  }
-  if (params.actor.orgRole !== "user_admin") {
-    return false;
-  }
-
-  return (
-    params.target.id === params.actor.id ||
-    (params.target.orgRole === "user" && normalizeManagerUserId(params.target.managerUserId) === params.actor.id)
-  );
+  return canViewCustomerOrganizationUser({ actor: params.actor }, params.target);
 }
 
 export function listVisibleOrganizationUsers(params: {
@@ -215,6 +203,25 @@ export function validateManagerAssignment(params: {
       error: "Manager must be an active member of the same organization.",
       code: "manager_invalid",
     };
+  }
+
+  const byId = new Map(params.orgUsers.map((user) => [user.id, user] as const));
+  const visited = new Set<string>();
+  let cursor: UserProfile | undefined = manager;
+  while (cursor) {
+    if (cursor.id === params.target.id) {
+      return {
+        ok: false,
+        error: "Manager assignment would create a reporting cycle.",
+        code: "manager_invalid",
+      };
+    }
+    if (visited.has(cursor.id)) {
+      break;
+    }
+    visited.add(cursor.id);
+    const nextId = normalizeManagerUserId(cursor.managerUserId);
+    cursor = nextId ? byId.get(nextId) : undefined;
   }
 
   return { ok: true, manager };
@@ -281,19 +288,22 @@ export function canEnterpriseActorManageRegularUser(params: {
   actor: UserProfile;
   target: UserProfile;
 }): boolean {
-  if (params.actor.accountType !== "enterprise" || params.target.accountType !== "enterprise") {
+  return canManageCustomerRegularUser({ actor: params.actor }, params.target);
+}
+
+export function isCurrentOrganizationManager(params: {
+  user: UserProfile;
+  orgUsers: readonly UserProfile[];
+}): boolean {
+  if (!params.user.orgId || !canBeAssignedAsManager(params.user, params.user.orgId)) {
     return false;
   }
-  if (!params.actor.orgId || params.actor.orgId !== params.target.orgId) {
-    return false;
-  }
-  if (params.actor.orgRole === "org_admin") {
-    return true;
-  }
-  if (params.actor.orgRole === "user_admin") {
-    return params.target.orgRole === "user" && normalizeManagerUserId(params.target.managerUserId) === params.actor.id;
-  }
-  return false;
+  return params.orgUsers.some((report) =>
+    report.accountType === "enterprise"
+    && report.orgId === params.user.orgId
+    && report.status === "active"
+    && normalizeManagerUserId(report.managerUserId) === params.user.id
+  );
 }
 
 export function canOrgAdminManageRole(role: OrgUserRole): role is "user" | "user_admin" {

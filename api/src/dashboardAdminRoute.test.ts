@@ -15,6 +15,8 @@ import {
   EnterpriseJoinRequestRecord,
   EnterpriseOrg,
   MobileAuthRecord,
+  OrganizationProductSettings,
+  OrganizationProductSwitchKey,
   OrgTrainingPackAttachmentRecord,
   OrgTrainingRecord,
   SimulationScoreRecord,
@@ -134,6 +136,11 @@ const moduleEntitlementRows = new Map<string, {
   updatedAt: string | null;
 }>();
 const moduleEntitlementAuditEvents: AuditEvent[] = [];
+const productSettingsRows = new Map<string, OrganizationProductSettings & {
+  orgId: string;
+  updatedByAdminSessionId: string | null;
+}>();
+const productSettingsAuditEvents: AuditEvent[] = [];
 const trainingContentAssetRouteCalls: Array<{
   method: string;
   params: Record<string, any>;
@@ -540,7 +547,7 @@ function buildDatabase(): ApiDatabase {
       buildUser("org_admin_none", "admin-no-performance@acme.example", {
         orgRole: "org_admin",
         performanceAccess: "none",
-        dashboardAccessEnabled: true,
+        dashboardAccessEnabled: false,
       }),
       buildUser("user_admin_none", "manager-no-performance@acme.example", {
         orgRole: "user_admin",
@@ -1458,6 +1465,41 @@ before(async () => {
       return 0;
     },
   });
+  imported.setOrganizationProductSettingsStoreForTest({
+    async initialize() {},
+    async get(orgId: string) {
+      return productSettingsRows.get(orgId) ?? {
+        orgId,
+        allowCustomerScenarioCreation: false,
+        requireOrgAdminScenarioApproval: true,
+        allowUserAdminFocusTopicManagement: false,
+        allowManagerFocusTopicManagement: false,
+        updatedByAdminSessionId: null,
+        updatedAt: null,
+      };
+    },
+    async setSwitch(input) {
+      const previous = productSettingsRows.get(input.orgId) ?? {
+        orgId: input.orgId,
+        allowCustomerScenarioCreation: false,
+        requireOrgAdminScenarioApproval: true,
+        allowUserAdminFocusTopicManagement: false,
+        allowManagerFocusTopicManagement: false,
+        updatedByAdminSessionId: null,
+        updatedAt: null,
+      };
+      const current = {
+        ...previous,
+        [input.switchKey]: input.enabled,
+        updatedByAdminSessionId: input.adminSessionId,
+        updatedAt: (input.updatedAt ?? new Date()).toISOString(),
+      };
+      const changed = previous[input.switchKey] !== input.enabled;
+      productSettingsRows.set(input.orgId, current);
+      if (changed) productSettingsAuditEvents.push(input.auditEvent);
+      return { previous, current, switchKey: input.switchKey, changed };
+    },
+  });
   imported.setTrainingContentAssetServiceForTest({
     async initiateUpload(params) {
       trainingContentAssetRouteCalls.push({ method: "initiate", params });
@@ -2233,6 +2275,76 @@ test("internal Admin Utility module endpoint is authorized, tenant-scoped, persi
   assert.equal(missingOrg.status, 404);
 });
 
+test("organization product settings expose conservative defaults and master-only audited controls", async () => {
+  productSettingsRows.clear();
+  productSettingsAuditEvents.length = 0;
+
+  const defaults = await adminRequest("/orgs/org_1/product-settings");
+  assert.equal(defaults.status, 200);
+  assert.deepEqual(defaults.body.settings, {
+    allowCustomerScenarioCreation: false,
+    requireOrgAdminScenarioApproval: true,
+    allowUserAdminFocusTopicManagement: false,
+    allowManagerFocusTopicManagement: false,
+    updatedAt: null,
+  });
+
+  const orgAdminRead = await dashboardRequest("/dashboard/admin/product-settings", orgAdminToken);
+  assert.equal(orgAdminRead.status, 200);
+  const userAdminRead = await dashboardRequest("/dashboard/admin/product-settings", userAdminToken);
+  assert.equal(userAdminRead.status, 403);
+  const unauthenticatedWrite = await publicRequest(
+    "/orgs/org_1/product-settings/allowCustomerScenarioCreation",
+    { method: "PATCH", body: JSON.stringify({ enabled: true }) },
+  );
+  assert.equal(unauthenticatedWrite.status, 401);
+  for (const [label, token] of [
+    ["Org Admin", orgAdminToken],
+    ["User Admin and current manager", userAdminToken],
+    ["regular dashboard user", regularDashboardToken],
+  ] as const) {
+    const customerWrite = await dashboardRequest(
+      "/orgs/org_1/product-settings/allowCustomerScenarioCreation",
+      token,
+      { method: "PATCH", body: JSON.stringify({ enabled: true }) },
+    );
+    assert.equal(customerWrite.status, 401, label);
+  }
+
+  for (const switchKey of [
+    "allowCustomerScenarioCreation",
+    "requireOrgAdminScenarioApproval",
+    "allowUserAdminFocusTopicManagement",
+    "allowManagerFocusTopicManagement",
+  ] as const) {
+    const enabled = switchKey !== "requireOrgAdminScenarioApproval";
+    const updated = await adminRequest(`/orgs/org_1/product-settings/${switchKey}`, {
+      method: "PATCH",
+      headers: { "user-agent": "route-test-agent" },
+      body: JSON.stringify({ enabled }),
+    });
+    assert.equal(updated.status, 200, switchKey);
+    assert.equal((updated.body.settings as Record<string, unknown>)[switchKey], enabled);
+  }
+  assert.equal(productSettingsAuditEvents.length, 4);
+  assert.equal(productSettingsAuditEvents.every((event) => event.actorType === "platform_admin" && event.orgId === "org_1"), true);
+  assert.equal(productSettingsAuditEvents.every((event) => typeof event.metadata?.adminSessionId === "string"), true);
+  assert.equal(productSettingsAuditEvents.every((event) => event.metadata?.userAgent === "route-test-agent"), true);
+
+  const repeated = await adminRequest("/orgs/org_1/product-settings/allowCustomerScenarioCreation", {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(repeated.status, 200);
+  assert.equal(repeated.body.changed, false);
+  assert.equal(productSettingsAuditEvents.length, 4);
+
+  assert.equal((await adminRequest("/orgs/org_missing/product-settings")).status, 404);
+  assert.equal((await adminRequest("/orgs/org_1/product-settings/notASwitch", {
+    method: "PATCH", body: JSON.stringify({ enabled: true }),
+  })).status, 400);
+});
+
 test("organization contact updates remain admin-only, narrow, persistent, and auditable", async () => {
   const unauthorized = await publicRequest("/orgs/org_1", {
     method: "PATCH",
@@ -2742,9 +2854,9 @@ test("organization performance route maps facade authorization denials without c
   assert.equal((validEmpty.body.activity as { attemptCount?: number }).attemptCount, 0);
   assert.deepEqual(validEmpty.body.metricGroups, []);
 
-  for (const token of [regularTeamToken, orgAdminNoneToken]) {
+  for (const [label, token] of [["regular team", regularTeamToken], ["org admin none", orgAdminNoneToken]] as const) {
     const denied = await dashboardRequest(organizationPerformancePath(), token);
-    assert.equal(denied.status, 403);
+    assert.equal(denied.status, 403, `${label}: ${JSON.stringify(denied.body)}`);
     assert.equal(denied.body.error, "Organization performance access required.");
     assert.equal(denied.body.code, "dashboard_scope_denied");
   }
@@ -2884,9 +2996,9 @@ test("organization intelligence HTTP route enforces inputs, scope, existence hid
     assert.equal((await dashboardRequest(route + extra, orgAdminToken)).status, 400, extra);
   }
 
-  for (const token of [regularTeamToken, orgAdminNoneToken, userAdminNoneToken]) {
+  for (const [label, token] of [["regular team", regularTeamToken], ["org admin none", orgAdminNoneToken], ["user admin none", userAdminNoneToken]] as const) {
     const denied = await dashboardRequest(route, token);
-    assert.equal(denied.status, 403);
+    assert.equal(denied.status, 403, label);
     assert.equal(denied.body.code, "dashboard_scope_denied");
   }
 
@@ -2950,9 +3062,9 @@ test("team performance HTTP route keeps 400, 403, 404, and generic 500 distinct"
   for (const extra of ["&month=10", "&dimension=division&dimensionId=division_a", "&from=2026-09-01"]) {
     assert.equal((await dashboardRequest(route + extra, regularTeamToken)).status, 400);
   }
-  for (const token of [orgAdminNoneToken, userAdminNoneToken]) {
+  for (const [label, token] of [["org admin none", orgAdminNoneToken], ["user admin none", userAdminNoneToken]] as const) {
     const denied = await dashboardRequest(route, token);
-    assert.equal(denied.status, 403);
+    assert.equal(denied.status, 403, label);
     assert.equal(denied.body.code, "dashboard_scope_denied");
   }
   const crossOrg = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_2"), regularTeamToken);
@@ -3016,9 +3128,9 @@ test("team intelligence HTTP route enforces input, access, existence hiding, saf
     assert.equal((await dashboardRequest(route + extra, regularTeamToken)).status, 400);
   }
 
-  for (const token of [orgAdminNoneToken, userAdminNoneToken]) {
+  for (const [label, token] of [["org admin none", orgAdminNoneToken], ["user admin none", userAdminNoneToken]] as const) {
     const denied = await dashboardRequest(route, token);
-    assert.equal(denied.status, 403);
+    assert.equal(denied.status, 403, label);
     assert.equal(denied.body.code, "dashboard_scope_denied");
   }
   assert.equal(
@@ -3080,14 +3192,33 @@ test("dashboard admin users are tenant-scoped and regular users cannot access Ad
   );
 });
 
-test("user-admin users are scoped to themselves and directly assigned reports", async () => {
+test("user-admin users see all same-organization users with regular-user administration capabilities", async () => {
   const result = await dashboardRequest("/dashboard/admin/users", userAdminToken);
   assert.equal(result.status, 200);
 
-  const users = result.body.users as Array<{ userId: string }>;
-  const userIds = users.map((user) => user.userId).sort();
-  assert.deepEqual(userIds, ["learner", "learner_atomic", "learner_status", "role_target", "user_admin"]);
-  assert.deepEqual(result.body.managerOptions, []);
+  const users = result.body.users as Array<{
+    userId: string;
+    canEditEmployeeId: boolean;
+    canEditNames: boolean;
+    canAssignManager: boolean;
+    canDeactivate: boolean;
+  }>;
+  const userIds = users.map((user) => user.userId);
+  for (const expected of ["learner", "unassigned_learner", "other_manager_report", "eligible_user_admin", "org_admin"]) {
+    assert.equal(userIds.includes(expected), true, expected);
+  }
+  assert.equal(userIds.includes("other_org_user"), false);
+  const regularRow = users.find((user) => user.userId === "unassigned_learner");
+  assert.deepEqual(
+    { editId: regularRow?.canEditEmployeeId, editNames: regularRow?.canEditNames, manager: regularRow?.canAssignManager },
+    { editId: true, editNames: true, manager: true },
+  );
+  const privilegedRow = users.find((user) => user.userId === "org_admin");
+  assert.deepEqual(
+    { editId: privilegedRow?.canEditEmployeeId, editNames: privilegedRow?.canEditNames, manager: privilegedRow?.canAssignManager, deactivate: privilegedRow?.canDeactivate },
+    { editId: false, editNames: false, manager: false, deactivate: false },
+  );
+  assert.equal((result.body.managerOptions as Array<{ userId: string }>).some((row) => row.userId === "org_admin_peer"), true);
 
   const viewer = result.body.viewer as {
     performanceAccess?: string;
@@ -3098,8 +3229,8 @@ test("user-admin users are scoped to themselves and directly assigned reports", 
     };
   };
   assert.equal(viewer.performanceAccess, "team");
-  assert.equal(viewer.capabilities?.approveRejectAccessRequests, false);
-  assert.equal(viewer.capabilities?.assignUserManagers, false);
+  assert.equal(viewer.capabilities?.approveRejectAccessRequests, true);
+  assert.equal(viewer.capabilities?.assignUserManagers, true);
   assert.equal(viewer.capabilities?.managePerformanceAccess, false);
 });
 
@@ -3519,7 +3650,7 @@ test("dashboard division route filtering stays tenant-bound and fails closed on 
   assert.equal(inaccessibleAttemptWithMismatchedDivision.body.error, "Attempt detail not found.");
 });
 
-test("mobile user-admin routes are scoped to self and direct reports", async () => {
+test("mobile user-admin routes use organization-wide regular-user administration scope", async () => {
   const orgAdminList = await mobileRequest("/mobile/users/org_admin/admin/org/users", "token_org_admin");
   assert.equal(orgAdminList.status, 200);
   const orgAdminUserIds = (orgAdminList.body.users as Array<{ userId: string }>).map((row) => row.userId);
@@ -3529,28 +3660,31 @@ test("mobile user-admin routes are scoped to self and direct reports", async () 
 
   const scopedList = await mobileRequest("/mobile/users/user_admin/admin/org/users", "token_user_admin");
   assert.equal(scopedList.status, 200);
-  const scopedUserIds = (scopedList.body.users as Array<{ userId: string }>).map((row) => row.userId).sort();
-  assert.deepEqual(scopedUserIds, ["learner", "learner_atomic", "learner_status", "role_target", "user_admin"]);
+  const scopedUserIds = (scopedList.body.users as Array<{ userId: string }>).map((row) => row.userId);
+  assert.equal(scopedUserIds.includes("unassigned_learner"), true);
+  assert.equal(scopedUserIds.includes("other_manager_report"), true);
+  assert.equal(scopedUserIds.includes("eligible_user_admin"), true);
+  assert.equal(scopedUserIds.includes("other_org_user"), false);
 
   const selfDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/user_admin", "token_user_admin");
   assert.equal(selfDetail.status, 200);
   const directReportDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin");
   assert.equal(directReportDetail.status, 200);
   const unassignedDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/unassigned_learner", "token_user_admin");
-  assert.equal(unassignedDetail.status, 404);
+  assert.equal(unassignedDetail.status, 200);
   const otherManagerReportDetail = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
-  assert.equal(otherManagerReportDetail.status, 404);
+  assert.equal(otherManagerReportDetail.status, 200);
 
   const otherUserAdminPatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/eligible_user_admin", "token_user_admin", {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" })
   });
-  assert.equal(otherUserAdminPatch.status, 404);
+  assert.equal(otherUserAdminPatch.status, 403);
   const orgAdminPatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/org_admin", "token_user_admin", {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" })
   });
-  assert.equal(orgAdminPatch.status, 404);
+  assert.equal(orgAdminPatch.status, 403);
   const usageControlPatch = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin", {
     method: "PATCH",
     body: JSON.stringify({ dailySecondsCapOverride: 60 })
@@ -3563,6 +3697,25 @@ test("mobile user-admin routes are scoped to self and direct reports", async () 
   });
   assert.equal(employeePatch.status, 200);
   assert.equal((employeePatch.body as { employeeId?: string }).employeeId, "EMP-MOBILE-1");
+  const mobileNameAndManager = await mobileRequest(
+    "/mobile/users/user_admin/admin/org/users/unassigned_learner",
+    "token_user_admin",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ firstName: "Updated", lastName: "Learner", managerUserId: "regular_dashboard" }),
+    },
+  );
+  assert.equal(mobileNameAndManager.status, 200);
+  const mobileUpdatedUser = await readUser("unassigned_learner");
+  assert.equal(mobileUpdatedUser?.firstName, "Updated");
+  assert.equal(mobileUpdatedUser?.lastName, "Learner");
+  assert.equal(mobileUpdatedUser?.managerUserId, "regular_dashboard");
+  const clearMobileManager = await mobileRequest(
+    "/mobile/users/user_admin/admin/org/users/unassigned_learner",
+    "token_user_admin",
+    { method: "PATCH", body: JSON.stringify({ managerUserId: null }) },
+  );
+  assert.equal(clearMobileManager.status, 200);
   const deactivate = await mobileRequest("/mobile/users/user_admin/admin/org/users/learner", "token_user_admin", {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" })
@@ -3574,15 +3727,15 @@ test("mobile user-admin routes are scoped to self and direct reports", async () 
   });
   assert.equal(reactivate.status, 200);
 
-  const accessRequestDenied = await mobileRequest(
-    "/mobile/users/user_admin/admin/org/access-requests/jr_pending",
+  const crossTenantDecision = await mobileRequest(
+    "/mobile/users/user_admin/admin/org/access-requests/jr_other",
     "token_user_admin",
     {
       method: "PATCH",
       body: JSON.stringify({ action: "approve" })
     }
   );
-  assert.equal(accessRequestDenied.status, 403);
+  assert.equal(crossTenantDecision.status, 404);
 
   const crossTenantRead = await mobileRequest("/mobile/users/org_admin/admin/org/users/other_org_user", "token_org_admin");
   assert.equal(crossTenantRead.status, 404);
@@ -3813,7 +3966,7 @@ test("mobile admin user patching is atomic across combined status and Employee I
     method: "PATCH",
     body: JSON.stringify({ status: "disabled", employeeId: "EMP-NEW-MGR" })
   });
-  assert.equal(unauthorizedAdmin.status, 404);
+  assert.equal(unauthorizedAdmin.status, 403);
   const afterUnauthorizedAdmin = await readUser("eligible_user_admin");
   assert.equal(afterUnauthorizedAdmin?.status, "active");
   assert.equal(afterUnauthorizedAdmin?.employeeId, "MGR-2");
@@ -3844,14 +3997,19 @@ test("mobile admin user patching is atomic across combined status and Employee I
   assert.equal(afterRestore?.status, "active");
   assert.equal(afterRestore?.employeeId, null);
 
-  const scopedBypass = await mobileRequest("/mobile/users/user_admin/admin/org/users/unassigned_learner", "token_user_admin", {
+  const organizationWide = await mobileRequest("/mobile/users/user_admin/admin/org/users/unassigned_learner", "token_user_admin", {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled", employeeId: "EMP-SCOPE-BYPASS" })
   });
-  assert.equal(scopedBypass.status, 404);
-  const afterScopedBypass = await readUser("unassigned_learner");
-  assert.equal(afterScopedBypass?.status, "active");
-  assert.equal(afterScopedBypass?.employeeId, "EMP-U");
+  assert.equal(organizationWide.status, 200);
+  const afterOrganizationWide = await readUser("unassigned_learner");
+  assert.equal(afterOrganizationWide?.status, "disabled");
+  assert.equal(afterOrganizationWide?.employeeId, "EMP-SCOPE-BYPASS");
+  const restoreOrganizationWide = await mobileRequest("/mobile/users/org_admin/admin/org/users/unassigned_learner", "token_org_admin", {
+    method: "PATCH",
+    body: JSON.stringify({ status: "active", employeeId: "EMP-U" })
+  });
+  assert.equal(restoreOrganizationWide.status, 200);
 
   const crossTenant = await mobileRequest("/mobile/users/org_admin/admin/org/users/other_org_user", "token_org_admin", {
     method: "PATCH",
@@ -3863,9 +4021,9 @@ test("mobile admin user patching is atomic across combined status and Employee I
   assert.equal(afterCrossTenant?.employeeId, "EMP-1");
 });
 
-test("mobile manager scope updates immediately after reassignment and demotion", async () => {
+test("mobile User Admin visibility remains organization-wide across manager reassignment", async () => {
   const initiallyDenied = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
-  assert.equal(initiallyDenied.status, 404);
+  assert.equal(initiallyDenied.status, 200);
 
   const assigned = await dashboardRequest("/dashboard/admin/users/other_manager_report", orgAdminToken, {
     method: "PATCH",
@@ -3881,14 +4039,11 @@ test("mobile manager scope updates immediately after reassignment and demotion",
   });
   assert.equal(reassignedAway.status, 200);
   const noLongerVisible = await mobileRequest("/mobile/users/user_admin/admin/org/users/other_manager_report", "token_user_admin");
-  assert.equal(noLongerVisible.status, 404);
+  assert.equal(noLongerVisible.status, 200);
 
   const managerList = await mobileRequest("/mobile/users/mobile_scope_manager/admin/org/users", "token_mobile_scope_manager");
   assert.equal(managerList.status, 200);
-  assert.deepEqual(
-    (managerList.body.users as Array<{ userId: string }>).map((row) => row.userId).sort(),
-    ["mobile_scope_manager", "mobile_scope_report"]
-  );
+  assert.equal((managerList.body.users as Array<{ userId: string }>).some((row) => row.userId === "unassigned_learner"), true);
 
   const demoted = await dashboardRequest("/dashboard/admin/users/mobile_scope_manager", orgAdminToken, {
     method: "PATCH",
@@ -3905,11 +4060,11 @@ test("mobile manager scope updates immediately after reassignment and demotion",
 });
 
 test("manager options and assignment validation share role-independent eligibility", async () => {
-  const userAdminNameDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
+  const userAdminNameAllowed = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ firstName: "No", lastName: "Access" }),
   });
-  assert.equal(userAdminNameDenied.status, 403);
+  assert.equal(userAdminNameAllowed.status, 200);
 
   const userAdminRoleDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
     method: "PATCH",
@@ -3917,11 +4072,11 @@ test("manager options and assignment validation share role-independent eligibili
   });
   assert.equal(userAdminRoleDenied.status, 403);
 
-  const userAdminManagerDenied = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
+  const userAdminManagerAllowed = await dashboardRequest("/dashboard/admin/users/learner", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ managerUserId: "eligible_user_admin" }),
   });
-  assert.equal(userAdminManagerDenied.status, 403);
+  assert.equal(userAdminManagerAllowed.status, 200);
 
   for (const managerUserId of [
     "other_org_user",
@@ -4125,28 +4280,28 @@ test("dashboard admin role boundaries block user-admin access to administrators"
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" }),
   });
-  assert.equal(userAdminDeactivateOrgAdmin.status, 404);
+  assert.equal(userAdminDeactivateOrgAdmin.status, 403);
   assert.equal((await readUser("org_admin_peer"))?.status, "active");
 
   const userAdminEditOrgAdmin = await dashboardRequest("/dashboard/admin/users/org_admin_peer", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ employeeId: "UA-NOPE" }),
   });
-  assert.equal(userAdminEditOrgAdmin.status, 404);
+  assert.equal(userAdminEditOrgAdmin.status, 403);
   assert.equal((await readUser("org_admin_peer"))?.employeeId, "ADM-2");
 
   const userAdminDeactivateUserAdmin = await dashboardRequest("/dashboard/admin/users/eligible_user_admin", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ status: "disabled" }),
   });
-  assert.equal(userAdminDeactivateUserAdmin.status, 404);
+  assert.equal(userAdminDeactivateUserAdmin.status, 403);
   assert.equal((await readUser("eligible_user_admin"))?.status, "active");
 
   const userAdminReactivateUserAdmin = await dashboardRequest("/dashboard/admin/users/disabled_user_admin", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ status: "active" }),
   });
-  assert.equal(userAdminReactivateUserAdmin.status, 404);
+  assert.equal(userAdminReactivateUserAdmin.status, 403);
   assert.equal((await readUser("disabled_user_admin"))?.status, "disabled");
 
   const orgAdminDeactivateUserAdmin = await dashboardRequest("/dashboard/admin/users/eligible_user_admin", orgAdminToken, {
@@ -4218,6 +4373,12 @@ test("Employee ID edits support clear, conflict, CSV export, and user-admin role
   const rows = exported.body.rows as Array<{ employeeId: string; email: string; role: string; status: string }>;
   assert.equal(rows.some((row) => row.email === "learner@acme.example" && row.employeeId === "EMP-2"), true);
   assert.equal(rows.some((row) => row.email === "learner@other.example"), false);
+
+  const userAdminExport = await dashboardRequest("/dashboard/admin/users/export", userAdminToken);
+  assert.equal(userAdminExport.status, 200);
+  const userAdminRows = userAdminExport.body.rows as Array<{ email: string }>;
+  assert.equal(userAdminRows.some((row) => row.email === "unassigned@acme.example"), true);
+  assert.equal(userAdminRows.some((row) => row.email === "learner@other.example"), false);
 
   const auditMetadata = await readAuditMetadataJson();
   assert.equal(auditMetadata.includes("EMP-2"), false);
@@ -5071,7 +5232,8 @@ test("company-code join requests accept Gmail, are duplicate-safe, and still req
   const unauthenticated = await publicRequest("/dashboard/admin/access-requests");
   assert.equal(unauthenticated.status, 401);
   const unauthorizedRole = await dashboardRequest("/dashboard/admin/access-requests", userAdminToken);
-  assert.equal(unauthorizedRole.status, 403);
+  assert.equal(unauthorizedRole.status, 200);
+  assert.equal((unauthorizedRole.body.requests as Array<{ orgId: string }>).every((row) => row.orgId === "org_1"), true);
   const crossTenant = await dashboardRequest("/dashboard/admin/access-requests?orgId=org_2", orgAdminToken);
   assert.equal(crossTenant.status, 404);
 });
@@ -5128,18 +5290,18 @@ test("file-backed failed join approval never publishes membership or request sta
 });
 
 test("dashboard and mobile approvals use the same pending-request transition", async () => {
-  const userAdminDenied = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", userAdminToken, {
+  const userAdminApproved = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ action: "approve" }),
   });
-  assert.equal(userAdminDenied.status, 403);
+  assert.equal(userAdminApproved.status, 200);
 
   const approved = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", orgAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ action: "approve" }),
   });
-  assert.equal(approved.status, 200);
-  assert.equal((approved.body.request as { status?: string }).status, "approved");
+  assert.equal(approved.status, 409);
+  assert.equal((userAdminApproved.body.request as { status?: string }).status, "approved");
   assert.equal((await waitForPersistedUserState("pending_user", (user) => user?.orgId === "org_1"))?.performanceAccess, "none");
 
   const repeatedApproval = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", orgAdminToken, {
@@ -5162,7 +5324,7 @@ test("dashboard and mobile approvals use the same pending-request transition", a
     true
   );
 
-  const rejected = await dashboardRequest("/dashboard/admin/access-requests/jr_reject", orgAdminToken, {
+  const rejected = await dashboardRequest("/dashboard/admin/access-requests/jr_reject", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ action: "reject", reason: "Not a trial user." }),
   });
@@ -5177,8 +5339,8 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   assert.equal((await readDb()).enterpriseJoinRequests.find((request) => request.id === "jr_reject")?.status, "rejected");
 
   const mobileApproved = await mobileRequest(
-    "/mobile/users/org_admin/admin/org/access-requests/jr_mobile",
-    "token_org_admin",
+    "/mobile/users/user_admin/admin/org/access-requests/jr_mobile",
+    "token_user_admin",
     {
       method: "PATCH",
       body: JSON.stringify({ action: "approve" }),

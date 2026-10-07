@@ -82,6 +82,7 @@ test("database startup initializes Performance tables through the normal extract
       performancePlanStore,
       userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
       orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+      organizationProductSettingsStore: fakeStore(calls, "organizationProductSettingsStore"),
       trainingContentStore: fakeStore(calls, "trainingContentStore"),
       trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore"),
       trainingPackStore: fakeStore(calls, "trainingPackStore")
@@ -107,6 +108,7 @@ test("database startup initializes Performance tables through the normal extract
     "migrateLegacyWebAuthSessionsFromAppState",
     "performancePlanStore.initialize",
     "orgModuleEntitlementStore.initialize",
+    "organizationProductSettingsStore.initialize",
     "trainingContentStore.initialize",
     "trainingContentAssetStore.initialize",
     "trainingPackStore.initialize",
@@ -135,6 +137,7 @@ test("database readiness refresh initializes the Performance store before loadin
       performancePlanStore: fakeStore(calls, "performancePlanStore"),
       userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
       orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+      organizationProductSettingsStore: fakeStore(calls, "organizationProductSettingsStore"),
       trainingContentStore: fakeStore(calls, "trainingContentStore"),
       trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
     },
@@ -157,6 +160,7 @@ test("database readiness refresh initializes the Performance store before loadin
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
     "orgModuleEntitlementStore.initialize",
+    "organizationProductSettingsStore.initialize",
     "trainingContentStore.initialize",
     "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization",
@@ -180,6 +184,7 @@ test("database readiness fails before loading app state when user profile normal
         performancePlanStore: fakeStore(calls, "performancePlanStore"),
         userEmployeeIdClaimStore: fakeStore(calls, "userEmployeeIdClaimStore"),
         orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
+        organizationProductSettingsStore: fakeStore(calls, "organizationProductSettingsStore"),
         trainingContentStore: fakeStore(calls, "trainingContentStore"),
         trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
       },
@@ -205,6 +210,7 @@ test("database readiness fails before loading app state when user profile normal
     "performancePlanStore.initialize",
     "userEmployeeIdClaimStore.initialize",
     "orgModuleEntitlementStore.initialize",
+    "organizationProductSettingsStore.initialize",
     "trainingContentStore.initialize",
     "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization"
