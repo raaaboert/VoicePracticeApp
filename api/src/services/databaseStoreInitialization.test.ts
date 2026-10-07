@@ -84,6 +84,7 @@ test("database startup initializes Performance tables through the normal extract
       orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
       organizationProductSettingsStore: fakeStore(calls, "organizationProductSettingsStore"),
       trainingContentStore: fakeStore(calls, "trainingContentStore"),
+      focusTopicAuthorityStore: fakeStore(calls, "focusTopicAuthorityStore"),
       trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore"),
       trainingPackStore: fakeStore(calls, "trainingPackStore")
     },
@@ -110,6 +111,7 @@ test("database startup initializes Performance tables through the normal extract
     "orgModuleEntitlementStore.initialize",
     "organizationProductSettingsStore.initialize",
     "trainingContentStore.initialize",
+    "focusTopicAuthorityStore.initialize",
     "trainingContentAssetStore.initialize",
     "trainingPackStore.initialize",
     "runStartupUsageIntegrityMaintenance"
@@ -139,6 +141,7 @@ test("database readiness refresh initializes the Performance store before loadin
       orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
       organizationProductSettingsStore: fakeStore(calls, "organizationProductSettingsStore"),
       trainingContentStore: fakeStore(calls, "trainingContentStore"),
+      focusTopicAuthorityStore: fakeStore(calls, "focusTopicAuthorityStore"),
       trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
     },
     async loadDatabase(): Promise<void> {
@@ -162,6 +165,7 @@ test("database readiness refresh initializes the Performance store before loadin
     "orgModuleEntitlementStore.initialize",
     "organizationProductSettingsStore.initialize",
     "trainingContentStore.initialize",
+    "focusTopicAuthorityStore.initialize",
     "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization",
     "loadDatabase"
@@ -186,6 +190,7 @@ test("database readiness fails before loading app state when user profile normal
         orgModuleEntitlementStore: fakeStore(calls, "orgModuleEntitlementStore"),
         organizationProductSettingsStore: fakeStore(calls, "organizationProductSettingsStore"),
         trainingContentStore: fakeStore(calls, "trainingContentStore"),
+        focusTopicAuthorityStore: fakeStore(calls, "focusTopicAuthorityStore"),
         trainingContentAssetStore: fakeStore(calls, "trainingContentAssetStore")
       },
       async migrateUserProfileAppStateNormalization(): Promise<void> {
@@ -212,6 +217,7 @@ test("database readiness fails before loading app state when user profile normal
     "orgModuleEntitlementStore.initialize",
     "organizationProductSettingsStore.initialize",
     "trainingContentStore.initialize",
+    "focusTopicAuthorityStore.initialize",
     "trainingContentAssetStore.initialize",
     "migrateUserProfileAppStateNormalization"
   ]);

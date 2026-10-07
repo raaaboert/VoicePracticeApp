@@ -271,6 +271,10 @@ import {
   createOrganizationProductSettingsStore,
   OrganizationProductSettingsStore,
 } from "./storage/organizationProductSettingsStore.js";
+import {
+  createFocusTopicAuthorityStore,
+  type FocusTopicAuthorityStore,
+} from "./storage/focusTopicAuthorityStore.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
 import { createTrainingContentScenarioLinkService } from "./services/trainingContentScenarioLinks.js";
 import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
@@ -645,6 +649,13 @@ let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitl
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
 });
 let organizationProductSettingsStore: OrganizationProductSettingsStore = createOrganizationProductSettingsStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+let focusTopicAuthorityStore: FocusTopicAuthorityStore = createFocusTopicAuthorityStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
@@ -4834,6 +4845,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
         orgModuleEntitlementStore,
         organizationProductSettingsStore,
         trainingContentStore,
+        focusTopicAuthorityStore,
         trainingContentAssetStore
       },
       loadDatabase: async () => {
@@ -16296,6 +16308,22 @@ app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: R
     return;
   }
 
+  try {
+    if (await focusTopicAuthorityStore.hasTopicReferences(orgId, trainingId)) {
+      response.status(409).json({
+        error: "This Focus Topic has durable history and must be archived instead of deleted.",
+        code: "focus_topic_archive_required",
+      });
+      return;
+    }
+  } catch {
+    response.status(503).json({
+      error: "Focus Topic reference safety could not be verified.",
+      code: "focus_topic_reference_check_unavailable",
+    });
+    return;
+  }
+
   const result = await withDatabase(async (db) => {
     const org = getOrgById(db, orgId);
     if (!org) {
@@ -24386,6 +24414,7 @@ export async function startApiServer(): Promise<void> {
       orgModuleEntitlementStore,
       organizationProductSettingsStore,
       trainingContentStore,
+      focusTopicAuthorityStore,
       trainingContentAssetStore,
       trainingPackStore
     },
@@ -24581,6 +24610,13 @@ export function setOrganizationProductSettingsStoreForTest(store: OrganizationPr
     throw new Error("setOrganizationProductSettingsStoreForTest is only available in test.");
   }
   organizationProductSettingsStore = store;
+}
+
+export function setFocusTopicAuthorityStoreForTest(store: FocusTopicAuthorityStore): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setFocusTopicAuthorityStoreForTest is only available in test.");
+  }
+  focusTopicAuthorityStore = store;
 }
 
 export function setTrainingContentAssetServiceForTest(
