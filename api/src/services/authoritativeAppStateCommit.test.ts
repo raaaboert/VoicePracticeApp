@@ -25,7 +25,7 @@ const auditEvent: AuditEvent = {
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
-type Failure = "claims" | "sessions" | "session_create" | "audit" | "save" | "commit" | null;
+type Failure = "claims" | "sessions" | "session_create" | "audit" | "sidewrite" | "save" | "commit" | null;
 function harness(
   failure: Failure = null,
   fileMode = false,
@@ -33,10 +33,10 @@ function harness(
   initialOrgStatus: "active" | "disabled" = "active",
   options?: { initialDb?: ApiDatabase; auditEvent?: AuditEvent; newWebSessions?: WebAuthSessionRecord[] },
 ) {
-  type Durable = { appState: ApiDatabase; sessions: string[]; audits: AuditEvent[]; claims: string[] };
+  type Durable = { appState: ApiDatabase; sessions: string[]; audits: AuditEvent[]; claims: string[]; notifications: string[] };
   const initialDb = options?.initialDb ?? db(initialStatus);
   (initialDb.orgs[0] as { status: string }).status = initialOrgStatus;
-  let durable: Durable = { appState: initialDb, sessions: ["user_1"], audits: [], claims: [] };
+  let durable: Durable = { appState: initialDb, sessions: ["user_1"], audits: [], claims: [], notifications: [] };
   let staged: Durable | null = null;
   let activeClient: AppStateTransactionClient | null = null;
   let cached: ApiDatabase | null = null;
@@ -101,19 +101,25 @@ function harness(
     before: structuredClone(durable.appState), working,
     auditEvents: [options?.auditEvent ?? auditEvent],
     newWebSessions: options?.newWebSessions,
+    requiredTransactionSideWrites: [async (received) => {
+      const target = checkClient(received);
+      if (failure === "sidewrite") throw new Error("injected notification side-write failure");
+      target.notifications.push("notification_1");
+    }],
     buildPersistedSnapshot: (value) => value,
     onCommitted: (value) => { cached = value; },
   });
   return { commit, getDurable: () => durable, getCache: () => cached };
 }
 
-for (const failure of ["claims", "sessions", "audit", "save", "commit"] as const) {
+for (const failure of ["claims", "sessions", "audit", "sidewrite", "save", "commit"] as const) {
   test(`authoritative ${failure} failure rolls back state, session purge, audit, and cache publication`, async () => {
     const subject = harness(failure);
     await assert.rejects(subject.commit(), /injected/);
     assert.equal(subject.getDurable().appState.users[0]?.status, "active");
     assert.deepEqual(subject.getDurable().sessions, ["user_1"]);
     assert.deepEqual(subject.getDurable().audits, []);
+    assert.deepEqual(subject.getDurable().notifications, []);
     assert.equal(subject.getCache(), null);
   });
 }
@@ -124,6 +130,7 @@ test("successful privileged mutation commits one audit, revocation, and app_stat
   assert.equal(subject.getDurable().appState.users[0]?.status, "disabled");
   assert.deepEqual(subject.getDurable().sessions, []);
   assert.deepEqual(subject.getDurable().audits.map((event) => event.id), ["audit_1"]);
+  assert.deepEqual(subject.getDurable().notifications, ["notification_1"]);
   assert.equal(subject.getCache()?.users[0]?.status, "disabled");
 });
 

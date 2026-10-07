@@ -115,15 +115,17 @@ export function AdminWorkspace({
   accessRequestsPayload,
   orgId,
   trainingContentAvailable,
+  initialTab = "users",
 }: {
   usersPayload: DashboardAdminUsersResponse;
   accessRequestsPayload: DashboardAdminAccessRequestsResponse;
   orgId: string | null;
   trainingContentAvailable: boolean;
+  initialTab?: AdminTab;
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const [activeTab, setActiveTab] = useState<AdminTab>("users");
+  const [activeTab, setActiveTab] = useState<AdminTab>(initialTab);
   const [users, setUsers] = useState(usersPayload.users);
   const [requests, setRequests] = useState(accessRequestsPayload.requests);
   const [search, setSearch] = useState("");

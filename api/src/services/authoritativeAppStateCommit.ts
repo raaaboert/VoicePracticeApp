@@ -1,5 +1,6 @@
 import type { ApiDatabase, AuditEvent, WebAuthSessionRecord } from "@voicepractice/shared";
 import type { DatabaseStorage } from "../storage.js";
+import type { AppStateTransactionClient } from "../storage.js";
 import type { AuditEventStore } from "../storage/auditEventStore.js";
 import type { UserEmployeeIdClaimStore } from "../storage/userEmployeeIdClaimStore.js";
 import type { WebAuthSessionStore } from "../storage/webAuthSessionStore.js";
@@ -16,6 +17,7 @@ export interface AuthoritativeAppStateCommitInput {
   newWebSessions?: WebAuthSessionRecord[];
   buildPersistedSnapshot: (db: ApiDatabase) => ApiDatabase;
   beforeSessionRevocation?: () => Promise<void>;
+  requiredTransactionSideWrites?: Array<(client: AppStateTransactionClient | null) => Promise<void>>;
   beforeAppStateSave?: () => Promise<void>;
   onCommitted: (db: ApiDatabase) => void;
 }
@@ -34,6 +36,9 @@ export async function commitAuthoritativeAppState(input: AuthoritativeAppStateCo
     }
     if (input.auditEvents.length > 0) {
       await input.auditStore.appendEvents(input.auditEvents, { client });
+    }
+    for (const sideWrite of input.requiredTransactionSideWrites ?? []) {
+      await sideWrite(client);
     }
     await input.beforeAppStateSave?.();
     await input.storage.save(input.buildPersistedSnapshot(input.working), client);

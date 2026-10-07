@@ -27,6 +27,7 @@ import {
 } from "@voicepractice/shared";
 
 import { createWebAuthService } from "./services/webAuth.js";
+import { buildAccessRequestNotificationInputs } from "./services/accessRequestNotifications.js";
 import {
   AuthorizedOrganizationPerformanceInvariantError,
   type AuthorizedOrganizationPerformanceQuery,
@@ -47,6 +48,10 @@ import type {
 import { TrainingContentAssetServiceError } from "./services/trainingContentAssetService.js";
 import { TrainingContentManagementServiceError } from "./services/trainingContentManagementService.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import {
+  createMemoryUserNotificationStoreForTest,
+  type UserNotificationStore,
+} from "./storage/userNotificationStore.js";
 import {
   getTrainingPackOrderRevision,
   type TrainingPackStore,
@@ -128,6 +133,8 @@ let setRuntimeDurabilityResponseObserverForTest: (
 ) => void;
 let setContentManagementTrainingPackStoreForTest: (store: TrainingPackStore | null) => void;
 let setTrainingPackOrderAuditFailureForTest: (error: Error | null) => void;
+let setUserNotificationStoreForTest: ((store: UserNotificationStore) => void) | null = null;
+let notificationStore = createMemoryUserNotificationStoreForTest();
 const moduleEntitlementRows = new Map<string, {
   orgId: string;
   moduleKey: "training_content";
@@ -1281,6 +1288,10 @@ beforeEach(async () => {
   if (dbPath) {
     await refreshWebAuthTokens(await readDb());
   }
+  if (setUserNotificationStoreForTest) {
+    notificationStore = createMemoryUserNotificationStoreForTest();
+    setUserNotificationStoreForTest(notificationStore);
+  }
 });
 
 async function dashboardRequest(pathname: string, token = orgAdminToken, init?: RequestInit) {
@@ -1418,6 +1429,8 @@ before(async () => {
   setRuntimeDurabilityResponseObserverForTest = imported.setRuntimeDurabilityResponseObserverForTest;
   setContentManagementTrainingPackStoreForTest = imported.setContentManagementTrainingPackStoreForTest;
   setTrainingPackOrderAuditFailureForTest = imported.setTrainingPackOrderAuditFailureForTest;
+  setUserNotificationStoreForTest = imported.setUserNotificationStoreForTest;
+  setUserNotificationStoreForTest(notificationStore);
   imported.setOrgModuleEntitlementStoreForTest({
     async initialize() {
       // The route test injects a deterministic store; PostgreSQL behavior is covered separately.
@@ -5209,6 +5222,32 @@ test("company-code join requests accept Gmail, are duplicate-safe, and still req
   assert.equal(duplicate.status, 200);
   assert.equal(duplicate.body.created, false);
 
+  const orgAdminNotifications = await dashboardRequest("/dashboard/notifications", orgAdminToken);
+  const userAdminNotifications = await dashboardRequest("/dashboard/notifications", userAdminToken);
+  const regularNotifications = await dashboardRequest("/dashboard/notifications", regularDashboardToken);
+  assert.equal(orgAdminNotifications.status, 200);
+  assert.equal(userAdminNotifications.status, 200);
+  assert.equal(regularNotifications.status, 200);
+  assert.equal(orgAdminNotifications.body.unreadCount, 1);
+  assert.equal(userAdminNotifications.body.unreadCount, 1);
+  assert.equal(regularNotifications.body.unreadCount, 0);
+  const orgAdminNotification = (orgAdminNotifications.body.notifications as Array<{ id: string; kind: string; subjectId: string }>)[0]!;
+  assert.equal(orgAdminNotification.kind, "access_request");
+  const crossUserRead = await dashboardRequest(
+    `/dashboard/notifications/${encodeURIComponent(orgAdminNotification.id)}/read`,
+    userAdminToken,
+    { method: "PATCH" },
+  );
+  assert.equal(crossUserRead.status, 404);
+  const ownRead = await dashboardRequest(
+    `/dashboard/notifications/${encodeURIComponent(orgAdminNotification.id)}/read`,
+    orgAdminToken,
+    { method: "PATCH" },
+  );
+  assert.equal(ownRead.status, 200);
+  assert.equal((ownRead.body.notification as { readAt: string | null }).readAt !== null, true);
+  assert.equal((await dashboardRequest("/dashboard/notifications/unread-count", orgAdminToken)).body.unreadCount, 0);
+
   const db = await readDb();
   const gmailUser = db.users.find((user) => user.id === "gmail_join");
   assert.equal(gmailUser?.accountType, "individual");
@@ -5290,6 +5329,13 @@ test("file-backed failed join approval never publishes membership or request sta
 });
 
 test("dashboard and mobile approvals use the same pending-request transition", async () => {
+  const notificationDb = await readDb();
+  const pendingNotificationRequest = notificationDb.enterpriseJoinRequests.find((entry) => entry.id === "jr_pending");
+  assert.ok(pendingNotificationRequest);
+  await notificationStore.enqueueMany(buildAccessRequestNotificationInputs({
+    db: notificationDb,
+    request: pendingNotificationRequest,
+  }));
   const userAdminApproved = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", userAdminToken, {
     method: "PATCH",
     body: JSON.stringify({ action: "approve" }),
@@ -5302,6 +5348,8 @@ test("dashboard and mobile approvals use the same pending-request transition", a
   });
   assert.equal(approved.status, 409);
   assert.equal((userAdminApproved.body.request as { status?: string }).status, "approved");
+  const resolvedNotifications = await notificationStore.listForRecipient({ recipientUserId: "org_admin", limit: 10 });
+  assert.equal(resolvedNotifications.find((row) => row.subjectId === "jr_pending")?.resolution, "approved");
   assert.equal((await waitForPersistedUserState("pending_user", (user) => user?.orgId === "org_1"))?.performanceAccess, "none");
 
   const repeatedApproval = await dashboardRequest("/dashboard/admin/access-requests/jr_pending", orgAdminToken, {

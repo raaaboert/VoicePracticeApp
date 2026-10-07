@@ -22,6 +22,7 @@
     "test:postgres:app-state": "tsx --test src/storage/appStateTransaction.integration.test.ts",
     "test:postgres:product-settings": "tsx --test src/storage/organizationProductSettingsPostgres.integration.test.ts",
     "test:postgres:focus-topic-authority": "tsx --test src/storage/focusTopicAuthorityPostgres.integration.test.ts",
+    "test:postgres:notifications": "tsx --test src/storage/userNotificationAppStatePostgres.integration.test.ts",
     "reset:simulation-baseline": "tsx ./scripts/reset-simulation-baseline.ts",
     "reset:pretester-history": "tsx ./scripts/reset-pretester-history.ts --local-file",
     "test": "node ../scripts/run-tsx-tests.mjs src=.test.ts scripts=.test.ts"

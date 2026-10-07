@@ -49,6 +49,16 @@ test("middleware allows nested Training Content proxy calls on the app host", ()
   assert.equal(response.headers.get("location"), null);
 });
 
+test("middleware keeps notification inbox API calls on the customer app host", () => {
+  const appResponse = proxy(appHostRequest("/api/notifications/notification_1/read"));
+  assert.equal(appResponse.status, 200);
+  assert.equal(appResponse.headers.get("x-middleware-next"), "1");
+
+  const publicResponse = proxy(publicHostRequest("/api/notifications"));
+  assert.equal(publicResponse.status, 307);
+  assert.equal(publicResponse.headers.get("location"), "https://app.peritio.ai/api/notifications");
+});
+
 test("middleware still redirects non-app API paths away from the app host", () => {
   const response = proxy(appHostRequest("/api/unknown"));
 

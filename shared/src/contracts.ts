@@ -2661,6 +2661,59 @@ export interface DashboardAdminDecideAccessRequestResponse {
   request: DashboardAdminAccessRequestRow;
 }
 
+export const USER_NOTIFICATION_KINDS = [
+  "access_request",
+  "topic_assigned",
+  "content_added",
+  "scenario_submitted",
+  "scenario_reviewed",
+  "goal_due_7d",
+  "goal_due_1d",
+  "goal_overdue",
+  "goal_updated",
+  "goal_commented",
+  "team_goal_due",
+  "team_goal_overdue",
+] as const;
+
+export type UserNotificationKind = (typeof USER_NOTIFICATION_KINDS)[number];
+
+export interface UserNotificationPayload {
+  title?: string;
+  body?: string;
+  destination?: string;
+}
+
+export interface DashboardNotificationRow {
+  id: string;
+  orgId: string;
+  kind: UserNotificationKind;
+  subjectType: string;
+  subjectId: string;
+  payload: UserNotificationPayload;
+  createdAt: string;
+  readAt: string | null;
+  resolvedAt: string | null;
+  resolution: string | null;
+}
+
+export interface DashboardNotificationsResponse {
+  generatedAt: string;
+  unreadCount: number;
+  notifications: DashboardNotificationRow[];
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
+export interface DashboardNotificationUnreadCountResponse {
+  unreadCount: number;
+}
+
+export interface DashboardNotificationMutationResponse {
+  ok: true;
+  notification: DashboardNotificationRow;
+}
+
 export interface RecordUsageSessionRequest {
   simulationSessionId: string;
   userId: string;

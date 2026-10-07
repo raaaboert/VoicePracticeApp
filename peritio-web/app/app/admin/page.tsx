@@ -14,7 +14,7 @@ import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 export default async function AdminPage({
   searchParams,
 }: {
-  searchParams: Promise<{ orgId?: string }>;
+  searchParams: Promise<{ orgId?: string; tab?: string }>;
 }) {
   const params = await searchParams;
   const orgId = params.orgId?.trim() || null;
@@ -64,6 +64,7 @@ export default async function AdminPage({
         accessRequestsPayload={accessRequestsPayload}
         orgId={orgId}
         trainingContentAvailable={trainingContentAvailable}
+        initialTab={params.tab === "access" ? "access" : "users"}
       />
     </>
   );

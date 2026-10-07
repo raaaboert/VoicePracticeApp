@@ -85,6 +85,10 @@ export function isPerformanceApiPath(pathname: string): boolean {
   return pathname.startsWith("/api/performance/");
 }
 
+export function isNotificationApiPath(pathname: string): boolean {
+  return pathname === "/api/notifications" || pathname.startsWith("/api/notifications/");
+}
+
 export function isAppExperiencePath(pathname: string): boolean {
   return pathname === "/" || pathname === "/login" || pathname === "/app" || pathname.startsWith("/app/");
 }

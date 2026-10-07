@@ -16,6 +16,8 @@ import {
   DashboardAdminUpdateUserResponse,
   DashboardAdminUsersExportResponse,
   DashboardAdminUsersResponse,
+  DashboardNotificationMutationResponse,
+  DashboardNotificationsResponse,
   ArchiveDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentRequest,
@@ -772,6 +774,24 @@ export async function decideDashboardAdminAccessRequest(
       body: JSON.stringify(input),
       token,
     }
+  );
+}
+
+export async function getDashboardNotifications(limit = 20, offset = 0): Promise<DashboardNotificationsResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardNotificationsResponse>(
+    `/dashboard/notifications?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+    { token },
+  );
+}
+
+export async function markDashboardNotificationRead(
+  notificationId: string,
+): Promise<DashboardNotificationMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardNotificationMutationResponse>(
+    `/dashboard/notifications/${encodeURIComponent(notificationId)}/read`,
+    { method: "PATCH", token },
   );
 }
 

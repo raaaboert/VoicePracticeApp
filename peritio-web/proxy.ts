@@ -9,6 +9,7 @@ import {
   isAppExperiencePath,
   isAuthApiPath,
   isPerformanceApiPath,
+  isNotificationApiPath,
   isSystemPath,
 } from "@/src/lib/domain";
 import { WEB_AUTH_SESSION_COOKIE_NAME } from "@/src/lib/authConstants";
@@ -64,6 +65,7 @@ export function proxy(request: NextRequest) {
       isAppExperiencePath(pathname) ||
       isAuthApiPath(pathname) ||
       isAdminApiPath(pathname) ||
+      isNotificationApiPath(pathname) ||
       isPerformanceApiPath(pathname)
     ) {
       return NextResponse.redirect(
@@ -103,6 +105,7 @@ export function proxy(request: NextRequest) {
       pathname.startsWith("/app/") ||
       isAuthApiPath(pathname) ||
       isAdminApiPath(pathname) ||
+      isNotificationApiPath(pathname) ||
       isPerformanceApiPath(pathname)
     ) {
       return NextResponse.next();

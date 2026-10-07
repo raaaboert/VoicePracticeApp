@@ -26,6 +26,8 @@ import {
   DashboardAdminUserRow,
   DashboardAdminUsersExportResponse,
   DashboardAdminUsersResponse,
+  DashboardNotificationMutationResponse,
+  DashboardNotificationsResponse,
   ArchiveDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentRequest,
@@ -226,7 +228,7 @@ import {
   encodeSupportCaseMessage,
   normalizeSupportCaseOrigin,
 } from "./supportCaseOrigin.js";
-import { createDatabaseStorage, DatabaseStorage } from "./storage.js";
+import { createDatabaseStorage, DatabaseStorage, type AppStateTransactionClient } from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
@@ -236,6 +238,10 @@ import { createSupportCaseStore } from "./storage/supportCaseStore.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import {
+  createUserNotificationStore,
+  type UserNotificationStore,
+} from "./storage/userNotificationStore.js";
 import {
   ORG_ACCESS_REQUIRED_CODE,
   resolveMobilePaidAiOrganizationAccess,
@@ -357,6 +363,12 @@ import {
 import { createPostCommitEffectRegistry, runPostCommitEffects } from "./services/postCommitEffects.js";
 import type { PostCommitEffect } from "./services/postCommitEffects.js";
 import { commitAuthoritativeAppState } from "./services/authoritativeAppStateCommit.js";
+import {
+  buildAccessRequestNotificationInputs,
+  listAuthorizedDashboardNotifications,
+  markAuthorizedDashboardNotificationRead,
+  resolveAccessRequestNotifications,
+} from "./services/accessRequestNotifications.js";
 import {
   buildRecoveredSimulationEvaluationResult,
   isRecoverableSimulationScoreRecord,
@@ -656,6 +668,13 @@ let organizationProductSettingsStore: OrganizationProductSettingsStore = createO
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
 });
 let focusTopicAuthorityStore: FocusTopicAuthorityStore = createFocusTopicAuthorityStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+let userNotificationStore: UserNotificationStore = createUserNotificationStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
@@ -3006,6 +3025,10 @@ interface AppendAuditEventInput {
 
 const pendingAuditEventsByDb = new WeakMap<ApiDatabase, AuditEvent[]>();
 const pendingWebAuthSessionsByDb = new WeakMap<ApiDatabase, WebAuthSessionRecord[]>();
+const pendingRequiredTransactionSideWritesByDb = new WeakMap<
+  ApiDatabase,
+  Array<(client: AppStateTransactionClient | null) => Promise<void>>
+>();
 const pendingPostCommitEffectsByDb = createPostCommitEffectRegistry<ApiDatabase>();
 const activeMutationDatabases = new WeakSet<ApiDatabase>();
 
@@ -4066,13 +4089,14 @@ function ensureOrgJoinCodes(orgs: EnterpriseOrg[]): EnterpriseOrg[] {
   });
 }
 
-function expireOrgJoinRequests(db: { enterpriseJoinRequests?: EnterpriseJoinRequestRecord[] }, now: Date): void {
+function expireOrgJoinRequests(db: ApiDatabase, now: Date): void {
   const list = db.enterpriseJoinRequests;
   if (!Array.isArray(list) || list.length === 0) {
     return;
   }
 
   const nowMs = now.getTime();
+  const expiredRequestIds: string[] = [];
   for (const row of list) {
     if (row.status !== "pending") {
       continue;
@@ -4088,6 +4112,10 @@ function expireOrgJoinRequests(db: { enterpriseJoinRequests?: EnterpriseJoinRequ
     row.decidedAt = now.toISOString();
     row.decidedByUserId = null;
     row.decisionReason = "Request expired after 7 days.";
+    expiredRequestIds.push(row.id);
+  }
+  if (expiredRequestIds.length > 0 && activeMutationDatabases.has(db)) {
+    queueAccessRequestNotificationResolution(db, expiredRequestIds, "expired", now);
   }
 }
 
@@ -4548,6 +4576,26 @@ async function withFreshReportingRead<T>(handler: (db: ApiDatabase) => Promise<T
   });
 }
 
+function queueRequiredTransactionSideWrite(
+  db: ApiDatabase,
+  write: (client: AppStateTransactionClient | null) => Promise<void>,
+): void {
+  const pending = pendingRequiredTransactionSideWritesByDb.get(db);
+  if (pending) {
+    pending.push(write);
+  } else {
+    pendingRequiredTransactionSideWritesByDb.set(db, [write]);
+  }
+}
+
+function drainRequiredTransactionSideWrites(
+  db: ApiDatabase,
+): Array<(client: AppStateTransactionClient | null) => Promise<void>> {
+  const pending = pendingRequiredTransactionSideWritesByDb.get(db) ?? [];
+  pendingRequiredTransactionSideWritesByDb.delete(db);
+  return pending;
+}
+
 function queuePendingWebAuthSession(db: ApiDatabase, session: WebAuthSessionRecord): void {
   const pending = pendingWebAuthSessionsByDb.get(db) ?? [];
   pending.push(session);
@@ -4603,6 +4651,7 @@ async function commitDatabaseWrite<T>(
       const result = await handler(db);
       const pendingAuditEvents = drainPendingAuditEvents(db);
       const pendingWebAuthSessions = drainPendingWebAuthSessions(db);
+      const pendingRequiredTransactionSideWrites = drainRequiredTransactionSideWrites(db);
       await commitAuthoritativeAppState({
         storage: getOrCreateDatabaseStorage(),
         claimStore: userEmployeeIdClaimStore,
@@ -4612,6 +4661,7 @@ async function commitDatabaseWrite<T>(
         working: db,
         auditEvents: pendingAuditEvents,
         newWebSessions: pendingWebAuthSessions,
+        requiredTransactionSideWrites: pendingRequiredTransactionSideWrites,
         buildPersistedSnapshot: buildPersistedDatabaseSnapshot,
         beforeSessionRevocation: webSessionRevocationFailureForTest
           ? async () => { throw webSessionRevocationFailureForTest; }
@@ -4630,6 +4680,7 @@ async function commitDatabaseWrite<T>(
       activeMutationDatabases.delete(db);
       drainPendingAuditEvents(db);
       drainPendingWebAuthSessions(db);
+      drainRequiredTransactionSideWrites(db);
       pendingPostCommitEffectsByDb.discard(db);
       throw error;
     }
@@ -4844,6 +4895,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
         userEmployeeIdClaimStore,
         orgModuleEntitlementStore,
         organizationProductSettingsStore,
+        userNotificationStore,
         trainingContentStore,
         focusTopicAuthorityStore,
         trainingContentAssetStore
@@ -8393,8 +8445,9 @@ function supersedeOtherPendingOrgJoinRequests(
   db: ApiDatabase,
   approvedRequest: EnterpriseJoinRequestRecord,
   decidedAt: string,
-): { orgIds: Set<string>; count: number } {
+): { orgIds: Set<string>; requestIds: string[]; count: number } {
   const affectedOrgIds = new Set<string>();
+  const requestIds: string[] = [];
   let count = 0;
   for (const request of db.enterpriseJoinRequests) {
     if (request.id === approvedRequest.id || request.userId !== approvedRequest.userId || request.status !== "pending") {
@@ -8406,9 +8459,10 @@ function supersedeOtherPendingOrgJoinRequests(
     request.decidedByUserId = null;
     request.decisionReason = "Superseded by an approved organization membership.";
     affectedOrgIds.add(request.orgId);
+    requestIds.push(request.id);
     count += 1;
   }
-  return { orgIds: affectedOrgIds, count };
+  return { orgIds: affectedOrgIds, requestIds, count };
 }
 
 function queueCommittedOrgJoinUpdates(db: ApiDatabase, userId: string, orgIds: Set<string>): void {
@@ -8427,6 +8481,36 @@ function queueCommittedOrgJoinUpdates(db: ApiDatabase, userId: string, orgIds: S
 
 function queueCommittedOrgJoinAudit(db: ApiDatabase, input: AppendAuditEventInput): void {
   queuePendingAuditEvent(db, buildAuditEvent(input));
+}
+
+function queueAccessRequestCreatedNotifications(
+  db: ApiDatabase,
+  requestRecord: EnterpriseJoinRequestRecord,
+): void {
+  const notifications = buildAccessRequestNotificationInputs({ db, request: requestRecord });
+  if (notifications.length === 0) return;
+  queueRequiredTransactionSideWrite(db, async (client) => {
+    await userNotificationStore.enqueueMany(notifications, { client });
+  });
+}
+
+function queueAccessRequestNotificationResolution(
+  db: ApiDatabase,
+  requestIds: readonly string[],
+  resolution: string,
+  resolvedAt: Date = new Date(),
+): void {
+  const uniqueRequestIds = [...new Set(requestIds.filter((id) => id.trim()))];
+  if (uniqueRequestIds.length === 0) return;
+  queueRequiredTransactionSideWrite(db, async (client) => {
+    await resolveAccessRequestNotifications({
+      store: userNotificationStore,
+      requestIds: uniqueRequestIds,
+      resolution,
+      resolvedAt,
+      client,
+    });
+  });
 }
 
 function decideEnterpriseJoinRequest(params: {
@@ -8455,6 +8539,7 @@ function decideEnterpriseJoinRequest(params: {
     requestRecord.decidedAt = nowValue;
     requestRecord.decidedByUserId = params.actor.id;
     requestRecord.decisionReason = "Target user no longer exists.";
+    queueAccessRequestNotificationResolution(params.db, [requestRecord.id], "target_missing", new Date(nowValue));
     return { ok: false, status: 404, error: "Target user not found." };
   }
 
@@ -8497,6 +8582,8 @@ function decideEnterpriseJoinRequest(params: {
     requestRecord.decidedByUserId = params.actor.id;
     requestRecord.decisionReason = params.reason?.trim() || null;
     const superseded = supersedeOtherPendingOrgJoinRequests(params.db, requestRecord, nowValue);
+    queueAccessRequestNotificationResolution(params.db, [requestRecord.id], "approved", new Date(nowValue));
+    queueAccessRequestNotificationResolution(params.db, superseded.requestIds, "superseded", new Date(nowValue));
     queueCommittedOrgJoinUpdates(params.db, targetUser.id, new Set([params.org.id, ...superseded.orgIds]));
     appendDecisionAudit(
       params.channel === "mobile" ? "org_join.approved_by_org_admin" : "org_join.approved_by_dashboard_admin",
@@ -8513,6 +8600,7 @@ function decideEnterpriseJoinRequest(params: {
     requestRecord.decidedAt = nowValue;
     requestRecord.decidedByUserId = params.actor.id;
     requestRecord.decisionReason = params.reason?.trim() || "Rejected by organization admin.";
+    queueAccessRequestNotificationResolution(params.db, [requestRecord.id], "rejected", new Date(nowValue));
     queueCommittedOrgJoinUpdates(params.db, targetUser.id, new Set([params.org.id]));
     appendDecisionAudit(
       params.channel === "mobile" ? "org_join.rejected_by_org_admin" : "org_join.rejected_by_dashboard_admin",
@@ -8567,6 +8655,7 @@ function createOrReusePendingOrgJoinRequest(params: {
     decisionReason: null
   };
   params.db.enterpriseJoinRequests.push(record);
+  queueAccessRequestCreatedNotifications(params.db, record);
   emitMobileUpdateForOrg(params.db, params.org.id, "org");
   return { created: true, request: record };
 }
@@ -13242,6 +13331,75 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
   if (!payload) return;
   identityAdministrationResponseObserverForTest?.("PATCH /dashboard/admin/users/:userId", 200);
   response.json(payload);
+});
+
+app.get("/dashboard/notifications", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  const rawLimit = getSingleQueryParam(request.query.limit);
+  const rawOffset = getSingleQueryParam(request.query.offset);
+  const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 20;
+  const parsedOffset = rawOffset ? Number.parseInt(rawOffset, 10) : 0;
+  if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 50) {
+    response.status(400).json({ error: "limit must be an integer from 1 to 50." });
+    return;
+  }
+  if (!Number.isInteger(parsedOffset) || parsedOffset < 0 || parsedOffset > 10_000) {
+    response.status(400).json({ error: "offset must be an integer from 0 to 10000." });
+    return;
+  }
+  await withFreshDatabaseRead(async (db) => {
+    const recipient = getUserById(db, request.dashboard!.user.id);
+    if (!recipient) {
+      response.status(404).json({ error: "Notifications not found." });
+      return;
+    }
+    const payload: DashboardNotificationsResponse = await listAuthorizedDashboardNotifications({
+      db,
+      recipient,
+      store: userNotificationStore,
+      limit: parsedLimit,
+      offset: parsedOffset,
+    });
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/notifications/unread-count", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshDatabaseRead(async (db) => {
+    const recipient = getUserById(db, request.dashboard!.user.id);
+    if (!recipient) {
+      response.status(404).json({ error: "Notifications not found." });
+      return;
+    }
+    const payload = await listAuthorizedDashboardNotifications({
+      db,
+      recipient,
+      store: userNotificationStore,
+      limit: 1,
+    });
+    response.json({ unreadCount: payload.unreadCount });
+  });
+});
+
+app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshDatabaseRead(async (db) => {
+    const recipient = getUserById(db, request.dashboard!.user.id);
+    if (!recipient) {
+      response.status(404).json({ error: "Notification not found." });
+      return;
+    }
+    const notification = await markAuthorizedDashboardNotificationRead({
+      db,
+      recipient,
+      store: userNotificationStore,
+      notificationId: request.params.notificationId,
+    });
+    if (!notification) {
+      response.status(404).json({ error: "Notification not found." });
+      return;
+    }
+    const payload: DashboardNotificationMutationResponse = { ok: true, notification };
+    response.json(payload);
+  });
 });
 
 app.get("/dashboard/admin/access-requests", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
@@ -23863,6 +24021,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       requestRecord.decidedAt = nowValue;
       requestRecord.decidedByUserId = null;
       requestRecord.decisionReason = "Target user no longer exists.";
+      queueAccessRequestNotificationResolution(db, [requestRecord.id], "target_missing", new Date(nowValue));
       response.status(404).json({ error: "Target user not found." });
       return;
     }
@@ -23902,6 +24061,8 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       requestRecord.decisionReason = body.reason?.trim() || (assignOrgAdmin ? "Approved as org admin." : null);
 
       const superseded = supersedeOtherPendingOrgJoinRequests(db, requestRecord, nowValue);
+      queueAccessRequestNotificationResolution(db, [requestRecord.id], "approved", new Date(nowValue));
+      queueAccessRequestNotificationResolution(db, superseded.requestIds, "superseded", new Date(nowValue));
       queueCommittedOrgJoinUpdates(db, targetUser.id, new Set([org.id, ...superseded.orgIds]));
       queueCommittedOrgJoinAudit(db, {
         actorType: "platform_admin",
@@ -23923,6 +24084,7 @@ app.patch("/org-join-requests/:requestId", requireAdmin, async (request: Request
       requestRecord.decidedAt = nowValue;
       requestRecord.decidedByUserId = null;
       requestRecord.decisionReason = body.reason?.trim() || "Rejected by platform admin.";
+      queueAccessRequestNotificationResolution(db, [requestRecord.id], "rejected", new Date(nowValue));
 
       queueCommittedOrgJoinUpdates(db, targetUser.id, new Set([org.id]));
       queueCommittedOrgJoinAudit(db, {
@@ -24413,6 +24575,7 @@ export async function startApiServer(): Promise<void> {
       userEmployeeIdClaimStore,
       orgModuleEntitlementStore,
       organizationProductSettingsStore,
+      userNotificationStore,
       trainingContentStore,
       focusTopicAuthorityStore,
       trainingContentAssetStore,
@@ -24617,6 +24780,13 @@ export function setFocusTopicAuthorityStoreForTest(store: FocusTopicAuthoritySto
     throw new Error("setFocusTopicAuthorityStoreForTest is only available in test.");
   }
   focusTopicAuthorityStore = store;
+}
+
+export function setUserNotificationStoreForTest(store: UserNotificationStore): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("setUserNotificationStoreForTest is only available in test.");
+  }
+  userNotificationStore = store;
 }
 
 export function setTrainingContentAssetServiceForTest(

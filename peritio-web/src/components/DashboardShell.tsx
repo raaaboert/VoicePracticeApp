@@ -8,6 +8,7 @@ import { DashboardViewer } from "@voicepractice/shared";
 import { DashboardSessionGuard } from "@/src/components/DashboardSessionGuard";
 import { isDashboardSidebarItemActive } from "@/src/components/dashboardSidebarState";
 import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
+import { NotificationInbox } from "@/src/components/NotificationInbox";
 
 const BASE_NAV_ITEMS = [
   { href: "/app/dashboard", label: "Dashboard" },
@@ -88,6 +89,7 @@ export function DashboardShell({
             <span className="pill">{viewer.email}</span>
           </div>
           <div className="topbar-actions">
+            {!hasCrossAccountAccess ? <NotificationInbox /> : null}
             <ThemeSwitchButton />
             <button type="button" className="ghost-button" onClick={signOut}>
               Sign out
