@@ -21,6 +21,7 @@ import {
   type MobileFocusTopicCatalogContext,
 } from "./mobileFocusTopicCatalog.js";
 import { LEGACY_ORG_TRAINING_CREATED_AT } from "./orgTrainingWorkspace.js";
+import type { FocusTopicAssignment } from "./focusTopicAuthority.js";
 
 const NOW = "2026-10-01T12:00:00.000Z";
 const ORG_ID = "org_a";
@@ -260,6 +261,9 @@ function harness(overrides: Partial<MobileFocusTopicCatalogContext> & {
       async listTrainingPacksForOrg() { return packs; },
     },
     trainingContentStore: {
+      async getPublishedContentForMobile(orgId, contentId) {
+        return records.find((record) => record.content.orgId === orgId && record.content.id === contentId) ?? null;
+      },
       async listPublishedContentForMobileFocusTopics(orgId, topicIds) {
         contentReads.push({ orgId, topicIds: [...topicIds] });
         return records;
@@ -293,6 +297,63 @@ function harness(overrides: Partial<MobileFocusTopicCatalogContext> & {
   };
   return { service, context, contentReads };
 }
+
+function directAssignment(topicId: string, overrides: Partial<FocusTopicAssignment> = {}): FocusTopicAssignment {
+  return {
+    id: `direct_${topicId}`, orgId: ORG_ID, topicId, audience: "organization",
+    subjectUserId: null, grantsManagement: false, createdBy: "admin", createdAt: NOW,
+    revokedBy: null, revokedAt: null, ...overrides,
+  };
+}
+
+test("assignment authority ignores legacy division and Pack gates, includes empty assigned Topics, and denies others", async () => {
+  const { service, context } = harness({
+    authorityMode: "assignments",
+    topics: [topic("assigned"), topic("unassigned"), topic("archived", { status: "archived" })],
+    authoritySnapshot: {
+      assignments: [directAssignment("assigned"), directAssignment("archived")],
+      scenarioAttachments: [], contentAttachments: [],
+    },
+    isTopicVisible: () => false,
+    packAssignments: [assignment("pack", ["standard"])],
+    packAttachments: [packAttachment("unassigned", "pack")],
+  });
+  assert.deepEqual((await service.getCatalog(context)).topics.map((row) => row.id), ["assigned"]);
+  assert.deepEqual((await service.getDetail(context, "assigned"))?.scenarios, []);
+  assert.equal(await service.getDetail(context, "unassigned"), null);
+  assert.equal(await service.getDetail(context, "archived"), null);
+});
+
+test("assignment detail uses direct standard, custom, and content attachments without standalone content grants", async () => {
+  const resource = contentRecord({ id: "content", topicId: null,
+    assignment: { revokedAt: NOW, revokedByActorId: "admin" } });
+  const { service, context } = harness({
+    authorityMode: "assignments", topics: [topic("topic")], records: [resource],
+    authoritySnapshot: {
+      assignments: [directAssignment("topic")],
+      scenarioAttachments: [
+        { id: "std", orgId: ORG_ID, topicId: "topic", scenarioKind: "standard",
+          scenarioId: "standard", attachedBy: "admin", attachedAt: NOW, detachedBy: null, detachedAt: null },
+        { id: "custom", orgId: ORG_ID, topicId: "topic", scenarioKind: "org",
+          scenarioId: "custom", attachedBy: "admin", attachedAt: NOW, detachedBy: null, detachedAt: null },
+        { id: "detached", orgId: ORG_ID, topicId: "topic", scenarioKind: "standard",
+          scenarioId: "old", attachedBy: "admin", attachedAt: NOW, detachedBy: "admin", detachedAt: NOW },
+      ],
+      contentAttachments: [{ id: "resource", orgId: ORG_ID, topicId: "topic", contentId: "content",
+        attachedBy: "admin", attachedAt: NOW, detachedBy: null, detachedAt: null }],
+    },
+    resolveScenario: (id, trainingId) => id === "standard"
+      ? scenarioSummary(id, "standard", null)
+      : id === "custom" ? scenarioSummary(id, "custom", trainingId ?? null) : null,
+  });
+  const detail = await service.getDetail(context, "topic");
+  assert.deepEqual(detail?.scenarios.map((row) => [row.id, row.source, row.trainingId]), [
+    ["custom", "custom", "topic"], ["standard", "standard", null],
+  ]);
+  assert.deepEqual(detail?.resources.map((row) => row.id), ["content"]);
+  assert.deepEqual((await service.getCatalog(context)).topics.map((row) =>
+    [row.scenarioCount, row.resourceCount]), [[2, 1]]);
+});
 
 test("catalog uses active authoritative topic IDs, division visibility, and deterministic ordering", async () => {
   const topics = [

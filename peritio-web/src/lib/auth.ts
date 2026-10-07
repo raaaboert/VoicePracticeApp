@@ -814,6 +814,59 @@ export async function reorderDashboardFocusTopics(
   );
 }
 
+export interface DashboardFocusTopicAssignment {
+  id: string;
+  topicId: string;
+  audience: "organization" | "managers_and_admins" | "manager_only" | "manager_with_team" | "individual";
+  subjectUserId: string | null;
+  grantsManagement: boolean;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export async function listDashboardFocusTopicAssignments(orgId: string, topicId: string) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<{ topicId: string; assignments: DashboardFocusTopicAssignment[] }>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignments`, { token },
+  );
+}
+
+export async function createDashboardFocusTopic(orgId: string, input: { name: string; description: string; status: string }) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<{ id: string; name: string; status: string; description: string }>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function updateDashboardFocusTopic(
+  orgId: string, topicId: string, input: { name?: string; description?: string; status?: string },
+) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<{ id: string; name: string; status: string; description: string }>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`,
+    { method: "PATCH", body: JSON.stringify(input), token },
+  );
+}
+
+export async function createDashboardFocusTopicAssignment(
+  orgId: string, topicId: string, input: { audience: DashboardFocusTopicAssignment["audience"]; subjectUserId: string | null },
+) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicAssignment>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignments`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function revokeDashboardFocusTopicAssignment(orgId: string, topicId: string, assignmentId: string) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicAssignment>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignments/${encodeURIComponent(assignmentId)}`,
+    { method: "DELETE", token },
+  );
+}
+
 export async function getDashboardTrainingPackOrder(orgId: string): Promise<CustomerTrainingPackOrderListResponse> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   const response = await fetchDashboardApi<CustomerTrainingPackOrderListResponse>(

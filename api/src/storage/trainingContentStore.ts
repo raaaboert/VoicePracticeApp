@@ -252,6 +252,7 @@ export interface TrainingContentStore {
 
 interface CreateTrainingContentStoreParams {
   provider: StorageProvider;
+  focusTopicAuthority?: "legacy" | "assignments";
   databaseUrl: string | null;
   pgPoolMax: number;
   pgConnectTimeoutMs: number;
@@ -551,7 +552,8 @@ class PostgresTrainingContentStore implements TrainingContentStore {
   constructor(
     databaseUrl: string,
     options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number },
-    queryPool?: TrainingContentQueryPool
+    queryPool?: TrainingContentQueryPool,
+    private readonly focusTopicAuthority: "legacy" | "assignments" = "legacy",
   ) {
     this.pool =
       queryPool ??
@@ -1234,7 +1236,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       );
       const content = mapRequiredContentRow(updated.rows[0]);
       if (content.publicationState === "published") {
-        await assertPublishable(client, content);
+        await assertPublishable(client, content, this.focusTopicAuthority);
       }
       const metadataFields = changedFields.filter(
         (field) => field !== "nativeBody" && field !== "externalUrl"
@@ -1370,7 +1372,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         );
       }
       if (content.publicationState === "published") {
-        await assertPublishable(client, content);
+        await assertPublishable(client, content, this.focusTopicAuthority);
       }
       await client.query(
         `
@@ -1436,7 +1438,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       }
 
       if (input.action === "publish") {
-        await assertPublishable(client, content);
+        await assertPublishable(client, content, this.focusTopicAuthority);
       }
       const now = nextMutationTime(content.updatedAt, input.now ?? new Date());
       const actorId = requiredId(input.actor.actorId, "Actor id");
@@ -1660,7 +1662,8 @@ async function readRequiredContentDetail(
 
 async function assertPublishable(
   client: Pick<PoolClient, "query">,
-  content: TrainingContentItem
+  content: TrainingContentItem,
+  focusTopicAuthority: "legacy" | "assignments",
 ): Promise<void> {
   const reasons: string[] = [];
   const assignmentResult = await client.query<{ count: string | number }>(
@@ -1671,7 +1674,22 @@ async function assertPublishable(
     `,
     [content.orgId, content.id]
   );
-  if (databaseInteger(assignmentResult.rows[0]?.count ?? 0, "Assignment count") === 0) {
+  let hasPublicationTarget = databaseInteger(assignmentResult.rows[0]?.count ?? 0, "Assignment count") > 0;
+  if (!hasPublicationTarget && focusTopicAuthority === "assignments") {
+    const topicResult = await client.query<{ attached: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM org_content_topic_attachments a
+         JOIN app_state s ON s.id = 'primary'
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.state_json->'orgTrainings', '[]'::jsonb)) t
+         WHERE a.org_id = $1 AND a.content_id = $2 AND a.detached_at IS NULL
+           AND t->>'orgId' = a.org_id AND t->>'id' = a.topic_id
+           AND t->>'status' <> 'archived'
+       ) AS attached`,
+      [content.orgId, content.id],
+    );
+    hasPublicationTarget = topicResult.rows[0]?.attached === true;
+  }
+  if (!hasPublicationTarget) {
     reasons.push("assignment_required");
   }
   if (content.contentType === "native" && !content.nativeBody?.trim()) {
@@ -2233,6 +2251,7 @@ export function createTrainingContentStore(params: CreateTrainingContentStorePar
       pgConnectTimeoutMs: params.pgConnectTimeoutMs,
       pgIdleTimeoutMs: params.pgIdleTimeoutMs,
     },
-    params.queryPool
+    params.queryPool,
+    params.focusTopicAuthority,
   );
 }

@@ -2260,6 +2260,7 @@ export interface OrgTrainingListResponse {
   orgId: string;
   trainings: OrgTrainingSummary[];
   orderRevision: string;
+  authorityMode?: "legacy" | "assignments";
 }
 
 export interface OrgDivisionListResponse {

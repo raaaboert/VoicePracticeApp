@@ -1,5 +1,6 @@
 import type {
   AppConfig,
+  OrgTrainingRecord,
   MobileModuleAvailabilityResponse,
   MobileRelatedPracticeScenarioSummary,
   MobileRelatedPracticeScenariosResponse,
@@ -24,8 +25,15 @@ import { resolveTrainingContentEligibility } from "./trainingContentEligibility.
 import type { TrainingContentScenarioLinkService } from "./trainingContentScenarioLinks.js";
 import type { TrainingContentStorageReadinessService } from "./trainingContentStorageReadiness.js";
 import { resolveCanonicalMobileScenarioSetupSelection } from "./mobileScenarioSetupSelection.js";
+import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
+import { canFutureLearnerAccessFocusTopic } from "./focusTopicAuthority.js";
 
 export interface MobileTrainingContentRequestContext {
+  authorityMode?: "legacy" | "assignments";
+  authoritySnapshot?: FocusTopicAuthoritySnapshot;
+  topics?: readonly OrgTrainingRecord[];
+  generalScenarioConfig?: Pick<AppConfig,
+    "industries" | "roleIndustries" | "segments" | "orgCustomScenarios" | "orgTrainings">;
   user: UserProfile;
   users: readonly UserProfile[];
   organizationActive: boolean;
@@ -148,12 +156,9 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
     const normalizedScenarioId = scenarioId.trim();
     if (
       !normalizedScenarioId
-      || !isScenarioAvailableToMobileUser(
-        context.scenarioConfig,
-        orgId,
-        normalizedScenarioId,
-        trainingId
-      )
+      || !(context.authorityMode === "assignments"
+        ? resolveAssignmentModeScenarioLaunchContext(context, orgId, normalizedScenarioId, trainingId)
+        : isScenarioAvailableToMobileUser(context.scenarioConfig, orgId, normalizedScenarioId, trainingId))
     ) {
       throw unavailableScenarioError();
     }
@@ -183,11 +188,13 @@ class DefaultTrainingContentMobileService implements TrainingContentMobileServic
       .listRawScenarioLinkCandidatesForContent(record.content.orgId, record.content.id);
     const scenarios = new Map<string, MobileRelatedPracticeScenarioSummary>();
     for (const link of links) {
-      const scenario = resolveMobileScenarioLaunchContext(
-        context.scenarioConfig,
-        record.content.orgId,
-        link.scenarioId
-      );
+      const scenario = context.authorityMode === "assignments"
+        ? resolveAssignmentModeScenarioLaunchContext(context, record.content.orgId, link.scenarioId)
+          ?? (context.topics ?? []).reduce<MobileRelatedPracticeScenarioSummary | null>((found, topic) =>
+            found ?? resolveAssignmentModeScenarioLaunchContext(
+              context, record.content.orgId, link.scenarioId, topic.id,
+            ), null)
+        : resolveMobileScenarioLaunchContext(context.scenarioConfig, record.content.orgId, link.scenarioId);
       if (scenario && !scenarios.has(scenario.id)) {
         scenarios.set(scenario.id, scenario);
       }
@@ -333,10 +340,11 @@ export function isMobileTrainingContentRecordEligible(
     || record.content.categoryId !== record.category.id
     || record.category.archivedAt !== null
     || record.content.archivedAt !== null
+    || record.content.publicationState !== "published"
   ) {
     return false;
   }
-  return resolveTrainingContentEligibility({
+  const standaloneEligible = resolveTrainingContentEligibility({
     orgId,
     userId: context.user.id,
     moduleEnabled: true,
@@ -344,6 +352,17 @@ export function isMobileTrainingContentRecordEligible(
     assignments: record.assignments,
     users: context.users,
   }).eligible;
+  if (standaloneEligible) return true;
+  if (context.authorityMode !== "assignments") return false;
+  const attachedTopicIds = new Set((context.authoritySnapshot?.contentAttachments ?? [])
+    .filter((row) => row.orgId === orgId && row.contentId === record.content.id && row.detachedAt === null)
+    .map((row) => row.topicId));
+  const org = { id: orgId, status: context.organizationActive ? "active" as const : "disabled" as const };
+  return (context.topics ?? []).some((topic) => attachedTopicIds.has(topic.id)
+    && canFutureLearnerAccessFocusTopic({
+      user: context.user, users: context.users, organization: org, topic,
+      assignments: context.authoritySnapshot?.assignments ?? [],
+    }));
 }
 
 function buildLibrary(
@@ -505,6 +524,33 @@ function resolveMobileScenarioLaunchContext(
       trainingId: training.id,
     })
     : null;
+}
+
+function resolveAssignmentModeScenarioLaunchContext(
+  context: MobileTrainingContentRequestContext,
+  orgId: string,
+  scenarioId: string,
+  trainingId?: string | null,
+): MobileRelatedPracticeScenarioSummary | null {
+  const topicId = trainingId?.trim() ?? "";
+  if (!topicId) {
+    const general = resolveMobileScenarioLaunchContext(
+      context.generalScenarioConfig ?? context.scenarioConfig, orgId, scenarioId, null,
+    );
+    return general?.source === "standard" ? general : null;
+  }
+  const topic = (context.topics ?? []).find((row) => row.orgId === orgId && row.id === topicId);
+  if (!topic || !canFutureLearnerAccessFocusTopic({
+    user: context.user, users: context.users,
+    organization: { id: orgId, status: context.organizationActive ? "active" : "disabled" },
+    topic, assignments: context.authoritySnapshot?.assignments ?? [],
+  })) return null;
+  const launch = resolveMobileScenarioLaunchContext(context.scenarioConfig, orgId, scenarioId, topicId);
+  if (!launch || !(context.authoritySnapshot?.scenarioAttachments ?? []).some((row) =>
+    row.orgId === orgId && row.topicId === topicId && row.scenarioId === scenarioId
+    && row.scenarioKind === (launch.source === "standard" ? "standard" : "org")
+    && row.detachedAt === null)) return null;
+  return launch;
 }
 
 function unavailableAssetError(): TrainingContentMobileServiceError {

@@ -280,7 +280,15 @@ import {
 import {
   createFocusTopicAuthorityStore,
   type FocusTopicAuthorityStore,
+  type FocusTopicAuthoritySnapshot,
 } from "./storage/focusTopicAuthorityStore.js";
+import {
+  canFutureLearnerAccessFocusTopic,
+  FOCUS_TOPIC_ASSIGNMENT_AUDIENCES,
+  type FocusTopicAssignment,
+  type FocusTopicAssignmentAudience,
+} from "./services/focusTopicAuthority.js";
+import { buildTopicAssignedNotificationInputs } from "./services/topicAssignedNotifications.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
 import { createTrainingContentScenarioLinkService } from "./services/trainingContentScenarioLinks.js";
 import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
@@ -683,6 +691,7 @@ let userNotificationStore: UserNotificationStore = createUserNotificationStore({
 });
 const trainingContentStore = createTrainingContentStore({
   provider: STORAGE_PROVIDER,
+  focusTopicAuthority: runtimeConfig.focusTopicAuthority,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
@@ -1871,8 +1880,57 @@ async function resolveSimulationRuntimeBundle(params: {
   requestedIndustryBaseline: unknown;
   submittedTrainingPackId?: string | null;
   simulationSessionId?: string | null;
+  isSuperUser?: boolean;
+  requireRegisteredSession?: boolean;
   response: Response;
 }): Promise<SimulationRuntimeBundle | { bootstrapOrgId: string } | null> {
+  let authoritativeTrainingId = params.trainingId;
+  let directTopicScenarioAttached = false;
+  let anchoredTrainingPackId: string | null = null;
+  let hasRegisteredAssignmentSession = false;
+  if (runtimeConfig.focusTopicAuthority === "assignments" && !params.isSuperUser) {
+    if (!params.org || params.org.status !== "active"
+      || params.user.accountType !== "enterprise" || params.user.orgId !== params.org.id
+      || params.user.status !== "active" || !params.user.emailVerifiedAt) {
+      params.response.status(404).json({ error: "Scenario is not available." });
+      return null;
+    }
+    const registered = params.simulationSessionId
+      ? await simulationSessionStore.getById(params.simulationSessionId)
+      : null;
+    if (registered) {
+      hasRegisteredAssignmentSession = true;
+      if (registered.userId !== params.user.id || registered.orgId !== params.org.id
+        || registered.scenarioId !== params.scenarioId
+        || (params.trainingId && params.trainingId !== (registered.trainingId ?? null))) {
+        params.response.status(404).json({ error: "Simulation session is not available." });
+        return null;
+      }
+      authoritativeTrainingId = registered.trainingId ?? null;
+      directTopicScenarioAttached = Boolean(authoritativeTrainingId);
+      anchoredTrainingPackId = registered.trainingPackId ?? null;
+    } else {
+      if (params.requireRegisteredSession && params.trainingId) {
+        params.response.status(404).json({ error: "Simulation session is not available." });
+        return null;
+      }
+      const configForUser = resolveConfigForUser(
+        params.db, params.user, params.actingOrgId,
+        { forAssignedTopic: Boolean(params.trainingId) },
+      );
+      const launch = resolveAssignmentModeTopicLaunch({
+        db: params.db, user: params.user, org: params.org, configForUser,
+        scenarioId: params.scenarioId, topicClaim: params.trainingId,
+        authority: await focusTopicAuthorityStore.listSnapshot(params.org.id),
+      });
+      if (!launch) {
+        params.response.status(404).json({ error: "Scenario is not available." });
+        return null;
+      }
+      authoritativeTrainingId = launch.trainingId;
+      directTopicScenarioAttached = Boolean(authoritativeTrainingId);
+    }
+  }
   const useModularPromptArchitecture =
     USE_MODULAR_PROMPT_ARCHITECTURE_ENV && params.org?.enableModularPromptArchitecture === true;
   const requestedIndustryId =
@@ -1880,9 +1938,11 @@ async function resolveSimulationRuntimeBundle(params: {
       ? params.requestedIndustryId.trim()
       : null;
   const submittedTrainingPackId =
-    typeof params.submittedTrainingPackId === "string" && params.submittedTrainingPackId.trim()
-      ? params.submittedTrainingPackId.trim()
-      : null;
+    runtimeConfig.focusTopicAuthority === "assignments" && !params.isSuperUser
+      ? anchoredTrainingPackId
+      : typeof params.submittedTrainingPackId === "string" && params.submittedTrainingPackId.trim()
+        ? params.submittedTrainingPackId.trim()
+        : null;
   const cacheResult =
     params.difficulty && params.personaStyle
       ? simulationRuntimeCache.read({
@@ -1890,7 +1950,7 @@ async function resolveSimulationRuntimeBundle(params: {
           userId: params.user.id,
           actingOrgId: params.actingOrgId,
           scenarioId: params.scenarioId,
-          trainingId: params.trainingId,
+          trainingId: authoritativeTrainingId,
           difficulty: params.difficulty,
           personaStyle: params.personaStyle,
           requestedIndustryId,
@@ -1909,10 +1969,16 @@ async function resolveSimulationRuntimeBundle(params: {
   }
 
   const contextBuildStartedAtMs = Date.now();
-  const configForUser = resolveConfigForUser(params.db, params.user, params.actingOrgId);
+  const configForUser = resolveConfigForUser(
+    params.db, params.user, params.actingOrgId,
+    { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && Boolean(authoritativeTrainingId) },
+  );
   const effectiveDifficulty = params.difficulty ?? configForUser.defaultDifficulty;
   const effectivePersonaStyle = params.personaStyle ?? configForUser.defaultPersonaStyle;
-  const resolvedScenario = resolveMobileScenarioForUser(configForUser, params.scenarioId, params.trainingId);
+  const resolvedScenario = resolveMobileScenarioForUser(
+    configForUser, params.scenarioId, authoritativeTrainingId,
+    { directTopicScenarioAttached },
+  );
   if (!resolvedScenario) {
     const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
       configForUser,
@@ -1940,12 +2006,14 @@ async function resolveSimulationRuntimeBundle(params: {
   );
   const counterpartBehaviorGuidance = resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario);
   const trainingPackLookupStartedAtMs = Date.now();
-  const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
-    orgId: params.actingOrgId,
-    scenarioId: resolvedScenario.scenario.id,
-    useModularPromptArchitecture,
-    submittedTrainingPackId,
-  });
+  const activeTrainingPack = hasRegisteredAssignmentSession
+    ? await resolvePinnedTrainingPackForSession(params.actingOrgId, anchoredTrainingPackId)
+    : await resolvePersistedTrainingPackForScenario({
+        orgId: params.actingOrgId,
+        scenarioId: resolvedScenario.scenario.id,
+        useModularPromptArchitecture,
+        submittedTrainingPackId,
+      });
   const trainingPackLookupMs = useModularPromptArchitecture
     ? Date.now() - trainingPackLookupStartedAtMs
     : 0;
@@ -1986,7 +2054,7 @@ async function resolveSimulationRuntimeBundle(params: {
       db: params.db,
       user: params.user,
       org: params.org,
-      trainingId: resolvedScenario.canonicalTrainingId,
+      trainingId: authoritativeTrainingId,
       resolvedScenario,
     }),
     counterpartBehaviorGuidance,
@@ -2006,7 +2074,7 @@ async function resolveSimulationRuntimeBundle(params: {
       userId: params.user.id,
       actingOrgId: params.actingOrgId,
       scenarioId: params.scenarioId,
-      trainingId: params.trainingId,
+      trainingId: authoritativeTrainingId,
       difficulty: effectiveDifficulty,
       personaStyle: effectivePersonaStyle,
       requestedIndustryId,
@@ -4905,6 +4973,9 @@ async function refreshDatabaseReadiness(): Promise<void> {
       },
       migrateUserProfileAppStateNormalization
     });
+    if (runtimeConfig.focusTopicAuthority === "assignments") {
+      await focusTopicAuthorityStore.assertAssignmentsReady();
+    }
     isDatabaseReady = true;
     databaseReadyError = null;
     databaseReadyConsecutiveFailures = 0;
@@ -5291,8 +5362,40 @@ async function withMobileTrainingContentContext<T>(
     }
 
     const organization = user.orgId ? getOrgById(db, user.orgId) : null;
-    const configForUser = resolveConfigForUser(db, user);
+    const baseConfig = resolveConfigForUser(db, user);
+    const assignmentMode = runtimeConfig.focusTopicAuthority === "assignments";
+    const authoritySnapshot = assignmentMode && organization
+      ? await focusTopicAuthorityStore.listSnapshot(organization.id) : undefined;
+    const assignedConfig = assignmentMode && organization
+      ? resolveConfigForUser(db, user, organization.id, { forAssignedTopic: true })
+      : baseConfig;
+    const visibleTopicIds = new Set(assignmentMode && organization
+      ? db.orgTrainings.filter((topic) => canFutureLearnerAccessFocusTopic({
+          user, users: db.users, organization, topic,
+          assignments: authoritySnapshot?.assignments ?? [],
+        })).map((topic) => topic.id)
+      : []);
+    const directCustomAttachments = (authoritySnapshot?.scenarioAttachments ?? []).filter((row) =>
+      row.scenarioKind === "org" && row.detachedAt === null && visibleTopicIds.has(row.topicId));
+    const configForUser = assignmentMode ? {
+      ...assignedConfig,
+      orgTrainings: (assignedConfig.orgTrainings ?? [])
+        .filter((topic) => visibleTopicIds.has(topic.id))
+        .map((topic) => ({
+          ...topic,
+          attachedTrainingPackIds: [], attachedTrainingPackCount: 0,
+          attachedCustomScenarioIds: directCustomAttachments.filter((row) => row.topicId === topic.id)
+            .map((row) => row.scenarioId),
+          attachedCustomScenarioCount: directCustomAttachments.filter((row) => row.topicId === topic.id).length,
+        })),
+      orgCustomScenarios: (assignedConfig.orgCustomScenarios ?? []).filter((scenario) =>
+        directCustomAttachments.some((row) => row.scenarioId === scenario.id)),
+    } : baseConfig;
     return handler({
+      authorityMode: runtimeConfig.focusTopicAuthority,
+      authoritySnapshot,
+      topics: db.orgTrainings,
+      generalScenarioConfig: baseConfig,
       user,
       users: db.users,
       organizationActive: organization?.status === "active",
@@ -6325,8 +6428,56 @@ function buildPerformanceScopeCandidatesForUser(
   db: ApiDatabase,
   org: EnterpriseOrg,
   user: UserProfile,
-  trainingPacks: readonly TrainingPack[]
+  trainingPacks: readonly TrainingPack[],
+  authoritySnapshot?: FocusTopicAuthoritySnapshot,
 ): PerformanceScopeCandidate[] {
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    if (!authoritySnapshot) return [];
+    const catalog = buildDashboardScenarioCatalog(db, org);
+    const generalConfig = resolveConfigForUser(db, user, org.id);
+    const topicConfig = resolveConfigForUser(db, user, org.id, { forAssignedTopic: true });
+    const candidates = new Map<string, PerformanceScopeCandidate>();
+    const add = (scenarioId: string, topic: { id: string; name: string } | null,
+      config: AppConfig, directTopicScenarioAttached: boolean) => {
+      const entry = catalog.get(scenarioId);
+      if (!entry) return;
+      const actionable = resolveMobileFocusTopicScenarioSummary(
+        config, scenarioId, topic?.id ?? null, { directTopicScenarioAttached },
+      );
+      if (!actionable || actionable.source !== entry.source) return;
+      const existing = candidates.get(scenarioId);
+      const focusTopics = existing?.focusTopics.filter((row) => !row.id.startsWith("role:")) ?? [];
+      if (topic && !focusTopics.some((row) => row.id === topic.id)) focusTopics.push(topic);
+      if (!topic && focusTopics.length === 0) focusTopics.push({
+        id: `role:${entry.segmentId}`, name: entry.segmentLabel || "Assigned role",
+      });
+      candidates.set(scenarioId, {
+        scenarioId, displayName: entry.title, source: entry.source,
+        segmentId: entry.segmentId, segmentLabel: entry.segmentLabel,
+        focusTopics: focusTopics.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)),
+        metadata: { summary: entry.summary },
+      });
+    };
+    for (const segment of generalConfig.segments) {
+      for (const scenario of segment.scenarios ?? []) {
+        if (scenario.enabled !== false) add(scenario.id, null, generalConfig, false);
+      }
+    }
+    for (const topic of db.orgTrainings) {
+      if (!canFutureLearnerAccessFocusTopic({
+        user, users: db.users, organization: org, topic,
+        assignments: authoritySnapshot.assignments,
+      })) continue;
+      for (const attachment of authoritySnapshot.scenarioAttachments) {
+        if (attachment.orgId !== org.id || attachment.topicId !== topic.id || attachment.detachedAt) continue;
+        const entry = catalog.get(attachment.scenarioId);
+        if (entry?.source !== (attachment.scenarioKind === "standard" ? "standard" : "custom")) continue;
+        add(attachment.scenarioId, { id: topic.id, name: topic.name }, topicConfig, true);
+      }
+    }
+    return [...candidates.values()].sort((left, right) =>
+      left.displayName.localeCompare(right.displayName) || left.scenarioId.localeCompare(right.scenarioId));
+  }
   const catalog = buildDashboardScenarioCatalog(db, org);
   const visibleStandardScenarioIds = new Set(
     listOrgVisibleStandardScenarios({ config: db.config, org })
@@ -6426,11 +6577,12 @@ function buildPerformanceScopeCandidatesForUser(
     .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.scenarioId.localeCompare(right.scenarioId));
 }
 
-function buildPerformanceUserContext(
+async function buildPerformanceUserContext(
   db: ApiDatabase,
   user: UserProfile,
-  trainingPacks: readonly TrainingPack[]
-): PerformancePlanUserContext | null {
+  trainingPacks: readonly TrainingPack[],
+  authoritySnapshot?: FocusTopicAuthoritySnapshot,
+): Promise<PerformancePlanUserContext | null> {
   if (user.accountType !== "enterprise" || !user.orgId || user.status !== "active") {
     return null;
   }
@@ -6451,17 +6603,21 @@ function buildPerformanceUserContext(
     divisionName,
     status: user.status,
     orgRole: user.orgRole,
-    candidates: buildPerformanceScopeCandidatesForUser(db, org, user, trainingPacks)
+    candidates: buildPerformanceScopeCandidatesForUser(
+      db, org, user, trainingPacks,
+      authoritySnapshot ?? (runtimeConfig.focusTopicAuthority === "assignments"
+        ? await focusTopicAuthorityStore.listSnapshot(org.id) : undefined),
+    )
   };
 }
 
-function listDashboardPerformanceUserContexts(
+async function listDashboardPerformanceUserContexts(
   db: ApiDatabase,
   principal: DashboardRequestPrincipal,
   divisionId: string | null,
   explicitOrgId: string | null,
   trainingPacksByOrgId: ReadonlyMap<string, readonly TrainingPack[]>
-): PerformancePlanUserContext[] {
+): Promise<PerformancePlanUserContext[]> {
   const viewer = principal.viewer;
   const accessibleOrgIds = new Set(listDashboardAccessibleOrgs(db, viewer).map((org) => org.id));
   if (explicitOrgId) {
@@ -6478,6 +6634,12 @@ function listDashboardPerformanceUserContexts(
     orgIds: accessibleOrgIds,
   });
   const contexts: PerformancePlanUserContext[] = [];
+  const authorityByOrg = new Map<string, FocusTopicAuthoritySnapshot>();
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    for (const orgId of accessibleOrgIds) {
+      authorityByOrg.set(orgId, await focusTopicAuthorityStore.listSnapshot(orgId));
+    }
+  }
   for (const user of db.users) {
     if (user.accountType !== "enterprise" || !user.orgId || !accessibleOrgIds.has(user.orgId)) {
       continue;
@@ -6485,7 +6647,9 @@ function listDashboardPerformanceUserContexts(
     if (!permittedUserIds.has(user.id)) {
       continue;
     }
-    const context = buildPerformanceUserContext(db, user, trainingPacksByOrgId.get(user.orgId) ?? []);
+    const context = await buildPerformanceUserContext(
+      db, user, trainingPacksByOrgId.get(user.orgId) ?? [], authorityByOrg.get(user.orgId),
+    );
     if (!context) {
       continue;
     }
@@ -6502,14 +6666,14 @@ function listDashboardPerformanceUserContexts(
   );
 }
 
-function getDashboardPerformanceUserContext(
+async function getDashboardPerformanceUserContext(
   db: ApiDatabase,
   principal: DashboardRequestPrincipal,
   userId: string,
   explicitOrgId: string | null,
   divisionId: string | null,
   trainingPacks: readonly TrainingPack[]
-): PerformancePlanUserContext | null {
+): Promise<PerformancePlanUserContext | null> {
   const user = getUserById(db, userId);
   if (!user || user.accountType !== "enterprise" || !user.orgId) {
     return null;
@@ -6517,7 +6681,7 @@ function getDashboardPerformanceUserContext(
   if (!canDashboardViewerAccessPerformanceTarget(db, principal, user, explicitOrgId, divisionId)) {
     return null;
   }
-  const context = buildPerformanceUserContext(db, user, trainingPacks);
+  const context = await buildPerformanceUserContext(db, user, trainingPacks);
   if (!context) {
     return null;
   }
@@ -7626,6 +7790,10 @@ function isActivityInDashboardTrainingScope(
     return explicitTrainingId === trainingId;
   }
 
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    return false;
+  }
+
   if (entry.trainingPackId && attachedTrainingPackIds.has(entry.trainingPackId)) {
     return true;
   }
@@ -8316,6 +8484,15 @@ function canDashboardAdminChangeUserStatus(params: {
     nextStatus: params.nextStatus,
     orgUsers: params.orgUsers,
   });
+}
+
+async function resolvePinnedTrainingPackForSession(
+  orgId: string | null,
+  trainingPackId: string | null,
+): Promise<TrainingPack | null> {
+  if (!orgId || !trainingPackId) return null;
+  const packs = await listTrainingPacksForDashboardOrg(orgId);
+  return packs.find((pack) => pack.id === trainingPackId) ?? null;
 }
 
 function buildDashboardAdminManagerOptions(orgUsers: readonly UserProfile[], orgId: string): DashboardAdminManagerOption[] {
@@ -9503,6 +9680,7 @@ function resolveMobileScenarioForUser(
   configForUser: MobileScenarioResolutionConfig,
   scenarioId: string,
   trainingId?: string | null,
+  options?: { directTopicScenarioAttached?: boolean },
 ): ResolvedMobileScenarioContext | null {
   for (const segment of configForUser.segments) {
     if (segment.enabled !== true) {
@@ -9541,10 +9719,11 @@ function resolveMobileScenarioForUser(
   const normalizedTrainingId = typeof trainingId === "string" ? trainingId.trim() : "";
   if (normalizedTrainingId) {
     const selectedTraining = activeTrainings.find((entry) => entry.id === normalizedTrainingId);
-    if (!selectedTraining || !selectedTraining.attachedCustomScenarioIds.includes(customScenario.id)) {
+    if (!options?.directTopicScenarioAttached
+      && (!selectedTraining || !selectedTraining.attachedCustomScenarioIds.includes(customScenario.id))) {
       return null;
     }
-  } else if (
+  } else if (!options?.directTopicScenarioAttached &&
     !activeTrainings.some((entry) => entry.attachedCustomScenarioIds.includes(customScenario.id))
   ) {
     return null;
@@ -9567,12 +9746,58 @@ function resolveMobileScenarioForUser(
   };
 }
 
+function resolveAssignmentModeTopicLaunch(params: {
+  db: ApiDatabase;
+  user: UserProfile;
+  org: EnterpriseOrg;
+  configForUser: MobileScenarioResolutionConfig & Pick<AppConfig, "industries">;
+  scenarioId: string;
+  topicClaim: string | null;
+  authority: FocusTopicAuthoritySnapshot;
+}): { trainingId: string | null; scenario: ResolvedMobileScenarioContext } | null {
+  if (params.user.isSuperUser) return null;
+  const topicId = params.topicClaim?.trim() || null;
+  if (!topicId) {
+    const scenario = resolveMobileScenarioForUser(params.configForUser, params.scenarioId, null);
+    return scenario?.source === "standard" ? { trainingId: null, scenario } : null;
+  }
+  const topic = params.db.orgTrainings.find((row) => row.id === topicId && row.orgId === params.org.id);
+  if (!topic || !canFutureLearnerAccessFocusTopic({
+    user: params.user,
+    users: params.db.users,
+    organization: params.org,
+    topic,
+    assignments: params.authority.assignments,
+  })) return null;
+  const scenario = resolveMobileScenarioForUser(
+    params.configForUser,
+    params.scenarioId,
+    topicId,
+    { directTopicScenarioAttached: true },
+  );
+  if (!scenario) return null;
+  const kind = scenario.source === "standard" ? "standard" : "org";
+  const attached = params.authority.scenarioAttachments.some((row) =>
+    row.orgId === params.org.id && row.topicId === topicId
+    && row.scenarioId === params.scenarioId && row.scenarioKind === kind
+    && row.detachedAt === null
+  );
+  if (!attached || !resolveMobileFocusTopicScenarioSummary(
+    params.configForUser,
+    params.scenarioId,
+    topicId,
+    { directTopicScenarioAttached: true },
+  )) return null;
+  return { trainingId: topicId, scenario };
+}
+
 function resolveMobileFocusTopicScenarioSummary(
   configForUser: MobileScenarioResolutionConfig & Pick<AppConfig, "industries">,
   scenarioId: string,
   trainingId?: string | null,
+  options?: { directTopicScenarioAttached?: boolean },
 ): MobileFocusTopicScenarioSummary | null {
-  const resolved = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
+  const resolved = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId, options);
   if (!resolved) {
     return null;
   }
@@ -10556,7 +10781,12 @@ async function resolveAiBudgetLimitError(
   return null;
 }
 
-function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: string | null): AppConfig {
+function resolveConfigForUser(
+  db: ApiDatabase,
+  user: UserProfile,
+  actingOrgId?: string | null,
+  options?: { forAssignedTopic?: boolean },
+): AppConfig {
   const resolvedOrgId = isSuperUser(user) ? actingOrgId ?? null : user.orgId;
 
   if (!resolvedOrgId) {
@@ -10580,7 +10810,10 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: 
   const divisionsEnabled = org.divisionsEnabled === true;
   const userDivisionId = divisionsEnabled ? resolveUserActiveDivisionId(db, org.id, user) : null;
   const mobileCustomScenarios = getMobileReadyOrgCustomScenarios(org, db.config);
-  const mobileTrainings = getMobileReadyOrgTrainings(db, org, db.config).filter((training) =>
+  const mobileTrainings = (options?.forAssignedTopic
+    ? buildOrgTrainingSummariesInCompanyOrder({ db, orgId: org.id }).filter((topic) => topic.status === "active")
+    : getMobileReadyOrgTrainings(db, org, db.config)).filter((training) =>
+    options?.forAssignedTopic ||
     isDivisionVisibleToUser({
       divisionsEnabled,
       userDivisionId,
@@ -10591,6 +10824,7 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: 
     mobileTrainings.flatMap((training) => training.attachedCustomScenarioIds)
   );
   const trainingScopedCustomScenarios = mobileCustomScenarios.filter((scenario) =>
+    options?.forAssignedTopic ||
     mobileTrainingScenarioIdSet.has(scenario.id)
   );
   const customIndustryIdSet = new Set(
@@ -10605,7 +10839,7 @@ function resolveConfigForUser(db: ApiDatabase, user: UserProfile, actingOrgId?: 
   const filteredSegments = db.config.segments
     .filter((segment) => allowedRoleSegmentIds.has(segment.id))
     .map((segment) => {
-      if (!divisionsEnabled) {
+      if (!divisionsEnabled || options?.forAssignedTopic) {
         return segment;
       }
       return {
@@ -13356,6 +13590,8 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
       db,
       recipient,
       store: userNotificationStore,
+      topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
+        ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       limit: parsedLimit,
       offset: parsedOffset,
     });
@@ -13374,6 +13610,8 @@ app.get("/dashboard/notifications/unread-count", requireDashboardAuth, async (re
       db,
       recipient,
       store: userNotificationStore,
+      topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
+        ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       limit: 1,
     });
     response.json({ unreadCount: payload.unreadCount });
@@ -13391,6 +13629,8 @@ app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth,
       db,
       recipient,
       store: userNotificationStore,
+      topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
+        ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       notificationId: request.params.notificationId,
     });
     if (!notification) {
@@ -13549,7 +13789,7 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
       const orgs = listDashboardAccessibleOrgs(db, request.dashboard!.viewer);
       const organizationSummaries = [];
       for (const org of orgs) {
-        const users = listDashboardPerformanceUserContexts(
+        const users = await listDashboardPerformanceUserContexts(
           db,
           request.dashboard!,
           null,
@@ -13610,7 +13850,7 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
         .filter((org) => !requestedOrgId || org.id === requestedOrgId)
         .map((org) => org.id)
     );
-    const users = listDashboardPerformanceUserContexts(
+    const users = await listDashboardPerformanceUserContexts(
       db,
       request.dashboard!,
       divisionFilter.appliedDivisionId,
@@ -13846,7 +14086,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
       return;
     }
     const trainingPacks = await listTrainingPacksForDashboardOrg(requestedOrgId);
-    const userContext = getDashboardPerformanceUserContext(
+    const userContext = await getDashboardPerformanceUserContext(
       db,
       request.dashboard!,
       body.userId,
@@ -13950,7 +14190,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
       });
       return;
     }
-    const userContext = getDashboardPerformanceUserContext(
+    const userContext = await getDashboardPerformanceUserContext(
       db,
       request.dashboard!,
       body.userId,
@@ -14069,7 +14309,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       });
       return;
     }
-    const userContext = getDashboardPerformanceUserContext(
+    const userContext = await getDashboardPerformanceUserContext(
       db,
       request.dashboard!,
       loaded.plan.userId,
@@ -15275,6 +15515,10 @@ app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
 });
 
 app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin, async (request: Request, response: Response) => {
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    response.status(409).json({ error: "Training Pack assignments are read-only under direct Focus Topic authority." });
+    return;
+  }
   const orgId = request.params.orgId;
   const trainingPackId = request.params.trainingPackId?.trim();
   const body = request.body as SetTrainingPackAssignmentsRequest;
@@ -16212,6 +16456,7 @@ app.get(
     return {
       generatedAt: nowIso(),
       orgId: org.id,
+      authorityMode: runtimeConfig.focusTopicAuthority,
       trainings: buildOrgTrainingSummariesInCompanyOrder({
         db,
         orgId: org.id,
@@ -16226,16 +16471,304 @@ app.get(
   }
 );
 
-app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, response: Response) => {
+app.get(
+  "/orgs/:orgId/trainings/:trainingId/assignments",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const topic = await withFreshDatabaseSnapshotRead((db) => {
+      const org = resolveContentOrganizationOrg(db, request, request.params.orgId, response);
+      return org ? findOrgTrainingRecord(db, org.id, request.params.trainingId) : null;
+    });
+    if (response.headersSent) return;
+    if (!topic) {
+      response.status(404).json({ error: "Focus Topic not found." });
+      return;
+    }
+    const snapshot = await focusTopicAuthorityStore.listSnapshot(topic.orgId);
+    response.json({
+      topicId: topic.id,
+      assignments: snapshot.assignments.filter((row) => row.topicId === topic.id),
+    });
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/assignments",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (runtimeConfig.focusTopicAuthority !== "assignments") {
+      response.status(409).json({ error: "Direct Focus Topic assignments are not active in this environment." });
+      return;
+    }
+    const body = request.body as { audience?: unknown; subjectUserId?: unknown };
+    if (!FOCUS_TOPIC_ASSIGNMENT_AUDIENCES.includes(body.audience as FocusTopicAssignmentAudience)) {
+      response.status(400).json({ error: "Invalid Focus Topic audience." });
+      return;
+    }
+    const audience = body.audience as FocusTopicAssignmentAudience;
+    const targeted = audience === "manager_only" || audience === "manager_with_team" || audience === "individual";
+    const subjectUserId = typeof body.subjectUserId === "string" ? body.subjectUserId.trim() : null;
+    if (targeted !== Boolean(subjectUserId)) {
+      response.status(400).json({ error: "Audience subject is invalid." });
+      return;
+    }
+    const result = await withDatabase(async (db) => {
+      const org = resolveContentOrganizationOrg(db, request, request.params.orgId, response);
+      if (!org) return null;
+      const topic = findOrgTrainingRecord(db, org.id, request.params.trainingId);
+      if (!topic || topic.status === "archived") {
+        response.status(404).json({ error: "Focus Topic not found." });
+        return null;
+      }
+      const subject = subjectUserId ? getUserById(db, subjectUserId) : null;
+      if (targeted && (!subject || subject.accountType !== "enterprise"
+        || subject.orgId !== org.id || subject.status !== "active" || !subject.emailVerifiedAt)) {
+        response.status(400).json({ error: "Audience subject is not an active organization member." });
+        return null;
+      }
+      if ((audience === "manager_only" || audience === "manager_with_team")
+        && !db.users.some((user) => user.orgId === org.id && user.status === "active"
+          && user.managerUserId === subjectUserId)) {
+        response.status(400).json({ error: "Selected manager has no active direct reports." });
+        return null;
+      }
+      const actorId = request.dashboard?.user.id ?? "platform_admin";
+      const createdAt = new Date();
+      const assignment: FocusTopicAssignment = {
+        id: `fta_${uuid()}`, orgId: org.id, topicId: topic.id, audience, subjectUserId,
+        grantsManagement: false, createdBy: actorId, createdAt: createdAt.toISOString(),
+        revokedBy: null, revokedAt: null,
+      };
+      const notificationInputs = buildTopicAssignedNotificationInputs({
+        db, topic, assignments: [assignment], eventKey: assignment.id, createdAt,
+      });
+      queueRequiredTransactionSideWrite(db, async (client) => {
+        if (!client) throw new Error("Focus Topic assignment transaction requires PostgreSQL.");
+        await focusTopicAuthorityStore.createAssignment(assignment, client);
+        await userNotificationStore.enqueueMany(notificationInputs, { client });
+      });
+      const audit = {
+        action: "focus_topic.assignment.created", orgId: org.id,
+        message: `Created Focus Topic learner assignment for ${topic.name}.`,
+        metadata: { topicId: topic.id, assignmentId: assignment.id, audience, subjectUserId, grantsManagement: false },
+      };
+      if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+      else appendPlatformAuditEvent(db, audit);
+      emitMobileUpdateForOrg(db, org.id, "org");
+      return assignment;
+    });
+    if (response.headersSent || !result) return;
+    response.status(201).json(result);
+  },
+);
+
+app.delete(
+  "/orgs/:orgId/trainings/:trainingId/assignments/:assignmentId",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (runtimeConfig.focusTopicAuthority !== "assignments") {
+      response.status(409).json({ error: "Direct Focus Topic assignments are not active in this environment." });
+      return;
+    }
+    const result = await withDatabase(async (db) => {
+      const org = resolveContentOrganizationOrg(db, request, request.params.orgId, response);
+      if (!org) return null;
+      const topic = findOrgTrainingRecord(db, org.id, request.params.trainingId);
+      if (!topic) {
+        response.status(404).json({ error: "Focus Topic not found." });
+        return null;
+      }
+      const snapshot = await focusTopicAuthorityStore.listSnapshot(org.id);
+      const assignment = snapshot.assignments.find((row) => row.topicId === topic.id
+        && row.id === request.params.assignmentId && row.revokedAt === null);
+      if (!assignment) {
+        response.status(404).json({ error: "Active Focus Topic assignment not found." });
+        return null;
+      }
+      const actorId = request.dashboard?.user.id ?? "platform_admin";
+      const at = new Date();
+      queueRequiredTransactionSideWrite(db, async (client) => {
+        if (!client) throw new Error("Focus Topic assignment transaction requires PostgreSQL.");
+        await focusTopicAuthorityStore.revokeAssignment({
+          orgId: org.id, topicId: topic.id, assignmentId: assignment.id, actorId, at,
+        }, client);
+      });
+      const audit = {
+        action: "focus_topic.assignment.revoked", orgId: org.id,
+        message: `Revoked Focus Topic learner assignment for ${topic.name}.`,
+        metadata: { topicId: topic.id, assignmentId: assignment.id, audience: assignment.audience,
+          subjectUserId: assignment.subjectUserId, grantsManagement: assignment.grantsManagement },
+      };
+      if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+      else appendPlatformAuditEvent(db, audit);
+      emitMobileUpdateForOrg(db, org.id, "org");
+      return { ...assignment, revokedBy: actorId, revokedAt: at.toISOString() };
+    });
+    if (response.headersSent || !result) return;
+    response.json(result);
+  },
+);
+
+app.get(
+  "/orgs/:orgId/trainings/:trainingId/direct-attachments",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const topic = await withFreshDatabaseSnapshotRead((db) => {
+      const org = resolveContentOrganizationOrg(db, request, request.params.orgId, response);
+      return org ? findOrgTrainingRecord(db, org.id, request.params.trainingId) : null;
+    });
+    if (response.headersSent) return;
+    if (!topic) {
+      response.status(404).json({ error: "Focus Topic not found." });
+      return;
+    }
+    const authority = await focusTopicAuthorityStore.listSnapshot(topic.orgId);
+    response.json({
+      topicId: topic.id,
+      scenarios: authority.scenarioAttachments.filter((row) => row.topicId === topic.id),
+      content: authority.contentAttachments.filter((row) => row.topicId === topic.id),
+    });
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/direct-attachments",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (runtimeConfig.focusTopicAuthority !== "assignments") {
+      response.status(409).json({ error: "Direct Focus Topic attachments are not active in this environment." });
+      return;
+    }
+    const body = request.body as { kind?: unknown; scenarioKind?: unknown; scenarioId?: unknown; contentId?: unknown };
+    if (body.kind !== "scenario" && body.kind !== "content") {
+      response.status(400).json({ error: "Attachment kind must be scenario or content." });
+      return;
+    }
+    const result = await withDatabase(async (db) => {
+      const org = resolveContentOrganizationOrg(db, request, request.params.orgId, response);
+      if (!org) return null;
+      const topic = findOrgTrainingRecord(db, org.id, request.params.trainingId);
+      if (!topic || topic.status === "archived") {
+        response.status(404).json({ error: "Focus Topic not found." });
+        return null;
+      }
+      const actorId = request.dashboard?.user.id ?? "platform_admin";
+      const attachedAt = nowIso();
+      if (body.kind === "scenario") {
+        const scenarioKind = body.scenarioKind;
+        const scenarioId = typeof body.scenarioId === "string" ? body.scenarioId.trim() : "";
+        const valid = scenarioKind === "standard"
+          ? getConfigScenarioById(db.config, scenarioId)?.scenario.enabled !== false
+          : scenarioKind === "org" && (org.customScenarios ?? []).some((scenario) =>
+              scenario.id === scenarioId && scenario.enabled === true);
+        if (!scenarioId || !valid) {
+          response.status(400).json({ error: "Scenario is not available in this organization." });
+          return null;
+        }
+        const row = {
+          id: `ftsa_${uuid()}`, orgId: org.id, topicId: topic.id,
+          scenarioKind: scenarioKind as "standard" | "org", scenarioId,
+          attachedBy: actorId, attachedAt, detachedBy: null, detachedAt: null,
+        };
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Focus Topic attachment transaction requires PostgreSQL.");
+          await focusTopicAuthorityStore.attachScenario(row, client);
+        });
+        const audit = { action: "focus_topic.scenario.attached", orgId: org.id,
+          message: "Attached a scenario to a Focus Topic.",
+          metadata: { topicId: topic.id, attachmentId: row.id, scenarioKind, scenarioId } };
+        if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+        else appendPlatformAuditEvent(db, audit);
+        emitMobileUpdateForOrg(db, org.id, "org");
+        return row;
+      }
+      const contentId = typeof body.contentId === "string" ? body.contentId.trim() : "";
+      const content = contentId ? await trainingContentStore.getContentItemForOrg(org.id, contentId) : null;
+      if (!content || content.archivedAt) {
+        response.status(400).json({ error: "Training Content item is not available in this organization." });
+        return null;
+      }
+      const row = {
+        id: `ftca_${uuid()}`, orgId: org.id, topicId: topic.id, contentId,
+        attachedBy: actorId, attachedAt, detachedBy: null, detachedAt: null,
+      };
+      queueRequiredTransactionSideWrite(db, async (client) => {
+        if (!client) throw new Error("Focus Topic attachment transaction requires PostgreSQL.");
+        await focusTopicAuthorityStore.attachContent(row, client);
+      });
+      const audit = { action: "focus_topic.content.attached", orgId: org.id,
+        message: "Attached Training Content to a Focus Topic.",
+        metadata: { topicId: topic.id, attachmentId: row.id, contentId } };
+      if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+      else appendPlatformAuditEvent(db, audit);
+      emitMobileUpdateForOrg(db, org.id, "org");
+      return row;
+    });
+    if (response.headersSent || !result) return;
+    response.status(201).json(result);
+  },
+);
+
+app.delete(
+  "/orgs/:orgId/trainings/:trainingId/direct-attachments/:attachmentId",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (runtimeConfig.focusTopicAuthority !== "assignments") {
+      response.status(409).json({ error: "Direct Focus Topic attachments are not active in this environment." });
+      return;
+    }
+    const result = await withDatabase(async (db) => {
+      const org = resolveContentOrganizationOrg(db, request, request.params.orgId, response);
+      if (!org) return null;
+      const topic = findOrgTrainingRecord(db, org.id, request.params.trainingId);
+      if (!topic) {
+        response.status(404).json({ error: "Focus Topic not found." });
+        return null;
+      }
+      const authority = await focusTopicAuthorityStore.listSnapshot(org.id);
+      const scenario = authority.scenarioAttachments.find((row) => row.topicId === topic.id
+        && row.id === request.params.attachmentId && row.detachedAt === null);
+      const content = authority.contentAttachments.find((row) => row.topicId === topic.id
+        && row.id === request.params.attachmentId && row.detachedAt === null);
+      if (!scenario && !content) {
+        response.status(404).json({ error: "Active Focus Topic attachment not found." });
+        return null;
+      }
+      const actorId = request.dashboard?.user.id ?? "platform_admin";
+      const at = new Date();
+      queueRequiredTransactionSideWrite(db, async (client) => {
+        if (!client) throw new Error("Focus Topic attachment transaction requires PostgreSQL.");
+        const input = { orgId: org.id, topicId: topic.id,
+          attachmentId: request.params.attachmentId, actorId, at };
+        if (scenario) await focusTopicAuthorityStore.detachScenario(input, client);
+        else await focusTopicAuthorityStore.detachContent(input, client);
+      });
+      const audit = { action: "focus_topic.attachment.detached", orgId: org.id,
+        message: "Detached a direct Focus Topic child.",
+        metadata: { topicId: topic.id, attachmentId: request.params.attachmentId,
+          kind: scenario ? "scenario" : "content" } };
+      if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+      else appendPlatformAuditEvent(db, audit);
+      emitMobileUpdateForOrg(db, org.id, "org");
+      return { detached: true, attachmentId: request.params.attachmentId,
+        detachedAt: at.toISOString(), detachedBy: actorId };
+    });
+    if (response.headersSent || !result) return;
+    response.json(result);
+  },
+);
+
+app.post("/orgs/:orgId/trainings", requireContentOrganizationAuth, async (request: ContentOrganizationAuthRequest, response: Response) => {
+  if (request.dashboard && runtimeConfig.focusTopicAuthority !== "assignments") {
+    response.status(401).json({ error: "Customer Focus Topic editing requires direct assignment authority." });
+    return;
+  }
   const orgId = request.params.orgId;
   const body = request.body as CreateOrgTrainingRequest;
 
   const createdTraining = await withDatabase(async (db) => {
-    const org = getOrgById(db, orgId);
-    if (!org) {
-      response.status(404).json({ error: "Organization not found." });
-      return;
-    }
+    const org = resolveContentOrganizationOrg(db, request, orgId, response);
+    if (!org) return;
 
     await ensureOrgTrainingWorkspace(db, org);
     const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -16270,7 +16803,7 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
       });
     }
     emitMobileUpdateForOrg(db, org.id, "org");
-    appendPlatformAuditEvent(db, {
+    const audit = {
       action: "org.training.created",
       orgId: org.id,
       message: `Created training "${training.name}" for ${org.name}.`,
@@ -16278,7 +16811,9 @@ app.post("/orgs/:orgId/trainings", requireAdmin, async (request: Request, respon
         trainingId: training.id,
         status: training.status,
       },
-    });
+    };
+    if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+    else appendPlatformAuditEvent(db, audit);
 
     return (
       buildOrgTrainingSummaryForResponse(db, org.id, training.id) ?? {
@@ -16369,7 +16904,11 @@ app.put(
   }
 );
 
-app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
+app.patch("/orgs/:orgId/trainings/:trainingId", requireContentOrganizationAuth, async (request: ContentOrganizationAuthRequest, response: Response) => {
+  if (request.dashboard && runtimeConfig.focusTopicAuthority !== "assignments") {
+    response.status(401).json({ error: "Customer Focus Topic editing requires direct assignment authority." });
+    return;
+  }
   const orgId = request.params.orgId;
   const trainingId = request.params.trainingId?.trim();
   const patch = request.body as UpdateOrgTrainingRequest;
@@ -16380,11 +16919,8 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
   }
 
   const updatedTraining = await withDatabase(async (db) => {
-    const org = getOrgById(db, orgId);
-    if (!org) {
-      response.status(404).json({ error: "Organization not found." });
-      return;
-    }
+    const org = resolveContentOrganizationOrg(db, request, orgId, response);
+    if (!org) return;
 
     await ensureOrgTrainingWorkspace(db, org);
     const training = findOrgTrainingRecord(db, org.id, trainingId);
@@ -16437,9 +16973,22 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
         trainingId: training.id,
         updatedAt,
       });
+      if (runtimeConfig.focusTopicAuthority === "assignments") {
+        const authority = await focusTopicAuthorityStore.listSnapshot(org.id);
+        const assignments = authority.assignments.filter((row) => row.topicId === training.id && row.revokedAt === null);
+        const notifications = assignments.flatMap((assignment) => buildTopicAssignedNotificationInputs({
+          db, topic: training, assignments: [assignment],
+          eventKey: `activated:${training.id}:${updatedAt}:${assignment.id}`,
+          createdAt: new Date(updatedAt),
+        }));
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Focus Topic activation notifications require PostgreSQL.");
+          await userNotificationStore.enqueueMany(notifications, { client });
+        });
+      }
     }
     emitMobileUpdateForOrg(db, org.id, "org");
-    appendPlatformAuditEvent(db, {
+    const audit = {
       action: "org.training.updated",
       orgId: org.id,
       message: `Updated training "${training.name}" for ${org.name}.`,
@@ -16448,7 +16997,9 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
         status: training.status,
         fields: Object.keys(patch ?? {}).slice(0, 25),
       },
-    });
+    };
+    if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
+    else appendPlatformAuditEvent(db, audit);
 
     return buildOrgTrainingSummaryForResponse(db, org.id, training.id);
   });
@@ -16458,6 +17009,13 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Re
 });
 
 app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: Request, response: Response) => {
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    response.status(409).json({
+      error: "Focus Topics must be archived under direct assignment authority.",
+      code: "focus_topic_archive_required",
+    });
+    return;
+  }
   const orgId = request.params.orgId;
   const trainingId = request.params.trainingId?.trim();
 
@@ -16533,6 +17091,10 @@ app.delete("/orgs/:orgId/trainings/:trainingId", requireAdmin, async (request: R
 });
 
 app.put("/orgs/:orgId/trainings/:trainingId/training-packs", requireAdmin, async (request: Request, response: Response) => {
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    response.status(409).json({ error: "Legacy Focus Topic Pack attachments are read-only under direct Focus Topic authority." });
+    return;
+  }
   const orgId = request.params.orgId;
   const trainingId = request.params.trainingId?.trim();
   const body = request.body as SetOrgTrainingPackAttachmentsRequest;
@@ -16618,6 +17180,10 @@ app.put(
   "/orgs/:orgId/trainings/:trainingId/custom-scenarios",
   requireAdmin,
   async (request: Request, response: Response) => {
+    if (runtimeConfig.focusTopicAuthority === "assignments") {
+      response.status(409).json({ error: "Legacy Focus Topic scenario attachments are read-only under direct Focus Topic authority." });
+      return;
+    }
     const orgId = request.params.orgId;
     const trainingId = request.params.trainingId?.trim();
     const body = request.body as SetOrgTrainingScenarioAttachmentsRequest;
@@ -18250,7 +18816,10 @@ app.get("/mobile/users/:userId/focus-topics", async (request: Request, response:
         return null;
       }
 
-      const configForUser = resolveConfigForUser(db, user, org.id);
+      const configForUser = resolveConfigForUser(
+        db, user, org.id,
+        { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" },
+      );
       const userDivisionId = org.divisionsEnabled === true
         ? resolveUserActiveDivisionId(db, org.id, user)
         : null;
@@ -18267,6 +18836,7 @@ app.get("/mobile/users/:userId/focus-topics", async (request: Request, response:
         MobileFocusTopicCatalogContext,
         "isTopicVisible" | "resolveScenario"
       > = {
+        authorityMode: runtimeConfig.focusTopicAuthority,
         actingOrgId: org.id,
         organizationActive: org.status === "active",
         user,
@@ -18291,16 +18861,21 @@ app.get("/mobile/users/:userId/focus-topics", async (request: Request, response:
 
     const visibleTopicIds = new Set(snapshot.visibleTopicIds);
     // The facade combines app-state authority at T1 with extracted-store rows at T2.
+    const authoritySnapshot = runtimeConfig.focusTopicAuthority === "assignments"
+      ? await focusTopicAuthorityStore.listSnapshot(snapshot.context.actingOrgId)
+      : undefined;
     // Its same-org/live-reference checks omit inconsistent rows, while object launch
     // and resource detail paths independently re-authorize on their later requests.
     const result = await mobileFocusTopicCatalogService.getCatalog({
       ...snapshot.context,
+      authoritySnapshot,
       isTopicVisible: (topic) => visibleTopicIds.has(topic.id),
-      resolveScenario: (scenarioId, trainingId) =>
+      resolveScenario: (scenarioId, trainingId, options) =>
         resolveMobileFocusTopicScenarioSummary(
           snapshot.context.scenarioConfig,
           scenarioId,
-          trainingId
+          trainingId,
+          options,
         ),
     });
     response.json(result);
@@ -18352,7 +18927,10 @@ app.get("/mobile/users/:userId/focus-topics/:topicId", async (request: Request, 
         return null;
       }
 
-      const configForUser = resolveConfigForUser(db, user, org.id);
+      const configForUser = resolveConfigForUser(
+        db, user, org.id,
+        { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" },
+      );
       const userDivisionId = org.divisionsEnabled === true
         ? resolveUserActiveDivisionId(db, org.id, user)
         : null;
@@ -18369,6 +18947,7 @@ app.get("/mobile/users/:userId/focus-topics/:topicId", async (request: Request, 
         MobileFocusTopicCatalogContext,
         "isTopicVisible" | "resolveScenario"
       > = {
+        authorityMode: runtimeConfig.focusTopicAuthority,
         actingOrgId: org.id,
         organizationActive: org.status === "active",
         user,
@@ -18392,14 +18971,19 @@ app.get("/mobile/users/:userId/focus-topics/:topicId", async (request: Request, 
     }
 
     const visibleTopicIds = new Set(snapshot.visibleTopicIds);
+    const authoritySnapshot = runtimeConfig.focusTopicAuthority === "assignments"
+      ? await focusTopicAuthorityStore.listSnapshot(snapshot.context.actingOrgId)
+      : undefined;
     const result = await mobileFocusTopicCatalogService.getDetail({
       ...snapshot.context,
+      authoritySnapshot,
       isTopicVisible: (topic) => visibleTopicIds.has(topic.id),
-      resolveScenario: (scenarioId, trainingId) =>
+      resolveScenario: (scenarioId, trainingId, options) =>
         resolveMobileFocusTopicScenarioSummary(
           snapshot.context.scenarioConfig,
           scenarioId,
-          trainingId
+          trainingId,
+          options,
         ),
     }, request.params.topicId);
     if (!result) {
@@ -18589,7 +19173,7 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
     return;
   }
 
-  const config = await withFreshDatabaseSnapshotRead((db) => {
+  const snapshot = await withFreshDatabaseSnapshotRead((db) => {
     const user = getUserById(db, request.params.userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -18606,11 +19190,60 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
       return null;
     }
 
-    return structuredClone(resolveConfigForUser(db, user, accessContext.actingOrgId));
+    const baseConfig = resolveConfigForUser(db, user, accessContext.actingOrgId);
+    return structuredClone({
+      baseConfig,
+      topicConfig: runtimeConfig.focusTopicAuthority === "assignments"
+        ? resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true })
+        : baseConfig,
+      user,
+      org: accessContext.actingOrg,
+      users: db.users,
+      topics: db.orgTrainings,
+    });
   });
-  if (config) {
-    response.json(config);
+  if (!snapshot) return;
+  if (runtimeConfig.focusTopicAuthority !== "assignments" || !snapshot.org || snapshot.user.isSuperUser) {
+    response.json(snapshot.baseConfig);
+    return;
   }
+  const authority = await focusTopicAuthorityStore.listSnapshot(snapshot.org.id);
+  const visibleTopicIds = new Set(snapshot.topics
+    .filter((topic) => canFutureLearnerAccessFocusTopic({
+      user: snapshot.user, users: snapshot.users, organization: snapshot.org!, topic,
+      assignments: authority.assignments,
+    }))
+    .map((topic) => topic.id));
+  const directScenarios = authority.scenarioAttachments.filter((row) => row.detachedAt === null
+    && row.orgId === snapshot.org!.id && visibleTopicIds.has(row.topicId));
+  const directStandardIds = new Set(directScenarios.filter((row) => row.scenarioKind === "standard")
+    .map((row) => row.scenarioId));
+  const directCustomIds = new Set(directScenarios.filter((row) => row.scenarioKind === "org")
+    .map((row) => row.scenarioId));
+  const generalStandardIds = new Set(snapshot.baseConfig.segments.flatMap((segment) =>
+    (segment.scenarios ?? []).map((scenario) => scenario.id)));
+  response.json({
+    ...snapshot.topicConfig,
+    segments: snapshot.topicConfig.segments.map((segment) => ({
+      ...segment,
+      scenarios: (segment.scenarios ?? []).filter((scenario) =>
+        generalStandardIds.has(scenario.id) || directStandardIds.has(scenario.id)),
+    })),
+    orgTrainings: (snapshot.topicConfig.orgTrainings ?? [])
+      .filter((topic) => visibleTopicIds.has(topic.id))
+      .map((topic) => ({
+        ...topic,
+        attachedTrainingPackIds: [],
+        attachedTrainingPackCount: 0,
+        attachedCustomScenarioIds: directScenarios
+          .filter((row) => row.topicId === topic.id && row.scenarioKind === "org")
+          .map((row) => row.scenarioId),
+        attachedCustomScenarioCount: directScenarios.filter((row) =>
+          row.topicId === topic.id && row.scenarioKind === "org").length,
+      })),
+    orgCustomScenarios: (snapshot.topicConfig.orgCustomScenarios ?? [])
+      .filter((scenario) => directCustomIds.has(scenario.id)),
+  });
 });
 
 app.get("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
@@ -19578,6 +20211,8 @@ app.post(
         requestedIndustryBaseline: parsedPayload.industryBaseline,
         submittedTrainingPackId,
         simulationSessionId,
+        isSuperUser: accessContext.isSuperUser,
+        requireRegisteredSession: true,
         response,
       });
 
@@ -20906,6 +21541,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
         requestedIndustryId: body.industryId,
         requestedIndustryBaseline: body.industryBaseline,
         simulationSessionId,
+        isSuperUser: accessContext.isSuperUser,
         response,
       });
       if (!runtime || "bootstrapOrgId" in runtime) {
@@ -21276,6 +21912,8 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
         requestedIndustryBaseline: body.industryBaseline,
         submittedTrainingPackId,
         simulationSessionId: recognizedSessionId,
+        isSuperUser: accessContext.isSuperUser,
+        requireRegisteredSession: true,
         response,
       });
       if (!runtime || "bootstrapOrgId" in runtime) {
@@ -21619,13 +22257,34 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    if (configForUser.featureFlags?.scoringEnabled === false) {
+    const baseConfigForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
+    if (baseConfigForUser.featureFlags?.scoringEnabled === false) {
       response.status(403).json({ error: "Scoring is currently disabled for this account." });
       return null;
     }
 
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, trainingId);
+    const assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser && recognizedSessionId
+      ? await simulationSessionStore.getById(recognizedSessionId)
+      : null;
+    const configForUser = runtimeConfig.focusTopicAuthority === "assignments" && (assignmentSession?.trainingId || trainingId)
+      ? resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true })
+      : baseConfigForUser;
+    if (runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser) {
+      if (!org || org.status !== "active" || user.status !== "active" || !user.emailVerifiedAt
+        || user.accountType !== "enterprise" || user.orgId !== org.id
+        || (trainingId && !assignmentSession)
+        || (assignmentSession && (assignmentSession.userId !== user.id
+          || assignmentSession.orgId !== org.id || assignmentSession.scenarioId !== scenarioId
+          || (trainingId && trainingId !== (assignmentSession.trainingId ?? null))))) {
+        response.status(404).json({ error: "Simulation session is not available." });
+        return null;
+      }
+    }
+    const authoritativeTrainingId = assignmentSession?.trainingId ?? trainingId;
+    const resolvedScenario = resolveMobileScenarioForUser(
+      configForUser, scenarioId, authoritativeTrainingId,
+      { directTopicScenarioAttached: Boolean(assignmentSession?.trainingId) },
+    );
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
@@ -21657,7 +22316,8 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       resolvedScenarioSource: resolvedScenario.source,
-      canonicalTrainingId: resolvedScenario.canonicalTrainingId,
+      canonicalTrainingId: assignmentSession?.trainingId ?? resolvedScenario.canonicalTrainingId,
+      assignmentSession,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
       industryId: industryPromptContext.industryId,
@@ -21668,7 +22328,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         db,
         user,
         org,
-        trainingId: resolvedScenario.canonicalTrainingId,
+        trainingId: assignmentSession?.trainingId ?? resolvedScenario.canonicalTrainingId,
         resolvedScenario,
       }),
       useModularPromptArchitecture
@@ -21690,12 +22350,14 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     return;
   }
 
-  const activeTrainingPack = await resolvePersistedTrainingPackForScenario({
-    orgId: context.actingOrgId,
-    scenarioId: context.scenario.id,
-    useModularPromptArchitecture: context.useModularPromptArchitecture,
-    submittedTrainingPackId
-  });
+  const activeTrainingPack = context.assignmentSession
+    ? await resolvePinnedTrainingPackForSession(context.actingOrgId, context.assignmentSession.trainingPackId ?? null)
+    : await resolvePersistedTrainingPackForScenario({
+        orgId: context.actingOrgId,
+        scenarioId: context.scenario.id,
+        useModularPromptArchitecture: context.useModularPromptArchitecture,
+        submittedTrainingPackId
+      });
 
   try {
     const recognizedSession =
@@ -22288,7 +22950,7 @@ app.get("/mobile/users/:userId/performance/options", async (request: Request, re
     const trainingPacks = accessContext.actingOrgId
       ? await listTrainingPacksForDashboardOrg(accessContext.actingOrgId)
       : [];
-    const userContext = buildPerformanceUserContext(db, user, trainingPacks);
+    const userContext = await buildPerformanceUserContext(db, user, trainingPacks);
     const payload: MobilePerformancePlanOptionsResponse = buildMobilePerformancePlanOptionsResponse({
       candidates: userContext?.candidates ?? [],
       defaultTimeZone: userContext?.timeZone ?? resolveTimeZone(user.timezone),
@@ -22334,7 +22996,7 @@ app.post("/mobile/users/:userId/performance/preview", async (request: Request, r
       return;
     }
     const trainingPacks = await listTrainingPacksForDashboardOrg(accessContext.actingOrgId);
-    const userContext = buildPerformanceUserContext(db, user, trainingPacks);
+    const userContext = await buildPerformanceUserContext(db, user, trainingPacks);
     if (!userContext) {
       response.status(403).json({
         error: "Performance goals require an active enterprise account.",
@@ -22422,7 +23084,7 @@ app.post("/mobile/users/:userId/performance/plans", async (request: Request, res
     if (rejectMobilePerformanceTargetSpoof(request.body, user.id, accessContext.actingOrgId, response)) {
       return;
     }
-    const userContext = buildPerformanceUserContext(
+    const userContext = await buildPerformanceUserContext(
       db,
       user,
       candidateOrgId === accessContext.actingOrgId ? candidateTrainingPacks : []
@@ -23544,8 +24206,19 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);
+    const configForUser = resolveConfigForUser(
+      db, user, accessContext.actingOrgId,
+      { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && Boolean(trainingId) },
+    );
+    const assignmentLaunch = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser && org
+      ? resolveAssignmentModeTopicLaunch({
+          db, user, org, configForUser, scenarioId: body.scenarioId, topicClaim: trainingId,
+          authority: await focusTopicAuthorityStore.listSnapshot(org.id),
+        })
+      : null;
+    const resolvedScenario = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+      ? assignmentLaunch?.scenario ?? null
+      : resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for simulation session start." });
       return;
@@ -23554,7 +24227,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       response.status(400).json({ error: "Invalid segment for simulation session start." });
       return;
     }
-    const canonicalTrainingId = resolvedScenario.canonicalTrainingId;
+    const canonicalTrainingId = assignmentLaunch?.trainingId ?? resolvedScenario.canonicalTrainingId;
 
     const entitlements = computeEntitlements(db, user, new Date(), {
       actingOrgId: accessContext.actingOrgId,
@@ -23570,7 +24243,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       orgId: accessContext.actingOrgId,
       scenarioId: body.scenarioId,
       useModularPromptArchitecture,
-      submittedTrainingPackId
+      submittedTrainingPackId: runtimeConfig.focusTopicAuthority === "assignments" ? null : submittedTrainingPackId,
     });
     const divisionId = resolveSimulationDivisionIdForContext({
       db,
@@ -23599,7 +24272,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         segmentId: body.segmentId,
         scenarioId: body.scenarioId,
         trainingId: canonicalTrainingId,
-        trainingPackId: persistedTrainingPack?.id ?? submittedTrainingPackId,
+        trainingPackId: persistedTrainingPack?.id ?? null,
         clientStartedAt: parsedClientStartedAt?.toISOString() ?? null,
         now: new Date()
       });
@@ -23700,8 +24373,28 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    const resolvedScenario = resolveMobileScenarioForUser(configForUser, requiredScenarioId, trainingId);
+    const assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+      ? await simulationSessionStore.getById(requiredSimulationSessionId)
+      : null;
+    const configForUser = resolveConfigForUser(
+      db, user, accessContext.actingOrgId,
+      { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && Boolean(assignmentSession?.trainingId ?? trainingId) },
+    );
+    if (runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+      && (!org || org.status !== "active" || user.status !== "active" || !user.emailVerifiedAt
+        || user.accountType !== "enterprise" || user.orgId !== org.id
+        || !assignmentSession || assignmentSession.userId !== user.id
+        || assignmentSession.orgId !== org.id || assignmentSession.scenarioId !== requiredScenarioId
+        || assignmentSession.segmentId !== requiredSegmentId
+        || (trainingId && trainingId !== (assignmentSession.trainingId ?? null)))) {
+      response.status(404).json({ error: "Simulation session is not available." });
+      return;
+    }
+    const authoritativeTrainingId = assignmentSession?.trainingId ?? trainingId;
+    const resolvedScenario = resolveMobileScenarioForUser(
+      configForUser, requiredScenarioId, authoritativeTrainingId,
+      { directTopicScenarioAttached: Boolean(assignmentSession?.trainingId) },
+    );
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for usage session." });
       return;
@@ -23710,15 +24403,17 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
-    const canonicalTrainingId = resolvedScenario.canonicalTrainingId;
+    const canonicalTrainingId = assignmentSession?.trainingId ?? resolvedScenario.canonicalTrainingId;
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
-    const persistedTrainingPack = await resolvePersistedTrainingPackForScenario({
-      orgId: accessContext.actingOrgId,
-      scenarioId: requiredScenarioId,
-      useModularPromptArchitecture,
-      submittedTrainingPackId
-    });
+    const persistedTrainingPack = assignmentSession
+      ? await resolvePinnedTrainingPackForSession(accessContext.actingOrgId, assignmentSession.trainingPackId ?? null)
+      : await resolvePersistedTrainingPackForScenario({
+          orgId: accessContext.actingOrgId,
+          scenarioId: requiredScenarioId,
+          useModularPromptArchitecture,
+          submittedTrainingPackId
+        });
     const divisionId = resolveSimulationDivisionIdForContext({
       db,
       user,
@@ -23775,8 +24470,8 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
           segmentId: requiredSegmentId,
           scenarioId: requiredScenarioId,
           trainingId: canonicalTrainingId,
-          submittedTrainingPackId,
-          resolvedTrainingPackId: persistedTrainingPack?.id ?? null,
+          submittedTrainingPackId: assignmentSession ? null : submittedTrainingPackId,
+          resolvedTrainingPackId: assignmentSession?.trainingPackId ?? persistedTrainingPack?.id ?? null,
           startedAt: normalizedStartedAt,
           endedAt: normalizedEndedAt,
           rawDurationSeconds,
@@ -24592,6 +25287,10 @@ export async function startApiServer(): Promise<void> {
       runStartupUsageIntegrityMaintenance
     }
   });
+
+  if (runtimeConfig.focusTopicAuthority === "assignments") {
+    await focusTopicAuthorityStore.assertAssignmentsReady();
+  }
 
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console

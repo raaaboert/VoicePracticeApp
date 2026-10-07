@@ -13,6 +13,8 @@ import type {
   UserNotificationRecord,
   UserNotificationStore,
 } from "../storage/userNotificationStore.js";
+import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
+import { canViewTopicAssignedNotification, TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE } from "./topicAssignedNotifications.js";
 
 export const ACCESS_REQUEST_NOTIFICATION_SUBJECT_TYPE = "organization_access_request";
 
@@ -102,6 +104,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   db: ApiDatabase;
   recipient: UserProfile;
   store: UserNotificationStore;
+  topicAuthority?: FocusTopicAuthoritySnapshot | null;
   limit: number;
   offset?: number;
 }): Promise<DashboardNotificationsResponse> {
@@ -119,21 +122,24 @@ export async function listAuthorizedDashboardNotifications(params: {
   const readTimeResolutionAt = new Date();
   let offsetAfterLastPageRow: number | null = null;
   for (const [candidateIndex, notification] of candidates.entries()) {
-    if (canViewAccessRequestNotification({ db: params.db, recipient: params.recipient, notification })) {
-      const request = params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!;
-      if (!notification.resolvedAt && request.status !== "pending") {
-        const resolution = request.status;
+    const accessRequestVisible = canViewAccessRequestNotification({
+      db: params.db, recipient: params.recipient, notification,
+    });
+    const topicVisible = canViewTopicAssignedNotification({
+      db: params.db, recipient: params.recipient, notification,
+      authority: params.topicAuthority ?? null,
+    });
+    if (accessRequestVisible || topicVisible) {
+      const accessRequest = accessRequestVisible
+        ? params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!
+        : null;
+      if (!notification.resolvedAt && accessRequest && accessRequest.status !== "pending") {
+        const resolution = accessRequest.status;
         const ids = closedIdsByResolution.get(resolution) ?? [];
         ids.push(notification.id);
         closedIdsByResolution.set(resolution, ids);
-        visible.push({
-          ...notification,
-          resolvedAt: readTimeResolutionAt.toISOString(),
-          resolution,
-        });
-      } else {
-        visible.push(notification);
-      }
+        visible.push({ ...notification, resolvedAt: readTimeResolutionAt.toISOString(), resolution });
+      } else visible.push(notification);
       if (visible.length === limit) {
         offsetAfterLastPageRow = offset + candidateIndex + 1;
       }
@@ -154,7 +160,7 @@ export async function listAuthorizedDashboardNotifications(params: {
         .filter((request) => request.orgId === orgId && request.status === "pending")
         .map((request) => request.id)
     : [];
-  const unreadCount = orgId && canDecideCustomerAccessRequests(params.recipient)
+  const accessRequestUnreadCount = orgId && canDecideCustomerAccessRequests(params.recipient)
     ? await params.store.countActionableUnread({
         recipientUserId: params.recipient.id,
         orgId,
@@ -163,6 +169,25 @@ export async function listAuthorizedDashboardNotifications(params: {
         subjectIds: actionableRequestIds,
       })
     : 0;
+  const accessibleTopicIds = (params.db.orgTrainings ?? [])
+    .filter((topic) => topic.orgId === orgId && canViewTopicAssignedNotification({
+      db: params.db, recipient: params.recipient,
+      notification: {
+        id: "", orgId: topic.orgId, recipientUserId: params.recipient.id,
+        kind: "topic_assigned", subjectType: TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE,
+        subjectId: topic.id, dedupKey: "", payload: {}, createdAt: "",
+        readAt: null, resolvedAt: null, resolution: null,
+      },
+      authority: params.topicAuthority ?? null,
+    }))
+    .map((topic) => topic.id);
+  const topicUnreadCount = orgId && accessibleTopicIds.length > 0
+    ? await params.store.countActionableUnread({
+        recipientUserId: params.recipient.id, orgId, kinds: ["topic_assigned"],
+        subjectType: TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE, subjectIds: accessibleTopicIds,
+      })
+    : 0;
+  const unreadCount = accessRequestUnreadCount + topicUnreadCount;
   const hasMore = visible.length > limit || candidates.length === queryLimit;
   return {
     generatedAt: new Date().toISOString(),
@@ -177,6 +202,7 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   db: ApiDatabase;
   recipient: UserProfile;
   store: UserNotificationStore;
+  topicAuthority?: FocusTopicAuthoritySnapshot | null;
   notificationId: string;
   readAt?: Date;
 }): Promise<DashboardNotificationRow | null> {
@@ -185,7 +211,14 @@ export async function markAuthorizedDashboardNotificationRead(params: {
     recipientUserId: params.recipient.id,
   });
   if (!notification) return null;
-  if (!canViewAccessRequestNotification({ db: params.db, recipient: params.recipient, notification })) {
+  const accessRequestVisible = canViewAccessRequestNotification({
+    db: params.db, recipient: params.recipient, notification,
+  });
+  const topicVisible = canViewTopicAssignedNotification({
+    db: params.db, recipient: params.recipient, notification,
+    authority: params.topicAuthority ?? null,
+  });
+  if (!accessRequestVisible && !topicVisible) {
     if (!notification.resolvedAt) {
       await params.store.resolveOne({
         id: notification.id,
@@ -195,8 +228,10 @@ export async function markAuthorizedDashboardNotificationRead(params: {
     }
     return null;
   }
-  const request = params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!;
-  if (!notification.resolvedAt && request.status !== "pending") {
+  const request = accessRequestVisible
+    ? params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!
+    : null;
+  if (!notification.resolvedAt && request && request.status !== "pending") {
     await params.store.resolveOne({
       id: notification.id,
       recipientUserId: params.recipient.id,
@@ -213,7 +248,7 @@ export async function markAuthorizedDashboardNotificationRead(params: {
 }
 
 function toDashboardRow(notification: UserNotificationRecord): DashboardNotificationRow {
-  if (notification.kind !== "access_request") {
+  if (notification.kind !== "access_request" && notification.kind !== "topic_assigned") {
     throw new Error("Unsupported notification kind reached dashboard serialization.");
   }
   return {

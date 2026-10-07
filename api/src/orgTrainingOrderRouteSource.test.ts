@@ -79,7 +79,7 @@ test("customer Training Pack ordering projects summaries without shrinking platf
 
 test("Focus Topic list is a fresh side-effect-free app-state read with no extracted-store work", () => {
   const listStart = indexSource.indexOf('"/orgs/:orgId/trainings",');
-  const listEnd = indexSource.indexOf('app.post("/orgs/:orgId/trainings"', listStart);
+  const listEnd = indexSource.indexOf('"/orgs/:orgId/trainings/:trainingId/assignments",', listStart);
   const listRoute = indexSource.slice(listStart, listEnd);
   assert.ok(listStart >= 0 && listEnd > listStart);
   assert.match(listRoute, /withFreshDatabaseSnapshotRead/);

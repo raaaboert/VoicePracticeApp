@@ -12,6 +12,9 @@ import type {
 } from "@voicepractice/shared";
 
 import type { OrgModuleEntitlementStore } from "../storage/orgModuleEntitlementStore.js";
+import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
+import type { FocusTopicAuthorityMode } from "../runtimeConfig.js";
+import { canFutureLearnerAccessFocusTopic } from "./focusTopicAuthority.js";
 import type {
   TrainingContentMobileReadRecord,
   TrainingContentStore,
@@ -36,6 +39,8 @@ type MobileScenarioConfig = Pick<
 >;
 
 export interface MobileFocusTopicCatalogContext {
+  authorityMode?: FocusTopicAuthorityMode;
+  authoritySnapshot?: FocusTopicAuthoritySnapshot;
   actingOrgId: string;
   organizationActive: boolean;
   user: UserProfile;
@@ -48,7 +53,8 @@ export interface MobileFocusTopicCatalogContext {
   isTopicVisible(topic: OrgTrainingRecord): boolean;
   resolveScenario(
     scenarioId: string,
-    trainingId?: string | null
+    trainingId?: string | null,
+    options?: { directTopicScenarioAttached?: boolean },
   ): MobileFocusTopicScenarioSummary | null;
 }
 
@@ -64,7 +70,7 @@ interface MobileFocusTopicCatalogDependencies {
   trainingPackStore: Pick<TrainingPackStore, "listTrainingPacksForOrg">;
   trainingContentStore: Pick<
     TrainingContentStore,
-    "listPublishedContentForMobileFocusTopics"
+    "listPublishedContentForMobileFocusTopics" | "getPublishedContentForMobile"
   >;
   entitlementStore: Pick<OrgModuleEntitlementStore, "getOrgModuleEntitlement">;
 }
@@ -138,12 +144,15 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
     const scenariosByTopicId = new Map(
       topics.map((topic) => [topic.id, new Map<string, MobileFocusTopicScenarioSummary>()] as const)
     );
-    addDirectCustomScenarios(context, scenariosByTopicId);
-
-    const packs = await this.dependencies.trainingPackStore.listTrainingPacksForOrg(
-      context.actingOrgId
-    );
-    addAssignedPackStandardScenarios(context, packs, scenariosByTopicId);
+    if (context.authorityMode === "assignments") {
+      addDirectAssignmentScenarios(context, scenariosByTopicId);
+    } else {
+      addDirectCustomScenarios(context, scenariosByTopicId);
+      const packs = await this.dependencies.trainingPackStore.listTrainingPacksForOrg(
+        context.actingOrgId
+      );
+      addAssignedPackStandardScenarios(context, packs, scenariosByTopicId);
+    }
 
     const resourcesByTopicId = new Map(
       topics.map((topic) => [topic.id, new Map<string, MobileTrainingContentSummary>()] as const)
@@ -154,7 +163,7 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
       const scenarios = [...(scenariosByTopicId.get(topic.id)?.values() ?? [])]
         .sort(compareScenarios);
       const resources = [...(resourcesByTopicId.get(topic.id)?.values() ?? [])];
-      return scenarios.length === 0 && resources.length === 0
+      return context.authorityMode !== "assignments" && scenarios.length === 0 && resources.length === 0
         ? []
         : [{ topic, scenarios, resources }];
     });
@@ -183,13 +192,40 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
       return;
     }
 
-    const records = await this.dependencies.trainingContentStore
-      .listPublishedContentForMobileFocusTopics(
-        context.actingOrgId,
-        topics.map((topic) => topic.id)
+    if (context.authorityMode === "assignments") {
+      const attachments = (context.authoritySnapshot?.contentAttachments ?? []).filter((row) =>
+        row.orgId === context.actingOrgId
+        && row.detachedAt === null
+        && resourcesByTopicId.has(row.topicId)
       );
-    for (const record of records) {
-      addEligibleResource(context, mobileContext, record, resourcesByTopicId);
+      const recordsByContentId = new Map<string, TrainingContentMobileReadRecord | null>();
+      for (const attachment of attachments) {
+        if (!recordsByContentId.has(attachment.contentId)) {
+          recordsByContentId.set(
+            attachment.contentId,
+            await this.dependencies.trainingContentStore.getPublishedContentForMobile(
+              context.actingOrgId,
+              attachment.contentId,
+            ),
+          );
+        }
+        const record = recordsByContentId.get(attachment.contentId);
+        const resources = resourcesByTopicId.get(attachment.topicId);
+        if (record && resources && record.content.orgId === context.actingOrgId
+          && record.category.orgId === context.actingOrgId
+          && record.category.archivedAt === null && record.content.archivedAt === null) {
+          resources.set(record.content.id, toMobileTrainingContentSummary(record));
+        }
+      }
+    } else {
+      const records = await this.dependencies.trainingContentStore
+        .listPublishedContentForMobileFocusTopics(
+          context.actingOrgId,
+          topics.map((topic) => topic.id)
+        );
+      for (const record of records) {
+        addEligibleResource(context, mobileContext, record, resourcesByTopicId);
+      }
     }
   }
 }
@@ -202,7 +238,15 @@ function selectVisibleActiveTopics(
     if (
       topic.orgId !== context.actingOrgId
       || topic.status !== "active"
-      || !context.isTopicVisible(topic)
+      || (context.authorityMode === "assignments"
+        ? !canFutureLearnerAccessFocusTopic({
+            user: context.user,
+            users: context.users,
+            organization: { id: context.actingOrgId, status: context.organizationActive ? "active" : "disabled" },
+            topic,
+            assignments: context.authoritySnapshot?.assignments ?? [],
+          })
+        : !context.isTopicVisible(topic))
       || topicsById.has(topic.id)
     ) {
       continue;
@@ -210,6 +254,25 @@ function selectVisibleActiveTopics(
     topicsById.set(topic.id, topic);
   }
   return Array.from(topicsById.values()).sort(compareOrgTrainingCompanyOrder);
+}
+
+function addDirectAssignmentScenarios(
+  context: MobileFocusTopicCatalogContext,
+  scenariosByTopicId: Map<string, Map<string, MobileFocusTopicScenarioSummary>>,
+): void {
+  for (const attachment of context.authoritySnapshot?.scenarioAttachments ?? []) {
+    const scenarios = scenariosByTopicId.get(attachment.topicId);
+    if (!scenarios || attachment.orgId !== context.actingOrgId || attachment.detachedAt !== null) continue;
+    const trainingId = attachment.scenarioKind === "standard" ? null : attachment.topicId;
+    const resolved = context.resolveScenario(attachment.scenarioId, trainingId, {
+      directTopicScenarioAttached: true,
+    });
+    if (resolved?.id === attachment.scenarioId
+      && resolved.source === (attachment.scenarioKind === "standard" ? "standard" : "custom")
+      && resolved.trainingId === trainingId) {
+      scenarios.set(resolved.id, resolved);
+    }
+  }
 }
 
 function addDirectCustomScenarios(

@@ -21,6 +21,7 @@ import {
   moveActiveFocusTopic,
 } from "../focusTopicOrder";
 import { EnterpriseCustomScenariosCard } from "./EnterpriseCustomScenariosCard";
+import { EnterpriseFocusTopicAuthorityCard } from "./EnterpriseFocusTopicAuthorityCard";
 import { EnterpriseTrainingPacksCard } from "./EnterpriseTrainingPacksCard";
 
 interface EnterpriseTrainingsWorkspaceProps {
@@ -108,6 +109,7 @@ export function EnterpriseTrainingsWorkspace({
   const [trainings, setTrainings] = useState<OrgTrainingSummary[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [orderRevision, setOrderRevision] = useState("");
+  const [authorityMode, setAuthorityMode] = useState<"legacy" | "assignments">("legacy");
   const [savedActiveTrainingIds, setSavedActiveTrainingIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,6 +146,7 @@ export function EnterpriseTrainingsWorkspace({
       setTrainings(nextTrainings);
       setSavedActiveTrainingIds(activeFocusTopicIds(nextTrainings));
       setOrderRevision(payload.orderRevision);
+      setAuthorityMode(payload.authorityMode ?? "legacy");
       setGeneratedAt(payload.generatedAt ?? null);
 
       const preferredTargetId =
@@ -568,7 +571,7 @@ export function EnterpriseTrainingsWorkspace({
               </p>
             </div>
             <div className="card-actions">
-              {selectedTraining ? (
+              {selectedTraining && authorityMode === "legacy" ? (
                 <button
                   type="button"
                   className="danger"
@@ -662,7 +665,9 @@ export function EnterpriseTrainingsWorkspace({
                   ))}
                 </select>
                 <div className="small" style={{ marginTop: 4 }}>
-                  {divisionsEnabled
+                  {authorityMode === "assignments"
+                    ? "Division is reporting metadata; it does not grant Focus Topic learner access."
+                    : divisionsEnabled
                     ? "Assigned divisions restrict visibility to matching users. Unassigned Focus Topics remain general."
                     : "Division assignments are retained, but live routing is currently disabled for this company."}
                 </div>
@@ -682,7 +687,7 @@ export function EnterpriseTrainingsWorkspace({
           {!selectedTraining ? (
             <p className="small">Save the Focus Topic first, then create and manage its packs and custom scenarios below.</p>
           ) : null}
-          {selectedTraining ? (
+          {selectedTraining && authorityMode === "legacy" ? (
             <p className="small" style={{ marginTop: 12 }}>
               Custom scenarios do not accept direct division assignments. They inherit routing from this Focus Topic.
             </p>
@@ -692,20 +697,24 @@ export function EnterpriseTrainingsWorkspace({
 
       {selectedTraining ? (
         <>
+          {authorityMode === "assignments" ? <EnterpriseFocusTopicAuthorityCard
+            key={selectedTraining.id}
+            orgId={orgId} topic={selectedTraining} users={orgUsers}
+          /> : null}
           <EnterpriseTrainingPacksCard
             orgId={orgId}
             orgName={orgName}
             config={config}
             orgUsers={orgUsers}
             onCatalogChanged={() => refreshWorkspace({ preserveTargetId: selectedTraining.id, preserveNotice: true })}
-            trainingScope={{
+            trainingScope={authorityMode === "legacy" ? {
               trainingId: selectedTraining.id,
               trainingName: selectedTraining.name,
               attachedTrainingPackIds: selectedTraining.attachedTrainingPackIds,
               onTrainingPackOwnershipChange: async (trainingPackIds) => {
                 await updateTrainingPackOwnership(selectedTraining.id, trainingPackIds);
               },
-            }}
+            } : undefined}
           />
 
           <EnterpriseCustomScenariosCard
@@ -713,14 +722,14 @@ export function EnterpriseTrainingsWorkspace({
             orgName={orgName}
             config={config}
             onCatalogChanged={() => refreshWorkspace({ preserveTargetId: selectedTraining.id, preserveNotice: true })}
-            trainingScope={{
+            trainingScope={authorityMode === "legacy" ? {
               trainingId: selectedTraining.id,
               trainingName: selectedTraining.name,
               attachedScenarioIds: selectedTraining.attachedCustomScenarioIds,
               onScenarioOwnershipChange: async (scenarioIds) => {
                 await updateTrainingScenarioOwnership(selectedTraining.id, scenarioIds);
               },
-            }}
+            } : undefined}
           />
         </>
       ) : null}

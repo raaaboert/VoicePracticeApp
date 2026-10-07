@@ -47,6 +47,22 @@ provider-console settings are not fully represented in the repository.
 The production API must remain one instance because some `app_state`
 read/modify/write and snapshot behavior is process-local.
 
+### Focus Topic authority rollback
+
+The direct Focus Topic learner-authority implementation defaults to
+`FOCUS_TOPIC_AUTHORITY=legacy`. A future controlled cutover may set it to
+`assignments` only after the matching PostgreSQL backfill APPLY has been
+validated and signed off. Assignment-mode startup fails closed without that
+state; this code release does not change the deployed setting.
+
+For an emergency authority rollback, set `FOCUS_TOPIC_AUTHORITY=legacy` and
+verify the legacy Focus Topic catalog and launch flow. Legacy Training Pack
+assignment and attachment data remains intact. New direct Topic assignments
+created after the cutover are **not** dual-written to the legacy Pack model and
+may be ignored while legacy mode is active. Preserve those SQL rows and recorded
+session attribution for a later recovery or return to assignment mode; do not
+restore PostgreSQL merely to change the authority setting.
+
 ## Video Worker Rollback
 
 The Training Content video worker is a separate Render service and can be rolled

@@ -47,6 +47,17 @@ test("auth code delivery overrides default to null when unset", () => {
   assert.equal(config.mobileEmailVerificationDeliveryProvider, null);
 });
 
+test("Focus Topic authority defaults to legacy and rejects unknown or file-backed assignment mode", () => {
+  assert.equal(loadRuntimeConfig(makeEnv()).focusTopicAuthority, "legacy");
+  assert.throws(() => loadRuntimeConfig(makeEnv({ FOCUS_TOPIC_AUTHORITY: "unknown" })), /FOCUS_TOPIC_AUTHORITY/);
+  assert.throws(() => loadRuntimeConfig(makeEnv({ FOCUS_TOPIC_AUTHORITY: "assignments" })), /requires PostgreSQL/);
+  assert.equal(loadRuntimeConfig(makeEnv({
+    FOCUS_TOPIC_AUTHORITY: "assignments",
+    STORAGE_PROVIDER: "postgres",
+    DATABASE_URL: "postgres://localhost/peritio_test",
+  })).focusTopicAuthority, "assignments");
+});
+
 test("production refuses internal debug endpoints while safe production and non-production configurations load", () => {
   assert.throws(
     () => loadRuntimeConfig(makeProductionEnv({ ENABLE_INTERNAL_DEBUG_ENDPOINTS: "true" })),

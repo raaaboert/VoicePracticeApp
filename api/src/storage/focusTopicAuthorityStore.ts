@@ -4,6 +4,10 @@ import { Pool, type PoolClient } from "pg";
 
 import type { StorageProvider } from "../runtimeConfig.js";
 import type { FocusTopicAssignment } from "../services/focusTopicAuthority.js";
+import {
+  FOCUS_TOPIC_AUTHORITY_BACKFILL_VERSION,
+  FOCUS_TOPIC_AUTHORITY_SCHEMA_GENERATION,
+} from "../services/focusTopicAuthorityBackfill.js";
 import type {
   FocusTopicAuthorityBackfillPlan,
   FocusTopicContentAttachment,
@@ -32,7 +36,18 @@ export interface FocusTopicBackfillRunRecord {
 
 export interface FocusTopicAuthorityStore {
   initialize(): Promise<void>;
+  assertAssignmentsReady(): Promise<void>;
   listSnapshot(orgId?: string): Promise<FocusTopicAuthoritySnapshot>;
+  createAssignment(row: FocusTopicAssignment, client: Pick<PoolClient, "query">): Promise<FocusTopicAssignment>;
+  revokeAssignment(input: {
+    orgId: string; topicId: string; assignmentId: string; actorId: string; at: Date;
+  }, client: Pick<PoolClient, "query">): Promise<FocusTopicAssignment>;
+  attachScenario(row: FocusTopicScenarioAttachment, client: Pick<PoolClient, "query">): Promise<FocusTopicScenarioAttachment>;
+  detachScenario(input: { orgId: string; topicId: string; attachmentId: string; actorId: string; at: Date },
+    client: Pick<PoolClient, "query">): Promise<FocusTopicScenarioAttachment>;
+  attachContent(row: FocusTopicContentAttachment, client: Pick<PoolClient, "query">): Promise<FocusTopicContentAttachment>;
+  detachContent(input: { orgId: string; topicId: string; attachmentId: string; actorId: string; at: Date },
+    client: Pick<PoolClient, "query">): Promise<FocusTopicContentAttachment>;
   applyBackfillPlan(input: {
     plan: FocusTopicAuthorityBackfillPlan;
     validTopicKeys: ReadonlySet<string>;
@@ -54,9 +69,18 @@ type QueryPool = Pick<Pool, "query" | "connect">;
 
 class NullFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
   async initialize(): Promise<void> {}
+  async assertAssignmentsReady(): Promise<void> {
+    throw new Error("Focus Topic assignment authority requires PostgreSQL and a validated, signed-off backfill APPLY run.");
+  }
   async listSnapshot(): Promise<FocusTopicAuthoritySnapshot> {
     return { assignments: [], scenarioAttachments: [], contentAttachments: [] };
   }
+  async createAssignment(): Promise<FocusTopicAssignment> { throw new Error("Focus Topic assignments require PostgreSQL."); }
+  async revokeAssignment(): Promise<FocusTopicAssignment> { throw new Error("Focus Topic assignments require PostgreSQL."); }
+  async attachScenario(): Promise<FocusTopicScenarioAttachment> { throw new Error("Focus Topic attachments require PostgreSQL."); }
+  async detachScenario(): Promise<FocusTopicScenarioAttachment> { throw new Error("Focus Topic attachments require PostgreSQL."); }
+  async attachContent(): Promise<FocusTopicContentAttachment> { throw new Error("Focus Topic attachments require PostgreSQL."); }
+  async detachContent(): Promise<FocusTopicContentAttachment> { throw new Error("Focus Topic attachments require PostgreSQL."); }
   async applyBackfillPlan(): Promise<FocusTopicBackfillRunRecord> {
     throw new Error("Focus Topic authority backfill requires postgres storage.");
   }
@@ -78,6 +102,40 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
     await this.initialized;
   }
 
+  async assertAssignmentsReady(): Promise<void> {
+    await this.initialize();
+    const result = await this.pool.query<BackfillRunRow>(
+      `SELECT * FROM focus_topic_backfill_runs
+       WHERE mode = 'apply'
+       ORDER BY executed_at DESC, id DESC LIMIT 1`,
+    );
+    const run = result.rows[0];
+    if (!run || run.run_version !== FOCUS_TOPIC_AUTHORITY_BACKFILL_VERSION
+      || run.schema_generation !== FOCUS_TOPIC_AUTHORITY_SCHEMA_GENERATION
+      || !run.validated_at || !run.validated_by || !run.signed_off_at || !run.signed_off_by
+      || !/^[a-f0-9]{64}$/.test(run.input_fingerprint)
+      || run.result_summary.issueCount !== 0
+      || !["assignmentCount", "scenarioAttachmentCount", "contentAttachmentCount"].every(
+        (key) => Number.isSafeInteger(run.result_summary[key]) && Number(run.result_summary[key]) >= 0
+      )
+      || Number(run.result_summary.assignmentCount) === 0) {
+      throw new Error("Focus Topic assignment authority requires a valid, signed-off backfill APPLY run for the expected schema and version.");
+    }
+    const counts = await this.pool.query<{
+      assignment_count: string; scenario_count: string; content_count: string;
+    }>(`SELECT
+      (SELECT COUNT(*) FROM focus_topic_assignments)::text AS assignment_count,
+      (SELECT COUNT(*) FROM focus_topic_scenario_attachments)::text AS scenario_count,
+      (SELECT COUNT(*) FROM org_content_topic_attachments)::text AS content_count`);
+    const row = counts.rows[0];
+    if (!row
+      || Number(row.assignment_count) < Number(run.result_summary.assignmentCount)
+      || Number(row.scenario_count) < Number(run.result_summary.scenarioAttachmentCount)
+      || Number(row.content_count) < Number(run.result_summary.contentAttachmentCount)) {
+      throw new Error("Focus Topic assignment authority rows do not match the signed-off backfill run.");
+    }
+  }
+
   async listSnapshot(orgId?: string): Promise<FocusTopicAuthoritySnapshot> {
     await this.initialize();
     const where = orgId ? "WHERE org_id = $1" : "";
@@ -92,6 +150,80 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
       scenarioAttachments: scenarios.rows.map(mapScenario),
       contentAttachments: content.rows.map(mapContent),
     };
+  }
+
+  async createAssignment(row: FocusTopicAssignment, client: Pick<PoolClient, "query">): Promise<FocusTopicAssignment> {
+    await this.initialize();
+    if (row.grantsManagement || row.revokedAt || row.revokedBy) {
+      throw new Error("Batch 3 assignments must be active learner-only grants.");
+    }
+    const inserted = await client.query<AssignmentRow>(
+      `INSERT INTO focus_topic_assignments (
+         id, org_id, topic_id, audience, subject_user_id, grants_management,
+         created_by, created_at, revoked_by, revoked_at
+       ) VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,NULL,NULL) RETURNING *`,
+      [row.id, row.orgId, row.topicId, row.audience, row.subjectUserId, row.createdBy, row.createdAt],
+    );
+    return mapAssignment(requiredRow(inserted.rows[0], "Created Focus Topic assignment"));
+  }
+
+  async revokeAssignment(input: {
+    orgId: string; topicId: string; assignmentId: string; actorId: string; at: Date;
+  }, client: Pick<PoolClient, "query">): Promise<FocusTopicAssignment> {
+    await this.initialize();
+    const updated = await client.query<AssignmentRow>(
+      `UPDATE focus_topic_assignments SET revoked_by = $4, revoked_at = $5
+       WHERE id = $1 AND org_id = $2 AND topic_id = $3 AND revoked_at IS NULL
+       RETURNING *`,
+      [input.assignmentId, input.orgId, input.topicId, input.actorId, input.at],
+    );
+    return mapAssignment(requiredRow(updated.rows[0], "Active Focus Topic assignment"));
+  }
+
+  async attachScenario(row: FocusTopicScenarioAttachment, client: Pick<PoolClient, "query">): Promise<FocusTopicScenarioAttachment> {
+    await this.initialize();
+    if (row.detachedAt || row.detachedBy) throw new Error("New Focus Topic attachment must be active.");
+    const result = await client.query<ScenarioRow>(
+      `INSERT INTO focus_topic_scenario_attachments
+       (id,org_id,topic_id,scenario_kind,scenario_id,attached_by,attached_at,detached_by,detached_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL) RETURNING *`,
+      [row.id,row.orgId,row.topicId,row.scenarioKind,row.scenarioId,row.attachedBy,row.attachedAt],
+    );
+    return mapScenario(requiredRow(result.rows[0], "Created Focus Topic scenario attachment"));
+  }
+
+  async detachScenario(input: { orgId: string; topicId: string; attachmentId: string; actorId: string; at: Date },
+    client: Pick<PoolClient, "query">): Promise<FocusTopicScenarioAttachment> {
+    await this.initialize();
+    const result = await client.query<ScenarioRow>(
+      `UPDATE focus_topic_scenario_attachments SET detached_by=$4, detached_at=$5
+       WHERE id=$1 AND org_id=$2 AND topic_id=$3 AND detached_at IS NULL RETURNING *`,
+      [input.attachmentId,input.orgId,input.topicId,input.actorId,input.at],
+    );
+    return mapScenario(requiredRow(result.rows[0], "Active Focus Topic scenario attachment"));
+  }
+
+  async attachContent(row: FocusTopicContentAttachment, client: Pick<PoolClient, "query">): Promise<FocusTopicContentAttachment> {
+    await this.initialize();
+    if (row.detachedAt || row.detachedBy) throw new Error("New Focus Topic attachment must be active.");
+    const result = await client.query<ContentRow>(
+      `INSERT INTO org_content_topic_attachments
+       (id,org_id,content_id,topic_id,attached_by,attached_at,detached_by,detached_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL) RETURNING *`,
+      [row.id,row.orgId,row.contentId,row.topicId,row.attachedBy,row.attachedAt],
+    );
+    return mapContent(requiredRow(result.rows[0], "Created Focus Topic content attachment"));
+  }
+
+  async detachContent(input: { orgId: string; topicId: string; attachmentId: string; actorId: string; at: Date },
+    client: Pick<PoolClient, "query">): Promise<FocusTopicContentAttachment> {
+    await this.initialize();
+    const result = await client.query<ContentRow>(
+      `UPDATE org_content_topic_attachments SET detached_by=$4, detached_at=$5
+       WHERE id=$1 AND org_id=$2 AND topic_id=$3 AND detached_at IS NULL RETURNING *`,
+      [input.attachmentId,input.orgId,input.topicId,input.actorId,input.at],
+    );
+    return mapContent(requiredRow(result.rows[0], "Active Focus Topic content attachment"));
   }
 
   async applyBackfillPlan(input: {

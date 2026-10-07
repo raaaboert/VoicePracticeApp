@@ -9,6 +9,7 @@ import type { AppReviewCredential } from "./services/emailVerification.js";
 export type StorageProvider = "file" | "postgres";
 export type AuthCodeDeliveryProvider = "log_only" | "resend";
 export type DeploymentEnvironment = "development" | "staging" | "production";
+export type FocusTopicAuthorityMode = "legacy" | "assignments";
 
 export interface RuntimeConfig {
   nodeEnv: string;
@@ -46,6 +47,7 @@ export interface RuntimeConfig {
   useModularPromptArchitecture: boolean;
   enableInternalDebugEndpoints: boolean;
   trainingContentStorage: TrainingContentStorageConfig;
+  focusTopicAuthority: FocusTopicAuthorityMode;
 }
 
 const PLACEHOLDER_VALUES = new Set([
@@ -185,6 +187,13 @@ function parseDeploymentEnvironment(value: string | undefined): DeploymentEnviro
   }
 
   throw new Error('PERITIO_ENV must be one of "development", "staging", or "production".');
+}
+
+function parseFocusTopicAuthorityMode(value: string | undefined): FocusTopicAuthorityMode {
+  const candidate = value?.trim().toLowerCase();
+  if (!candidate || candidate === "legacy") return "legacy";
+  if (candidate === "assignments") return "assignments";
+  throw new Error('FOCUS_TOPIC_AUTHORITY must be "legacy" or "assignments".');
 }
 
 function normalizeDatabaseUrlFingerprint(value: string): string {
@@ -354,6 +363,10 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   });
 
   const storageProvider = parseStorageProvider(env.STORAGE_PROVIDER, databaseUrl, isProductionDeployment);
+  const focusTopicAuthority = parseFocusTopicAuthorityMode(env.FOCUS_TOPIC_AUTHORITY);
+  if (focusTopicAuthority === "assignments" && storageProvider !== "postgres") {
+    throw new Error('FOCUS_TOPIC_AUTHORITY=assignments requires PostgreSQL storage.');
+  }
   if (storageProvider === "postgres" && !databaseUrl) {
     throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
   }
@@ -531,5 +544,6 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     useModularPromptArchitecture: toBoolean(env.USE_MODULAR_PROMPT_ARCHITECTURE, false),
     enableInternalDebugEndpoints,
     trainingContentStorage,
+    focusTopicAuthority,
   };
 }

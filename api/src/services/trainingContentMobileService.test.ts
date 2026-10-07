@@ -410,6 +410,47 @@ function setup(users = [buildUser("learner")]) {
   return { service, store, entitlementStore, objectStorage, readiness, context };
 }
 
+test("direct Topic attachment grants in-topic content without standalone assignment; links grant neither side", async () => {
+  const fixture = setup();
+  const content = record({ content: buildContent("attached", "category_a", 0, { focusTopicId: null }),
+    category: buildCategory("category_a", 0), assignments: [] });
+  fixture.store.records = [content];
+  fixture.store.scenarioLinks = [scenarioLink("attached", "custom_visible")];
+  fixture.context.authorityMode = "assignments";
+  fixture.context.generalScenarioConfig = scenarioConfig;
+  fixture.context.topics = [{ id: "training_visible", orgId: ORG_ID, name: "Sales readiness",
+    status: "active", description: "", createdAt: NOW, updatedAt: NOW }];
+  fixture.context.authoritySnapshot = {
+    assignments: [{ id: "grant", orgId: ORG_ID, topicId: "training_visible",
+      audience: "individual", subjectUserId: "learner", grantsManagement: false,
+      createdBy: "admin", createdAt: NOW, revokedBy: null, revokedAt: null }],
+    scenarioAttachments: [{ id: "scenario", orgId: ORG_ID, topicId: "training_visible",
+      scenarioKind: "org", scenarioId: "custom_visible", attachedBy: "admin", attachedAt: NOW,
+      detachedBy: null, detachedAt: null }],
+    contentAttachments: [{ id: "content", orgId: ORG_ID, topicId: "training_visible",
+      contentId: "attached", attachedBy: "admin", attachedAt: NOW,
+      detachedBy: null, detachedAt: null }],
+  };
+  assert.equal((await fixture.service.getDetail(fixture.context, "attached")).item.id, "attached");
+  assert.deepEqual((await fixture.service.getRelatedForScenario(fixture.context,
+    "custom_visible", "training_visible")).items.map((row) => row.id), ["attached"]);
+  assert.deepEqual((await fixture.service.getRelatedScenariosForContent(fixture.context,
+    "attached")).scenarios.map((row) => [row.id, row.trainingId]), [["custom_visible", "training_visible"]]);
+  await assert.rejects(fixture.service.getRelatedForScenario(fixture.context, "custom_visible"),
+    (error) => error instanceof TrainingContentMobileServiceError && error.status === 404);
+  fixture.context.authoritySnapshot = { ...fixture.context.authoritySnapshot,
+    scenarioAttachments: [{ ...fixture.context.authoritySnapshot.scenarioAttachments[0]!, scenarioKind: "standard" }] };
+  await assert.rejects(fixture.service.getRelatedForScenario(fixture.context,
+    "custom_visible", "training_visible"),
+  (error) => error instanceof TrainingContentMobileServiceError && error.status === 404);
+  assert.deepEqual((await fixture.service.getRelatedScenariosForContent(fixture.context,
+    "attached")).scenarios, []);
+  fixture.context.authoritySnapshot = { ...fixture.context.authoritySnapshot,
+    assignments: [{ ...fixture.context.authoritySnapshot.assignments[0]!, revokedAt: NOW, revokedBy: "admin" }] };
+  await assert.rejects(fixture.service.getDetail(fixture.context, "attached"),
+    (error) => error instanceof TrainingContentMobileServiceError && error.status === 404);
+});
+
 test("module availability uses the relational entitlement and requires an active complete member", async () => {
   const fixture = setup();
   assert.deepEqual(await fixture.service.getModules(fixture.context), {

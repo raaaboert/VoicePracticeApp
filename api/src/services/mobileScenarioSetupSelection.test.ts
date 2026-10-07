@@ -108,6 +108,18 @@ test("selection fails closed when no Setup-visible industry exists", () => {
     }),
     null
   );
+  const mappedElsewhere = config([
+    { industryId: "first_in_links", roleId: "different_role", active: true },
+  ]);
+  mappedElsewhere.segments.push({
+    id: "different_role", label: "Other", enabled: true, summary: "",
+    scenarios: [{ id: "other", segmentId: "different_role", title: "Other", description: "",
+      desiredOutcome: "", aiRole: "", enabled: true }],
+  });
+  assert.equal(resolveCanonicalMobileScenarioSetupSelection(mappedElsewhere, {
+    id: "scenario_a", title: "Scenario A", source: "standard", segmentId: "sales",
+    allowedIndustryIds: [], trainingId: null,
+  }), null);
 });
 
 test("Focus Topic and Related Practice projections use the same canonical resolver", () => {
@@ -120,6 +132,10 @@ test("Focus Topic and Related Practice projections use the same canonical resolv
   assert.match(
     indexSource,
     /function resolveMobileFocusTopicScenarioSummary[\s\S]*?resolveCanonicalMobileScenarioSetupSelection/
+  );
+  assert.match(
+    indexSource,
+    /function resolveAssignmentModeTopicLaunch[\s\S]*?if \(!attached \|\| !resolveMobileFocusTopicScenarioSummary\(/
   );
   assert.match(
     trainingContentSource,
