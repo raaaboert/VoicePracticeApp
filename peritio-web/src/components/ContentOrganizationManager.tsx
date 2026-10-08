@@ -2,12 +2,7 @@
 
 import { ArrowDown, ArrowUp, Check, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type {
-  CustomerTrainingPackOrderListResponse,
-  CustomerTrainingPackOrderSummary,
-  OrgTrainingListResponse,
-  OrgTrainingSummary,
-} from "@voicepractice/shared";
+import type { OrgTrainingListResponse, OrgTrainingSummary } from "@voicepractice/shared";
 
 import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
 import {
@@ -19,15 +14,6 @@ import {
 
 function orderKey(items: readonly { id: string }[]): string {
   return items.map((item) => item.id).join("|");
-}
-
-function moveItem<T extends { id: string }>(items: readonly T[], id: string, direction: -1 | 1): T[] {
-  const index = items.findIndex((item) => item.id === id);
-  const nextIndex = index + direction;
-  if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return items.slice();
-  const next = items.slice();
-  [next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!];
-  return next;
 }
 
 function OrderList<T extends { id: string }>({
@@ -87,28 +73,20 @@ export function ContentOrganizationManager({
   orgId,
   initialFocusTopics,
   initialFocusTopicOrderRevision,
-  initialTrainingPacks,
-  initialTrainingPackOrderRevision,
 }: {
   orgId: string;
   initialFocusTopics: OrgTrainingSummary[];
   initialFocusTopicOrderRevision: string;
-  initialTrainingPacks: CustomerTrainingPackOrderSummary[];
-  initialTrainingPackOrderRevision: string;
 }) {
   const initialActiveFocusTopics = projectActiveFocusTopicOrder(initialFocusTopics);
   const [focusTopicRecords, setFocusTopicRecords] = useState(initialFocusTopics);
   const [focusTopics, setFocusTopics] = useState(initialActiveFocusTopics);
   const [savedFocusTopicKey, setSavedFocusTopicKey] = useState(orderKey(initialActiveFocusTopics));
   const [focusTopicRevision, setFocusTopicRevision] = useState(initialFocusTopicOrderRevision);
-  const [trainingPacks, setTrainingPacks] = useState(initialTrainingPacks);
-  const [savedTrainingPackKey, setSavedTrainingPackKey] = useState(orderKey(initialTrainingPacks));
-  const [trainingPackRevision, setTrainingPackRevision] = useState(initialTrainingPackOrderRevision);
-  const [saving, setSaving] = useState<"focus-topics" | "training-packs" | null>(null);
+  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const focusTopicsDirty = orderKey(focusTopics) !== savedFocusTopicKey;
-  const trainingPacksDirty = orderKey(trainingPacks) !== savedTrainingPackKey;
   const inactiveFocusTopics = projectInactiveFocusTopics(focusTopicRecords);
 
   useEffect(() => {
@@ -121,20 +99,16 @@ export function ContentOrganizationManager({
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (focusTopicsDirty || trainingPacksDirty) event.preventDefault();
+      if (focusTopicsDirty) event.preventDefault();
     };
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [focusTopicsDirty, trainingPacksDirty]);
-
-  const beginAction = (kind: "focus-topics" | "training-packs") => {
-    setSaving(kind);
-    setMessage(null);
-    setError(null);
-  };
+  }, [focusTopicsDirty]);
 
   const saveFocusTopics = async () => {
-    beginAction("focus-topics");
+    setSaving(true);
+    setMessage(null);
+    setError(null);
     try {
       const response = await fetchAdminApiJson<OrgTrainingListResponse>(
         `/api/admin/content-organization/focus-topics?orgId=${encodeURIComponent(orgId)}`,
@@ -153,32 +127,7 @@ export function ContentOrganizationManager({
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save Focus Topic order.");
     } finally {
-      setSaving(null);
-    }
-  };
-
-  const saveTrainingPacks = async () => {
-    beginAction("training-packs");
-    try {
-      const response = await fetchAdminApiJson<CustomerTrainingPackOrderListResponse>(
-        `/api/admin/content-organization/training-packs?orgId=${encodeURIComponent(orgId)}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expectedOrderRevision: trainingPackRevision,
-            trainingPackIds: trainingPacks.map((pack) => pack.id),
-          }),
-        }
-      );
-      setTrainingPacks(response.packs);
-      setSavedTrainingPackKey(orderKey(response.packs));
-      setTrainingPackRevision(response.orderRevision);
-      setMessage("Training Pack order saved.");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save Training Pack order.");
-    } finally {
-      setSaving(null);
+      setSaving(false);
     }
   };
 
@@ -198,9 +147,9 @@ export function ContentOrganizationManager({
             className="primary-button icon-text-button"
             type="button"
             onClick={saveFocusTopics}
-            disabled={!focusTopicsDirty || saving !== null}
+            disabled={!focusTopicsDirty || saving}
           >
-            {saving === "focus-topics"
+            {saving
               ? <LoaderCircle size={17} className="spin" aria-hidden="true" />
               : <Check size={17} aria-hidden="true" />}
             Save company order
@@ -210,7 +159,7 @@ export function ContentOrganizationManager({
           items={focusTopics}
           label={(topic) => topic.name}
           describe={(_topic, index) => `Position ${index + 1}`}
-          saving={saving !== null}
+          saving={saving}
           onMove={(id, direction) => {
             setFocusTopics((current) => moveActiveFocusTopic(current, id, direction));
             setMessage(null);
@@ -235,37 +184,6 @@ export function ContentOrganizationManager({
         ) : null}
       </section>
 
-      <section className="section-card">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Delivery configuration</p>
-            <h2>Training Packs</h2>
-            <p className="muted-copy">Organize Training Packs for customer administration. Order does not change assignments or scoring.</p>
-          </div>
-          <button
-            className="primary-button icon-text-button"
-            type="button"
-            onClick={saveTrainingPacks}
-            disabled={!trainingPacksDirty || saving !== null}
-          >
-            {saving === "training-packs"
-              ? <LoaderCircle size={17} className="spin" aria-hidden="true" />
-              : <Check size={17} aria-hidden="true" />}
-            Save order
-          </button>
-        </div>
-        <OrderList
-          items={trainingPacks}
-          label={(pack) => pack.title}
-          describe={(pack, index) => `Position ${index + 1} · ${pack.active ? "Active" : "Inactive"}`}
-          saving={saving !== null}
-          onMove={(id, direction) => {
-            setTrainingPacks((current) => moveItem(current, id, direction));
-            setMessage(null);
-            setError(null);
-          }}
-        />
-      </section>
     </div>
   );
 }

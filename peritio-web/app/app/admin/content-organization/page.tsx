@@ -8,7 +8,6 @@ import {
   DashboardSessionInvalidError,
   getDashboardAdminUsers,
   getDashboardFocusTopicOrder,
-  getDashboardTrainingPackOrder,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
@@ -25,24 +24,19 @@ export default async function ContentOrganizationPage({
       redirect("/app/access-denied");
     }
     const orgId = usersPayload.org.id;
-    const [focusTopics, trainingPacks] = await Promise.all([
-      getDashboardFocusTopicOrder(orgId),
-      getDashboardTrainingPackOrder(orgId),
-    ]);
+    const focusTopics = await getDashboardFocusTopicOrder(orgId);
     return (
       <>
         <PageHeader
           eyebrow="Admin"
-          title="Content Organization"
-          description={`Set the presentation order for ${usersPayload.org.name}.`}
+          title="Focus Topic Order"
+          description="Set the order learners see Focus Topics."
         />
-        <TrainingContentAdminNav orgId={selectedOrgId} active="content-organization" />
+        <TrainingContentAdminNav orgId={selectedOrgId} active="focus-topic-order" />
         <ContentOrganizationManager
           orgId={orgId}
           initialFocusTopics={focusTopics.trainings}
           initialFocusTopicOrderRevision={focusTopics.orderRevision}
-          initialTrainingPacks={trainingPacks.packs}
-          initialTrainingPackOrderRevision={trainingPacks.orderRevision}
         />
       </>
     );

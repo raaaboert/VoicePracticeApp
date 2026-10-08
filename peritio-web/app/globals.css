@@ -886,6 +886,30 @@ select.text-input {
   vertical-align: middle;
 }
 
+.admin-access-request-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.admin-request-history {
+  color: var(--text-muted);
+}
+
+.admin-request-history summary {
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.admin-request-history[open] summary {
+  margin-bottom: 1rem;
+}
+
+.admin-request-empty {
+  margin: 0;
+}
+
 .tab-row {
   margin-bottom: 1rem;
 }
@@ -3041,15 +3065,18 @@ html[data-theme="light"] .progress-track {
   display: grid;
   gap: 1.25rem;
   width: 100%;
+  max-width: 74rem;
 }
 
 .focus-topic-selector {
-  max-width: 34rem;
+  max-width: 30rem;
 }
 
 .focus-topic-admin-panel {
   display: grid;
   gap: 1rem;
+  width: 100%;
+  max-width: 68rem;
   padding: 1.15rem;
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -3069,7 +3096,7 @@ html[data-theme="light"] .progress-track {
 
 .focus-topic-details-grid {
   display: grid;
-  grid-template-columns: minmax(12rem, 20rem) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 44rem);
   gap: 1rem;
   align-items: start;
 }
@@ -3089,7 +3116,11 @@ html[data-theme="light"] .progress-track {
 }
 
 .focus-topic-field-wide {
-  grid-column: 1 / -1;
+  grid-column: auto;
+}
+
+.focus-topic-status-field {
+  max-width: 15rem;
 }
 
 .focus-topic-description {
@@ -3106,9 +3137,11 @@ html[data-theme="light"] .progress-track {
 
 .focus-topic-assignment-controls {
   display: grid;
-  grid-template-columns: minmax(15rem, 1fr) minmax(15rem, 1fr) auto;
+  grid-template-columns: minmax(15rem, 22rem) minmax(15rem, 24rem) auto;
   gap: 0.8rem;
   align-items: end;
+  justify-content: start;
+  max-width: 64rem;
 }
 
 .focus-topic-add-assignment {
@@ -3126,6 +3159,7 @@ html[data-theme="light"] .progress-track {
 .focus-topic-assignment-list {
   display: grid;
   gap: 0.6rem;
+  max-width: 64rem;
 }
 
 .focus-topic-assignment-row {
@@ -3142,6 +3176,16 @@ html[data-theme="light"] .progress-track {
 .focus-topic-assignment-row.revoked {
   background: transparent;
   opacity: 0.72;
+}
+
+.focus-topic-assignment-history summary {
+  color: var(--text);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.focus-topic-assignment-history[open] summary {
+  margin-bottom: 0.65rem;
 }
 
 .focus-topic-assignment-title {

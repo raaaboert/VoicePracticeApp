@@ -15,7 +15,6 @@ import {
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(componentsDir, "..", "..");
 const manager = readFileSync(join(componentsDir, "ContentOrganizationManager.tsx"), "utf8");
-const admin = readFileSync(join(componentsDir, "AdminWorkspace.tsx"), "utf8");
 const nav = readFileSync(join(componentsDir, "TrainingContentAdminNav.tsx"), "utf8");
 const auth = readFileSync(join(webRoot, "src", "lib", "auth.ts"), "utf8");
 const page = readFileSync(
@@ -23,27 +22,31 @@ const page = readFileSync(
   "utf8",
 );
 
-test("customer content organization is capability-gated and keeps Focus Topics separate from Training Packs", () => {
+test("customer Focus Topic Order page is capability-gated and narrowly describes learner ordering", () => {
   assert.equal(page.includes("viewer.capabilities.manageOrganizationContent"), true);
-  assert.equal(nav.includes("Content Organization"), true);
-  assert.equal(nav.includes('active: "admin" | "training-content" | "content-organization" | "focus-topics"'), true);
+  assert.equal(nav.includes("Focus Topic Order"), true);
+  assert.equal(nav.includes("Content Organization"), false);
+  assert.equal(nav.includes('"admin" | "focus-topics" | "training-content" | "focus-topic-order"'), true);
+  assert.equal(page.includes('title="Focus Topic Order"'), true);
+  assert.equal(page.includes("Set the order learners see Focus Topics."), true);
   assert.equal(manager.includes("Learner discovery"), true);
-  assert.equal(manager.includes("Delivery configuration"), true);
-  assert.equal(manager.includes("Order does not change assignments or scoring."), true);
   assert.equal(existsSync(join(webRoot, "app", "app", "admin", "content-organization", "page.tsx")), true);
 });
 
-test("customer ordering uses full lists, explicit saves, and existing authoritative API paths", () => {
+test("customer ordering uses the full Focus Topic list and existing authoritative API path", () => {
   assert.equal(manager.includes("Move ${itemLabel} up"), true);
   assert.equal(manager.includes("Move ${itemLabel} down"), true);
   assert.equal(manager.includes("Save company order"), true);
-  assert.equal(manager.match(/Save order/g)?.length, 1);
   assert.equal(manager.includes("buildFocusTopicOrderRequest(focusTopics, focusTopicRevision)"), true);
-  assert.equal(manager.includes("expectedOrderRevision: trainingPackRevision"), true);
-  assert.equal(manager.includes("trainingPackIds: trainingPacks.map"), true);
   assert.equal(auth.includes("/orgs/${encodeURIComponent(orgId)}/trainings/order"), true);
+});
+
+test("Training Pack ordering is absent from the customer Focus Topic Order page while APIs remain intact", () => {
+  assert.equal(manager.includes("Training Packs"), false);
+  assert.equal(manager.includes("initialTrainingPacks"), false);
+  assert.equal(page.includes("getDashboardTrainingPackOrder"), false);
+  assert.equal(page.includes("initialTrainingPacks"), false);
   assert.equal(auth.includes("/orgs/${encodeURIComponent(orgId)}/training-packs/order"), true);
-  assert.equal(manager.includes("Position ${index + 1} · ${pack.active ? \"Active\" : \"Inactive\"}"), true);
 });
 
 function focusTopic(id: string, name: string, status: OrgTrainingStatus): OrgTrainingSummary {
@@ -104,11 +107,4 @@ test("fresh mixed-status data rebuilds active ordering state from current status
   assert.deepEqual(projectActiveFocusTopicOrder(refreshed).map((topic) => topic.id), ["b", "c"]);
   assert.equal(manager.includes("setFocusTopics(activeTopics)"), true);
   assert.equal(manager.includes("setFocusTopicRevision(initialFocusTopicOrderRevision)"), true);
-});
-
-test("customer Content Organization props use only the explicit Training Pack ordering summary", () => {
-  assert.equal(manager.includes("initialTrainingPacks: CustomerTrainingPackOrderSummary[]"), true);
-  assert.equal(manager.includes("initialTrainingPacks: TrainingPack[]"), false);
-  assert.equal(auth.includes("minimizeCustomerTrainingPackOrderResponse(response)"), true);
-  assert.equal(page.includes("initialTrainingPacks={trainingPacks.packs}"), true);
 });

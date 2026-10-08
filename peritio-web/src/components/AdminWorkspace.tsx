@@ -22,6 +22,7 @@ import {
 import { formatDateTime } from "@/src/lib/formatters";
 import { ManagerCombobox } from "@/src/components/ManagerCombobox";
 import { TrainingContentAdminNav } from "@/src/components/TrainingContentAdminNav";
+import { partitionAdminAccessRequests } from "@/src/components/adminAccessRequestPresentation";
 
 type AdminTab = "users" | "access";
 
@@ -137,6 +138,10 @@ export function AdminWorkspace({
   const canManageAccessRequests = usersPayload.viewer.capabilities.approveRejectAccessRequests;
   const canManagePerformanceAccess = usersPayload.viewer.capabilities.managePerformanceAccess;
   const managerOptions = usersPayload.managerOptions ?? [];
+  const { pendingRequests, requestHistory } = useMemo(
+    () => partitionAdminAccessRequests(requests),
+    [requests]
+  );
 
   useEffect(() => {
     setRequests(accessRequestsPayload.requests);
@@ -550,82 +555,113 @@ export function AdminWorkspace({
           </div>
         </section>
       ) : canManageAccessRequests ? (
-        <section className="section-card admin-section">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">Access</p>
-              <h2>Membership requests</h2>
+        <div className="admin-access-request-stack">
+          <section className="section-card admin-section" aria-labelledby="pending-requests-heading">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Access</p>
+                <h2 id="pending-requests-heading">Pending Requests</h2>
+                <p className="muted-copy">Review organization membership requests that still need a decision.</p>
+              </div>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isPending}
+                onClick={() => {
+                  startTransition(() => router.refresh());
+                }}
+              >
+                Refresh
+              </button>
             </div>
-            <button
-              type="button"
-              className="ghost-button"
-              disabled={isPending}
-              onClick={() => {
-                startTransition(() => router.refresh());
-              }}
-            >
-              Refresh
-            </button>
-          </div>
 
-          <div className="table-wrap">
-            <table className="data-table admin-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Email</th>
-                  <th>Requested</th>
-                  <th>Status</th>
-                  <th>Organization</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {requests.map((request) => (
-                  <tr key={request.id}>
-                    <td>{request.displayName}</td>
-                    <td>{request.email}</td>
-                    <td>{formatDateTime(request.createdAt)}</td>
-                    <td>
-                      <span className={`pill ${request.status === "pending" ? "accent" : "muted"}`}>
-                        {statusLabel(request.status)}
-                      </span>
-                    </td>
-                    <td>{request.orgName}</td>
-                    <td>
-                      {request.status === "pending" ? (
-                        <div className="pill-row">
-                          <button
-                            type="button"
-                            className="ghost-button compact-button"
-                            disabled={savingRequestId === request.id}
-                            onClick={() => {
-                              void decideRequest(request, "approve");
-                            }}
-                          >
-                            Approve
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost-button compact-button danger-button"
-                            disabled={savingRequestId === request.id}
-                            onClick={() => {
-                              void decideRequest(request, "reject");
-                            }}
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="table-subcopy">{request.decidedAt ? formatDateTime(request.decidedAt) : "-"}</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+            {pendingRequests.length === 0 ? (
+              <p className="muted-copy admin-request-empty">No pending requests.</p>
+            ) : (
+              <div className="table-wrap">
+                <table className="data-table admin-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Requested</th>
+                      <th>Organization</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pendingRequests.map((request) => (
+                      <tr key={request.id}>
+                        <td>{request.displayName}</td>
+                        <td>{request.email}</td>
+                        <td>{formatDateTime(request.createdAt)}</td>
+                        <td>{request.orgName}</td>
+                        <td>
+                          <div className="pill-row">
+                            <button
+                              type="button"
+                              className="ghost-button compact-button"
+                              disabled={savingRequestId === request.id}
+                              onClick={() => {
+                                void decideRequest(request, "approve");
+                              }}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-button compact-button danger-button"
+                              disabled={savingRequestId === request.id}
+                              onClick={() => {
+                                void decideRequest(request, "reject");
+                              }}
+                            >
+                              Deny
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <details className="section-card admin-section admin-request-history">
+            <summary>Request History ({requestHistory.length})</summary>
+            {requestHistory.length === 0 ? (
+              <p className="muted-copy admin-request-empty">No previous requests.</p>
+            ) : (
+              <div className="table-wrap">
+                <table className="data-table admin-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Requested</th>
+                      <th>Final status</th>
+                      <th>Decision time</th>
+                      <th>Organization</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {requestHistory.map((request) => (
+                      <tr key={request.id}>
+                        <td>{request.displayName}</td>
+                        <td>{request.email}</td>
+                        <td>{formatDateTime(request.createdAt)}</td>
+                        <td><span className="pill muted">{statusLabel(request.status)}</span></td>
+                        <td>{formatDateTime(request.decidedAt ?? request.updatedAt)}</td>
+                        <td>{request.orgName}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </details>
+        </div>
       ) : null}
     </div>
   );

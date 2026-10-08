@@ -5,6 +5,8 @@ import type { DashboardAdminUserRow, OrgTrainingSummary } from "@voicepractice/s
 
 import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
 import type { DashboardFocusTopicAssignment } from "@/src/lib/auth";
+import { formatDateTime } from "@/src/lib/formatters";
+import { partitionFocusTopicAssignments } from "@/src/components/focusTopicAssignmentPresentation";
 
 type TopicRow = Pick<OrgTrainingSummary, "id" | "name" | "description" | "status">;
 type Audience = DashboardFocusTopicAssignment["audience"];
@@ -43,8 +45,7 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
   const subjectOptions = users.filter((user) => user.status === "active"
     && (audience === "individual" || user.assignedReportCount > 0));
   const userLabel = (id: string | null) => users.find((user) => user.userId === id)?.displayName ?? "Former member";
-  const activeAssignments = assignments.filter((row) => !row.revokedAt);
-  const assignmentHistory = assignments.filter((row) => Boolean(row.revokedAt));
+  const { activeAssignments, assignmentHistory } = partitionFocusTopicAssignments(assignments);
   const assignmentSubject = (row: DashboardFocusTopicAssignment) =>
     row.subjectUserId ? userLabel(row.subjectUserId) : "All eligible members";
 
@@ -112,7 +113,7 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
       <div className="section-header"><div>
         <p className="eyebrow">Learner authority</p>
         <h2>Focus Topic administration</h2>
-        <p className="muted-copy">Create, publish, archive, and assign Focus Topics directly.</p>
+        <p className="muted-copy">Manage Topic details and learner assignments.</p>
       </div></div>
       {error ? <div className="notice danger" role="alert">{error}</div> : null}
       {message ? <div className="notice success" role="status">{message}</div> : null}
@@ -148,7 +149,7 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
             <textarea className="text-input focus-topic-description" id="focus-topic-description" value={description}
               maxLength={4000} disabled={busy || selected?.status === "archived"}
               onChange={(event) => setDescription(event.target.value)} /></div>
-          {selected ? <div className="focus-topic-field"><label htmlFor="focus-topic-status">Status</label>
+          {selected ? <div className="focus-topic-field focus-topic-status-field"><label htmlFor="focus-topic-status">Status</label>
             <select className="text-input" id="focus-topic-status" value={status}
               disabled={busy || selected.status === "archived"}
               onChange={(event) => setStatus(event.target.value as "draft" | "active") }>
@@ -205,6 +206,7 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
                   <span className="status-badge status-active">Active</span>
                 </div>
                 <small>{assignmentSubject(row)}</small>
+                <small>Assigned {formatDateTime(row.createdAt)}</small>
               </div>
               <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
                 onClick={() => revokeAssignment(row.id)}>Revoke</button>
@@ -212,20 +214,23 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
           </div>
         </div>
 
-        {assignmentHistory.length > 0 ? <div className="focus-topic-assignment-section focus-topic-assignment-history">
-          <h4>Assignment history</h4>
-          <div className="focus-topic-assignment-list">
-            {assignmentHistory.map((row) => <div key={row.id} className="focus-topic-assignment-row revoked">
-              <div className="training-content-order-copy">
-                <div className="focus-topic-assignment-title">
-                  <strong>{AUDIENCES.find((option) => option.value === row.audience)?.label}</strong>
-                  <span className="status-badge">Revoked</span>
+        <details className="focus-topic-assignment-section focus-topic-assignment-history">
+          <summary>Assignment History ({assignmentHistory.length})</summary>
+          {assignmentHistory.length === 0 ? <p className="muted-copy">No revoked assignments.</p> : (
+            <div className="focus-topic-assignment-list">
+              {assignmentHistory.map((row) => <div key={row.id} className="focus-topic-assignment-row revoked">
+                <div className="training-content-order-copy">
+                  <div className="focus-topic-assignment-title">
+                    <strong>{AUDIENCES.find((option) => option.value === row.audience)?.label}</strong>
+                    <span className="status-badge">Revoked</span>
+                  </div>
+                  <small>{assignmentSubject(row)}</small>
+                  <small>Assigned {formatDateTime(row.createdAt)} · Revoked {formatDateTime(row.revokedAt)}</small>
                 </div>
-                <small>{assignmentSubject(row)}</small>
-              </div>
-            </div>)}
-          </div>
-        </div> : null}
+              </div>)}
+            </div>
+          )}
+        </details>
       </div> : null}
     </section>
   );

@@ -19,17 +19,20 @@ const pages = {
 };
 
 test("all Admin sections use one canonical four-item navigation in the same order", () => {
-  const labels = ["Users &amp; Access", "Content Organization", "Focus Topics", "Learning Resources"];
+  const labels = ["Users & Access", "Focus Topics", "Learning Resources", "Focus Topic Order"];
   let previous = -1;
   for (const label of labels) {
     const position = nav.indexOf(label);
     assert.ok(position > previous, `${label} must follow the previous Admin destination`);
     previous = position;
   }
+  assert.equal(nav.match(/\{ key:/g)?.length, 4);
   assert.equal(nav.includes("showFocusTopics"), false);
   assert.match(nav, /aria-label="Admin sections"/);
+  assert.match(nav, /ADMIN_SECTIONS\.map\(\(section\) =>/);
+  assert.match(nav, /active === section\.key \? " active" : ""/);
   assert.match(admin, /<TrainingContentAdminNav orgId=\{orgId\} active="admin" \/>/);
-  assert.match(pages.organization, /active="content-organization"/);
+  assert.match(pages.organization, /active="focus-topic-order"/);
   assert.match(pages.topics, /active="focus-topics"/);
   assert.match(pages.resources, /active="training-content"/);
 });
@@ -58,11 +61,12 @@ test("Focus Topic fields and actions use shared controls with accessible labels"
 });
 
 test("active assignments and revoked history have distinct presentation without changing operations", () => {
-  assert.match(focusTopics, /const activeAssignments = assignments\.filter\(\(row\) => !row\.revokedAt\)/);
-  assert.match(focusTopics, /const assignmentHistory = assignments\.filter/);
+  assert.match(focusTopics, /partitionFocusTopicAssignments\(assignments\)/);
   assert.match(focusTopics, />Active assignments</);
-  assert.match(focusTopics, />Assignment history</);
+  assert.match(focusTopics, />Assignment History \(\{assignmentHistory\.length\}\)</);
   assert.match(focusTopics, /className="focus-topic-assignment-row revoked"/);
+  assert.match(focusTopics, /Assigned \{formatDateTime\(row\.createdAt\)\}/);
+  assert.match(focusTopics, /Revoked \{formatDateTime\(row\.revokedAt\)\}/);
   assert.match(focusTopics, /onClick=\{\(\) => revokeAssignment\(row\.id\)\}/);
   for (const operation of ["create_topic", "update_topic", "create_assignment", "revoke_assignment"]) {
     assert.match(focusTopics, new RegExp(`action: "${operation}"`));
