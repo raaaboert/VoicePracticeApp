@@ -81,6 +81,7 @@ test("tenant dashboard viewer remains scoped to its own org", () => {
     assignUserManagers: true,
     managePerformanceAccess: true,
     manageOrganizationContent: true,
+    manageFocusTopics: true,
   });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), false);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
@@ -152,6 +153,7 @@ test("super users retain cross-account dashboard access", () => {
     assignUserManagers: false,
     managePerformanceAccess: false,
     manageOrganizationContent: false,
+    manageFocusTopics: true,
   });
   assert.equal(canDashboardViewerAccessCustomerDirectory(viewer), true);
   assert.equal(canDashboardViewerAccessOrg(viewer, "org_a"), true);
@@ -167,7 +169,10 @@ test("org admin has inherent dashboard entry and the resolver accepts a future m
   assert.equal(resolveDashboardAccessEligibility(db, manager).eligible, false);
   assert.equal(resolveDashboardAccessEligibility(db, manager, { hasEffectiveFocusTopicManagementGrant: true }).eligible, true);
   assert.equal(resolveDashboardViewer(db, manager), null);
-  assert.equal(resolveDashboardViewer(db, manager, { hasEffectiveFocusTopicManagementGrant: true })?.userId, manager.id);
+  const scopedViewer = resolveDashboardViewer(db, manager, { hasEffectiveFocusTopicManagementGrant: true });
+  assert.equal(scopedViewer?.userId, manager.id);
+  assert.equal(scopedViewer?.capabilities.manageFocusTopics, true);
+  assert.equal(scopedViewer?.capabilities.manageOrganizationContent, false);
 });
 
 test("legacy platform_admin alone no longer resolves to a dashboard viewer", () => {
@@ -305,6 +310,7 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     assignUserManagers: true,
     managePerformanceAccess: false,
     manageOrganizationContent: false,
+    manageFocusTopics: false,
   });
 
   assert.deepEqual(buildDashboardAdminCapabilities("user"), {
@@ -317,6 +323,7 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     assignUserManagers: false,
     managePerformanceAccess: false,
     manageOrganizationContent: false,
+    manageFocusTopics: false,
   });
 
   assert.deepEqual(buildDashboardAdminCapabilities(null, { superUserOrgContext: true }), {
@@ -329,6 +336,7 @@ test("dashboard capability derivation distinguishes user admin, regular user, an
     assignUserManagers: true,
     managePerformanceAccess: true,
     manageOrganizationContent: true,
+    manageFocusTopics: true,
   });
 
   assert.equal(buildDashboardAdminCapabilities("org_admin").managePerformanceAccess, true);

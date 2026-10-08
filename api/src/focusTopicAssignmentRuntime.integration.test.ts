@@ -11,6 +11,9 @@ import { createFocusTopicAuthorityStore } from "./storage/focusTopicAuthoritySto
 import { createOrgModuleEntitlementStore } from "./storage/orgModuleEntitlementStore.js";
 import { createUserNotificationStore } from "./storage/userNotificationStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
+import { createOrganizationProductSettingsStore } from "./storage/organizationProductSettingsStore.js";
+import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import { createWebAuthService } from "./services/webAuth.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
 
@@ -86,7 +89,26 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         email: "learner@focus-runtime.integration.test", divisionId: "division_runtime_a" };
       org.divisionsEnabled = true;
       db.orgs = [org, foreignOrg];
-      db.users = [user];
+      const scopedUserAdmin = {
+        ...sourceUser,
+        id: "user_focus_scoped_admin",
+        orgId: org.id,
+        email: "scoped-admin@focus-runtime.integration.test",
+        orgRole: "user_admin" as const,
+        emailVerifiedAt: now,
+        status: "active" as const,
+        dashboardAccessEnabled: false,
+      };
+      const orgAdmin = {
+        ...sourceUser,
+        id: "user_focus_org_admin",
+        orgId: org.id,
+        email: "org-admin@focus-runtime.integration.test",
+        orgRole: "org_admin" as const,
+        emailVerifiedAt: now,
+        status: "active" as const,
+      };
+      db.users = [user, scopedUserAdmin, orgAdmin];
       user.firstName = "Test";
       user.lastName = "Learner";
       user.emailVerifiedAt = now;
@@ -126,12 +148,36 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       db.orgTrainingScenarioAttachments.push({ id: "legacy_custom_attachment", orgId: org.id,
         trainingId: topic.id, scenarioId: customScenarioId, createdAt: now, updatedAt: now });
       const foreignTopic: OrgTrainingRecord = { ...topic, id: "focus_foreign_topic", orgId: foreignOrg.id };
-      db.orgTrainings.push(foreignTopic);
+      const unmanagedTopic: OrgTrainingRecord = {
+        ...topic, id: "focus_runtime_unmanaged_topic", name: "Unmanaged Topic",
+      };
+      db.orgTrainings.push(foreignTopic, unmanagedTopic);
       const storage = createDatabaseStorage({ provider: "postgres", dbPath: "unused",
         databaseUrl: url, pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000,
         queryPool: pool, ensureDatabaseShape: imported.ensureDatabaseShape,
         createDefaultDatabase: imported.createDefaultDatabase });
       await storage.save(db);
+      await moduleEntitlements.setOrgModuleEntitlement({
+        orgId: org.id, moduleKey: "training_content", enabled: true,
+        updatedByActorId: "platform_admin", updatedAt: new Date(now),
+      });
+      const categoryId = randomUUID();
+      const foreignCategoryId = randomUUID();
+      const contentId = randomUUID();
+      const foreignContentId = randomUUID();
+      await pool.query(`INSERT INTO org_content_categories
+        (id,org_id,name,description,display_order,is_default,created_by_actor_id,updated_by_actor_id,created_at,updated_at)
+        VALUES ($1,$2,'General','',0,TRUE,'platform_admin','platform_admin',$3,$3),
+          ($4,$5,'General','',0,TRUE,'platform_admin','platform_admin',$3,$3)`,
+      [categoryId, org.id, now, foreignCategoryId, foreignOrg.id]);
+      await pool.query(`INSERT INTO org_content_items
+        (id,org_id,category_id,title,description,content_type,publication_state,native_body,
+          display_order,content_version,created_by_actor_id,updated_by_actor_id,created_at,updated_at)
+        VALUES ($1,$2,$3,'Scoped content','', 'native','published','Content body',0,1,
+          'platform_admin','platform_admin',$4,$4),
+          ($5,$6,$7,'Foreign content','', 'native','published','Foreign body',0,1,
+          'platform_admin','platform_admin',$4,$4)`,
+      [contentId, org.id, categoryId, now, foreignContentId, foreignOrg.id, foreignCategoryId]);
       assert.equal((await storage.load()).users.some((candidate) => candidate.id === user.id), true);
       const persistedUsers = await pool.query<{ ids: string[] }>(
         "SELECT ARRAY(SELECT jsonb_array_elements(state_json->'users')->>'id') AS ids FROM app_state WHERE id='primary'");
@@ -216,20 +262,163 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const masterCreated = await masterCall(assignmentsPath, "POST", {
         audience: "organization", subjectUserId: null, grantsManagement: true,
       });
-      assert.equal(masterCreated.status, 201, JSON.stringify(masterCreated.body));
-      assert.equal(masterCreated.body.grantsManagement, false);
-      const createdId = masterCreated.body.id as string;
+      assert.equal(masterCreated.status, 400, JSON.stringify(masterCreated.body));
+      const managementGrant = await masterCall(assignmentsPath, "POST", {
+        audience: "individual", subjectUserId: scopedUserAdmin.id, grantsManagement: true,
+      });
+      assert.equal(managementGrant.status, 201, JSON.stringify(managementGrant.body));
+      assert.equal(managementGrant.body.grantsManagement, true);
+      assert.equal((await pool.query(
+        "SELECT 1 FROM focus_topic_assignments WHERE id=$1 AND grants_management=TRUE",
+        [managementGrant.body.id],
+      )).rowCount, 1);
+      const productSettings = createOrganizationProductSettingsStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 3,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await productSettings.initialize();
+      await pool.query(`INSERT INTO organization_product_settings (
+        org_id, allow_user_admin_focus_topic_management, updated_at
+      ) VALUES ($1, TRUE, NOW())
+      ON CONFLICT (org_id) DO UPDATE SET allow_user_admin_focus_topic_management=TRUE, updated_at=NOW()`,
+      [org.id]);
+      const scopedWebAuth = createWebAuthService({
+        tokenSecret: process.env.WEB_AUTH_TOKEN_SECRET!,
+        codeSecret: process.env.WEB_AUTH_CODE_SECRET!,
+      });
+      const scopedWebAuthStore = createWebAuthSessionStore({
+        provider: "postgres", dbPath: "unused", databaseUrl: url, pgPoolMax: 3,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await scopedWebAuthStore.initialize();
+      const scopedSession = scopedWebAuth.issueSession(
+        scopedUserAdmin, 60, new Date(), {
+          accessType: "customer_dashboard_user", orgId: org.id,
+        },
+      );
+      await scopedWebAuthStore.saveSession(scopedSession.record);
+      const orgAdminSession = scopedWebAuth.issueSession(
+        orgAdmin, 60, new Date(), {
+          accessType: "customer_dashboard_user", orgId: org.id,
+        },
+      );
+      await scopedWebAuthStore.saveSession(orgAdminSession.record);
+      const dashboardCall = async (
+        sessionToken: string,
+        path: string,
+        method: "GET" | "POST" | "DELETE" = "GET",
+        body?: Record<string, unknown>,
+      ) => {
+        const response = await fetch(base + path, {
+          method,
+          headers: {
+            Authorization: `Bearer ${sessionToken}`,
+            ...(body ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        return { status: response.status, body: await response.json() as Record<string, unknown> };
+      };
+      const scopedCall = (path: string, method: "GET" | "POST" | "DELETE" = "GET",
+        body?: Record<string, unknown>) => dashboardCall(scopedSession.token, path, method, body);
+      const orgAdminCall = (path: string, method: "GET" | "POST" | "DELETE" = "GET",
+        body?: Record<string, unknown>) => dashboardCall(orgAdminSession.token, path, method, body);
+      const scopedTopics = await scopedCall(`/orgs/${org.id}/trainings`);
+      assert.equal(scopedTopics.status, 200, JSON.stringify(scopedTopics.body));
+      assert.deepEqual(
+        (scopedTopics.body.trainings as Array<{ id: string }>).map((entry) => entry.id),
+        [topic.id],
+      );
+      assert.equal(
+        ((scopedTopics.body.management as { canManageAllTopics: boolean }).canManageAllTopics),
+        false,
+      );
+      assert.equal((await scopedCall(`/orgs/${org.id}/trainings`, "POST", {
+        name: "Denied Topic", description: "", status: "draft",
+      })).status, 403);
+      assert.equal((await scopedCall(assignmentsPath)).status, 200);
+      assert.equal((await scopedCall(assignmentsPath, "POST", {
+        audience: "individual", subjectUserId: user.id,
+      })).status, 403);
+      assert.equal((await scopedCall(
+        `/orgs/${org.id}/trainings/${foreignTopic.id}/assignments`,
+      )).status, 404);
+      const relatedBefore = await scopedCall(attachmentsPath);
+      assert.equal(relatedBefore.status, 200, JSON.stringify(relatedBefore.body));
+      assert.deepEqual(
+        (relatedBefore.body.contentItems as Array<{ id: string }>).map((entry) => entry.id),
+        [contentId],
+      );
+      const scopedAttached = await scopedCall(attachmentsPath, "POST", { kind: "content", contentId });
+      assert.equal(scopedAttached.status, 201, JSON.stringify(scopedAttached.body));
+      assert.equal((await scopedCall(attachmentsPath, "POST", { kind: "content", contentId })).status, 409);
+      assert.equal((await scopedCall(attachmentsPath, "POST", {
+        kind: "content", contentId: foreignContentId,
+      })).status, 400);
+      const unmanagedAttachmentsPath = `/orgs/${org.id}/trainings/${unmanagedTopic.id}/direct-attachments`;
+      assert.equal((await scopedCall(unmanagedAttachmentsPath, "POST", {
+        kind: "content", contentId,
+      })).status, 404);
+      const sharedAttachment = await orgAdminCall(unmanagedAttachmentsPath, "POST", {
+        kind: "content", contentId,
+      });
+      assert.equal(sharedAttachment.status, 201, JSON.stringify(sharedAttachment.body));
+      const scopedDetached = await scopedCall(
+        `${attachmentsPath}/${scopedAttached.body.id as string}`, "DELETE",
+      );
+      assert.equal(scopedDetached.status, 200, JSON.stringify(scopedDetached.body));
+      const attachmentRows = await pool.query<{ topic_id: string; detached_at: Date | null }>(
+        `SELECT topic_id,detached_at FROM org_content_topic_attachments
+         WHERE content_id=$1 ORDER BY topic_id`, [contentId],
+      );
+      assert.deepEqual(attachmentRows.rows.map((entry) => [entry.topic_id, Boolean(entry.detached_at)]), [
+        [topic.id, true], [unmanagedTopic.id, false],
+      ]);
+      assert.equal((await pool.query(
+        "SELECT 1 FROM audit_events WHERE action='focus_topic.content.attached'",
+      )).rowCount, 2);
+      assert.equal((await pool.query(
+        "SELECT 1 FROM audit_events WHERE action='focus_topic.attachment.detached'",
+      )).rowCount, 1);
+      assert.equal((await pool.query(
+        "SELECT 1 FROM user_notifications WHERE kind='content_added' AND recipient_user_id=$1",
+        [orgAdmin.id],
+      )).rowCount, 2);
+      await moduleEntitlements.setOrgModuleEntitlement({
+        orgId: org.id, moduleKey: "training_content", enabled: false,
+        updatedByActorId: "platform_admin", updatedAt: new Date(),
+      });
+      assert.equal((await scopedCall(attachmentsPath, "POST", { kind: "content", contentId })).status, 403);
+      await moduleEntitlements.setOrgModuleEntitlement({
+        orgId: org.id, moduleKey: "training_content", enabled: true,
+        updatedByActorId: "platform_admin", updatedAt: new Date(),
+      });
+      const learnerCreated = await masterCall(assignmentsPath, "POST", {
+        audience: "organization", subjectUserId: null,
+      });
+      assert.equal(learnerCreated.status, 201, JSON.stringify(learnerCreated.body));
+      const masterCreatedBody = learnerCreated.body;
+      assert.equal(masterCreatedBody.grantsManagement, false);
+      const createdId = masterCreatedBody.id as string;
       assert.equal((await pool.query("SELECT 1 FROM audit_events WHERE action='focus_topic.assignment.created'")).rowCount, 1);
-      assert.equal((await pool.query("SELECT 1 FROM user_notifications WHERE kind='topic_assigned'")).rowCount, 0);
+      assert.ok(((await pool.query("SELECT 1 FROM user_notifications WHERE kind='topic_assigned'")).rowCount ?? 0) >= 1);
       const duplicateAssignment = await masterCall(assignmentsPath, "POST", {
         audience: "organization", subjectUserId: null,
       });
       assert.equal(duplicateAssignment.status, 409, JSON.stringify(duplicateAssignment.body));
       assert.equal(duplicateAssignment.body.code, "focus_topic_assignment_already_active");
+      assert.equal((await scopedCall(`${assignmentsPath}/${createdId}`, "DELETE")).status, 403);
       const masterRevoked = await masterCall(`${assignmentsPath}/${createdId}`, "DELETE");
       assert.equal(masterRevoked.status, 200, JSON.stringify(masterRevoked.body));
       assert.equal((await pool.query("SELECT 1 FROM focus_topic_assignments WHERE id=$1 AND revoked_at IS NOT NULL",
         [createdId])).rowCount, 1);
+      const revokedManagement = await masterCall(
+        `${assignmentsPath}/${managementGrant.body.id as string}`,
+        "DELETE",
+      );
+      assert.equal(revokedManagement.status, 200, JSON.stringify(revokedManagement.body));
+      const staleScopedRequest = await scopedCall(`/orgs/${org.id}/trainings`);
+      assert.equal(staleScopedRequest.status, 403, JSON.stringify(staleScopedRequest.body));
 
       const prefetchSessionId = `prefetch_${randomUUID()}`;
       const originalFetch = globalThis.fetch;

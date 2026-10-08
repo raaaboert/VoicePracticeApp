@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { DashboardAdminCapabilities } from "@voicepractice/shared";
 
 import { trainingContentOrgQuery } from "@/src/lib/trainingContentPresentation";
 
@@ -18,14 +19,21 @@ const ADMIN_SECTIONS: ReadonlyArray<{
 export function TrainingContentAdminNav({
   orgId,
   active,
+  capabilities,
 }: {
   orgId: string | null;
   active: AdminSection;
+  capabilities?: DashboardAdminCapabilities;
 }) {
   const query = trainingContentOrgQuery(orgId);
+  const sections = capabilities ? ADMIN_SECTIONS.filter((section) => {
+    if (section.key === "admin") return capabilities.viewOrganizationUsers;
+    if (section.key === "focus-topics") return capabilities.manageFocusTopics;
+    return capabilities.manageOrganizationContent;
+  }) : ADMIN_SECTIONS;
   return (
     <nav className="tab-row" aria-label="Admin sections">
-      {ADMIN_SECTIONS.map((section) => (
+      {sections.map((section) => (
         <Link
           key={section.key}
           className={`tab-button${active === section.key ? " active" : ""}`}

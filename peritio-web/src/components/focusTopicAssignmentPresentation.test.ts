@@ -43,12 +43,9 @@ test("two different active individual subjects remain distinct", () => {
 
 test("active rows show created time and revoke while history shows both times without revoke", () => {
   assert.match(source, /Assigned \{formatDateTime\(row\.createdAt\)\}/);
-  assert.match(source, /Revoked \{formatDateTime\(row\.revokedAt\)\}/);
-  const historyStart = source.indexOf("<details className=\"focus-topic-assignment-section focus-topic-assignment-history\"");
-  const history = source.slice(historyStart, source.indexOf("</details>", historyStart));
-  assert.ok(historyStart >= 0);
-  assert.equal(history.includes("revokeAssignment("), false);
-  assert.match(source.slice(0, historyStart), /onClick=\{\(\) => revokeAssignment\(row\.id\)\}/);
+  assert.match(source, /Revoked \$\{formatDateTime\(row\.revokedAt\)\}/);
+  assert.match(source, /!options\.revoked && canManageAllTopics/);
+  assert.match(source, /onClick=\{\(\) => revokeAssignment\(row\.id, options\.management === true\)\}/);
 });
 
 test("assignment composer keeps fields in one row and a normal-sized action beneath them", () => {

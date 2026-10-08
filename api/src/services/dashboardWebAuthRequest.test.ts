@@ -193,3 +193,30 @@ test("dashboard request-code issues an email verification code for an eligible u
   assert.equal(emailVerificationRequests, 1);
   assert.equal(signInRequests, 0);
 });
+
+test("dashboard request-code accepts a current Focus Topic management grant without broad dashboard access", async () => {
+  const manager = createUser({
+    id: "scoped_manager",
+    email: "scoped@example.com",
+    orgRole: "user",
+    dashboardAccessEnabled: false,
+  });
+  const db = createDb({
+    users: [manager],
+    orgs: [{ id: "org_active", name: "Active Org", status: "active" }],
+  });
+  const result = await handleDashboardWebAuthCodeRequest({
+    db,
+    email: manager.email,
+    now: new Date("2026-10-08T12:00:00.000Z"),
+    hasEffectiveFocusTopicManagementGrant: true,
+    issueSignInCode: async () => ({
+      expiresAt: "2026-10-08T12:15:00.000Z",
+      delivery: "email",
+    }),
+    issueEmailVerificationCode: async () => {
+      throw new Error("Verification delivery was not expected.");
+    },
+  });
+  assert.equal(result.outcome, "issued");
+});

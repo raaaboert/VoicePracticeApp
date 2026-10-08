@@ -126,6 +126,12 @@ export function resolveDashboardViewer(
     orgName: eligibility.org?.name ?? null,
     orgRole: user.isSuperUser === true ? null : user.orgRole,
     performanceAccess: normalizePerformanceAccess(user),
-    capabilities: user.isSuperUser === true ? buildDashboardAdminCapabilities(null) : buildDashboardAdminCapabilities(user.orgRole),
+    capabilities: user.isSuperUser === true
+      ? { ...buildDashboardAdminCapabilities(null), manageFocusTopics: true }
+      : {
+          ...buildDashboardAdminCapabilities(user.orgRole),
+          manageFocusTopics: user.orgRole === "org_admin"
+            || options?.hasEffectiveFocusTopicManagementGrant === true,
+        },
   };
 }

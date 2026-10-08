@@ -1721,6 +1721,7 @@ export interface DashboardAdminCapabilities {
   assignUserManagers: boolean;
   managePerformanceAccess: boolean;
   manageOrganizationContent: boolean;
+  manageFocusTopics?: boolean;
 }
 
 export interface DashboardDivisionScopeOption {

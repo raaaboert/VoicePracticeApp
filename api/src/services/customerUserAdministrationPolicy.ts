@@ -135,6 +135,7 @@ export function buildCustomerUserAdministrationCapabilities(
       assignUserManagers: true,
       managePerformanceAccess: true,
       manageOrganizationContent: true,
+      manageFocusTopics: true,
     };
   }
   if (role === "user_admin") {
@@ -148,6 +149,7 @@ export function buildCustomerUserAdministrationCapabilities(
       assignUserManagers: true,
       managePerformanceAccess: false,
       manageOrganizationContent: false,
+      manageFocusTopics: false,
     };
   }
   return {
@@ -160,5 +162,6 @@ export function buildCustomerUserAdministrationCapabilities(
     assignUserManagers: false,
     managePerformanceAccess: false,
     manageOrganizationContent: false,
+    manageFocusTopics: false,
   };
 }

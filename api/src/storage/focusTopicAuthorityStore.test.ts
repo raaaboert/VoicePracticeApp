@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createFocusTopicAuthorityStore,
   isDuplicateActiveFocusTopicAssignmentError,
+  isDuplicateActiveFocusTopicContentAttachmentError,
 } from "./focusTopicAuthorityStore.js";
 
 test("duplicate active assignment classifier accepts only the two known PostgreSQL constraints", () => {
@@ -14,6 +15,15 @@ test("duplicate active assignment classifier accepts only the two known PostgreS
   assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "23505", constraint: "other_uidx" }), false);
   assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "40001",
     constraint: "focus_topic_assignments_active_broad_uidx" }), false);
+});
+
+test("duplicate active content attachment classifier accepts only its PostgreSQL constraint", () => {
+  assert.equal(isDuplicateActiveFocusTopicContentAttachmentError({ code: "23505",
+    constraint: "org_content_topic_attachments_active_uidx" }), true);
+  assert.equal(isDuplicateActiveFocusTopicContentAttachmentError({ code: "23505",
+    constraint: "focus_topic_scenario_attachments_active_uidx" }), false);
+  assert.equal(isDuplicateActiveFocusTopicContentAttachmentError({ code: "40001",
+    constraint: "org_content_topic_attachments_active_uidx" }), false);
 });
 
 test("authority schema enforces audience subjects, management scope, historical uniqueness, and content organization FK",async()=>{

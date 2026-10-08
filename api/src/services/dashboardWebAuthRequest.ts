@@ -66,6 +66,7 @@ export async function handleDashboardWebAuthCodeRequest(params: {
     expiresAt: string;
     delivery: WebAuthDeliveryMode;
   }>;
+  hasEffectiveFocusTopicManagementGrant?: boolean;
 }): Promise<DashboardWebAuthRequestResult> {
   const publicResponse = buildPublicResponse();
   const normalizedEmail = params.email.trim().toLowerCase();
@@ -81,7 +82,9 @@ export async function handleDashboardWebAuthCodeRequest(params: {
     };
   }
 
-  const eligibility = resolveDashboardAccessEligibility(params.db, user);
+  const eligibility = resolveDashboardAccessEligibility(params.db, user, {
+    hasEffectiveFocusTopicManagementGrant: params.hasEffectiveFocusTopicManagementGrant,
+  });
   if (!eligibility.eligible) {
     return {
       response: publicResponse,

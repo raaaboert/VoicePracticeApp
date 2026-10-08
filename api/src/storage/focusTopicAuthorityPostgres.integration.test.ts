@@ -140,6 +140,106 @@ test("real PostgreSQL assignment governance, notification rollback, revocation h
       await notifications.enqueueMany(activationNotifications);
       assert.equal((await pool.query("SELECT 1 FROM user_notifications WHERE dedup_key LIKE 'topic-assigned:activation_event:%'")).rowCount, 2);
 
+      const managementGrant = {
+        ...row,
+        id: "management_1",
+        audience: "manager_only" as const,
+        subjectUserId: "manager",
+        grantsManagement: true,
+      };
+      const managementClient = await pool.connect();
+      try {
+        await managementClient.query("BEGIN");
+        await authority.createAssignment(managementGrant, managementClient);
+        await managementClient.query("COMMIT");
+        await managementClient.query("BEGIN");
+        await assert.rejects(authority.createAssignment({ ...managementGrant, id: "management_duplicate" }, managementClient));
+        await managementClient.query("ROLLBACK");
+        await managementClient.query("BEGIN");
+        await authority.revokeAssignment({
+          orgId: "org", topicId: "topic", assignmentId: managementGrant.id,
+          actorId: "org_admin", at: new Date("2026-10-07T13:00:00.000Z"),
+        }, managementClient);
+        await authority.createAssignment({ ...managementGrant, id: "management_2" }, managementClient);
+        await managementClient.query("COMMIT");
+      } finally { managementClient.release(); }
+      const persistedManagement = (await authority.listSnapshot("org")).assignments
+        .filter((entry) => entry.grantsManagement);
+      assert.deepEqual(persistedManagement.map((entry) => [entry.id, Boolean(entry.revokedAt)]), [
+        ["management_1", true],
+        ["management_2", false],
+      ]);
+
+      const contentId = "11111111-1111-4111-8111-111111111111";
+      await pool.query("INSERT INTO org_content_items (org_id,id) VALUES ('org',$1)", [contentId]);
+      const contentAttachment = {
+        id: "content_attachment_1",
+        orgId: "org",
+        topicId: "topic",
+        contentId,
+        attachedBy: "org_admin",
+        attachedAt: NOW,
+        detachedBy: null,
+        detachedAt: null,
+      };
+      const contentClient = await pool.connect();
+      try {
+        await contentClient.query("BEGIN");
+        await authority.attachContent(contentAttachment, contentClient);
+        await notifications.enqueueOne({
+          orgId: "org", recipientUserId: "org_admin", kind: "content_added",
+          subjectType: "focus_topic", subjectId: "topic",
+          dedupKey: "content_attachment_1:org_admin",
+          payload: { title: "Learning Resource added" },
+        }, { client: contentClient });
+        await contentClient.query("COMMIT");
+        await contentClient.query("BEGIN");
+        await assert.rejects(authority.attachContent({
+          ...contentAttachment, id: "content_attachment_duplicate",
+        }, contentClient));
+        await contentClient.query("ROLLBACK");
+        await contentClient.query("BEGIN");
+        await authority.detachContent({
+          orgId: "org", topicId: "topic", attachmentId: contentAttachment.id,
+          actorId: "manager", at: new Date("2026-10-07T14:00:00.000Z"),
+        }, contentClient);
+        await authority.attachContent({
+          ...contentAttachment, id: "content_attachment_2", topicId: "topic_2",
+        }, contentClient);
+        await authority.attachContent({
+          ...contentAttachment, id: "content_attachment_3",
+        }, contentClient);
+        await contentClient.query("COMMIT");
+        await contentClient.query("BEGIN");
+        await authority.detachContent({
+          orgId: "org", topicId: "topic", attachmentId: "content_attachment_3",
+          actorId: "manager", at: new Date("2026-10-07T15:00:00.000Z"),
+        }, contentClient);
+        await contentClient.query("ROLLBACK");
+        await contentClient.query("BEGIN");
+        await authority.attachContent({
+          ...contentAttachment, id: "content_attachment_notification_failure", topicId: "topic_failed",
+        }, contentClient);
+        await assert.rejects(notifications.enqueueOne({
+          orgId: "org", recipientUserId: "org_admin", kind: "content_added",
+          subjectType: "focus_topic", subjectId: "topic_failed",
+          dedupKey: "content_attachment_notification_failure:org_admin",
+          payload: { title: "x".repeat(1000) },
+        }, { client: contentClient }));
+        await contentClient.query("ROLLBACK");
+      } finally { contentClient.release(); }
+      const persistedContent = (await authority.listSnapshot("org")).contentAttachments;
+      assert.deepEqual(persistedContent.map((entry) => [
+        entry.id, entry.topicId, Boolean(entry.detachedAt),
+      ]), [
+        ["content_attachment_1", "topic", true],
+        ["content_attachment_3", "topic", false],
+        ["content_attachment_2", "topic_2", false],
+      ]);
+      assert.equal((await notifications.listForRecipient({
+        recipientUserId: "org_admin", limit: 10,
+      })).filter((entry) => entry.kind === "content_added").length, 1);
+
       await pool.query(`INSERT INTO focus_topic_backfill_runs
         (id,run_version,mode,schema_generation,input_fingerprint,result_summary,executed_at,
           validated_at,validated_by,signed_off_at,signed_off_by)

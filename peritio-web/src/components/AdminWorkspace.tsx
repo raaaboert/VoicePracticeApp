@@ -308,7 +308,7 @@ export function AdminWorkspace({
 
   return (
     <div className="page-stack admin-workspace">
-      <TrainingContentAdminNav orgId={orgId} active="admin" />
+      <TrainingContentAdminNav orgId={orgId} active="admin" capabilities={usersPayload.viewer.capabilities} />
       <div className="tab-row admin-local-tabs" role="tablist" aria-label="Users and access views">
         <button
           type="button"

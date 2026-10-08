@@ -36,8 +36,10 @@ test("Dashboard shell does not render the customer Access warning card", () => {
 test("Dashboard shell uses server-derived capabilities for Admin navigation", () => {
   assert.equal(dashboardShellSource.includes("viewer.capabilities.viewOrganizationUsers"), true);
   assert.equal(dashboardShellSource.includes("viewer.capabilities.approveRejectAccessRequests"), true);
+  assert.equal(dashboardShellSource.includes("viewer.capabilities.manageFocusTopics"), true);
   assert.equal(dashboardShellSource.includes("viewer.orgRole ==="), false);
-  assert.equal(dashboardShellSource.includes('{ href: "/app/admin", label: "Admin" }'), true);
+  assert.equal(dashboardShellSource.includes('const adminPath = viewer.capabilities.viewOrganizationUsers'), true);
+  assert.equal(dashboardShellSource.includes('{ href: adminPath, label: "Admin" }'), true);
 });
 
 test("Dashboard shell uses the deployed square brand mark without duplicating its wordmark", () => {

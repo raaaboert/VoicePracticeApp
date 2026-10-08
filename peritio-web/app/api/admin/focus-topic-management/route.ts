@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 import {
   assertDashboardAuthConfig,
+  attachDashboardFocusTopicContent,
   createDashboardFocusTopic,
   createDashboardFocusTopicAssignment,
+  detachDashboardFocusTopicContent,
+  getDashboardFocusTopicRelatedContent,
   listDashboardFocusTopicAssignments,
   revokeDashboardFocusTopicAssignment,
   updateDashboardFocusTopic,
@@ -21,8 +24,11 @@ type Action =
   | { action: "update_topic"; orgId: string; topicId: string; name?: string; description?: string; status?: string }
   | { action: "list_assignments"; orgId: string; topicId: string }
   | { action: "create_assignment"; orgId: string; topicId: string;
-      audience: DashboardFocusTopicAssignment["audience"]; subjectUserId: string | null }
-  | { action: "revoke_assignment"; orgId: string; topicId: string; assignmentId: string };
+      audience: DashboardFocusTopicAssignment["audience"]; subjectUserId: string | null; grantsManagement?: boolean }
+  | { action: "revoke_assignment"; orgId: string; topicId: string; assignmentId: string }
+  | { action: "list_related_content"; orgId: string; topicId: string }
+  | { action: "attach_content"; orgId: string; topicId: string; contentId: string }
+  | { action: "detach_content"; orgId: string; topicId: string; attachmentId: string };
 
 export async function POST(request: NextRequest) {
   assertDashboardAuthConfig();
@@ -44,6 +50,12 @@ export async function POST(request: NextRequest) {
         return noStore(NextResponse.json(await createDashboardFocusTopicAssignment(body.orgId, body.topicId, body), { status: 201 }));
       case "revoke_assignment":
         return noStore(NextResponse.json(await revokeDashboardFocusTopicAssignment(body.orgId, body.topicId, body.assignmentId)));
+      case "list_related_content":
+        return noStore(NextResponse.json(await getDashboardFocusTopicRelatedContent(body.orgId, body.topicId)));
+      case "attach_content":
+        return noStore(NextResponse.json(await attachDashboardFocusTopicContent(body.orgId, body.topicId, body.contentId), { status: 201 }));
+      case "detach_content":
+        return noStore(NextResponse.json(await detachDashboardFocusTopicContent(body.orgId, body.topicId, body.attachmentId)));
       default:
         return noStore(NextResponse.json({ error: "Unknown Focus Topic action." }, { status: 400 }));
     }

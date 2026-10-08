@@ -19,6 +19,10 @@ import {
   shouldPreserveTopicAssignedNotificationInLegacyMode,
   TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE,
 } from "./topicAssignedNotifications.js";
+import {
+  canViewFocusTopicContentAttachedNotification,
+  FOCUS_TOPIC_CONTENT_NOTIFICATION_SUBJECT_TYPE,
+} from "./focusTopicContentNotifications.js";
 
 export const ACCESS_REQUEST_NOTIFICATION_SUBJECT_TYPE = "organization_access_request";
 
@@ -134,7 +138,10 @@ export async function listAuthorizedDashboardNotifications(params: {
       db: params.db, recipient: params.recipient, notification,
       authority: params.topicAuthority ?? null,
     });
-    if (accessRequestVisible || topicVisible) {
+    const contentAttachedVisible = canViewFocusTopicContentAttachedNotification({
+      db: params.db, recipient: params.recipient, notification,
+    });
+    if (accessRequestVisible || topicVisible || contentAttachedVisible) {
       const accessRequest = accessRequestVisible
         ? params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!
         : null;
@@ -195,7 +202,21 @@ export async function listAuthorizedDashboardNotifications(params: {
         subjectType: TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE, subjectIds: accessibleTopicIds,
       })
     : 0;
-  const unreadCount = accessRequestUnreadCount + topicUnreadCount;
+  const contentAttachedTopicIds = orgId
+    && params.recipient.orgRole === "org_admin"
+    && params.recipient.status === "active"
+    && Boolean(params.recipient.emailVerifiedAt)
+    ? (params.db.orgTrainings ?? [])
+        .filter((topic) => topic.orgId === orgId)
+        .map((topic) => topic.id)
+    : [];
+  const contentAttachedUnreadCount = orgId && contentAttachedTopicIds.length > 0
+    ? await params.store.countActionableUnread({
+        recipientUserId: params.recipient.id, orgId, kinds: ["content_added"],
+        subjectType: FOCUS_TOPIC_CONTENT_NOTIFICATION_SUBJECT_TYPE, subjectIds: contentAttachedTopicIds,
+      })
+    : 0;
+  const unreadCount = accessRequestUnreadCount + topicUnreadCount + contentAttachedUnreadCount;
   const hasMore = visible.length > limit || candidates.length === queryLimit;
   return {
     generatedAt: new Date().toISOString(),
@@ -227,7 +248,10 @@ export async function markAuthorizedDashboardNotificationRead(params: {
     db: params.db, recipient: params.recipient, notification,
     authority: params.topicAuthority ?? null,
   });
-  if (!accessRequestVisible && !topicVisible) {
+  const contentAttachedVisible = canViewFocusTopicContentAttachedNotification({
+    db: params.db, recipient: params.recipient, notification,
+  });
+  if (!accessRequestVisible && !topicVisible && !contentAttachedVisible) {
     if (!notification.resolvedAt && !(params.topicAuthorityMode === "legacy"
       && shouldPreserveTopicAssignedNotificationInLegacyMode({
         db: params.db, recipient: params.recipient, notification,
@@ -260,7 +284,9 @@ export async function markAuthorizedDashboardNotificationRead(params: {
 }
 
 function toDashboardRow(notification: UserNotificationRecord): DashboardNotificationRow {
-  if (notification.kind !== "access_request" && notification.kind !== "topic_assigned") {
+  if (notification.kind !== "access_request"
+    && notification.kind !== "topic_assigned"
+    && notification.kind !== "content_added") {
     throw new Error("Unsupported notification kind reached dashboard serialization.");
   }
   return {

@@ -78,6 +78,13 @@ export function isDuplicateActiveFocusTopicAssignmentError(error: unknown): bool
     && ACTIVE_ASSIGNMENT_UNIQUE_CONSTRAINTS.has(record.constraint);
 }
 
+export function isDuplicateActiveFocusTopicContentAttachmentError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as { code?: unknown; constraint?: unknown };
+  return record.code === "23505"
+    && record.constraint === "org_content_topic_attachments_active_uidx";
+}
+
 type QueryPool = Pick<Pool, "query" | "connect">;
 
 class NullFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
@@ -167,15 +174,21 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
 
   async createAssignment(row: FocusTopicAssignment, client: Pick<PoolClient, "query">): Promise<FocusTopicAssignment> {
     await this.initialize();
-    if (row.grantsManagement || row.revokedAt || row.revokedBy) {
-      throw new Error("Batch 3 assignments must be active learner-only grants.");
+    if (row.revokedAt || row.revokedBy) {
+      throw new Error("New Focus Topic assignments must be active.");
+    }
+    const targeted = row.audience === "individual" || row.audience === "manager_only"
+      || row.audience === "manager_with_team";
+    if (row.grantsManagement && !targeted) {
+      throw new Error("Focus Topic management grants must use a targeted audience.");
     }
     const inserted = await client.query<AssignmentRow>(
       `INSERT INTO focus_topic_assignments (
          id, org_id, topic_id, audience, subject_user_id, grants_management,
          created_by, created_at, revoked_by, revoked_at
-       ) VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,NULL,NULL) RETURNING *`,
-      [row.id, row.orgId, row.topicId, row.audience, row.subjectUserId, row.createdBy, row.createdAt],
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL) RETURNING *`,
+      [row.id, row.orgId, row.topicId, row.audience, row.subjectUserId,
+        row.grantsManagement, row.createdBy, row.createdAt],
     );
     return mapAssignment(requiredRow(inserted.rows[0], "Created Focus Topic assignment"));
   }

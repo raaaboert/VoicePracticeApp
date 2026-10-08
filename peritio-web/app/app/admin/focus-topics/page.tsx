@@ -8,6 +8,7 @@ import {
   DashboardSessionInvalidError,
   getDashboardAdminUsers,
   getDashboardFocusTopicOrder,
+  getDashboardViewer,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
@@ -16,17 +17,27 @@ export default async function FocusTopicAdminPage({ searchParams }: {
 }) {
   const selectedOrgId = (await searchParams).orgId?.trim() || null;
   try {
-    const usersPayload = await getDashboardAdminUsers(selectedOrgId);
-    if (!usersPayload.viewer.capabilities.manageOrganizationContent) redirect("/app/access-denied");
-    const topics = await getDashboardFocusTopicOrder(usersPayload.org.id);
+    const viewer = await getDashboardViewer();
+    if (!viewer || !viewer.capabilities.manageFocusTopics) redirect("/app/access-denied");
+    if (viewer.accessType !== "super_user" && selectedOrgId && selectedOrgId !== viewer.orgId) {
+      redirect("/app/access-denied");
+    }
+    const usersPayload = viewer.accessType === "super_user" || viewer.capabilities.manageOrganizationContent
+      ? await getDashboardAdminUsers(selectedOrgId)
+      : null;
+    const orgId = usersPayload?.org.id ?? viewer.orgId;
+    if (!orgId) redirect("/app/access-denied");
+    const topics = await getDashboardFocusTopicOrder(orgId);
     if (topics.authorityMode !== "assignments") redirect(`/app/admin/content-organization${selectedOrgId
       ? `?orgId=${encodeURIComponent(selectedOrgId)}` : ""}`);
     return <>
       <PageHeader eyebrow="Admin" title="Focus Topics"
-        description={`Manage learner assignments for ${usersPayload.org.name}.`} />
-      <TrainingContentAdminNav orgId={selectedOrgId} active="focus-topics" />
-      <FocusTopicAdministration orgId={usersPayload.org.id}
-        initialTopics={topics.trainings} users={usersPayload.users} />
+        description={`Manage Focus Topic access and related learning resources for ${usersPayload?.org.name ?? viewer.orgName}.`} />
+      <TrainingContentAdminNav orgId={selectedOrgId} active="focus-topics" capabilities={viewer.capabilities} />
+      <FocusTopicAdministration orgId={orgId}
+        initialTopics={topics.trainings} users={usersPayload?.users ?? []}
+        canManageAllTopics={topics.management.canManageAllTopics}
+        learningResourcesEnabled={topics.management.learningResourcesEnabled} />
     </>;
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) redirect(buildDashboardSessionResetPath());
