@@ -3,12 +3,14 @@ import test from "node:test";
 import type { ApiDatabase, EnterpriseJoinRequestRecord, UserProfile } from "@voicepractice/shared";
 
 import { createMemoryUserNotificationStoreForTest } from "../storage/userNotificationStore.js";
+import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
 import {
   buildAccessRequestNotificationInputs,
   listAuthorizedDashboardNotifications,
   markAuthorizedDashboardNotificationRead,
   resolveAccessRequestNotifications,
 } from "./accessRequestNotifications.js";
+import { TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE } from "./topicAssignedNotifications.js";
 
 const NOW = "2026-10-06T12:00:00.000Z";
 
@@ -224,4 +226,35 @@ test("unknown notification kinds fail closed at the policy layer", async () => {
   const result = await listAuthorizedDashboardNotifications({ db: source, recipient, store, limit: 20 });
   assert.equal(result.notifications.length, 0);
   assert.equal((await store.listForRecipient({ recipientUserId: recipient.id, limit: 10 }))[0]?.resolution, "authorization_revoked");
+});
+
+test("legacy authority mode hides Topic notifications without destroying them and assignments restoration re-evaluates access", async () => {
+  const recipient = user("learner");
+  const source = db([recipient], []);
+  source.orgTrainings = [{ id: "topic_1", orgId: "org_1", name: "Coaching", description: "",
+    status: "active", createdAt: NOW, updatedAt: NOW }];
+  const store = createMemoryUserNotificationStoreForTest();
+  await store.enqueueOne({ orgId: "org_1", recipientUserId: recipient.id, kind: "topic_assigned",
+    subjectType: TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE, subjectId: "topic_1", dedupKey: "topic:event:learner",
+    payload: { title: "New Focus Topic" }, createdAt: new Date(NOW) });
+  const authority: FocusTopicAuthoritySnapshot = { assignments: [{ id: "assignment_1", orgId: "org_1",
+    topicId: "topic_1", audience: "individual", subjectUserId: recipient.id, grantsManagement: false,
+    createdBy: "admin", createdAt: NOW, revokedBy: null, revokedAt: null }],
+    scenarioAttachments: [], contentAttachments: [] };
+  const assigned = await listAuthorizedDashboardNotifications({ db: source, recipient, store,
+    topicAuthority: authority, topicAuthorityMode: "assignments", limit: 20 });
+  assert.equal(assigned.notifications.length, 1);
+  const legacy = await listAuthorizedDashboardNotifications({ db: source, recipient, store,
+    topicAuthority: null, topicAuthorityMode: "legacy", limit: 20 });
+  assert.equal(legacy.notifications.length, 0);
+  assert.equal((await store.listForRecipient({ recipientUserId: recipient.id, limit: 10 }))[0]?.resolvedAt, null);
+  const restored = await listAuthorizedDashboardNotifications({ db: source, recipient, store,
+    topicAuthority: authority, topicAuthorityMode: "assignments", limit: 20 });
+  assert.equal(restored.notifications.length, 1);
+
+  source.orgTrainings[0]!.status = "archived";
+  await listAuthorizedDashboardNotifications({ db: source, recipient, store,
+    topicAuthority: null, topicAuthorityMode: "legacy", limit: 20 });
+  assert.equal((await store.listForRecipient({ recipientUserId: recipient.id, limit: 10 }))[0]?.resolution,
+    "authorization_revoked");
 });

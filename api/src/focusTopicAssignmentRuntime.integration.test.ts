@@ -83,7 +83,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const foreignOrg = { ...sourceOrg, id: "org_focus_foreign", name: "Local foreign organization",
         joinCode: "FOCUS-FOREIGN" };
       const user = { ...sourceUser, id: "user_focus_runtime", orgId: org.id,
-        email: "learner@focus-runtime.integration.test" };
+        email: "learner@focus-runtime.integration.test", divisionId: "division_runtime_a" };
+      org.divisionsEnabled = true;
       db.orgs = [org, foreignOrg];
       db.users = [user];
       user.firstName = "Test";
@@ -97,9 +98,33 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const segment = db.config.segments.find((candidate) => candidate.id === "solution_manager");
       const scenario = segment?.scenarios.find((candidate) => candidate.enabled !== false);
       assert.ok(segment && scenario);
+      const unattachedScenario = segment.scenarios.find((candidate) =>
+        candidate.enabled !== false && candidate.id !== scenario.id);
+      assert.ok(unattachedScenario);
+      db.orgDivisions.push(
+        { id: "division_runtime_a", orgId: org.id, name: "Division A", active: true,
+          createdAt: now, updatedAt: now, deletedAt: null },
+        { id: "division_runtime_b", orgId: org.id, name: "Division B", active: true,
+          createdAt: now, updatedAt: now, deletedAt: null },
+      );
+      for (const restrictedScenario of [scenario, unattachedScenario]) {
+        db.orgStandardScenarioDivisionAssignments.push({ id: `division_${restrictedScenario.id}`,
+          orgId: org.id, scenarioId: restrictedScenario.id, divisionId: "division_runtime_b",
+          createdAt: now, updatedAt: now });
+      }
       const topic: OrgTrainingRecord = { id: "focus_runtime_topic", orgId: org.id,
         name: "Runtime Topic", description: "", status: "active", createdAt: now, updatedAt: now };
       db.orgTrainings.push(topic);
+      const customScenarioId = "custom_legacy_only";
+      org.customScenarios = [...(org.customScenarios ?? []), {
+        id: customScenarioId, orgId: org.id, segmentId: segment.id, title: "Legacy-only custom scenario",
+        description: "A legacy Topic relationship must not authorize scoring.", aiRole: "Counterpart",
+        scoringGuidance: "", applicableIndustryIds: [...org.activeIndustries], enabled: true,
+        provenance: { sourceMode: "scratch", creationMethod: "manual" }, createdBy: "platform_admin",
+        createdAt: now, updatedAt: now,
+      }];
+      db.orgTrainingScenarioAttachments.push({ id: "legacy_custom_attachment", orgId: org.id,
+        trainingId: topic.id, scenarioId: customScenarioId, createdAt: now, updatedAt: now });
       const foreignTopic: OrgTrainingRecord = { ...topic, id: "focus_foreign_topic", orgId: foreignOrg.id };
       db.orgTrainings.push(foreignTopic);
       const storage = createDatabaseStorage({ provider: "postgres", dbPath: "unused",
@@ -174,6 +199,16 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         return { status: response.status, body: await response.json() as Record<string, unknown> };
       };
       const assignmentsPath = `/orgs/${org.id}/trainings/${topic.id}/assignments`;
+      const attachmentsPath = `/orgs/${org.id}/trainings/${topic.id}/direct-attachments`;
+      const attachmentCountBefore = await pool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM focus_topic_scenario_attachments");
+      const unknownStandard = await masterCall(attachmentsPath, "POST", {
+        kind: "scenario", scenarioKind: "standard", scenarioId: "unknown_standard_scenario",
+      });
+      assert.equal(unknownStandard.status, 400, JSON.stringify(unknownStandard.body));
+      const attachmentCountAfter = await pool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM focus_topic_scenario_attachments");
+      assert.equal(attachmentCountAfter.rows[0]?.count, attachmentCountBefore.rows[0]?.count);
       const invalidSubject = await masterCall(assignmentsPath, "POST", {
         audience: "individual", subjectUserId: "foreign_user",
       });
@@ -185,7 +220,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal(masterCreated.body.grantsManagement, false);
       const createdId = masterCreated.body.id as string;
       assert.equal((await pool.query("SELECT 1 FROM audit_events WHERE action='focus_topic.assignment.created'")).rowCount, 1);
-      assert.equal((await pool.query("SELECT 1 FROM user_notifications WHERE kind='topic_assigned'")).rowCount, 1);
+      assert.equal((await pool.query("SELECT 1 FROM user_notifications WHERE kind='topic_assigned'")).rowCount, 0);
+      const duplicateAssignment = await masterCall(assignmentsPath, "POST", {
+        audience: "organization", subjectUserId: null,
+      });
+      assert.equal(duplicateAssignment.status, 409, JSON.stringify(duplicateAssignment.body));
+      assert.equal(duplicateAssignment.body.code, "focus_topic_assignment_already_active");
       const masterRevoked = await masterCall(`${assignmentsPath}/${createdId}`, "DELETE");
       assert.equal(masterRevoked.status, 200, JSON.stringify(masterRevoked.body));
       assert.equal((await pool.query("SELECT 1 FROM focus_topic_assignments WHERE id=$1 AND revoked_at IS NOT NULL",
@@ -204,6 +244,14 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         return originalFetch(input, init);
       }) as typeof fetch;
       try {
+        const installedOpening = await call(`/mobile/users/${user.id}/ai/opening`, {
+          scenarioId: scenario.id, trainingId: null, simulationSessionId: `installed_${randomUUID()}`,
+        });
+        assert.equal(installedOpening.status, 200, JSON.stringify(installedOpening.body));
+        const unattachedOpening = await call(`/mobile/users/${user.id}/ai/opening`, {
+          scenarioId: unattachedScenario.id, trainingId: null, simulationSessionId: `unattached_${randomUUID()}`,
+        });
+        assert.equal(unattachedOpening.status, 404, JSON.stringify(unattachedOpening.body));
         const opening = await call(`/mobile/users/${user.id}/ai/opening`, {
           scenarioId: scenario.id, trainingId: topic.id, simulationSessionId: prefetchSessionId,
         });
@@ -245,6 +293,18 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const general = await pool.query<{ training_id: string | null }>(
         "SELECT training_id FROM simulation_sessions WHERE simulation_session_id=$1", [generalSessionId]);
       assert.equal(general.rows[0]?.training_id, null);
+      const unclaimedCustomScore = await call(`/mobile/users/${user.id}/ai/score`, {
+        scenarioId: customScenarioId, startedAt: now, endedAt: new Date(Date.now() + 1000).toISOString(),
+        history: [
+          { role: "assistant", content: "What concerns you?" },
+          { role: "user", content: "I want to understand the concern." },
+          { role: "assistant", content: "The team is behind." },
+          { role: "user", content: "Let us identify the blocker." },
+          { role: "assistant", content: "We need a plan." },
+          { role: "user", content: "I propose owners and a review date." },
+        ],
+      });
+      assert.equal(unclaimedCustomScore.status, 404, JSON.stringify(unclaimedCustomScore.body));
       const disabledUserSessionId = `disabled_user_${randomUUID()}`;
       const disabledOrgSessionId = `disabled_org_${randomUUID()}`;
       const movedMemberSessionId = `moved_member_${randomUUID()}`;

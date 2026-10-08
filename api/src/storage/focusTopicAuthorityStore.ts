@@ -65,6 +65,19 @@ export interface FocusTopicAuthorityStore {
   }): Promise<FocusTopicBackfillRunRecord>;
 }
 
+const ACTIVE_ASSIGNMENT_UNIQUE_CONSTRAINTS = new Set([
+  "focus_topic_assignments_active_broad_uidx",
+  "focus_topic_assignments_active_targeted_uidx",
+]);
+
+export function isDuplicateActiveFocusTopicAssignmentError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as { code?: unknown; constraint?: unknown };
+  return record.code === "23505"
+    && typeof record.constraint === "string"
+    && ACTIVE_ASSIGNMENT_UNIQUE_CONSTRAINTS.has(record.constraint);
+}
+
 type QueryPool = Pick<Pool, "query" | "connect">;
 
 class NullFocusTopicAuthorityStore implements FocusTopicAuthorityStore {

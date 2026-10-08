@@ -14,7 +14,11 @@ import type {
   UserNotificationStore,
 } from "../storage/userNotificationStore.js";
 import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
-import { canViewTopicAssignedNotification, TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE } from "./topicAssignedNotifications.js";
+import {
+  canViewTopicAssignedNotification,
+  shouldPreserveTopicAssignedNotificationInLegacyMode,
+  TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE,
+} from "./topicAssignedNotifications.js";
 
 export const ACCESS_REQUEST_NOTIFICATION_SUBJECT_TYPE = "organization_access_request";
 
@@ -105,6 +109,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   recipient: UserProfile;
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
+  topicAuthorityMode?: "legacy" | "assignments";
   limit: number;
   offset?: number;
 }): Promise<DashboardNotificationsResponse> {
@@ -143,7 +148,10 @@ export async function listAuthorizedDashboardNotifications(params: {
       if (visible.length === limit) {
         offsetAfterLastPageRow = offset + candidateIndex + 1;
       }
-    } else if (!notification.resolvedAt) {
+    } else if (!notification.resolvedAt && !(params.topicAuthorityMode === "legacy"
+      && shouldPreserveTopicAssignedNotificationInLegacyMode({
+        db: params.db, recipient: params.recipient, notification,
+      }))) {
       hiddenIds.push(notification.id);
     }
   }
@@ -203,6 +211,7 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   recipient: UserProfile;
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
+  topicAuthorityMode?: "legacy" | "assignments";
   notificationId: string;
   readAt?: Date;
 }): Promise<DashboardNotificationRow | null> {
@@ -219,7 +228,10 @@ export async function markAuthorizedDashboardNotificationRead(params: {
     authority: params.topicAuthority ?? null,
   });
   if (!accessRequestVisible && !topicVisible) {
-    if (!notification.resolvedAt) {
+    if (!notification.resolvedAt && !(params.topicAuthorityMode === "legacy"
+      && shouldPreserveTopicAssignedNotificationInLegacyMode({
+        db: params.db, recipient: params.recipient, notification,
+      }))) {
       await params.store.resolveOne({
         id: notification.id,
         recipientUserId: params.recipient.id,

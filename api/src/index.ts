@@ -279,6 +279,7 @@ import {
 } from "./storage/organizationProductSettingsStore.js";
 import {
   createFocusTopicAuthorityStore,
+  isDuplicateActiveFocusTopicAssignmentError,
   type FocusTopicAuthorityStore,
   type FocusTopicAuthoritySnapshot,
 } from "./storage/focusTopicAuthorityStore.js";
@@ -1888,6 +1889,8 @@ async function resolveSimulationRuntimeBundle(params: {
   let directTopicScenarioAttached = false;
   let anchoredTrainingPackId: string | null = null;
   let hasRegisteredAssignmentSession = false;
+  let assignmentAuthorizedScenario: ResolvedMobileScenarioContext | null = null;
+  let assignmentUsesTopicConfig = false;
   if (runtimeConfig.focusTopicAuthority === "assignments" && !params.isSuperUser) {
     if (!params.org || params.org.status !== "active"
       || params.user.accountType !== "enterprise" || params.user.orgId !== params.org.id
@@ -1909,17 +1912,18 @@ async function resolveSimulationRuntimeBundle(params: {
       authoritativeTrainingId = registered.trainingId ?? null;
       directTopicScenarioAttached = Boolean(authoritativeTrainingId);
       anchoredTrainingPackId = registered.trainingPackId ?? null;
+      assignmentUsesTopicConfig = true;
     } else {
       if (params.requireRegisteredSession && params.trainingId) {
         params.response.status(404).json({ error: "Simulation session is not available." });
         return null;
       }
-      const configForUser = resolveConfigForUser(
-        params.db, params.user, params.actingOrgId,
-        { forAssignedTopic: Boolean(params.trainingId) },
+      const generalConfig = resolveConfigForUser(params.db, params.user, params.actingOrgId);
+      const topicConfig = resolveConfigForUser(
+        params.db, params.user, params.actingOrgId, { forAssignedTopic: true },
       );
       const launch = resolveAssignmentModeTopicLaunch({
-        db: params.db, user: params.user, org: params.org, configForUser,
+        db: params.db, user: params.user, org: params.org, generalConfig, topicConfig,
         scenarioId: params.scenarioId, topicClaim: params.trainingId,
         authority: await focusTopicAuthorityStore.listSnapshot(params.org.id),
       });
@@ -1929,6 +1933,8 @@ async function resolveSimulationRuntimeBundle(params: {
       }
       authoritativeTrainingId = launch.trainingId;
       directTopicScenarioAttached = Boolean(authoritativeTrainingId);
+      assignmentAuthorizedScenario = launch.scenario;
+      assignmentUsesTopicConfig = launch.usesTopicConfig;
     }
   }
   const useModularPromptArchitecture =
@@ -1971,13 +1977,12 @@ async function resolveSimulationRuntimeBundle(params: {
   const contextBuildStartedAtMs = Date.now();
   const configForUser = resolveConfigForUser(
     params.db, params.user, params.actingOrgId,
-    { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && Boolean(authoritativeTrainingId) },
+    { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && assignmentUsesTopicConfig },
   );
   const effectiveDifficulty = params.difficulty ?? configForUser.defaultDifficulty;
   const effectivePersonaStyle = params.personaStyle ?? configForUser.defaultPersonaStyle;
-  const resolvedScenario = resolveMobileScenarioForUser(
-    configForUser, params.scenarioId, authoritativeTrainingId,
-    { directTopicScenarioAttached },
+  const resolvedScenario = assignmentAuthorizedScenario ?? resolveMobileScenarioForUser(
+    configForUser, params.scenarioId, authoritativeTrainingId, { directTopicScenarioAttached },
   );
   if (!resolvedScenario) {
     const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
@@ -9750,16 +9755,36 @@ function resolveAssignmentModeTopicLaunch(params: {
   db: ApiDatabase;
   user: UserProfile;
   org: EnterpriseOrg;
-  configForUser: MobileScenarioResolutionConfig & Pick<AppConfig, "industries">;
+  generalConfig: MobileScenarioResolutionConfig & Pick<AppConfig, "industries">;
+  topicConfig: MobileScenarioResolutionConfig & Pick<AppConfig, "industries">;
   scenarioId: string;
   topicClaim: string | null;
   authority: FocusTopicAuthoritySnapshot;
-}): { trainingId: string | null; scenario: ResolvedMobileScenarioContext } | null {
+}): { trainingId: string | null; scenario: ResolvedMobileScenarioContext; usesTopicConfig: boolean } | null {
   if (params.user.isSuperUser) return null;
   const topicId = params.topicClaim?.trim() || null;
   if (!topicId) {
-    const scenario = resolveMobileScenarioForUser(params.configForUser, params.scenarioId, null);
-    return scenario?.source === "standard" ? { trainingId: null, scenario } : null;
+    const generalScenario = resolveMobileScenarioForUser(params.generalConfig, params.scenarioId, null);
+    if (generalScenario?.source === "standard") {
+      return { trainingId: null, scenario: generalScenario, usesTopicConfig: false };
+    }
+    const hasAccessibleDirectAttachment = params.db.orgTrainings.some((topic) =>
+      topic.orgId === params.org.id
+      && canFutureLearnerAccessFocusTopic({
+        user: params.user, users: params.db.users, organization: params.org, topic,
+        assignments: params.authority.assignments,
+      })
+      && params.authority.scenarioAttachments.some((row) =>
+        row.orgId === params.org.id && row.topicId === topic.id
+        && row.scenarioKind === "standard" && row.scenarioId === params.scenarioId
+        && row.detachedAt === null
+      )
+    );
+    if (!hasAccessibleDirectAttachment) return null;
+    const topicScenario = resolveMobileScenarioForUser(params.topicConfig, params.scenarioId, null);
+    if (topicScenario?.source !== "standard"
+      || !resolveMobileFocusTopicScenarioSummary(params.topicConfig, params.scenarioId, null)) return null;
+    return { trainingId: null, scenario: topicScenario, usesTopicConfig: true };
   }
   const topic = params.db.orgTrainings.find((row) => row.id === topicId && row.orgId === params.org.id);
   if (!topic || !canFutureLearnerAccessFocusTopic({
@@ -9770,7 +9795,7 @@ function resolveAssignmentModeTopicLaunch(params: {
     assignments: params.authority.assignments,
   })) return null;
   const scenario = resolveMobileScenarioForUser(
-    params.configForUser,
+    params.topicConfig,
     params.scenarioId,
     topicId,
     { directTopicScenarioAttached: true },
@@ -9783,12 +9808,12 @@ function resolveAssignmentModeTopicLaunch(params: {
     && row.detachedAt === null
   );
   if (!attached || !resolveMobileFocusTopicScenarioSummary(
-    params.configForUser,
+    params.topicConfig,
     params.scenarioId,
     topicId,
     { directTopicScenarioAttached: true },
   )) return null;
-  return { trainingId: topicId, scenario };
+  return { trainingId: topicId, scenario, usesTopicConfig: true };
 }
 
 function resolveMobileFocusTopicScenarioSummary(
@@ -13592,6 +13617,7 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
       store: userNotificationStore,
       topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
+      topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       limit: parsedLimit,
       offset: parsedOffset,
     });
@@ -13612,6 +13638,7 @@ app.get("/dashboard/notifications/unread-count", requireDashboardAuth, async (re
       store: userNotificationStore,
       topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
+      topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       limit: 1,
     });
     response.json({ unreadCount: payload.unreadCount });
@@ -13631,6 +13658,7 @@ app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth,
       store: userNotificationStore,
       topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
+      topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       notificationId: request.params.notificationId,
     });
     if (!notification) {
@@ -16539,8 +16567,12 @@ app.post(
         grantsManagement: false, createdBy: actorId, createdAt: createdAt.toISOString(),
         revokedBy: null, revokedAt: null,
       };
+      const authorityBefore = await focusTopicAuthorityStore.listSnapshot(org.id);
       const notificationInputs = buildTopicAssignedNotificationInputs({
-        db, topic, assignments: [assignment], eventKey: assignment.id, createdAt,
+        db, topic,
+        assignmentsBefore: authorityBefore.assignments,
+        assignmentsAfter: [...authorityBefore.assignments, assignment],
+        eventKey: assignment.id, createdAt,
       });
       queueRequiredTransactionSideWrite(db, async (client) => {
         if (!client) throw new Error("Focus Topic assignment transaction requires PostgreSQL.");
@@ -16556,6 +16588,15 @@ app.post(
       else appendPlatformAuditEvent(db, audit);
       emitMobileUpdateForOrg(db, org.id, "org");
       return assignment;
+    }).catch((error: unknown) => {
+      if (isDuplicateActiveFocusTopicAssignmentError(error)) {
+        response.status(409).json({
+          error: "An active Focus Topic assignment already exists for this audience.",
+          code: "focus_topic_assignment_already_active",
+        });
+        return null;
+      }
+      throw error;
     });
     if (response.headersSent || !result) return;
     response.status(201).json(result);
@@ -16658,7 +16699,8 @@ app.post(
         const scenarioKind = body.scenarioKind;
         const scenarioId = typeof body.scenarioId === "string" ? body.scenarioId.trim() : "";
         const valid = scenarioKind === "standard"
-          ? getConfigScenarioById(db.config, scenarioId)?.scenario.enabled !== false
+          ? listOrgVisibleStandardScenarios({ config: db.config, org }).some((scenario) =>
+              scenario.scenarioId === scenarioId && scenario.enabled)
           : scenarioKind === "org" && (org.customScenarios ?? []).some((scenario) =>
               scenario.id === scenarioId && scenario.enabled === true);
         if (!scenarioId || !valid) {
@@ -16975,12 +17017,13 @@ app.patch("/orgs/:orgId/trainings/:trainingId", requireContentOrganizationAuth, 
       });
       if (runtimeConfig.focusTopicAuthority === "assignments") {
         const authority = await focusTopicAuthorityStore.listSnapshot(org.id);
-        const assignments = authority.assignments.filter((row) => row.topicId === training.id && row.revokedAt === null);
-        const notifications = assignments.flatMap((assignment) => buildTopicAssignedNotificationInputs({
-          db, topic: training, assignments: [assignment],
-          eventKey: `activated:${training.id}:${updatedAt}:${assignment.id}`,
+        const notifications = buildTopicAssignedNotificationInputs({
+          db, topic: training, topicBefore: { ...training, status: previousStatus },
+          assignmentsBefore: authority.assignments,
+          assignmentsAfter: authority.assignments,
+          eventKey: `activated:${training.id}:${updatedAt}`,
           createdAt: new Date(updatedAt),
-        }));
+        });
         queueRequiredTransactionSideWrite(db, async (client) => {
           if (!client) throw new Error("Focus Topic activation notifications require PostgreSQL.");
           await userNotificationStore.enqueueMany(notifications, { client });
@@ -21181,7 +21224,6 @@ app.get("/internal/ai/debug-prompt", async (request: Request, response: Response
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
-
     const org = getOrgById(db, user.orgId);
     const orgFlag = org?.enableModularPromptArchitecture === true;
     const useModularPromptArchitecture = USE_MODULAR_PROMPT_ARCHITECTURE_ENV && orgFlag;
@@ -22266,29 +22308,50 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     const assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser && recognizedSessionId
       ? await simulationSessionStore.getById(recognizedSessionId)
       : null;
-    const configForUser = runtimeConfig.focusTopicAuthority === "assignments" && (assignmentSession?.trainingId || trainingId)
-      ? resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true })
-      : baseConfigForUser;
+    let configForUser = baseConfigForUser;
+    let authoritativeTrainingId = trainingId;
+    let resolvedScenario: ResolvedMobileScenarioContext | null = null;
     if (runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser) {
       if (!org || org.status !== "active" || user.status !== "active" || !user.emailVerifiedAt
         || user.accountType !== "enterprise" || user.orgId !== org.id
-        || (trainingId && !assignmentSession)
         || (assignmentSession && (assignmentSession.userId !== user.id
           || assignmentSession.orgId !== org.id || assignmentSession.scenarioId !== scenarioId
           || (trainingId && trainingId !== (assignmentSession.trainingId ?? null))))) {
         response.status(404).json({ error: "Simulation session is not available." });
         return null;
       }
+      const topicConfig = resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true });
+      if (assignmentSession) {
+        authoritativeTrainingId = assignmentSession.trainingId ?? null;
+        configForUser = topicConfig;
+        resolvedScenario = resolveMobileScenarioForUser(
+          topicConfig, scenarioId, authoritativeTrainingId,
+          { directTopicScenarioAttached: Boolean(authoritativeTrainingId) },
+        );
+      } else {
+        const launch = resolveAssignmentModeTopicLaunch({
+          db, user, org, generalConfig: baseConfigForUser, topicConfig,
+          scenarioId, topicClaim: trainingId,
+          authority: await focusTopicAuthorityStore.listSnapshot(org.id),
+        });
+        if (!launch) {
+          response.status(404).json({ error: "Scenario is not available." });
+          return null;
+        }
+        authoritativeTrainingId = launch.trainingId;
+        configForUser = launch.usesTopicConfig ? topicConfig : baseConfigForUser;
+        resolvedScenario = launch.scenario;
+      }
+    } else {
+      resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, authoritativeTrainingId);
     }
-    const authoritativeTrainingId = assignmentSession?.trainingId ?? trainingId;
-    const resolvedScenario = resolveMobileScenarioForUser(
-      configForUser, scenarioId, authoritativeTrainingId,
-      { directTopicScenarioAttached: Boolean(assignmentSession?.trainingId) },
-    );
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
     }
+    const canonicalTrainingId = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+      ? authoritativeTrainingId ?? resolvedScenario.canonicalTrainingId
+      : resolvedScenario.canonicalTrainingId;
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
@@ -22316,7 +22379,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       segment: resolvedScenario.segment,
       scenario: resolvedScenario.scenario,
       resolvedScenarioSource: resolvedScenario.source,
-      canonicalTrainingId: assignmentSession?.trainingId ?? resolvedScenario.canonicalTrainingId,
+      canonicalTrainingId,
       assignmentSession,
       difficulty: difficulty ?? configForUser.defaultDifficulty,
       personaStyle: personaStyle ?? configForUser.defaultPersonaStyle,
@@ -22328,7 +22391,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         db,
         user,
         org,
-        trainingId: assignmentSession?.trainingId ?? resolvedScenario.canonicalTrainingId,
+        trainingId: canonicalTrainingId,
         resolvedScenario,
       }),
       useModularPromptArchitecture
@@ -24206,16 +24269,17 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const configForUser = resolveConfigForUser(
-      db, user, accessContext.actingOrgId,
-      { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && Boolean(trainingId) },
-    );
+    const generalConfig = resolveConfigForUser(db, user, accessContext.actingOrgId);
+    const topicConfig = runtimeConfig.focusTopicAuthority === "assignments"
+      ? resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true })
+      : generalConfig;
     const assignmentLaunch = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser && org
       ? resolveAssignmentModeTopicLaunch({
-          db, user, org, configForUser, scenarioId: body.scenarioId, topicClaim: trainingId,
+          db, user, org, generalConfig, topicConfig, scenarioId: body.scenarioId, topicClaim: trainingId,
           authority: await focusTopicAuthorityStore.listSnapshot(org.id),
         })
       : null;
+    const configForUser = assignmentLaunch?.usesTopicConfig ? topicConfig : generalConfig;
     const resolvedScenario = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
       ? assignmentLaunch?.scenario ?? null
       : resolveMobileScenarioForUser(configForUser, body.scenarioId, trainingId);

@@ -118,7 +118,8 @@ test("real PostgreSQL assignment governance, notification rollback, revocation h
       await pool.query("INSERT INTO app_state (id,state_json) VALUES ('primary',$1::jsonb)", [JSON.stringify(state)]);
       const activation: ApiDatabase = { ...state, orgTrainings: [{ ...topic, status: "active" as const }] };
       const activationNotifications = buildTopicAssignedNotificationInputs({
-        db: activation, topic: activation.orgTrainings[0]!, assignments: [activeAssignment],
+        db: activation, topic: activation.orgTrainings[0]!, topicBefore: topic,
+        assignmentsBefore: [activeAssignment], assignmentsAfter: [activeAssignment],
         eventKey: "activation_event", createdAt: new Date(NOW),
       });
       assert.equal(activationNotifications.length, 2);
