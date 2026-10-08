@@ -43,6 +43,10 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
   const subjectOptions = users.filter((user) => user.status === "active"
     && (audience === "individual" || user.assignedReportCount > 0));
   const userLabel = (id: string | null) => users.find((user) => user.userId === id)?.displayName ?? "Former member";
+  const activeAssignments = assignments.filter((row) => !row.revokedAt);
+  const assignmentHistory = assignments.filter((row) => Boolean(row.revokedAt));
+  const assignmentSubject = (row: DashboardFocusTopicAssignment) =>
+    row.subjectUserId ? userLabel(row.subjectUserId) : "All eligible members";
 
   const run = async (operation: () => Promise<void>) => {
     setBusy(true); setError(null); setMessage(null);
@@ -60,9 +64,7 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
   });
 
   const createTopic = () => void run(async () => {
-    const created = await action<TopicRow>({
-      action: "create_topic", orgId, name, description, status: "draft",
-    });
+    const created = await action<TopicRow>({ action: "create_topic", orgId, name, description, status: "draft" });
     setTopics((current) => [...current, created]);
     setSelectedId(created.id); setStatus("draft"); setAssignments([]);
     setMessage("Focus Topic created as a draft.");
@@ -106,7 +108,7 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
   });
 
   return (
-    <section className="section-card" aria-label="Focus Topic administration">
+    <section className="section-card focus-topic-admin" aria-label="Focus Topic administration">
       <div className="section-header"><div>
         <p className="eyebrow">Learner authority</p>
         <h2>Focus Topic administration</h2>
@@ -114,10 +116,11 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
       </div></div>
       {error ? <div className="notice danger" role="alert">{error}</div> : null}
       {message ? <div className="notice success" role="status">{message}</div> : null}
-      <div className="page-stack">
-        <div className="field">
+
+      <div className="focus-topic-selector">
+        <div className="focus-topic-field">
           <label htmlFor="focus-topic-select">Focus Topic</label>
-          <select id="focus-topic-select" value={selectedId ?? ""} disabled={busy}
+          <select className="text-input" id="focus-topic-select" value={selectedId ?? ""} disabled={busy}
             onChange={(event) => {
               const topic = topics.find((row) => row.id === event.target.value);
               if (topic) selectTopic(topic);
@@ -127,55 +130,102 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
             {topics.map((topic) => <option key={topic.id} value={topic.id}>{topic.name} ({topic.status})</option>)}
           </select>
         </div>
-        <div className="field"><label htmlFor="focus-topic-name">Name</label>
-          <input id="focus-topic-name" value={name} maxLength={160} disabled={busy || selected?.status === "archived"}
-            onChange={(event) => setName(event.target.value)} /></div>
-        <div className="field"><label htmlFor="focus-topic-description">Description</label>
-          <textarea id="focus-topic-description" value={description} maxLength={4000}
-            disabled={busy || selected?.status === "archived"}
-            onChange={(event) => setDescription(event.target.value)} /></div>
-        {selected ? <div className="field"><label htmlFor="focus-topic-status">Status</label>
-          <select id="focus-topic-status" value={status} disabled={busy || selected.status === "archived"}
-            onChange={(event) => setStatus(event.target.value as "draft" | "active") }>
-            <option value="draft">Draft</option><option value="active">Active</option>
-            {selected.status === "archived" ? <option value="archived">Archived</option> : null}
-          </select></div> : null}
-        <div className="action-row">
+      </div>
+
+      <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-details-heading">
+        <div className="focus-topic-panel-heading">
+          <div>
+            <p className="eyebrow">Topic details</p>
+            <h3 id="focus-topic-details-heading">{selected ? "Edit Focus Topic" : "Create Focus Topic"}</h3>
+          </div>
+        </div>
+        <div className="focus-topic-details-grid">
+          <div className="focus-topic-field focus-topic-field-wide"><label htmlFor="focus-topic-name">Name</label>
+            <input className="text-input" id="focus-topic-name" value={name} maxLength={160}
+              disabled={busy || selected?.status === "archived"}
+              onChange={(event) => setName(event.target.value)} /></div>
+          <div className="focus-topic-field focus-topic-field-wide"><label htmlFor="focus-topic-description">Description</label>
+            <textarea className="text-input focus-topic-description" id="focus-topic-description" value={description}
+              maxLength={4000} disabled={busy || selected?.status === "archived"}
+              onChange={(event) => setDescription(event.target.value)} /></div>
+          {selected ? <div className="focus-topic-field"><label htmlFor="focus-topic-status">Status</label>
+            <select className="text-input" id="focus-topic-status" value={status}
+              disabled={busy || selected.status === "archived"}
+              onChange={(event) => setStatus(event.target.value as "draft" | "active") }>
+              <option value="draft">Draft</option><option value="active">Active</option>
+              {selected.status === "archived" ? <option value="archived">Archived</option> : null}
+            </select></div> : null}
+        </div>
+        <div className="focus-topic-actions">
           <button type="button" className="primary-button" disabled={busy || !name.trim() || selected?.status === "archived"}
             onClick={selected ? saveTopic : createTopic}>{selected ? "Save Focus Topic" : "Create draft"}</button>
-          {selected && selected.status !== "archived" ? <button type="button" className="secondary-button"
+          {selected && selected.status !== "archived" ? <button type="button" className="ghost-button danger-button"
             disabled={busy} onClick={archiveTopic}>Archive Focus Topic</button> : null}
         </div>
       </div>
-      {selected ? <div className="page-stack">
-        <h3>Assignments</h3>
-        <p className="muted-copy">Assignments control learner access. Manager + current direct team follows current reporting lines.</p>
-        <div className="field"><label htmlFor="focus-topic-audience">Audience</label>
-          <select id="focus-topic-audience" value={audience} disabled={busy || selected.status === "archived"}
-            onChange={(event) => { setAudience(event.target.value as Audience); setSubjectUserId(""); }}>
-            {AUDIENCES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-          <small>{AUDIENCES.find((option) => option.value === audience)?.description}</small>
+
+      {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-assignments-heading">
+        <div className="focus-topic-panel-heading">
+          <div>
+            <p className="eyebrow">Learner access</p>
+            <h3 id="focus-topic-assignments-heading">Assignments</h3>
+            <p className="muted-copy">Assignments control learner access. Manager + current direct team follows current reporting lines.</p>
+          </div>
         </div>
-        {targeted ? <div className="field"><label htmlFor="focus-topic-subject">
-          {audience === "individual" ? "Learner" : "Manager"}</label>
-          <select id="focus-topic-subject" value={subjectUserId} disabled={busy || selected.status === "archived"}
-            onChange={(event) => setSubjectUserId(event.target.value)}>
-            <option value="">Select an active organization member</option>
-            {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>{user.displayName}</option>)}
-          </select></div> : null}
-        <button type="button" className="primary-button" disabled={busy || selected.status === "archived" || (targeted && !subjectUserId)}
-          onClick={createAssignment}>Add assignment</button>
-        <div className="training-content-order-list">
-          {assignments.length === 0 ? <p className="muted-copy">No assignments yet.</p> : null}
-          {assignments.map((row) => <div key={row.id} className="training-content-order-row">
-            <div className="training-content-order-copy"><strong>{AUDIENCES.find((option) => option.value === row.audience)?.label}</strong>
-              <small>{row.subjectUserId ? userLabel(row.subjectUserId) : ""} {row.revokedAt ? "· Revoked" : "· Active"}</small>
-            </div>
-            {!row.revokedAt ? <button type="button" className="secondary-button" disabled={busy}
-              onClick={() => revokeAssignment(row.id)}>Revoke</button> : null}
-          </div>)}
+        <div className="focus-topic-assignment-controls">
+          <div className="focus-topic-field"><label htmlFor="focus-topic-audience">Audience</label>
+            <select className="text-input" id="focus-topic-audience" value={audience}
+              disabled={busy || selected.status === "archived"}
+              onChange={(event) => { setAudience(event.target.value as Audience); setSubjectUserId(""); }}>
+              {AUDIENCES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            <small>{AUDIENCES.find((option) => option.value === audience)?.description}</small>
+          </div>
+          {targeted ? <div className="focus-topic-field"><label htmlFor="focus-topic-subject">
+            {audience === "individual" ? "Learner" : "Manager"}</label>
+            <select className="text-input" id="focus-topic-subject" value={subjectUserId}
+              disabled={busy || selected.status === "archived"}
+              onChange={(event) => setSubjectUserId(event.target.value)}>
+              <option value="">Select an active organization member</option>
+              {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>{user.displayName}</option>)}
+            </select></div> : null}
+          <button type="button" className="primary-button focus-topic-add-assignment"
+            disabled={busy || selected.status === "archived" || (targeted && !subjectUserId)}
+            onClick={createAssignment}>Add Assignment</button>
         </div>
+
+        <div className="focus-topic-assignment-section">
+          <h4>Active assignments</h4>
+          {activeAssignments.length === 0 ? <p className="muted-copy">No active assignments.</p> : null}
+          <div className="focus-topic-assignment-list">
+            {activeAssignments.map((row) => <div key={row.id} className="focus-topic-assignment-row">
+              <div className="training-content-order-copy">
+                <div className="focus-topic-assignment-title">
+                  <strong>{AUDIENCES.find((option) => option.value === row.audience)?.label}</strong>
+                  <span className="status-badge status-active">Active</span>
+                </div>
+                <small>{assignmentSubject(row)}</small>
+              </div>
+              <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
+                onClick={() => revokeAssignment(row.id)}>Revoke</button>
+            </div>)}
+          </div>
+        </div>
+
+        {assignmentHistory.length > 0 ? <div className="focus-topic-assignment-section focus-topic-assignment-history">
+          <h4>Assignment history</h4>
+          <div className="focus-topic-assignment-list">
+            {assignmentHistory.map((row) => <div key={row.id} className="focus-topic-assignment-row revoked">
+              <div className="training-content-order-copy">
+                <div className="focus-topic-assignment-title">
+                  <strong>{AUDIENCES.find((option) => option.value === row.audience)?.label}</strong>
+                  <span className="status-badge">Revoked</span>
+                </div>
+                <small>{assignmentSubject(row)}</small>
+              </div>
+            </div>)}
+          </div>
+        </div> : null}
       </div> : null}
     </section>
   );

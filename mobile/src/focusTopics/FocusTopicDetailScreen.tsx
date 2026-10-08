@@ -20,7 +20,6 @@ import { fetchFocusTopicDetail } from "./api";
 import {
   createFocusTopicRequestGate,
   formatFocusTopicDetailCounts,
-  isFocusTopicDetailEmpty,
   isFocusTopicUnavailableError,
 } from "./model";
 
@@ -59,11 +58,6 @@ export function FocusTopicDetailScreen(props: FocusTopicDetailScreenProps) {
         { signal: attempt.signal }
       );
       if (!requestGate.current.isCurrent(attempt)) {
-        return;
-      }
-      if (isFocusTopicDetailEmpty(response)) {
-        setUnavailable(true);
-        props.onUnavailable();
         return;
       }
       setDetail(response);

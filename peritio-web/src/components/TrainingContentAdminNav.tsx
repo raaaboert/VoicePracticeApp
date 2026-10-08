@@ -5,11 +5,9 @@ import { trainingContentOrgQuery } from "@/src/lib/trainingContentPresentation";
 export function TrainingContentAdminNav({
   orgId,
   active,
-  showFocusTopics = false,
 }: {
   orgId: string | null;
   active: "admin" | "training-content" | "content-organization" | "focus-topics";
-  showFocusTopics?: boolean;
 }) {
   const query = trainingContentOrgQuery(orgId);
   return (
@@ -26,12 +24,12 @@ export function TrainingContentAdminNav({
       >
         Content Organization
       </Link>
-      {showFocusTopics ? <Link
+      <Link
         className={`tab-button${active === "focus-topics" ? " active" : ""}`}
         href={`/app/admin/focus-topics${query}`}
       >
         Focus Topics
-      </Link> : null}
+      </Link>
       <Link
         className={`tab-button${active === "training-content" ? " active" : ""}`}
         href={`/app/admin/training-content${query}`}

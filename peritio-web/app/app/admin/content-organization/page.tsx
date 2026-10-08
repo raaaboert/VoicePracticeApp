@@ -36,8 +36,7 @@ export default async function ContentOrganizationPage({
           title="Content Organization"
           description={`Set the presentation order for ${usersPayload.org.name}.`}
         />
-        <TrainingContentAdminNav orgId={selectedOrgId} active="content-organization"
-          showFocusTopics={focusTopics.authorityMode === "assignments"} />
+        <TrainingContentAdminNav orgId={selectedOrgId} active="content-organization" />
         <ContentOrganizationManager
           orgId={orgId}
           initialFocusTopics={focusTopics.trainings}

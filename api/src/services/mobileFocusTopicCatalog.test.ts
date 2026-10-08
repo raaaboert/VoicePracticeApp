@@ -324,6 +324,44 @@ test("assignment authority ignores legacy division and Pack gates, includes empt
   assert.equal(await service.getDetail(context, "archived"), null);
 });
 
+test("revoked broad history does not override an active individual grant for an empty Topic", async () => {
+  const { service, context } = harness({
+    authorityMode: "assignments",
+    topics: [topic("cutover_test", { name: "Cutover Test" })],
+    authoritySnapshot: {
+      assignments: [
+        directAssignment("cutover_test", { revokedAt: NOW, revokedBy: "admin" }),
+        directAssignment("cutover_test", {
+          id: "active_individual",
+          audience: "individual",
+          subjectUserId: "learner",
+        }),
+      ],
+      scenarioAttachments: [],
+      contentAttachments: [],
+    },
+    isTopicVisible: () => false,
+  });
+
+  const catalog = await service.getCatalog(context);
+  assert.deepEqual(catalog.topics.map((row) => row.id), ["cutover_test"]);
+  assert.deepEqual(await service.getDetail(context, "cutover_test"), {
+    topic: { id: "cutover_test", name: "Cutover Test", description: "cutover_test description" },
+    scenarios: [],
+    resources: [],
+  });
+
+  context.authoritySnapshot = {
+    ...context.authoritySnapshot!,
+    assignments: context.authoritySnapshot!.assignments.map((row) => ({
+      ...row,
+      revokedAt: NOW,
+      revokedBy: "admin",
+    })),
+  };
+  assert.equal(await service.getDetail(context, "cutover_test"), null);
+});
+
 test("assignment detail uses direct standard, custom, and content attachments without standalone content grants", async () => {
   const resource = contentRecord({ id: "content", topicId: null,
     assignment: { revokedAt: NOW, revokedByActorId: "admin" } });

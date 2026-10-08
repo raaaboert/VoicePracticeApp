@@ -3037,6 +3037,125 @@ html[data-theme="light"] .progress-track {
   flex-wrap: wrap;
 }
 
+.focus-topic-admin {
+  display: grid;
+  gap: 1.25rem;
+  width: 100%;
+}
+
+.focus-topic-selector {
+  max-width: 34rem;
+}
+
+.focus-topic-admin-panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1.15rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--panel-muted);
+}
+
+.focus-topic-panel-heading h3,
+.focus-topic-panel-heading p,
+.focus-topic-assignment-section h4,
+.focus-topic-assignment-section p {
+  margin: 0;
+}
+
+.focus-topic-panel-heading .muted-copy {
+  margin-top: 0.35rem;
+}
+
+.focus-topic-details-grid {
+  display: grid;
+  grid-template-columns: minmax(12rem, 20rem) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.focus-topic-field {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.focus-topic-field small {
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.focus-topic-field-wide {
+  grid-column: 1 / -1;
+}
+
+.focus-topic-description {
+  min-height: 7rem;
+  resize: vertical;
+}
+
+.focus-topic-actions {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.focus-topic-assignment-controls {
+  display: grid;
+  grid-template-columns: minmax(15rem, 1fr) minmax(15rem, 1fr) auto;
+  gap: 0.8rem;
+  align-items: end;
+}
+
+.focus-topic-add-assignment {
+  width: auto;
+  white-space: nowrap;
+}
+
+.focus-topic-assignment-section {
+  display: grid;
+  gap: 0.65rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.focus-topic-assignment-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.focus-topic-assignment-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.focus-topic-assignment-row.revoked {
+  background: transparent;
+  opacity: 0.72;
+}
+
+.focus-topic-assignment-title {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.status-active {
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
 .training-content-category-edit {
   display: grid;
   grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 2fr) auto;
@@ -3243,6 +3362,26 @@ html[data-theme="light"] .progress-track {
 }
 
 @media (max-width: 720px) {
+  .focus-topic-details-grid,
+  .focus-topic-assignment-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-topic-field-wide {
+    grid-column: auto;
+  }
+
+  .focus-topic-actions,
+  .focus-topic-actions > *,
+  .focus-topic-add-assignment {
+    width: 100%;
+  }
+
+  .focus-topic-assignment-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .public-shell,
   .login-shell {
     padding: 1rem;

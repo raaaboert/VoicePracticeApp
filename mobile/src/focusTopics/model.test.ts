@@ -10,7 +10,6 @@ import {
   FOCUS_TOPICS_EMPTY_MESSAGE,
   formatFocusTopicDetailCounts,
   formatFocusTopicCounts,
-  isFocusTopicDetailEmpty,
   isFocusTopicUnavailableError,
   parseFocusTopicCatalogResponse,
   parseFocusTopicDetailResponse,
@@ -150,7 +149,6 @@ test("detail parser projects safe fields and preserves scenario and resource ord
   assert.deepEqual(detail.scenarios.map((scenario) => scenario.id), ["scenario", "custom"]);
   assert.deepEqual(detail.resources.map((resource) => resource.id), ["resource", "resource_2"]);
   assert.equal(formatFocusTopicDetailCounts(detail), "2 scenarios · 2 resources");
-  assert.equal(isFocusTopicDetailEmpty(detail), false);
 });
 
 test("detail parser rejects malformed topics, scenarios, resources, and attribution shapes", () => {
@@ -174,13 +172,17 @@ test("detail parser rejects malformed topics, scenarios, resources, and attribut
   }
 });
 
-test("detail empty and unavailable states fail closed without conflating transient errors", () => {
+test("empty authorized detail remains valid while unavailable errors fail closed", () => {
   const empty = parseFocusTopicDetailResponse({
     topic: { id: "topic", name: "Topic", description: "" },
     scenarios: [],
     resources: [],
   });
-  assert.equal(isFocusTopicDetailEmpty(empty), true);
+  assert.deepEqual(empty, {
+    topic: { id: "topic", name: "Topic", description: "" },
+    scenarios: [],
+    resources: [],
+  });
   assert.equal(formatFocusTopicDetailCounts(empty), "");
   assert.equal(
     isFocusTopicUnavailableError(createMobileApiError(404, { code: "focus_topic_not_available" })),

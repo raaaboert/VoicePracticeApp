@@ -240,6 +240,8 @@ test("Topic Detail handles loading, unavailable, retry, empty sections, and stal
   assert.match(detail, /accessibilityLabel="Retry Focus Topic"/);
   assert.match(detail, /No practice scenarios are available for this topic right now\./);
   assert.match(detail, /No learning resources are available for this topic right now\./);
+  assert.doesNotMatch(detail, /isFocusTopicDetailEmpty/);
+  assert.match(detail, /setDetail\(response\)/);
   assert.match(detail, /requestGate\.current\.isCurrent\(attempt\)/);
   assert.match(detail, /return \(\) => requestGate\.current\.invalidate\(\)/);
   assert.match(screen, /<FocusTopicDetailScreen[\s\S]*?key=\{selectedTopicId\}/);

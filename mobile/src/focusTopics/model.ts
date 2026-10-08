@@ -102,12 +102,6 @@ export function parseFocusTopicDetailResponse(
   return { topic, scenarios, resources };
 }
 
-export function isFocusTopicDetailEmpty(
-  detail: MobileFocusTopicDetailResponse
-): boolean {
-  return detail.scenarios.length === 0 && detail.resources.length === 0;
-}
-
 export function isFocusTopicUnavailableError(error: unknown): boolean {
   return error instanceof MobileApiError
     && (error.status === 404 || error.code === "focus_topic_not_available");

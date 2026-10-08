@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type {
@@ -22,6 +21,7 @@ import {
 } from "@/src/lib/adminApiClient";
 import { formatDateTime } from "@/src/lib/formatters";
 import { ManagerCombobox } from "@/src/components/ManagerCombobox";
+import { TrainingContentAdminNav } from "@/src/components/TrainingContentAdminNav";
 
 type AdminTab = "users" | "access";
 
@@ -114,13 +114,11 @@ export function AdminWorkspace({
   usersPayload,
   accessRequestsPayload,
   orgId,
-  trainingContentAvailable,
   initialTab = "users",
 }: {
   usersPayload: DashboardAdminUsersResponse;
   accessRequestsPayload: DashboardAdminAccessRequestsResponse;
   orgId: string | null;
-  trainingContentAvailable: boolean;
   initialTab?: AdminTab;
 }) {
   const router = useRouter();
@@ -305,7 +303,8 @@ export function AdminWorkspace({
 
   return (
     <div className="page-stack admin-workspace">
-      <div className="tab-row" role="tablist" aria-label="Admin sections">
+      <TrainingContentAdminNav orgId={orgId} active="admin" />
+      <div className="tab-row admin-local-tabs" role="tablist" aria-label="Users and access views">
         <button
           type="button"
           className={`tab-button${activeTab === "users" ? " active" : ""}`}
@@ -321,22 +320,6 @@ export function AdminWorkspace({
           >
             Access Requests
           </button>
-        ) : null}
-        {trainingContentAvailable ? (
-          <Link
-            className="tab-button"
-            href={`/app/admin/training-content${encodeOrgQuery(orgId)}`}
-          >
-            Learning Resources
-          </Link>
-        ) : null}
-        {usersPayload.viewer.capabilities.manageOrganizationContent ? (
-          <Link
-            className="tab-button"
-            href={`/app/admin/content-organization${encodeOrgQuery(orgId)}`}
-          >
-            Content Organization
-          </Link>
         ) : null}
       </div>
 

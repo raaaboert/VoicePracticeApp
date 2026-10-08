@@ -26,10 +26,10 @@ const librarySource = readFileSync(
   "utf8"
 );
 
-test("Training Content navigation is conditional and uses dedicated pages", () => {
-  assert.equal(adminSource.includes("{trainingContentAvailable ? ("), true);
+test("Training Content navigation uses the shared Admin navigation and dedicated pages", () => {
+  assert.equal(adminSource.includes("<TrainingContentAdminNav"), true);
   assert.equal(adminSource.includes("viewer.orgRole"), false);
-  assert.equal(adminSource.includes("Learning Resources"), true);
+  assert.equal(librarySource.includes('active="training-content"'), true);
   assert.equal(
     existsSync(join(webRoot, "app", "app", "admin", "training-content", "page.tsx")),
     true

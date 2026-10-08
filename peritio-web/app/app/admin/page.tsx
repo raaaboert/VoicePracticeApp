@@ -7,7 +7,6 @@ import {
   DashboardSessionInvalidError,
   getDashboardAdminAccessRequests,
   getDashboardAdminUsers,
-  getDashboardTrainingContent,
 } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
@@ -21,7 +20,6 @@ export default async function AdminPage({
 
   let usersPayload;
   let accessRequestsPayload;
-  let trainingContentAvailable = false;
   try {
     usersPayload = await getDashboardAdminUsers(orgId);
     accessRequestsPayload = usersPayload.viewer.capabilities.approveRejectAccessRequests
@@ -32,16 +30,6 @@ export default async function AdminPage({
           org: usersPayload.org,
           requests: [],
         };
-    if (usersPayload.viewer.capabilities.manageOrganizationContent) {
-      try {
-        await getDashboardTrainingContent({ orgId, page: 1, pageSize: 1 });
-        trainingContentAvailable = true;
-      } catch (error) {
-        if (!(error instanceof DashboardApiError && error.code === "module_disabled")) {
-          throw error;
-        }
-      }
-    }
   } catch (error) {
     if (error instanceof DashboardSessionInvalidError) {
       redirect(buildDashboardSessionResetPath());
@@ -63,7 +51,6 @@ export default async function AdminPage({
         usersPayload={usersPayload}
         accessRequestsPayload={accessRequestsPayload}
         orgId={orgId}
-        trainingContentAvailable={trainingContentAvailable}
         initialTab={params.tab === "access" ? "access" : "users"}
       />
     </>

@@ -24,7 +24,7 @@ export default async function FocusTopicAdminPage({ searchParams }: {
     return <>
       <PageHeader eyebrow="Admin" title="Focus Topics"
         description={`Manage learner assignments for ${usersPayload.org.name}.`} />
-      <TrainingContentAdminNav orgId={selectedOrgId} active="focus-topics" showFocusTopics />
+      <TrainingContentAdminNav orgId={selectedOrgId} active="focus-topics" />
       <FocusTopicAdministration orgId={usersPayload.org.id}
         initialTopics={topics.trainings} users={usersPayload.users} />
     </>;

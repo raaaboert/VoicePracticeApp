@@ -24,9 +24,9 @@ const page = readFileSync(
 );
 
 test("customer content organization is capability-gated and keeps Focus Topics separate from Training Packs", () => {
-  assert.equal(admin.includes("viewer.capabilities.manageOrganizationContent"), true);
-  assert.equal(admin.includes("Content Organization"), true);
-  assert.equal(nav.includes('active: "admin" | "training-content" | "content-organization"'), true);
+  assert.equal(page.includes("viewer.capabilities.manageOrganizationContent"), true);
+  assert.equal(nav.includes("Content Organization"), true);
+  assert.equal(nav.includes('active: "admin" | "training-content" | "content-organization" | "focus-topics"'), true);
   assert.equal(manager.includes("Learner discovery"), true);
   assert.equal(manager.includes("Delivery configuration"), true);
   assert.equal(manager.includes("Order does not change assignments or scoring."), true);
