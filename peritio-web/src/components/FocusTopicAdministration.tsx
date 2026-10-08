@@ -173,23 +173,25 @@ export function FocusTopicAdministration({ orgId, initialTopics, users }: {
             <p className="muted-copy">Assignments control learner access. Manager + current direct team follows current reporting lines.</p>
           </div>
         </div>
-        <div className="focus-topic-assignment-controls">
-          <div className="focus-topic-field"><label htmlFor="focus-topic-audience">Audience</label>
-            <select className="text-input" id="focus-topic-audience" value={audience}
-              disabled={busy || selected.status === "archived"}
-              onChange={(event) => { setAudience(event.target.value as Audience); setSubjectUserId(""); }}>
-              {AUDIENCES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-            <small>{AUDIENCES.find((option) => option.value === audience)?.description}</small>
+        <div className="focus-topic-assignment-composer">
+          <div className={`focus-topic-assignment-fields${targeted ? " targeted" : ""}`}>
+            <div className="focus-topic-field"><label htmlFor="focus-topic-audience">Audience</label>
+              <select className="text-input" id="focus-topic-audience" value={audience}
+                disabled={busy || selected.status === "archived"}
+                onChange={(event) => { setAudience(event.target.value as Audience); setSubjectUserId(""); }}>
+                {AUDIENCES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              <small>{AUDIENCES.find((option) => option.value === audience)?.description}</small>
+            </div>
+            {targeted ? <div className="focus-topic-field"><label htmlFor="focus-topic-subject">
+              {audience === "individual" ? "Learner" : "Manager"}</label>
+              <select className="text-input" id="focus-topic-subject" value={subjectUserId}
+                disabled={busy || selected.status === "archived"}
+                onChange={(event) => setSubjectUserId(event.target.value)}>
+                <option value="">Select an active organization member</option>
+                {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>{user.displayName}</option>)}
+              </select></div> : null}
           </div>
-          {targeted ? <div className="focus-topic-field"><label htmlFor="focus-topic-subject">
-            {audience === "individual" ? "Learner" : "Manager"}</label>
-            <select className="text-input" id="focus-topic-subject" value={subjectUserId}
-              disabled={busy || selected.status === "archived"}
-              onChange={(event) => setSubjectUserId(event.target.value)}>
-              <option value="">Select an active organization member</option>
-              {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>{user.displayName}</option>)}
-            </select></div> : null}
           <button type="button" className="primary-button focus-topic-add-assignment"
             disabled={busy || selected.status === "archived" || (targeted && !subjectUserId)}
             onClick={createAssignment}>Add Assignment</button>

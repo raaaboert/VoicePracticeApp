@@ -13,14 +13,18 @@ const lightTokens = css.slice(
 );
 
 test("light theme keeps distinct higher-contrast surface, text, border, and status tokens", () => {
-  assert.equal(rootTokens.includes("--text: #eef3ec"), true);
-  assert.equal(rootTokens.includes("--panel: rgba(22, 30, 24, 0.86)"), true);
-  assert.equal(lightTokens.includes("--text: #132018"), true);
-  assert.equal(lightTokens.includes("--text-muted: #526253"), true);
-  assert.equal(lightTokens.includes("--panel-strong: #ffffff"), true);
-  assert.equal(lightTokens.includes("--panel-muted: #eef2ea"), true);
-  assert.equal(lightTokens.includes("--border: rgba(55, 74, 58, 0.24)"), true);
-  assert.equal(lightTokens.includes("--border-strong: rgba(55, 74, 58, 0.4)"), true);
+  assert.equal(rootTokens.includes("--canvas: #101711"), true);
+  assert.equal(rootTokens.includes("--surface: #18231c"), true);
+  assert.equal(rootTokens.includes("--surface-raised: #202c23"), true);
+  assert.equal(rootTokens.includes("--text-primary: #f6f0df"), true);
+  assert.equal(lightTokens.includes("--canvas: #f5f1e8"), true);
+  assert.equal(lightTokens.includes("--surface: #fbf8f0"), true);
+  assert.equal(lightTokens.includes("--surface-raised: #fffdf8"), true);
+  assert.equal(lightTokens.includes("--surface-muted: #e7ece2"), true);
+  assert.equal(lightTokens.includes("--text-primary: #1f2921"), true);
+  assert.equal(lightTokens.includes("--text-muted: #596761"), true);
+  assert.equal(lightTokens.includes("--border: rgba(55, 74, 58, 0.3)"), true);
+  assert.equal(lightTokens.includes("--border-strong: rgba(55, 74, 58, 0.5)"), true);
   assert.equal(lightTokens.includes("--success: #247044"), true);
   assert.equal(lightTokens.includes("--success-border: rgba(36, 112, 68, 0.42)"), true);
   assert.equal(lightTokens.includes("--danger: #a9363e"), true);
@@ -33,6 +37,7 @@ test("shared Dashboard controls consume theme tokens for normal, placeholder, di
   assert.equal(css.includes("background: var(--panel-strong)"), true);
   assert.equal(css.includes("border: 1px solid var(--border-strong)"), true);
   assert.equal(css.includes("outline: 2px solid var(--accent)"), true);
+  assert.equal(css.includes("box-shadow: 0 0 0 3px var(--accent-soft)"), true);
   assert.equal(css.includes("background: var(--sidebar-bg)"), true);
   assert.equal(css.includes("border-color: var(--success-border)"), true);
   assert.equal(css.includes("border-color: var(--danger-border)"), true);

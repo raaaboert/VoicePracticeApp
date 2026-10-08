@@ -56,7 +56,8 @@ test("Focus Topic fields and actions use shared controls with accessible labels"
   assert.match(focusTopics, /"Save Focus Topic"/);
   assert.match(focusTopics, />Archive Focus Topic</);
   assert.match(focusTopics, />Add Assignment</);
-  assert.match(styles, /\.focus-topic-assignment-controls\s*\{/);
+  assert.match(styles, /\.focus-topic-assignment-composer\s*\{/);
+  assert.match(styles, /\.focus-topic-assignment-fields\.targeted\s*\{/);
   assert.match(styles, /\.focus-topic-description\s*\{/);
 });
 

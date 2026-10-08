@@ -8,6 +8,7 @@ import { partitionFocusTopicAssignments } from "./focusTopicAssignmentPresentati
 
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(componentsDir, "FocusTopicAdministration.tsx"), "utf8");
+const styles = readFileSync(join(componentsDir, "../../app/globals.css"), "utf8");
 
 const revoked = {
   id: "assignment_old",
@@ -48,4 +49,18 @@ test("active rows show created time and revoke while history shows both times wi
   assert.ok(historyStart >= 0);
   assert.equal(history.includes("revokeAssignment("), false);
   assert.match(source.slice(0, historyStart), /onClick=\{\(\) => revokeAssignment\(row\.id\)\}/);
+});
+
+test("assignment composer keeps fields in one row and a normal-sized action beneath them", () => {
+  const composerStart = source.indexOf('<div className="focus-topic-assignment-composer">');
+  const fieldsStart = source.indexOf("focus-topic-assignment-fields", composerStart);
+  const fieldsEnd = source.indexOf("</div>", source.indexOf("</select>", fieldsStart)) + "</div>".length;
+  const buttonStart = source.indexOf("focus-topic-add-assignment", composerStart);
+
+  assert.ok(composerStart >= 0);
+  assert.ok(fieldsStart > composerStart);
+  assert.ok(buttonStart > fieldsEnd, "Add Assignment must follow the field row");
+  assert.match(source, /focus-topic-assignment-fields\$\{targeted \? " targeted" : ""\}/);
+  assert.match(styles, /\.focus-topic-assignment-fields\.targeted\s*\{[\s\S]*?grid-template-columns: minmax\(15rem, 22rem\) minmax\(15rem, 24rem\)/);
+  assert.match(styles, /\.focus-topic-add-assignment\s*\{[\s\S]*?justify-self: start;[\s\S]*?width: auto;/);
 });
