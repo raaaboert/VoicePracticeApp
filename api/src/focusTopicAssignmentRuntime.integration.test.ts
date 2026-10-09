@@ -121,6 +121,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         orgRole: "user" as const,
         emailVerifiedAt: now,
         status: "active" as const,
+        dashboardAccessEnabled: true,
       };
       const secondReport = {
         ...sourceUser,
@@ -179,7 +180,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const unmanagedTopic: OrgTrainingRecord = {
         ...topic, id: "focus_runtime_unmanaged_topic", name: "Unmanaged Topic",
       };
-      db.orgTrainings.push(foreignTopic, unmanagedTopic);
+      const inactiveTopic: OrgTrainingRecord = {
+        ...topic, id: "focus_runtime_inactive_topic", name: "Inactive Topic", status: "archived",
+      };
+      db.orgTrainings.push(foreignTopic, unmanagedTopic, inactiveTopic);
       const storage = createDatabaseStorage({ provider: "postgres", dbPath: "unused",
         databaseUrl: url, pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000,
         queryPool: pool, ensureDatabaseShape: imported.ensureDatabaseShape,
@@ -286,6 +290,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const assignmentsPath = `/orgs/${org.id}/trainings/${topic.id}/assignments`;
       const managementPath = `/orgs/${org.id}/trainings/${topic.id}/management-grants`;
       const attachmentsPath = `/orgs/${org.id}/trainings/${topic.id}/direct-attachments`;
+      const unmanagedAttachmentsPath = `/orgs/${org.id}/trainings/${unmanagedTopic.id}/direct-attachments`;
       const attachmentCountBefore = await pool.query<{ count: string }>(
         "SELECT COUNT(*)::text AS count FROM focus_topic_scenario_attachments");
       const unknownStandard = await masterCall(attachmentsPath, "POST", {
@@ -404,6 +409,24 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await dashboardCall(
         managerSession.token, `/orgs/${org.id}/trainings`,
       )).status, 200);
+      const managerCall = (
+        path: string,
+        method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
+        body?: Record<string, unknown>,
+      ) => dashboardCall(managerSession.token, path, method, body);
+      const managerCreated = await managerCall(
+        `/orgs/${org.id}/trainings/${topic.id}/content`, "POST", {
+          contentType: "pdf", title: "Manager draft", description: "",
+        },
+      );
+      assert.equal(managerCreated.status, 201, JSON.stringify(managerCreated.body));
+      const managerAttached = await managerCall(attachmentsPath, "POST", {
+        kind: "content", contentId,
+      });
+      assert.equal(managerAttached.status, 201, JSON.stringify(managerAttached.body));
+      assert.equal((await managerCall(
+        `${attachmentsPath}/${managerAttached.body.id as string}`, "DELETE",
+      )).status, 200);
       const afterFirstReportLoss = await storage.load();
       afterFirstReportLoss.users.find((candidate) => candidate.id === secondReport.id)!.managerUserId = null;
       await storage.save(afterFirstReportLoss);
@@ -469,10 +492,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       )).status, 404);
       const relatedBefore = await scopedCall(attachmentsPath);
       assert.equal(relatedBefore.status, 200, JSON.stringify(relatedBefore.body));
-      assert.deepEqual(
-        (relatedBefore.body.contentItems as Array<{ id: string }>).map((entry) => entry.id),
-        [contentId],
-      );
+      const relatedBeforeIds = (relatedBefore.body.contentItems as Array<{ id: string }>)
+        .map((entry) => entry.id);
+      assert.equal(relatedBeforeIds.includes(contentId), true);
+      assert.equal(relatedBeforeIds.includes(
+        ((managerCreated.body.item as { id: string }).id),
+      ), true);
       const restrictedAttach = await scopedCall(attachmentsPath, "POST", {
         kind: "content", contentId: restrictedContentId,
       });
@@ -485,7 +510,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const relatedItems = relatedWithRestrictedAttachment.body.contentItems as Array<{
         id: string; availableToAttach: boolean;
       }>;
-      assert.deepEqual(relatedItems.map((entry) => entry.id), [contentId, restrictedContentId]);
+      assert.equal(relatedItems.some((entry) => entry.id === contentId), true);
+      assert.equal(relatedItems.some((entry) => entry.id === restrictedContentId), true);
       assert.equal(relatedItems.find((entry) => entry.id === restrictedContentId)?.availableToAttach, false);
       assert.equal((await scopedCall(
         `${attachmentsPath}/${adminRestrictedAttachment.body.id as string}`, "DELETE",
@@ -496,6 +522,157 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await scopedCall(attachmentsPath, "POST", {
         kind: "content", contentId: foreignContentId,
       })).status, 403);
+      const topicContentPath = `/orgs/${org.id}/trainings/${topic.id}/content`;
+      assert.equal((await scopedCall(topicContentPath, "POST", {
+        contentType: "pdf", title: "Spoofed creator", description: "",
+        actorId: orgAdmin.id,
+      })).status, 400);
+      assert.equal((await scopedCall(
+        `/orgs/${org.id}/trainings/${unmanagedTopic.id}/content`, "POST", {
+          contentType: "pdf", title: "Unmanaged", description: "",
+        },
+      )).status, 404);
+      assert.equal((await scopedCall(
+        `/orgs/${foreignOrg.id}/trainings/${foreignTopic.id}/content`, "POST", {
+          contentType: "pdf", title: "Foreign", description: "",
+        },
+      )).status, 404);
+      assert.equal((await orgAdminCall(
+        `/orgs/${org.id}/trainings/${inactiveTopic.id}/content`, "POST", {
+          contentType: "pdf", title: "Inactive", description: "",
+        },
+      )).status, 404);
+      const auditCountBeforeFailedCreate = Number((await pool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM audit_events",
+      )).rows[0]?.count ?? "0");
+      await pool.query(`CREATE FUNCTION reject_runtime_content_notification() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.kind = 'content_added' THEN RAISE EXCEPTION 'forced content notification failure'; END IF;
+          RETURN NEW;
+        END $$`);
+      await pool.query(`CREATE TRIGGER reject_runtime_content_notification
+        BEFORE INSERT ON user_notifications FOR EACH ROW
+        EXECUTE FUNCTION reject_runtime_content_notification()`);
+      const failedAtomicCreate = await scopedCall(topicContentPath, "POST", {
+        contentType: "pdf", title: "Must roll back", description: "",
+      });
+      assert.equal(failedAtomicCreate.status, 500, JSON.stringify(failedAtomicCreate.body));
+      assert.equal((await pool.query(
+        "SELECT 1 FROM org_content_items WHERE org_id=$1 AND title='Must roll back'",
+        [org.id],
+      )).rowCount, 0);
+      assert.equal(Number((await pool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM audit_events",
+      )).rows[0]?.count ?? "0"), auditCountBeforeFailedCreate);
+      await pool.query("DROP TRIGGER reject_runtime_content_notification ON user_notifications");
+      await pool.query("DROP FUNCTION reject_runtime_content_notification() ");
+      const orgAdminCreated = await orgAdminCall(topicContentPath, "POST", {
+        contentType: "pdf", title: "Org admin Topic draft", description: "",
+      });
+      assert.equal(orgAdminCreated.status, 201, JSON.stringify(orgAdminCreated.body));
+      assert.equal((orgAdminCreated.body.item as {
+        publicationState: string; createdByActorId: string;
+      }).publicationState, "draft");
+      assert.equal((await pool.query(
+        `SELECT 1 FROM org_content_topic_attachments
+         WHERE org_id=$1 AND content_id=$2 AND topic_id=$3 AND detached_at IS NULL`,
+        [org.id, (orgAdminCreated.body.item as { id: string }).id, topic.id],
+      )).rowCount, 1);
+      const scopedCreated = await scopedCall(topicContentPath, "POST", {
+        contentType: "pdf", title: "Scoped draft", description: "Initial description",
+      });
+      assert.equal(scopedCreated.status, 201, JSON.stringify(scopedCreated.body));
+      const scopedCreatedItem = scopedCreated.body.item as {
+        id: string; publicationState: string; updatedAt: string;
+      };
+      assert.equal(scopedCreatedItem.publicationState, "draft");
+      const scopedCreatedContent = await pool.query<{
+        publication_state: string; created_by_actor_id: string;
+      }>(
+        `SELECT publication_state,created_by_actor_id FROM org_content_items
+         WHERE org_id=$1 AND id=$2`, [org.id, scopedCreatedItem.id],
+      );
+      assert.deepEqual(scopedCreatedContent.rows[0], {
+        publication_state: "draft", created_by_actor_id: scopedUserAdmin.id,
+      });
+      assert.equal((await pool.query(
+        `SELECT 1 FROM org_content_topic_attachments
+         WHERE org_id=$1 AND content_id=$2 AND topic_id=$3 AND detached_at IS NULL`,
+        [org.id, scopedCreatedItem.id, topic.id],
+      )).rowCount, 1);
+      assert.equal((await pool.query(
+        `SELECT 1 FROM org_content_assignments
+         WHERE org_id=$1 AND content_id=$2 AND revoked_at IS NULL`,
+        [org.id, scopedCreatedItem.id],
+      )).rowCount, 0);
+      const draftLearnerDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      assert.equal(draftLearnerDetail.status, 200);
+      assert.equal((draftLearnerDetail.body.resources as Array<{ id: string }>)
+        .some((entry) => entry.id === scopedCreatedItem.id), false);
+      const scopedUpdatePath = `${topicContentPath}/${scopedCreatedItem.id}`;
+      const firstUpdate = await scopedCall(scopedUpdatePath, "PATCH", {
+        expectedUpdatedAt: scopedCreatedItem.updatedAt,
+        title: "Scoped draft updated",
+        description: "Updated description",
+      });
+      assert.equal(firstUpdate.status, 200, JSON.stringify(firstUpdate.body));
+      let currentScopedUpdatedAt = ((firstUpdate.body.item as { updatedAt: string }).updatedAt);
+      await pool.query(`INSERT INTO org_content_assets (
+        id,org_id,content_id,asset_role,version,upload_state,storage_provider,
+        final_object_key,original_filename,declared_mime_type,detected_mime_type,
+        file_extension,declared_byte_size,byte_size,is_current,finalized_at,created_by_actor_id
+      ) VALUES ($1,$2,$3,'primary',1,'ready','r2',$4,'scoped.pdf','application/pdf',
+        'application/pdf','pdf',8,8,TRUE,NOW(),$5)`,
+      [randomUUID(), org.id, scopedCreatedItem.id,
+        `organizations/${org.id}/content/${scopedCreatedItem.id}/primary/1/scoped.pdf`,
+        scopedUserAdmin.id]);
+      const publishedScoped = await scopedCall(`${scopedUpdatePath}/publish`, "POST", {
+        expectedUpdatedAt: currentScopedUpdatedAt,
+      });
+      assert.equal(publishedScoped.status, 200, JSON.stringify(publishedScoped.body));
+      currentScopedUpdatedAt = ((publishedScoped.body.item as { updatedAt: string }).updatedAt);
+      const publishedLearnerDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      assert.equal((publishedLearnerDetail.body.resources as Array<{ id: string }>)
+        .some((entry) => entry.id === scopedCreatedItem.id), true);
+      const unpublishedScoped = await scopedCall(`${scopedUpdatePath}/unpublish`, "POST", {
+        expectedUpdatedAt: currentScopedUpdatedAt,
+      });
+      assert.equal(unpublishedScoped.status, 200, JSON.stringify(unpublishedScoped.body));
+      currentScopedUpdatedAt = ((unpublishedScoped.body.item as { updatedAt: string }).updatedAt);
+      const standaloneId = randomUUID();
+      await pool.query(`INSERT INTO org_content_assignments
+        (id,org_id,content_id,assignment_type,subject_user_id,created_by_actor_id,created_at)
+        VALUES ($1,$2,$3,'organization',NULL,$4,NOW())`,
+      [standaloneId, org.id, scopedCreatedItem.id, orgAdmin.id]);
+      const deniedByStandalone = await scopedCall(scopedUpdatePath, "PATCH", {
+        expectedUpdatedAt: currentScopedUpdatedAt, title: "Denied shared edit",
+      });
+      assert.equal(deniedByStandalone.status, 403, JSON.stringify(deniedByStandalone.body));
+      const adminSharedUpdate = await orgAdminCall(scopedUpdatePath, "PATCH", {
+        expectedUpdatedAt: currentScopedUpdatedAt, title: "Organization Admin shared edit",
+      });
+      assert.equal(adminSharedUpdate.status, 200, JSON.stringify(adminSharedUpdate.body));
+      currentScopedUpdatedAt = ((adminSharedUpdate.body.item as { updatedAt: string }).updatedAt);
+      await pool.query(`UPDATE org_content_assignments SET revoked_at=NOW(),revoked_by_actor_id=$3
+        WHERE org_id=$1 AND id=$2`, [org.id, standaloneId, orgAdmin.id]);
+      const restoredUpdate = await scopedCall(scopedUpdatePath, "PATCH", {
+        expectedUpdatedAt: currentScopedUpdatedAt, title: "Exclusive again",
+      });
+      assert.equal(restoredUpdate.status, 200, JSON.stringify(restoredUpdate.body));
+      currentScopedUpdatedAt = ((restoredUpdate.body.item as { updatedAt: string }).updatedAt);
+      const secondTopicAttachment = await orgAdminCall(unmanagedAttachmentsPath, "POST", {
+        kind: "content", contentId: scopedCreatedItem.id,
+      });
+      assert.equal(secondTopicAttachment.status, 201, JSON.stringify(secondTopicAttachment.body));
+      assert.equal((await scopedCall(scopedUpdatePath, "PATCH", {
+        expectedUpdatedAt: currentScopedUpdatedAt, title: "Denied outside Topic scope",
+      })).status, 403);
+      assert.equal((await orgAdminCall(
+        `${unmanagedAttachmentsPath}/${secondTopicAttachment.body.id as string}`, "DELETE",
+      )).status, 200);
+      assert.equal((await scopedCall(scopedUpdatePath, "PATCH", {
+        expectedUpdatedAt: currentScopedUpdatedAt, title: "Scope restored",
+      })).status, 200);
       for (const [path, method, body] of [
         ["/dashboard/admin/training-content", "POST", {}],
         [`/dashboard/admin/training-content/${contentId}`, "PATCH", {}],
@@ -506,7 +683,6 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       ] as const) {
         assert.equal((await scopedCall(path, method, body)).status, 403, `${method} ${path}`);
       }
-      const unmanagedAttachmentsPath = `/orgs/${org.id}/trainings/${unmanagedTopic.id}/direct-attachments`;
       assert.equal((await scopedCall(unmanagedAttachmentsPath, "POST", {
         kind: "content", contentId,
       })).status, 404);
@@ -523,23 +699,26 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
          WHERE content_id=$1 ORDER BY topic_id`, [contentId],
       );
       assert.deepEqual(attachmentRows.rows.map((entry) => [entry.topic_id, Boolean(entry.detached_at)]), [
-        [topic.id, true], [unmanagedTopic.id, false],
+        [topic.id, true], [topic.id, true], [unmanagedTopic.id, false],
       ]);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.content.attached'",
-      )).rowCount, 3);
+      )).rowCount, 5);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.attachment.detached'",
-      )).rowCount, 2);
-      assert.equal((await pool.query(
+      )).rowCount, 4);
+      assert.ok(((await pool.query(
         "SELECT 1 FROM user_notifications WHERE kind='content_added' AND recipient_user_id=$1",
         [orgAdmin.id],
-      )).rowCount, 1);
+      )).rowCount ?? 0) >= 2);
       await moduleEntitlements.setOrgModuleEntitlement({
         orgId: org.id, moduleKey: "training_content", enabled: false,
         updatedByActorId: "platform_admin", updatedAt: new Date(),
       });
       assert.equal((await scopedCall(attachmentsPath, "POST", { kind: "content", contentId })).status, 403);
+      assert.equal((await scopedCall(topicContentPath, "POST", {
+        contentType: "pdf", title: "Module disabled", description: "",
+      })).status, 403);
       await moduleEntitlements.setOrgModuleEntitlement({
         orgId: org.id, moduleKey: "training_content", enabled: true,
         updatedByActorId: "platform_admin", updatedAt: new Date(),

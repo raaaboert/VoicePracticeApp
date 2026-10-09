@@ -93,6 +93,7 @@ export interface TrainingContentAuthorityRecord {
   content: TrainingContentItem;
   categoryArchivedAt: string | null;
   assignments: TrainingContentAssignment[];
+  topicAttachments: Array<{ topicId: string; detachedAt: string | null }>;
 }
 
 export interface TrainingContentManagementListResult {
@@ -153,6 +154,16 @@ export interface CreateTrainingContentInput {
   now?: Date;
 }
 
+export type TrainingContentTransactionGuard = (
+  client: Pick<PoolClient, "query">,
+) => Promise<void>;
+
+export interface CreateTopicScopedTrainingContentInput extends CreateTrainingContentInput {
+  topicId: string;
+  attachmentId: string;
+  transactionGuard: TrainingContentTransactionGuard;
+}
+
 export interface UpdateTrainingContentInput {
   orgId: string;
   contentId: string;
@@ -166,6 +177,7 @@ export interface UpdateTrainingContentInput {
   externalUrl?: string | null;
   actor: TrainingContentMutationActor;
   now?: Date;
+  transactionGuard?: TrainingContentTransactionGuard;
 }
 
 export interface ReplaceTrainingContentAssignmentsInput {
@@ -207,6 +219,7 @@ export interface TransitionTrainingContentInput {
   action: "publish" | "unpublish" | "archive";
   actor: TrainingContentMutationActor;
   now?: Date;
+  transactionGuard?: TrainingContentTransactionGuard;
 }
 
 export interface TrainingContentStore {
@@ -246,6 +259,12 @@ export interface TrainingContentStore {
     contentId: string
   ): Promise<TrainingContentManagementDetail | null>;
   createContent(input: CreateTrainingContentInput): Promise<TrainingContentManagementDetail>;
+  createTopicScopedContent(input: CreateTopicScopedTrainingContentInput,
+    client?: Pick<PoolClient, "query">): Promise<{
+    detail: TrainingContentManagementDetail;
+    attachment: { id: string; orgId: string; contentId: string; topicId: string;
+      attachedBy: string; attachedAt: string; detachedBy: null; detachedAt: null };
+  }>;
   updateContent(input: UpdateTrainingContentInput): Promise<TrainingContentManagementDetail>;
   replaceAssignments(
     input: ReplaceTrainingContentAssignmentsInput
@@ -269,6 +288,17 @@ interface CreateTrainingContentStoreParams {
 
 type TrainingContentQueryPool = Pick<Pool, "query" | "connect">;
 type TrainingContentQueryable = Pick<PoolClient, "query"> | Pick<Pool, "query">;
+
+export async function lockTrainingContentAuthorityMutation(
+  client: Pick<PoolClient, "query">,
+  orgId: string,
+  contentId: string,
+): Promise<void> {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended('peritio_training_content_authority:' || $1 || ':' || $2, 0))",
+    [requiredId(orgId, "Organization id"), requiredId(contentId, "Content id")],
+  );
+}
 
 interface TrainingContentItemRow {
   id: string;
@@ -531,6 +561,10 @@ class NullTrainingContentStore implements TrainingContentStore {
     return this.unavailable();
   }
 
+  async createTopicScopedContent(): Promise<never> {
+    return this.unavailable();
+  }
+
   async updateContent(): Promise<TrainingContentManagementDetail> {
     return this.unavailable();
   }
@@ -710,10 +744,28 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       normalizedOrgId,
       result.rows.map((row) => row.id),
     );
+    const topicAttachmentsResult = await this.pool.query<{
+      content_id: string;
+      topic_id: string;
+      detached_at: string | Date | null;
+    }>(
+      `SELECT content_id, topic_id, detached_at
+       FROM org_content_topic_attachments
+       WHERE org_id = $1 AND content_id = ANY($2::uuid[])
+       ORDER BY content_id, topic_id, id`,
+      [normalizedOrgId, result.rows.map((row) => row.id)],
+    );
+    const topicAttachments = new Map<string, Array<{ topicId: string; detachedAt: string | null }>>();
+    for (const row of topicAttachmentsResult.rows) {
+      const rows = topicAttachments.get(row.content_id) ?? [];
+      rows.push({ topicId: row.topic_id, detachedAt: optionalIso(row.detached_at) });
+      topicAttachments.set(row.content_id, rows);
+    }
     return result.rows.map((row) => ({
       content: mapContentItemRow(row),
       categoryArchivedAt: optionalIso(row.category_archived_at),
       assignments: assignments.get(row.id) ?? [],
+      topicAttachments: topicAttachments.get(row.id) ?? [],
     }));
   }
 
@@ -1175,15 +1227,97 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     }
   }
 
+  async createTopicScopedContent(input: CreateTopicScopedTrainingContentInput,
+    providedClient?: Pick<PoolClient, "query">): Promise<{
+    detail: TrainingContentManagementDetail;
+    attachment: { id: string; orgId: string; contentId: string; topicId: string;
+      attachedBy: string; attachedAt: string; detachedBy: null; detachedAt: null };
+  }> {
+    await this.initialize();
+    const ownedClient = providedClient ? null : await this.pool.connect();
+    const client = providedClient ?? ownedClient!;
+    const now = input.now ?? new Date();
+    const contentId = randomUUID();
+    const actorId = requiredId(input.actor.actorId, "Actor id");
+    try {
+      if (ownedClient) await client.query("BEGIN");
+      await input.transactionGuard(client);
+      const category = await lockActiveCategory(client, input.orgId, input.categoryId);
+      const orderResult = await client.query<{ max_order: string | number | null }>(
+        `SELECT MAX(display_order) AS max_order
+         FROM org_content_items
+         WHERE org_id = $1 AND category_id = $2`,
+        [category.orgId, category.id],
+      );
+      const displayOrder =
+        (optionalDatabaseInteger(orderResult.rows[0]?.max_order ?? null, "Display order") ?? -1) + 1;
+      const inserted = await client.query<TrainingContentItemRow>(
+        `INSERT INTO org_content_items (
+           id, org_id, category_id, title, description, focus_topic_id,
+           focus_topic_name_snapshot, content_type, publication_state, native_body,
+           external_url, display_order, content_version, created_by_actor_id,
+           updated_by_actor_id, created_at, updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10,$11,1,$12,$12,$13,$13)
+         RETURNING ${CONTENT_COLUMNS}`,
+        [contentId, category.orgId, category.id, input.title, input.description,
+          input.focusTopicId, input.focusTopicNameSnapshot, input.contentType,
+          input.nativeBody, input.externalUrl, displayOrder, actorId, now],
+      );
+      const content = mapRequiredContentRow(inserted.rows[0]);
+      await client.query(
+        `INSERT INTO org_content_topic_attachments
+         (id,org_id,content_id,topic_id,attached_by,attached_at,detached_by,detached_at)
+         VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL)`,
+        [requiredId(input.attachmentId, "Attachment id"), content.orgId, content.id,
+          requiredId(input.topicId, "Topic id"), actorId, now],
+      );
+      await insertAuditEvent(client, {
+        actor: input.actor,
+        action: "training_content_created",
+        orgId: content.orgId,
+        contentId: content.id,
+        contentType: content.contentType,
+        contentVersion: content.contentVersion,
+        metadata: {
+          publicationState: content.publicationState,
+          categoryId: content.categoryId,
+          focusTopicId: input.topicId,
+          creationScope: "focus_topic",
+        },
+        now,
+      });
+      const detail = await readRequiredContentDetail(client, content.orgId, content.id);
+      const attachment = {
+        id: input.attachmentId,
+        orgId: content.orgId,
+        contentId: content.id,
+        topicId: input.topicId,
+        attachedBy: actorId,
+        attachedAt: now.toISOString(),
+        detachedBy: null,
+        detachedAt: null,
+      } as const;
+      if (ownedClient) await client.query("COMMIT");
+      return { detail, attachment };
+    } catch (error) {
+      if (ownedClient) await rollbackQuietly(client);
+      throw error;
+    } finally {
+      ownedClient?.release();
+    }
+  }
+
   async updateContent(input: UpdateTrainingContentInput): Promise<TrainingContentManagementDetail> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await lockTrainingContentAuthorityMutation(client, input.orgId, input.contentId);
       const requestedCategory = input.categoryId
         ? await lockActiveCategory(client, input.orgId, input.categoryId)
         : null;
       const current = await lockContent(client, input.orgId, input.contentId);
+      if (input.transactionGuard) await input.transactionGuard(client);
       assertExpectedUpdatedAt(current, input.expectedUpdatedAt);
       if (current.publicationState === "archived") {
         throw new TrainingContentStoreError(
@@ -1336,6 +1470,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await lockTrainingContentAuthorityMutation(client, input.orgId, input.contentId);
       const content = await lockContent(client, input.orgId, input.contentId);
       assertExpectedUpdatedAt(content, input.expectedUpdatedAt);
       if (content.publicationState === "archived") {
@@ -1453,7 +1588,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await lockTrainingContentAuthorityMutation(client, input.orgId, input.contentId);
       const content = await lockContent(client, input.orgId, input.contentId);
+      if (input.transactionGuard) await input.transactionGuard(client);
       assertExpectedUpdatedAt(content, input.expectedUpdatedAt);
       if (content.publicationState === "archived") {
         throw new TrainingContentStoreError(
@@ -1607,9 +1744,7 @@ async function readContentDetail(
   if (!content) {
     return null;
   }
-  const [categoryResult, assetResult, latestVideoUploadResult, assignmentResult] =
-    await Promise.all([
-    queryable.query<{ name: string }>(
+  const categoryResult = await queryable.query<{ name: string }>(
       `
         SELECT name
         FROM org_content_categories
@@ -1617,8 +1752,8 @@ async function readContentDetail(
         LIMIT 1
       `,
       [content.orgId, content.categoryId]
-    ),
-    queryable.query<TrainingContentAssetRow>(
+    );
+  const assetResult = await queryable.query<TrainingContentAssetRow>(
       `
         SELECT ${CURRENT_ASSET_COLUMNS}
         FROM org_content_assets
@@ -1629,9 +1764,9 @@ async function readContentDetail(
         LIMIT 1
       `,
       [content.orgId, content.id]
-    ),
-    content.contentType === "video"
-      ? queryable.query<TrainingContentAssetRow>(
+    );
+  const latestVideoUploadResult = content.contentType === "video"
+      ? await queryable.query<TrainingContentAssetRow>(
         `
           SELECT ${CURRENT_ASSET_COLUMNS}
           FROM org_content_assets candidate
@@ -1652,8 +1787,8 @@ async function readContentDetail(
         `,
         [content.orgId, content.id]
       )
-      : Promise.resolve({ rows: [] as TrainingContentAssetRow[] }),
-    queryable.query<TrainingContentAssignmentRow>(
+      : { rows: [] as TrainingContentAssetRow[] };
+  const assignmentResult = await queryable.query<TrainingContentAssignmentRow>(
       `
         SELECT ${ASSIGNMENT_COLUMNS}
         FROM org_content_assignments
@@ -1661,8 +1796,7 @@ async function readContentDetail(
         ORDER BY assignment_type ASC, subject_user_id ASC NULLS FIRST, created_at ASC, id ASC
       `,
       [content.orgId, content.id]
-    ),
-  ]);
+    );
   const categoryName = categoryResult.rows[0]?.name;
   if (!categoryName) {
     throw new Error("Training Content category row is missing.");

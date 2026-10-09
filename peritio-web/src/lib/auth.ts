@@ -34,6 +34,7 @@ import {
   DashboardTrainingContentTargetsResponse,
   DashboardTrainingContentUploadInitiationRequest,
   DashboardTrainingContentUploadInitiationResponse,
+  TrainingContentFileLimitsBytes,
   DashboardOverviewResponse,
   DashboardCustomerDetailResponse,
   DashboardCustomerListResponse,
@@ -843,6 +844,13 @@ export interface DashboardFocusTopicContentItem {
   archivedAt: string | null;
   updatedAt: string;
   availableToAttach: boolean;
+  canMutate: boolean;
+  mutationRestriction: string | null;
+  currentAsset: {
+    id: string;
+    uploadState: string;
+    originalFilename: string | null;
+  } | null;
 }
 
 export interface DashboardFocusTopicContentAttachment {
@@ -862,6 +870,17 @@ export interface DashboardFocusTopicRelatedContentResponse {
     canManageAllTopics: boolean;
     learningResourcesEnabled: boolean;
   };
+  fileLimitsBytes: TrainingContentFileLimitsBytes;
+}
+
+export interface DashboardFocusTopicContentMutationResponse {
+  item: DashboardFocusTopicContentItem;
+  fileLimitsBytes: TrainingContentFileLimitsBytes;
+}
+
+export interface DashboardFocusTopicContentCreateResponse
+  extends DashboardFocusTopicContentMutationResponse {
+  attachment: DashboardFocusTopicContentAttachment;
 }
 
 export async function listDashboardFocusTopicAssignments(orgId: string, topicId: string) {
@@ -941,6 +960,75 @@ export async function detachDashboardFocusTopicContent(
     `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
       + `/direct-attachments/${encodeURIComponent(attachmentId)}`,
     { method: "DELETE", token },
+  );
+}
+
+export async function createDashboardFocusTopicContent(
+  orgId: string,
+  topicId: string,
+  input: { contentType: "audio" | "pdf" | "docx" | "image"; title: string; description: string },
+): Promise<DashboardFocusTopicContentCreateResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicContentCreateResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/content`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function updateDashboardFocusTopicContent(
+  orgId: string,
+  topicId: string,
+  contentId: string,
+  input: { expectedUpdatedAt: string; title?: string; description?: string },
+): Promise<DashboardFocusTopicContentMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicContentMutationResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}`,
+    { method: "PATCH", body: JSON.stringify(input), token },
+  );
+}
+
+export async function transitionDashboardFocusTopicContent(
+  orgId: string,
+  topicId: string,
+  contentId: string,
+  action: "publish" | "unpublish",
+  expectedUpdatedAt: string,
+): Promise<DashboardFocusTopicContentMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicContentMutationResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}/${action}`,
+    { method: "POST", body: JSON.stringify({ expectedUpdatedAt }), token },
+  );
+}
+
+export async function initiateDashboardFocusTopicContentUpload(
+  orgId: string,
+  topicId: string,
+  contentId: string,
+  input: DashboardTrainingContentUploadInitiationRequest,
+): Promise<DashboardTrainingContentUploadInitiationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentUploadInitiationResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}/assets/uploads`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function finalizeDashboardFocusTopicContentUpload(
+  orgId: string,
+  topicId: string,
+  contentId: string,
+  assetId: string,
+): Promise<DashboardTrainingContentAssetFinalizationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardTrainingContentAssetFinalizationResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}/assets/${encodeURIComponent(assetId)}/finalize`,
+    { method: "POST", body: "{}", token },
   );
 }
 

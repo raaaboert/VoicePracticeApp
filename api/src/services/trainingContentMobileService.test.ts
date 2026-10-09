@@ -238,6 +238,7 @@ class FakeStore implements TrainingContentStore {
       content: entry.content,
       categoryArchivedAt: entry.category.archivedAt,
       assignments: entry.assignments,
+      topicAttachments: [],
     }));
   }
   async getContentItemForOrg(_orgId: string, contentId: string) {
@@ -289,6 +290,7 @@ class FakeStore implements TrainingContentStore {
   async listContentForManagement(): Promise<never> { throw new Error("not used"); }
   async getContentDetailForOrg(): Promise<never> { throw new Error("not used"); }
   async createContent(): Promise<never> { throw new Error("not used"); }
+  async createTopicScopedContent(): Promise<never> { throw new Error("not used"); }
   async updateContent(): Promise<never> { throw new Error("not used"); }
   async replaceAssignments(): Promise<never> { throw new Error("not used"); }
   async transitionContent(): Promise<never> { throw new Error("not used"); }

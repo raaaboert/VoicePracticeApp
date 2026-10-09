@@ -82,6 +82,10 @@ export interface TrainingContentAuditActor {
   actorId: string;
 }
 
+export type TrainingContentAssetTransactionGuard = (
+  client: Pick<PoolClient, "query">,
+) => Promise<void>;
+
 export interface CreatePendingTrainingContentAssetInput {
   orgId: string;
   contentId: string;
@@ -95,6 +99,7 @@ export interface CreatePendingTrainingContentAssetInput {
   maxPendingBytesForOrganization: number;
   actor: TrainingContentAuditActor;
   now?: Date;
+  transactionGuard?: TrainingContentAssetTransactionGuard;
 }
 
 export type ClaimTrainingContentAssetFinalizationResult =
@@ -154,6 +159,7 @@ export interface TrainingContentAssetStore {
     leaseSeconds: number;
     actor: TrainingContentAuditActor;
     now?: Date;
+    transactionGuard?: TrainingContentAssetTransactionGuard;
   }): Promise<ClaimTrainingContentAssetFinalizationResult>;
   queueVideoProcessing(params: {
     orgId: string;
@@ -164,6 +170,7 @@ export interface TrainingContentAssetStore {
     checksumOrEtag: string | null;
     actor: TrainingContentAuditActor;
     now?: Date;
+    transactionGuard?: TrainingContentAssetTransactionGuard;
   }): Promise<QueueTrainingContentVideoProcessingResult>;
   claimNextVideoProcessing(params: {
     leaseSeconds: number;
@@ -197,6 +204,7 @@ export interface TrainingContentAssetStore {
     processingLeaseToken?: string;
     actor: TrainingContentAuditActor;
     now?: Date;
+    transactionGuard?: TrainingContentAssetTransactionGuard;
   }): Promise<{ asset: TrainingContentAssetRecord; replacedAsset: TrainingContentAssetRecord | null }>;
   markAssetBackedUp(assetId: string, backedUpAt: Date): Promise<TrainingContentAssetRecord>;
   recordBackupFailure(assetId: string, now?: Date): Promise<TrainingContentAssetRecord>;
@@ -238,6 +246,17 @@ interface TrainingContentAssetStoreParams {
 }
 
 type AssetQueryPool = Pick<Pool, "query" | "connect">;
+
+async function lockAssetAuthorityMutation(
+  client: Pick<PoolClient, "query">,
+  orgId: string,
+  contentId: string,
+): Promise<void> {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended('peritio_training_content_authority:' || $1 || ':' || $2, 0))",
+    [requiredId(orgId, "Organization id"), requiredId(contentId, "Content id")],
+  );
+}
 
 interface ContentRow {
   id: string;
@@ -499,6 +518,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
 
     try {
       await client.query("BEGIN");
+      await lockAssetAuthorityMutation(client, orgId, contentId);
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [`training-content-upload:${orgId}`]
@@ -517,6 +537,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
           "content_archived"
         );
       }
+      if (input.transactionGuard) await input.transactionGuard(client);
 
       const currentResult = await client.query<AssetRow>(
         `
@@ -757,13 +778,16 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     leaseSeconds: number;
     actor: TrainingContentAuditActor;
     now?: Date;
+    transactionGuard?: TrainingContentAssetTransactionGuard;
   }): Promise<ClaimTrainingContentAssetFinalizationResult> {
     await this.initialize();
     const client = await this.pool.connect();
     const now = params.now ?? new Date();
     try {
       await client.query("BEGIN");
+      await lockAssetAuthorityMutation(client, params.orgId, params.contentId);
       await lockFinalizableContent(client, params.orgId, params.contentId);
+      if (params.transactionGuard) await params.transactionGuard(client);
       const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
       if (asset.uploadState === "ready") {
         await client.query("COMMIT");
@@ -874,13 +898,16 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     checksumOrEtag: string | null;
     actor: TrainingContentAuditActor;
     now?: Date;
+    transactionGuard?: TrainingContentAssetTransactionGuard;
   }): Promise<QueueTrainingContentVideoProcessingResult> {
     await this.initialize();
     const client = await this.pool.connect();
     const now = params.now ?? new Date();
     try {
       await client.query("BEGIN");
+      await lockAssetAuthorityMutation(client, params.orgId, params.contentId);
       await lockFinalizableContent(client, params.orgId, params.contentId);
+      if (params.transactionGuard) await params.transactionGuard(client);
       const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
       if (asset.uploadState === "ready") {
         await client.query("COMMIT");
@@ -1234,13 +1261,16 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     processingLeaseToken?: string;
     actor: TrainingContentAuditActor;
     now?: Date;
+    transactionGuard?: TrainingContentAssetTransactionGuard;
   }): Promise<{ asset: TrainingContentAssetRecord; replacedAsset: TrainingContentAssetRecord | null }> {
     await this.initialize();
     const client = await this.pool.connect();
     const now = params.now ?? new Date();
     try {
       await client.query("BEGIN");
+      await lockAssetAuthorityMutation(client, params.orgId, params.contentId);
       await lockFinalizableContent(client, params.orgId, params.contentId);
+      if (params.transactionGuard) await params.transactionGuard(client);
       const asset = await lockAsset(client, params.orgId, params.contentId, params.assetId);
       if (asset.uploadState === "ready") {
         if (asset.finalObjectKey !== params.finalObjectKey) {

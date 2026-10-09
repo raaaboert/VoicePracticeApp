@@ -1,15 +1,28 @@
 "use client";
 
 import { useState } from "react";
-import type { DashboardAdminUserRow, OrgTrainingSummary } from "@voicepractice/shared";
+import type {
+  DashboardAdminUserRow,
+  DashboardTrainingContentAssetFinalizationResponse,
+  DashboardTrainingContentUploadInitiationResponse,
+  OrgTrainingSummary,
+} from "@voicepractice/shared";
 
 import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
 import type {
   DashboardFocusTopicAssignment,
   DashboardFocusTopicContentAttachment,
+  DashboardFocusTopicContentCreateResponse,
+  DashboardFocusTopicContentItem,
+  DashboardFocusTopicContentMutationResponse,
   DashboardFocusTopicRelatedContentResponse,
 } from "@/src/lib/auth";
 import { formatDateTime } from "@/src/lib/formatters";
+import { directUploadTrainingContentAsset } from "@/src/lib/trainingContentDirectUpload";
+import {
+  trainingContentDeclaredMimeType,
+  validateTrainingContentFileSelection,
+} from "@/src/lib/trainingContentPresentation";
 import { partitionFocusTopicAssignments } from "@/src/components/focusTopicAssignmentPresentation";
 
 type TopicRow = Pick<OrgTrainingSummary, "id" | "name" | "description" | "status">;
@@ -21,6 +34,16 @@ const AUDIENCES: Array<{ value: Audience; label: string; description: string }> 
   { value: "manager_with_team", label: "Manager + current direct team", description: "The selected manager and their current direct reports." },
   { value: "individual", label: "Individual", description: "Only the selected learner." },
 ];
+
+function contentTypeForFile(file: File): "audio" | "pdf" | "docx" | "image" | null {
+  const name = file.name.toLowerCase();
+  if (file.type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    || name.endsWith(".docx")) return "docx";
+  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("audio/")) return "audio";
+  return null;
+}
 
 async function action<T>(body: Record<string, unknown>): Promise<T> {
   return fetchAdminApiJson<T>("/api/admin/focus-topic-management", {
@@ -50,6 +73,15 @@ export function FocusTopicAdministration({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [contentMode, setContentMode] = useState<"attach" | "upload">("attach");
+  const [uploadTitle, setUploadTitle] = useState("");
+  const [uploadDescription, setUploadDescription] = useState("");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [editingContentId, setEditingContentId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [editingDescription, setEditingDescription] = useState("");
+  const [replacementFile, setReplacementFile] = useState<File | null>(null);
   const selected = topics.find((topic) => topic.id === selectedId) ?? null;
   const targeted = ["manager_only", "manager_with_team", "individual"].includes(audience);
   const subjectOptions = users.filter((user) => user.status === "active"
@@ -164,6 +196,108 @@ export function FocusTopicAdministration({
         ? { ...row, detachedAt: result.detachedAt } : row),
     });
     setMessage("Learning Resource detached. Relationship history remains recorded.");
+  });
+  const refreshRelatedContent = async () => {
+    if (!selected) return null;
+    const next = await action<DashboardFocusTopicRelatedContentResponse>({
+      action: "list_related_content", orgId, topicId: selected.id,
+    });
+    setRelated(next);
+    return next;
+  };
+  const uploadAsset = async (
+    item: DashboardFocusTopicContentItem,
+    file: File,
+    replacementAssetId?: string | null,
+  ) => {
+    if (!selected || !related) return;
+    const contentType = contentTypeForFile(file);
+    if (!contentType || contentType !== item.contentType) {
+      throw new Error("The selected file must match this Learning Resource type.");
+    }
+    const fileError = validateTrainingContentFileSelection({
+      contentType, file, limits: related.fileLimitsBytes,
+    });
+    if (fileError) throw new Error(fileError);
+    const initiated = await action<DashboardTrainingContentUploadInitiationResponse>({
+      action: "initiate_content_upload",
+      orgId,
+      topicId: selected.id,
+      contentId: item.id,
+      assetRole: "primary",
+      originalFilename: file.name,
+      declaredMimeType: trainingContentDeclaredMimeType(contentType, file),
+      declaredByteSize: file.size,
+      replacementAssetId: replacementAssetId ?? null,
+    });
+    await directUploadTrainingContentAsset(initiated.upload, file, setUploadProgress);
+    await action<DashboardTrainingContentAssetFinalizationResponse>({
+      action: "finalize_content_upload",
+      orgId,
+      topicId: selected.id,
+      contentId: item.id,
+      assetId: initiated.asset.id,
+    });
+  };
+  const createAndUploadContent = () => void run(async () => {
+    if (!selected || !uploadFile) return;
+    const contentType = contentTypeForFile(uploadFile);
+    if (!contentType) throw new Error("Choose an audio, PDF, DOCX, or image file.");
+    if (!related) return;
+    const fileError = validateTrainingContentFileSelection({
+      contentType, file: uploadFile, limits: related.fileLimitsBytes,
+    });
+    if (fileError) throw new Error(fileError);
+    setUploadProgress(0);
+    const created = await action<DashboardFocusTopicContentCreateResponse>({
+      action: "create_content",
+      orgId,
+      topicId: selected.id,
+      contentType,
+      title: uploadTitle,
+      description: uploadDescription,
+    });
+    setRelated((current) => current ? {
+      ...current,
+      content: [...current.content, created.attachment],
+      contentItems: [...current.contentItems, created.item],
+    } : current);
+    await uploadAsset(created.item, uploadFile);
+    await refreshRelatedContent();
+    setUploadTitle(""); setUploadDescription(""); setUploadFile(null); setUploadProgress(null);
+    setMessage("Draft Learning Resource uploaded and attached to this Focus Topic.");
+  });
+  const beginEditingContent = (item: DashboardFocusTopicContentItem) => {
+    setEditingContentId(item.id);
+    setEditingTitle(item.title);
+    setEditingDescription(item.description);
+    setReplacementFile(null);
+  };
+  const saveContent = (item: DashboardFocusTopicContentItem) => void run(async () => {
+    if (!selected) return;
+    await action<DashboardFocusTopicContentMutationResponse>({
+      action: "update_content", orgId, topicId: selected.id, contentId: item.id,
+      expectedUpdatedAt: item.updatedAt, title: editingTitle, description: editingDescription,
+    });
+    if (replacementFile) {
+      setUploadProgress(0);
+      await uploadAsset(item, replacementFile, item.currentAsset?.id ?? null);
+    }
+    await refreshRelatedContent();
+    setEditingContentId(null); setReplacementFile(null); setUploadProgress(null);
+    setMessage("Learning Resource updated.");
+  });
+  const transitionContent = (
+    item: DashboardFocusTopicContentItem,
+    next: "publish_content" | "unpublish_content",
+  ) => void run(async () => {
+    if (!selected) return;
+    await action<DashboardFocusTopicContentMutationResponse>({
+      action: next, orgId, topicId: selected.id, contentId: item.id,
+      expectedUpdatedAt: item.updatedAt,
+    });
+    await refreshRelatedContent();
+    setMessage(next === "publish_content" ? "Learning Resource published." : "Learning Resource returned to draft.");
   });
 
   const renderAssignments = (
@@ -313,7 +447,7 @@ export function FocusTopicAdministration({
     {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-related-heading">
       <div className="focus-topic-panel-heading"><div><p className="eyebrow">Learning Resources</p>
         <h3 id="focus-topic-related-heading">Related Content</h3>
-        <p className="muted-copy">Attach existing organization content. Shared central items are not edited here.</p>
+        <p className="muted-copy">Attach an existing organization resource or upload a new draft for this Topic.</p>
       </div></div>
       {!learningResourcesEnabled || related?.permissions.learningResourcesEnabled === false
         ? <div className="notice" role="status">Learning Resources are not enabled for this organization. Related Content is read-only.</div>
@@ -322,17 +456,53 @@ export function FocusTopicAdministration({
         {attachedContent.length === 0 ? <p className="muted-copy">No Learning Resources are attached.</p> : null}
         <div className="focus-topic-assignment-list">{attachedContent.map(({ attachment, item }) =>
           <div key={attachment.id} className="focus-topic-assignment-row">
-            <div className="training-content-order-copy"><strong>{item?.title ?? "Unavailable Learning Resource"}</strong>
+            <div className="training-content-order-copy"><div className="focus-topic-assignment-title">
+              <strong>{item?.title ?? "Unavailable Learning Resource"}</strong>
+              {item ? <span className={`status-badge${item.publicationState === "published" ? " status-active" : ""}`}>
+                {item.publicationState === "published" ? "Published" : "Draft"}
+              </span> : null}
+            </div>
               <small>{item
                 ? `${item.contentType} · ${item.publicationState}${item.archivedAt ? " · archived" : ""}`
                 : attachment.contentId}</small>
-              <small>Attached {formatDateTime(attachment.attachedAt)}</small></div>
+              <small>Attached {formatDateTime(attachment.attachedAt)}</small>
+              {item && !item.canMutate ? <small>{item.mutationRestriction}</small> : null}
+              {item && editingContentId === item.id ? <div className="focus-topic-content-editor">
+                <label>Title<input className="text-input" value={editingTitle} maxLength={200}
+                  onChange={(event) => setEditingTitle(event.target.value)} /></label>
+                <label>Description<textarea className="text-input" value={editingDescription} maxLength={2000}
+                  onChange={(event) => setEditingDescription(event.target.value)} /></label>
+                <label>Replace file (optional)<input type="file" accept="audio/*,image/*,.pdf,.docx"
+                  onChange={(event) => setReplacementFile(event.target.files?.[0] ?? null)} /></label>
+                {uploadProgress !== null ? <small role="status">Uploading: {uploadProgress}%</small> : null}
+                <div className="focus-topic-actions"><button type="button" className="primary-button compact-button"
+                  disabled={busy || !editingTitle.trim()} onClick={() => saveContent(item)}>Save</button>
+                  <button type="button" className="ghost-button compact-button" disabled={busy}
+                    onClick={() => setEditingContentId(null)}>Cancel</button></div>
+              </div> : null}
+            </div>
+            {item?.canMutate && editingContentId !== item.id ? <>
+              <button type="button" className="ghost-button compact-button" disabled={busy}
+                onClick={() => beginEditingContent(item)}>Edit</button>
+              <button type="button" className="ghost-button compact-button" disabled={busy}
+                onClick={() => transitionContent(item, item.publicationState === "published"
+                  ? "unpublish_content" : "publish_content")}>
+                {item.publicationState === "published" ? "Unpublish" : "Publish"}
+              </button>
+            </> : null}
             {related?.permissions.canManageRelatedContent ? <button type="button"
               className="ghost-button danger-button compact-button" disabled={busy}
               onClick={() => detachContent(attachment.id)}>Detach</button> : null}
           </div>)}</div>
       </div>
-      <div className="focus-topic-assignment-section"><h4>Available Organization Content</h4>
+      {related?.permissions.canManageRelatedContent ? <div className="focus-topic-content-mode" role="group"
+        aria-label="Add Content">
+        <button type="button" className={contentMode === "attach" ? "primary-button" : "ghost-button"}
+          disabled={busy} onClick={() => setContentMode("attach")}>Attach Existing</button>
+        <button type="button" className={contentMode === "upload" ? "primary-button" : "ghost-button"}
+          disabled={busy} onClick={() => setContentMode("upload")}>Upload New</button>
+      </div> : null}
+      {contentMode === "attach" ? <div className="focus-topic-assignment-section"><h4>Available Content</h4>
         {availableContent.length === 0 ? <p className="muted-copy">No additional current Learning Resources are available.</p> : null}
         <div className="focus-topic-assignment-list">{availableContent.map((item) =>
           <div key={item.id} className="focus-topic-assignment-row">
@@ -343,7 +513,24 @@ export function FocusTopicAdministration({
               className="primary-button compact-button" disabled={busy}
               onClick={() => attachContent(item.id)}>Attach</button> : null}
           </div>)}</div>
-      </div>
+      </div> : null}
+      {contentMode === "upload" && related?.permissions.canManageRelatedContent
+        ? <div className="focus-topic-assignment-section focus-topic-upload-new"><h4>Upload New</h4>
+          <p className="muted-copy">The new organization resource starts as a draft and is attached here automatically.</p>
+          <div className="focus-topic-details-grid">
+            <label className="focus-topic-field">Title<input className="text-input" value={uploadTitle} maxLength={200}
+              onChange={(event) => setUploadTitle(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide">Description<textarea className="text-input"
+              value={uploadDescription} maxLength={2000}
+              onChange={(event) => setUploadDescription(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide">File
+              <input type="file" accept="audio/*,image/*,.pdf,.docx"
+                onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} /></label>
+          </div>
+          {uploadProgress !== null ? <p className="muted-copy" role="status">Uploading: {uploadProgress}%</p> : null}
+          <button type="button" className="primary-button" disabled={busy || !uploadTitle.trim() || !uploadFile}
+            onClick={createAndUploadContent}>Create Draft &amp; Upload</button>
+        </div> : null}
     </div> : null}
   </section>;
 }

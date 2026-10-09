@@ -8,6 +8,7 @@ import { adminFetch } from "../lib/api";
 type Audience = "organization" | "managers_and_admins" | "manager_only" | "manager_with_team" | "individual";
 type Assignment = {
   id: string; audience: Audience; subjectUserId: string | null; revokedAt: string | null;
+  grantsManagement: boolean;
 };
 type Attachment = {
   id: string; scenarioKind?: "standard" | "org"; scenarioId?: string;
@@ -37,6 +38,8 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users }: {
   const [notice, setNotice] = useState<string | null>(null);
   const base = `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topic.id)}`;
   const targeted = audience === "manager_only" || audience === "manager_with_team" || audience === "individual";
+  const learnerAssignments = assignments.filter((row) => !row.grantsManagement);
+  const managementGrants = assignments.filter((row) => row.grantsManagement);
 
   const refresh = async () => {
     const [assignmentResult, attachmentResult] = await Promise.all([
@@ -73,7 +76,7 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users }: {
     <p className="small">Assignments and direct attachments control this Topic. Revoked and detached rows remain in history.</p>
     {error ? <p className="error" role="alert">{error}</p> : null}
     {notice ? <p className="success" role="status">{notice}</p> : null}
-    <h4>Assignments</h4>
+    <h4>Learner authority</h4>
     <div className="enterprise-detail-grid">
       <div className="enterprise-detail-item"><label htmlFor="topic-authority-audience">Audience</label>
         <select id="topic-authority-audience" value={audience} disabled={busy || topic.status === "archived"}
@@ -96,13 +99,23 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users }: {
           audience, subjectUserId: targeted ? subjectUserId : null,
         }) });
       }, "Assignment created.")}>Add assignment</button>
-    <ul>{assignments.map((row) => <li key={row.id}>
+    <ul>{learnerAssignments.map((row) => <li key={row.id}>
       {AUDIENCES.find((option) => option.value === row.audience)?.label ?? row.audience}
       {row.subjectUserId ? ` · ${users.find((user) => user.userId === row.subjectUserId)?.email ?? "Former member"}` : ""}
       {row.revokedAt ? " · Revoked" : <button type="button" disabled={busy}
         onClick={() => void run(async () => {
           await adminFetch(`${base}/assignments/${encodeURIComponent(row.id)}`, { method: "DELETE" });
         }, "Assignment revoked; history retained.")}>Revoke</button>}
+    </li>)}</ul>
+    <h4>Management grants</h4>
+    <p className="small">Management authority is independent from learner access.</p>
+    <ul>{managementGrants.map((row) => <li key={row.id}>
+      Management grant · {AUDIENCES.find((option) => option.value === row.audience)?.label ?? row.audience}
+      {row.subjectUserId ? ` · ${users.find((user) => user.userId === row.subjectUserId)?.email ?? "Former member"}` : ""}
+      {row.revokedAt ? " · Revoked" : <button type="button" disabled={busy}
+        onClick={() => void run(async () => {
+          await adminFetch(`${base}/management-grants/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+        }, "Management grant revoked; history retained.")}>Revoke</button>}
     </li>)}</ul>
     <h4>Direct attachments</h4>
     <p className="small">Enter an existing standard scenario, organization scenario, or content ID. The server validates its organization and lifecycle.</p>

@@ -67,6 +67,7 @@ class FakeAssetStore implements TrainingContentAssetStore {
   readonly contents = new Map<string, TrainingContentItem>();
   readonly assets = new Map<string, TrainingContentAssetRecord>();
   readonly audits: Array<{ action: string; metadata: Record<string, unknown> }> = [];
+  readonly transactionGuards: unknown[] = [];
   failCompleteOnce = false;
 
   constructor(content = buildContent()) {
@@ -85,6 +86,7 @@ class FakeAssetStore implements TrainingContentAssetStore {
   }
 
   async createPendingAsset(input: CreatePendingTrainingContentAssetInput) {
+    this.transactionGuards.push(input.transactionGuard);
     const content = await this.getContentItemForOrg(input.orgId, input.contentId);
     if (!content) {
       throw new Error("content missing");
@@ -175,6 +177,7 @@ class FakeAssetStore implements TrainingContentAssetStore {
   }
 
   async claimFinalization(params: any): Promise<any> {
+    this.transactionGuards.push(params.transactionGuard);
     const asset = this.requireAsset(params.assetId);
     if (asset.uploadState === "ready") {
       return { status: "ready", asset: clone(asset), recovered: false };
@@ -217,6 +220,7 @@ class FakeAssetStore implements TrainingContentAssetStore {
   }
 
   async queueVideoProcessing(params: any): Promise<any> {
+    this.transactionGuards.push(params.transactionGuard);
     const asset = this.requireAsset(params.assetId);
     if (asset.uploadState === "ready") {
       return { status: "ready", asset: clone(asset) };
@@ -264,6 +268,7 @@ class FakeAssetStore implements TrainingContentAssetStore {
   }
 
   async completeFinalization(params: any) {
+    this.transactionGuards.push(params.transactionGuard);
     if (this.failCompleteOnce) {
       this.failCompleteOnce = false;
       throw new Error("simulated database commit failure");
@@ -613,6 +618,56 @@ test("upload initiation requires entitlement and server-derived management capab
       error instanceof TrainingContentAssetServiceError
       && error.code === "module_disabled"
   );
+});
+
+test("Topic-scoped uploads require and forward a transaction guard while video stays deferred", async () => {
+  const guard = async () => {};
+  const scopedContext = {
+    ...ORG_ADMIN_CONTEXT,
+    capabilities: buildDashboardAdminCapabilities("user_admin"),
+    authorityScope: "focus_topic" as const,
+    transactionGuard: guard,
+  };
+  const harness = buildHarness();
+  const initiated = await harness.service.initiateUpload({
+    context: scopedContext,
+    contentId: buildContent().id,
+    assetRole: "primary",
+    originalFilename: "reference.pdf",
+    declaredMimeType: "application/pdf",
+    declaredByteSize: PDF_BYTES.byteLength,
+    now: NOW,
+  });
+  assert.equal(harness.assetStore.transactionGuards[0], guard);
+  putInitiatedUpload(harness, initiated.asset.id);
+  await harness.service.finalizeUpload({
+    context: scopedContext,
+    contentId: buildContent().id,
+    assetId: initiated.asset.id,
+    now: NOW,
+  });
+  assert.equal(harness.assetStore.transactionGuards.includes(guard), true);
+
+  await assert.rejects(harness.service.initiateUpload({
+    context: { ...scopedContext, transactionGuard: undefined },
+    contentId: buildContent().id,
+    assetRole: "primary",
+    originalFilename: "reference.pdf",
+    declaredMimeType: "application/pdf",
+    declaredByteSize: PDF_BYTES.byteLength,
+  }), (error: unknown) => error instanceof TrainingContentAssetServiceError
+    && error.code === "dashboard_scope_denied");
+
+  const videoHarness = buildHarness({ content: buildContent({ contentType: "video" }) });
+  await assert.rejects(videoHarness.service.initiateUpload({
+    context: scopedContext,
+    contentId: buildContent().id,
+    assetRole: "primary",
+    originalFilename: "coaching.mp4",
+    declaredMimeType: "video/mp4",
+    declaredByteSize: MP4_BYTES.byteLength,
+  }), (error: unknown) => error instanceof TrainingContentAssetServiceError
+    && error.code === "focus_topic_video_upload_deferred");
 });
 
 test("upload initiation rejects cross-organization content and declared policy violations", async () => {

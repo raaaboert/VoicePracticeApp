@@ -15,9 +15,26 @@ import { buildDashboardAdminCapabilities } from "./dashboardAuthorization.js";
 import {
   createTrainingContentManagementService,
   mapTrainingContentManagementServiceError,
+  normalizeTopicScopedContentCreateInput,
   type TrainingContentReferenceData,
   TrainingContentManagementServiceError,
 } from "./trainingContentManagementService.js";
+
+test("Topic-scoped creation accepts uploaded resource types and rejects central-only fields", () => {
+  assert.deepEqual(normalizeTopicScopedContentCreateInput({
+    contentType: "pdf", title: " Guide ", description: " Notes ",
+  }), {
+    contentType: "pdf", categoryId: null, title: "Guide", description: "Notes",
+  });
+  for (const contentType of ["native", "external_url", "video"]) {
+    assert.throws(() => normalizeTopicScopedContentCreateInput({
+      contentType, title: "Guide", description: "",
+    }), TrainingContentManagementServiceError);
+  }
+  assert.throws(() => normalizeTopicScopedContentCreateInput({
+    contentType: "pdf", title: "Guide", description: "", createdByActorId: "spoofed",
+  }), TrainingContentManagementServiceError);
+});
 import {
   createTrainingContentScenarioLinkService,
   TrainingContentScenarioLinkServiceError,

@@ -3,15 +3,20 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   assertDashboardAuthConfig,
   attachDashboardFocusTopicContent,
+  createDashboardFocusTopicContent,
   createDashboardFocusTopic,
   createDashboardFocusTopicAssignment,
   createDashboardFocusTopicManagementGrant,
   detachDashboardFocusTopicContent,
+  finalizeDashboardFocusTopicContentUpload,
   getDashboardFocusTopicRelatedContent,
   listDashboardFocusTopicAssignments,
+  initiateDashboardFocusTopicContentUpload,
   revokeDashboardFocusTopicAssignment,
   revokeDashboardFocusTopicManagementGrant,
   updateDashboardFocusTopic,
+  transitionDashboardFocusTopicContent,
+  updateDashboardFocusTopicContent,
   type DashboardFocusTopicAssignment,
 } from "@/src/lib/auth";
 import {
@@ -33,7 +38,19 @@ type Action =
   | { action: "revoke_management_grant"; orgId: string; topicId: string; assignmentId: string }
   | { action: "list_related_content"; orgId: string; topicId: string }
   | { action: "attach_content"; orgId: string; topicId: string; contentId: string }
-  | { action: "detach_content"; orgId: string; topicId: string; attachmentId: string };
+  | { action: "detach_content"; orgId: string; topicId: string; attachmentId: string }
+  | { action: "create_content"; orgId: string; topicId: string;
+      contentType: "audio" | "pdf" | "docx" | "image"; title: string; description: string }
+  | { action: "update_content"; orgId: string; topicId: string; contentId: string;
+      expectedUpdatedAt: string; title?: string; description?: string }
+  | { action: "publish_content" | "unpublish_content"; orgId: string; topicId: string;
+      contentId: string; expectedUpdatedAt: string }
+  | { action: "initiate_content_upload"; orgId: string; topicId: string; contentId: string;
+      assetRole: "primary" | "thumbnail" | "inline";
+      originalFilename: string; declaredMimeType: string; declaredByteSize: number;
+      replacementAssetId?: string | null }
+  | { action: "finalize_content_upload"; orgId: string; topicId: string;
+      contentId: string; assetId: string };
 
 export async function POST(request: NextRequest) {
   assertDashboardAuthConfig();
@@ -65,6 +82,43 @@ export async function POST(request: NextRequest) {
         return noStore(NextResponse.json(await attachDashboardFocusTopicContent(body.orgId, body.topicId, body.contentId), { status: 201 }));
       case "detach_content":
         return noStore(NextResponse.json(await detachDashboardFocusTopicContent(body.orgId, body.topicId, body.attachmentId)));
+      case "create_content":
+        return noStore(NextResponse.json(await createDashboardFocusTopicContent(
+          body.orgId, body.topicId, {
+            contentType: body.contentType, title: body.title, description: body.description,
+          },
+        ), { status: 201 }));
+      case "update_content":
+        return noStore(NextResponse.json(await updateDashboardFocusTopicContent(
+          body.orgId, body.topicId, body.contentId, {
+            expectedUpdatedAt: body.expectedUpdatedAt,
+            ...(body.title === undefined ? {} : { title: body.title }),
+            ...(body.description === undefined ? {} : { description: body.description }),
+          },
+        )));
+      case "publish_content":
+      case "unpublish_content":
+        return noStore(NextResponse.json(await transitionDashboardFocusTopicContent(
+          body.orgId,
+          body.topicId,
+          body.contentId,
+          body.action === "publish_content" ? "publish" : "unpublish",
+          body.expectedUpdatedAt,
+        )));
+      case "initiate_content_upload":
+        return noStore(NextResponse.json(await initiateDashboardFocusTopicContentUpload(
+          body.orgId, body.topicId, body.contentId, {
+            assetRole: body.assetRole,
+            originalFilename: body.originalFilename,
+            declaredMimeType: body.declaredMimeType,
+            declaredByteSize: body.declaredByteSize,
+            replacementAssetId: body.replacementAssetId,
+          },
+        ), { status: 201 }));
+      case "finalize_content_upload":
+        return noStore(NextResponse.json(await finalizeDashboardFocusTopicContentUpload(
+          body.orgId, body.topicId, body.contentId, body.assetId,
+        )));
       default:
         return noStore(NextResponse.json({ error: "Unknown Focus Topic action." }, { status: 400 }));
     }

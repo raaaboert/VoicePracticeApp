@@ -8,6 +8,7 @@ import type { OrgModuleEntitlementStore } from "../storage/orgModuleEntitlementS
 import type {
   TrainingContentAssetRecord,
   TrainingContentAssetStore,
+  TrainingContentAssetTransactionGuard,
   TrainingContentAuditActor,
 } from "../storage/trainingContentAssetStore.js";
 import {
@@ -26,9 +27,7 @@ import {
   validateDeclaredTrainingContentFile,
   validateTrainingContentFileSignature,
 } from "./trainingContentFilePolicy.js";
-import type {
-  TrainingContentStorageReadinessService,
-} from "./trainingContentStorageReadiness.js";
+import type { TrainingContentStorageReadinessService } from "./trainingContentStorageReadiness.js";
 import {
   backupFinalizedAssetBestEffort,
   type TrainingContentBackupService,
@@ -39,6 +38,8 @@ export interface TrainingContentManagementRequestContext {
   actorId: string;
   capabilities: DashboardAdminCapabilities;
   actorType?: "web_user";
+  authorityScope?: "organization" | "focus_topic";
+  transactionGuard?: TrainingContentAssetTransactionGuard;
 }
 
 export interface TrainingContentAssetPublicRecord {
@@ -187,6 +188,13 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
         "training_content_archived"
       );
     }
+    if (params.context.authorityScope === "focus_topic" && content.contentType === "video") {
+      throw new TrainingContentAssetServiceError(
+        "Video replacement from a Focus Topic is not available in this release.",
+        409,
+        "focus_topic_video_upload_deferred"
+      );
+    }
     assertTrainingContentAssetRoleMatchesContent({
       contentType: content.contentType,
       assetRole,
@@ -208,6 +216,7 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
         this.dependencies.config.maxPendingUploadBytesPerOrganization,
       actor,
       now,
+      transactionGuard: params.context.transactionGuard,
     });
     if (!created.asset.temporaryObjectKey) {
       throw new Error("Pending Training Content asset is missing its temporary object key.");
@@ -374,6 +383,7 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
         checksumOrEtag: source.etag,
         actor: buildActor(params.context),
         now,
+        transactionGuard: params.context.transactionGuard,
       });
       if (queued.status === "ready" || queued.status === "queued") {
         return {
@@ -442,6 +452,7 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
       leaseSeconds: existingFinalObject ? 0 : this.dependencies.config.finalizationLeaseSeconds,
       actor: buildActor(params.context),
       now,
+      transactionGuard: params.context.transactionGuard,
     });
     if (claim.status === "busy") {
       throw new TrainingContentAssetServiceError(
@@ -515,6 +526,7 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
       checksumOrEtag: finalObject.etag,
       actor: buildActor(params.context),
       now,
+      transactionGuard: params.context.transactionGuard,
     });
     await backupFinalizedAssetBestEffort(this.dependencies.backup, completed.asset);
     await this.tryDeleteTemporaryObject(completed.asset, now);
@@ -643,7 +655,9 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
         { moduleKey: "training_content" }
       );
     }
-    if (!canManageTrainingContent(context, entitlement)) {
+    const topicScoped = context.authorityScope === "focus_topic";
+    if ((!topicScoped && !canManageTrainingContent(context, entitlement))
+      || (topicScoped && !context.transactionGuard)) {
       throw new TrainingContentAssetServiceError(
         "Training Content administration is not available for this account.",
         403,

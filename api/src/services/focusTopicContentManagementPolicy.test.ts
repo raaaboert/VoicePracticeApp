@@ -5,6 +5,7 @@ import type { TrainingContentAssignment, TrainingContentItem } from "@voicepract
 
 import {
   canScopedActorAttachContent,
+  canScopedActorMutateContent,
   isContentVisibleToWholeOrganization,
 } from "./focusTopicContentManagementPolicy.js";
 
@@ -17,7 +18,11 @@ const organizationAssignment = {
   subjectUserId: null, createdByActorId: "admin", createdAt: "2026-10-08T00:00:00.000Z",
   revokedByActorId: null, revokedAt: null,
 } as TrainingContentAssignment;
-const record = { content, categoryArchivedAt: null, assignments: [organizationAssignment] };
+const topicAttachment = { topicId: "topic", detachedAt: null };
+const record = {
+  content, categoryArchivedAt: null, assignments: [organizationAssignment],
+  topicAttachments: [topicAttachment],
+};
 
 test("whole-organization visibility requires a current published item and active organization assignment", () => {
   assert.equal(isContentVisibleToWholeOrganization(record), true);
@@ -43,4 +48,33 @@ test("scoped actors can attach their current authored item or organization-visib
   assert.equal(canScopedActorAttachContent({ actorId: "author", record: {
     ...record, categoryArchivedAt: "2026-10-08T02:00:00.000Z",
   } }), false);
+});
+
+test("scoped mutation requires current scope over every active Topic and no standalone assignment", () => {
+  const base = {
+    actorId: "actor",
+    actorOrgId: "org",
+    actorCurrent: true,
+    organizationCurrent: true,
+    learningResourcesEnabled: true,
+    record: { ...record, assignments: [] },
+    manageableTopicIds: new Set(["topic"]),
+  };
+  assert.equal(canScopedActorMutateContent(base), true);
+  assert.equal(canScopedActorMutateContent({
+    ...base,
+    record: { ...base.record, topicAttachments: [topicAttachment, { topicId: "other", detachedAt: null }] },
+  }), false);
+  assert.equal(canScopedActorMutateContent({
+    ...base,
+    manageableTopicIds: new Set(["topic", "other"]),
+    record: { ...base.record, topicAttachments: [topicAttachment, { topicId: "other", detachedAt: null }] },
+  }), true);
+  assert.equal(canScopedActorMutateContent({ ...base, record }), false);
+  assert.equal(canScopedActorMutateContent({
+    ...base,
+    record: { ...base.record, topicAttachments: [] },
+  }), false);
+  assert.equal(canScopedActorMutateContent({ ...base, actorCurrent: false }), false);
+  assert.equal(canScopedActorMutateContent({ ...base, learningResourcesEnabled: false }), false);
 });

@@ -443,6 +443,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
           : normalizeExternalUrlForType(params.input.externalUrl, current.content.contentType),
         actor: buildActor(params.context),
         now: params.now,
+        transactionGuard: params.context.transactionGuard,
       });
     } else if (expectedUpdatedAt !== current.content.updatedAt) {
       throw new TrainingContentManagementServiceError(
@@ -567,7 +568,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
   }): Promise<DashboardTrainingContentDetail> {
     await this.authorize(params.context);
     assertOnlyFields(params.input, ["expectedUpdatedAt"]);
-    if (params.action === "publish") {
+    if (params.action === "publish" && params.context.authorityScope !== "focus_topic") {
       const current = await this.dependencies.store.getContentDetailForOrg(
         params.context.orgId,
         requiredId(params.contentId, "Content id")
@@ -588,6 +589,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       action: params.action,
       actor: buildActor(params.context),
       now: params.now,
+      transactionGuard: params.context.transactionGuard,
     });
     return this.mapDetail(detail, params.context.orgId, params.references);
   }
@@ -891,7 +893,9 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         { moduleKey: "training_content" }
       );
     }
-    if (!canManageTrainingContent(context, entitlement)) {
+    const topicScoped = context.authorityScope === "focus_topic";
+    if ((!topicScoped && !canManageTrainingContent(context, entitlement))
+      || (topicScoped && !context.transactionGuard)) {
       throw new TrainingContentManagementServiceError(
         "Training Content administration is not available for this account.",
         403,
@@ -1267,6 +1271,31 @@ function resolveFocusTopic(
     });
   }
   return topic;
+}
+
+export interface NormalizedTopicScopedContentCreateInput {
+  contentType: Extract<TrainingContentType, "audio" | "pdf" | "docx" | "image">;
+  categoryId: string | null;
+  title: string;
+  description: string;
+}
+
+export function normalizeTopicScopedContentCreateInput(
+  input: Record<string, unknown>,
+): NormalizedTopicScopedContentCreateInput {
+  assertOnlyFields(input, ["contentType", "categoryId", "title", "description"]);
+  const contentType = normalizeContentType(input.contentType);
+  if (!(["audio", "pdf", "docx", "image"] as TrainingContentType[]).includes(contentType)) {
+    throw validationError("Topic uploads support audio, PDF, DOCX, and image files.");
+  }
+  return {
+    contentType: contentType as NormalizedTopicScopedContentCreateInput["contentType"],
+    categoryId: input.categoryId === undefined || input.categoryId === null || input.categoryId === ""
+      ? null
+      : requiredString(input.categoryId, "categoryId", 200),
+    title: normalizeTitle(input.title),
+    description: normalizeDescription(input.description),
+  };
 }
 
 function normalizeContentType(value: unknown): TrainingContentType {

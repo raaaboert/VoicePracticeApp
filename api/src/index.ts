@@ -152,6 +152,8 @@ import {
   TrainingPack,
   TrainingPackAssignmentRecord,
   TrainingPackAssignmentProgressStatus,
+  TrainingContentAssignment,
+  TrainingContentItem,
   TIER_IDS,
   TierDefinition,
   RoleIndustryDefinition,
@@ -297,8 +299,14 @@ import {
 } from "./services/focusTopicManagementPolicy.js";
 import { buildTopicAssignedNotificationInputs } from "./services/topicAssignedNotifications.js";
 import { buildFocusTopicContentAttachedNotificationInputs } from "./services/focusTopicContentNotifications.js";
-import { canScopedActorAttachContent } from "./services/focusTopicContentManagementPolicy.js";
-import { createTrainingContentStore } from "./storage/trainingContentStore.js";
+import {
+  canScopedActorAttachContent,
+  canScopedActorMutateContent,
+} from "./services/focusTopicContentManagementPolicy.js";
+import {
+  createTrainingContentStore,
+  lockTrainingContentAuthorityMutation,
+} from "./storage/trainingContentStore.js";
 import { createTrainingContentScenarioLinkService } from "./services/trainingContentScenarioLinks.js";
 import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
 import {
@@ -319,6 +327,7 @@ import { createTrainingContentBackupService } from "./services/trainingContentBa
 import {
   createTrainingContentManagementService,
   mapTrainingContentManagementServiceError,
+  normalizeTopicScopedContentCreateInput,
   TrainingContentManagementService,
   TrainingContentReferenceData,
 } from "./services/trainingContentManagementService.js";
@@ -8364,6 +8373,258 @@ interface FocusTopicManagementContext {
   learningResourcesEnabled: boolean;
 }
 
+class FocusTopicScopedContentError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "FocusTopicScopedContentError";
+  }
+}
+
+function respondWithFocusTopicScopedContentError(error: unknown, response: Response): void {
+  if (error instanceof FocusTopicScopedContentError) {
+    response.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  respondWithTrainingContentManagementError(error, response);
+}
+
+function createScopedContentTransactionGuard(params: {
+  orgId: string;
+  actorId: string;
+  topicId?: string;
+  contentId?: string;
+  enforceExclusiveScope?: boolean;
+}): (client: AppStateTransactionClient) => Promise<void> {
+  return async (client) => {
+    const stateResult = await client.query<{ state_json: unknown }>(
+      "SELECT state_json FROM app_state WHERE id = 'primary' FOR SHARE",
+    );
+    const currentDb = ensureDatabaseShape(stateResult.rows[0]?.state_json);
+    const organization = getOrgById(currentDb, params.orgId);
+    const actor = getUserById(currentDb, params.actorId);
+    if (!organization || organization.status !== "active" || !actor
+      || actor.accountType !== "enterprise" || actor.orgId !== organization.id
+      || actor.status !== "active" || !actor.emailVerifiedAt) {
+      throw new FocusTopicScopedContentError(
+        "Focus Topic content management is no longer available for this account.",
+        403,
+        "focus_topic_content_scope_denied",
+      );
+    }
+    const entitlementResult = await client.query<{ enabled: boolean }>(
+      `SELECT enabled FROM org_module_entitlements
+       WHERE org_id = $1 AND module_key = 'training_content' FOR SHARE`,
+      [organization.id],
+    );
+    const learningResourcesEnabled = entitlementResult.rows[0]?.enabled === true;
+    if (!learningResourcesEnabled) {
+      throw new FocusTopicScopedContentError(
+        "Learning Resources are not enabled for this organization.",
+        403,
+        "module_disabled",
+      );
+    }
+    const settingsResult = await client.query<{
+      allow_user_admin_focus_topic_management: boolean;
+      allow_manager_focus_topic_management: boolean;
+    }>(
+      `SELECT allow_user_admin_focus_topic_management, allow_manager_focus_topic_management
+       FROM organization_product_settings WHERE org_id = $1 FOR SHARE`,
+      [organization.id],
+    );
+    const settings = settingsResult.rows[0] ?? {
+      allow_user_admin_focus_topic_management: false,
+      allow_manager_focus_topic_management: false,
+    };
+    const assignmentsResult = await client.query<{
+      id: string; org_id: string; topic_id: string; audience: FocusTopicAssignmentAudience;
+      subject_user_id: string | null; grants_management: boolean; created_by: string;
+      created_at: string | Date; revoked_by: string | null; revoked_at: string | Date | null;
+    }>(
+      `SELECT * FROM focus_topic_assignments WHERE org_id = $1 FOR SHARE`,
+      [organization.id],
+    );
+    const assignments: FocusTopicAssignment[] = assignmentsResult.rows.map((row) => ({
+      id: row.id,
+      orgId: row.org_id,
+      topicId: row.topic_id,
+      audience: row.audience,
+      subjectUserId: row.subject_user_id,
+      grantsManagement: row.grants_management,
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at).toISOString(),
+      revokedBy: row.revoked_by,
+      revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+    }));
+    const scope = resolveFocusTopicManagementScope({
+      db: currentDb,
+      actor,
+      organization,
+      topics: currentDb.orgTrainings.filter((topic) => topic.orgId === organization.id),
+      assignments,
+      productSettings: {
+        allowUserAdminFocusTopicManagement:
+          settings.allow_user_admin_focus_topic_management === true,
+        allowManagerFocusTopicManagement:
+          settings.allow_manager_focus_topic_management === true,
+      },
+    });
+    if (params.topicId) {
+      const topic = findOrgTrainingRecord(currentDb, organization.id, params.topicId);
+      if (!topic || topic.status !== "active"
+        || (!scope.canManageAllTopics && !scope.manageableTopicIds.has(topic.id))) {
+        throw new FocusTopicScopedContentError(
+          "Focus Topic content management is no longer available for this Topic.",
+          403,
+          "focus_topic_content_scope_denied",
+        );
+      }
+    }
+    if (!params.contentId) return;
+    const contentResult = await client.query<{
+      id: string; org_id: string; archived_at: string | Date | null;
+      category_archived_at: string | Date | null;
+    }>(
+      `SELECT c.id, c.org_id, c.archived_at, category.archived_at AS category_archived_at
+       FROM org_content_items c
+       INNER JOIN org_content_categories category
+         ON category.org_id = c.org_id AND category.id = c.category_id
+       WHERE c.org_id = $1 AND c.id = $2
+       FOR SHARE OF c, category`,
+      [organization.id, params.contentId],
+    );
+    const contentRow = contentResult.rows[0];
+    if (!contentRow) {
+      throw new FocusTopicScopedContentError(
+        "Learning Resource was not found.", 404, "training_content_not_found",
+      );
+    }
+    const standaloneResult = await client.query<{ id: string }>(
+        `SELECT id FROM org_content_assignments
+         WHERE org_id = $1 AND content_id = $2 AND revoked_at IS NULL FOR SHARE`,
+        [organization.id, params.contentId],
+      );
+    const topicResult = await client.query<{ topic_id: string }>(
+        `SELECT topic_id FROM org_content_topic_attachments
+         WHERE org_id = $1 AND content_id = $2 AND detached_at IS NULL FOR SHARE`,
+        [organization.id, params.contentId],
+      );
+    if (params.topicId && !topicResult.rows.some((row) => row.topic_id === params.topicId)) {
+      throw new FocusTopicScopedContentError(
+        "Learning Resource is not attached to this Focus Topic.",
+        404,
+        "training_content_not_found",
+      );
+    }
+    const record = {
+      content: {
+        id: contentRow.id,
+        orgId: contentRow.org_id,
+        archivedAt: contentRow.archived_at ? new Date(contentRow.archived_at).toISOString() : null,
+      } as TrainingContentItem,
+      categoryArchivedAt: contentRow.category_archived_at
+        ? new Date(contentRow.category_archived_at).toISOString()
+        : null,
+      assignments: standaloneResult.rows.map((row) => ({
+        id: row.id,
+        revokedAt: null,
+      })) as TrainingContentAssignment[],
+      topicAttachments: topicResult.rows.map((row) => ({
+        topicId: row.topic_id,
+        detachedAt: null,
+      })),
+    };
+    if (params.enforceExclusiveScope !== false && !canScopedActorMutateContent({
+      actorId: actor.id,
+      actorOrgId: organization.id,
+      actorCurrent: true,
+      organizationCurrent: true,
+      learningResourcesEnabled,
+      record,
+      manageableTopicIds: scope.manageableTopicIds,
+    })) {
+      throw new FocusTopicScopedContentError(
+        "This Learning Resource is shared outside your current Topic scope and is read-only here.",
+        403,
+        "focus_topic_content_shared_read_only",
+      );
+    }
+  };
+}
+
+async function assertScopedAttachAllowedInTransaction(params: {
+  client: AppStateTransactionClient;
+  orgId: string;
+  actorId: string;
+  contentId: string;
+}): Promise<void> {
+  const result = await params.client.query<{
+    id: string; org_id: string; publication_state: TrainingContentItem["publicationState"];
+    archived_at: string | Date | null; created_by_actor_id: string;
+    category_archived_at: string | Date | null;
+  }>(
+    `SELECT c.id, c.org_id, c.publication_state, c.archived_at, c.created_by_actor_id,
+            category.archived_at AS category_archived_at
+     FROM org_content_items c
+     INNER JOIN org_content_categories category
+       ON category.org_id = c.org_id AND category.id = c.category_id
+     WHERE c.org_id = $1 AND c.id = $2
+     FOR SHARE OF c, category`,
+    [params.orgId, params.contentId],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new FocusTopicScopedContentError(
+      "This Learning Resource is not available to attach.",
+      403,
+      "focus_topic_content_attach_denied",
+    );
+  }
+  const assignments = await params.client.query<{
+    id: string; assignment_type: TrainingContentAssignment["assignmentType"];
+    subject_user_id: string | null;
+  }>(
+    `SELECT id, assignment_type, subject_user_id FROM org_content_assignments
+     WHERE org_id = $1 AND content_id = $2 AND revoked_at IS NULL FOR SHARE`,
+    [params.orgId, params.contentId],
+  );
+  const allowed = canScopedActorAttachContent({
+    actorId: params.actorId,
+    record: {
+      content: {
+        id: row.id,
+        orgId: row.org_id,
+        publicationState: row.publication_state,
+        archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
+        createdByActorId: row.created_by_actor_id,
+      } as TrainingContentItem,
+      categoryArchivedAt: row.category_archived_at
+        ? new Date(row.category_archived_at).toISOString()
+        : null,
+      assignments: assignments.rows.map((assignment) => ({
+        id: assignment.id,
+        orgId: params.orgId,
+        contentId: params.contentId,
+        assignmentType: assignment.assignment_type,
+        subjectUserId: assignment.subject_user_id,
+        revokedAt: null,
+      })) as TrainingContentAssignment[],
+      topicAttachments: [],
+    },
+  });
+  if (!allowed) {
+    throw new FocusTopicScopedContentError(
+      "This Learning Resource is not available to attach.",
+      403,
+      "focus_topic_content_attach_denied",
+    );
+  }
+}
+
 async function resolveFocusTopicManagementContext(
   db: ApiDatabase,
   request: ContentOrganizationAuthRequest,
@@ -8417,6 +8678,67 @@ async function resolveFocusTopicManagementContext(
   return { org, scope, learningResourcesEnabled };
 }
 
+function buildTopicScopedTrainingContentResources(params: {
+  db: ApiDatabase;
+  request: ContentOrganizationAuthRequest;
+  management: FocusTopicManagementContext;
+  topic: OrgTrainingRecord;
+  contentId?: string;
+}): ResolvedTrainingContentManagementResources | null {
+  const principal = params.request.dashboard;
+  if (!principal) return null;
+  return {
+    context: {
+      orgId: params.management.org.id,
+      actorId: principal.user.id,
+      capabilities: principal.viewer.capabilities,
+      actorType: "web_user",
+      authorityScope: "focus_topic",
+      transactionGuard: createScopedContentTransactionGuard({
+        orgId: params.management.org.id,
+        actorId: principal.user.id,
+        topicId: params.topic.id,
+        contentId: params.contentId,
+        enforceExclusiveScope: !params.management.scope.canManageAllTopics,
+      }),
+    },
+    references: {
+      users: params.db.users.filter((user) =>
+        user.accountType === "enterprise" && user.orgId === params.management.org.id),
+      focusTopics: params.db.orgTrainings.filter((topic) =>
+        topic.orgId === params.management.org.id),
+      focusTopicScenarioAttachments: params.db.orgTrainingScenarioAttachments.filter(
+        (attachment) => attachment.orgId === params.management.org.id),
+      scenarioConfig: params.db.config,
+      scenarioOrg: params.management.org,
+    },
+    org: params.management.org,
+  };
+}
+
+function topicScopedContentSummary(detail: {
+  content: TrainingContentItem;
+  currentAsset: { id: string; uploadState: string; originalFilename: string | null } | null;
+}) {
+  return {
+    id: detail.content.id,
+    title: detail.content.title,
+    description: detail.content.description,
+    contentType: detail.content.contentType,
+    publicationState: detail.content.publicationState,
+    archivedAt: detail.content.archivedAt,
+    updatedAt: detail.content.updatedAt,
+    availableToAttach: false,
+    canMutate: detail.content.archivedAt === null,
+    mutationRestriction: null,
+    currentAsset: detail.currentAsset ? {
+      id: detail.currentAsset.id,
+      uploadState: detail.currentAsset.uploadState,
+      originalFilename: detail.currentAsset.originalFilename,
+    } : null,
+  };
+}
+
 function requireAllFocusTopicManagement(
   context: FocusTopicManagementContext,
   response: Response,
@@ -8458,6 +8780,23 @@ function rejectTrainingContentClientOwnedFields(body: unknown, response: Respons
     error: "The request contains server-owned Training Content fields.",
     code: "training_content_server_owned_field",
     fields: rejectedFields.sort(),
+  });
+  return true;
+}
+
+function rejectUnexpectedTopicContentFields(
+  body: unknown,
+  allowedFields: readonly string[],
+  response: Response,
+): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const allowed = new Set(allowedFields);
+  const rejected = Object.keys(body).filter((field) => !allowed.has(field));
+  if (rejected.length === 0) return false;
+  response.status(400).json({
+    error: "The request contains fields that cannot be changed from a Focus Topic.",
+    code: "focus_topic_content_field_denied",
+    fields: rejected.sort(),
   });
   return true;
 }
@@ -16683,6 +17022,14 @@ app.get(
 );
 
 app.post(
+  "/orgs/:orgId/trainings/:trainingId/assignments",
+  (_request, response, next) => { response.locals.focusTopicGrantsManagement = false; next(); },
+);
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/management-grants",
+  (_request, response, next) => { response.locals.focusTopicGrantsManagement = true; next(); },
+);
+app.post(
   [
     "/orgs/:orgId/trainings/:trainingId/assignments",
     "/orgs/:orgId/trainings/:trainingId/management-grants",
@@ -16693,7 +17040,7 @@ app.post(
       response.status(409).json({ error: "Direct Focus Topic assignments are not active in this environment." });
       return;
     }
-    const grantsManagement = request.path.endsWith("/management-grants");
+    const grantsManagement = response.locals.focusTopicGrantsManagement === true;
     const body = request.body as { audience?: unknown; subjectUserId?: unknown };
     if (!FOCUS_TOPIC_ASSIGNMENT_AUDIENCES.includes(body.audience as FocusTopicAssignmentAudience)) {
       response.status(400).json({ error: "Invalid Focus Topic audience." });
@@ -16790,6 +17137,14 @@ app.post(
 );
 
 app.delete(
+  "/orgs/:orgId/trainings/:trainingId/assignments/:assignmentId",
+  (_request, response, next) => { response.locals.focusTopicGrantsManagement = false; next(); },
+);
+app.delete(
+  "/orgs/:orgId/trainings/:trainingId/management-grants/:assignmentId",
+  (_request, response, next) => { response.locals.focusTopicGrantsManagement = true; next(); },
+);
+app.delete(
   [
     "/orgs/:orgId/trainings/:trainingId/assignments/:assignmentId",
     "/orgs/:orgId/trainings/:trainingId/management-grants/:assignmentId",
@@ -16800,7 +17155,7 @@ app.delete(
       response.status(409).json({ error: "Direct Focus Topic assignments are not active in this environment." });
       return;
     }
-    const grantsManagement = request.path.includes("/management-grants/");
+    const grantsManagement = response.locals.focusTopicGrantsManagement === true;
     const result = await withDatabase(async (db) => {
       const management = await resolveFocusTopicManagementContext(
         db, request, request.params.orgId, response, request.params.trainingId,
@@ -16884,12 +17239,27 @@ app.get(
       || attachedContentIds.has(record.content.id)
       || canScopedActorAttachContent({ actorId, record })
     );
+    const contentDetails = new Map((await Promise.all(visibleContent.map(async (record) => [
+      record.content.id,
+      await trainingContentStore.getContentDetailForOrg(topic.orgId, record.content.id),
+    ] as const))));
     response.json({
       topicId: topic.id,
       scenarios: authority.scenarioAttachments.filter((row) => row.topicId === topic.id),
       content: authority.contentAttachments.filter((row) => row.topicId === topic.id),
       contentItems: visibleContent.map((record) => {
         const item = record.content;
+        const canMutate = item.archivedAt === null && (management.scope.canManageAllTopics
+          || canScopedActorMutateContent({
+            actorId,
+            actorOrgId: topic.orgId,
+            actorCurrent: true,
+            organizationCurrent: management.org.status === "active",
+            learningResourcesEnabled: management.learningResourcesEnabled,
+            record,
+            manageableTopicIds: management.scope.manageableTopicIds,
+          }));
+        const currentAsset = contentDetails.get(item.id)?.currentAsset ?? null;
         return {
           id: item.id,
           title: item.title,
@@ -16901,6 +17271,15 @@ app.get(
           availableToAttach: item.archivedAt === null
             && (management.scope.canManageAllTopics
               || canScopedActorAttachContent({ actorId, record })),
+          canMutate,
+          mutationRestriction: canMutate
+            ? null
+            : "Shared outside your current Topic scope. Organization Admin management is required.",
+          currentAsset: currentAsset ? {
+            id: currentAsset.id,
+            uploadState: currentAsset.uploadState,
+            originalFilename: currentAsset.originalFilename,
+          } : null,
         };
       }),
       permissions: {
@@ -16908,7 +17287,268 @@ app.get(
         canManageAllTopics: management.scope.canManageAllTopics,
         learningResourcesEnabled: management.learningResourcesEnabled,
       },
+      fileLimitsBytes: trainingContentManagementService.getFileLimits(),
     });
+  },
+);
+
+async function resolveTopicScopedContentRouteResources(
+  request: ContentOrganizationAuthRequest,
+  response: Response,
+  contentId?: string,
+): Promise<ResolvedTrainingContentManagementResources | null> {
+  if (runtimeConfig.focusTopicAuthority !== "assignments") {
+    response.status(409).json({
+      error: "Topic-scoped Learning Resource management is not active in this environment.",
+      code: "focus_topic_content_authority_inactive",
+    });
+    return null;
+  }
+  if (!request.dashboard) {
+    response.status(403).json({
+      error: "Use central Learning Resources administration for this account.",
+      code: "focus_topic_content_scope_denied",
+    });
+    return null;
+  }
+  return withFreshDatabaseRead(async (db) => {
+    const management = await resolveFocusTopicManagementContext(
+      db, request, request.params.orgId, response, request.params.trainingId,
+    );
+    if (!management) return null;
+    const topic = findOrgTrainingRecord(db, management.org.id, request.params.trainingId);
+    if (!topic || topic.status !== "active") {
+      response.status(404).json({ error: "Focus Topic not found." });
+      return null;
+    }
+    if (!management.learningResourcesEnabled) {
+      response.status(403).json({
+        error: "Learning Resources are not enabled for this organization.",
+        code: "module_disabled",
+      });
+      return null;
+    }
+    return buildTopicScopedTrainingContentResources({
+      db, request, management, topic, contentId,
+    });
+  });
+}
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/content",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
+    if (runtimeConfig.focusTopicAuthority !== "assignments" || !request.dashboard) {
+      response.status(403).json({
+        error: "Topic-scoped Learning Resource creation is not available for this account.",
+        code: "focus_topic_content_scope_denied",
+      });
+      return;
+    }
+    try {
+      const input = normalizeTopicScopedContentCreateInput(
+        (request.body && typeof request.body === "object" && !Array.isArray(request.body))
+          ? request.body as Record<string, unknown>
+          : {},
+      );
+      const created: {
+        result: Awaited<ReturnType<typeof trainingContentStore.createTopicScopedContent>> | null;
+      } = { result: null };
+      await withDatabase(async (db) => {
+        const management = await resolveFocusTopicManagementContext(
+          db, request, request.params.orgId, response, request.params.trainingId,
+        );
+        if (!management) return null;
+        const topic = findOrgTrainingRecord(db, management.org.id, request.params.trainingId);
+        if (!topic || topic.status !== "active") {
+          response.status(404).json({ error: "Focus Topic not found." });
+          return null;
+        }
+        if (!management.learningResourcesEnabled) {
+          response.status(403).json({
+            error: "Learning Resources are not enabled for this organization.",
+            code: "module_disabled",
+          });
+          return null;
+        }
+        const actorId = request.dashboard!.user.id;
+        const actor = { actorType: "web_user" as const, actorId };
+        const category = input.categoryId
+          ? await trainingContentCategoryStore.getActiveCategoryForOrg(management.org.id, input.categoryId)
+          : await trainingContentCategoryStore.ensureDefaultCategory({ orgId: management.org.id, actor });
+        if (!category) {
+          response.status(400).json({
+            error: "The selected Learning Resource category is not available.",
+            code: "training_content_validation_failed",
+          });
+          return null;
+        }
+        const now = new Date();
+        const attachmentId = `ftca_${uuid()}`;
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Topic-scoped content creation requires PostgreSQL.");
+          created.result = await trainingContentStore.createTopicScopedContent({
+            orgId: management.org.id,
+            categoryId: category.id,
+            title: input.title,
+            description: input.description,
+            focusTopicId: topic.id,
+            focusTopicNameSnapshot: topic.name,
+            contentType: input.contentType,
+            nativeBody: null,
+            externalUrl: null,
+            actor,
+            now,
+            topicId: topic.id,
+            attachmentId,
+            transactionGuard: createScopedContentTransactionGuard({
+              orgId: management.org.id, actorId, topicId: topic.id,
+            }),
+          }, client);
+          const notificationInputs = buildFocusTopicContentAttachedNotificationInputs({
+            db,
+            topic,
+            content: created.result.detail.content,
+            attachmentId,
+            actorId,
+            createdAt: now,
+          });
+          await userNotificationStore.enqueueMany(notificationInputs, { client });
+        });
+        appendWebAuditEvent(db, request.dashboard!.user, {
+          action: "focus_topic.content.created_attached",
+          orgId: management.org.id,
+          message: "Created and attached a draft Learning Resource to a Focus Topic.",
+          metadata: { topicId: topic.id, attachmentId, contentType: input.contentType },
+        });
+        emitMobileUpdateForOrg(db, management.org.id, "org");
+        return null;
+      });
+      const result = created.result;
+      if (response.headersSent || !result) return;
+      response.status(201).json({
+        item: topicScopedContentSummary(result.detail),
+        attachment: result.attachment,
+        fileLimitsBytes: trainingContentManagementService.getFileLimits(),
+      });
+    } catch (error) {
+      respondWithFocusTopicScopedContentError(error, response);
+    }
+  },
+);
+
+app.patch(
+  "/orgs/:orgId/trainings/:trainingId/content/:contentId",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
+    if (rejectUnexpectedTopicContentFields(
+      request.body, ["expectedUpdatedAt", "title", "description"], response,
+    )) return;
+    const resources = await resolveTopicScopedContentRouteResources(
+      request, response, request.params.contentId,
+    );
+    if (!resources) return;
+    try {
+      const item = await trainingContentManagementService.updateContent({
+        context: resources.context,
+        references: resources.references,
+        contentId: request.params.contentId,
+        input: request.body as UpdateDashboardTrainingContentRequest,
+      });
+      response.json({ item, fileLimitsBytes: trainingContentManagementService.getFileLimits() });
+    } catch (error) {
+      respondWithFocusTopicScopedContentError(error, response);
+    }
+  },
+);
+
+for (const action of ["publish", "unpublish"] as const) {
+  app.post(
+    `/orgs/:orgId/trainings/:trainingId/content/:contentId/${action}`,
+    requireContentOrganizationAuth,
+    async (request: ContentOrganizationAuthRequest, response: Response) => {
+      if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
+      if (rejectUnexpectedTopicContentFields(request.body, ["expectedUpdatedAt"], response)) return;
+      const resources = await resolveTopicScopedContentRouteResources(
+        request, response, request.params.contentId,
+      );
+      if (!resources) return;
+      try {
+        const item = await trainingContentManagementService.transitionContent({
+          context: resources.context,
+          references: resources.references,
+          contentId: request.params.contentId,
+          action,
+          input: request.body as DashboardTrainingContentLifecycleRequest,
+        });
+        response.json({ item, fileLimitsBytes: trainingContentManagementService.getFileLimits() });
+      } catch (error) {
+        respondWithFocusTopicScopedContentError(error, response);
+      }
+    },
+  );
+}
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/content/:contentId/assets/uploads",
+  trainingContentStorageRateLimiter,
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
+    if (rejectUnexpectedTopicContentFields(request.body, [
+      "assetRole", "originalFilename", "declaredMimeType", "declaredByteSize", "replacementAssetId",
+    ], response)) return;
+    const resources = await resolveTopicScopedContentRouteResources(
+      request, response, request.params.contentId,
+    );
+    if (!resources) return;
+    const body = request.body as Record<string, unknown>;
+    try {
+      const result = await trainingContentAssetService.initiateUpload({
+        context: resources.context,
+        contentId: request.params.contentId,
+        assetRole: body?.assetRole,
+        originalFilename: body?.originalFilename,
+        declaredMimeType: body?.declaredMimeType,
+        declaredByteSize: body?.declaredByteSize,
+        replacementAssetId: body?.replacementAssetId,
+      });
+      response.status(201).json(result);
+    } catch (error) {
+      if (error instanceof FocusTopicScopedContentError) {
+        respondWithFocusTopicScopedContentError(error, response);
+      } else {
+        respondWithTrainingContentAssetError(error, response);
+      }
+    }
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/content/:contentId/assets/:assetId/finalize",
+  trainingContentStorageRateLimiter,
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const resources = await resolveTopicScopedContentRouteResources(
+      request, response, request.params.contentId,
+    );
+    if (!resources) return;
+    try {
+      const result = await trainingContentAssetService.finalizeUpload({
+        context: resources.context,
+        contentId: request.params.contentId,
+        assetId: request.params.assetId,
+      });
+      response.status(result.asset.uploadState === "processing" ? 202 : 200).json(result);
+    } catch (error) {
+      if (error instanceof FocusTopicScopedContentError) {
+        respondWithFocusTopicScopedContentError(error, response);
+      } else {
+        respondWithTrainingContentAssetError(error, response);
+      }
+    }
   },
 );
 
@@ -17002,6 +17642,17 @@ app.post(
       });
       queueRequiredTransactionSideWrite(db, async (client) => {
         if (!client) throw new Error("Focus Topic attachment transaction requires PostgreSQL.");
+        await lockTrainingContentAuthorityMutation(client, org.id, contentId);
+        if (request.dashboard) {
+          await createScopedContentTransactionGuard({
+            orgId: org.id, actorId, topicId: topic.id,
+          })(client);
+          if (!management.scope.canManageAllTopics) {
+            await assertScopedAttachAllowedInTransaction({
+              client, orgId: org.id, actorId, contentId,
+            });
+          }
+        }
         await focusTopicAuthorityStore.attachContent(row, client);
         await userNotificationStore.enqueueMany(notificationInputs, { client });
       });
@@ -17018,6 +17669,10 @@ app.post(
           error: "This Learning Resource is already attached to the Focus Topic.",
           code: "focus_topic_content_already_attached",
         });
+        return null;
+      }
+      if (error instanceof FocusTopicScopedContentError) {
+        respondWithFocusTopicScopedContentError(error, response);
         return null;
       }
       throw error;
@@ -17070,7 +17725,15 @@ app.delete(
         const input = { orgId: org.id, topicId: topic.id,
           attachmentId: request.params.attachmentId, actorId, at };
         if (scenario) await focusTopicAuthorityStore.detachScenario(input, client);
-        else await focusTopicAuthorityStore.detachContent(input, client);
+        else {
+          await lockTrainingContentAuthorityMutation(client, org.id, content!.contentId);
+          if (request.dashboard) {
+            await createScopedContentTransactionGuard({
+              orgId: org.id, actorId, topicId: topic.id,
+            })(client);
+          }
+          await focusTopicAuthorityStore.detachContent(input, client);
+        }
       });
       const audit = { action: "focus_topic.attachment.detached", orgId: org.id,
         message: "Detached a direct Focus Topic child.",
@@ -17081,6 +17744,12 @@ app.delete(
       emitMobileUpdateForOrg(db, org.id, "org");
       return { detached: true, attachmentId: request.params.attachmentId,
         detachedAt: at.toISOString(), detachedBy: actorId };
+    }).catch((error: unknown) => {
+      if (error instanceof FocusTopicScopedContentError) {
+        respondWithFocusTopicScopedContentError(error, response);
+        return null;
+      }
+      throw error;
     });
     if (response.headersSent || !result) return;
     response.json(result);
