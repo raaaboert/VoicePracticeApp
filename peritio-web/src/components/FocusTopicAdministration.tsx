@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import type {
+  CustomerPracticeScenario,
+  CustomerPracticeScenarioListResponse,
   DashboardAdminUserRow,
   DashboardTrainingContentAssetFinalizationResponse,
   DashboardTrainingContentUploadInitiationResponse,
@@ -65,6 +67,17 @@ export function FocusTopicAdministration({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<DashboardFocusTopicAssignment[]>([]);
   const [related, setRelated] = useState<DashboardFocusTopicRelatedContentResponse | null>(null);
+  const [practiceScenarios, setPracticeScenarios] = useState<CustomerPracticeScenarioListResponse | null>(null);
+  const [editingScenarioId, setEditingScenarioId] = useState<string | null>(null);
+  const [scenarioTitle, setScenarioTitle] = useState("");
+  const [scenarioDescription, setScenarioDescription] = useState("");
+  const [scenarioDesiredOutcome, setScenarioDesiredOutcome] = useState("");
+  const [scenarioAiRole, setScenarioAiRole] = useState("");
+  const [scenarioScoringGuidance, setScenarioScoringGuidance] = useState("");
+  const [scenarioSegmentId, setScenarioSegmentId] = useState("");
+  const [scenarioIndustryIds, setScenarioIndustryIds] = useState<string[]>([]);
+  const [scenarioSourceLabel, setScenarioSourceLabel] = useState("");
+  const [scenarioSourceReferenceId, setScenarioSourceReferenceId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState<"draft" | "active" | "archived">("draft");
@@ -116,22 +129,27 @@ export function FocusTopicAdministration({
   };
 
   const selectTopic = (topic: TopicRow) => void run(async () => {
-    const [assignmentResult, relatedResult] = await Promise.all([
+    const [assignmentResult, relatedResult, scenarioResult] = await Promise.all([
       action<{ assignments: DashboardFocusTopicAssignment[] }>({
         action: "list_assignments", orgId, topicId: topic.id,
       }),
       action<DashboardFocusTopicRelatedContentResponse>({
         action: "list_related_content", orgId, topicId: topic.id,
       }),
+      action<CustomerPracticeScenarioListResponse>({
+        action: "list_practice_scenarios", orgId, topicId: topic.id,
+      }),
     ]);
     setSelectedId(topic.id); setName(topic.name); setDescription(topic.description); setStatus(topic.status);
     setAssignments(assignmentResult.assignments); setRelated(relatedResult);
+    setPracticeScenarios(scenarioResult); setEditingScenarioId(null);
   });
 
   const createTopic = () => void run(async () => {
     const created = await action<TopicRow>({ action: "create_topic", orgId, name, description, status: "draft" });
     setTopics((current) => [...current, created]); setSelectedId(created.id); setStatus("draft");
     setAssignments([]); setRelated(null); setMessage("Focus Topic created as a draft.");
+    setPracticeScenarios(null);
   });
   const saveTopic = () => void run(async () => {
     if (!selected) return;
@@ -336,6 +354,68 @@ export function FocusTopicAdministration({
     setMessage(next === "publish_content" ? "Learning Resource published." : "Learning Resource returned to draft.");
   });
 
+  const resetScenarioForm = () => {
+    setEditingScenarioId(null); setScenarioTitle(""); setScenarioDescription("");
+    setScenarioDesiredOutcome(""); setScenarioAiRole(""); setScenarioScoringGuidance("");
+    setScenarioSegmentId(""); setScenarioIndustryIds([]); setScenarioSourceLabel("");
+    setScenarioSourceReferenceId("");
+  };
+  const beginScenarioRevision = (scenario: CustomerPracticeScenario) => {
+    const version = scenario.currentVersion;
+    setEditingScenarioId(scenario.id); setScenarioTitle(version.title);
+    setScenarioDescription(version.description); setScenarioDesiredOutcome(version.desiredOutcome ?? "");
+    setScenarioAiRole(version.aiRole); setScenarioScoringGuidance(version.scoringGuidance);
+    setScenarioSegmentId(version.segmentId); setScenarioIndustryIds(version.applicableIndustryIds);
+    const firstSource = version.sourceReferences[0];
+    setScenarioSourceLabel(firstSource?.label ?? "");
+    setScenarioSourceReferenceId(firstSource?.referenceId ?? "");
+  };
+  const saveScenarioDraft = () => void run(async () => {
+    if (!selected || !practiceScenarios) return;
+    const payload = {
+      action: editingScenarioId ? "revise_practice_scenario" : "create_practice_scenario",
+      orgId, topicId: selected.id,
+      ...(editingScenarioId ? { scenarioId: editingScenarioId } : {}),
+      title: scenarioTitle, description: scenarioDescription,
+      desiredOutcome: scenarioDesiredOutcome || null,
+      aiRole: scenarioAiRole, scoringGuidance: scenarioScoringGuidance,
+      segmentId: scenarioSegmentId, applicableIndustryIds: scenarioIndustryIds,
+      sourceReferences: scenarioSourceLabel.trim() ? [{
+        kind: "manual", referenceId: scenarioSourceReferenceId.trim() || null,
+        label: scenarioSourceLabel.trim(),
+      }] : [],
+    };
+    const saved = await action<CustomerPracticeScenario>(payload);
+    setPracticeScenarios({
+      ...practiceScenarios,
+      scenarios: editingScenarioId
+        ? practiceScenarios.scenarios.map((row) => row.id === saved.id ? saved : row)
+        : [saved, ...practiceScenarios.scenarios],
+      editableScenarioIds: practiceScenarios.editableScenarioIds.includes(saved.id)
+        ? practiceScenarios.editableScenarioIds
+        : [...practiceScenarios.editableScenarioIds, saved.id],
+    });
+    resetScenarioForm();
+    setMessage(editingScenarioId ? "New Practice Scenario revision created." : "Practice Scenario draft created.");
+  });
+  const transitionScenario = (
+    scenario: CustomerPracticeScenario,
+    next: "submit" | "approve" | "reject" | "publish" | "archive",
+  ) => void run(async () => {
+    if (!selected || !practiceScenarios) return;
+    const updated = await action<CustomerPracticeScenario>({
+      action: `${next}_practice_scenario`, orgId, topicId: selected.id, scenarioId: scenario.id,
+    });
+    setPracticeScenarios({
+      ...practiceScenarios,
+      scenarios: practiceScenarios.scenarios.map((row) => row.id === updated.id ? updated : row),
+    });
+    setMessage(`Practice Scenario ${next === "submit" ? "submitted"
+      : next === "approve" ? "approved"
+      : next === "reject" ? "rejected"
+      : next === "publish" ? "published" : "archived"}.`);
+  });
+
   const renderAssignments = (
     rows: DashboardFocusTopicAssignment[],
     options: { revoked?: boolean; management?: boolean },
@@ -371,7 +451,8 @@ export function FocusTopicAdministration({
         onChange={(event) => {
           const topic = topics.find((row) => row.id === event.target.value);
           if (topic) selectTopic(topic);
-          else { setSelectedId(null); setName(""); setDescription(""); setAssignments([]); setRelated(null); }
+          else { setSelectedId(null); setName(""); setDescription(""); setAssignments([]);
+            setRelated(null); setPracticeScenarios(null); resetScenarioForm(); }
         }}>
         <option value="">{canManageAllTopics ? "Create a new Focus Topic" : "Select a Focus Topic"}</option>
         {topics.map((topic) => <option key={topic.id} value={topic.id}>{topic.name} ({topic.status})</option>)}
@@ -478,6 +559,113 @@ export function FocusTopicAdministration({
           : <div className="focus-topic-assignment-list">
             {renderAssignments(managerParts.assignmentHistory, { revoked: true, management: true })}</div>}
       </details>
+    </div> : null}
+
+    {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-practice-heading">
+      <div className="focus-topic-panel-heading"><div><p className="eyebrow">Practice Scenarios</p>
+        <h3 id="focus-topic-practice-heading">Practice Scenarios</h3>
+        <p className="muted-copy">Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version.</p>
+      </div></div>
+      {practiceScenarios && !practiceScenarios.permissions.creationEnabled
+        ? <div className="notice" role="status">Customer Practice Scenario creation is not enabled for this organization. Existing scenarios remain visible.</div>
+        : null}
+      <div className="focus-topic-assignment-section"><h4>Topic scenarios</h4>
+        {!practiceScenarios ? <p className="muted-copy">Select this Topic to load Practice Scenarios.</p> : null}
+        {practiceScenarios?.scenarios.length === 0
+          ? <p className="muted-copy">No customer Practice Scenarios have been created for this Topic.</p> : null}
+        <div className="focus-topic-assignment-list">{practiceScenarios?.scenarios.map((scenario) => {
+          const version = scenario.currentVersion;
+          const editable = practiceScenarios.editableScenarioIds.includes(scenario.id)
+            && practiceScenarios.permissions.canAuthor && scenario.status !== "archived";
+          return <div key={scenario.id} className="focus-topic-assignment-row">
+            <div className="training-content-order-copy">
+              <div className="focus-topic-assignment-title"><strong>{version.title}</strong>
+                <span className={`status-badge${scenario.status === "published" ? " status-active" : ""}`}>
+                  {scenario.status.replaceAll("_", " ")}
+                </span>
+              </div>
+              <small>Version {version.versionNumber} · {version.segmentId}</small>
+              <small>{version.description}</small>
+              <small>{version.applicableIndustryIds.length} applicable {version.applicableIndustryIds.length === 1 ? "industry" : "industries"}</small>
+              {version.sourceReferences.length > 0
+                ? <small>Source reference: {version.sourceReferences.map((source) => source.label).join(" · ")}</small>
+                : <small>Source reference: Manual authoring</small>}
+              {scenario.publishedVersion && scenario.publishedVersion.id !== version.id
+                ? <small>Published learner version: {scenario.publishedVersion.versionNumber}</small> : null}
+            </div>
+            {editable && scenario.status !== "in_review"
+              ? <button type="button" className="ghost-button compact-button" disabled={busy}
+                onClick={() => beginScenarioRevision(scenario)}>Edit / New Revision</button> : null}
+            {editable && (scenario.status === "draft" || scenario.status === "rejected")
+              ? <button type="button" className="primary-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "submit")}>
+                {practiceScenarios.permissions.approvalRequired ? "Submit for Review" : "Approve Draft"}
+              </button> : null}
+            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <>
+              <button type="button" className="primary-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "approve")}>Approve</button>
+              <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "reject")}>Reject</button>
+            </> : null}
+            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "approved"
+              ? <button type="button" className="primary-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "publish")}>Publish Approved Version</button> : null}
+            {practiceScenarios.permissions.canReviewAndPublish && scenario.status !== "archived"
+              ? <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "archive")}>Archive</button> : null}
+          </div>;
+        })}</div>
+      </div>
+      {practiceScenarios?.permissions.canAuthor && selected.status !== "archived"
+        ? <div className="focus-topic-assignment-section focus-topic-upload-new">
+          <h4>{editingScenarioId ? "Create New Revision" : "Create Draft"}</h4>
+          <p className="muted-copy">Content saves as a new immutable version. Submission and publication are separate actions.</p>
+          <div className="focus-topic-details-grid">
+            <label className="focus-topic-field focus-topic-field-wide">Title
+              <input className="text-input" value={scenarioTitle} maxLength={300}
+                onChange={(event) => setScenarioTitle(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide">Scenario context
+              <textarea className="text-input" value={scenarioDescription} maxLength={12000}
+                onChange={(event) => setScenarioDescription(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide">Desired outcome
+              <textarea className="text-input" value={scenarioDesiredOutcome} maxLength={4000}
+                onChange={(event) => setScenarioDesiredOutcome(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide">AI counterpart role
+              <textarea className="text-input" value={scenarioAiRole} maxLength={2000}
+                onChange={(event) => setScenarioAiRole(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide">Scoring guidance
+              <textarea className="text-input" value={scenarioScoringGuidance} maxLength={8000}
+                onChange={(event) => setScenarioScoringGuidance(event.target.value)} /></label>
+            <label className="focus-topic-field">Role
+              <select className="text-input" value={scenarioSegmentId}
+                onChange={(event) => setScenarioSegmentId(event.target.value)}>
+                <option value="">Select a role</option>
+                {practiceScenarios.roleOptions.map((option) =>
+                  <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select></label>
+            <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Applicable industries</legend>
+              <div className="focus-topic-content-mode">{practiceScenarios.industryOptions.map((option) =>
+                <label key={option.id}><input type="checkbox" checked={scenarioIndustryIds.includes(option.id)}
+                  onChange={(event) => setScenarioIndustryIds((current) => event.target.checked
+                    ? [...new Set([...current, option.id])]
+                    : current.filter((id) => id !== option.id))} /> {option.label}</label>)}</div>
+            </fieldset>
+            <label className="focus-topic-field">Source label (optional)
+              <input className="text-input" value={scenarioSourceLabel} maxLength={500}
+                onChange={(event) => setScenarioSourceLabel(event.target.value)} /></label>
+            <label className="focus-topic-field">Source reference (optional)
+              <input className="text-input" value={scenarioSourceReferenceId} maxLength={300}
+                onChange={(event) => setScenarioSourceReferenceId(event.target.value)} /></label>
+          </div>
+          <div className="focus-topic-actions">
+            <button type="button" className="primary-button" disabled={busy || !scenarioTitle.trim()
+              || !scenarioDescription.trim() || !scenarioAiRole.trim() || !scenarioScoringGuidance.trim()
+              || !scenarioSegmentId || scenarioIndustryIds.length === 0}
+              onClick={saveScenarioDraft}>{editingScenarioId ? "Save New Revision" : "Create Draft"}</button>
+            {editingScenarioId ? <button type="button" className="ghost-button" disabled={busy}
+              onClick={resetScenarioForm}>Cancel Revision</button> : null}
+          </div>
+        </div> : null}
     </div> : null}
 
     {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-related-heading">

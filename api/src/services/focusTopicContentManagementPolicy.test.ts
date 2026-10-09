@@ -7,6 +7,7 @@ import {
   canScopedActorAttachContent,
   canScopedActorMutateContent,
   isContentVisibleToWholeOrganization,
+  resolveTopicWorkspaceContentAuthority,
 } from "./focusTopicContentManagementPolicy.js";
 
 const content = {
@@ -77,4 +78,23 @@ test("scoped mutation requires current scope over every active Topic and no stan
   }), false);
   assert.equal(canScopedActorMutateContent({ ...base, actorCurrent: false }), false);
   assert.equal(canScopedActorMutateContent({ ...base, learningResourcesEnabled: false }), false);
+});
+
+test("Topic workspace uploads preserve full Organization Admin authority at finalization", () => {
+  assert.deepEqual(resolveTopicWorkspaceContentAuthority({
+    canManageAllTopics: true,
+    topicId: "topic",
+  }), {
+    authorityScope: "organization",
+    authorityTopicId: undefined,
+    enforceExclusiveScope: false,
+  });
+  assert.deepEqual(resolveTopicWorkspaceContentAuthority({
+    canManageAllTopics: false,
+    topicId: "topic",
+  }), {
+    authorityScope: "focus_topic",
+    authorityTopicId: "topic",
+    enforceExclusiveScope: true,
+  });
 });

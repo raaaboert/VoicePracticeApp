@@ -751,6 +751,10 @@ export interface OrgCustomScenario {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** Stable lifecycle version selected by the server when this scenario was published. */
+  customerScenarioVersionId?: string | null;
+  customerScenarioVersionNumber?: number | null;
+  homeFocusTopicId?: string | null;
 }
 
 export interface SegmentDefinition {
@@ -902,6 +906,98 @@ export interface OrgTrainingRecord {
   updatedAt: string;
 }
 
+export const CUSTOMER_PRACTICE_SCENARIO_STATUSES = [
+  "draft",
+  "in_review",
+  "approved",
+  "rejected",
+  "published",
+  "archived",
+] as const;
+export type CustomerPracticeScenarioStatus = (typeof CUSTOMER_PRACTICE_SCENARIO_STATUSES)[number];
+
+export const CUSTOMER_PRACTICE_SCENARIO_SOURCE_REFERENCE_KINDS = [
+  "manual",
+  "training_content",
+  "external",
+] as const;
+export type CustomerPracticeScenarioSourceReferenceKind =
+  (typeof CUSTOMER_PRACTICE_SCENARIO_SOURCE_REFERENCE_KINDS)[number];
+
+export interface CustomerPracticeScenarioSourceReference {
+  kind: CustomerPracticeScenarioSourceReferenceKind;
+  referenceId: string | null;
+  label: string;
+}
+
+export interface CustomerPracticeScenarioVersion {
+  id: string;
+  scenarioId: string;
+  orgId: string;
+  versionNumber: number;
+  status: CustomerPracticeScenarioStatus;
+  title: string;
+  description: string;
+  desiredOutcome: string | null;
+  aiRole: string;
+  scoringGuidance: string;
+  segmentId: string;
+  applicableIndustryIds: IndustryId[];
+  provenance: OrgCustomScenarioProvenance;
+  sourceReferences: CustomerPracticeScenarioSourceReference[];
+  createdByActorId: string;
+  createdAt: string;
+  submittedByActorId: string | null;
+  submittedAt: string | null;
+  reviewedByActorId: string | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  publishedByActorId: string | null;
+  publishedAt: string | null;
+}
+
+export interface CustomerPracticeScenario {
+  id: string;
+  orgId: string;
+  homeFocusTopicId: string;
+  status: CustomerPracticeScenarioStatus;
+  currentVersionId: string;
+  approvedVersionId: string | null;
+  publishedVersionId: string | null;
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedByActorId: string | null;
+  archivedAt: string | null;
+  currentVersion: CustomerPracticeScenarioVersion;
+  publishedVersion: CustomerPracticeScenarioVersion | null;
+}
+
+export interface CustomerPracticeScenarioListResponse {
+  topicId: string;
+  scenarios: CustomerPracticeScenario[];
+  roleOptions: Array<{ id: string; label: string }>;
+  industryOptions: Array<{ id: IndustryId; label: string }>;
+  editableScenarioIds: string[];
+  permissions: {
+    creationEnabled: boolean;
+    approvalRequired: boolean;
+    canAuthor: boolean;
+    canReviewAndPublish: boolean;
+  };
+}
+
+export interface CustomerPracticeScenarioDraftRequest {
+  title: string;
+  description: string;
+  desiredOutcome?: string | null;
+  aiRole: string;
+  scoringGuidance: string;
+  segmentId: string;
+  applicableIndustryIds: IndustryId[];
+  sourceReferences?: CustomerPracticeScenarioSourceReference[];
+}
+
 export interface OrgDivisionRecord {
   id: string;
   orgId: string;
@@ -1024,6 +1120,7 @@ export interface UsageSessionRecord {
   divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
+  scenarioVersionId?: string | null;
   trainingId?: string | null;
   trainingPackId?: string | null;
   startedAt: string;
@@ -1042,6 +1139,7 @@ export interface SimulationSessionRecord {
   divisionId?: string | null;
   segmentId: string;
   scenarioId: string;
+  scenarioVersionId?: string | null;
   trainingId?: string | null;
   trainingPackId?: string | null;
   clientStartedAt?: string | null;

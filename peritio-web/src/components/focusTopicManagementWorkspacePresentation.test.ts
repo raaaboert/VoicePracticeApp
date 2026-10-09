@@ -72,3 +72,25 @@ test("scoped dashboard page uses server-derived Topic capability and filtered wo
   assert.match(page, /topics\.management\.learningResourcesEnabled/);
   assert.match(page, /usersPayload\?\.users \?\? \[\]/);
 });
+
+test("Focus Topic workspace exposes the customer Practice Scenario review lifecycle", () => {
+  for (const copy of [
+    "Practice Scenarios",
+    "Create Draft",
+    "Submit for Review",
+    "Approve",
+    "Reject",
+    "Publish",
+    "Archive",
+    "Edit / New Revision",
+  ]) {
+    assert.equal(source.includes(copy), true, copy);
+  }
+  assert.match(source, /practiceScenarios\.permissions\.canReviewAndPublish/);
+  assert.match(source, /practiceScenarios\.editableScenarioIds/);
+  assert.match(proxy, /case "list_practice_scenarios"/);
+  assert.match(proxy, /case "create_practice_scenario"/);
+  assert.match(proxy, /case "submit_practice_scenario"/);
+  assert.match(proxy, /transitionDashboardCustomerPracticeScenario/);
+  assert.equal(source.includes("Generate with AI"), false);
+});

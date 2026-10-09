@@ -14,6 +14,7 @@ export interface OperationalStoreSet {
   userEmployeeIdClaimStore: InitializableStore;
   orgModuleEntitlementStore: InitializableStore;
   organizationProductSettingsStore: InitializableStore;
+  customerPracticeScenarioStore: InitializableStore;
   focusTopicAuthorityStore: InitializableStore;
   userNotificationStore: InitializableStore;
   trainingContentStore: InitializableStore;
@@ -51,6 +52,7 @@ export async function initializeDatabaseStoresForReadiness(params: {
   await params.stores.userEmployeeIdClaimStore.initialize();
   await params.stores.orgModuleEntitlementStore.initialize();
   await params.stores.organizationProductSettingsStore.initialize();
+  await params.stores.customerPracticeScenarioStore.initialize();
   await params.stores.userNotificationStore.initialize();
   await params.stores.trainingContentStore.initialize();
   await params.stores.focusTopicAuthorityStore.initialize();
@@ -81,6 +83,7 @@ export async function initializeDatabaseStoresForStartup(params: {
   await params.stores.performancePlanStore.initialize();
   await params.stores.orgModuleEntitlementStore.initialize();
   await params.stores.organizationProductSettingsStore.initialize();
+  await params.stores.customerPracticeScenarioStore.initialize();
   await params.stores.userNotificationStore.initialize();
   await params.stores.trainingContentStore.initialize();
   await params.stores.focusTopicAuthorityStore.initialize();

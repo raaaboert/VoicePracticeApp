@@ -51,6 +51,7 @@ interface SimulationSessionRow {
   division_id: string | null;
   segment_id: string;
   scenario_id: string;
+  scenario_version_id: string | null;
   training_id: string | null;
   training_pack_id: string | null;
   client_started_at: string | Date | null;
@@ -121,6 +122,7 @@ function normalizeSimulationSessionRecord(candidate: unknown): SimulationSession
     divisionId: normalizeNullableString((candidate as { divisionId?: unknown }).divisionId) ?? undefined,
     segmentId,
     scenarioId,
+    scenarioVersionId: normalizeNullableString((candidate as { scenarioVersionId?: unknown }).scenarioVersionId) ?? undefined,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
     trainingPackId: normalizeNullableString((candidate as { trainingPackId?: unknown }).trainingPackId) ?? undefined,
     clientStartedAt: normalizeIsoString((candidate as { clientStartedAt?: unknown }).clientStartedAt) ?? undefined,
@@ -142,6 +144,7 @@ function mapSimulationSessionRow(row: SimulationSessionRow): SimulationSessionRe
     divisionId: row.division_id,
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
+    scenarioVersionId: row.scenario_version_id,
     trainingId: row.training_id,
     trainingPackId: row.training_pack_id,
     clientStartedAt: row.client_started_at,
@@ -181,6 +184,7 @@ function assertSessionIdentityCompatibility(existing: SimulationSessionRecord, i
     existing.orgId !== incoming.orgId ||
     existing.segmentId !== incoming.segmentId ||
     existing.scenarioId !== incoming.scenarioId ||
+    (existing.scenarioVersionId ?? null) !== (incoming.scenarioVersionId ?? null) ||
     existingTrainingId !== incomingTrainingId
   ) {
     throw new Error("Simulation session identity does not match the previously recognized session.");
@@ -548,6 +552,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           division_id,
           segment_id,
           scenario_id,
+          scenario_version_id,
           training_id,
           training_pack_id,
           client_started_at,
@@ -575,6 +580,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           division_id,
           segment_id,
           scenario_id,
+          scenario_version_id,
           training_id,
           training_pack_id,
           client_started_at,
@@ -610,6 +616,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           division_id,
           segment_id,
           scenario_id,
+          scenario_version_id,
           training_id,
           training_pack_id,
           client_started_at,
@@ -620,8 +627,8 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           usage_session_record_id
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8,
-          $9::timestamptz, $10::timestamptz, $11::timestamptz, $12, $13::timestamptz, $14
+          $1, $2, $3, $4, $5, $6, $7, $8, $9,
+          $10::timestamptz, $11::timestamptz, $12::timestamptz, $13, $14::timestamptz, $15
         )
         ON CONFLICT (simulation_session_id) DO UPDATE
           SET user_id = EXCLUDED.user_id,
@@ -629,6 +636,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               division_id = EXCLUDED.division_id,
               segment_id = EXCLUDED.segment_id,
               scenario_id = EXCLUDED.scenario_id,
+              scenario_version_id = EXCLUDED.scenario_version_id,
               training_id = EXCLUDED.training_id,
               training_pack_id = COALESCE(simulation_sessions.training_pack_id, EXCLUDED.training_pack_id),
               client_started_at = COALESCE(simulation_sessions.client_started_at, EXCLUDED.client_started_at),
@@ -645,6 +653,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
         nextRecord.divisionId ?? null,
         nextRecord.segmentId,
         nextRecord.scenarioId,
+        nextRecord.scenarioVersionId ?? null,
         nextRecord.trainingId ?? null,
         nextRecord.trainingPackId ?? null,
         nextRecord.clientStartedAt ?? null,
@@ -764,6 +773,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               division_id TEXT NULL,
               segment_id TEXT NOT NULL,
               scenario_id TEXT NOT NULL,
+              scenario_version_id TEXT NULL,
               training_id TEXT NULL,
               training_pack_id TEXT NULL,
               client_started_at TIMESTAMPTZ NULL,
@@ -778,6 +788,9 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_user_id ON simulation_sessions (user_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_org_id ON simulation_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_id ON simulation_sessions (scenario_id);
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS scenario_version_id TEXT NULL;
+            CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_version_id
+              ON simulation_sessions (scenario_version_id) WHERE scenario_version_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_status ON simulation_sessions (status);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_last_seen_at ON simulation_sessions (last_seen_at DESC);
           `

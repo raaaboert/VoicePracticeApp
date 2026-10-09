@@ -295,6 +295,7 @@ test("frozen production baseline startup compatibility migrates performance acce
           },
           orgModuleEntitlementStore: noOpStore,
           organizationProductSettingsStore: noOpStore,
+          customerPracticeScenarioStore: noOpStore,
           userNotificationStore: noOpStore,
           trainingContentStore: noOpStore,
           focusTopicAuthorityStore: noOpStore,

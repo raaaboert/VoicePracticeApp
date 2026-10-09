@@ -10,6 +10,19 @@ export interface FocusTopicContentAuthorityRecord {
   }[];
 }
 
+export function resolveTopicWorkspaceContentAuthority(params: {
+  canManageAllTopics: boolean;
+  topicId: string;
+}): {
+  authorityScope: "organization" | "focus_topic";
+  authorityTopicId: string | undefined;
+  enforceExclusiveScope: boolean;
+} {
+  return params.canManageAllTopics
+    ? { authorityScope: "organization", authorityTopicId: undefined, enforceExclusiveScope: false }
+    : { authorityScope: "focus_topic", authorityTopicId: params.topicId, enforceExclusiveScope: true };
+}
+
 export function isContentVisibleToWholeOrganization(
   record: FocusTopicContentAuthorityRecord,
 ): boolean {

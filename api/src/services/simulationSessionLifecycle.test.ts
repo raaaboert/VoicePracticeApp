@@ -75,6 +75,7 @@ test("simulation session lifecycle recognizes start, finalizes usage once, and s
       orgId: "org_1",
       segmentId: "segment_1",
       scenarioId: "scenario_1",
+      scenarioVersionId: "scenario_version_1",
       trainingId: null,
       trainingPackId: "pack_1",
       clientStartedAt: "2026-04-01T10:00:00.000Z",
@@ -103,6 +104,8 @@ test("simulation session lifecycle recognizes start, finalizes usage once, and s
     });
     assert.equal(first.usageResult.created, true);
     assert.equal(first.usageResult.record.id, buildUsageSessionIdFromSimulationSessionId("sim_alpha"));
+    assert.equal(first.usageResult.record.scenarioVersionId, "scenario_version_1");
+    assert.equal(first.simulationSession.scenarioVersionId, "scenario_version_1");
     assert.equal(first.simulationSession.status, "usage_recorded");
 
     const replay = await completeRecognizedSimulationUsage({

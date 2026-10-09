@@ -21,6 +21,9 @@ import {
   ArchiveDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentCategoryRequest,
   CreateDashboardTrainingContentRequest,
+  CustomerPracticeScenario,
+  CustomerPracticeScenarioDraftRequest,
+  CustomerPracticeScenarioListResponse,
   DashboardTrainingContentAssetAccessResponse,
   DashboardTrainingContentAssetFinalizationResponse,
   DashboardTrainingContentDetailResponse,
@@ -907,6 +910,52 @@ export interface DashboardFocusTopicContentMutationResponse {
 export interface DashboardFocusTopicContentCreateResponse
   extends DashboardFocusTopicContentMutationResponse {
   attachment: DashboardFocusTopicContentAttachment;
+}
+
+export async function listDashboardCustomerPracticeScenarios(
+  orgId: string, topicId: string,
+): Promise<CustomerPracticeScenarioListResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<CustomerPracticeScenarioListResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/practice-scenarios`,
+    { token },
+  );
+}
+
+export async function createDashboardCustomerPracticeScenario(
+  orgId: string, topicId: string, input: CustomerPracticeScenarioDraftRequest,
+): Promise<CustomerPracticeScenario> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<CustomerPracticeScenario>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/practice-scenarios`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function reviseDashboardCustomerPracticeScenario(
+  orgId: string, topicId: string, scenarioId: string, input: CustomerPracticeScenarioDraftRequest,
+): Promise<CustomerPracticeScenario> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<CustomerPracticeScenario>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/practice-scenarios/${encodeURIComponent(scenarioId)}/revisions`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function transitionDashboardCustomerPracticeScenario(
+  orgId: string,
+  topicId: string,
+  scenarioId: string,
+  action: "submit" | "approve" | "reject" | "publish" | "archive",
+  reviewNote?: string,
+): Promise<CustomerPracticeScenario> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<CustomerPracticeScenario>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/practice-scenarios/${encodeURIComponent(scenarioId)}/${action}`,
+    { method: "POST", body: JSON.stringify(reviewNote ? { reviewNote } : {}), token },
+  );
 }
 
 export async function listDashboardFocusTopicAssignments(orgId: string, topicId: string) {

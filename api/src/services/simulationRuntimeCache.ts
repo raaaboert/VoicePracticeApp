@@ -19,6 +19,7 @@ export interface SimulationRuntimeCacheValue {
   source: "standard" | "custom";
   segment: SegmentDefinition;
   scenario: Scenario;
+  scenarioVersionId?: string | null;
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
   industryId: string | null;

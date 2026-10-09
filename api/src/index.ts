@@ -73,6 +73,9 @@ import {
   COMMON_TIMEZONES,
   CreateUserRequest,
   CreateOrgCustomScenarioRequest,
+  CustomerPracticeScenario,
+  CustomerPracticeScenarioDraftRequest,
+  CustomerPracticeScenarioListResponse,
   CustomerTrainingPackOrderSummary,
   DEFAULT_INDUSTRIES,
   DEFAULT_ROLE_INDUSTRIES,
@@ -280,6 +283,11 @@ import {
   OrganizationProductSettingsStore,
 } from "./storage/organizationProductSettingsStore.js";
 import {
+  createCustomerPracticeScenarioStore,
+  CustomerPracticeScenarioStoreError,
+  type CustomerPracticeScenarioStore,
+} from "./storage/customerPracticeScenarioStore.js";
+import {
   createFocusTopicAuthorityStore,
   isDuplicateActiveFocusTopicAssignmentError,
   isDuplicateActiveFocusTopicContentAttachmentError,
@@ -302,6 +310,7 @@ import { buildFocusTopicContentAttachedNotificationInputs } from "./services/foc
 import {
   canScopedActorAttachContent,
   canScopedActorMutateContent,
+  resolveTopicWorkspaceContentAuthority,
 } from "./services/focusTopicContentManagementPolicy.js";
 import {
   createTrainingContentStore,
@@ -695,6 +704,13 @@ let orgModuleEntitlementStore: OrgModuleEntitlementStore = createOrgModuleEntitl
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
 });
 let organizationProductSettingsStore: OrganizationProductSettingsStore = createOrganizationProductSettingsStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
+let customerPracticeScenarioStore: CustomerPracticeScenarioStore = createCustomerPracticeScenarioStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
@@ -1876,6 +1892,7 @@ interface SimulationRuntimeBundle {
   source: "standard" | "custom";
   segment: SegmentDefinition;
   scenario: Scenario;
+  scenarioVersionId: string | null;
   difficulty: Difficulty;
   personaStyle: PersonaStyle;
   industryId: string | null;
@@ -1914,6 +1931,7 @@ async function resolveSimulationRuntimeBundle(params: {
   let directTopicScenarioAttached = false;
   let anchoredTrainingPackId: string | null = null;
   let hasRegisteredAssignmentSession = false;
+  let registeredScenarioVersionId: string | null = null;
   let assignmentAuthorizedScenario: ResolvedMobileScenarioContext | null = null;
   let assignmentUsesTopicConfig = false;
   if (runtimeConfig.focusTopicAuthority === "assignments" && !params.isSuperUser) {
@@ -1937,6 +1955,7 @@ async function resolveSimulationRuntimeBundle(params: {
       authoritativeTrainingId = registered.trainingId ?? null;
       directTopicScenarioAttached = Boolean(authoritativeTrainingId);
       anchoredTrainingPackId = registered.trainingPackId ?? null;
+      registeredScenarioVersionId = registered.scenarioVersionId ?? null;
       assignmentUsesTopicConfig = true;
     } else {
       if (params.requireRegisteredSession && params.trainingId) {
@@ -1992,6 +2011,7 @@ async function resolveSimulationRuntimeBundle(params: {
   if (cacheResult.status === "hit" && cacheResult.value) {
     return {
       ...cacheResult.value,
+      scenarioVersionId: cacheResult.value.scenarioVersionId ?? null,
       cacheStatus: "hit",
       cacheReason: null,
       contextBuildMs: 0,
@@ -2006,9 +2026,39 @@ async function resolveSimulationRuntimeBundle(params: {
   );
   const effectiveDifficulty = params.difficulty ?? configForUser.defaultDifficulty;
   const effectivePersonaStyle = params.personaStyle ?? configForUser.defaultPersonaStyle;
-  const resolvedScenario = assignmentAuthorizedScenario ?? resolveMobileScenarioForUser(
+  let resolvedScenario = assignmentAuthorizedScenario ?? resolveMobileScenarioForUser(
     configForUser, params.scenarioId, authoritativeTrainingId, { directTopicScenarioAttached },
   );
+  if (registeredScenarioVersionId && params.actingOrgId) {
+    const version = await customerPracticeScenarioStore.getVersion(
+      params.actingOrgId, params.scenarioId, registeredScenarioVersionId,
+    );
+    const segment = version
+      ? configForUser.segments.find((entry) => entry.id === version.segmentId && entry.enabled === true)
+      : null;
+    if (!version || !segment) {
+      params.response.status(404).json({ error: "Simulation scenario version is not available." });
+      return null;
+    }
+    resolvedScenario = {
+      source: "custom",
+      segment,
+      scenario: {
+        id: params.scenarioId,
+        segmentId: version.segmentId,
+        title: version.title,
+        summary: buildScenarioSummary(version.description),
+        description: version.description,
+        desiredOutcome: version.desiredOutcome ?? undefined,
+        aiRole: version.aiRole,
+        enabled: true,
+      },
+      scenarioVersionId: version.id,
+      canonicalTrainingId: authoritativeTrainingId,
+      allowedIndustryIds: version.applicableIndustryIds,
+      scoringGuidance: version.scoringGuidance,
+    };
+  }
   if (!resolvedScenario) {
     const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
       configForUser,
@@ -2075,6 +2125,7 @@ async function resolveSimulationRuntimeBundle(params: {
     source: resolvedScenario.source,
     segment: resolvedScenario.segment,
     scenario: resolvedScenario.scenario,
+    scenarioVersionId: resolvedScenario.scenarioVersionId,
     difficulty: effectiveDifficulty,
     personaStyle: effectivePersonaStyle,
     industryId: industryPromptContext.industryId,
@@ -2114,6 +2165,7 @@ async function resolveSimulationRuntimeBundle(params: {
     {
       segment: runtimeBundle.segment,
       scenario: runtimeBundle.scenario,
+      scenarioVersionId: runtimeBundle.scenarioVersionId,
       source: runtimeBundle.source,
       difficulty: runtimeBundle.difficulty,
       personaStyle: runtimeBundle.personaStyle,
@@ -2747,6 +2799,20 @@ function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: num
         : PLATFORM_ADMIN_ACTOR_ID,
     createdAt,
     updatedAt,
+    customerScenarioVersionId:
+      typeof candidate.customerScenarioVersionId === "string" && candidate.customerScenarioVersionId.trim()
+        ? candidate.customerScenarioVersionId.trim()
+        : null,
+    customerScenarioVersionNumber:
+      typeof candidate.customerScenarioVersionNumber === "number"
+        && Number.isSafeInteger(candidate.customerScenarioVersionNumber)
+        && candidate.customerScenarioVersionNumber > 0
+        ? candidate.customerScenarioVersionNumber
+        : null,
+    homeFocusTopicId:
+      typeof candidate.homeFocusTopicId === "string" && candidate.homeFocusTopicId.trim()
+        ? candidate.homeFocusTopicId.trim()
+        : null,
   };
 }
 
@@ -4993,6 +5059,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
         userEmployeeIdClaimStore,
         orgModuleEntitlementStore,
         organizationProductSettingsStore,
+        customerPracticeScenarioStore,
         userNotificationStore,
         trainingContentStore,
         focusTopicAuthorityStore,
@@ -8604,6 +8671,80 @@ function createCentralContentTransactionGuard(params: {
   };
 }
 
+function createCustomerScenarioTransactionGuard(params: {
+  orgId: string;
+  actorId: string;
+  topicId: string;
+  requireFullAuthority: boolean;
+  requireCreationEnabled: boolean;
+}): (client: AppStateTransactionClient) => Promise<void> {
+  return async (client) => {
+    const stateResult = await client.query<{ state_json: unknown }>(
+      "SELECT state_json FROM app_state WHERE id = 'primary' FOR SHARE",
+    );
+    const currentDb = ensureDatabaseShape(stateResult.rows[0]?.state_json);
+    const organization = getOrgById(currentDb, params.orgId);
+    const actor = getUserById(currentDb, params.actorId);
+    if (!organization || organization.status !== "active" || !actor
+      || actor.accountType !== "enterprise" || actor.orgId !== organization.id
+      || actor.status !== "active" || !actor.emailVerifiedAt) {
+      throw new CustomerPracticeScenarioStoreError(
+        "Practice Scenario administration is no longer available for this account.",
+        "scenario_scope_denied", 403,
+      );
+    }
+    const topic = findOrgTrainingRecord(currentDb, organization.id, params.topicId);
+    if (!topic || topic.status === "archived") {
+      throw new CustomerPracticeScenarioStoreError("Focus Topic not found.", "scenario_topic_not_found", 404);
+    }
+    const settingsResult = await client.query<{
+      allow_customer_scenario_creation: boolean;
+      allow_user_admin_focus_topic_management: boolean;
+      allow_manager_focus_topic_management: boolean;
+    }>(
+      `SELECT allow_customer_scenario_creation, allow_user_admin_focus_topic_management,
+              allow_manager_focus_topic_management
+       FROM organization_product_settings WHERE org_id=$1 FOR SHARE`,
+      [organization.id],
+    );
+    const stored = settingsResult.rows[0];
+    if (params.requireCreationEnabled && stored?.allow_customer_scenario_creation !== true) {
+      throw new CustomerPracticeScenarioStoreError(
+        "Customer Practice Scenario creation is not enabled for this organization.",
+        "scenario_creation_disabled", 403,
+      );
+    }
+    const assignmentsResult = await client.query<{
+      id: string; org_id: string; topic_id: string; audience: FocusTopicAssignmentAudience;
+      subject_user_id: string | null; grants_management: boolean; created_by: string;
+      created_at: string | Date; revoked_by: string | null; revoked_at: string | Date | null;
+    }>("SELECT * FROM focus_topic_assignments WHERE org_id=$1 FOR SHARE", [organization.id]);
+    const assignments: FocusTopicAssignment[] = assignmentsResult.rows.map((row) => ({
+      id: row.id, orgId: row.org_id, topicId: row.topic_id, audience: row.audience,
+      subjectUserId: row.subject_user_id, grantsManagement: row.grants_management,
+      createdBy: row.created_by, createdAt: new Date(row.created_at).toISOString(),
+      revokedBy: row.revoked_by,
+      revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+    }));
+    const scope = resolveFocusTopicManagementScope({
+      db: currentDb, actor, organization,
+      topics: currentDb.orgTrainings.filter((entry) => entry.orgId === organization.id),
+      assignments,
+      productSettings: {
+        allowUserAdminFocusTopicManagement: stored?.allow_user_admin_focus_topic_management === true,
+        allowManagerFocusTopicManagement: stored?.allow_manager_focus_topic_management === true,
+      },
+    });
+    if ((params.requireFullAuthority && !scope.canManageAllTopics)
+      || (!scope.canManageAllTopics && !scope.manageableTopicIds.has(topic.id))) {
+      throw new CustomerPracticeScenarioStoreError(
+        "Practice Scenario administration is not available for this Focus Topic.",
+        "scenario_scope_denied", 403,
+      );
+    }
+  };
+}
+
 async function assertScopedAttachAllowedInTransaction(params: {
   client: AppStateTransactionClient;
   orgId: string;
@@ -8735,21 +8876,30 @@ function buildTopicScopedTrainingContentResources(params: {
 }): ResolvedTrainingContentManagementResources | null {
   const principal = params.request.dashboard;
   if (!principal) return null;
+  const authority = resolveTopicWorkspaceContentAuthority({
+    canManageAllTopics: params.management.scope.canManageAllTopics,
+    topicId: params.topic.id,
+  });
   return {
     context: {
       orgId: params.management.org.id,
       actorId: principal.user.id,
       capabilities: principal.viewer.capabilities,
       actorType: "web_user",
-      authorityScope: "focus_topic",
-      authorityTopicId: params.topic.id,
-      transactionGuard: createScopedContentTransactionGuard({
-        orgId: params.management.org.id,
-        actorId: principal.user.id,
-        topicId: params.topic.id,
-        contentId: params.contentId,
-        enforceExclusiveScope: !params.management.scope.canManageAllTopics,
-      }),
+      authorityScope: authority.authorityScope,
+      authorityTopicId: authority.authorityTopicId,
+      transactionGuard: authority.authorityScope === "organization"
+        ? createCentralContentTransactionGuard({
+            orgId: params.management.org.id,
+            actorId: principal.user.id,
+          })
+        : createScopedContentTransactionGuard({
+            orgId: params.management.org.id,
+            actorId: principal.user.id,
+            topicId: params.topic.id,
+            contentId: params.contentId,
+            enforceExclusiveScope: authority.enforceExclusiveScope,
+          }),
     },
     references: {
       users: params.db.users.filter((user) =>
@@ -10263,6 +10413,7 @@ interface ResolvedMobileScenarioContext {
   source: "standard" | "custom";
   segment: SegmentDefinition;
   scenario: Scenario;
+  scenarioVersionId: string | null;
   canonicalTrainingId: string | null;
   allowedIndustryIds: IndustryId[];
   scoringGuidance: string | null;
@@ -10299,6 +10450,7 @@ function resolveMobileScenarioForUser(
       source: "standard",
       segment,
       scenario,
+      scenarioVersionId: null,
       canonicalTrainingId: null,
       allowedIndustryIds,
       scoringGuidance: null,
@@ -10337,6 +10489,7 @@ function resolveMobileScenarioForUser(
     source: "custom",
     segment,
     scenario: buildRuntimeScenarioFromOrgCustomScenario(customScenario, segment.label),
+    scenarioVersionId: customScenario.customerScenarioVersionId?.trim() || null,
     canonicalTrainingId: normalizedTrainingId || null,
     allowedIndustryIds: uniqueStrings(customScenario.applicableIndustryIds) as IndustryId[],
     scoringGuidance: customScenario.scoringGuidance?.trim() || null,
@@ -17520,6 +17673,471 @@ app.get(
   },
 );
 
+function respondWithCustomerPracticeScenarioError(error: unknown, response: Response): void {
+  if (error instanceof CustomerPracticeScenarioStoreError) {
+    response.status(error.statusCode).json({ error: error.message, code: error.code });
+    return;
+  }
+  throw error;
+}
+
+function validateCustomerPracticeScenarioDraft(
+  db: ApiDatabase,
+  org: EnterpriseOrg,
+  input: CustomerPracticeScenarioDraftRequest,
+): void {
+  const segmentId = typeof input.segmentId === "string" ? input.segmentId.trim() : "";
+  const segment = db.config.segments.find((entry) => entry.id === segmentId && entry.enabled === true);
+  if (!segment) {
+    throw new CustomerPracticeScenarioStoreError("The selected role is not available.", "scenario_validation_failed");
+  }
+  const allowedIndustryIds = new Set((db.config.industries ?? [])
+    .filter((entry) => entry.enabled)
+    .map((entry) => entry.id));
+  const requestedIndustryIds = Array.isArray(input.applicableIndustryIds)
+    ? uniqueStrings(input.applicableIndustryIds)
+    : [];
+  if (requestedIndustryIds.length === 0
+    || requestedIndustryIds.some((industryId) => !allowedIndustryIds.has(industryId))) {
+    throw new CustomerPracticeScenarioStoreError(
+      "Choose at least one enabled industry for this organization.", "scenario_validation_failed",
+    );
+  }
+  const roleAvailable = (db.config.roleIndustries ?? []).some((entry) => entry.active
+    && entry.roleId === segment.id && requestedIndustryIds.includes(entry.industryId));
+  if (!roleAvailable) {
+    throw new CustomerPracticeScenarioStoreError(
+      "The selected role and industries are not available together.", "scenario_validation_failed",
+    );
+  }
+  if (org.status !== "active") {
+    throw new CustomerPracticeScenarioStoreError("Organization not found.", "scenario_scope_denied", 404);
+  }
+}
+
+function buildPublishedCustomerScenarioProjection(
+  scenario: CustomerPracticeScenario,
+  publishedAt: string,
+): OrgCustomScenario {
+  const version = scenario.currentVersion;
+  return {
+    id: scenario.id,
+    orgId: scenario.orgId,
+    segmentId: version.segmentId,
+    title: version.title,
+    summary: buildScenarioSummary(version.description),
+    description: version.description,
+    desiredOutcome: version.desiredOutcome ?? undefined,
+    aiRole: version.aiRole,
+    scoringGuidance: version.scoringGuidance,
+    applicableIndustryIds: version.applicableIndustryIds,
+    enabled: true,
+    provenance: version.provenance,
+    createdBy: scenario.createdByActorId,
+    createdAt: scenario.createdAt,
+    updatedAt: publishedAt,
+    customerScenarioVersionId: version.id,
+    customerScenarioVersionNumber: version.versionNumber,
+    homeFocusTopicId: scenario.homeFocusTopicId,
+  };
+}
+
+async function resolveCustomerScenarioRouteContext(
+  db: ApiDatabase,
+  request: ContentOrganizationAuthRequest,
+  response: Response,
+): Promise<{
+  management: FocusTopicManagementContext;
+  topic: OrgTrainingRecord;
+  actorId: string;
+  settings: Awaited<ReturnType<OrganizationProductSettingsStore["get"]>>;
+} | null> {
+  if (!request.dashboard || runtimeConfig.focusTopicAuthority !== "assignments") {
+    response.status(403).json({
+      error: "Customer Practice Scenario management requires dashboard Topic authority.",
+      code: "scenario_scope_denied",
+    });
+    return null;
+  }
+  const management = await resolveFocusTopicManagementContext(
+    db, request, request.params.orgId, response, request.params.trainingId,
+  );
+  if (!management) return null;
+  const topic = findOrgTrainingRecord(db, management.org.id, request.params.trainingId);
+  if (!topic || topic.status === "archived") {
+    response.status(404).json({ error: "Focus Topic not found." });
+    return null;
+  }
+  return {
+    management,
+    topic,
+    actorId: request.dashboard.user.id,
+    settings: await organizationProductSettingsStore.get(management.org.id),
+  };
+}
+
+app.get(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const context = await withFreshDatabaseSnapshotRead(async (db) => {
+      const routeContext = await resolveCustomerScenarioRouteContext(db, request, response);
+      return routeContext ? {
+        ...routeContext,
+        roleOptions: db.config.segments.filter((entry) => entry.enabled)
+          .map((entry) => ({ id: entry.id, label: entry.label })),
+        industryOptions: (db.config.industries ?? []).filter((entry) => entry.enabled)
+          .map((entry) => ({ id: entry.id, label: entry.label })),
+      } : null;
+    });
+    if (!context || response.headersSent) return;
+    const scenarios = await customerPracticeScenarioStore.listByTopic(
+      context.management.org.id, context.topic.id,
+    );
+    const payload: CustomerPracticeScenarioListResponse = {
+      topicId: context.topic.id,
+      scenarios,
+      roleOptions: context.roleOptions,
+      industryOptions: context.industryOptions,
+      editableScenarioIds: scenarios
+        .filter((scenario) => context.management.scope.canManageAllTopics
+          || scenario.createdByActorId === context.actorId)
+        .map((scenario) => scenario.id),
+      permissions: {
+        creationEnabled: context.settings.allowCustomerScenarioCreation,
+        approvalRequired: context.settings.requireOrgAdminScenarioApproval,
+        canAuthor: context.settings.allowCustomerScenarioCreation,
+        canReviewAndPublish: context.management.scope.canManageAllTopics,
+      },
+    };
+    response.json(payload);
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const scenarioId = `cps_${uuid()}`;
+    const versionId = `cpsv_${uuid()}`;
+    try {
+      const result = await withDatabase(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.settings.allowCustomerScenarioCreation) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Customer Practice Scenario creation is not enabled for this organization.",
+            "scenario_creation_disabled", 403,
+          );
+        }
+        const draft = request.body as CustomerPracticeScenarioDraftRequest;
+        validateCustomerPracticeScenarioDraft(db, context.management.org, draft);
+        const now = new Date();
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Practice Scenario creation requires PostgreSQL.");
+          await customerPracticeScenarioStore.createDraft({
+            orgId: context.management.org.id, scenarioId, versionId,
+            homeFocusTopicId: context.topic.id, actorId: context.actorId,
+            draft, now,
+            guard: createCustomerScenarioTransactionGuard({
+              orgId: context.management.org.id, actorId: context.actorId,
+              topicId: context.topic.id, requireFullAuthority: false,
+              requireCreationEnabled: true,
+            }),
+          }, client);
+        });
+        appendWebAuditEvent(db, request.dashboard!.user, {
+          action: "focus_topic.practice_scenario.created",
+          orgId: context.management.org.id,
+          message: "Created a draft customer Practice Scenario.",
+          metadata: { topicId: context.topic.id, scenarioId, versionId },
+        });
+        return { orgId: context.management.org.id };
+      });
+      if (!result || response.headersSent) return;
+      response.status(201).json(await customerPracticeScenarioStore.get(result.orgId, scenarioId));
+    } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios/:scenarioId/revisions",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const versionId = `cpsv_${uuid()}`;
+    try {
+      const result = await withDatabase(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.settings.allowCustomerScenarioCreation) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Customer Practice Scenario creation is not enabled for this organization.",
+            "scenario_creation_disabled", 403,
+          );
+        }
+        const existing = await customerPracticeScenarioStore.get(
+          context.management.org.id, request.params.scenarioId,
+        );
+        if (!existing || existing.homeFocusTopicId !== context.topic.id) {
+          throw new CustomerPracticeScenarioStoreError("Practice Scenario not found.", "scenario_not_found", 404);
+        }
+        if (!context.management.scope.canManageAllTopics && existing.createdByActorId !== context.actorId) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Scoped Topic managers may revise only scenarios they authored.", "scenario_scope_denied", 403,
+          );
+        }
+        const draft = request.body as CustomerPracticeScenarioDraftRequest;
+        validateCustomerPracticeScenarioDraft(db, context.management.org, draft);
+        const now = new Date();
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Practice Scenario revision requires PostgreSQL.");
+          await customerPracticeScenarioStore.createRevision({
+            orgId: context.management.org.id, scenarioId: existing.id, versionId,
+            actorId: context.actorId, draft, now,
+            guard: createCustomerScenarioTransactionGuard({
+              orgId: context.management.org.id, actorId: context.actorId,
+              topicId: context.topic.id, requireFullAuthority: false,
+              requireCreationEnabled: true,
+            }),
+          }, client);
+        });
+        appendWebAuditEvent(db, request.dashboard!.user, {
+          action: "focus_topic.practice_scenario.revised", orgId: context.management.org.id,
+          message: "Created a new immutable Practice Scenario revision.",
+          metadata: { topicId: context.topic.id, scenarioId: existing.id, versionId },
+        });
+        return { orgId: context.management.org.id, scenarioId: existing.id };
+      });
+      if (!result || response.headersSent) return;
+      response.json(await customerPracticeScenarioStore.get(result.orgId, result.scenarioId));
+    } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios/:scenarioId/submit",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    try {
+      const result = await withDatabase(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        const existing = await customerPracticeScenarioStore.get(context.management.org.id, request.params.scenarioId);
+        if (!existing || existing.homeFocusTopicId !== context.topic.id) {
+          throw new CustomerPracticeScenarioStoreError("Practice Scenario not found.", "scenario_not_found", 404);
+        }
+        if (!context.management.scope.canManageAllTopics && existing.createdByActorId !== context.actorId) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Scoped Topic managers may submit only scenarios they authored.", "scenario_scope_denied", 403,
+          );
+        }
+        const now = new Date();
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Practice Scenario submission requires PostgreSQL.");
+          await customerPracticeScenarioStore.submit({
+            orgId: context.management.org.id, scenarioId: existing.id,
+            actorId: context.actorId,
+            approvalRequired: context.settings.requireOrgAdminScenarioApproval,
+            now,
+            guard: createCustomerScenarioTransactionGuard({
+              orgId: context.management.org.id, actorId: context.actorId,
+              topicId: context.topic.id, requireFullAuthority: false,
+              requireCreationEnabled: true,
+            }),
+          }, client);
+        });
+        appendWebAuditEvent(db, request.dashboard!.user, {
+          action: "focus_topic.practice_scenario.submitted", orgId: context.management.org.id,
+          message: context.settings.requireOrgAdminScenarioApproval
+            ? "Submitted a Practice Scenario for Org Admin review."
+            : "Submitted and approved a Practice Scenario under organization policy.",
+          metadata: { topicId: context.topic.id, scenarioId: existing.id,
+            approvalRequired: context.settings.requireOrgAdminScenarioApproval },
+        });
+        return { orgId: context.management.org.id, scenarioId: existing.id };
+      });
+      if (!result || response.headersSent) return;
+      response.json(await customerPracticeScenarioStore.get(result.orgId, result.scenarioId));
+    } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
+  },
+);
+
+for (const decision of ["approve", "reject"] as const) {
+  app.post(
+    `/orgs/:orgId/trainings/:trainingId/practice-scenarios/:scenarioId/${decision}`,
+    requireContentOrganizationAuth,
+    async (request: ContentOrganizationAuthRequest, response: Response) => {
+      try {
+        const result = await withDatabase(async (db) => {
+          const context = await resolveCustomerScenarioRouteContext(db, request, response);
+          if (!context || response.headersSent) return null;
+          if (!context.management.scope.canManageAllTopics) {
+            throw new CustomerPracticeScenarioStoreError(
+              "Only an Organization Admin can review Practice Scenarios.", "scenario_scope_denied", 403,
+            );
+          }
+          const existing = await customerPracticeScenarioStore.get(context.management.org.id, request.params.scenarioId);
+          if (!existing || existing.homeFocusTopicId !== context.topic.id) {
+            throw new CustomerPracticeScenarioStoreError("Practice Scenario not found.", "scenario_not_found", 404);
+          }
+          const now = new Date();
+          queueRequiredTransactionSideWrite(db, async (client) => {
+            if (!client) throw new Error("Practice Scenario review requires PostgreSQL.");
+            await customerPracticeScenarioStore.review({
+              orgId: context.management.org.id, scenarioId: existing.id,
+              actorId: context.actorId, decision,
+              reviewNote: (request.body as { reviewNote?: unknown })?.reviewNote as string | null,
+              now,
+              guard: createCustomerScenarioTransactionGuard({
+                orgId: context.management.org.id, actorId: context.actorId,
+                topicId: context.topic.id, requireFullAuthority: true,
+                requireCreationEnabled: false,
+              }),
+            }, client);
+          });
+          appendWebAuditEvent(db, request.dashboard!.user, {
+            action: decision === "approve"
+              ? "focus_topic.practice_scenario.approved"
+              : "focus_topic.practice_scenario.rejected",
+            orgId: context.management.org.id,
+            message: `${decision === "approve" ? "Approved" : "Rejected"} a Practice Scenario revision.`,
+            metadata: { topicId: context.topic.id, scenarioId: existing.id,
+              versionId: existing.currentVersionId },
+          });
+          return { orgId: context.management.org.id, scenarioId: existing.id };
+        });
+        if (!result || response.headersSent) return;
+        response.json(await customerPracticeScenarioStore.get(result.orgId, result.scenarioId));
+      } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
+    },
+  );
+}
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios/:scenarioId/publish",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    try {
+      const result = await withDatabase(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.management.scope.canManageAllTopics) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Only an Organization Admin can publish Practice Scenarios.", "scenario_scope_denied", 403,
+          );
+        }
+        if (!context.settings.allowCustomerScenarioCreation) {
+          throw new CustomerPracticeScenarioStoreError(
+            "New Practice Scenario publication is disabled for this organization.",
+            "scenario_creation_disabled", 403,
+          );
+        }
+        const existing = await customerPracticeScenarioStore.get(context.management.org.id, request.params.scenarioId);
+        if (!existing || existing.homeFocusTopicId !== context.topic.id) {
+          throw new CustomerPracticeScenarioStoreError("Practice Scenario not found.", "scenario_not_found", 404);
+        }
+        if (existing.status !== "approved" || existing.approvedVersionId !== existing.currentVersionId) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Only the approved current revision can be published.", "scenario_not_approved", 409,
+          );
+        }
+        const now = new Date();
+        const nowValue = now.toISOString();
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Practice Scenario publication requires PostgreSQL.");
+          await customerPracticeScenarioStore.publish({
+            orgId: context.management.org.id, scenarioId: existing.id,
+            actorId: context.actorId, now,
+            guard: createCustomerScenarioTransactionGuard({
+              orgId: context.management.org.id, actorId: context.actorId,
+              topicId: context.topic.id, requireFullAuthority: true,
+              requireCreationEnabled: true,
+            }),
+          }, client);
+          const attachment = await client.query<{ id: string }>(
+            `SELECT id FROM focus_topic_scenario_attachments
+             WHERE org_id=$1 AND topic_id=$2 AND scenario_kind='org' AND scenario_id=$3
+               AND detached_at IS NULL FOR SHARE`,
+            [context.management.org.id, context.topic.id, existing.id],
+          );
+          if (!attachment.rows[0]) {
+            await focusTopicAuthorityStore.attachScenario({
+              id: `ftsa_${uuid()}`, orgId: context.management.org.id,
+              topicId: context.topic.id, scenarioKind: "org", scenarioId: existing.id,
+              attachedBy: context.actorId, attachedAt: nowValue,
+              detachedBy: null, detachedAt: null,
+            }, client);
+          }
+        });
+        const projection = buildPublishedCustomerScenarioProjection(existing, nowValue);
+        context.management.org.customScenarios = sortOrgCustomScenariosByTitle([
+          ...ensureOrgCustomScenarioCollection(context.management.org)
+            .filter((entry) => entry.id !== existing.id),
+          projection,
+        ]);
+        appendWebAuditEvent(db, request.dashboard!.user, {
+          action: "focus_topic.practice_scenario.published", orgId: context.management.org.id,
+          message: "Published an approved customer Practice Scenario version.",
+          metadata: { topicId: context.topic.id, scenarioId: existing.id,
+            versionId: existing.currentVersionId, versionNumber: existing.currentVersion.versionNumber },
+        });
+        emitMobileUpdateForOrg(db, context.management.org.id, "org");
+        return { orgId: context.management.org.id, scenarioId: existing.id };
+      });
+      if (!result || response.headersSent) return;
+      response.json(await customerPracticeScenarioStore.get(result.orgId, result.scenarioId));
+    } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios/:scenarioId/archive",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    try {
+      const result = await withDatabase(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.management.scope.canManageAllTopics) {
+          throw new CustomerPracticeScenarioStoreError(
+            "Only an Organization Admin can archive Practice Scenarios.", "scenario_scope_denied", 403,
+          );
+        }
+        const existing = await customerPracticeScenarioStore.get(context.management.org.id, request.params.scenarioId);
+        if (!existing || existing.homeFocusTopicId !== context.topic.id) {
+          throw new CustomerPracticeScenarioStoreError("Practice Scenario not found.", "scenario_not_found", 404);
+        }
+        const now = new Date();
+        queueRequiredTransactionSideWrite(db, async (client) => {
+          if (!client) throw new Error("Practice Scenario archive requires PostgreSQL.");
+          await customerPracticeScenarioStore.archive({
+            orgId: context.management.org.id, scenarioId: existing.id,
+            actorId: context.actorId, now,
+            guard: createCustomerScenarioTransactionGuard({
+              orgId: context.management.org.id, actorId: context.actorId,
+              topicId: context.topic.id, requireFullAuthority: true,
+              requireCreationEnabled: false,
+            }),
+          }, client);
+        });
+        context.management.org.customScenarios = sortOrgCustomScenariosByTitle(
+          ensureOrgCustomScenarioCollection(context.management.org).map((entry) =>
+            entry.id === existing.id ? { ...entry, enabled: false, updatedAt: now.toISOString() } : entry),
+        );
+        appendWebAuditEvent(db, request.dashboard!.user, {
+          action: "focus_topic.practice_scenario.archived", orgId: context.management.org.id,
+          message: "Archived a customer Practice Scenario while preserving its version history.",
+          metadata: { topicId: context.topic.id, scenarioId: existing.id },
+        });
+        emitMobileUpdateForOrg(db, context.management.org.id, "org");
+        return { orgId: context.management.org.id, scenarioId: existing.id };
+      });
+      if (!result || response.headersSent) return;
+      response.json(await customerPracticeScenarioStore.get(result.orgId, result.scenarioId));
+    } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
+  },
+);
+
 async function resolveTopicScopedContentRouteResources(
   request: ContentOrganizationAuthRequest,
   response: Response,
@@ -23604,6 +24222,31 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     } else {
       resolvedScenario = resolveMobileScenarioForUser(configForUser, scenarioId, authoritativeTrainingId);
     }
+    if (assignmentSession?.scenarioVersionId && accessContext.actingOrgId) {
+      const version = await customerPracticeScenarioStore.getVersion(
+        accessContext.actingOrgId, scenarioId, assignmentSession.scenarioVersionId,
+      );
+      const segment = version
+        ? configForUser.segments.find((entry) => entry.id === version.segmentId && entry.enabled === true)
+        : null;
+      if (!version || !segment) {
+        response.status(404).json({ error: "Simulation scenario version is not available." });
+        return null;
+      }
+      resolvedScenario = {
+        source: "custom",
+        segment,
+        scenario: {
+          id: scenarioId, segmentId: version.segmentId, title: version.title,
+          summary: buildScenarioSummary(version.description), description: version.description,
+          desiredOutcome: version.desiredOutcome ?? undefined, aiRole: version.aiRole, enabled: true,
+        },
+        scenarioVersionId: version.id,
+        canonicalTrainingId: authoritativeTrainingId,
+        allowedIndustryIds: version.applicableIndustryIds,
+        scoringGuidance: version.scoringGuidance,
+      };
+    }
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
@@ -25594,6 +26237,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         divisionId,
         segmentId: body.segmentId,
         scenarioId: body.scenarioId,
+        scenarioVersionId: resolvedScenario.scenarioVersionId,
         trainingId: canonicalTrainingId,
         trainingPackId: persistedTrainingPack?.id ?? null,
         clientStartedAt: parsedClientStartedAt?.toISOString() ?? null,
@@ -26593,6 +27237,7 @@ export async function startApiServer(): Promise<void> {
       userEmployeeIdClaimStore,
       orgModuleEntitlementStore,
       organizationProductSettingsStore,
+      customerPracticeScenarioStore,
       userNotificationStore,
       trainingContentStore,
       focusTopicAuthorityStore,

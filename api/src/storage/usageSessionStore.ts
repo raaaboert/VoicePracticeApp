@@ -55,6 +55,7 @@ interface UsageSessionRow {
   division_id: string | null;
   segment_id: string;
   scenario_id: string;
+  scenario_version_id: string | null;
   training_id: string | null;
   training_pack_id: string | null;
   started_at: string | Date;
@@ -141,6 +142,7 @@ function normalizeUsageSessionRecord(candidate: unknown): UsageSessionRecord | n
     divisionId: normalizeNullableString((candidate as { divisionId?: unknown }).divisionId) ?? undefined,
     segmentId,
     scenarioId,
+    scenarioVersionId: normalizeNullableString((candidate as { scenarioVersionId?: unknown }).scenarioVersionId) ?? undefined,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
     trainingPackId: normalizeNullableString((candidate as { trainingPackId?: unknown }).trainingPackId) ?? undefined,
     startedAt,
@@ -270,6 +272,7 @@ function mapUsageSessionRow(row: UsageSessionRow): UsageSessionRecord | null {
     divisionId: row.division_id,
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
+    scenarioVersionId: row.scenario_version_id,
     trainingId: row.training_id,
     trainingPackId: row.training_pack_id,
     startedAt: row.started_at,
@@ -709,6 +712,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
               division_id TEXT NULL,
               segment_id TEXT NOT NULL,
               scenario_id TEXT NOT NULL,
+              scenario_version_id TEXT NULL,
               training_id TEXT NULL,
               training_pack_id TEXT NULL,
               started_at TIMESTAMPTZ NOT NULL,
@@ -719,10 +723,13 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             );
 
             ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
+            ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS scenario_version_id TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_user_id ON usage_sessions (user_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_id ON usage_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_training_pack_id ON usage_sessions (training_pack_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_scenario_id ON usage_sessions (scenario_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_sessions_scenario_version_id
+              ON usage_sessions (scenario_version_id) WHERE scenario_version_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_segment_id ON usage_sessions (segment_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_started_at ON usage_sessions (started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_ended_at ON usage_sessions (ended_at DESC);
@@ -745,6 +752,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           division_id,
           segment_id,
           scenario_id,
+          scenario_version_id,
           training_id,
           training_pack_id,
           started_at,
@@ -791,6 +799,7 @@ async function upsertUsageSessionRow(
         division_id,
         segment_id,
         scenario_id,
+        scenario_version_id,
         training_id,
         training_pack_id,
         started_at,
@@ -800,8 +809,8 @@ async function upsertUsageSessionRow(
         created_at
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8,
-        $9::timestamptz, $10::timestamptz, $11, $12, $13::timestamptz
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz
       )
       ON CONFLICT (id) DO UPDATE
         SET user_id = EXCLUDED.user_id,
@@ -809,6 +818,7 @@ async function upsertUsageSessionRow(
             division_id = EXCLUDED.division_id,
             segment_id = EXCLUDED.segment_id,
             scenario_id = EXCLUDED.scenario_id,
+            scenario_version_id = EXCLUDED.scenario_version_id,
             training_id = EXCLUDED.training_id,
             training_pack_id = EXCLUDED.training_pack_id,
             started_at = EXCLUDED.started_at,
@@ -824,6 +834,7 @@ async function upsertUsageSessionRow(
       record.divisionId ?? null,
       record.segmentId,
       record.scenarioId,
+      record.scenarioVersionId ?? null,
       record.trainingId ?? null,
       record.trainingPackId ?? null,
       record.startedAt,
