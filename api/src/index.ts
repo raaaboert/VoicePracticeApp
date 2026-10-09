@@ -297,6 +297,7 @@ import {
 } from "./services/focusTopicManagementPolicy.js";
 import { buildTopicAssignedNotificationInputs } from "./services/topicAssignedNotifications.js";
 import { buildFocusTopicContentAttachedNotificationInputs } from "./services/focusTopicContentNotifications.js";
+import { canScopedActorAttachContent } from "./services/focusTopicContentManagementPolicy.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
 import { createTrainingContentScenarioLinkService } from "./services/trainingContentScenarioLinks.js";
 import { createTrainingContentCategoryStore } from "./storage/trainingContentCategoryStore.js";
@@ -16682,14 +16683,18 @@ app.get(
 );
 
 app.post(
-  "/orgs/:orgId/trainings/:trainingId/assignments",
+  [
+    "/orgs/:orgId/trainings/:trainingId/assignments",
+    "/orgs/:orgId/trainings/:trainingId/management-grants",
+  ],
   requireContentOrganizationAuth,
   async (request: ContentOrganizationAuthRequest, response: Response) => {
     if (runtimeConfig.focusTopicAuthority !== "assignments") {
       response.status(409).json({ error: "Direct Focus Topic assignments are not active in this environment." });
       return;
     }
-    const body = request.body as { audience?: unknown; subjectUserId?: unknown; grantsManagement?: unknown };
+    const grantsManagement = request.path.endsWith("/management-grants");
+    const body = request.body as { audience?: unknown; subjectUserId?: unknown };
     if (!FOCUS_TOPIC_ASSIGNMENT_AUDIENCES.includes(body.audience as FocusTopicAssignmentAudience)) {
       response.status(400).json({ error: "Invalid Focus Topic audience." });
       return;
@@ -16697,7 +16702,6 @@ app.post(
     const audience = body.audience as FocusTopicAssignmentAudience;
     const targeted = audience === "manager_only" || audience === "manager_with_team" || audience === "individual";
     const subjectUserId = typeof body.subjectUserId === "string" ? body.subjectUserId.trim() : null;
-    const grantsManagement = body.grantsManagement === true;
     if (targeted !== Boolean(subjectUserId)) {
       response.status(400).json({ error: "Audience subject is invalid." });
       return;
@@ -16741,8 +16745,10 @@ app.post(
         grantsManagement, createdBy: actorId, createdAt: createdAt.toISOString(),
         revokedBy: null, revokedAt: null,
       };
-      const authorityBefore = await focusTopicAuthorityStore.listSnapshot(org.id);
-      const notificationInputs = buildTopicAssignedNotificationInputs({
+      const authorityBefore = grantsManagement
+        ? null
+        : await focusTopicAuthorityStore.listSnapshot(org.id);
+      const notificationInputs = authorityBefore === null ? [] : buildTopicAssignedNotificationInputs({
         db, topic,
         assignmentsBefore: authorityBefore.assignments,
         assignmentsAfter: [...authorityBefore.assignments, assignment],
@@ -16752,6 +16758,9 @@ app.post(
         if (!client) throw new Error("Focus Topic assignment transaction requires PostgreSQL.");
         await focusTopicAuthorityStore.createAssignment(assignment, client);
         await userNotificationStore.enqueueMany(notificationInputs, { client });
+        if (grantsManagement && subjectUserId) {
+          await webAuthSessionStore.revokeUserSessions(subjectUserId, client);
+        }
       });
       const audit = {
         action: grantsManagement ? "focus_topic.management_grant.created" : "focus_topic.assignment.created",
@@ -16781,13 +16790,17 @@ app.post(
 );
 
 app.delete(
-  "/orgs/:orgId/trainings/:trainingId/assignments/:assignmentId",
+  [
+    "/orgs/:orgId/trainings/:trainingId/assignments/:assignmentId",
+    "/orgs/:orgId/trainings/:trainingId/management-grants/:assignmentId",
+  ],
   requireContentOrganizationAuth,
   async (request: ContentOrganizationAuthRequest, response: Response) => {
     if (runtimeConfig.focusTopicAuthority !== "assignments") {
       response.status(409).json({ error: "Direct Focus Topic assignments are not active in this environment." });
       return;
     }
+    const grantsManagement = request.path.includes("/management-grants/");
     const result = await withDatabase(async (db) => {
       const management = await resolveFocusTopicManagementContext(
         db, request, request.params.orgId, response, request.params.trainingId,
@@ -16801,7 +16814,8 @@ app.delete(
       }
       const snapshot = await focusTopicAuthorityStore.listSnapshot(org.id);
       const assignment = snapshot.assignments.find((row) => row.topicId === topic.id
-        && row.id === request.params.assignmentId && row.revokedAt === null);
+        && row.id === request.params.assignmentId && row.revokedAt === null
+        && row.grantsManagement === grantsManagement);
       if (!assignment) {
         response.status(404).json({ error: "Active Focus Topic assignment not found." });
         return null;
@@ -16813,6 +16827,9 @@ app.delete(
         await focusTopicAuthorityStore.revokeAssignment({
           orgId: org.id, topicId: topic.id, assignmentId: assignment.id, actorId, at,
         }, client);
+        if (assignment.grantsManagement && assignment.subjectUserId) {
+          await webAuthSessionStore.revokeUserSessions(assignment.subjectUserId, client);
+        }
       });
       const audit = {
         action: assignment.grantsManagement
@@ -16854,23 +16871,38 @@ app.get(
       return;
     }
     const { topic, management } = resolved;
-    const [authority, contentItems] = await Promise.all([
+    const [authority, contentAuthority] = await Promise.all([
       focusTopicAuthorityStore.listSnapshot(topic.orgId),
-      trainingContentStore.listContentItemsForOrg(topic.orgId),
+      trainingContentStore.listContentAuthorityForOrg(topic.orgId),
     ]);
+    const actorId = request.dashboard?.user.id ?? "platform_admin";
+    const attachedContentIds = new Set(authority.contentAttachments
+      .filter((row) => row.topicId === topic.id && row.detachedAt === null)
+      .map((row) => row.contentId));
+    const visibleContent = contentAuthority.filter((record) =>
+      management.scope.canManageAllTopics
+      || attachedContentIds.has(record.content.id)
+      || canScopedActorAttachContent({ actorId, record })
+    );
     response.json({
       topicId: topic.id,
       scenarios: authority.scenarioAttachments.filter((row) => row.topicId === topic.id),
       content: authority.contentAttachments.filter((row) => row.topicId === topic.id),
-      contentItems: contentItems.map((item) => ({
-        id: item.id,
-        title: item.title,
-        description: item.description,
-        contentType: item.contentType,
-        publicationState: item.publicationState,
-        archivedAt: item.archivedAt,
-        updatedAt: item.updatedAt,
-      })),
+      contentItems: visibleContent.map((record) => {
+        const item = record.content;
+        return {
+          id: item.id,
+          title: item.title,
+          description: item.description,
+          contentType: item.contentType,
+          publicationState: item.publicationState,
+          archivedAt: item.archivedAt,
+          updatedAt: item.updatedAt,
+          availableToAttach: item.archivedAt === null
+            && (management.scope.canManageAllTopics
+              || canScopedActorAttachContent({ actorId, record })),
+        };
+      }),
       permissions: {
         canManageRelatedContent: management.learningResourcesEnabled,
         canManageAllTopics: management.scope.canManageAllTopics,
@@ -16944,9 +16976,21 @@ app.post(
         return null;
       }
       const contentId = typeof body.contentId === "string" ? body.contentId.trim() : "";
-      const content = contentId ? await trainingContentStore.getContentItemForOrg(org.id, contentId) : null;
-      if (!content || content.archivedAt) {
-        response.status(400).json({ error: "Training Content item is not available in this organization." });
+      const authorityRecord = contentId
+        ? (await trainingContentStore.listContentAuthorityForOrg(org.id))
+          .find((record) => record.content.id === contentId)
+        : null;
+      const content = authorityRecord?.content ?? null;
+      const canAttach = Boolean(content && !content.archivedAt
+        && (management.scope.canManageAllTopics
+          || canScopedActorAttachContent({ actorId, record: authorityRecord! })));
+      if (!canAttach || !content) {
+        response.status(management.scope.canManageAllTopics ? 400 : 403).json({
+          error: management.scope.canManageAllTopics
+            ? "Training Content item is not available in this organization."
+            : "This Learning Resource is not available to attach.",
+          code: "focus_topic_content_attach_denied",
+        });
         return null;
       }
       const row = {
@@ -16954,7 +16998,7 @@ app.post(
         attachedBy: actorId, attachedAt, detachedBy: null, detachedAt: null,
       };
       const notificationInputs = buildFocusTopicContentAttachedNotificationInputs({
-        db, topic, content, attachmentId: row.id, createdAt: new Date(attachedAt),
+        db, topic, content, attachmentId: row.id, actorId, createdAt: new Date(attachedAt),
       });
       queueRequiredTransactionSideWrite(db, async (client) => {
         if (!client) throw new Error("Focus Topic attachment transaction requires PostgreSQL.");

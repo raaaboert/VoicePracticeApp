@@ -49,6 +49,21 @@ test("future learner authority fails closed for inactive, unverified, cross-org,
   assert.equal(evaluate(base,org,topic,{...assignment,revokedAt:NOW,revokedBy:"admin"}),false);
 });
 
+test("learner and management authority are independent for the same subject and Topic", () => {
+  const actor = user("actor", { orgRole: "user_admin" });
+  const learner = row("individual", actor.id);
+  const management = row("individual", actor.id, { id: "management", grantsManagement: true });
+  assert.equal(canFutureLearnerAccessFocusTopic({
+    user: actor, users: [actor], organization: org, topic, assignments: [management],
+  }), false);
+  assert.equal(canFutureLearnerAccessFocusTopic({
+    user: actor, users: [actor], organization: org, topic, assignments: [learner],
+  }), true);
+  assert.equal(canFutureLearnerAccessFocusTopic({
+    user: actor, users: [actor], organization: org, topic, assignments: [learner, management],
+  }), true);
+});
+
 test("future management requires explicit targeted grants plus current role/manager state and product switch", () => {
   const report=user("report",{managerUserId:"manager"});
   const manager=user("manager"); const userAdmin=user("user_admin",{orgRole:"user_admin"}); const admin=user("admin",{orgRole:"org_admin"});
@@ -60,7 +75,10 @@ test("future management requires explicit targeted grants plus current role/mana
   assert.equal(evaluate(userAdmin,[row("individual","user_admin")]),false);
   assert.equal(evaluate(userAdmin,[row("individual","user_admin",{grantsManagement:true})]),true);
   assert.equal(evaluate(userAdmin,[row("individual","user_admin",{grantsManagement:true})],{allowUserAdminFocusTopicManagement:false}),false);
-  assert.equal(evaluate(manager,[row("manager_with_team","manager",{grantsManagement:true})]),true);
+  assert.equal(evaluate(manager,[row("manager_with_team","manager",{grantsManagement:true})]),false);
+  assert.equal(evaluate(manager,[row("manager_only","manager",{grantsManagement:true})]),true);
+  assert.equal(evaluate(userAdmin,[row("manager_only","user_admin",{grantsManagement:true})]),false);
+  assert.equal(evaluate(user("demoted"),[row("individual","demoted",{grantsManagement:true})]),false);
   assert.equal(canFutureActorManageFocusTopic({actor:manager,users:[manager],organization:org,topic,assignments:[row("manager_only","manager",{grantsManagement:true})],productSettings:settings}),false);
   assert.equal(evaluate(report,[row("manager_with_team","manager",{grantsManagement:true})]),false);
   assert.equal(evaluate(manager,[row("manager_only","manager",{grantsManagement:true,orgId:"other"})]),false);

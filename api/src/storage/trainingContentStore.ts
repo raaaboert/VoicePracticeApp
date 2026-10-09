@@ -89,6 +89,12 @@ export interface TrainingContentManagementDetail extends TrainingContentManageme
   assignments: TrainingContentAssignment[];
 }
 
+export interface TrainingContentAuthorityRecord {
+  content: TrainingContentItem;
+  categoryArchivedAt: string | null;
+  assignments: TrainingContentAssignment[];
+}
+
 export interface TrainingContentManagementListResult {
   items: TrainingContentManagementListRow[];
   page: number;
@@ -206,6 +212,7 @@ export interface TransitionTrainingContentInput {
 export interface TrainingContentStore {
   initialize(): Promise<void>;
   listContentItemsForOrg(orgId: string): Promise<TrainingContentItem[]>;
+  listContentAuthorityForOrg(orgId: string): Promise<TrainingContentAuthorityRecord[]>;
   getContentItemForOrg(orgId: string, contentId: string): Promise<TrainingContentItem | null>;
   listActiveScenarioLinksForContent(
     orgId: string,
@@ -480,6 +487,10 @@ class NullTrainingContentStore implements TrainingContentStore {
     return [];
   }
 
+  async listContentAuthorityForOrg(): Promise<TrainingContentAuthorityRecord[]> {
+    return [];
+  }
+
   async getContentItemForOrg(): Promise<TrainingContentItem | null> {
     return null;
   }
@@ -678,6 +689,32 @@ class PostgresTrainingContentStore implements TrainingContentStore {
       [requiredId(orgId, "Organization id")]
     );
     return result.rows.map(mapContentItemRow);
+  }
+
+  async listContentAuthorityForOrg(orgId: string): Promise<TrainingContentAuthorityRecord[]> {
+    await this.initialize();
+    const normalizedOrgId = requiredId(orgId, "Organization id");
+    const result = await this.pool.query<TrainingContentItemRow & {
+      category_archived_at: string | Date | null;
+    }>(
+      `SELECT c.*, category.archived_at AS category_archived_at
+       FROM org_content_items c
+       INNER JOIN org_content_categories category
+         ON category.org_id = c.org_id AND category.id = c.category_id
+       WHERE c.org_id = $1
+       ORDER BY c.display_order ASC, c.updated_at DESC, c.id ASC`,
+      [normalizedOrgId],
+    );
+    const assignments = await listActiveAssignments(
+      this.pool,
+      normalizedOrgId,
+      result.rows.map((row) => row.id),
+    );
+    return result.rows.map((row) => ({
+      content: mapContentItemRow(row),
+      categoryArchivedAt: optionalIso(row.category_archived_at),
+      assignments: assignments.get(row.id) ?? [],
+    }));
   }
 
   async getContentItemForOrg(orgId: string, contentId: string): Promise<TrainingContentItem | null> {

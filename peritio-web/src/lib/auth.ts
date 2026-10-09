@@ -842,6 +842,7 @@ export interface DashboardFocusTopicContentItem {
   publicationState: string;
   archivedAt: string | null;
   updatedAt: string;
+  availableToAttach: boolean;
 }
 
 export interface DashboardFocusTopicContentAttachment {
@@ -892,12 +893,24 @@ export async function createDashboardFocusTopicAssignment(
   orgId: string, topicId: string, input: {
     audience: DashboardFocusTopicAssignment["audience"];
     subjectUserId: string | null;
-    grantsManagement?: boolean;
   },
 ) {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<DashboardFocusTopicAssignment>(
     `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignments`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function createDashboardFocusTopicManagementGrant(
+  orgId: string, topicId: string, input: {
+    audience: "individual" | "manager_only";
+    subjectUserId: string;
+  },
+) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicAssignment>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/management-grants`,
     { method: "POST", body: JSON.stringify(input), token },
   );
 }
@@ -935,6 +948,19 @@ export async function revokeDashboardFocusTopicAssignment(orgId: string, topicId
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<DashboardFocusTopicAssignment>(
     `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignments/${encodeURIComponent(assignmentId)}`,
+    { method: "DELETE", token },
+  );
+}
+
+export async function revokeDashboardFocusTopicManagementGrant(
+  orgId: string,
+  topicId: string,
+  assignmentId: string,
+) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicAssignment>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/management-grants/${encodeURIComponent(assignmentId)}`,
     { method: "DELETE", token },
   );
 }

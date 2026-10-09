@@ -40,6 +40,18 @@ test("Topic assignment fan-out includes only current eligible audience and uses 
   assert.equal(rows.every((row) => row.kind === "topic_assigned" && row.subjectId === topic.id), true);
 });
 
+test("management grants do not produce learner assignment notifications", () => {
+  const management = {
+    ...assignment,
+    audience: "manager_only" as const,
+    grantsManagement: true,
+  };
+  assert.deepEqual(buildTopicAssignedNotificationInputs({
+    db, topic, assignmentsBefore: [], assignmentsAfter: [management],
+    eventKey: management.id, createdAt: new Date(NOW),
+  }), []);
+});
+
 test("Topic notification visibility rechecks current assignment, membership, and Topic status", () => {
   const row = buildTopicAssignedNotificationInputs({
     db, topic, assignmentsBefore: [], assignmentsAfter: [assignment],

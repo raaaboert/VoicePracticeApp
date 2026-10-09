@@ -86,7 +86,9 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const foreignOrg = { ...sourceOrg, id: "org_focus_foreign", name: "Local foreign organization",
         joinCode: "FOCUS-FOREIGN" };
       const user = { ...sourceUser, id: "user_focus_runtime", orgId: org.id,
-        email: "learner@focus-runtime.integration.test", divisionId: "division_runtime_a" };
+        email: "learner@focus-runtime.integration.test", divisionId: "division_runtime_a",
+        orgRole: "user" as const };
+      const scopedMobileToken = `local_${randomUUID()}`;
       org.divisionsEnabled = true;
       db.orgs = [org, foreignOrg];
       const scopedUserAdmin = {
@@ -94,10 +96,13 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         id: "user_focus_scoped_admin",
         orgId: org.id,
         email: "scoped-admin@focus-runtime.integration.test",
+        firstName: "Scoped",
+        lastName: "Admin",
         orgRole: "user_admin" as const,
         emailVerifiedAt: now,
         status: "active" as const,
         dashboardAccessEnabled: false,
+        mobileProfileReonboardingRequired: false,
       };
       const orgAdmin = {
         ...sourceUser,
@@ -108,7 +113,27 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         emailVerifiedAt: now,
         status: "active" as const,
       };
-      db.users = [user, scopedUserAdmin, orgAdmin];
+      const scopedManager = {
+        ...sourceUser,
+        id: "user_focus_scoped_manager",
+        orgId: org.id,
+        email: "scoped-manager@focus-runtime.integration.test",
+        orgRole: "user" as const,
+        emailVerifiedAt: now,
+        status: "active" as const,
+      };
+      const secondReport = {
+        ...sourceUser,
+        id: "user_focus_second_report",
+        orgId: org.id,
+        email: "second-report@focus-runtime.integration.test",
+        orgRole: "user" as const,
+        managerUserId: scopedManager.id,
+        emailVerifiedAt: now,
+        status: "active" as const,
+      };
+      user.managerUserId = scopedManager.id;
+      db.users = [user, secondReport, scopedManager, scopedUserAdmin, orgAdmin];
       user.firstName = "Test";
       user.lastName = "Learner";
       user.emailVerifiedAt = now;
@@ -116,6 +141,9 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       user.mobileProfileReonboardingRequired = false;
       db.mobileAuthTokens.push({ userId: user.id,
         tokenHash: createHmac("sha256", tokenSecret).update(token).digest("hex"),
+        createdAt: now, updatedAt: now });
+      db.mobileAuthTokens.push({ userId: scopedUserAdmin.id,
+        tokenHash: createHmac("sha256", tokenSecret).update(scopedMobileToken).digest("hex"),
         createdAt: now, updatedAt: now });
       const segment = db.config.segments.find((candidate) => candidate.id === "solution_manager");
       const scenario = segment?.scenarios.find((candidate) => candidate.enabled !== false);
@@ -164,6 +192,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const categoryId = randomUUID();
       const foreignCategoryId = randomUUID();
       const contentId = randomUUID();
+      const restrictedContentId = randomUUID();
       const foreignContentId = randomUUID();
       await pool.query(`INSERT INTO org_content_categories
         (id,org_id,name,description,display_order,is_default,created_by_actor_id,updated_by_actor_id,created_at,updated_at)
@@ -175,10 +204,20 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           display_order,content_version,created_by_actor_id,updated_by_actor_id,created_at,updated_at)
         VALUES ($1,$2,$3,'Scoped content','', 'native','published','Content body',0,1,
           'platform_admin','platform_admin',$4,$4),
+          ($8,$2,$3,'Restricted content','', 'native','published','Restricted body',1,1,
+          'platform_admin','platform_admin',$4,$4),
           ($5,$6,$7,'Foreign content','', 'native','published','Foreign body',0,1,
           'platform_admin','platform_admin',$4,$4)`,
-      [contentId, org.id, categoryId, now, foreignContentId, foreignOrg.id, foreignCategoryId]);
-      assert.equal((await storage.load()).users.some((candidate) => candidate.id === user.id), true);
+      [contentId, org.id, categoryId, now, foreignContentId, foreignOrg.id, foreignCategoryId,
+        restrictedContentId]);
+      await pool.query(`INSERT INTO org_content_assignments
+        (id,org_id,content_id,assignment_type,subject_user_id,created_by_actor_id,created_at)
+        VALUES ($1,$2,$3,'organization',NULL,'platform_admin',$4)`,
+      [randomUUID(), org.id, contentId, now]);
+      const loadedAfterSeed = await storage.load();
+      assert.equal(loadedAfterSeed.users.some((candidate) => candidate.id === user.id), true);
+      assert.equal(loadedAfterSeed.users.filter((candidate) =>
+        candidate.managerUserId === scopedManager.id && candidate.status === "active").length, 2);
       const persistedUsers = await pool.query<{ ids: string[] }>(
         "SELECT ARRAY(SELECT jsonb_array_elements(state_json->'users')->>'id') AS ids FROM app_state WHERE id='primary'");
       assert.equal(persistedUsers.rows[0]?.ids.includes(user.id), true);
@@ -245,6 +284,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         return { status: response.status, body: await response.json() as Record<string, unknown> };
       };
       const assignmentsPath = `/orgs/${org.id}/trainings/${topic.id}/assignments`;
+      const managementPath = `/orgs/${org.id}/trainings/${topic.id}/management-grants`;
       const attachmentsPath = `/orgs/${org.id}/trainings/${topic.id}/direct-attachments`;
       const attachmentCountBefore = await pool.query<{ count: string }>(
         "SELECT COUNT(*)::text AS count FROM focus_topic_scenario_attachments");
@@ -259,12 +299,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         audience: "individual", subjectUserId: "foreign_user",
       });
       assert.equal(invalidSubject.status, 400);
-      const masterCreated = await masterCall(assignmentsPath, "POST", {
-        audience: "organization", subjectUserId: null, grantsManagement: true,
-      });
-      assert.equal(masterCreated.status, 400, JSON.stringify(masterCreated.body));
-      const managementGrant = await masterCall(assignmentsPath, "POST", {
-        audience: "individual", subjectUserId: scopedUserAdmin.id, grantsManagement: true,
+      const managementGrant = await masterCall(managementPath, "POST", {
+        audience: "individual", subjectUserId: scopedUserAdmin.id,
       });
       assert.equal(managementGrant.status, 201, JSON.stringify(managementGrant.body));
       assert.equal(managementGrant.body.grantsManagement, true);
@@ -272,15 +308,46 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         "SELECT 1 FROM focus_topic_assignments WHERE id=$1 AND grants_management=TRUE",
         [managementGrant.body.id],
       )).rowCount, 1);
+      const scopedCatalogBeforeLearner = await fetch(
+        `${base}/mobile/users/${scopedUserAdmin.id}/focus-topics`,
+        { headers: { Authorization: `Bearer ${scopedMobileToken}` } },
+      );
+      assert.equal(scopedCatalogBeforeLearner.status, 200);
+      assert.deepEqual(((await scopedCatalogBeforeLearner.json()) as {
+        topics: Array<{ id: string }>;
+      }).topics, []);
+      assert.equal((await pool.query(
+        "SELECT 1 FROM user_notifications WHERE kind='topic_assigned' AND recipient_user_id=$1",
+        [scopedUserAdmin.id],
+      )).rowCount, 0);
+      const scopedLearnerAssignment = await masterCall(assignmentsPath, "POST", {
+        audience: "individual", subjectUserId: scopedUserAdmin.id, grantsManagement: true,
+      });
+      assert.equal(scopedLearnerAssignment.status, 201, JSON.stringify(scopedLearnerAssignment.body));
+      assert.equal(scopedLearnerAssignment.body.grantsManagement, false);
+      assert.equal((await masterCall(managementPath, "POST", {
+        audience: "individual", subjectUserId: scopedUserAdmin.id,
+      })).status, 409);
+      assert.equal((await masterCall(assignmentsPath, "POST", {
+        audience: "individual", subjectUserId: scopedUserAdmin.id,
+      })).status, 409);
+      const scopedCatalogWithLearner = await fetch(
+        `${base}/mobile/users/${scopedUserAdmin.id}/focus-topics`,
+        { headers: { Authorization: `Bearer ${scopedMobileToken}` } },
+      );
+      assert.deepEqual(((await scopedCatalogWithLearner.json()) as {
+        topics: Array<{ id: string }>;
+      }).topics.map((entry) => entry.id), [topic.id]);
       const productSettings = createOrganizationProductSettingsStore({
         provider: "postgres", databaseUrl: url, pgPoolMax: 3,
         pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
       });
       await productSettings.initialize();
       await pool.query(`INSERT INTO organization_product_settings (
-        org_id, allow_user_admin_focus_topic_management, updated_at
-      ) VALUES ($1, TRUE, NOW())
-      ON CONFLICT (org_id) DO UPDATE SET allow_user_admin_focus_topic_management=TRUE, updated_at=NOW()`,
+        org_id, allow_user_admin_focus_topic_management, allow_manager_focus_topic_management, updated_at
+      ) VALUES ($1, TRUE, TRUE, NOW())
+      ON CONFLICT (org_id) DO UPDATE SET allow_user_admin_focus_topic_management=TRUE,
+        allow_manager_focus_topic_management=TRUE, updated_at=NOW()`,
       [org.id]);
       const scopedWebAuth = createWebAuthService({
         tokenSecret: process.env.WEB_AUTH_TOKEN_SECRET!,
@@ -297,6 +364,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         },
       );
       await scopedWebAuthStore.saveSession(scopedSession.record);
+      let scopedSessionToken = scopedSession.token;
       const orgAdminSession = scopedWebAuth.issueSession(
         orgAdmin, 60, new Date(), {
           accessType: "customer_dashboard_user", orgId: org.id,
@@ -306,7 +374,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const dashboardCall = async (
         sessionToken: string,
         path: string,
-        method: "GET" | "POST" | "DELETE" = "GET",
+        method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
         body?: Record<string, unknown>,
       ) => {
         const response = await fetch(base + path, {
@@ -319,10 +387,35 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         });
         return { status: response.status, body: await response.json() as Record<string, unknown> };
       };
-      const scopedCall = (path: string, method: "GET" | "POST" | "DELETE" = "GET",
-        body?: Record<string, unknown>) => dashboardCall(scopedSession.token, path, method, body);
-      const orgAdminCall = (path: string, method: "GET" | "POST" | "DELETE" = "GET",
+      const scopedCall = (path: string, method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
+        body?: Record<string, unknown>) => dashboardCall(scopedSessionToken, path, method, body);
+      const orgAdminCall = (path: string, method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
         body?: Record<string, unknown>) => dashboardCall(orgAdminSession.token, path, method, body);
+      const managerGrant = await masterCall(managementPath, "POST", {
+        audience: "manager_only", subjectUserId: scopedManager.id,
+      });
+      assert.equal(managerGrant.status, 201, JSON.stringify(managerGrant.body));
+      const managerSession = scopedWebAuth.issueSession(
+        scopedManager, 60, new Date(), {
+          accessType: "customer_dashboard_user", orgId: org.id,
+        },
+      );
+      await scopedWebAuthStore.saveSession(managerSession.record);
+      assert.equal((await dashboardCall(
+        managerSession.token, `/orgs/${org.id}/trainings`,
+      )).status, 200);
+      const afterFirstReportLoss = await storage.load();
+      afterFirstReportLoss.users.find((candidate) => candidate.id === secondReport.id)!.managerUserId = null;
+      await storage.save(afterFirstReportLoss);
+      assert.equal((await dashboardCall(
+        managerSession.token, `/orgs/${org.id}/trainings`,
+      )).status, 200);
+      const afterFinalReportLoss = await storage.load();
+      afterFinalReportLoss.users.find((candidate) => candidate.id === user.id)!.managerUserId = null;
+      await storage.save(afterFinalReportLoss);
+      assert.equal((await dashboardCall(
+        managerSession.token, `/orgs/${org.id}/trainings`,
+      )).status, 403);
       const scopedTopics = await scopedCall(`/orgs/${org.id}/trainings`);
       assert.equal(scopedTopics.status, 200, JSON.stringify(scopedTopics.body));
       assert.deepEqual(
@@ -333,6 +426,37 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         ((scopedTopics.body.management as { canManageAllTopics: boolean }).canManageAllTopics),
         false,
       );
+      await pool.query(`UPDATE organization_product_settings
+        SET allow_user_admin_focus_topic_management=FALSE, updated_at=NOW() WHERE org_id=$1`, [org.id]);
+      assert.equal((await scopedCall(`/orgs/${org.id}/trainings`)).status, 403);
+      await pool.query(`UPDATE organization_product_settings
+        SET allow_user_admin_focus_topic_management=TRUE, updated_at=NOW() WHERE org_id=$1`, [org.id]);
+      const switchRestoredSession = scopedWebAuth.issueSession(scopedUserAdmin, 60, new Date(), {
+        accessType: "customer_dashboard_user", orgId: org.id,
+      });
+      await scopedWebAuthStore.saveSession(switchRestoredSession.record);
+      scopedSessionToken = switchRestoredSession.token;
+      assert.equal((await scopedCall(`/orgs/${org.id}/trainings`)).status, 200);
+      assert.equal((await masterCall(`/users/${scopedUserAdmin.id}`, "PATCH", {
+        orgRole: "user",
+      })).status, 200);
+      const demotedSession = scopedWebAuth.issueSession(
+        { ...scopedUserAdmin, orgRole: "user" }, 60, new Date(), {
+          accessType: "customer_dashboard_user", orgId: org.id,
+        },
+      );
+      await scopedWebAuthStore.saveSession(demotedSession.record);
+      scopedSessionToken = demotedSession.token;
+      assert.equal((await scopedCall(`/orgs/${org.id}/trainings`)).status, 403);
+      assert.equal((await masterCall(`/users/${scopedUserAdmin.id}`, "PATCH", {
+        orgRole: "user_admin",
+      })).status, 200);
+      const roleRestoredSession = scopedWebAuth.issueSession(scopedUserAdmin, 60, new Date(), {
+        accessType: "customer_dashboard_user", orgId: org.id,
+      });
+      await scopedWebAuthStore.saveSession(roleRestoredSession.record);
+      scopedSessionToken = roleRestoredSession.token;
+      assert.equal((await scopedCall(`/orgs/${org.id}/trainings`)).status, 200);
       assert.equal((await scopedCall(`/orgs/${org.id}/trainings`, "POST", {
         name: "Denied Topic", description: "", status: "draft",
       })).status, 403);
@@ -349,12 +473,39 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         (relatedBefore.body.contentItems as Array<{ id: string }>).map((entry) => entry.id),
         [contentId],
       );
+      const restrictedAttach = await scopedCall(attachmentsPath, "POST", {
+        kind: "content", contentId: restrictedContentId,
+      });
+      assert.equal(restrictedAttach.status, 403, JSON.stringify(restrictedAttach.body));
+      const adminRestrictedAttachment = await orgAdminCall(attachmentsPath, "POST", {
+        kind: "content", contentId: restrictedContentId,
+      });
+      assert.equal(adminRestrictedAttachment.status, 201, JSON.stringify(adminRestrictedAttachment.body));
+      const relatedWithRestrictedAttachment = await scopedCall(attachmentsPath);
+      const relatedItems = relatedWithRestrictedAttachment.body.contentItems as Array<{
+        id: string; availableToAttach: boolean;
+      }>;
+      assert.deepEqual(relatedItems.map((entry) => entry.id), [contentId, restrictedContentId]);
+      assert.equal(relatedItems.find((entry) => entry.id === restrictedContentId)?.availableToAttach, false);
+      assert.equal((await scopedCall(
+        `${attachmentsPath}/${adminRestrictedAttachment.body.id as string}`, "DELETE",
+      )).status, 200);
       const scopedAttached = await scopedCall(attachmentsPath, "POST", { kind: "content", contentId });
       assert.equal(scopedAttached.status, 201, JSON.stringify(scopedAttached.body));
       assert.equal((await scopedCall(attachmentsPath, "POST", { kind: "content", contentId })).status, 409);
       assert.equal((await scopedCall(attachmentsPath, "POST", {
         kind: "content", contentId: foreignContentId,
-      })).status, 400);
+      })).status, 403);
+      for (const [path, method, body] of [
+        ["/dashboard/admin/training-content", "POST", {}],
+        [`/dashboard/admin/training-content/${contentId}`, "PATCH", {}],
+        [`/dashboard/admin/training-content/${contentId}/publish`, "POST", {}],
+        [`/dashboard/admin/training-content/${contentId}/archive`, "POST", {}],
+        [`/dashboard/admin/training-content/${contentId}/assignments`, "PUT", {}],
+        [`/dashboard/admin/training-content/${contentId}/assets/uploads`, "POST", {}],
+      ] as const) {
+        assert.equal((await scopedCall(path, method, body)).status, 403, `${method} ${path}`);
+      }
       const unmanagedAttachmentsPath = `/orgs/${org.id}/trainings/${unmanagedTopic.id}/direct-attachments`;
       assert.equal((await scopedCall(unmanagedAttachmentsPath, "POST", {
         kind: "content", contentId,
@@ -376,14 +527,14 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       ]);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.content.attached'",
-      )).rowCount, 2);
+      )).rowCount, 3);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.attachment.detached'",
-      )).rowCount, 1);
+      )).rowCount, 2);
       assert.equal((await pool.query(
         "SELECT 1 FROM user_notifications WHERE kind='content_added' AND recipient_user_id=$1",
         [orgAdmin.id],
-      )).rowCount, 2);
+      )).rowCount, 1);
       await moduleEntitlements.setOrgModuleEntitlement({
         orgId: org.id, moduleKey: "training_content", enabled: false,
         updatedByActorId: "platform_admin", updatedAt: new Date(),
@@ -400,7 +551,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const masterCreatedBody = learnerCreated.body;
       assert.equal(masterCreatedBody.grantsManagement, false);
       const createdId = masterCreatedBody.id as string;
-      assert.equal((await pool.query("SELECT 1 FROM audit_events WHERE action='focus_topic.assignment.created'")).rowCount, 1);
+      assert.equal((await pool.query("SELECT 1 FROM audit_events WHERE action='focus_topic.assignment.created'")).rowCount, 2);
       assert.ok(((await pool.query("SELECT 1 FROM user_notifications WHERE kind='topic_assigned'")).rowCount ?? 0) >= 1);
       const duplicateAssignment = await masterCall(assignmentsPath, "POST", {
         audience: "organization", subjectUserId: null,
@@ -413,12 +564,56 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await pool.query("SELECT 1 FROM focus_topic_assignments WHERE id=$1 AND revoked_at IS NOT NULL",
         [createdId])).rowCount, 1);
       const revokedManagement = await masterCall(
-        `${assignmentsPath}/${managementGrant.body.id as string}`,
+        `${managementPath}/${managementGrant.body.id as string}`,
         "DELETE",
       );
       assert.equal(revokedManagement.status, 200, JSON.stringify(revokedManagement.body));
+      const learnerAfterManagementRevoke = await fetch(
+        `${base}/mobile/users/${scopedUserAdmin.id}/focus-topics`,
+        { headers: { Authorization: `Bearer ${scopedMobileToken}` } },
+      );
+      assert.deepEqual(((await learnerAfterManagementRevoke.json()) as {
+        topics: Array<{ id: string }>;
+      }).topics.map((entry) => entry.id), [topic.id]);
       const staleScopedRequest = await scopedCall(`/orgs/${org.id}/trainings`);
-      assert.equal(staleScopedRequest.status, 403, JSON.stringify(staleScopedRequest.body));
+      assert.equal(staleScopedRequest.status, 401, JSON.stringify(staleScopedRequest.body));
+      const preRegrantSession = scopedWebAuth.issueSession(
+        scopedUserAdmin, 60, new Date(), {
+          accessType: "customer_dashboard_user", orgId: org.id,
+        },
+      );
+      await scopedWebAuthStore.saveSession(preRegrantSession.record);
+      const regrantedManagement = await masterCall(managementPath, "POST", {
+        audience: "individual", subjectUserId: scopedUserAdmin.id,
+      });
+      assert.equal(regrantedManagement.status, 201, JSON.stringify(regrantedManagement.body));
+      assert.equal((await dashboardCall(
+        preRegrantSession.token, `/orgs/${org.id}/trainings`,
+      )).status, 401);
+      const freshScopedSession = scopedWebAuth.issueSession(
+        scopedUserAdmin, 60, new Date(), {
+          accessType: "customer_dashboard_user", orgId: org.id,
+        },
+      );
+      await scopedWebAuthStore.saveSession(freshScopedSession.record);
+      assert.equal((await dashboardCall(
+        freshScopedSession.token, `/orgs/${org.id}/trainings`,
+      )).status, 200);
+      const learnerRevoked = await masterCall(
+        `${assignmentsPath}/${scopedLearnerAssignment.body.id as string}`,
+        "DELETE",
+      );
+      assert.equal(learnerRevoked.status, 200, JSON.stringify(learnerRevoked.body));
+      const learnerAfterLearnerRevoke = await fetch(
+        `${base}/mobile/users/${scopedUserAdmin.id}/focus-topics`,
+        { headers: { Authorization: `Bearer ${scopedMobileToken}` } },
+      );
+      assert.deepEqual(((await learnerAfterLearnerRevoke.json()) as {
+        topics: Array<{ id: string }>;
+      }).topics, []);
+      assert.equal((await dashboardCall(
+        freshScopedSession.token, `/orgs/${org.id}/trainings`,
+      )).status, 200);
 
       const prefetchSessionId = `prefetch_${randomUUID()}`;
       const originalFetch = globalThis.fetch;

@@ -120,14 +120,33 @@ test("revoked, cross-organization, inactive, and moved-user grants fail closed",
 test("Manager management disappears with the switch, grant, or final active report", () => {
   const actor = user("actor");
   const report = user("report", { managerUserId: actor.id });
+  const secondReport = user("second_report", { managerUserId: actor.id });
   const managerGrant = grant({ audience: "manager_only" });
   assert.equal(scope({ actor, users: [actor, report], assignments: [managerGrant] }).manageableTopicIds.size, 0);
   assert.equal(scope({ actor, users: [actor, report], managerSwitch: true }).manageableTopicIds.size, 0);
   assert.deepEqual([...scope({
-    actor, users: [actor, report], assignments: [managerGrant], managerSwitch: true,
+    actor, users: [actor, report, secondReport], assignments: [managerGrant], managerSwitch: true,
+  }).manageableTopicIds], ["topic_a"]);
+  assert.deepEqual([...scope({
+    actor, users: [actor, { ...report, status: "disabled" }, secondReport],
+    assignments: [managerGrant], managerSwitch: true,
   }).manageableTopicIds], ["topic_a"]);
   assert.equal(scope({
     actor, users: [actor, { ...report, status: "disabled" }], assignments: [managerGrant], managerSwitch: true,
+  }).manageableTopicIds.size, 0);
+});
+
+test("management grants are never reinterpreted across User Admin and Manager role paths", () => {
+  const report = user("report", { managerUserId: "actor" });
+  const individualGrant = grant({ audience: "individual", subjectUserId: "actor" });
+  const managerGrant = grant({ audience: "manager_only", subjectUserId: "actor" });
+  assert.equal(scope({
+    actor: user("actor"), users: [user("actor"), report], assignments: [individualGrant],
+    managerSwitch: true,
+  }).manageableTopicIds.size, 0);
+  assert.equal(scope({
+    actor: user("actor", { orgRole: "user_admin" }), assignments: [managerGrant],
+    userAdminSwitch: true,
   }).manageableTopicIds.size, 0);
 });
 

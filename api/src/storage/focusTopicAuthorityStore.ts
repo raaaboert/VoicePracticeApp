@@ -179,8 +179,8 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
     }
     const targeted = row.audience === "individual" || row.audience === "manager_only"
       || row.audience === "manager_with_team";
-    if (row.grantsManagement && !targeted) {
-      throw new Error("Focus Topic management grants must use a targeted audience.");
+    if (row.grantsManagement && row.audience !== "individual" && row.audience !== "manager_only") {
+      throw new Error("Focus Topic management grants must use individual or manager_only audience.");
     }
     const inserted = await client.query<AssignmentRow>(
       `INSERT INTO focus_topic_assignments (
@@ -369,16 +369,39 @@ function requiredId(value:string,label:string):string { const normalized=value.t
 function requiredRow<T>(value:T|undefined,label:string):T { if(!value)throw new Error(`${label} was not found.`); return value; }
 async function rollbackQuietly(client:Pick<PoolClient,"query">):Promise<void>{try{await client.query("ROLLBACK");}catch{}}
 
-async function initializeSchema(pool: Pick<Pool,"query">): Promise<void> {
+async function initializeSchema(pool: QueryPool): Promise<void> {
+  const migrations = await Promise.all([
+    readFocusTopicMigration("015_focus_topic_authority.sql"),
+    readFocusTopicMigration("017_focus_topic_management_authority.sql"),
+  ]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('peritio_focus_topic_authority_schema_v1', 0))",
+    );
+    for (const migration of migrations) await client.query(migration);
+    await client.query("COMMIT");
+  } catch (error) {
+    await rollbackQuietly(client);
+    throw new Error("Focus Topic authority migration SQL could not be applied.", { cause: error });
+  } finally {
+    client.release();
+  }
+}
+
+async function readFocusTopicMigration(filename: string): Promise<string> {
   const candidates = [
-    new URL("../../sql/015_focus_topic_authority.sql", import.meta.url),
-    new URL("../sql/015_focus_topic_authority.sql", import.meta.url),
+    new URL(`../../sql/${filename}`, import.meta.url),
+    new URL(`../sql/${filename}`, import.meta.url),
   ];
   let lastError: unknown;
   for (const candidate of candidates) {
-    try { await pool.query(await readFile(candidate,"utf8")); return; } catch (error) { lastError=error; }
+    try { return await readFile(candidate, "utf8"); } catch (error) { lastError = error; }
   }
-  throw new Error("Focus Topic authority migration SQL could not be applied.",{cause:lastError});
+  throw new Error(`Focus Topic authority migration ${filename} is missing from the runtime artifact.`, {
+    cause: lastError,
+  });
 }
 
 export function createFocusTopicAuthorityStore(params: {

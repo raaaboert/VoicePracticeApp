@@ -28,21 +28,27 @@ test("duplicate active content attachment classifier accepts only its PostgreSQL
 
 test("authority schema enforces audience subjects, management scope, historical uniqueness, and content organization FK",async()=>{
   const sql=await readFile(new URL("../../sql/015_focus_topic_authority.sql",import.meta.url),"utf8");
+  const correction=await readFile(new URL("../../sql/017_focus_topic_management_authority.sql",import.meta.url),"utf8");
   assert.match(sql,/focus_topic_assignments_subject_check/); assert.match(sql,/focus_topic_assignments_management_check/);
   assert.match(sql,/WHERE revoked_at IS NULL AND audience IN/); assert.match(sql,/focus_topic_scenario_attachments_active_uidx/);
   assert.match(sql,/FOREIGN KEY \(org_id, content_id\)[\s\S]*REFERENCES org_content_items \(org_id, id\)[\s\S]*ON DELETE RESTRICT/);
   assert.match(sql,/focus_topic_backfill_runs_signoff_check/); assert.doesNotMatch(sql,/CREATE TABLE IF NOT EXISTS focus_topics/);
   assert.doesNotMatch(sql,/ON DELETE CASCADE/);
+  assert.match(correction,/audience NOT IN \('individual', 'manager_only'\)/);
+  assert.match(correction,/subject_user_id,[\s\S]*grants_management/);
+  assert.match(correction,/DROP INDEX IF EXISTS focus_topic_assignments_active_targeted_uidx/);
+  assert.doesNotMatch(correction,/UPDATE focus_topic_assignments/);
 });
 
 test("store initialization applies additive schema and topic reference lookup covers all relation history",async()=>{
   const queries:string[]=[];
   const store=createFocusTopicAuthorityStore({provider:"postgres",databaseUrl:"postgres://test",pgPoolMax:1,pgConnectTimeoutMs:1,pgIdleTimeoutMs:1,queryPool:{
     async query(text:string){queries.push(text); return /AS referenced/.test(text)?{rows:[{referenced:true}],rowCount:1}:{rows:[],rowCount:0};},
-    async connect(){throw new Error("unused");},
+    async connect(){return {async query(text:string){queries.push(text);return{rows:[],rowCount:0};},release(){}};},
   } as any});
   await store.initialize(); assert.equal(await store.hasTopicReferences("org","topic"),true);
-  assert.match(queries[0]!,/CREATE TABLE IF NOT EXISTS focus_topic_assignments/);
+  assert.equal(queries.some((query)=>/CREATE TABLE IF NOT EXISTS focus_topic_assignments/.test(query)),true);
+  assert.equal(queries.some((query)=>/unsupported audience/.test(query)),true);
   assert.match(queries.at(-1)!,/org_content_topic_attachments/);
 });
 
@@ -60,8 +66,8 @@ test("backfill apply is transactional and idempotent while validation and signof
   const validTopicKeys=new Set(["org:topic"]);
   const first=await store.applyBackfillPlan({plan,validTopicKeys}); const second=await store.applyBackfillPlan({plan,validTopicKeys});
   assert.equal(first.signedOffAt,null); assert.equal(second.id,first.id);
-  assert.equal(queries.filter((query)=>query==="BEGIN").length,2);
-  assert.equal(queries.filter((query)=>query==="COMMIT").length,2);
+  assert.equal(queries.filter((query)=>query==="BEGIN").length,3);
+  assert.equal(queries.filter((query)=>query==="COMMIT").length,3);
   assert.equal(queries.some((query)=>/ON CONFLICT \(id\) DO NOTHING/.test(query)),true);
   assert.equal(queries.some((query)=>/ON CONFLICT \(run_version, schema_generation, input_fingerprint\)/.test(query)),true);
   await assert.rejects(store.markBackfillSignedOff({runId:first.id,signedOffBy:"reviewer"}),/Validated backfill run was not found/);

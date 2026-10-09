@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Pool } from "pg";
 import type { ApiDatabase, AuditEvent } from "@voicepractice/shared";
@@ -12,6 +13,48 @@ import { createUserNotificationStore } from "./userNotificationStore.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
 const NOW = "2026-10-07T12:00:00.000Z";
+
+test("real PostgreSQL authority correction rejects incompatible existing management rows",
+  { skip: !databaseUrl }, async () => {
+    assertThrowawayDatabase(databaseUrl);
+    const setup = new Pool({ connectionString: databaseUrl, max: 1 });
+    const schema = `focus_authority_invalid_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let pool: Pool | null = null;
+    try {
+      await setup.query(`CREATE SCHEMA ${quotedSchema}`);
+      const url = scopedUrl(databaseUrl, schema);
+      pool = new Pool({ connectionString: url, max: 2 });
+      await pool.query(`CREATE TABLE org_content_items (org_id TEXT NOT NULL, id UUID NOT NULL,
+        PRIMARY KEY (org_id, id))`);
+      await pool.query(await readFile(
+        new URL("../../sql/015_focus_topic_authority.sql", import.meta.url), "utf8",
+      ));
+      await pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+        VALUES ('invalid','org','topic','manager_with_team','manager',TRUE,'admin',$1)`, [NOW]);
+      const authority = createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await assert.rejects(authority.initialize(), (error: unknown) => {
+        const cause = error instanceof Error
+          ? (error as Error & { cause?: unknown }).cause
+          : null;
+        return error instanceof Error
+          && /migration SQL could not be applied/.test(error.message)
+          && cause instanceof Error
+          && /unsupported audience/.test(cause.message);
+      });
+      assert.equal((await pool.query(
+        "SELECT 1 FROM focus_topic_assignments WHERE id='invalid'",
+      )).rowCount, 1);
+    } finally {
+      await pool?.end();
+      await setup.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      await setup.end();
+    }
+  });
 
 function assertThrowawayDatabase(url: string): void {
   const parsed = new URL(url);
@@ -151,10 +194,35 @@ test("real PostgreSQL assignment governance, notification rollback, revocation h
       try {
         await managementClient.query("BEGIN");
         await authority.createAssignment(managementGrant, managementClient);
+        await authority.createAssignment({
+          ...managementGrant,
+          id: "manager_learner_assignment",
+          grantsManagement: false,
+        }, managementClient);
         await managementClient.query("COMMIT");
         await managementClient.query("BEGIN");
         await assert.rejects(authority.createAssignment({ ...managementGrant, id: "management_duplicate" }, managementClient));
         await managementClient.query("ROLLBACK");
+        await managementClient.query("BEGIN");
+        await assert.rejects(authority.createAssignment({
+          ...managementGrant,
+          id: "manager_learner_duplicate",
+          grantsManagement: false,
+        }, managementClient));
+        await managementClient.query("ROLLBACK");
+        await managementClient.query("BEGIN");
+        await assert.rejects(authority.createAssignment({
+          ...managementGrant,
+          id: "invalid_manager_team_management",
+          audience: "manager_with_team",
+        }, managementClient), /individual or manager_only/);
+        await managementClient.query("ROLLBACK");
+        await assert.rejects(pool.query(
+          `INSERT INTO focus_topic_assignments
+           (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+           VALUES ('invalid_broad_management','org','topic','organization',NULL,TRUE,'admin',$1)`,
+          [NOW],
+        ), /focus_topic_assignments_management_check/);
         await managementClient.query("BEGIN");
         await authority.revokeAssignment({
           orgId: "org", topicId: "topic", assignmentId: managementGrant.id,
@@ -169,6 +237,10 @@ test("real PostgreSQL assignment governance, notification rollback, revocation h
         ["management_1", true],
         ["management_2", false],
       ]);
+      const persistedLearner = (await authority.listSnapshot("org")).assignments.find(
+        (entry) => entry.id === "manager_learner_assignment",
+      );
+      assert.equal(persistedLearner?.revokedAt, null);
 
       const contentId = "11111111-1111-4111-8111-111111111111";
       await pool.query("INSERT INTO org_content_items (org_id,id) VALUES ('org',$1)", [contentId]);

@@ -37,6 +37,7 @@ export function buildFocusTopicContentAttachedNotificationInputs(params: {
   topic: Pick<OrgTrainingRecord, "id" | "orgId" | "name" | "status">;
   content: Pick<TrainingContentItem, "id" | "orgId" | "title" | "archivedAt">;
   attachmentId: string;
+  actorId: string;
   createdAt: Date;
 }): EnqueueUserNotificationInput[] {
   const org = params.db.orgs.find((candidate) => candidate.id === params.topic.orgId);
@@ -49,6 +50,7 @@ export function buildFocusTopicContentAttachedNotificationInputs(params: {
       && user.orgId === org.id
       && user.orgRole === "org_admin"
       && user.status === "active"
+      && user.id !== params.actorId
       && Boolean(user.emailVerifiedAt))
     .map((recipient) => ({
       orgId: org.id,

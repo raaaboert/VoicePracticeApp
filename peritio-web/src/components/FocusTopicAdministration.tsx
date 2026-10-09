@@ -69,7 +69,7 @@ export function FocusTopicAdministration({
     item: related?.contentItems.find((item) => item.id === attachment.contentId) ?? null,
   }));
   const availableContent = related?.contentItems.filter((item) =>
-    !item.archivedAt && !activeContentIds.has(item.id)) ?? [];
+    item.availableToAttach && !activeContentIds.has(item.id)) ?? [];
 
   const run = async (operation: () => Promise<void>) => {
     setBusy(true); setError(null); setMessage(null);
@@ -116,7 +116,7 @@ export function FocusTopicAdministration({
     if (!selected) return;
     const created = await action<DashboardFocusTopicAssignment>({
       action: "create_assignment", orgId, topicId: selected.id, audience,
-      subjectUserId: targeted ? subjectUserId : null, grantsManagement: false,
+      subjectUserId: targeted ? subjectUserId : null,
     });
     setAssignments((current) => [...current, created]); setSubjectUserId("");
     setMessage("Learner assignment created.");
@@ -126,18 +126,22 @@ export function FocusTopicAdministration({
     const subject = users.find((user) => user.userId === managementSubjectUserId);
     if (!subject) return;
     const created = await action<DashboardFocusTopicAssignment>({
-      action: "create_assignment", orgId, topicId: selected.id,
+      action: "create_management_grant", orgId, topicId: selected.id,
       audience: subject.orgRole === "user_admin" ? "individual" : "manager_only",
-      subjectUserId: subject.userId, grantsManagement: true,
+      subjectUserId: subject.userId,
     });
     setAssignments((current) => [...current, created]); setManagementSubjectUserId("");
     setMessage("Topic management grant created.");
   });
   const revokeAssignment = (assignmentId: string, management: boolean) => void run(async () => {
     if (!selected) return;
-    const revoked = await action<DashboardFocusTopicAssignment>({
-      action: "revoke_assignment", orgId, topicId: selected.id, assignmentId,
-    });
+    const revoked = management
+      ? await action<DashboardFocusTopicAssignment>({
+          action: "revoke_management_grant", orgId, topicId: selected.id, assignmentId,
+        })
+      : await action<DashboardFocusTopicAssignment>({
+          action: "revoke_assignment", orgId, topicId: selected.id, assignmentId,
+        });
     setAssignments((current) => current.map((row) => row.id === revoked.id ? revoked : row));
     setMessage(management ? "Topic management grant revoked." : "Learner assignment revoked.");
   });
@@ -279,7 +283,7 @@ export function FocusTopicAdministration({
       aria-labelledby="focus-topic-managers-heading">
       <div className="focus-topic-panel-heading"><div><p className="eyebrow">Scoped administration</p>
         <h3 id="focus-topic-managers-heading">Topic managers</h3>
-        <p className="muted-copy">Grant this Topic to one eligible User Admin or current Manager. Product switches still apply.</p>
+        <p className="muted-copy">Grant management of this Topic to an eligible User Admin or current Manager. Learner access is assigned separately.</p>
       </div></div>
       <div className="focus-topic-assignment-composer">
         <div className="focus-topic-field"><label htmlFor="focus-topic-manager-subject">Responsible actor</label>

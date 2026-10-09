@@ -45,6 +45,7 @@ export function canFutureLearnerAccessFocusTopic(params: {
   if (params.topic.orgId !== params.organization.id || params.topic.status !== "active") return false;
   return params.assignments.some((assignment) =>
     isActiveSameTopicAssignment(assignment, params.organization.id, params.topic.id)
+    && !assignment.grantsManagement
     && learnerAudienceMatches(assignment, params.user, params.users, params.organization.id)
   );
 }
@@ -65,18 +66,23 @@ export function canFutureActorManageFocusTopic(params: {
   if (topic.orgId !== organization.id || topic.status !== "active") return false;
   if (actor.orgRole === "org_admin") return true;
 
-  const hasExplicitGrant = params.assignments.some((assignment) =>
-    isActiveSameTopicAssignment(assignment, organization.id, topic.id)
-    && assignment.grantsManagement
-    && isTargetedAudience(assignment.audience)
-    && assignment.subjectUserId === actor.id
-  );
-  if (!hasExplicitGrant) return false;
   if (actor.orgRole === "user_admin") {
-    return params.productSettings.allowUserAdminFocusTopicManagement;
+    return params.productSettings.allowUserAdminFocusTopicManagement
+      && params.assignments.some((assignment) =>
+        isActiveSameTopicAssignment(assignment, organization.id, topic.id)
+        && assignment.grantsManagement
+        && assignment.audience === "individual"
+        && assignment.subjectUserId === actor.id
+      );
   }
   return params.productSettings.allowManagerFocusTopicManagement
-    && hasActiveDirectReport(actor.id, params.users, organization.id);
+    && hasActiveDirectReport(actor.id, params.users, organization.id)
+    && params.assignments.some((assignment) =>
+      isActiveSameTopicAssignment(assignment, organization.id, topic.id)
+      && assignment.grantsManagement
+      && assignment.audience === "manager_only"
+      && assignment.subjectUserId === actor.id
+    );
 }
 
 export function isActiveVerifiedMember(

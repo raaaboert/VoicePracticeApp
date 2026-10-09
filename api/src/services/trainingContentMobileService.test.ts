@@ -233,6 +233,13 @@ class FakeStore implements TrainingContentStore {
 
   async initialize(): Promise<void> {}
   async listContentItemsForOrg() { return this.records.map((entry) => entry.content); }
+  async listContentAuthorityForOrg() {
+    return this.records.map((entry) => ({
+      content: entry.content,
+      categoryArchivedAt: entry.category.archivedAt,
+      assignments: entry.assignments,
+    }));
+  }
   async getContentItemForOrg(_orgId: string, contentId: string) {
     return this.records.find((entry) => entry.content.id === contentId)?.content ?? null;
   }
