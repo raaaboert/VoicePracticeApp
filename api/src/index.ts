@@ -313,6 +313,10 @@ import {
   createTrainingContentAssetStore,
   TrainingContentAssetStore,
 } from "./storage/trainingContentAssetStore.js";
+import {
+  createTrainingContentTranscriptStore,
+  TrainingContentTranscriptStoreError,
+} from "./storage/trainingContentTranscriptStore.js";
 import { createTrainingContentObjectStorage } from "./storage/trainingContentObjectStorage.js";
 import { createTrainingContentBackupStorage } from "./storage/trainingContentBackupStorage.js";
 import { buildOrgModuleEntitlementsResponse } from "./services/organizationModules.js";
@@ -331,6 +335,10 @@ import {
   TrainingContentManagementService,
   TrainingContentReferenceData,
 } from "./services/trainingContentManagementService.js";
+import {
+  evaluateTrainingContentGenerationSource,
+  normalizeCustomerTranscript,
+} from "./services/trainingContentGenerationSourcePolicy.js";
 import {
   createTrainingContentMobileService,
   mapTrainingContentMobileServiceError,
@@ -8556,6 +8564,46 @@ function createScopedContentTransactionGuard(params: {
   };
 }
 
+function createCentralContentTransactionGuard(params: {
+  orgId: string;
+  actorId: string;
+}): (client: AppStateTransactionClient) => Promise<void> {
+  return async (client) => {
+    const stateResult = await client.query<{ state_json: unknown }>(
+      "SELECT state_json FROM app_state WHERE id = 'primary' FOR SHARE",
+    );
+    const currentDb = ensureDatabaseShape(stateResult.rows[0]?.state_json);
+    const organization = getOrgById(currentDb, params.orgId);
+    const actor = getUserById(currentDb, params.actorId);
+    const isCurrentSuperUser = actor?.isSuperUser === true && actor.status === "active";
+    const isCurrentOrganizationAdmin = organization?.status === "active"
+      && actor?.accountType === "enterprise"
+      && actor.orgId === organization.id
+      && actor.orgRole === "org_admin"
+      && actor.status === "active"
+      && Boolean(actor.emailVerifiedAt);
+    if (!organization || (!isCurrentSuperUser && !isCurrentOrganizationAdmin)) {
+      throw new FocusTopicScopedContentError(
+        "Organization Learning Resource administration is no longer available for this account.",
+        403,
+        "dashboard_scope_denied",
+      );
+    }
+    const entitlementResult = await client.query<{ enabled: boolean }>(
+      `SELECT enabled FROM org_module_entitlements
+       WHERE org_id = $1 AND module_key = 'training_content' FOR SHARE`,
+      [organization.id],
+    );
+    if (entitlementResult.rows[0]?.enabled !== true) {
+      throw new FocusTopicScopedContentError(
+        "Learning Resources are not enabled for this organization.",
+        403,
+        "module_disabled",
+      );
+    }
+  };
+}
+
 async function assertScopedAttachAllowedInTransaction(params: {
   client: AppStateTransactionClient;
   orgId: string;
@@ -8694,6 +8742,7 @@ function buildTopicScopedTrainingContentResources(params: {
       capabilities: principal.viewer.capabilities,
       actorType: "web_user",
       authorityScope: "focus_topic",
+      authorityTopicId: params.topic.id,
       transactionGuard: createScopedContentTransactionGuard({
         orgId: params.management.org.id,
         actorId: principal.user.id,
@@ -8725,6 +8774,8 @@ function topicScopedContentSummary(detail: {
     title: detail.content.title,
     description: detail.content.description,
     contentType: detail.content.contentType,
+    externalKind: detail.content.externalKind ?? null,
+    externalUrl: detail.content.externalKind === "youtube" ? detail.content.externalUrl : null,
     publicationState: detail.content.publicationState,
     archivedAt: detail.content.archivedAt,
     updatedAt: detail.content.updatedAt,
@@ -8736,7 +8787,82 @@ function topicScopedContentSummary(detail: {
       uploadState: detail.currentAsset.uploadState,
       originalFilename: detail.currentAsset.originalFilename,
     } : null,
+    transcript: { status: "not_provided", version: null, characterCount: null,
+      canRead: true, canMutate: true },
+    generationSource: evaluateTrainingContentGenerationSource({
+      contentType: detail.content.contentType,
+      publicationState: detail.content.publicationState,
+      archivedAt: detail.content.archivedAt,
+      externalKind: detail.content.externalKind ?? null,
+      nativeBody: detail.content.nativeBody,
+      hasReadyPrimaryAsset: detail.currentAsset?.uploadState === "ready",
+      hasCurrentTranscript: false,
+      moduleEnabled: true,
+    }),
   };
+}
+
+async function buildTranscriptManagementPayload(params: {
+  orgId: string;
+  contentId: string;
+  moduleEnabled: boolean;
+  transactionGuard?: Parameters<typeof trainingContentTranscriptStore.getCurrent>[0]["transactionGuard"];
+}) {
+  const [detail, transcript] = await Promise.all([
+    trainingContentStore.getContentDetailForOrg(params.orgId, params.contentId),
+    trainingContentTranscriptStore.getCurrent({ orgId: params.orgId, contentId: params.contentId,
+      transactionGuard: params.transactionGuard }),
+  ]);
+  if (!detail) throw new TrainingContentTranscriptStoreError("Learning Resource was not found.", "content_not_found");
+  assertTranscriptSupportedContent(detail.content);
+  return {
+    transcript: transcript ? {
+      id: transcript.id,
+      version: transcript.version,
+      text: transcript.text,
+      characterCount: transcript.characterCount,
+      contentSha256: transcript.contentSha256,
+      createdAt: transcript.createdAt,
+    } : null,
+    generationSource: evaluateTrainingContentGenerationSource({
+      contentType: detail.content.contentType,
+      publicationState: detail.content.publicationState,
+      archivedAt: detail.content.archivedAt,
+      externalKind: detail.content.externalKind ?? null,
+      nativeBody: detail.content.nativeBody,
+      hasReadyPrimaryAsset: detail.currentAsset?.uploadState === "ready",
+      hasCurrentTranscript: transcript !== null,
+      moduleEnabled: params.moduleEnabled,
+    }),
+  };
+}
+
+function assertTranscriptSupportedContent(content: TrainingContentItem): void {
+  if (content.contentType !== "video"
+    && !(content.contentType === "external_url" && content.externalKind === "youtube")) {
+    throw new FocusTopicScopedContentError(
+      "Transcripts are supported for uploaded video and YouTube resources.",
+      409,
+      "training_content_transcript_unsupported",
+    );
+  }
+}
+
+function respondWithTranscriptError(error: unknown, response: Response): void {
+  if (error instanceof FocusTopicScopedContentError) {
+    respondWithFocusTopicScopedContentError(error, response); return;
+  }
+  if (error instanceof TrainingContentTranscriptStoreError) {
+    const status = error.code === "not_found" || error.code === "content_not_found" ? 404
+      : error.code === "content_archived" ? 409 : 503;
+    response.status(status).json({ error: error.message, code: `training_content_transcript_${error.code}` });
+    return;
+  }
+  if (error instanceof Error && /Transcript/.test(error.message)) {
+    response.status(400).json({ error: error.message, code: "training_content_transcript_invalid" });
+    return;
+  }
+  response.status(500).json({ error: "Transcript operation failed.", code: "training_content_transcript_failed" });
 }
 
 function requireAllFocusTopicManagement(
@@ -12646,6 +12772,13 @@ app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, res
   }, "web-auth-logout");
   response.json({ ok: true });
 });
+const trainingContentTranscriptStore = createTrainingContentTranscriptStore({
+  provider: STORAGE_PROVIDER,
+  databaseUrl: DATABASE_URL ?? undefined,
+  pgPoolMax: PG_POOL_MAX,
+  pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+});
 
 app.get("/dashboard/overview", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   await withFreshReportingRead(async (db) => {
@@ -13529,6 +13662,77 @@ app.post(
       respondWithTrainingContentAssetError(error, response);
     }
   }
+);
+
+app.get(
+  "/dashboard/admin/training-content/:contentId/transcript",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) return;
+    if (rejectMissingDashboardAdminCapability(
+      resources.context.capabilities, "manageOrganizationContent", response,
+    )) return;
+    try {
+      response.json(await buildTranscriptManagementPayload({ orgId: resources.org.id,
+        contentId: request.params.contentId, moduleEnabled: true,
+        transactionGuard: createCentralContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId }) }));
+    } catch (error) { respondWithTranscriptError(error, response); }
+  },
+);
+
+app.put(
+  "/dashboard/admin/training-content/:contentId/transcript",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
+    if (rejectUnexpectedTopicContentFields(request.body, ["text"], response)) return;
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) return;
+    if (rejectMissingDashboardAdminCapability(
+      resources.context.capabilities, "manageOrganizationContent", response,
+    )) return;
+    try {
+      const content = await trainingContentStore.getContentItemForOrg(resources.org.id, request.params.contentId);
+      if (!content) throw new TrainingContentTranscriptStoreError("Learning Resource was not found.", "content_not_found");
+      assertTranscriptSupportedContent(content);
+      await trainingContentTranscriptStore.replaceCurrent({ orgId: resources.org.id,
+        contentId: content.id, text: normalizeCustomerTranscript((request.body as { text?: unknown })?.text),
+        actor: { actorType: "web_user", actorId: resources.context.actorId },
+        transactionGuard: createCentralContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId }) });
+      response.json(await buildTranscriptManagementPayload({ orgId: resources.org.id,
+        contentId: content.id, moduleEnabled: true,
+        transactionGuard: createCentralContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId }) }));
+    } catch (error) { respondWithTranscriptError(error, response); }
+  },
+);
+
+app.delete(
+  "/dashboard/admin/training-content/:contentId/transcript",
+  requireDashboardAuth,
+  async (request: DashboardAuthRequest, response: Response) => {
+    const resources = await resolveTrainingContentManagementResources(request, response);
+    if (!resources) return;
+    if (rejectMissingDashboardAdminCapability(
+      resources.context.capabilities, "manageOrganizationContent", response,
+    )) return;
+    try {
+      const content = await trainingContentStore.getContentItemForOrg(resources.org.id, request.params.contentId);
+      if (!content) throw new TrainingContentTranscriptStoreError("Learning Resource was not found.", "content_not_found");
+      assertTranscriptSupportedContent(content);
+      await trainingContentTranscriptStore.removeCurrent({ orgId: resources.org.id,
+        contentId: content.id, actor: { actorType: "web_user", actorId: resources.context.actorId },
+        transactionGuard: createCentralContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId }) });
+      response.json(await buildTranscriptManagementPayload({ orgId: resources.org.id,
+        contentId: content.id, moduleEnabled: true,
+        transactionGuard: createCentralContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId }) }));
+    } catch (error) { respondWithTranscriptError(error, response); }
+  },
 );
 
 app.get("/dashboard/admin/product-settings", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
@@ -17243,6 +17447,9 @@ app.get(
       record.content.id,
       await trainingContentStore.getContentDetailForOrg(topic.orgId, record.content.id),
     ] as const))));
+    const transcriptMetadata = new Map((await trainingContentTranscriptStore.listCurrentMetadata(
+      topic.orgId, visibleContent.map((record) => record.content.id),
+    )).map((entry) => [entry.contentId, entry]));
     response.json({
       topicId: topic.id,
       scenarios: authority.scenarioAttachments.filter((row) => row.topicId === topic.id),
@@ -17260,11 +17467,15 @@ app.get(
             manageableTopicIds: management.scope.manageableTopicIds,
           }));
         const currentAsset = contentDetails.get(item.id)?.currentAsset ?? null;
+        const transcript = transcriptMetadata.get(item.id) ?? null;
+        const canReadTranscript = management.scope.canManageAllTopics || attachedContentIds.has(item.id);
         return {
           id: item.id,
           title: item.title,
           description: item.description,
           contentType: item.contentType,
+          externalKind: item.externalKind ?? null,
+          externalUrl: item.externalKind === "youtube" ? item.externalUrl : null,
           publicationState: item.publicationState,
           archivedAt: item.archivedAt,
           updatedAt: item.updatedAt,
@@ -17280,6 +17491,23 @@ app.get(
             uploadState: currentAsset.uploadState,
             originalFilename: currentAsset.originalFilename,
           } : null,
+          transcript: {
+            status: transcript ? "ready" : "not_provided",
+            version: transcript?.version ?? null,
+            characterCount: transcript?.characterCount ?? null,
+            canRead: canReadTranscript,
+            canMutate,
+          },
+          generationSource: evaluateTrainingContentGenerationSource({
+            contentType: item.contentType,
+            publicationState: item.publicationState,
+            archivedAt: item.archivedAt,
+            externalKind: item.externalKind ?? null,
+            nativeBody: item.nativeBody,
+            hasReadyPrimaryAsset: currentAsset?.uploadState === "ready",
+            hasCurrentTranscript: transcript !== null,
+            moduleEnabled: management.learningResourcesEnabled,
+          }),
         };
       }),
       permissions: {
@@ -17397,7 +17625,8 @@ app.post(
             focusTopicNameSnapshot: topic.name,
             contentType: input.contentType,
             nativeBody: null,
-            externalUrl: null,
+            externalUrl: input.externalUrl,
+            externalKind: input.externalKind,
             actor,
             now,
             topicId: topic.id,
@@ -17549,6 +17778,80 @@ app.post(
         respondWithTrainingContentAssetError(error, response);
       }
     }
+  },
+);
+
+app.get(
+  "/orgs/:orgId/trainings/:trainingId/content/:contentId/transcript",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const resources = await resolveTopicScopedContentRouteResources(request, response, request.params.contentId);
+    if (!resources) return;
+    try {
+      response.json(await buildTranscriptManagementPayload({
+        orgId: resources.org.id,
+        contentId: request.params.contentId,
+        moduleEnabled: true,
+        transactionGuard: createScopedContentTransactionGuard({
+          orgId: resources.org.id, actorId: resources.context.actorId,
+          topicId: request.params.trainingId, contentId: request.params.contentId,
+          enforceExclusiveScope: false,
+        }),
+      }));
+    } catch (error) { respondWithTranscriptError(error, response); }
+  },
+);
+
+app.put(
+  "/orgs/:orgId/trainings/:trainingId/content/:contentId/transcript",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
+    if (rejectUnexpectedTopicContentFields(request.body, ["text"], response)) return;
+    const resources = await resolveTopicScopedContentRouteResources(request, response, request.params.contentId);
+    if (!resources) return;
+    try {
+      const content = await trainingContentStore.getContentItemForOrg(resources.org.id, request.params.contentId);
+      if (!content) throw new TrainingContentTranscriptStoreError("Learning Resource was not found.", "content_not_found");
+      assertTranscriptSupportedContent(content);
+      await trainingContentTranscriptStore.replaceCurrent({
+        orgId: resources.org.id, contentId: content.id,
+        text: normalizeCustomerTranscript((request.body as { text?: unknown })?.text),
+        actor: { actorType: "web_user", actorId: resources.context.actorId },
+        transactionGuard: resources.context.transactionGuard,
+      });
+      response.json(await buildTranscriptManagementPayload({
+        orgId: resources.org.id, contentId: content.id, moduleEnabled: true,
+        transactionGuard: createScopedContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId, topicId: request.params.trainingId,
+          contentId: content.id, enforceExclusiveScope: false }),
+      }));
+    } catch (error) { respondWithTranscriptError(error, response); }
+  },
+);
+
+app.delete(
+  "/orgs/:orgId/trainings/:trainingId/content/:contentId/transcript",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const resources = await resolveTopicScopedContentRouteResources(request, response, request.params.contentId);
+    if (!resources) return;
+    try {
+      const content = await trainingContentStore.getContentItemForOrg(resources.org.id, request.params.contentId);
+      if (!content) throw new TrainingContentTranscriptStoreError("Learning Resource was not found.", "content_not_found");
+      assertTranscriptSupportedContent(content);
+      await trainingContentTranscriptStore.removeCurrent({
+        orgId: resources.org.id, contentId: content.id,
+        actor: { actorType: "web_user", actorId: resources.context.actorId },
+        transactionGuard: resources.context.transactionGuard,
+      });
+      response.json(await buildTranscriptManagementPayload({
+        orgId: resources.org.id, contentId: content.id, moduleEnabled: true,
+        transactionGuard: createScopedContentTransactionGuard({ orgId: resources.org.id,
+          actorId: resources.context.actorId, topicId: request.params.trainingId,
+          contentId: content.id, enforceExclusiveScope: false }),
+      }));
+    } catch (error) { respondWithTranscriptError(error, response); }
   },
 );
 

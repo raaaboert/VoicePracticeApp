@@ -3324,6 +3324,30 @@ input[type="radio"] {
   max-width: 38rem;
 }
 
+.focus-topic-transcript-panel,
+.focus-topic-transcript-editor {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface-muted);
+}
+
+.focus-topic-transcript-panel > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.focus-topic-transcript-editor textarea {
+  min-height: 12rem;
+  resize: vertical;
+}
+
 .focus-topic-content-editor label {
   display: grid;
   gap: 0.35rem;

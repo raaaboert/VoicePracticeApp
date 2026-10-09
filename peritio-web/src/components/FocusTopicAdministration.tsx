@@ -35,13 +35,14 @@ const AUDIENCES: Array<{ value: Audience; label: string; description: string }> 
   { value: "individual", label: "Individual", description: "Only the selected learner." },
 ];
 
-function contentTypeForFile(file: File): "audio" | "pdf" | "docx" | "image" | null {
+function contentTypeForFile(file: File): "video" | "audio" | "pdf" | "docx" | "image" | null {
   const name = file.name.toLowerCase();
   if (file.type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
   if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     || name.endsWith(".docx")) return "docx";
   if (file.type.startsWith("image/")) return "image";
   if (file.type.startsWith("audio/")) return "audio";
+  if (file.type === "video/mp4" || name.endsWith(".mp4")) return "video";
   return null;
 }
 
@@ -74,14 +75,18 @@ export function FocusTopicAdministration({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [contentMode, setContentMode] = useState<"attach" | "upload">("attach");
+  const [newSourceMode, setNewSourceMode] = useState<"file" | "youtube">("file");
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadDescription, setUploadDescription] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [editingContentId, setEditingContentId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [editingDescription, setEditingDescription] = useState("");
   const [replacementFile, setReplacementFile] = useState<File | null>(null);
+  const [transcriptContentId, setTranscriptContentId] = useState<string | null>(null);
+  const [transcriptText, setTranscriptText] = useState("");
   const selected = topics.find((topic) => topic.id === selectedId) ?? null;
   const targeted = ["manager_only", "manager_with_team", "individual"].includes(audience);
   const subjectOptions = users.filter((user) => user.status === "active"
@@ -242,7 +247,7 @@ export function FocusTopicAdministration({
   const createAndUploadContent = () => void run(async () => {
     if (!selected || !uploadFile) return;
     const contentType = contentTypeForFile(uploadFile);
-    if (!contentType) throw new Error("Choose an audio, PDF, DOCX, or image file.");
+    if (!contentType) throw new Error("Choose an MP4 video, audio, PDF, DOCX, or image file.");
     if (!related) return;
     const fileError = validateTrainingContentFileSelection({
       contentType, file: uploadFile, limits: related.fileLimitsBytes,
@@ -273,6 +278,37 @@ export function FocusTopicAdministration({
     setEditingDescription(item.description);
     setReplacementFile(null);
   };
+  const createYouTubeContent = () => void run(async () => {
+    if (!selected) return;
+    await action<DashboardFocusTopicContentCreateResponse>({
+      action: "create_content", orgId, topicId: selected.id,
+      contentType: "external_url", externalKind: "youtube", externalUrl: youtubeUrl,
+      title: uploadTitle, description: uploadDescription,
+    });
+    await refreshRelatedContent();
+    setUploadTitle(""); setUploadDescription(""); setYoutubeUrl("");
+    setMessage("Draft YouTube Learning Resource created and attached to this Focus Topic.");
+  });
+  const reviewTranscript = (item: DashboardFocusTopicContentItem) => void run(async () => {
+    if (!selected) return;
+    const result = await action<{ transcript: null | { text: string } }>({
+      action: "get_content_transcript", orgId, topicId: selected.id, contentId: item.id,
+    });
+    setTranscriptContentId(item.id); setTranscriptText(result.transcript?.text ?? "");
+  });
+  const saveTranscript = (item: DashboardFocusTopicContentItem) => void run(async () => {
+    if (!selected) return;
+    await action({ action: "put_content_transcript", orgId, topicId: selected.id,
+      contentId: item.id, text: transcriptText });
+    await refreshRelatedContent();
+    setMessage(item.transcript.status === "ready" ? "Transcript replaced." : "Transcript added.");
+  });
+  const removeTranscript = (item: DashboardFocusTopicContentItem) => void run(async () => {
+    if (!selected) return;
+    await action({ action: "remove_content_transcript", orgId, topicId: selected.id, contentId: item.id });
+    await refreshRelatedContent(); setTranscriptContentId(null); setTranscriptText("");
+    setMessage("Transcript removed. Learner publication is unchanged.");
+  });
   const saveContent = (item: DashboardFocusTopicContentItem) => void run(async () => {
     if (!selected) return;
     await action<DashboardFocusTopicContentMutationResponse>({
@@ -467,13 +503,45 @@ export function FocusTopicAdministration({
                 : attachment.contentId}</small>
               <small>Attached {formatDateTime(attachment.attachedAt)}</small>
               {item && !item.canMutate ? <small>{item.mutationRestriction}</small> : null}
+              {item ? <small>Generation source: {item.generationSource.eligible
+                ? "Ready" : item.generationSource.reasonCode.replaceAll("_", " ")}</small> : null}
+              {item && (item.contentType === "video" || item.externalKind === "youtube")
+                ? <div className="focus-topic-transcript-panel">
+                  <div><strong>Transcript</strong><small>{item.transcript.status === "ready"
+                    ? `${item.transcript.characterCount?.toLocaleString() ?? 0} characters · Ready`
+                    : "Not provided"}</small></div>
+                  <small>A transcript is required before this resource can be used to generate practice scenarios.</small>
+                  {item.transcript.canRead && (item.transcript.status === "ready" || item.transcript.canMutate)
+                    ? <button type="button" className="ghost-button compact-button"
+                    disabled={busy} onClick={() => reviewTranscript(item)}>
+                    {item.transcript.status === "ready" ? "Review Transcript" : "Add Transcript"}
+                  </button> : null}
+                  {transcriptContentId === item.id ? <div className="focus-topic-transcript-editor">
+                    <label>Private customer transcript<textarea className="text-input" value={transcriptText}
+                      maxLength={200000} readOnly={!item.transcript.canMutate}
+                      onChange={(event) => setTranscriptText(event.target.value)} /></label>
+                    {item.transcript.canMutate ? <div className="focus-topic-actions">
+                      <button type="button" className="primary-button compact-button"
+                        disabled={busy || !transcriptText.trim()} onClick={() => saveTranscript(item)}>
+                        {item.transcript.status === "ready" ? "Replace Transcript" : "Add Transcript"}
+                      </button>
+                      {item.transcript.status === "ready" ? <button type="button"
+                        className="ghost-button danger-button compact-button" disabled={busy}
+                        onClick={() => removeTranscript(item)}>Remove Transcript</button> : null}
+                    </div> : <small>{item.mutationRestriction}</small>}
+                    <button type="button" className="ghost-button compact-button" disabled={busy}
+                      onClick={() => { setTranscriptContentId(null); setTranscriptText(""); }}>Close</button>
+                  </div> : null}
+                </div> : null}
               {item && editingContentId === item.id ? <div className="focus-topic-content-editor">
                 <label>Title<input className="text-input" value={editingTitle} maxLength={200}
                   onChange={(event) => setEditingTitle(event.target.value)} /></label>
                 <label>Description<textarea className="text-input" value={editingDescription} maxLength={2000}
                   onChange={(event) => setEditingDescription(event.target.value)} /></label>
-                <label>Replace file (optional)<input type="file" accept="audio/*,image/*,.pdf,.docx"
-                  onChange={(event) => setReplacementFile(event.target.files?.[0] ?? null)} /></label>
+                {item.contentType !== "external_url" ? <label>Replace file (optional)
+                  <input type="file" accept="video/mp4,audio/*,image/*,.pdf,.docx"
+                    onChange={(event) => setReplacementFile(event.target.files?.[0] ?? null)} />
+                </label> : null}
                 {uploadProgress !== null ? <small role="status">Uploading: {uploadProgress}%</small> : null}
                 <div className="focus-topic-actions"><button type="button" className="primary-button compact-button"
                   disabled={busy || !editingTitle.trim()} onClick={() => saveContent(item)}>Save</button>
@@ -517,19 +585,33 @@ export function FocusTopicAdministration({
       {contentMode === "upload" && related?.permissions.canManageRelatedContent
         ? <div className="focus-topic-assignment-section focus-topic-upload-new"><h4>Upload New</h4>
           <p className="muted-copy">The new organization resource starts as a draft and is attached here automatically.</p>
+          <div className="focus-topic-content-mode" role="group" aria-label="New resource source">
+            <button type="button" className={newSourceMode === "file" ? "primary-button" : "ghost-button"}
+              disabled={busy} onClick={() => setNewSourceMode("file")}>Upload File</button>
+            <button type="button" className={newSourceMode === "youtube" ? "primary-button" : "ghost-button"}
+              disabled={busy} onClick={() => setNewSourceMode("youtube")}>YouTube URL</button>
+          </div>
           <div className="focus-topic-details-grid">
             <label className="focus-topic-field">Title<input className="text-input" value={uploadTitle} maxLength={200}
               onChange={(event) => setUploadTitle(event.target.value)} /></label>
             <label className="focus-topic-field focus-topic-field-wide">Description<textarea className="text-input"
               value={uploadDescription} maxLength={2000}
               onChange={(event) => setUploadDescription(event.target.value)} /></label>
-            <label className="focus-topic-field focus-topic-field-wide">File
-              <input type="file" accept="audio/*,image/*,.pdf,.docx"
+            {newSourceMode === "file" ? <label className="focus-topic-field focus-topic-field-wide">File
+              <input type="file" accept="video/mp4,audio/*,image/*,.pdf,.docx"
                 onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} /></label>
+              : <label className="focus-topic-field focus-topic-field-wide">Public YouTube URL
+                <input className="text-input" type="url" placeholder="https://www.youtube.com/watch?v=…"
+                  value={youtubeUrl} onChange={(event) => setYoutubeUrl(event.target.value)} />
+                <small>Peritio stores the canonical public URL and never fetches captions automatically.</small>
+              </label>}
           </div>
           {uploadProgress !== null ? <p className="muted-copy" role="status">Uploading: {uploadProgress}%</p> : null}
-          <button type="button" className="primary-button" disabled={busy || !uploadTitle.trim() || !uploadFile}
-            onClick={createAndUploadContent}>Create Draft &amp; Upload</button>
+          <button type="button" className="primary-button"
+            disabled={busy || !uploadTitle.trim() || (newSourceMode === "file" ? !uploadFile : !youtubeUrl.trim())}
+            onClick={newSourceMode === "file" ? createAndUploadContent : createYouTubeContent}>
+            {newSourceMode === "file" ? "Create Draft & Upload" : "Create Draft YouTube Resource"}
+          </button>
         </div> : null}
     </div> : null}
   </section>;

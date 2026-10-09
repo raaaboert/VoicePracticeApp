@@ -3,13 +3,19 @@ import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type {
+  ApiDatabase,
   AuditActorType,
+  TrainingContentAssignment,
   TrainingContentAssetRole,
   TrainingContentAssetUploadState,
   TrainingContentItem,
   TrainingContentPublicationState,
   TrainingContentType,
 } from "@voicepractice/shared";
+
+import type { FocusTopicAssignment } from "../services/focusTopicAuthority.js";
+import { canScopedActorMutateContent } from "../services/focusTopicContentManagementPolicy.js";
+import { resolveFocusTopicManagementScope } from "../services/focusTopicManagementPolicy.js";
 
 import type { StorageProvider } from "../runtimeConfig.js";
 import {
@@ -29,7 +35,8 @@ export type TrainingContentAssetStoreErrorCode =
   | "asset_not_found"
   | "asset_state_conflict"
   | "replacement_conflict"
-  | "pending_upload_limit_exceeded";
+  | "pending_upload_limit_exceeded"
+  | "asset_authority_denied";
 
 export class TrainingContentAssetStoreError extends Error {
   constructor(message: string, readonly code: TrainingContentAssetStoreErrorCode) {
@@ -75,6 +82,8 @@ export interface TrainingContentAssetRecord {
   createdByActorId: string;
   createdAt: string;
   updatedAt: string;
+  authorizationScope?: "central" | "focus_topic";
+  authorizationTopicId?: string | null;
 }
 
 export interface TrainingContentAuditActor {
@@ -100,6 +109,8 @@ export interface CreatePendingTrainingContentAssetInput {
   actor: TrainingContentAuditActor;
   now?: Date;
   transactionGuard?: TrainingContentAssetTransactionGuard;
+  authorizationScope?: "central" | "focus_topic";
+  authorizationTopicId?: string | null;
 }
 
 export type ClaimTrainingContentAssetFinalizationResult =
@@ -270,6 +281,7 @@ interface ContentRow {
   publication_state: TrainingContentPublicationState;
   native_body: string | null;
   external_url: string | null;
+  external_kind: "youtube" | null;
   display_order: number;
   content_version: number;
   created_by_actor_id: string;
@@ -317,6 +329,8 @@ interface AssetRow {
   created_by_actor_id: string;
   created_at: string | Date;
   updated_at: string | Date;
+  authorization_scope: "central" | "focus_topic";
+  authorization_topic_id: string | null;
 }
 
 const ASSET_COLUMNS = `
@@ -355,7 +369,9 @@ const ASSET_COLUMNS = `
   object_deleted_at,
   created_by_actor_id,
   created_at,
-  updated_at
+  updated_at,
+  authorization_scope,
+  authorization_topic_id
 `;
 
 class UnavailableTrainingContentAssetStore implements TrainingContentAssetStore {
@@ -650,10 +666,12 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
             replacement_for_asset_id,
             created_by_actor_id,
             created_at,
-            updated_at
+            updated_at,
+            authorization_scope,
+            authorization_topic_id
           )
           VALUES (
-            $1, $2, $3, $4, $5, 'pending', 'r2', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15
+            $1, $2, $3, $4, $5, 'pending', 'r2', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16, $17
           )
           RETURNING ${ASSET_COLUMNS}
         `,
@@ -673,6 +691,8 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
           input.replacementAssetId,
           actorId,
           now,
+          input.authorizationScope ?? "central",
+          input.authorizationTopicId ?? null,
         ]
       );
       const assetRow = inserted.rows[0];
@@ -1282,6 +1302,9 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
         await client.query("COMMIT");
         return { asset, replacedAsset: null };
       }
+      if (asset.authorizationScope === "focus_topic") {
+        await assertPersistedFocusTopicAssetAuthority(client, asset);
+      }
       if (asset.uploadState !== "processing" || asset.finalObjectKey !== params.finalObjectKey) {
         throw new TrainingContentAssetStoreError(
           "Training Content asset is not ready to commit finalization.",
@@ -1884,6 +1907,7 @@ function mapContentRow(row: ContentRow): TrainingContentItem {
     publicationState: row.publication_state,
     nativeBody: row.native_body,
     externalUrl: row.external_url,
+    externalKind: row.external_kind,
     displayOrder: row.display_order,
     contentVersion: row.content_version,
     createdByActorId: row.created_by_actor_id,
@@ -1939,7 +1963,93 @@ function mapAssetRow(row: AssetRow): TrainingContentAssetRecord {
     createdByActorId: row.created_by_actor_id,
     createdAt: requiredIso(row.created_at, "Asset created time"),
     updatedAt: requiredIso(row.updated_at, "Asset updated time"),
+    authorizationScope: row.authorization_scope,
+    authorizationTopicId: row.authorization_topic_id,
   };
+}
+
+async function assertPersistedFocusTopicAssetAuthority(
+  client: Pick<PoolClient, "query">,
+  asset: TrainingContentAssetRecord,
+): Promise<void> {
+  const topicId = asset.authorizationTopicId?.trim();
+  if (!topicId) throw authorityDenied();
+  const stateResult = await client.query<{ state_json: ApiDatabase }>(
+    "SELECT state_json FROM app_state WHERE id='primary' FOR SHARE",
+  );
+  const db = stateResult.rows[0]?.state_json;
+  const actor = db?.users?.find((candidate) => candidate.id === asset.createdByActorId);
+  const organization = db?.orgs?.find((candidate) => candidate.id === asset.orgId);
+  const topics = db?.orgTrainings?.filter((candidate) => candidate.orgId === asset.orgId) ?? [];
+  const topic = topics.find((candidate) => candidate.id === topicId);
+  if (!db || !actor || !organization || !topic || topic.status !== "active") throw authorityDenied();
+
+  const entitlementResult = await client.query<{ enabled: boolean }>(
+      `SELECT enabled FROM org_module_entitlements
+       WHERE org_id=$1 AND module_key='training_content' FOR SHARE`, [asset.orgId]);
+  const settingsResult = await client.query<{ allow_user_admin_focus_topic_management: boolean;
+      allow_manager_focus_topic_management: boolean }>(
+      `SELECT allow_user_admin_focus_topic_management,allow_manager_focus_topic_management
+       FROM organization_product_settings WHERE org_id=$1 FOR SHARE`, [asset.orgId]);
+  const assignmentsResult = await client.query<{ id: string; org_id: string; topic_id: string;
+      audience: FocusTopicAssignment["audience"];
+      subject_user_id: string | null; grants_management: boolean; created_by: string;
+      created_at: string | Date; revoked_by: string | null; revoked_at: string | Date | null }>(
+      "SELECT * FROM focus_topic_assignments WHERE org_id=$1 FOR SHARE", [asset.orgId]);
+  const contentResult = await client.query<{ id: string; org_id: string;
+      archived_at: string | Date | null;
+      category_archived_at: string | Date | null }>(
+      `SELECT c.id,c.org_id,c.archived_at,category.archived_at AS category_archived_at
+       FROM org_content_items c JOIN org_content_categories category
+         ON category.org_id=c.org_id AND category.id=c.category_id
+       WHERE c.org_id=$1 AND c.id=$2 FOR SHARE OF c,category`, [asset.orgId, asset.contentId]);
+  const standaloneResult = await client.query<{ id: string }>(
+      `SELECT id FROM org_content_assignments
+       WHERE org_id=$1 AND content_id=$2 AND revoked_at IS NULL FOR SHARE`, [asset.orgId, asset.contentId]);
+  const attachmentsResult = await client.query<{ topic_id: string }>(
+      `SELECT topic_id FROM org_content_topic_attachments
+       WHERE org_id=$1 AND content_id=$2 AND detached_at IS NULL FOR SHARE`, [asset.orgId, asset.contentId]);
+  const assignments: FocusTopicAssignment[] = assignmentsResult.rows.map((row) => ({
+    id: row.id, orgId: row.org_id, topicId: row.topic_id, audience: row.audience,
+    subjectUserId: row.subject_user_id, grantsManagement: row.grants_management,
+    createdBy: row.created_by, createdAt: new Date(row.created_at).toISOString(),
+    revokedBy: row.revoked_by, revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+  }));
+  const settings = settingsResult.rows[0] ?? {
+    allow_user_admin_focus_topic_management: false,
+    allow_manager_focus_topic_management: false,
+  };
+  const scope = resolveFocusTopicManagementScope({
+    db, actor, organization, topics, assignments,
+    productSettings: {
+      allowUserAdminFocusTopicManagement: settings.allow_user_admin_focus_topic_management,
+      allowManagerFocusTopicManagement: settings.allow_manager_focus_topic_management,
+    },
+  });
+  const content = contentResult.rows[0];
+  const record = content ? {
+    content: { id: content.id, orgId: content.org_id,
+      archivedAt: content.archived_at ? new Date(content.archived_at).toISOString() : null } as TrainingContentItem,
+    categoryArchivedAt: content.category_archived_at
+      ? new Date(content.category_archived_at).toISOString() : null,
+    assignments: standaloneResult.rows.map((row) => ({ id: row.id, orgId: asset.orgId,
+      contentId: asset.contentId, revokedAt: null })) as TrainingContentAssignment[],
+    topicAttachments: attachmentsResult.rows.map((row) => ({ topicId: row.topic_id, detachedAt: null })),
+  } : null;
+  if (!record || !scope.manageableTopicIds.has(topicId) || !canScopedActorMutateContent({
+    actorId: actor.id, actorOrgId: organization.id,
+    actorCurrent: actor.accountType === "enterprise" && actor.orgId === organization.id
+      && actor.status === "active" && Boolean(actor.emailVerifiedAt),
+    organizationCurrent: organization.status === "active",
+    learningResourcesEnabled: entitlementResult.rows[0]?.enabled === true,
+    record, manageableTopicIds: scope.manageableTopicIds,
+  })) throw authorityDenied();
+}
+
+function authorityDenied(): TrainingContentAssetStoreError {
+  return new TrainingContentAssetStoreError(
+    "Video finalization authority is no longer current.", "asset_authority_denied",
+  );
 }
 
 function mapRequiredAssetRow(row: AssetRow | undefined): TrainingContentAssetRecord {

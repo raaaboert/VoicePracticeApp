@@ -840,6 +840,8 @@ export interface DashboardFocusTopicContentItem {
   title: string;
   description: string;
   contentType: string;
+  externalKind: "youtube" | null;
+  externalUrl: string | null;
   publicationState: string;
   archivedAt: string | null;
   updatedAt: string;
@@ -851,6 +853,30 @@ export interface DashboardFocusTopicContentItem {
     uploadState: string;
     originalFilename: string | null;
   } | null;
+  transcript: {
+    status: "not_provided" | "ready";
+    version: number | null;
+    characterCount: number | null;
+    canRead: boolean;
+    canMutate: boolean;
+  };
+  generationSource: {
+    eligible: boolean;
+    reasonCode: string;
+    sourceKind: string;
+  };
+}
+
+export interface DashboardFocusTopicTranscriptResponse {
+  transcript: null | {
+    id: string;
+    version: number;
+    text: string;
+    characterCount: number;
+    contentSha256: string;
+    createdAt: string;
+  };
+  generationSource: DashboardFocusTopicContentItem["generationSource"];
 }
 
 export interface DashboardFocusTopicContentAttachment {
@@ -966,12 +992,45 @@ export async function detachDashboardFocusTopicContent(
 export async function createDashboardFocusTopicContent(
   orgId: string,
   topicId: string,
-  input: { contentType: "audio" | "pdf" | "docx" | "image"; title: string; description: string },
+  input: { contentType: "external_url" | "video" | "audio" | "pdf" | "docx" | "image";
+    title: string; description: string; externalUrl?: string; externalKind?: "youtube" },
 ): Promise<DashboardFocusTopicContentCreateResponse> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<DashboardFocusTopicContentCreateResponse>(
     `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/content`,
     { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
+export async function getDashboardFocusTopicContentTranscript(
+  orgId: string, topicId: string, contentId: string,
+): Promise<DashboardFocusTopicTranscriptResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicTranscriptResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}/transcript`, { token },
+  );
+}
+
+export async function putDashboardFocusTopicContentTranscript(
+  orgId: string, topicId: string, contentId: string, text: string,
+): Promise<DashboardFocusTopicTranscriptResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicTranscriptResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}/transcript`,
+    { method: "PUT", body: JSON.stringify({ text }), token },
+  );
+}
+
+export async function removeDashboardFocusTopicContentTranscript(
+  orgId: string, topicId: string, contentId: string,
+): Promise<DashboardFocusTopicTranscriptResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<DashboardFocusTopicTranscriptResponse>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}`
+      + `/content/${encodeURIComponent(contentId)}/transcript`,
+    { method: "DELETE", token },
   );
 }
 

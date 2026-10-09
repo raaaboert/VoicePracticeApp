@@ -9,6 +9,7 @@ const TRAINING_CONTENT_MIGRATIONS = [
   "011_training_content_video_processing.sql",
   "012_training_content_backup.sql",
   "013_training_content_scenario_links.sql",
+  "018_training_content_sources.sql",
 ] as const;
 
 type MigrationPool = Pick<Pool, "connect">;

@@ -184,12 +184,13 @@ test("postgres module store initializes idempotently and preserves tenant-scoped
 
   await store.initialize();
   await store.initialize();
-  assert.equal(fake.schemaQueries.length, 6);
+  assert.equal(fake.schemaQueries.length, 7);
   assert.match(fake.schemaQueries.join("\n"), /PRIMARY KEY \(org_id, module_key\)/);
   assert.match(fake.schemaQueries.join("\n"), /org_content_assets_ready_state_check/);
   assert.match(fake.schemaQueries.join("\n"), /org_content_items_category_fkey/);
   assert.match(fake.schemaQueries.join("\n"), /processing_lease_token/);
   assert.match(fake.schemaQueries.join("\n"), /backed_up_at/);
+  assert.match(fake.schemaQueries.join("\n"), /org_content_transcripts_current_unique_idx/);
   assert.ok(fake.transactionQueries.some((query) => query.includes("pg_advisory_xact_lock")));
   assert.equal((await store.getOrgModuleEntitlement("org_1", "training_content")).enabled, false);
 

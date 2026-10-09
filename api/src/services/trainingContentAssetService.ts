@@ -39,6 +39,7 @@ export interface TrainingContentManagementRequestContext {
   capabilities: DashboardAdminCapabilities;
   actorType?: "web_user";
   authorityScope?: "organization" | "focus_topic";
+  authorityTopicId?: string;
   transactionGuard?: TrainingContentAssetTransactionGuard;
 }
 
@@ -188,13 +189,6 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
         "training_content_archived"
       );
     }
-    if (params.context.authorityScope === "focus_topic" && content.contentType === "video") {
-      throw new TrainingContentAssetServiceError(
-        "Video replacement from a Focus Topic is not available in this release.",
-        409,
-        "focus_topic_video_upload_deferred"
-      );
-    }
     assertTrainingContentAssetRoleMatchesContent({
       contentType: content.contentType,
       assetRole,
@@ -217,6 +211,10 @@ class DefaultTrainingContentAssetService implements TrainingContentAssetService 
       actor,
       now,
       transactionGuard: params.context.transactionGuard,
+      authorizationScope: params.context.authorityScope === "focus_topic" ? "focus_topic" : "central",
+      authorizationTopicId: params.context.authorityScope === "focus_topic"
+        ? requiredId(params.context.authorityTopicId ?? "", "Focus Topic id")
+        : null,
     });
     if (!created.asset.temporaryObjectKey) {
       throw new Error("Pending Training Content asset is missing its temporary object key.");
@@ -868,6 +866,7 @@ export function mapTrainingContentAssetServiceError(error: unknown): TrainingCon
       asset_state_conflict: "training_content_asset_state_conflict",
       replacement_conflict: "training_content_replacement_conflict",
       pending_upload_limit_exceeded: "training_content_pending_upload_limit_exceeded",
+      asset_authority_denied: "focus_topic_content_shared_read_only",
     }[error.code];
     return new TrainingContentAssetServiceError(error.message, status, publicCode);
   }

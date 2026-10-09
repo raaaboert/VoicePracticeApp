@@ -13,6 +13,10 @@ import { createUserNotificationStore } from "./storage/userNotificationStore.js"
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createOrganizationProductSettingsStore } from "./storage/organizationProductSettingsStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import {
+  createTrainingContentAssetStore,
+  TrainingContentAssetStoreError,
+} from "./storage/trainingContentAssetStore.js";
 import { createWebAuthService } from "./services/webAuth.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
@@ -578,6 +582,235 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
          WHERE org_id=$1 AND content_id=$2 AND topic_id=$3 AND detached_at IS NULL`,
         [org.id, (orgAdminCreated.body.item as { id: string }).id, topic.id],
       )).rowCount, 1);
+      for (const externalUrl of [
+        "https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ",
+        "javascript:alert(1)",
+        "https://youtube.com/watch?v=short",
+      ]) assert.equal((await scopedCall(topicContentPath, "POST", {
+        contentType: "external_url", externalKind: "youtube", externalUrl,
+        title: "Invalid YouTube", description: "",
+      })).status, 400);
+      const youtubeCreated = await scopedCall(topicContentPath, "POST", {
+        contentType: "external_url", externalKind: "youtube",
+        externalUrl: "https://youtu.be/dQw4w9WgXcQ",
+        title: "Customer YouTube", description: "Public resource with private transcript",
+      });
+      assert.equal(youtubeCreated.status, 201, JSON.stringify(youtubeCreated.body));
+      const youtubeItem = youtubeCreated.body.item as {
+        id: string; updatedAt: string; publicationState: string;
+        externalKind: string; externalUrl: string;
+      };
+      assert.equal(youtubeItem.publicationState, "draft");
+      assert.equal(youtubeItem.externalKind, "youtube");
+      assert.equal(youtubeItem.externalUrl, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+      const youtubeRow = await pool.query<{ external_url: string; external_kind: string;
+        created_by_actor_id: string }>(
+        `SELECT external_url,external_kind,created_by_actor_id FROM org_content_items
+         WHERE org_id=$1 AND id=$2`, [org.id, youtubeItem.id],
+      );
+      assert.deepEqual(youtubeRow.rows[0], { external_url: youtubeItem.externalUrl,
+        external_kind: "youtube", created_by_actor_id: scopedUserAdmin.id });
+      assert.equal((await pool.query(
+        "SELECT 1 FROM org_content_assignments WHERE org_id=$1 AND content_id=$2 AND revoked_at IS NULL",
+        [org.id, youtubeItem.id],
+      )).rowCount, 0);
+      const publishedYoutube = await scopedCall(`${topicContentPath}/${youtubeItem.id}/publish`, "POST", {
+        expectedUpdatedAt: youtubeItem.updatedAt,
+      });
+      assert.equal(publishedYoutube.status, 200, JSON.stringify(publishedYoutube.body));
+      const youtubeLearnerDetailBeforeTranscript = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      assert.equal((youtubeLearnerDetailBeforeTranscript.body.resources as Array<{ id: string }>)
+        .some((entry) => entry.id === youtubeItem.id), true);
+
+      const transcriptPath = `${topicContentPath}/${youtubeItem.id}/transcript`;
+      assert.equal((await call(transcriptPath)).status, 401);
+      assert.equal((await managerCall(transcriptPath)).status, 404);
+      assert.equal((await scopedCall(transcriptPath, "PUT", {
+        text: "Denied actor spoof", actorId: orgAdmin.id,
+      })).status, 400);
+      assert.equal((await scopedCall(
+        `/orgs/${foreignOrg.id}/trainings/${topic.id}/content/${youtubeItem.id}/transcript`,
+      )).status, 404);
+      assert.equal((await scopedCall(
+        `/dashboard/admin/training-content/${youtubeItem.id}/transcript`,
+      )).status, 403);
+      await pool.query(`CREATE FUNCTION reject_runtime_transcript_audit() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.action LIKE 'training_content_transcript_%' THEN RAISE EXCEPTION 'forced transcript audit failure'; END IF;
+          RETURN NEW;
+        END $$`);
+      await pool.query(`CREATE TRIGGER reject_runtime_transcript_audit
+        BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION reject_runtime_transcript_audit()`);
+      assert.equal((await scopedCall(transcriptPath, "PUT", {
+        text: "PRIVATE_TRANSCRIPT_ROLLBACK_SENTINEL",
+      })).status, 500);
+      assert.equal((await pool.query(
+        "SELECT 1 FROM org_content_transcripts WHERE org_id=$1 AND content_id=$2",
+        [org.id, youtubeItem.id],
+      )).rowCount, 0);
+      await pool.query("DROP TRIGGER reject_runtime_transcript_audit ON audit_events");
+      await pool.query("DROP FUNCTION reject_runtime_transcript_audit() ");
+
+      const firstTranscript = await scopedCall(transcriptPath, "PUT", {
+        text: "PRIVATE_TRANSCRIPT_SENTINEL_VERSION_ONE",
+      });
+      assert.equal(firstTranscript.status, 200, JSON.stringify(firstTranscript.body));
+      assert.equal((firstTranscript.body.generationSource as { eligible: boolean }).eligible, true);
+      const replacedTranscript = await scopedCall(transcriptPath, "PUT", {
+        text: "PRIVATE_TRANSCRIPT_SENTINEL_VERSION_TWO",
+      });
+      assert.equal(replacedTranscript.status, 200, JSON.stringify(replacedTranscript.body));
+      const transcriptRows = await pool.query<{ version: number; current: boolean }>(
+        `SELECT version,(superseded_at IS NULL AND removed_at IS NULL) AS current
+         FROM org_content_transcripts WHERE org_id=$1 AND content_id=$2 ORDER BY version`,
+        [org.id, youtubeItem.id],
+      );
+      assert.deepEqual(transcriptRows.rows.map((row) => [row.version, row.current]), [[1, false], [2, true]]);
+      const youtubeLearnerDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      const youtubeMobileDetail = await call(`/mobile/users/${user.id}/training-content/${youtubeItem.id}`);
+      assert.equal(((youtubeMobileDetail.body.item as { externalUrl: string }).externalUrl), youtubeItem.externalUrl);
+      for (const learnerPayload of [youtubeLearnerDetail.body, youtubeMobileDetail.body]) {
+        const serialized = JSON.stringify(learnerPayload);
+        assert.equal(serialized.includes("PRIVATE_TRANSCRIPT_SENTINEL"), false);
+        assert.equal(serialized.includes("contentSha256"), false);
+        assert.equal(serialized.includes("generationSource"), false);
+      }
+      const youtubeSharedAttachment = await orgAdminCall(unmanagedAttachmentsPath, "POST", {
+        kind: "content", contentId: youtubeItem.id,
+      });
+      assert.equal(youtubeSharedAttachment.status, 201, JSON.stringify(youtubeSharedAttachment.body));
+      const readableSharedTranscript = await scopedCall(transcriptPath);
+      assert.equal(readableSharedTranscript.status, 200, JSON.stringify(readableSharedTranscript.body));
+      assert.equal((readableSharedTranscript.body.transcript as { text: string }).text,
+        "PRIVATE_TRANSCRIPT_SENTINEL_VERSION_TWO");
+      assert.equal((await scopedCall(transcriptPath, "PUT", { text: "Denied shared mutation" })).status, 403);
+      const centralTranscriptPath = `/dashboard/admin/training-content/${youtubeItem.id}/transcript`;
+      assert.equal((await orgAdminCall(centralTranscriptPath, "PUT", {
+        text: "PRIVATE_TRANSCRIPT_SENTINEL_ORG_ADMIN",
+      })).status, 200);
+      assert.equal((await orgAdminCall(
+        `${unmanagedAttachmentsPath}/${youtubeSharedAttachment.body.id as string}`, "DELETE",
+      )).status, 200);
+      const youtubeStandaloneId = randomUUID();
+      await pool.query(`INSERT INTO org_content_assignments
+        (id,org_id,content_id,assignment_type,subject_user_id,created_by_actor_id,created_at)
+        VALUES ($1,$2,$3,'organization',NULL,$4,NOW())`,
+      [youtubeStandaloneId, org.id, youtubeItem.id, orgAdmin.id]);
+      assert.equal((await scopedCall(transcriptPath, "PUT", { text: "Denied standalone mutation" })).status, 403);
+      await pool.query(`UPDATE org_content_assignments SET revoked_at=NOW(),revoked_by_actor_id=$3
+        WHERE org_id=$1 AND id=$2`, [org.id, youtubeStandaloneId, orgAdmin.id]);
+      assert.equal((await scopedCall(transcriptPath, "PUT", {
+        text: "PRIVATE_TRANSCRIPT_SENTINEL_EXCLUSIVE_AGAIN",
+      })).status, 200);
+      const removedTranscript = await orgAdminCall(centralTranscriptPath, "DELETE");
+      assert.equal(removedTranscript.status, 200, JSON.stringify(removedTranscript.body));
+      assert.equal(removedTranscript.body.transcript, null);
+      assert.equal((removedTranscript.body.generationSource as { reasonCode: string }).reasonCode,
+        "missing_transcript");
+      assert.equal((await pool.query(
+        `SELECT 1 FROM audit_events WHERE action IN
+         ('training_content_transcript_added','training_content_transcript_replaced','training_content_transcript_removed')
+         AND metadata::text LIKE '%PRIVATE_TRANSCRIPT%'`,
+      )).rowCount, 0);
+
+      const videoCreated = await scopedCall(topicContentPath, "POST", {
+        contentType: "video", title: "Scoped video", description: "Finalization authority test",
+      });
+      assert.equal(videoCreated.status, 201, JSON.stringify(videoCreated.body));
+      const videoItem = videoCreated.body.item as { id: string };
+      const assetStore = createTrainingContentAssetStore({
+        provider: "postgres",
+        databaseUrl: url,
+        pgPoolMax: 3,
+        pgConnectTimeoutMs: 2_000,
+        pgIdleTimeoutMs: 2_000,
+        queryPool: pool,
+      });
+      const pendingVideo = await assetStore.createPendingAsset({
+        orgId: org.id,
+        contentId: videoItem.id,
+        assetRole: "primary",
+        originalFilename: "scoped-video.mp4",
+        declaredMimeType: "video/mp4",
+        fileExtension: "mp4",
+        declaredByteSize: 8,
+        replacementAssetId: null,
+        uploadTtlSeconds: 600,
+        maxPendingBytesForOrganization: 1_000_000,
+        actor: { actorType: "web_user", actorId: scopedUserAdmin.id },
+        authorizationScope: "focus_topic",
+        authorizationTopicId: topic.id,
+      });
+      const queuedVideo = await assetStore.queueVideoProcessing({
+        orgId: org.id,
+        contentId: videoItem.id,
+        assetId: pendingVideo.asset.id,
+        actualByteSize: 8,
+        detectedMimeType: "video/mp4",
+        checksumOrEtag: "runtime-video-etag",
+        actor: { actorType: "web_user", actorId: scopedUserAdmin.id },
+      });
+      assert.equal(queuedVideo.status, "queued");
+      assert.ok(queuedVideo.asset.finalObjectKey);
+      const sharedVideoAttachment = await orgAdminCall(unmanagedAttachmentsPath, "POST", {
+        kind: "content", contentId: videoItem.id,
+      });
+      assert.equal(sharedVideoAttachment.status, 201, JSON.stringify(sharedVideoAttachment.body));
+      await assert.rejects(
+        assetStore.completeFinalization({
+          orgId: org.id,
+          contentId: videoItem.id,
+          assetId: pendingVideo.asset.id,
+          finalObjectKey: queuedVideo.asset.finalObjectKey!,
+          actualByteSize: 8,
+          detectedMimeType: "video/mp4",
+          checksumOrEtag: "runtime-video-etag",
+          actor: { actorType: "system", actorId: "training-content-video-worker" },
+        }),
+        (error: unknown) => error instanceof TrainingContentAssetStoreError
+          && error.code === "asset_authority_denied",
+      );
+      assert.equal((await assetStore.getAssetForOrg(
+        org.id, videoItem.id, pendingVideo.asset.id,
+      ))?.uploadState, "processing");
+      assert.equal((await orgAdminCall(
+        `${unmanagedAttachmentsPath}/${sharedVideoAttachment.body.id as string}`, "DELETE",
+      )).status, 200);
+      const finalizedVideo = await assetStore.completeFinalization({
+        orgId: org.id,
+        contentId: videoItem.id,
+        assetId: pendingVideo.asset.id,
+        finalObjectKey: queuedVideo.asset.finalObjectKey!,
+        actualByteSize: 8,
+        detectedMimeType: "video/mp4",
+        checksumOrEtag: "runtime-video-etag",
+        actor: { actorType: "system", actorId: "training-content-video-worker" },
+      });
+      assert.equal(finalizedVideo.asset.uploadState, "ready");
+      const videoBeforePublish = await scopedCall(attachmentsPath);
+      const videoBeforePublishItem = (videoBeforePublish.body.contentItems as Array<{
+        id: string; updatedAt: string;
+      }>).find((entry) => entry.id === videoItem.id);
+      assert.ok(videoBeforePublishItem);
+      assert.equal((await scopedCall(`${topicContentPath}/${videoItem.id}/publish`, "POST", {
+        expectedUpdatedAt: videoBeforePublishItem.updatedAt,
+      })).status, 200);
+      const videoBeforeTranscript = await scopedCall(attachmentsPath);
+      assert.equal((videoBeforeTranscript.body.contentItems as Array<{
+        id: string; generationSource: { reasonCode: string };
+      }>).find((entry) => entry.id === videoItem.id)?.generationSource.reasonCode, "missing_transcript");
+      const videoTranscriptPath = `${topicContentPath}/${videoItem.id}/transcript`;
+      const videoWithTranscript = await scopedCall(videoTranscriptPath, "PUT", {
+        text: "PRIVATE_VIDEO_TRANSCRIPT_SENTINEL",
+      });
+      assert.equal((videoWithTranscript.body.generationSource as { eligible: boolean }).eligible, true);
+      const learnerWithVideoTranscript = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      assert.equal(JSON.stringify(learnerWithVideoTranscript.body)
+        .includes("PRIVATE_VIDEO_TRANSCRIPT_SENTINEL"), false);
+      const videoWithoutTranscript = await scopedCall(videoTranscriptPath, "DELETE");
+      assert.equal((videoWithoutTranscript.body.generationSource as { reasonCode: string }).reasonCode,
+        "missing_transcript");
+
       const scopedCreated = await scopedCall(topicContentPath, "POST", {
         contentType: "pdf", title: "Scoped draft", description: "Initial description",
       });
@@ -703,10 +936,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       ]);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.content.attached'",
-      )).rowCount, 5);
+      )).rowCount, 7);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.attachment.detached'",
-      )).rowCount, 4);
+      )).rowCount, 6);
       assert.ok(((await pool.query(
         "SELECT 1 FROM user_notifications WHERE kind='content_added' AND recipient_user_id=$1",
         [orgAdmin.id],
@@ -747,6 +980,9 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         "DELETE",
       );
       assert.equal(revokedManagement.status, 200, JSON.stringify(revokedManagement.body));
+      assert.equal((await scopedCall(transcriptPath, "PUT", {
+        text: "Denied after management revoke",
+      })).status, 401);
       const learnerAfterManagementRevoke = await fetch(
         `${base}/mobile/users/${scopedUserAdmin.id}/focus-topics`,
         { headers: { Authorization: `Bearer ${scopedMobileToken}` } },

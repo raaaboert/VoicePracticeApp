@@ -102,6 +102,9 @@ export const TRAINING_CONTENT_TYPES = [
 ] as const;
 export type TrainingContentType = (typeof TRAINING_CONTENT_TYPES)[number];
 
+export const TRAINING_CONTENT_EXTERNAL_KINDS = ["youtube"] as const;
+export type TrainingContentExternalKind = (typeof TRAINING_CONTENT_EXTERNAL_KINDS)[number];
+
 export const TRAINING_CONTENT_PUBLICATION_STATES = ["draft", "published", "archived"] as const;
 export type TrainingContentPublicationState = (typeof TRAINING_CONTENT_PUBLICATION_STATES)[number];
 
@@ -145,6 +148,7 @@ export interface TrainingContentItem {
   publicationState: TrainingContentPublicationState;
   nativeBody: string | null;
   externalUrl: string | null;
+  externalKind?: TrainingContentExternalKind | null;
   displayOrder: number;
   contentVersion: number;
   createdByActorId: string;
@@ -400,6 +404,7 @@ export interface DashboardTrainingContentListItem {
   focusTopicName: string | null;
   focusTopicAvailable: boolean;
   contentType: TrainingContentType;
+  externalKind?: TrainingContentExternalKind | null;
   publicationState: TrainingContentPublicationState;
   contentVersion: number;
   currentAsset: DashboardTrainingContentAsset | null;
@@ -477,6 +482,7 @@ export interface CreateDashboardTrainingContentRequest {
   focusTopicId?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
+  externalKind?: TrainingContentExternalKind | null;
   relatedScenarioIds?: string[];
 }
 
@@ -488,6 +494,7 @@ export interface UpdateDashboardTrainingContentRequest {
   focusTopicId?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
+  externalKind?: TrainingContentExternalKind | null;
   relatedScenarioIds?: string[];
 }
 

@@ -9,9 +9,12 @@ import {
   createDashboardFocusTopicManagementGrant,
   detachDashboardFocusTopicContent,
   finalizeDashboardFocusTopicContentUpload,
+  getDashboardFocusTopicContentTranscript,
   getDashboardFocusTopicRelatedContent,
   listDashboardFocusTopicAssignments,
   initiateDashboardFocusTopicContentUpload,
+  putDashboardFocusTopicContentTranscript,
+  removeDashboardFocusTopicContentTranscript,
   revokeDashboardFocusTopicAssignment,
   revokeDashboardFocusTopicManagementGrant,
   updateDashboardFocusTopic,
@@ -40,7 +43,8 @@ type Action =
   | { action: "attach_content"; orgId: string; topicId: string; contentId: string }
   | { action: "detach_content"; orgId: string; topicId: string; attachmentId: string }
   | { action: "create_content"; orgId: string; topicId: string;
-      contentType: "audio" | "pdf" | "docx" | "image"; title: string; description: string }
+      contentType: "external_url" | "video" | "audio" | "pdf" | "docx" | "image";
+      title: string; description: string; externalUrl?: string; externalKind?: "youtube" }
   | { action: "update_content"; orgId: string; topicId: string; contentId: string;
       expectedUpdatedAt: string; title?: string; description?: string }
   | { action: "publish_content" | "unpublish_content"; orgId: string; topicId: string;
@@ -50,7 +54,10 @@ type Action =
       originalFilename: string; declaredMimeType: string; declaredByteSize: number;
       replacementAssetId?: string | null }
   | { action: "finalize_content_upload"; orgId: string; topicId: string;
-      contentId: string; assetId: string };
+      contentId: string; assetId: string }
+  | { action: "get_content_transcript"; orgId: string; topicId: string; contentId: string }
+  | { action: "put_content_transcript"; orgId: string; topicId: string; contentId: string; text: string }
+  | { action: "remove_content_transcript"; orgId: string; topicId: string; contentId: string };
 
 export async function POST(request: NextRequest) {
   assertDashboardAuthConfig();
@@ -86,6 +93,8 @@ export async function POST(request: NextRequest) {
         return noStore(NextResponse.json(await createDashboardFocusTopicContent(
           body.orgId, body.topicId, {
             contentType: body.contentType, title: body.title, description: body.description,
+            ...(body.externalUrl === undefined ? {} : { externalUrl: body.externalUrl }),
+            ...(body.externalKind === undefined ? {} : { externalKind: body.externalKind }),
           },
         ), { status: 201 }));
       case "update_content":
@@ -118,6 +127,18 @@ export async function POST(request: NextRequest) {
       case "finalize_content_upload":
         return noStore(NextResponse.json(await finalizeDashboardFocusTopicContentUpload(
           body.orgId, body.topicId, body.contentId, body.assetId,
+        )));
+      case "get_content_transcript":
+        return noStore(NextResponse.json(await getDashboardFocusTopicContentTranscript(
+          body.orgId, body.topicId, body.contentId,
+        )));
+      case "put_content_transcript":
+        return noStore(NextResponse.json(await putDashboardFocusTopicContentTranscript(
+          body.orgId, body.topicId, body.contentId, body.text,
+        )));
+      case "remove_content_transcript":
+        return noStore(NextResponse.json(await removeDashboardFocusTopicContentTranscript(
+          body.orgId, body.topicId, body.contentId,
         )));
       default:
         return noStore(NextResponse.json({ error: "Unknown Focus Topic action." }, { status: 400 }));

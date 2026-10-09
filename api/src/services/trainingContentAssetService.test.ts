@@ -620,12 +620,13 @@ test("upload initiation requires entitlement and server-derived management capab
   );
 });
 
-test("Topic-scoped uploads require and forward a transaction guard while video stays deferred", async () => {
+test("Topic-scoped uploads require authority metadata and support guarded video initiation", async () => {
   const guard = async () => {};
   const scopedContext = {
     ...ORG_ADMIN_CONTEXT,
     capabilities: buildDashboardAdminCapabilities("user_admin"),
     authorityScope: "focus_topic" as const,
+    authorityTopicId: "topic_1",
     transactionGuard: guard,
   };
   const harness = buildHarness();
@@ -659,15 +660,16 @@ test("Topic-scoped uploads require and forward a transaction guard while video s
     && error.code === "dashboard_scope_denied");
 
   const videoHarness = buildHarness({ content: buildContent({ contentType: "video" }) });
-  await assert.rejects(videoHarness.service.initiateUpload({
+  const videoInitiated = await videoHarness.service.initiateUpload({
     context: scopedContext,
     contentId: buildContent().id,
     assetRole: "primary",
     originalFilename: "coaching.mp4",
     declaredMimeType: "video/mp4",
     declaredByteSize: MP4_BYTES.byteLength,
-  }), (error: unknown) => error instanceof TrainingContentAssetServiceError
-    && error.code === "focus_topic_video_upload_deferred");
+  });
+  assert.equal(videoInitiated.asset.uploadState, "pending");
+  assert.equal(videoHarness.assetStore.transactionGuards[0], guard);
 });
 
 test("upload initiation rejects cross-organization content and declared policy violations", async () => {

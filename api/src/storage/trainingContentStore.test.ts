@@ -112,7 +112,7 @@ test("Training Content store initializes once and scopes every content read by o
     query.text.includes("CREATE TABLE IF NOT EXISTS")
     || query.text.includes("ALTER TABLE org_content_assets")
     || query.text.includes("ALTER TABLE org_content_scenario_links")
-  ).length, 6);
+  ).length, 7);
   assert.ok(queries.some((query) => query.text.includes("pg_advisory_xact_lock")));
   assert.equal(orgOne.length, 1);
   assert.equal(orgTwo.length, 0);

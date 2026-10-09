@@ -115,8 +115,8 @@ test("migration 013 only makes scenario-link focus_topic_id nullable", async () 
 
 test("migration loader includes 013 after the existing five migrations", async () => {
   const migrations = await loadTrainingContentMigrationSql();
-  assert.equal(migrations.length, 6);
-  assert.match(migrations.at(-1) ?? "", /ALTER COLUMN focus_topic_id DROP NOT NULL/);
+  assert.equal(migrations.length, 7);
+  assert.match(migrations[5] ?? "", /ALTER COLUMN focus_topic_id DROP NOT NULL/);
 });
 
 test("active link reads return zero links and always scope by organization", async () => {

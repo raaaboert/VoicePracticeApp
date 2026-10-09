@@ -7,6 +7,7 @@ import type {
   ClaimedTrainingContentVideoProcessing,
   TrainingContentAssetStore,
 } from "../storage/trainingContentAssetStore.js";
+import { TrainingContentAssetStoreError } from "../storage/trainingContentAssetStore.js";
 import type {
   TrainingContentObjectStorage,
 } from "../storage/trainingContentObjectStorage.js";
@@ -350,6 +351,9 @@ function normalizeFailure(
   }
   if (error instanceof TrainingContentVideoProcessingError) {
     return error;
+  }
+  if (error instanceof TrainingContentAssetStoreError && error.code === "asset_authority_denied") {
+    return permanentFailure("authorization_revoked", "Video finalization authority was revoked.");
   }
   return transientFailure(
     "processing_dependency_failed",

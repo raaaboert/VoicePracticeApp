@@ -393,7 +393,7 @@ test(
       await client.query(`CREATE SCHEMA ${quotedSchema}`);
       await client.query(`SET search_path TO ${quotedSchema}`);
       const migrations = await loadTrainingContentMigrationSql();
-      assert.equal(migrations.length, 6);
+      assert.equal(migrations.length, 7);
       await runMigrations(client, migrations.slice(0, 2));
       const contentId = randomUUID();
       await client.query(
@@ -495,6 +495,7 @@ test(
         "org_content_categories",
         "org_content_items",
         "org_content_scenario_links",
+        "org_content_transcripts",
         "org_content_usage",
         "org_content_usage_sessions",
       ]);
@@ -513,6 +514,40 @@ test(
           VALUES ($1, $2, $3, 'Org A PDF', 'pdf', 'draft', 'actor_a', 'actor_a')
         `,
         [contentA, orgA, categoryA]
+      );
+      await expectPostgresError(
+        () => client.query(
+          "UPDATE org_content_items SET external_kind='youtube' WHERE org_id=$1 AND id=$2",
+          [orgA, contentA],
+        ),
+        "23514",
+      );
+      const firstTranscriptId = randomUUID();
+      await client.query(
+        `INSERT INTO org_content_transcripts
+         (id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id)
+         VALUES ($1,$2,$3,1,'Version one',$4,'actor_a')`,
+        [firstTranscriptId, orgA, contentA, "a".repeat(64)],
+      );
+      await expectPostgresError(
+        () => client.query(
+          `INSERT INTO org_content_transcripts
+           (id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id)
+           VALUES ($1,$2,$3,2,'Competing current',$4,'actor_a')`,
+          [randomUUID(), orgA, contentA, "b".repeat(64)],
+        ),
+        "23505",
+      );
+      await client.query(
+        `UPDATE org_content_transcripts SET superseded_by_actor_id='actor_a',superseded_at=NOW()
+         WHERE org_id=$1 AND id=$2`,
+        [orgA, firstTranscriptId],
+      );
+      await client.query(
+        `INSERT INTO org_content_transcripts
+         (id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id)
+         VALUES ($1,$2,$3,2,'Version two',$4,'actor_a')`,
+        [randomUUID(), orgA, contentA, "b".repeat(64)],
       );
       await expectPostgresError(
         () => client.query(

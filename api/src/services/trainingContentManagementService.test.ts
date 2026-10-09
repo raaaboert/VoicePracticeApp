@@ -25,8 +25,17 @@ test("Topic-scoped creation accepts uploaded resource types and rejects central-
     contentType: "pdf", title: " Guide ", description: " Notes ",
   }), {
     contentType: "pdf", categoryId: null, title: "Guide", description: "Notes",
+    externalUrl: null, externalKind: null,
   });
-  for (const contentType of ["native", "external_url", "video"]) {
+  assert.equal(normalizeTopicScopedContentCreateInput({
+    contentType: "video", title: "Video", description: "",
+  }).contentType, "video");
+  assert.deepEqual(normalizeTopicScopedContentCreateInput({
+    contentType: "external_url", externalKind: "youtube",
+    externalUrl: "https://youtu.be/dQw4w9WgXcQ", title: "Video", description: "",
+  }), { contentType: "external_url", categoryId: null, title: "Video", description: "",
+    externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", externalKind: "youtube" });
+  for (const contentType of ["native", "external_url"]) {
     assert.throws(() => normalizeTopicScopedContentCreateInput({
       contentType, title: "Guide", description: "",
     }), TrainingContentManagementServiceError);
@@ -241,6 +250,7 @@ function harness(
         contentType: input.contentType,
         nativeBody: input.nativeBody,
         externalUrl: input.externalUrl,
+        externalKind: input.externalKind,
       });
       return current;
     },
@@ -258,6 +268,7 @@ function harness(
               "focusTopicNameSnapshot",
               "nativeBody",
               "externalUrl",
+              "externalKind",
             ].includes(key)
           )
         ),
@@ -711,6 +722,29 @@ test("external content requires HTTPS without embedded credentials and file draf
     },
   });
   assert.equal(external.externalUrl, "https://example.com/reference?q=1");
+
+  const youtubeHarness = harness();
+  const youtube = await youtubeHarness.service.createContent({
+    context,
+    references,
+    input: {
+      contentType: "external_url",
+      externalKind: "youtube",
+      title: "YouTube reference",
+      externalUrl: "https://youtu.be/dQw4w9WgXcQ",
+    },
+  });
+  assert.equal(youtube.externalKind, "youtube");
+  assert.equal(youtube.externalUrl, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  await assert.rejects(
+    youtubeHarness.service.updateContent({
+      context,
+      references,
+      contentId: youtube.id,
+      input: { expectedUpdatedAt: NOW, externalUrl: "https://example.com/not-youtube" },
+    }),
+    /valid public YouTube URL/,
+  );
 
   for (const externalUrl of [
     "http://example.com",

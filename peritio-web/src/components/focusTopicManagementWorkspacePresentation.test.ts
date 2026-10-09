@@ -47,6 +47,25 @@ test("Related Content separates attach-existing from scoped draft upload and edi
   assert.match(proxy, /case "finalize_content_upload"/);
 });
 
+test("Related Content supports YouTube sources, private transcripts, and eligibility state", () => {
+  assert.match(source, />YouTube URL<\/button>/);
+  assert.match(source, /Public YouTube URL/);
+  assert.match(source, /Create Draft YouTube Resource/);
+  assert.match(source, /item\.contentType !== "external_url" \? <label>Replace file/);
+  assert.match(source, /Generation source:/);
+  assert.match(source, /Transcript/);
+  assert.match(source, /Not provided/);
+  assert.match(source, /Ready/);
+  assert.match(source, /Add Transcript/);
+  assert.match(source, /Replace Transcript/);
+  assert.match(source, /Remove Transcript/);
+  assert.match(source, /readOnly=\{!item\.transcript\.canMutate\}/);
+  assert.match(source, /A transcript is required before this resource can be used to generate practice scenarios/);
+  assert.match(proxy, /case "get_content_transcript"/);
+  assert.match(proxy, /case "put_content_transcript"/);
+  assert.match(proxy, /case "remove_content_transcript"/);
+});
+
 test("scoped dashboard page uses server-derived Topic capability and filtered workspace metadata", () => {
   assert.match(page, /viewer\.capabilities\.manageFocusTopics/);
   assert.match(page, /topics\.management\.canManageAllTopics/);

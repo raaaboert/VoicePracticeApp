@@ -9,6 +9,7 @@ import type {
   TrainingContentAssetRole,
   TrainingContentAssetUploadState,
   TrainingContentCategory,
+  TrainingContentExternalKind,
   TrainingContentItem,
   TrainingContentListSort,
   TrainingContentPublicationState,
@@ -150,6 +151,7 @@ export interface CreateTrainingContentInput {
   contentType: TrainingContentType;
   nativeBody: string | null;
   externalUrl: string | null;
+  externalKind?: TrainingContentExternalKind | null;
   actor: TrainingContentMutationActor;
   now?: Date;
 }
@@ -175,6 +177,7 @@ export interface UpdateTrainingContentInput {
   focusTopicNameSnapshot?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
+  externalKind?: TrainingContentExternalKind | null;
   actor: TrainingContentMutationActor;
   now?: Date;
   transactionGuard?: TrainingContentTransactionGuard;
@@ -312,6 +315,7 @@ interface TrainingContentItemRow {
   publication_state: TrainingContentPublicationState;
   native_body: string | null;
   external_url: string | null;
+  external_kind: TrainingContentExternalKind | null;
   display_order: number;
   content_version: number;
   created_by_actor_id: string;
@@ -447,6 +451,7 @@ const CONTENT_COLUMNS = `
   publication_state,
   native_body,
   external_url,
+  external_kind,
   display_order,
   content_version,
   created_by_actor_id,
@@ -1173,6 +1178,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
             publication_state,
             native_body,
             external_url,
+            external_kind,
             display_order,
             content_version,
             created_by_actor_id,
@@ -1181,7 +1187,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
             updated_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, 1, $12, $12, $13, $13
+            $1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, $12, 1, $13, $13, $14, $14
           )
           RETURNING ${CONTENT_COLUMNS}
         `,
@@ -1196,6 +1202,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           input.contentType,
           input.nativeBody,
           input.externalUrl,
+          input.externalKind ?? null,
           displayOrder,
           requiredId(input.actor.actorId, "Actor id"),
           now,
@@ -1255,13 +1262,13 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         `INSERT INTO org_content_items (
            id, org_id, category_id, title, description, focus_topic_id,
            focus_topic_name_snapshot, content_type, publication_state, native_body,
-           external_url, display_order, content_version, created_by_actor_id,
+           external_url, external_kind, display_order, content_version, created_by_actor_id,
            updated_by_actor_id, created_at, updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10,$11,1,$12,$12,$13,$13)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10,$11,$12,1,$13,$13,$14,$14)
          RETURNING ${CONTENT_COLUMNS}`,
         [contentId, category.orgId, category.id, input.title, input.description,
           input.focusTopicId, input.focusTopicNameSnapshot, input.contentType,
-          input.nativeBody, input.externalUrl, displayOrder, actorId, now],
+          input.nativeBody, input.externalUrl, input.externalKind ?? null, displayOrder, actorId, now],
       );
       const content = mapRequiredContentRow(inserted.rows[0]);
       await client.query(
@@ -1336,6 +1343,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           : input.focusTopicNameSnapshot,
         nativeBody: input.nativeBody === undefined ? current.nativeBody : input.nativeBody,
         externalUrl: input.externalUrl === undefined ? current.externalUrl : input.externalUrl,
+        externalKind: input.externalKind === undefined ? (current.externalKind ?? null) : input.externalKind,
       };
       const categoryChanged = next.categoryId !== current.categoryId;
       let nextDisplayOrder = current.displayOrder;
@@ -1362,6 +1370,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           : null,
         next.nativeBody !== current.nativeBody ? "nativeBody" : null,
         next.externalUrl !== current.externalUrl ? "externalUrl" : null,
+        next.externalKind !== (current.externalKind ?? null) ? "externalKind" : null,
       ].filter((field): field is string => Boolean(field));
 
       if (changedFields.length === 0) {
@@ -1370,7 +1379,8 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         return detail;
       }
 
-      const sourceChanged = changedFields.includes("nativeBody") || changedFields.includes("externalUrl");
+      const sourceChanged = changedFields.includes("nativeBody")
+        || changedFields.includes("externalUrl") || changedFields.includes("externalKind");
       const now = nextMutationTime(current.updatedAt, input.now ?? new Date());
       const updated = await client.query<TrainingContentItemRow>(
         `
@@ -1382,10 +1392,11 @@ class PostgresTrainingContentStore implements TrainingContentStore {
               focus_topic_name_snapshot = $7,
               native_body = $8,
               external_url = $9,
-              display_order = $10,
-              content_version = content_version + $11,
-              updated_by_actor_id = $12,
-              updated_at = $13
+              external_kind = $10,
+              display_order = $11,
+              content_version = content_version + $12,
+              updated_by_actor_id = $13,
+              updated_at = $14
           WHERE org_id = $1 AND id = $2
           RETURNING ${CONTENT_COLUMNS}
         `,
@@ -1399,6 +1410,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           next.focusTopicNameSnapshot,
           next.nativeBody,
           next.externalUrl,
+          next.externalKind,
           nextDisplayOrder,
           sourceChanged ? 1 : 0,
           requiredId(input.actor.actorId, "Actor id"),
@@ -1410,7 +1422,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         await assertPublishable(client, content, this.focusTopicAuthority);
       }
       const metadataFields = changedFields.filter(
-        (field) => field !== "nativeBody" && field !== "externalUrl"
+        (field) => field !== "nativeBody" && field !== "externalUrl" && field !== "externalKind"
       );
       if (metadataFields.length > 0) {
         await insertAuditEvent(client, {
@@ -1440,7 +1452,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           now,
         });
       }
-      if (changedFields.includes("externalUrl")) {
+      if (changedFields.includes("externalUrl") || changedFields.includes("externalKind")) {
         await insertAuditEvent(client, {
           actor: input.actor,
           action: "training_content_external_url_updated",
@@ -1448,7 +1460,8 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           contentId: content.id,
           contentType: content.contentType,
           contentVersion: content.contentVersion,
-          metadata: { changedFields: ["externalUrl"] },
+          metadata: { changedFields: changedFields.filter((field) =>
+            field === "externalUrl" || field === "externalKind") },
           now,
         });
       }
@@ -2171,6 +2184,7 @@ function mapContentItemRow(row: TrainingContentItemRow): TrainingContentItem {
     publicationState: row.publication_state,
     nativeBody: row.native_body,
     externalUrl: row.external_url,
+    externalKind: row.external_kind,
     displayOrder: row.display_order,
     contentVersion: row.content_version,
     createdByActorId: row.created_by_actor_id,

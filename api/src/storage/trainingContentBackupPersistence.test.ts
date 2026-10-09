@@ -6,8 +6,8 @@ import { loadTrainingContentMigrationSql } from "./trainingContentMigrations.js"
 
 test("backup migration is additive, idempotent, and targets only ready unbacked assets", async () => {
   const migrations = await loadTrainingContentMigrationSql();
-  assert.equal(migrations.length, 6);
-  const backup = migrations.at(-2) ?? "";
+  assert.equal(migrations.length, 7);
+  const backup = migrations[4] ?? "";
 
   assert.match(backup, /ADD COLUMN IF NOT EXISTS backed_up_at TIMESTAMPTZ NULL/);
   assert.match(

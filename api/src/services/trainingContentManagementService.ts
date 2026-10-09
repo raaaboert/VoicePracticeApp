@@ -37,6 +37,7 @@ import {
 } from "@voicepractice/shared";
 
 import type { TrainingContentStorageConfig } from "../trainingContentStorageConfig.js";
+import { canonicalizeYouTubeUrl } from "./trainingContentGenerationSourcePolicy.js";
 import type { OrgModuleEntitlementStore } from "../storage/orgModuleEntitlementStore.js";
 import {
   type TrainingContentCategoryStore,
@@ -293,6 +294,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       "focusTopicId",
       "nativeBody",
       "externalUrl",
+      "externalKind",
       "relatedScenarioIds",
     ]);
     const actor = buildActor(params.context);
@@ -322,7 +324,10 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       params.input.focusTopicId
     );
     const nativeBody = normalizeNativeBodyForType(params.input.nativeBody, contentType);
-    const externalUrl = normalizeExternalUrlForType(params.input.externalUrl, contentType);
+    const externalKind = normalizeExternalKindForType(params.input.externalKind, contentType);
+    const externalUrl = externalKind === "youtube"
+      ? canonicalizeYouTubeForInput(params.input.externalUrl)
+      : normalizeExternalUrlForType(params.input.externalUrl, contentType);
     const detail = await this.dependencies.store.createContent({
       orgId: params.context.orgId,
       categoryId: category.id,
@@ -333,6 +338,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       contentType,
       nativeBody,
       externalUrl,
+      externalKind,
       actor,
       now: params.now,
     });
@@ -365,6 +371,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       "focusTopicId",
       "nativeBody",
       "externalUrl",
+      "externalKind",
       "relatedScenarioIds",
     ]);
     const contentId = requiredId(params.contentId, "Content id");
@@ -412,6 +419,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       params.input.focusTopicId,
       params.input.nativeBody,
       params.input.externalUrl,
+      params.input.externalKind,
     ].some((value) => value !== undefined);
     if (relatedScenarioIds !== undefined && current.content.publicationState === "archived") {
       throw new TrainingContentManagementServiceError(
@@ -420,6 +428,19 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         "training_content_archived"
       );
     }
+    const normalizedExternalKind = params.input.externalKind === undefined
+      ? undefined
+      : normalizeExternalKindForType(params.input.externalKind, current.content.contentType);
+    const effectiveExternalKind = normalizedExternalKind === undefined
+      ? current.content.externalKind ?? null
+      : normalizedExternalKind;
+    const normalizedExternalUrl = params.input.externalUrl === undefined
+      ? (normalizedExternalKind === "youtube"
+        ? canonicalizeYouTubeForInput(current.content.externalUrl)
+        : undefined)
+      : (effectiveExternalKind === "youtube"
+        ? canonicalizeYouTubeForInput(params.input.externalUrl)
+        : normalizeExternalUrlForType(params.input.externalUrl, current.content.contentType));
     let detail = current;
     if (hasContentChanges || relatedScenarioIds === undefined) {
       detail = await this.dependencies.store.updateContent({
@@ -438,9 +459,8 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         nativeBody: params.input.nativeBody === undefined
           ? undefined
           : normalizeNativeBodyForType(params.input.nativeBody, current.content.contentType),
-        externalUrl: params.input.externalUrl === undefined
-          ? undefined
-          : normalizeExternalUrlForType(params.input.externalUrl, current.content.contentType),
+        externalUrl: normalizedExternalUrl,
+        externalKind: normalizedExternalKind,
         actor: buildActor(params.context),
         now: params.now,
         transactionGuard: params.context.transactionGuard,
@@ -966,6 +986,7 @@ function mapListItem(
     focusTopicName: currentTopic?.name ?? row.content.focusTopicNameSnapshot,
     focusTopicAvailable: row.content.focusTopicId === null || currentTopic !== null,
     contentType: row.content.contentType,
+    externalKind: row.content.externalKind ?? null,
     publicationState: row.content.publicationState,
     contentVersion: row.content.contentVersion,
     currentAsset: row.currentAsset ? mapDashboardAsset(row.currentAsset) : null,
@@ -1274,19 +1295,28 @@ function resolveFocusTopic(
 }
 
 export interface NormalizedTopicScopedContentCreateInput {
-  contentType: Extract<TrainingContentType, "audio" | "pdf" | "docx" | "image">;
+  contentType: Extract<TrainingContentType, "external_url" | "video" | "audio" | "pdf" | "docx" | "image">;
   categoryId: string | null;
   title: string;
   description: string;
+  externalUrl: string | null;
+  externalKind: "youtube" | null;
 }
 
 export function normalizeTopicScopedContentCreateInput(
   input: Record<string, unknown>,
 ): NormalizedTopicScopedContentCreateInput {
-  assertOnlyFields(input, ["contentType", "categoryId", "title", "description"]);
+  assertOnlyFields(input, ["contentType", "categoryId", "title", "description", "externalUrl", "externalKind"]);
   const contentType = normalizeContentType(input.contentType);
-  if (!(["audio", "pdf", "docx", "image"] as TrainingContentType[]).includes(contentType)) {
-    throw validationError("Topic uploads support audio, PDF, DOCX, and image files.");
+  if (!(["external_url", "video", "audio", "pdf", "docx", "image"] as TrainingContentType[]).includes(contentType)) {
+    throw validationError("Topic content supports YouTube, video, audio, PDF, DOCX, and image resources.");
+  }
+  const youtube = contentType === "external_url";
+  if (youtube && input.externalKind !== "youtube") {
+    throw validationError("External Topic resources must explicitly identify YouTube.", { field: "externalKind" });
+  }
+  if (!youtube && (input.externalKind !== undefined || input.externalUrl !== undefined)) {
+    throw validationError("External URL fields are only valid for YouTube resources.");
   }
   return {
     contentType: contentType as NormalizedTopicScopedContentCreateInput["contentType"],
@@ -1295,7 +1325,27 @@ export function normalizeTopicScopedContentCreateInput(
       : requiredString(input.categoryId, "categoryId", 200),
     title: normalizeTitle(input.title),
     description: normalizeDescription(input.description),
+    externalUrl: youtube ? canonicalizeYouTubeForInput(input.externalUrl) : null,
+    externalKind: youtube ? "youtube" : null,
   };
+}
+
+function normalizeExternalKindForType(value: unknown, contentType: TrainingContentType): "youtube" | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (contentType !== "external_url" || value !== "youtube") {
+    throw validationError("External kind is only valid for YouTube resources.", { field: "externalKind" });
+  }
+  return "youtube";
+}
+
+function canonicalizeYouTubeForInput(value: unknown): string {
+  try {
+    return canonicalizeYouTubeUrl(value);
+  } catch (error) {
+    throw validationError(error instanceof Error ? error.message : "Enter a valid public YouTube URL.", {
+      field: "externalUrl",
+    });
+  }
 }
 
 function normalizeContentType(value: unknown): TrainingContentType {
