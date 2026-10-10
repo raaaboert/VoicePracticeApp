@@ -37,7 +37,7 @@ const draft = {
   scoringGuidance: "Assess discovery and next-step clarity.",
   segmentId: "sales",
   applicableIndustryIds: ["technology"],
-  sourceReferences: [{ kind: "manual" as const, referenceId: null, label: "Customer playbook" }],
+  sourceReferences: [{ kind: "training_content" as const, referenceId: "content_1", label: "Customer playbook" }],
 };
 
 test("real PostgreSQL preserves stable scenario identity across immutable approved versions", {
@@ -76,6 +76,7 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
     });
     assert.equal(created.status, "draft");
     assert.equal(created.currentVersion.versionNumber, 1);
+    assert.deepEqual(created.history.map((event) => event.eventType), ["created"]);
 
     const submitted = await store.submit({
       orgId: "org_a", scenarioId: created.id, actorId: "scoped_author",
@@ -107,17 +108,36 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
     assert.equal(revised.publishedVersion?.id, "version_1");
     assert.equal(revised.publishedVersion?.title, "Discovery call");
 
-    const approvedWithoutReview = await store.submit({
+    const submittedV2 = await store.submit({
       orgId: "org_a", scenarioId: created.id, actorId: "scoped_author",
-      approvalRequired: false, now: new Date("2026-10-09T11:05:00Z"),
+      approvalRequired: true, now: new Date("2026-10-09T11:05:00Z"),
     });
-    assert.equal(approvedWithoutReview.status, "approved");
-    assert.equal(approvedWithoutReview.approvedVersionId, "version_2");
+    assert.equal(submittedV2.status, "in_review");
+    const rejectedV2 = await store.review({
+      orgId: "org_a", scenarioId: created.id, actorId: "org_admin",
+      decision: "reject", reviewNote: "Clarify the objective", now: new Date("2026-10-09T11:06:00Z"),
+    });
+    assert.equal(rejectedV2.status, "rejected");
+    assert.equal(rejectedV2.history.at(-1)?.comment, "Clarify the objective");
+    await store.submit({
+      orgId: "org_a", scenarioId: created.id, actorId: "scoped_author",
+      approvalRequired: true, now: new Date("2026-10-09T11:07:00Z"),
+    });
+    const approvedV2 = await store.review({
+      orgId: "org_a", scenarioId: created.id, actorId: "org_admin",
+      decision: "approve", reviewNote: "Ready now", now: new Date("2026-10-09T11:08:00Z"),
+    });
+    assert.equal(approvedV2.approvedVersionId, "version_2");
     const publishedV2 = await store.publish({
       orgId: "org_a", scenarioId: created.id, actorId: "org_admin",
       now: new Date("2026-10-09T11:10:00Z"),
     });
     assert.equal(publishedV2.publishedVersionId, "version_2");
+    assert.deepEqual(publishedV2.versions.map((version) => version.id), ["version_1", "version_2"]);
+    assert.deepEqual(publishedV2.history.map((event) => event.eventType), [
+      "created", "submitted", "approved", "published", "created", "submitted", "rejected",
+      "submitted", "approved", "published",
+    ]);
     assert.equal((await store.getVersion("org_a", created.id, "version_1"))?.title, "Discovery call");
     assert.equal(await store.get("org_b", created.id), null);
 

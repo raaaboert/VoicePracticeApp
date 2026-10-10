@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ApiDatabase, EnterpriseJoinRequestRecord, UserProfile } from "@voicepractice/shared";
+import type { ApiDatabase, CustomerPracticeScenario, EnterpriseJoinRequestRecord, UserProfile } from "@voicepractice/shared";
 
 import { createMemoryUserNotificationStoreForTest } from "../storage/userNotificationStore.js";
 import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
@@ -11,6 +11,7 @@ import {
   resolveAccessRequestNotifications,
 } from "./accessRequestNotifications.js";
 import { TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE } from "./topicAssignedNotifications.js";
+import { buildScenarioSubmittedNotificationInputs } from "./customerPracticeScenarioNotifications.js";
 
 const NOW = "2026-10-06T12:00:00.000Z";
 
@@ -98,6 +99,35 @@ test("duplicate access-request enqueue remains exactly once per intended recipie
   await store.enqueueMany(rows);
   assert.equal((await store.listForRecipient({ recipientUserId: "org_admin", limit: 10 })).length, 1);
   assert.equal((await store.listForRecipient({ recipientUserId: "user_admin", limit: 10 })).length, 1);
+});
+
+test("scenario review notifications are reauthorized and counted by the dashboard read path", async () => {
+  const recipient = user("org_admin", { orgRole: "org_admin" });
+  const author = user("author");
+  const source = db([recipient, author]);
+  const scenario = {
+    id: "scenario_1", orgId: "org_1", status: "in_review", createdByActorId: author.id,
+    currentVersionId: "version_1", currentVersion: { id: "version_1", title: "Discovery call" },
+  } as unknown as CustomerPracticeScenario;
+  const store = createMemoryUserNotificationStoreForTest();
+  await store.enqueueMany(buildScenarioSubmittedNotificationInputs({
+    db: source, scenario, actorId: author.id, createdAt: new Date(NOW),
+  }));
+  const listed = await listAuthorizedDashboardNotifications({
+    db: source, recipient, store, practiceScenarios: [scenario], limit: 20,
+  });
+  assert.equal(listed.notifications.length, 1);
+  assert.equal(listed.unreadCount, 1);
+  const opened = await markAuthorizedDashboardNotificationRead({
+    db: source, recipient, store, practiceScenarios: [scenario],
+    notificationId: listed.notifications[0]!.id,
+  });
+  assert.ok(opened?.readAt);
+  const closed = await listAuthorizedDashboardNotifications({
+    db: source, recipient, store,
+    practiceScenarios: [{ ...scenario, status: "approved" }], limit: 20,
+  });
+  assert.equal(closed.notifications.length, 0);
 });
 
 test("authorized notification paging continues after the last returned row without skipping", async () => {

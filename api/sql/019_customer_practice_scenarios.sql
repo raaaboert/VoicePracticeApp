@@ -111,6 +111,66 @@ CREATE INDEX IF NOT EXISTS customer_practice_scenarios_published_idx
 CREATE INDEX IF NOT EXISTS customer_practice_scenario_versions_scenario_idx
   ON customer_practice_scenario_versions (org_id, scenario_id, version_number DESC);
 
+CREATE TABLE IF NOT EXISTS customer_practice_scenario_events (
+  id BIGSERIAL PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  scenario_id TEXT NOT NULL,
+  version_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  comment TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT customer_practice_scenario_events_type_check CHECK (
+    event_type IN ('created', 'submitted', 'approved', 'rejected', 'published', 'archived')
+  ),
+  CONSTRAINT customer_practice_scenario_events_status_check CHECK (
+    status IN ('draft', 'in_review', 'approved', 'rejected', 'published', 'archived')
+  ),
+  CONSTRAINT customer_practice_scenario_events_scenario_fk FOREIGN KEY (org_id, scenario_id)
+    REFERENCES customer_practice_scenarios (org_id, id) ON DELETE RESTRICT,
+  CONSTRAINT customer_practice_scenario_events_version_fk FOREIGN KEY (org_id, scenario_id, version_id)
+    REFERENCES customer_practice_scenario_versions (org_id, scenario_id, id) ON DELETE RESTRICT,
+  CONSTRAINT customer_practice_scenario_events_natural_unique UNIQUE
+    (scenario_id, version_id, event_type, actor_id, created_at)
+);
+
+CREATE INDEX IF NOT EXISTS customer_practice_scenario_events_scenario_idx
+  ON customer_practice_scenario_events (org_id, scenario_id, created_at, id);
+
+INSERT INTO customer_practice_scenario_events
+  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+SELECT org_id,scenario_id,id,'created','draft',created_by_actor_id,NULL,created_at
+FROM customer_practice_scenario_versions
+ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+INSERT INTO customer_practice_scenario_events
+  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+SELECT org_id,scenario_id,id,'submitted','in_review',submitted_by_actor_id,NULL,submitted_at
+FROM customer_practice_scenario_versions WHERE submitted_at IS NOT NULL AND submitted_by_actor_id IS NOT NULL
+ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+INSERT INTO customer_practice_scenario_events
+  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+SELECT org_id,scenario_id,id,
+  CASE WHEN status='rejected' THEN 'rejected' ELSE 'approved' END,
+  CASE WHEN status='rejected' THEN 'rejected' ELSE 'approved' END,
+  reviewed_by_actor_id,review_note,reviewed_at
+FROM customer_practice_scenario_versions WHERE reviewed_at IS NOT NULL AND reviewed_by_actor_id IS NOT NULL
+ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+INSERT INTO customer_practice_scenario_events
+  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+SELECT org_id,scenario_id,id,'published','published',published_by_actor_id,NULL,published_at
+FROM customer_practice_scenario_versions WHERE published_at IS NOT NULL AND published_by_actor_id IS NOT NULL
+ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+INSERT INTO customer_practice_scenario_events
+  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+SELECT org_id,id,current_version_id,'archived','archived',archived_by_actor_id,NULL,archived_at
+FROM customer_practice_scenarios WHERE archived_at IS NOT NULL AND archived_by_actor_id IS NOT NULL
+ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
 CREATE OR REPLACE FUNCTION prevent_customer_practice_scenario_version_content_update()
 RETURNS TRIGGER AS $$
 BEGIN

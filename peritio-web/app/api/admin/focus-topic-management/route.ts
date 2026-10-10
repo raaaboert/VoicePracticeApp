@@ -66,8 +66,7 @@ type Action =
   | { action: "create_practice_scenario" | "revise_practice_scenario"; orgId: string; topicId: string;
       scenarioId?: string; title: string; description: string; desiredOutcome?: string | null;
       aiRole: string; scoringGuidance: string; segmentId: string; applicableIndustryIds: string[];
-      sourceReferences?: Array<{ kind: "manual" | "training_content" | "external";
-        referenceId: string | null; label: string }> }
+      sourceContentIds?: string[] }
   | { action: "submit_practice_scenario" | "approve_practice_scenario" | "reject_practice_scenario"
       | "publish_practice_scenario" | "archive_practice_scenario";
       orgId: string; topicId: string; scenarioId: string; reviewNote?: string };

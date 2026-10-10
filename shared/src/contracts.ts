@@ -956,6 +956,28 @@ export interface CustomerPracticeScenarioVersion {
   publishedAt: string | null;
 }
 
+export const CUSTOMER_PRACTICE_SCENARIO_HISTORY_EVENT_TYPES = [
+  "created",
+  "submitted",
+  "approved",
+  "rejected",
+  "published",
+  "archived",
+] as const;
+export type CustomerPracticeScenarioHistoryEventType =
+  (typeof CUSTOMER_PRACTICE_SCENARIO_HISTORY_EVENT_TYPES)[number];
+
+export interface CustomerPracticeScenarioHistoryEvent {
+  id: string;
+  scenarioId: string;
+  versionId: string;
+  eventType: CustomerPracticeScenarioHistoryEventType;
+  status: CustomerPracticeScenarioStatus;
+  actorId: string;
+  comment: string | null;
+  createdAt: string;
+}
+
 export interface CustomerPracticeScenario {
   id: string;
   orgId: string;
@@ -971,6 +993,8 @@ export interface CustomerPracticeScenario {
   archivedAt: string | null;
   currentVersion: CustomerPracticeScenarioVersion;
   publishedVersion: CustomerPracticeScenarioVersion | null;
+  versions: CustomerPracticeScenarioVersion[];
+  history: CustomerPracticeScenarioHistoryEvent[];
 }
 
 export interface CustomerPracticeScenarioListResponse {
@@ -995,7 +1019,7 @@ export interface CustomerPracticeScenarioDraftRequest {
   scoringGuidance: string;
   segmentId: string;
   applicableIndustryIds: IndustryId[];
-  sourceReferences?: CustomerPracticeScenarioSourceReference[];
+  sourceContentIds?: string[];
 }
 
 export interface OrgDivisionRecord {

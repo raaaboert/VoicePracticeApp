@@ -1,5 +1,6 @@
 import type {
   ApiDatabase,
+  CustomerPracticeScenario,
   DashboardNotificationRow,
   DashboardNotificationsResponse,
   EnterpriseJoinRequestRecord,
@@ -23,6 +24,10 @@ import {
   canViewFocusTopicContentAttachedNotification,
   FOCUS_TOPIC_CONTENT_NOTIFICATION_SUBJECT_TYPE,
 } from "./focusTopicContentNotifications.js";
+import {
+  canViewCustomerPracticeScenarioNotification,
+  CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
+} from "./customerPracticeScenarioNotifications.js";
 
 export const ACCESS_REQUEST_NOTIFICATION_SUBJECT_TYPE = "organization_access_request";
 
@@ -114,6 +119,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
+  practiceScenarios?: readonly CustomerPracticeScenario[];
   limit: number;
   offset?: number;
 }): Promise<DashboardNotificationsResponse> {
@@ -141,7 +147,11 @@ export async function listAuthorizedDashboardNotifications(params: {
     const contentAttachedVisible = canViewFocusTopicContentAttachedNotification({
       db: params.db, recipient: params.recipient, notification,
     });
-    if (accessRequestVisible || topicVisible || contentAttachedVisible) {
+    const scenarioVisible = canViewCustomerPracticeScenarioNotification({
+      db: params.db, recipient: params.recipient, notification,
+      scenarios: params.practiceScenarios ?? [],
+    });
+    if (accessRequestVisible || topicVisible || contentAttachedVisible || scenarioVisible) {
       const accessRequest = accessRequestVisible
         ? params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!
         : null;
@@ -216,7 +226,21 @@ export async function listAuthorizedDashboardNotifications(params: {
         subjectType: FOCUS_TOPIC_CONTENT_NOTIFICATION_SUBJECT_TYPE, subjectIds: contentAttachedTopicIds,
       })
     : 0;
-  const unreadCount = accessRequestUnreadCount + topicUnreadCount + contentAttachedUnreadCount;
+  const visibleScenarioIds = (params.practiceScenarios ?? []).filter((scenario) =>
+    scenario.orgId === orgId && (
+      (scenario.status === "in_review" && params.recipient.orgRole === "org_admin")
+      || scenario.createdByActorId === params.recipient.id
+    )).map((scenario) => scenario.id);
+  const scenarioUnreadCount = orgId && visibleScenarioIds.length > 0
+    ? await params.store.countActionableUnread({
+        recipientUserId: params.recipient.id, orgId,
+        kinds: ["scenario_submitted", "scenario_reviewed"],
+        subjectType: CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
+        subjectIds: visibleScenarioIds,
+      })
+    : 0;
+  const unreadCount = accessRequestUnreadCount + topicUnreadCount + contentAttachedUnreadCount
+    + scenarioUnreadCount;
   const hasMore = visible.length > limit || candidates.length === queryLimit;
   return {
     generatedAt: new Date().toISOString(),
@@ -233,6 +257,7 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
+  practiceScenarios?: readonly CustomerPracticeScenario[];
   notificationId: string;
   readAt?: Date;
 }): Promise<DashboardNotificationRow | null> {
@@ -251,7 +276,11 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   const contentAttachedVisible = canViewFocusTopicContentAttachedNotification({
     db: params.db, recipient: params.recipient, notification,
   });
-  if (!accessRequestVisible && !topicVisible && !contentAttachedVisible) {
+  const scenarioVisible = canViewCustomerPracticeScenarioNotification({
+    db: params.db, recipient: params.recipient, notification,
+    scenarios: params.practiceScenarios ?? [],
+  });
+  if (!accessRequestVisible && !topicVisible && !contentAttachedVisible && !scenarioVisible) {
     if (!notification.resolvedAt && !(params.topicAuthorityMode === "legacy"
       && shouldPreserveTopicAssignedNotificationInLegacyMode({
         db: params.db, recipient: params.recipient, notification,
@@ -286,7 +315,9 @@ export async function markAuthorizedDashboardNotificationRead(params: {
 function toDashboardRow(notification: UserNotificationRecord): DashboardNotificationRow {
   if (notification.kind !== "access_request"
     && notification.kind !== "topic_assigned"
-    && notification.kind !== "content_added") {
+    && notification.kind !== "content_added"
+    && notification.kind !== "scenario_submitted"
+    && notification.kind !== "scenario_reviewed") {
     throw new Error("Unsupported notification kind reached dashboard serialization.");
   }
   return {

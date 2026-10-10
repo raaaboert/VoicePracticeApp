@@ -3,6 +3,8 @@ import { Pool, type PoolClient } from "pg";
 import type {
   CustomerPracticeScenario,
   CustomerPracticeScenarioDraftRequest,
+  CustomerPracticeScenarioHistoryEvent,
+  CustomerPracticeScenarioHistoryEventType,
   CustomerPracticeScenarioSourceReference,
   CustomerPracticeScenarioStatus,
   CustomerPracticeScenarioVersion,
@@ -15,9 +17,13 @@ import type { StorageProvider } from "../runtimeConfig.js";
 type Queryable = Pick<Pool | PoolClient, "query">;
 type TransactionClient = Pick<PoolClient, "query">;
 export type CustomerPracticeScenarioTransactionGuard = (client: TransactionClient) => Promise<void>;
+export type CustomerPracticeScenarioStoredDraft = CustomerPracticeScenarioDraftRequest & {
+  sourceReferences?: CustomerPracticeScenarioSourceReference[];
+};
 
 export interface CustomerPracticeScenarioStore {
   initialize(): Promise<void>;
+  listByOrg(orgId: string): Promise<CustomerPracticeScenario[]>;
   listByTopic(orgId: string, topicId: string): Promise<CustomerPracticeScenario[]>;
   get(orgId: string, scenarioId: string): Promise<CustomerPracticeScenario | null>;
   getVersion(orgId: string, scenarioId: string, versionId: string): Promise<CustomerPracticeScenarioVersion | null>;
@@ -27,7 +33,7 @@ export interface CustomerPracticeScenarioStore {
     versionId: string;
     homeFocusTopicId: string;
     actorId: string;
-    draft: CustomerPracticeScenarioDraftRequest;
+    draft: CustomerPracticeScenarioStoredDraft;
     now: Date;
     guard?: CustomerPracticeScenarioTransactionGuard;
   }, client?: TransactionClient): Promise<CustomerPracticeScenario>;
@@ -36,7 +42,7 @@ export interface CustomerPracticeScenarioStore {
     scenarioId: string;
     versionId: string;
     actorId: string;
-    draft: CustomerPracticeScenarioDraftRequest;
+    draft: CustomerPracticeScenarioStoredDraft;
     now: Date;
     guard?: CustomerPracticeScenarioTransactionGuard;
   }, client?: TransactionClient): Promise<CustomerPracticeScenario>;
@@ -114,6 +120,17 @@ interface VersionRow {
   published_at: string | Date | null;
 }
 
+interface EventRow {
+  id: number | string;
+  scenario_id: string;
+  version_id: string;
+  event_type: string;
+  status: string;
+  actor_id: string;
+  comment: string | null;
+  created_at: string | Date;
+}
+
 const SCENARIO_COLUMNS = `id, org_id, home_focus_topic_id, status, current_version_id,
   approved_version_id, published_version_id, created_by_actor_id, created_at, updated_at,
   archived_by_actor_id, archived_at`;
@@ -134,6 +151,7 @@ export class CustomerPracticeScenarioStoreError extends Error {
 
 class NullCustomerPracticeScenarioStore implements CustomerPracticeScenarioStore {
   async initialize(): Promise<void> {}
+  async listByOrg(): Promise<CustomerPracticeScenario[]> { return []; }
   async listByTopic(): Promise<CustomerPracticeScenario[]> { return []; }
   async get(): Promise<CustomerPracticeScenario | null> { return null; }
   async getVersion(): Promise<CustomerPracticeScenarioVersion | null> { return null; }
@@ -160,6 +178,16 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
       `SELECT ${SCENARIO_COLUMNS} FROM customer_practice_scenarios
        WHERE org_id = $1 AND home_focus_topic_id = $2 ORDER BY updated_at DESC, id`,
       [id(orgId, "Organization id"), id(topicId, "Focus Topic id")],
+    );
+    return await hydrate(this.pool, result.rows);
+  }
+
+  async listByOrg(orgId: string): Promise<CustomerPracticeScenario[]> {
+    await this.initialize();
+    const result = await this.pool.query<ScenarioRow>(
+      `SELECT ${SCENARIO_COLUMNS} FROM customer_practice_scenarios
+       WHERE org_id = $1 ORDER BY updated_at DESC, id`,
+      [id(orgId, "Organization id")],
     );
     return await hydrate(this.pool, result.rows);
   }
@@ -198,6 +226,9 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
       await insertVersion(queryClient, {
         orgId, scenarioId, versionId, versionNumber: 1, actorId, draft, now: input.now,
       });
+      await insertEvent(queryClient, {
+        orgId, scenarioId, versionId, eventType: "created", status: "draft", actorId, now: input.now,
+      });
       return required(await loadOne(queryClient, orgId, scenarioId));
     });
   }
@@ -230,6 +261,9 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
          WHERE org_id=$1 AND id=$2`,
         [orgId, scenarioId, versionId, input.now],
       );
+      await insertEvent(queryClient, {
+        orgId, scenarioId, versionId, eventType: "created", status: "draft", actorId, now: input.now,
+      });
       return required(await loadOne(queryClient, orgId, scenarioId));
     });
   }
@@ -254,6 +288,16 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
         [orgId, current.id, nextStatus, actorId, input.now,
           input.approvalRequired ? null : actorId, input.approvalRequired ? null : input.now],
       );
+      await insertEvent(queryClient, {
+        orgId, scenarioId, versionId: current.id,
+        eventType: "submitted", status: nextStatus, actorId, now: input.now,
+      });
+      if (!input.approvalRequired) {
+        await insertEvent(queryClient, {
+          orgId, scenarioId, versionId: current.id,
+          eventType: "approved", status: nextStatus, actorId, now: input.now,
+        });
+      }
       await queryClient.query(
         `UPDATE customer_practice_scenarios SET status=$3,approved_version_id=$4,updated_at=$5
          WHERE org_id=$1 AND id=$2`,
@@ -287,6 +331,11 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
         [orgId, scenarioId, nextStatus,
           input.decision === "approve" ? current.id : aggregate.approved_version_id, input.now],
       );
+      await insertEvent(queryClient, {
+        orgId, scenarioId, versionId: current.id,
+        eventType: input.decision === "approve" ? "approved" : "rejected",
+        status: nextStatus, actorId, comment: note, now: input.now,
+      });
       return required(await loadOne(queryClient, orgId, scenarioId));
     });
   }
@@ -319,6 +368,10 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
          WHERE org_id=$1 AND id=$2`,
         [orgId, scenarioId, current.id, input.now],
       );
+      await insertEvent(queryClient, {
+        orgId, scenarioId, versionId: current.id, eventType: "published",
+        status: "published", actorId, now: input.now,
+      });
       return required(await loadOne(queryClient, orgId, scenarioId));
     });
   }
@@ -341,6 +394,10 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
          WHERE org_id=$1 AND id=$2`,
         [orgId, aggregate.current_version_id],
       );
+      await insertEvent(queryClient, {
+        orgId, scenarioId, versionId: aggregate.current_version_id, eventType: "archived",
+        status: "archived", actorId, now: input.now,
+      });
       return required(await loadOne(queryClient, orgId, scenarioId));
     });
   }
@@ -383,6 +440,21 @@ async function insertVersion(client: Queryable, input: {
   );
 }
 
+async function insertEvent(client: Queryable, input: {
+  orgId: string; scenarioId: string; versionId: string;
+  eventType: CustomerPracticeScenarioHistoryEventType; status: CustomerPracticeScenarioStatus;
+  actorId: string; comment?: string | null; now: Date;
+}): Promise<void> {
+  await client.query(
+    `INSERT INTO customer_practice_scenario_events
+     (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING`,
+    [input.orgId, input.scenarioId, input.versionId, input.eventType, input.status,
+      input.actorId, input.comment ?? null, input.now],
+  );
+}
+
 async function lockScenario(client: Queryable, orgId: string, scenarioId: string): Promise<ScenarioRow> {
   const result = await client.query<ScenarioRow>(
     `SELECT ${SCENARIO_COLUMNS} FROM customer_practice_scenarios
@@ -411,13 +483,31 @@ async function loadOne(client: Queryable, orgId: string, scenarioId: string): Pr
 
 async function hydrate(client: Queryable, rows: ScenarioRow[]): Promise<CustomerPracticeScenario[]> {
   if (rows.length === 0) return [];
-  const versionIds = [...new Set(rows.flatMap((row) => [row.current_version_id, row.published_version_id]
-    .filter((value): value is string => Boolean(value))))];
+  const scenarioIds = rows.map((row) => row.id);
   const versions = await client.query<VersionRow>(
-    `SELECT ${VERSION_COLUMNS} FROM customer_practice_scenario_versions WHERE id = ANY($1::text[])`,
-    [versionIds],
+    `SELECT ${VERSION_COLUMNS} FROM customer_practice_scenario_versions
+     WHERE scenario_id = ANY($1::text[]) ORDER BY scenario_id, version_number`,
+    [scenarioIds],
+  );
+  const events = await client.query<EventRow>(
+    `SELECT id,scenario_id,version_id,event_type,status,actor_id,comment,created_at
+     FROM customer_practice_scenario_events WHERE scenario_id = ANY($1::text[])
+     ORDER BY scenario_id,created_at,id`,
+    [scenarioIds],
   );
   const byId = new Map(versions.rows.map((row) => [row.id, mapVersion(row)]));
+  const versionsByScenario = new Map<string, CustomerPracticeScenarioVersion[]>();
+  for (const version of byId.values()) {
+    const values = versionsByScenario.get(version.scenarioId) ?? [];
+    values.push(version);
+    versionsByScenario.set(version.scenarioId, values);
+  }
+  const eventsByScenario = new Map<string, CustomerPracticeScenarioHistoryEvent[]>();
+  for (const row of events.rows) {
+    const values = eventsByScenario.get(row.scenario_id) ?? [];
+    values.push(mapEvent(row));
+    eventsByScenario.set(row.scenario_id, values);
+  }
   return rows.map((row) => {
     const currentVersion = byId.get(row.current_version_id);
     if (!currentVersion) throw new Error("Practice Scenario current version is missing.");
@@ -436,8 +526,22 @@ async function hydrate(client: Queryable, rows: ScenarioRow[]): Promise<Customer
       archivedAt: optionalIso(row.archived_at),
       currentVersion,
       publishedVersion: row.published_version_id ? byId.get(row.published_version_id) ?? null : null,
+      versions: versionsByScenario.get(row.id) ?? [],
+      history: eventsByScenario.get(row.id) ?? [],
     };
   });
+}
+
+function mapEvent(row: EventRow): CustomerPracticeScenarioHistoryEvent {
+  const eventType = row.event_type as CustomerPracticeScenarioHistoryEventType;
+  if (!["created", "submitted", "approved", "rejected", "published", "archived"].includes(eventType)) {
+    throw new Error("Practice Scenario history event type is invalid.");
+  }
+  return {
+    id: String(row.id), scenarioId: row.scenario_id, versionId: row.version_id,
+    eventType, status: status(row.status), actorId: row.actor_id,
+    comment: row.comment, createdAt: iso(row.created_at),
+  };
 }
 
 function mapVersion(row: VersionRow): CustomerPracticeScenarioVersion {
@@ -468,13 +572,13 @@ function mapVersion(row: VersionRow): CustomerPracticeScenarioVersion {
   };
 }
 
-interface NormalizedDraft extends CustomerPracticeScenarioDraftRequest {
+interface NormalizedDraft extends CustomerPracticeScenarioStoredDraft {
   desiredOutcome: string | null;
   provenance: OrgCustomScenarioProvenance;
   sourceReferences: CustomerPracticeScenarioSourceReference[];
 }
 
-function normalizeDraft(input: CustomerPracticeScenarioDraftRequest): NormalizedDraft {
+function normalizeDraft(input: CustomerPracticeScenarioStoredDraft): NormalizedDraft {
   const title = requiredText(input.title, "Title", 300);
   const description = requiredText(input.description, "Description", 12_000);
   const aiRole = requiredText(input.aiRole, "AI role", 2_000);

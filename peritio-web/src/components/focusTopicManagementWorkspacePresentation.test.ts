@@ -88,6 +88,12 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   }
   assert.match(source, /practiceScenarios\.permissions\.canReviewAndPublish/);
   assert.match(source, /practiceScenarios\.editableScenarioIds/);
+  assert.match(source, /Awaiting review:/);
+  assert.match(source, /Review comment \(optional\)/);
+  assert.match(source, /Version and review history/);
+  assert.match(source, /Related Content sources \(optional\)/);
+  assert.match(source, /sourceContentIds: scenarioSourceContentIds/);
+  assert.doesNotMatch(source, /Source reference \(optional\)/);
   assert.match(proxy, /case "list_practice_scenarios"/);
   assert.match(proxy, /case "create_practice_scenario"/);
   assert.match(proxy, /case "submit_practice_scenario"/);

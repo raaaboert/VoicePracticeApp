@@ -308,6 +308,15 @@ import {
 import { buildTopicAssignedNotificationInputs } from "./services/topicAssignedNotifications.js";
 import { buildFocusTopicContentAttachedNotificationInputs } from "./services/focusTopicContentNotifications.js";
 import {
+  buildScenarioDecisionNotificationInputs,
+  buildScenarioSubmittedNotificationInputs,
+  CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
+} from "./services/customerPracticeScenarioNotifications.js";
+import {
+  CustomerPracticeScenarioSourceError,
+  resolveCustomerPracticeScenarioSourceReferences,
+} from "./services/customerPracticeScenarioSources.js";
+import {
   canScopedActorAttachContent,
   canScopedActorMutateContent,
   resolveTopicWorkspaceContentAuthority,
@@ -8677,6 +8686,7 @@ function createCustomerScenarioTransactionGuard(params: {
   topicId: string;
   requireFullAuthority: boolean;
   requireCreationEnabled: boolean;
+  sourceContentIds?: readonly string[];
 }): (client: AppStateTransactionClient) => Promise<void> {
   return async (client) => {
     const stateResult = await client.query<{ state_json: unknown }>(
@@ -8741,6 +8751,28 @@ function createCustomerScenarioTransactionGuard(params: {
         "Practice Scenario administration is not available for this Focus Topic.",
         "scenario_scope_denied", 403,
       );
+    }
+    if (params.sourceContentIds && params.sourceContentIds.length > 0) {
+      const sourceResult = await client.query<{ id: string }>(
+        `SELECT content.id
+         FROM org_content_items content
+         INNER JOIN org_content_categories category
+           ON category.org_id=content.org_id AND category.id=content.category_id
+         INNER JOIN org_content_topic_attachments attachment
+           ON attachment.org_id=content.org_id AND attachment.content_id=content.id
+         WHERE content.org_id=$1 AND attachment.topic_id=$2
+           AND content.id=ANY($3::text[]) AND content.archived_at IS NULL
+           AND category.archived_at IS NULL AND attachment.detached_at IS NULL
+         FOR SHARE OF content,category,attachment`,
+        [organization.id, topic.id, [...params.sourceContentIds]],
+      );
+      const matched = new Set(sourceResult.rows.map((row) => row.id));
+      if (params.sourceContentIds.some((contentId) => !matched.has(contentId))) {
+        throw new CustomerPracticeScenarioStoreError(
+          "Each source resource must remain attached to this Focus Topic.",
+          "scenario_source_invalid", 409,
+        );
+      }
     }
   };
 }
@@ -14455,6 +14487,8 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
       topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
+      practiceScenarios: recipient.orgId
+        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
       limit: parsedLimit,
       offset: parsedOffset,
     });
@@ -14476,6 +14510,8 @@ app.get("/dashboard/notifications/unread-count", requireDashboardAuth, async (re
       topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
+      practiceScenarios: recipient.orgId
+        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
       limit: 1,
     });
     response.json({ unreadCount: payload.unreadCount });
@@ -14496,6 +14532,8 @@ app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth,
       topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
+      practiceScenarios: recipient.orgId
+        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
       notificationId: request.params.notificationId,
     });
     if (!notification) {
@@ -16749,6 +16787,7 @@ app.get("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, 
       generatedAt: nowIso(),
       orgId: org.id,
       scenarios: ensureOrgCustomScenarioCollection(org),
+      practiceScenarios: await customerPracticeScenarioStore.listByOrg(org.id),
     });
   });
 });
@@ -17715,6 +17754,25 @@ function validateCustomerPracticeScenarioDraft(
   }
 }
 
+async function resolveCustomerPracticeScenarioDraft(
+  orgId: string,
+  topicId: string,
+  input: CustomerPracticeScenarioDraftRequest,
+) {
+  try {
+    const sourceReferences = resolveCustomerPracticeScenarioSourceReferences({
+      orgId, topicId, requestedContentIds: input.sourceContentIds,
+      contentAuthority: await trainingContentStore.listContentAuthorityForOrg(orgId),
+    });
+    return { ...input, sourceContentIds: undefined, sourceReferences };
+  } catch (error) {
+    if (error instanceof CustomerPracticeScenarioSourceError) {
+      throw new CustomerPracticeScenarioStoreError(error.message, error.code, 400);
+    }
+    throw error;
+  }
+}
+
 function buildPublishedCustomerScenarioProjection(
   scenario: CustomerPracticeScenario,
   publishedAt: string,
@@ -17830,8 +17888,11 @@ app.post(
             "scenario_creation_disabled", 403,
           );
         }
-        const draft = request.body as CustomerPracticeScenarioDraftRequest;
-        validateCustomerPracticeScenarioDraft(db, context.management.org, draft);
+        const requestDraft = request.body as CustomerPracticeScenarioDraftRequest;
+        validateCustomerPracticeScenarioDraft(db, context.management.org, requestDraft);
+        const draft = await resolveCustomerPracticeScenarioDraft(
+          context.management.org.id, context.topic.id, requestDraft,
+        );
         const now = new Date();
         queueRequiredTransactionSideWrite(db, async (client) => {
           if (!client) throw new Error("Practice Scenario creation requires PostgreSQL.");
@@ -17843,6 +17904,8 @@ app.post(
               orgId: context.management.org.id, actorId: context.actorId,
               topicId: context.topic.id, requireFullAuthority: false,
               requireCreationEnabled: true,
+              sourceContentIds: draft.sourceReferences.map((source) => source.referenceId)
+                .filter((contentId): contentId is string => Boolean(contentId)),
             }),
           }, client);
         });
@@ -17886,8 +17949,11 @@ app.post(
             "Scoped Topic managers may revise only scenarios they authored.", "scenario_scope_denied", 403,
           );
         }
-        const draft = request.body as CustomerPracticeScenarioDraftRequest;
-        validateCustomerPracticeScenarioDraft(db, context.management.org, draft);
+        const requestDraft = request.body as CustomerPracticeScenarioDraftRequest;
+        validateCustomerPracticeScenarioDraft(db, context.management.org, requestDraft);
+        const draft = await resolveCustomerPracticeScenarioDraft(
+          context.management.org.id, context.topic.id, requestDraft,
+        );
         const now = new Date();
         queueRequiredTransactionSideWrite(db, async (client) => {
           if (!client) throw new Error("Practice Scenario revision requires PostgreSQL.");
@@ -17898,6 +17964,8 @@ app.post(
               orgId: context.management.org.id, actorId: context.actorId,
               topicId: context.topic.id, requireFullAuthority: false,
               requireCreationEnabled: true,
+              sourceContentIds: draft.sourceReferences.map((source) => source.referenceId)
+                .filter((contentId): contentId is string => Boolean(contentId)),
             }),
           }, client);
         });
@@ -17934,7 +18002,7 @@ app.post(
         const now = new Date();
         queueRequiredTransactionSideWrite(db, async (client) => {
           if (!client) throw new Error("Practice Scenario submission requires PostgreSQL.");
-          await customerPracticeScenarioStore.submit({
+          const submitted = await customerPracticeScenarioStore.submit({
             orgId: context.management.org.id, scenarioId: existing.id,
             actorId: context.actorId,
             approvalRequired: context.settings.requireOrgAdminScenarioApproval,
@@ -17945,6 +18013,9 @@ app.post(
               requireCreationEnabled: true,
             }),
           }, client);
+          await userNotificationStore.enqueueMany(buildScenarioSubmittedNotificationInputs({
+            db, scenario: submitted, actorId: context.actorId, createdAt: now,
+          }), { client });
         });
         appendWebAuditEvent(db, request.dashboard!.user, {
           action: "focus_topic.practice_scenario.submitted", orgId: context.management.org.id,
@@ -17983,7 +18054,7 @@ for (const decision of ["approve", "reject"] as const) {
           const now = new Date();
           queueRequiredTransactionSideWrite(db, async (client) => {
             if (!client) throw new Error("Practice Scenario review requires PostgreSQL.");
-            await customerPracticeScenarioStore.review({
+            const reviewed = await customerPracticeScenarioStore.review({
               orgId: context.management.org.id, scenarioId: existing.id,
               actorId: context.actorId, decision,
               reviewNote: (request.body as { reviewNote?: unknown })?.reviewNote as string | null,
@@ -17994,6 +18065,14 @@ for (const decision of ["approve", "reject"] as const) {
                 requireCreationEnabled: false,
               }),
             }, client);
+            await userNotificationStore.resolveMatching({
+              kind: "scenario_submitted",
+              subjectType: CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
+              subjectIds: [existing.id], resolution: decision, resolvedAt: now, client,
+            });
+            await userNotificationStore.enqueueMany(buildScenarioDecisionNotificationInputs({
+              db, scenario: reviewed, actorId: context.actorId, decision, createdAt: now,
+            }), { client });
           });
           appendWebAuditEvent(db, request.dashboard!.user, {
             action: decision === "approve"
@@ -18045,7 +18124,7 @@ app.post(
         const nowValue = now.toISOString();
         queueRequiredTransactionSideWrite(db, async (client) => {
           if (!client) throw new Error("Practice Scenario publication requires PostgreSQL.");
-          await customerPracticeScenarioStore.publish({
+          const published = await customerPracticeScenarioStore.publish({
             orgId: context.management.org.id, scenarioId: existing.id,
             actorId: context.actorId, now,
             guard: createCustomerScenarioTransactionGuard({
@@ -18054,6 +18133,9 @@ app.post(
               requireCreationEnabled: true,
             }),
           }, client);
+          await userNotificationStore.enqueueMany(buildScenarioDecisionNotificationInputs({
+            db, scenario: published, actorId: context.actorId, decision: "publish", createdAt: now,
+          }), { client });
           const attachment = await client.query<{ id: string }>(
             `SELECT id FROM focus_topic_scenario_attachments
              WHERE org_id=$1 AND topic_id=$2 AND scenario_kind='org' AND scenario_id=$3
@@ -18119,6 +18201,11 @@ app.post(
               requireCreationEnabled: false,
             }),
           }, client);
+          await userNotificationStore.resolveMatching({
+            kind: "scenario_submitted",
+            subjectType: CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
+            subjectIds: [existing.id], resolution: "archived", resolvedAt: now, client,
+          });
         });
         context.management.org.customScenarios = sortOrgCustomScenariosByTitle(
           ensureOrgCustomScenarioCollection(context.management.org).map((entry) =>

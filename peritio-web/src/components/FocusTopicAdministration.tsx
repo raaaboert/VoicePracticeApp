@@ -76,8 +76,8 @@ export function FocusTopicAdministration({
   const [scenarioScoringGuidance, setScenarioScoringGuidance] = useState("");
   const [scenarioSegmentId, setScenarioSegmentId] = useState("");
   const [scenarioIndustryIds, setScenarioIndustryIds] = useState<string[]>([]);
-  const [scenarioSourceLabel, setScenarioSourceLabel] = useState("");
-  const [scenarioSourceReferenceId, setScenarioSourceReferenceId] = useState("");
+  const [scenarioSourceContentIds, setScenarioSourceContentIds] = useState<string[]>([]);
+  const [scenarioReviewNotes, setScenarioReviewNotes] = useState<Record<string, string>>({});
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState<"draft" | "active" | "archived">("draft");
@@ -120,6 +120,10 @@ export function FocusTopicAdministration({
   }));
   const availableContent = related?.contentItems.filter((item) =>
     item.availableToAttach && !activeContentIds.has(item.id)) ?? [];
+  const scenarioSourceOptions = attachedContent.flatMap(({ item }) =>
+    item && !item.archivedAt ? [item] : []);
+  const orderedPracticeScenarios = [...(practiceScenarios?.scenarios ?? [])].sort((left, right) =>
+    Number(right.status === "in_review") - Number(left.status === "in_review"));
 
   const run = async (operation: () => Promise<void>) => {
     setBusy(true); setError(null); setMessage(null);
@@ -357,8 +361,7 @@ export function FocusTopicAdministration({
   const resetScenarioForm = () => {
     setEditingScenarioId(null); setScenarioTitle(""); setScenarioDescription("");
     setScenarioDesiredOutcome(""); setScenarioAiRole(""); setScenarioScoringGuidance("");
-    setScenarioSegmentId(""); setScenarioIndustryIds([]); setScenarioSourceLabel("");
-    setScenarioSourceReferenceId("");
+    setScenarioSegmentId(""); setScenarioIndustryIds([]); setScenarioSourceContentIds([]);
   };
   const beginScenarioRevision = (scenario: CustomerPracticeScenario) => {
     const version = scenario.currentVersion;
@@ -366,9 +369,8 @@ export function FocusTopicAdministration({
     setScenarioDescription(version.description); setScenarioDesiredOutcome(version.desiredOutcome ?? "");
     setScenarioAiRole(version.aiRole); setScenarioScoringGuidance(version.scoringGuidance);
     setScenarioSegmentId(version.segmentId); setScenarioIndustryIds(version.applicableIndustryIds);
-    const firstSource = version.sourceReferences[0];
-    setScenarioSourceLabel(firstSource?.label ?? "");
-    setScenarioSourceReferenceId(firstSource?.referenceId ?? "");
+    setScenarioSourceContentIds(version.sourceReferences.flatMap((source) =>
+      source.kind === "training_content" && source.referenceId ? [source.referenceId] : []));
   };
   const saveScenarioDraft = () => void run(async () => {
     if (!selected || !practiceScenarios) return;
@@ -380,10 +382,7 @@ export function FocusTopicAdministration({
       desiredOutcome: scenarioDesiredOutcome || null,
       aiRole: scenarioAiRole, scoringGuidance: scenarioScoringGuidance,
       segmentId: scenarioSegmentId, applicableIndustryIds: scenarioIndustryIds,
-      sourceReferences: scenarioSourceLabel.trim() ? [{
-        kind: "manual", referenceId: scenarioSourceReferenceId.trim() || null,
-        label: scenarioSourceLabel.trim(),
-      }] : [],
+      sourceContentIds: scenarioSourceContentIds,
     };
     const saved = await action<CustomerPracticeScenario>(payload);
     setPracticeScenarios({
@@ -401,11 +400,14 @@ export function FocusTopicAdministration({
   const transitionScenario = (
     scenario: CustomerPracticeScenario,
     next: "submit" | "approve" | "reject" | "publish" | "archive",
+    reviewNote?: string,
   ) => void run(async () => {
     if (!selected || !practiceScenarios) return;
     const updated = await action<CustomerPracticeScenario>({
       action: `${next}_practice_scenario`, orgId, topicId: selected.id, scenarioId: scenario.id,
+      ...(reviewNote?.trim() ? { reviewNote: reviewNote.trim() } : {}),
     });
+    setScenarioReviewNotes((current) => ({ ...current, [scenario.id]: "" }));
     setPracticeScenarios({
       ...practiceScenarios,
       scenarios: practiceScenarios.scenarios.map((row) => row.id === updated.id ? updated : row),
@@ -569,11 +571,15 @@ export function FocusTopicAdministration({
       {practiceScenarios && !practiceScenarios.permissions.creationEnabled
         ? <div className="notice" role="status">Customer Practice Scenario creation is not enabled for this organization. Existing scenarios remain visible.</div>
         : null}
+      {practiceScenarios?.permissions.canReviewAndPublish ? <p className="muted-copy">
+        Awaiting review: {practiceScenarios.scenarios.filter((scenario) => scenario.status === "in_review").length}
+      </p> : null}
       <div className="focus-topic-assignment-section"><h4>Topic scenarios</h4>
         {!practiceScenarios ? <p className="muted-copy">Select this Topic to load Practice Scenarios.</p> : null}
         {practiceScenarios?.scenarios.length === 0
           ? <p className="muted-copy">No customer Practice Scenarios have been created for this Topic.</p> : null}
-        <div className="focus-topic-assignment-list">{practiceScenarios?.scenarios.map((scenario) => {
+        <div className="focus-topic-assignment-list">{orderedPracticeScenarios.map((scenario) => {
+          if (!practiceScenarios) return null;
           const version = scenario.currentVersion;
           const editable = practiceScenarios.editableScenarioIds.includes(scenario.id)
             && practiceScenarios.permissions.canAuthor && scenario.status !== "archived";
@@ -588,10 +594,19 @@ export function FocusTopicAdministration({
               <small>{version.description}</small>
               <small>{version.applicableIndustryIds.length} applicable {version.applicableIndustryIds.length === 1 ? "industry" : "industries"}</small>
               {version.sourceReferences.length > 0
-                ? <small>Source reference: {version.sourceReferences.map((source) => source.label).join(" · ")}</small>
-                : <small>Source reference: Manual authoring</small>}
+                ? <small>Related Content: {version.sourceReferences.map((source) => source.label).join(" · ")}</small>
+                : <small>Provenance: Manual authoring, no source selected</small>}
+              <small>Created manually from {version.provenance.sourceMode === "scratch" ? "a blank draft" : "an existing scenario"}.</small>
+              {version.reviewNote ? <small>Review comment: {version.reviewNote}</small> : null}
               {scenario.publishedVersion && scenario.publishedVersion.id !== version.id
                 ? <small>Published learner version: {scenario.publishedVersion.versionNumber}</small> : null}
+              <details><summary>Version and review history ({scenario.history.length})</summary>
+                <div>{scenario.history.map((event) => <small key={event.id}>
+                  Version {scenario.versions.find((candidate) => candidate.id === event.versionId)?.versionNumber ?? "?"}
+                  {` · ${event.eventType.replaceAll("_", " ")} → ${event.status.replaceAll("_", " ")} · ${formatDateTime(event.createdAt)} · ${userLabel(event.actorId)}`}
+                  {event.comment ? ` · ${event.comment}` : ""}
+                </small>)}</div>
+              </details>
             </div>
             {editable && scenario.status !== "in_review"
               ? <button type="button" className="ghost-button compact-button" disabled={busy}
@@ -602,10 +617,17 @@ export function FocusTopicAdministration({
                 {practiceScenarios.permissions.approvalRequired ? "Submit for Review" : "Approve Draft"}
               </button> : null}
             {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <>
+              <label className="focus-topic-field">Review comment (optional)
+                <input className="text-input" maxLength={2000}
+                  value={scenarioReviewNotes[scenario.id] ?? ""}
+                  onChange={(event) => setScenarioReviewNotes((current) => ({
+                    ...current, [scenario.id]: event.target.value,
+                  }))} />
+              </label>
               <button type="button" className="primary-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "approve")}>Approve</button>
+                onClick={() => transitionScenario(scenario, "approve", scenarioReviewNotes[scenario.id])}>Approve</button>
               <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "reject")}>Reject</button>
+                onClick={() => transitionScenario(scenario, "reject", scenarioReviewNotes[scenario.id])}>Reject</button>
             </> : null}
             {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "approved"
               ? <button type="button" className="primary-button compact-button" disabled={busy}
@@ -650,12 +672,15 @@ export function FocusTopicAdministration({
                     ? [...new Set([...current, option.id])]
                     : current.filter((id) => id !== option.id))} /> {option.label}</label>)}</div>
             </fieldset>
-            <label className="focus-topic-field">Source label (optional)
-              <input className="text-input" value={scenarioSourceLabel} maxLength={500}
-                onChange={(event) => setScenarioSourceLabel(event.target.value)} /></label>
-            <label className="focus-topic-field">Source reference (optional)
-              <input className="text-input" value={scenarioSourceReferenceId} maxLength={300}
-                onChange={(event) => setScenarioSourceReferenceId(event.target.value)} /></label>
+            <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Related Content sources (optional)</legend>
+              <p className="muted-copy">Select resources currently attached to this Focus Topic. Manual scenarios do not require a source.</p>
+              <div className="focus-topic-content-mode">{scenarioSourceOptions.map((item) =>
+                <label key={item.id}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
+                  onChange={(event) => setScenarioSourceContentIds((current) => event.target.checked
+                    ? [...new Set([...current, item.id])]
+                    : current.filter((id) => id !== item.id))} /> {item.title}</label>)}</div>
+              {scenarioSourceOptions.length === 0 ? <small>No current Related Content is available.</small> : null}
+            </fieldset>
           </div>
           <div className="focus-topic-actions">
             <button type="button" className="primary-button" disabled={busy || !scenarioTitle.trim()

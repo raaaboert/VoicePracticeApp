@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AppConfig,
+  CustomerPracticeScenario,
   buildDefaultScoringGuidance,
   CreateOrgCustomScenarioRequest,
   GenerateOrgCustomScenarioRequest,
@@ -37,6 +38,7 @@ interface OrgCustomScenariosListResponse {
   generatedAt: string;
   orgId: string;
   scenarios: OrgCustomScenario[];
+  practiceScenarios: CustomerPracticeScenario[];
 }
 
 interface BaseScenarioOption {
@@ -257,6 +259,7 @@ export function EnterpriseCustomScenariosCard({
   trainingScope,
 }: EnterpriseCustomScenariosCardProps) {
   const [scenarios, setScenarios] = useState<OrgCustomScenario[]>([]);
+  const [practiceScenarios, setPracticeScenarios] = useState<CustomerPracticeScenario[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -364,6 +367,7 @@ export function EnterpriseCustomScenariosCard({
         const payload = await adminFetch<OrgCustomScenariosListResponse>(`/orgs/${orgId}/custom-scenarios`);
         if (cancelled) return;
         setScenarios(payload.scenarios ?? []);
+        setPracticeScenarios(payload.practiceScenarios ?? []);
         setGeneratedAt(payload.generatedAt ?? null);
       } catch (caught) {
         if (cancelled) return;
@@ -388,6 +392,7 @@ export function EnterpriseCustomScenariosCard({
     try {
       const payload = await adminFetch<OrgCustomScenariosListResponse>(`/orgs/${orgId}/custom-scenarios`);
       setScenarios(payload.scenarios ?? []);
+      setPracticeScenarios(payload.practiceScenarios ?? []);
       setGeneratedAt(payload.generatedAt ?? null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load custom scenarios.");
@@ -1422,6 +1427,36 @@ export function EnterpriseCustomScenariosCard({
       {loading ? <p className="small">Loading custom scenarios...</p> : null}
       {error ? <p className="error">{error}</p> : null}
       {notice ? <p className="success">{notice}</p> : null}
+      {!trainingScope ? <section style={{ marginTop: 14 }} aria-label="Customer Practice Scenario lifecycle">
+        <h4>Customer Practice Scenario Lifecycle</h4>
+        <p className="small">Read-only canonical scenario identities, immutable versions, provenance, and review state.</p>
+        {practiceScenarios.length === 0 ? <p className="small">No lifecycle-managed Practice Scenarios.</p> : null}
+        {practiceScenarios.map((scenario) => <details key={scenario.id} style={{ marginBottom: 8 }}>
+          <summary>{scenario.currentVersion.title} · {scenario.status}</summary>
+          <div className="small">
+            <div>Stable scenario: {scenario.id}</div>
+            <div>Home Focus Topic: {scenario.homeFocusTopicId}</div>
+            <div>Current version: {scenario.currentVersionId}</div>
+            <div>Approved version: {scenario.approvedVersionId ?? "none"}</div>
+            <div>Published version: {scenario.publishedVersionId ?? "none"}</div>
+            {scenario.versions.map((version) => <details key={version.id}>
+              <summary>Version {version.versionNumber} · {version.status}</summary>
+              <div>Version id: {version.id}</div>
+              <div>Provenance: {version.provenance.creationMethod} / {version.provenance.sourceMode}</div>
+              <div>Source references: {version.sourceReferences.length > 0
+                ? version.sourceReferences.map((source) => `${source.label} (${source.referenceId ?? source.kind})`).join(", ")
+                : "none (manual scenario)"}</div>
+              <div>Submitted: {formatDateTime(version.submittedAt)}</div>
+              <div>Reviewed: {formatDateTime(version.reviewedAt)}</div>
+              <div>Review comment: {version.reviewNote ?? "none"}</div>
+              <div>Published: {formatDateTime(version.publishedAt)}</div>
+            </details>)}
+            <div>History: {scenario.history.map((event) =>
+              `${event.eventType} → ${event.status} by ${event.actorId} at ${formatDateTime(event.createdAt)}`
+                + `${event.comment ? ` (${event.comment})` : ""}`).join(" · ")}</div>
+          </div>
+        </details>)}
+      </section> : null}
       {collapsed ? (
         <p className="small">Custom scenarios are collapsed. Total: {scenarios.length}</p>
       ) : (
