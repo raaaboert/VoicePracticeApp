@@ -19,6 +19,8 @@ type TransactionClient = Pick<PoolClient, "query">;
 export type CustomerPracticeScenarioTransactionGuard = (client: TransactionClient) => Promise<void>;
 export type CustomerPracticeScenarioStoredDraft = CustomerPracticeScenarioDraftRequest & {
   sourceReferences?: CustomerPracticeScenarioSourceReference[];
+  /** Server-derived only; HTTP request bodies never populate this field. */
+  serverProvenance?: OrgCustomScenarioProvenance;
 };
 
 export interface CustomerPracticeScenarioStore {
@@ -215,7 +217,7 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
       const versionId = id(input.versionId, "Scenario version id");
       const topicId = id(input.homeFocusTopicId, "Home Focus Topic id");
       const actorId = id(input.actorId, "Actor id");
-      const draft = normalizeDraft(input.draft);
+      const draft = normalizeCustomerPracticeScenarioStoredDraft(input.draft);
       await queryClient.query(
         `INSERT INTO customer_practice_scenarios
          (id,org_id,home_focus_topic_id,status,current_version_id,approved_version_id,
@@ -254,7 +256,7 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
       await insertVersion(queryClient, {
         orgId, scenarioId, versionId,
         versionNumber: Number(nextNumberResult.rows[0]?.next_number ?? 1),
-        actorId, draft: normalizeDraft(input.draft), now: input.now,
+        actorId, draft: normalizeCustomerPracticeScenarioStoredDraft(input.draft), now: input.now,
       });
       await queryClient.query(
         `UPDATE customer_practice_scenarios SET current_version_id=$3,status='draft',updated_at=$4
@@ -578,7 +580,7 @@ interface NormalizedDraft extends CustomerPracticeScenarioStoredDraft {
   sourceReferences: CustomerPracticeScenarioSourceReference[];
 }
 
-function normalizeDraft(input: CustomerPracticeScenarioStoredDraft): NormalizedDraft {
+export function normalizeCustomerPracticeScenarioStoredDraft(input: CustomerPracticeScenarioStoredDraft): NormalizedDraft {
   const title = requiredText(input.title, "Title", 300);
   const description = requiredText(input.description, "Description", 12_000);
   const aiRole = requiredText(input.aiRole, "AI role", 2_000);
@@ -592,9 +594,21 @@ function normalizeDraft(input: CustomerPracticeScenarioStoredDraft): NormalizedD
     title, description, aiRole, scoringGuidance, segmentId,
     desiredOutcome: text(input.desiredOutcome, 4_000),
     applicableIndustryIds: applicableIndustryIds as IndustryId[],
-    provenance: { sourceMode: "scratch", creationMethod: "manual" },
+    provenance: normalizeCustomerPracticeScenarioServerProvenance(input.serverProvenance),
     sourceReferences: normalizeReferences(input.sourceReferences ?? []),
   };
+}
+
+export function normalizeCustomerPracticeScenarioServerProvenance(value: OrgCustomScenarioProvenance | undefined): OrgCustomScenarioProvenance {
+  if (value?.creationMethod === "ai" && value.sourceMode === "scratch"
+    && typeof value.modelUsed === "string" && typeof value.generatedPrompt === "string"
+    && typeof value.generatedAt === "string" && !Number.isNaN(new Date(value.generatedAt).getTime())) {
+    return { sourceMode: "scratch", creationMethod: "ai", modelUsed: value.modelUsed,
+      generatedPrompt: value.generatedPrompt, generatedAt: new Date(value.generatedAt).toISOString(),
+      baseScenarioId: null, baseScenarioTitle: null, baseScenarioSegmentId: null,
+      baseScenarioVersion: null, customizationParams: null };
+  }
+  return { sourceMode: "scratch", creationMethod: "manual" };
 }
 
 function normalizeReferences(value: unknown): CustomerPracticeScenarioSourceReference[] {

@@ -1,4 +1,4 @@
-import type { CustomerPracticeScenario, CustomerPracticeScenarioGeneratedDraft } from "@voicepractice/shared";
+import type { CustomerPracticeScenario, CustomerPracticeScenarioGeneratedDraft, OrgCustomScenarioProvenance } from "@voicepractice/shared";
 
 import type { ChatMessage } from "../openaiClient.js";
 import type { OpenAiScoringModelConfig } from "../openaiModelConfig.js";
@@ -12,6 +12,11 @@ export class CustomerPracticeScenarioGenerationError extends Error {
     super(message);
     this.name = "CustomerPracticeScenarioGenerationError";
   }
+}
+
+export interface CustomerPracticeScenarioGenerationResult {
+  draft: Omit<CustomerPracticeScenarioGeneratedDraft, "generationToken">;
+  serverProvenance: OrgCustomScenarioProvenance;
 }
 
 export function buildCustomerPracticeScenarioGenerationMessages(input: {
@@ -31,23 +36,26 @@ export async function generateCustomerPracticeScenarioDraft(input: {
   practiceGuidance: unknown;
   existingScenarios: readonly CustomerPracticeScenario[];
   modelConfig: OpenAiScoringModelConfig;
-  complete: (params: { model: string; apiFamily: "chat_completions" | "responses"; messages: ChatMessage[];
-    maxOutputTokens: number; reasoningEffort: OpenAiScoringModelConfig["reasoningEffort"]; route: string }) => Promise<{ text: string }>;
-}): Promise<CustomerPracticeScenarioGeneratedDraft> {
+    complete: (params: { model: string; apiFamily: "chat_completions" | "responses"; messages: ChatMessage[];
+    maxOutputTokens: number; reasoningEffort: OpenAiScoringModelConfig["reasoningEffort"]; route: string }) => Promise<{ text: string; model?: string }>;
+}): Promise<CustomerPracticeScenarioGenerationResult> {
   const practiceGuidance = normalizeGuidance(input.practiceGuidance);
-  let text: string;
+  let completion: { text: string; model?: string };
   try {
-    ({ text } = await input.complete({ model: input.modelConfig.model, apiFamily: input.modelConfig.apiFamily,
+    completion = await input.complete({ model: input.modelConfig.model, apiFamily: input.modelConfig.apiFamily,
       messages: buildCustomerPracticeScenarioGenerationMessages({ sourceText: input.sourceBundle.text, practiceGuidance }),
       maxOutputTokens: input.modelConfig.maxOutputTokens, reasoningEffort: input.modelConfig.reasoningEffort,
-      route: "customer_practice_scenario_generation" }));
+      route: "customer_practice_scenario_generation" });
   } catch {
     throw new CustomerPracticeScenarioGenerationError("Scenario generation is unavailable. No draft was created.", "generation_failed");
   }
-  const generated = parseGeneratedDraft(text);
+  const generated = parseGeneratedDraft(completion.text);
   const similarity = findSimilarScenarios(generated, input.existingScenarios);
-  return { ...generated, sourceContentIds: input.sourceBundle.sources.map((source) => source.contentId), similarity,
-    promptVersion: CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION };
+  return { draft: { ...generated, sourceContentIds: input.sourceBundle.sources.map((source) => source.contentId), similarity,
+    promptVersion: CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION },
+  serverProvenance: { sourceMode: "scratch", creationMethod: "ai", modelUsed: completion.model?.trim() || input.modelConfig.model,
+    generatedPrompt: CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION, generatedAt: new Date().toISOString(),
+    baseScenarioId: null, baseScenarioTitle: null, baseScenarioSegmentId: null, baseScenarioVersion: null, customizationParams: null } };
 }
 
 function normalizeGuidance(value: unknown): string | null {

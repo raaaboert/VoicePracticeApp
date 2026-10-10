@@ -1020,6 +1020,7 @@ export interface CustomerPracticeScenarioDraftRequest {
   segmentId: string;
   applicableIndustryIds: IndustryId[];
   sourceContentIds?: string[];
+  generationToken?: string;
 }
 
 export interface CustomerPracticeScenarioGenerationRequest {
@@ -1035,6 +1036,8 @@ export interface CustomerPracticeScenarioGeneratedDraft {
   sourceContentIds: string[];
   similarity: { flagged: boolean; matchingScenarioIds: string[] };
   promptVersion: string;
+  /** Opaque, short-lived server receipt required to preserve AI provenance on save. */
+  generationToken: string;
 }
 
 export interface OrgDivisionRecord {

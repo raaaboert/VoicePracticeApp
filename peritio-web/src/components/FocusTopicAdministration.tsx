@@ -380,6 +380,7 @@ export function FocusTopicAdministration({
     setMessage("Generated a draft for review. Complete the remaining fields, then save it as a normal draft.");
   });
   const beginScenarioRevision = (scenario: CustomerPracticeScenario) => {
+    setGeneratedScenario(null);
     const version = scenario.currentVersion;
     setEditingScenarioId(scenario.id); setScenarioTitle(version.title);
     setScenarioDescription(version.description); setScenarioDesiredOutcome(version.desiredOutcome ?? "");
@@ -399,6 +400,7 @@ export function FocusTopicAdministration({
       aiRole: scenarioAiRole, scoringGuidance: scenarioScoringGuidance,
       segmentId: scenarioSegmentId, applicableIndustryIds: scenarioIndustryIds,
       sourceContentIds: scenarioSourceContentIds,
+      ...(generatedScenario ? { generationToken: generatedScenario.generationToken } : {}),
     };
     const saved = await action<CustomerPracticeScenario>(payload);
     setPracticeScenarios({

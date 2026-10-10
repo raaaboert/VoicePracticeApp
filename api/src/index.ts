@@ -327,6 +327,7 @@ import {
   generateCustomerPracticeScenarioDraft,
   CustomerPracticeScenarioGenerationError,
 } from "./services/customerPracticeScenarioGeneration.js";
+import { CustomerPracticeScenarioGenerationReceiptRegistry } from "./services/customerPracticeScenarioGenerationReceipt.js";
 import {
   canScopedActorAttachContent,
   canScopedActorMutateContent,
@@ -737,6 +738,7 @@ let customerPracticeScenarioStore: CustomerPracticeScenarioStore = createCustome
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
 });
+const customerPracticeScenarioGenerationReceipts = new CustomerPracticeScenarioGenerationReceiptRegistry();
 let focusTopicAuthorityStore: FocusTopicAuthorityStore = createFocusTopicAuthorityStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL,
@@ -17837,6 +17839,7 @@ function validateCustomerPracticeScenarioDraft(
 async function resolveCustomerPracticeScenarioDraft(
   orgId: string,
   topicId: string,
+  actorId: string,
   input: CustomerPracticeScenarioDraftRequest,
 ) {
   try {
@@ -17844,7 +17847,17 @@ async function resolveCustomerPracticeScenarioDraft(
       orgId, topicId, requestedContentIds: input.sourceContentIds,
       contentAuthority: await trainingContentStore.listContentAuthorityForOrg(orgId),
     });
-    return { ...input, sourceContentIds: undefined, sourceReferences };
+    const sourceContentIds = sourceReferences.map((source) => source.referenceId)
+      .filter((contentId): contentId is string => Boolean(contentId));
+    const serverProvenance = customerPracticeScenarioGenerationReceipts.resolve({
+      token: input.generationToken, actorId, orgId, topicId, sourceContentIds,
+    });
+    if (typeof input.generationToken === "string" && input.generationToken.trim() && !serverProvenance) {
+      throw new CustomerPracticeScenarioStoreError("The generated draft is no longer valid. Generate it again before saving.", "scenario_generation_expired", 409);
+    }
+    const { serverProvenance: _untrustedServerProvenance, ...clientDraft } = input as CustomerPracticeScenarioDraftRequest & { serverProvenance?: unknown };
+    return { ...clientDraft, sourceContentIds: undefined, generationToken: undefined, sourceReferences,
+      ...(serverProvenance ? { serverProvenance } : {}) };
   } catch (error) {
     if (error instanceof CustomerPracticeScenarioSourceError) {
       throw new CustomerPracticeScenarioStoreError(error.message, error.code, 400);
@@ -17994,7 +18007,12 @@ app.post(
         });
       });
       if (!stillAuthorized || response.headersSent) return;
-      const payload: CustomerPracticeScenarioGeneratedDraft = generated;
+      const receipt = customerPracticeScenarioGenerationReceipts.issue({
+        actorId: prepared.context.actorId, orgId: prepared.context.management.org.id,
+        topicId: prepared.context.topic.id, sourceContentIds: generated.draft.sourceContentIds,
+        provenance: generated.serverProvenance,
+      });
+      const payload: CustomerPracticeScenarioGeneratedDraft = { ...generated.draft, generationToken: receipt.token };
       response.json(payload);
     } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
   },
@@ -18019,7 +18037,7 @@ app.post(
         const requestDraft = request.body as CustomerPracticeScenarioDraftRequest;
         validateCustomerPracticeScenarioDraft(db, context.management.org, requestDraft);
         const draft = await resolveCustomerPracticeScenarioDraft(
-          context.management.org.id, context.topic.id, requestDraft,
+          context.management.org.id, context.topic.id, context.actorId, requestDraft,
         );
         const now = new Date();
         queueRequiredTransactionSideWrite(db, async (client) => {
@@ -18080,7 +18098,7 @@ app.post(
         const requestDraft = request.body as CustomerPracticeScenarioDraftRequest;
         validateCustomerPracticeScenarioDraft(db, context.management.org, requestDraft);
         const draft = await resolveCustomerPracticeScenarioDraft(
-          context.management.org.id, context.topic.id, requestDraft,
+          context.management.org.id, context.topic.id, context.actorId, requestDraft,
         );
         const now = new Date();
         queueRequiredTransactionSideWrite(db, async (client) => {
