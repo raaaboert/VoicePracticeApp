@@ -5,7 +5,7 @@ import { deflateRawSync } from "node:zlib";
 import type { TrainingContentItem } from "@voicepractice/shared";
 import type { TrainingContentAuthorityRecord } from "../storage/trainingContentStore.js";
 import { buildCustomerPracticeScenarioGenerationSourceBundle, CustomerPracticeScenarioGenerationSourceError, reauthorizeCustomerPracticeScenarioGenerationSources } from "./customerPracticeScenarioGenerationSources.js";
-import { extractDocxGenerationText, extractPdfGenerationText } from "./trainingContentTextExtraction.js";
+import { extractDocxGenerationText, extractInWorker, extractPdfGenerationText, TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2 } from "./trainingContentTextExtraction.js";
 
 function item(id: string, patch: Partial<TrainingContentItem> = {}): TrainingContentItem {
   return { id, orgId: "org_1", categoryId: "cat_1", title: `Resource ${id}`, description: "", focusTopicId: "topic_1",
@@ -68,6 +68,24 @@ test("adversarial PDF and DOCX structures fail in bounded isolated extraction", 
   await assert.rejects(extractDocxGenerationText(unclosed), /safely prepared/);
   const manyEntries = zip(Object.fromEntries(Array.from({ length: 520 }, (_, index) => [`word/extra-${index}.xml`, "x"])));
   await assert.rejects(extractDocxGenerationText(manyEntries), /safely prepared/);
+});
+
+test("DOCX extraction matches only w:t elements, not table or section property tags", async () => {
+  const docx = zip({ "word/document.xml": [
+    "<w:document><w:body><w:p><w:r><w:t>Visible paragraph</w:t></w:r></w:p>",
+    "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Table cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+    "<w:sectPr><w:titlePg/><w:tab w:val=\"clear\"/></w:sectPr></w:body></w:document>",
+  ].join("") });
+  const text = await extractDocxGenerationText(docx);
+  assert.match(text, /Visible paragraph/); assert.match(text, /Table cell/);
+  assert.equal(text.includes("clear"), false);
+});
+
+test("worker timeout and declared resource caps fail safely without main-thread parsing", async () => {
+  assert.equal(TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2.workerIsolated, true);
+  assert.equal(TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2.workerMemoryMb, 48);
+  const pdf = Buffer.from("%PDF-1.4\nstream\nBT (bounded) Tj ET\nendstream", "latin1");
+  await assert.rejects(extractInWorker("pdf", pdf, { timeoutMs: 1 }), /safely prepared/);
 });
 
 test("mixed document bundles respect the aggregate bound", async () => {

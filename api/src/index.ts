@@ -18001,24 +18001,36 @@ app.post(
       if (!Array.isArray(requestInput?.sourceContentIds) || requestInput.sourceContentIds.length === 0) {
         throw new CustomerPracticeScenarioGenerationError("Select at least one eligible Related Content source.", "generation_invalid_response");
       }
+      // Keep the app-state lock to authorization and metadata only. Downloads,
+      // extraction workers, and the provider call must never run under it.
       const prepared = await withFreshDatabaseSnapshotRead(async (db) => {
         const context = await resolveCustomerScenarioRouteContext(db, request, response);
         if (!context || response.headersSent) return null;
         if (!context.settings.allowCustomerScenarioCreation) {
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
-        const sourceBundle = await buildCurrentCustomerScenarioGenerationSources({
-          orgId: context.management.org.id, topicId: context.topic.id,
-          selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
-          moduleEnabled: context.management.learningResourcesEnabled,
-        });
-        return { context, sourceBundle, scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
+        return { context };
       });
       if (!prepared || response.headersSent) return;
       if (!consumeRateLimit(customerScenarioGenerationRateLimitOptions, request, response, `${prepared.context.management.org.id}:${prepared.context.actorId}`)) return;
+      // Object storage and document extraction are deliberately outside the global lock.
+      const sourceBundle = await buildCurrentCustomerScenarioGenerationSources({
+        orgId: prepared.context.management.org.id, topicId: prepared.context.topic.id,
+        selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
+        moduleEnabled: prepared.context.management.learningResourcesEnabled,
+      });
+      // Detect a changed attachment/fingerprint before provider work without rebuilding the bundle.
+      const beforeProvider = await withFreshDatabaseSnapshotRead(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.settings.allowCustomerScenarioCreation) throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
+        await reauthorizeCurrentCustomerScenarioGenerationSources({ orgId: context.management.org.id, topicId: context.topic.id, selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true, moduleEnabled: context.management.learningResourcesEnabled });
+        return { scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
+      });
+      if (!beforeProvider || response.headersSent) return;
       const generated = await generateCustomerPracticeScenarioDraft({
-        sourceBundle: prepared.sourceBundle, practiceGuidance: requestInput.practiceGuidance,
-        existingScenarios: prepared.scenarios, modelConfig: OPENAI_MODEL_CONFIG.scenarioGeneration,
+        sourceBundle, practiceGuidance: requestInput.practiceGuidance,
+        existingScenarios: beforeProvider.scenarios, modelConfig: OPENAI_MODEL_CONFIG.scenarioGeneration,
         complete: async (params) => (await invokeAiProviderWithBudget({
           context: { user: request.dashboard!.user, orgId: prepared.context.management.org.id },
           kind: "customer_scenario_generation", model: params.model,
