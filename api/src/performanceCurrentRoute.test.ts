@@ -26,6 +26,7 @@ import { createPerformancePlanStore, PerformancePlanStore } from "./storage/perf
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import { createMemoryUserNotificationStoreForTest, type UserNotificationStore } from "./storage/userNotificationStore.js";
 import { createWebAuthService } from "./services/webAuth.js";
 
 const MOBILE_TOKEN_SECRET = "mobile_token_secret_for_performance_route_tests";
@@ -46,6 +47,7 @@ let dashboardOrgAdminNoneToken: string;
 let dashboardUserAdminNoneToken: string;
 let platformDashboardToken: string;
 let setDatabaseSaveBarrierForTest: (barrier: (() => Promise<void>) | null) => void;
+let setUserNotificationStoreForTest: (store: UserNotificationStore) => void;
 
 function hashMobileToken(token: string): string {
   return crypto.createHmac("sha256", MOBILE_TOKEN_SECRET).update(token).digest("hex");
@@ -766,6 +768,7 @@ before(async () => {
   await seedStores();
   const imported = await import("./index.js");
   setDatabaseSaveBarrierForTest = imported.setDatabaseSaveBarrierForTest;
+  setUserNotificationStoreForTest = imported.setUserNotificationStoreForTest;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -2089,4 +2092,59 @@ test("performance plan mutations do not depend on incidental app-state persisten
   } finally {
     setDatabaseSaveBarrierForTest(null);
   }
+});
+
+test("dashboard Performance goal routes enqueue durable notifications only for meaningful cross-user activity", async () => {
+  const notifications = createMemoryUserNotificationStoreForTest();
+  setUserNotificationStoreForTest(notifications);
+  const created = await dashboardRequest("/dashboard/performance/plans", {
+    method: "POST",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "dashboard_regular_organization",
+      startDate: "2101-01-01",
+      endDate: "2101-02-01",
+    })),
+  });
+  assert.equal(created.status, 201);
+  const planId = (created.body.plan as { id?: string }).id;
+  assert.ok(planId);
+
+  const targetInbox = await dashboardRequest("/dashboard/notifications", undefined, dashboardRegularOrganizationToken);
+  assert.equal(targetInbox.status, 200);
+  assert.equal((targetInbox.body.notifications as Array<{ kind?: string; subjectId?: string }>).some(
+    (notification) => notification.kind === "goal_updated" && notification.subjectId === planId,
+  ), true);
+
+  const updated = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(buildCreatePlanRequest({
+      userId: "dashboard_regular_organization",
+      startDate: "2101-01-01",
+      endDate: "2101-02-08",
+    })),
+  });
+  assert.equal(updated.status, 200);
+  const targetRows = await notifications.listForRecipient({ recipientUserId: "dashboard_regular_organization", limit: 20 });
+  assert.equal(targetRows.filter((notification) => notification.kind === "goal_updated").length, 2);
+
+  const learnerComment = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}/updates`, {
+    method: "POST",
+    body: JSON.stringify({ body: "I have started practicing." }),
+  }, dashboardRegularOrganizationToken);
+  assert.equal(learnerComment.status, 201);
+  const managerInbox = await dashboardRequest("/dashboard/notifications", undefined, dashboardToken);
+  assert.equal(managerInbox.status, 200);
+  assert.equal((managerInbox.body.notifications as Array<{ kind?: string; subjectId?: string }>).some(
+    (notification) => notification.kind === "goal_commented" && notification.subjectId === planId,
+  ), true);
+
+  const managerRowsBefore = await notifications.listForRecipient({ recipientUserId: "dashboard_admin", limit: 20 });
+  const selfComment = await dashboardRequest(`/dashboard/performance/plans/${encodeURIComponent(planId)}/updates`, {
+    method: "POST",
+    body: JSON.stringify({ body: "Manager follow-up." }),
+  });
+  assert.equal(selfComment.status, 201);
+  const managerRowsAfter = await notifications.listForRecipient({ recipientUserId: "dashboard_admin", limit: 20 });
+  assert.equal(managerRowsAfter.filter((notification) => notification.kind === "goal_commented").length,
+    managerRowsBefore.filter((notification) => notification.kind === "goal_commented").length);
 });

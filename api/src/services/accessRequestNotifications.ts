@@ -4,6 +4,7 @@ import type {
   DashboardNotificationRow,
   DashboardNotificationsResponse,
   EnterpriseJoinRequestRecord,
+  PerformancePlan,
   UserProfile,
 } from "@voicepractice/shared";
 
@@ -28,6 +29,10 @@ import {
   canViewCustomerPracticeScenarioNotification,
   CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
 } from "./customerPracticeScenarioNotifications.js";
+import {
+  canViewPerformanceGoalNotification,
+} from "./performanceGoalNotifications.js";
+import type { PerformancePlanStore } from "../storage/performancePlanStore.js";
 
 export const ACCESS_REQUEST_NOTIFICATION_SUBJECT_TYPE = "organization_access_request";
 
@@ -120,6 +125,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
   practiceScenarios?: readonly CustomerPracticeScenario[];
+  performancePlanStore?: PerformancePlanStore;
   limit: number;
   offset?: number;
 }): Promise<DashboardNotificationsResponse> {
@@ -135,6 +141,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   const hiddenIds: string[] = [];
   const closedIdsByResolution = new Map<string, string[]>();
   const readTimeResolutionAt = new Date();
+  const performancePlanById = new Map<string, PerformancePlan | null>();
   let offsetAfterLastPageRow: number | null = null;
   for (const [candidateIndex, notification] of candidates.entries()) {
     const accessRequestVisible = canViewAccessRequestNotification({
@@ -151,7 +158,21 @@ export async function listAuthorizedDashboardNotifications(params: {
       db: params.db, recipient: params.recipient, notification,
       scenarios: params.practiceScenarios ?? [],
     });
-    if (accessRequestVisible || topicVisible || contentAttachedVisible || scenarioVisible) {
+    let goalVisible = false;
+    if ((notification.kind === "goal_updated" || notification.kind === "goal_commented")
+      && params.performancePlanStore) {
+      if (!performancePlanById.has(notification.subjectId)) {
+        performancePlanById.set(notification.subjectId,
+          (await params.performancePlanStore.getPlanById(notification.subjectId))?.plan ?? null);
+      }
+      goalVisible = canViewPerformanceGoalNotification({
+        db: params.db,
+        recipient: params.recipient,
+        notification,
+        plan: performancePlanById.get(notification.subjectId) ?? null,
+      });
+    }
+    if (accessRequestVisible || topicVisible || contentAttachedVisible || scenarioVisible || goalVisible) {
       const accessRequest = accessRequestVisible
         ? params.db.enterpriseJoinRequests.find((candidate) => candidate.id === notification.subjectId)!
         : null;
@@ -239,8 +260,16 @@ export async function listAuthorizedDashboardNotifications(params: {
         subjectIds: visibleScenarioIds,
       })
     : 0;
+  // Goal notifications are reauthorized against the current Performance-plan
+  // relationship above. Count only rows that passed that check so a revoked
+  // manager never retains a stale badge for protected goal activity.
+  const goalUnreadCount = visible.filter((notification) =>
+    (notification.kind === "goal_updated" || notification.kind === "goal_commented")
+    && notification.readAt === null
+    && notification.resolvedAt === null,
+  ).length;
   const unreadCount = accessRequestUnreadCount + topicUnreadCount + contentAttachedUnreadCount
-    + scenarioUnreadCount;
+    + scenarioUnreadCount + goalUnreadCount;
   const hasMore = visible.length > limit || candidates.length === queryLimit;
   return {
     generatedAt: new Date().toISOString(),
@@ -258,6 +287,7 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
   practiceScenarios?: readonly CustomerPracticeScenario[];
+  performancePlanStore?: PerformancePlanStore;
   notificationId: string;
   readAt?: Date;
 }): Promise<DashboardNotificationRow | null> {
@@ -280,7 +310,14 @@ export async function markAuthorizedDashboardNotificationRead(params: {
     db: params.db, recipient: params.recipient, notification,
     scenarios: params.practiceScenarios ?? [],
   });
-  if (!accessRequestVisible && !topicVisible && !contentAttachedVisible && !scenarioVisible) {
+  const goalPlan = (notification.kind === "goal_updated" || notification.kind === "goal_commented")
+    && params.performancePlanStore
+    ? (await params.performancePlanStore.getPlanById(notification.subjectId))?.plan ?? null
+    : null;
+  const goalVisible = canViewPerformanceGoalNotification({
+    db: params.db, recipient: params.recipient, notification, plan: goalPlan,
+  });
+  if (!accessRequestVisible && !topicVisible && !contentAttachedVisible && !scenarioVisible && !goalVisible) {
     if (!notification.resolvedAt && !(params.topicAuthorityMode === "legacy"
       && shouldPreserveTopicAssignedNotificationInLegacyMode({
         db: params.db, recipient: params.recipient, notification,
@@ -320,7 +357,9 @@ function toDashboardRow(notification: UserNotificationRecord): DashboardNotifica
     && notification.kind !== "topic_overdue"
     && notification.kind !== "content_added"
     && notification.kind !== "scenario_submitted"
-    && notification.kind !== "scenario_reviewed") {
+    && notification.kind !== "scenario_reviewed"
+    && notification.kind !== "goal_updated"
+    && notification.kind !== "goal_commented") {
     throw new Error("Unsupported notification kind reached dashboard serialization.");
   }
   return {

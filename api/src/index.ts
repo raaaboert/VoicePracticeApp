@@ -312,6 +312,11 @@ import { buildTopicAssignedNotificationInputs } from "./services/topicAssignedNo
 import { isDateKey } from "./services/performanceDateWindows.js";
 import { buildFocusTopicContentAttachedNotificationInputs } from "./services/focusTopicContentNotifications.js";
 import {
+  buildPerformanceGoalChangedNotificationInputs,
+  buildPerformanceGoalCommentNotificationInputs,
+  isMaterialPerformanceGoalUpdate,
+} from "./services/performanceGoalNotifications.js";
+import {
   buildScenarioDecisionNotificationInputs,
   buildScenarioSubmittedNotificationInputs,
   CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE,
@@ -14536,6 +14541,7 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
         ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+      performancePlanStore,
       limit: parsedLimit,
       offset: parsedOffset,
     });
@@ -14559,6 +14565,7 @@ app.get("/dashboard/notifications/unread-count", requireDashboardAuth, async (re
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
         ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+      performancePlanStore,
       limit: 1,
     });
     response.json({ unreadCount: payload.unreadCount });
@@ -14581,6 +14588,7 @@ app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
         ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+      performancePlanStore,
       notificationId: request.params.notificationId,
     });
     if (!notification) {
@@ -15194,6 +15202,13 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
         actorType: resolvePerformanceDashboardAuditActorType(request.dashboard!.viewer),
         actorId: request.dashboard!.viewer.userId
       });
+      await userNotificationStore.enqueueMany(buildPerformanceGoalChangedNotificationInputs({
+        db,
+        plan: payload.plan,
+        actorId: request.dashboard!.viewer.userId,
+        event: "created",
+        createdAt: now,
+      }));
       response.status(201).json(payload);
     } catch (error) {
       if (error instanceof PerformancePlanInputError) {
@@ -15314,6 +15329,15 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
         actorType: resolvePerformanceDashboardAuditActorType(request.dashboard!.viewer),
         actorId: request.dashboard!.viewer.userId
       });
+      if (isMaterialPerformanceGoalUpdate(refreshed.plan, payload.plan)) {
+        await userNotificationStore.enqueueMany(buildPerformanceGoalChangedNotificationInputs({
+          db,
+          plan: payload.plan,
+          actorId: request.dashboard!.viewer.userId,
+          event: "updated",
+          createdAt: now,
+        }));
+      }
       response.json(payload);
     } catch (error) {
       if (error instanceof PerformancePlanInputError) {
@@ -15493,6 +15517,13 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
         now,
         users: db.users
       });
+      await userNotificationStore.enqueueMany(buildPerformanceGoalCommentNotificationInputs({
+        db,
+        plan: materialized.plan,
+        actorId: request.dashboard!.viewer.userId,
+        updateId: payload.update.id,
+        createdAt: now,
+      }));
       response.status(201).json(payload);
     } catch (error) {
       if (error instanceof PerformancePlanUpdateInputError) {
@@ -25603,6 +25634,13 @@ app.post("/mobile/users/:userId/performance/plans/:planId/updates", async (reque
         now,
         users: [user]
       });
+      await userNotificationStore.enqueueMany(buildPerformanceGoalCommentNotificationInputs({
+        db,
+        plan: materialized.plan,
+        actorId: user.id,
+        updateId: payload.update.id,
+        createdAt: now,
+      }));
       response.status(201).json(payload);
     } catch (error) {
       if (error instanceof PerformancePlanUpdateInputError) {
