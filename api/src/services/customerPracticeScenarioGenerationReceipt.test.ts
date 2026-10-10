@@ -10,6 +10,7 @@ test("server generation receipt binds AI provenance to actor, Topic, and canonic
     provenance: { sourceMode: "scratch", creationMethod: "ai", modelUsed: "server-model", generatedPrompt: "v1", generatedAt: "2026-10-10T00:00:00.000Z" } });
   assert.deepEqual(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a", "source_b"] }), receipt.provenance);
   assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_2", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a", "source_b"] }), null);
+  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_2", sourceContentIds: ["source_a", "source_b"] }), null);
   assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a"] }), null);
 });
 
@@ -28,6 +29,7 @@ test("save lifecycle accepts only server-issued AI provenance and preserves manu
   assert.equal(generated.creationMethod, "ai"); assert.equal(generated.modelUsed, "server-model");
   assert.equal(normalizeCustomerPracticeScenarioServerProvenance(undefined).creationMethod, "manual");
   assert.equal(normalizeCustomerPracticeScenarioServerProvenance({ sourceMode: "standard_base", creationMethod: "ai" }).creationMethod, "manual");
+  assert.equal(normalizeCustomerPracticeScenarioServerProvenance({ sourceMode: "scratch", creationMethod: "ai", modelUsed: "forged", generatedPrompt: "forged", generatedAt: "not-a-date" }).creationMethod, "manual");
 });
 
 test("mocked generation receipt flows into one immutable draft version with sources and no publication state", () => {

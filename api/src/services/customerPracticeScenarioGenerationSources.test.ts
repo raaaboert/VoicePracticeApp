@@ -5,7 +5,7 @@ import { deflateRawSync } from "node:zlib";
 import type { TrainingContentItem } from "@voicepractice/shared";
 import type { TrainingContentAuthorityRecord } from "../storage/trainingContentStore.js";
 import { buildCustomerPracticeScenarioGenerationSourceBundle, CustomerPracticeScenarioGenerationSourceError, reauthorizeCustomerPracticeScenarioGenerationSources } from "./customerPracticeScenarioGenerationSources.js";
-import { extractDocxGenerationText, extractInWorker, extractPdfGenerationText, TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2 } from "./trainingContentTextExtraction.js";
+import { extractDocxGenerationText, extractInWorker, extractPdfGenerationText, getTrainingContentExtractionWorkerStateForTest, TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2 } from "./trainingContentTextExtraction.js";
 
 function item(id: string, patch: Partial<TrainingContentItem> = {}): TrainingContentItem {
   return { id, orgId: "org_1", categoryId: "cat_1", title: `Resource ${id}`, description: "", focusTopicId: "topic_1",
@@ -86,6 +86,16 @@ test("worker timeout and declared resource caps fail safely without main-thread 
   assert.equal(TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2.workerMemoryMb, 48);
   const pdf = Buffer.from("%PDF-1.4\nstream\nBT (bounded) Tj ET\nendstream", "latin1");
   await assert.rejects(extractInWorker("pdf", pdf, { timeoutMs: 1 }), /safely prepared/);
+});
+
+test("extraction worker queue never exceeds its configured process-wide cap", async () => {
+  const pdf = Buffer.from("%PDF-1.4\nstream\nBT (bounded) Tj ET\nendstream", "latin1");
+  const jobs = Array.from({ length: TRAINING_CONTENT_TEXT_EXTRACTION_SECURITY_CONTRACT_V2.maxConcurrency + 2 }, () => extractInWorker("pdf", pdf, { timeoutMs: 1 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const state = getTrainingContentExtractionWorkerStateForTest();
+  assert.ok(state.activeWorkers <= state.maxConcurrency);
+  await Promise.allSettled(jobs);
+  assert.equal(getTrainingContentExtractionWorkerStateForTest().activeWorkers, 0);
 });
 
 test("mixed document bundles respect the aggregate bound", async () => {
