@@ -185,10 +185,10 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
     const inserted = await client.query<AssignmentRow>(
       `INSERT INTO focus_topic_assignments (
          id, org_id, topic_id, audience, subject_user_id, grants_management,
-         created_by, created_at, revoked_by, revoked_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL) RETURNING *`,
+         due_date, created_by, created_at, revoked_by, revoked_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,NULL) RETURNING *`,
       [row.id, row.orgId, row.topicId, row.audience, row.subjectUserId,
-        row.grantsManagement, row.createdBy, row.createdAt],
+        row.grantsManagement, row.dueDate, row.createdBy, row.createdAt],
     );
     return mapAssignment(requiredRow(inserted.rows[0], "Created Focus Topic assignment"));
   }
@@ -324,16 +324,17 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
   }
 }
 
-interface AssignmentRow { id:string; org_id:string; topic_id:string; audience:FocusTopicAssignment["audience"]; subject_user_id:string|null; grants_management:boolean; created_by:string; created_at:string|Date; revoked_by:string|null; revoked_at:string|Date|null }
+interface AssignmentRow { id:string; org_id:string; topic_id:string; audience:FocusTopicAssignment["audience"]; subject_user_id:string|null; grants_management:boolean; due_date:string|Date|null; created_by:string; created_at:string|Date; revoked_by:string|null; revoked_at:string|Date|null }
 interface ScenarioRow { id:string; org_id:string; topic_id:string; scenario_kind:"standard"|"org"; scenario_id:string; attached_by:string; attached_at:string|Date; detached_by:string|null; detached_at:string|Date|null }
 interface ContentRow { id:string; org_id:string; content_id:string; topic_id:string; attached_by:string; attached_at:string|Date; detached_by:string|null; detached_at:string|Date|null }
 interface BackfillRunRow { id:string; run_version:string; mode:"apply"; schema_generation:string; input_fingerprint:string; result_summary:Record<string,unknown>; executed_at:string|Date; validated_at:string|Date|null; validated_by:string|null; signed_off_at:string|Date|null; signed_off_by:string|null }
 
 async function insertAssignment(client: Pick<PoolClient,"query">, row: FocusTopicAssignment): Promise<void> {
   await client.query(
-    `INSERT INTO focus_topic_assignments VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `INSERT INTO focus_topic_assignments (id,org_id,topic_id,audience,subject_user_id,grants_management,due_date,created_by,created_at,revoked_by,revoked_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (id) DO NOTHING`,
-    [row.id,row.orgId,row.topicId,row.audience,row.subjectUserId,row.grantsManagement,row.createdBy,row.createdAt,row.revokedBy,row.revokedAt]
+    [row.id,row.orgId,row.topicId,row.audience,row.subjectUserId,row.grantsManagement,row.dueDate,row.createdBy,row.createdAt,row.revokedBy,row.revokedAt]
   );
 }
 async function insertScenario(client: Pick<PoolClient,"query">, row: FocusTopicScenarioAttachment): Promise<void> {
@@ -359,7 +360,7 @@ function assertPlanTopics(plan: FocusTopicAuthorityBackfillPlan, valid: Readonly
   }
 }
 
-function mapAssignment(row:AssignmentRow):FocusTopicAssignment { return {id:row.id,orgId:row.org_id,topicId:row.topic_id,audience:row.audience,subjectUserId:row.subject_user_id,grantsManagement:row.grants_management,createdBy:row.created_by,createdAt:iso(row.created_at),revokedBy:row.revoked_by,revokedAt:optionalIso(row.revoked_at)}; }
+function mapAssignment(row:AssignmentRow):FocusTopicAssignment { return {id:row.id,orgId:row.org_id,topicId:row.topic_id,audience:row.audience,subjectUserId:row.subject_user_id,grantsManagement:row.grants_management,dueDate:row.due_date ? (row.due_date instanceof Date ? row.due_date.toISOString().slice(0,10) : row.due_date.slice(0,10)) : null,createdBy:row.created_by,createdAt:iso(row.created_at),revokedBy:row.revoked_by,revokedAt:optionalIso(row.revoked_at)}; }
 function mapScenario(row:ScenarioRow):FocusTopicScenarioAttachment { return {id:row.id,orgId:row.org_id,topicId:row.topic_id,scenarioKind:row.scenario_kind,scenarioId:row.scenario_id,attachedBy:row.attached_by,attachedAt:iso(row.attached_at),detachedBy:row.detached_by,detachedAt:optionalIso(row.detached_at)}; }
 function mapContent(row:ContentRow):FocusTopicContentAttachment { return {id:row.id,orgId:row.org_id,contentId:row.content_id,topicId:row.topic_id,attachedBy:row.attached_by,attachedAt:iso(row.attached_at),detachedBy:row.detached_by,detachedAt:optionalIso(row.detached_at)}; }
 function mapRun(row:BackfillRunRow):FocusTopicBackfillRunRecord { return {id:row.id,runVersion:row.run_version,mode:row.mode,schemaGeneration:row.schema_generation,inputFingerprint:row.input_fingerprint,resultSummary:row.result_summary,executedAt:iso(row.executed_at),validatedAt:optionalIso(row.validated_at),validatedBy:row.validated_by,signedOffAt:optionalIso(row.signed_off_at),signedOffBy:row.signed_off_by}; }
@@ -373,6 +374,7 @@ async function initializeSchema(pool: QueryPool): Promise<void> {
   const migrations = await Promise.all([
     readFocusTopicMigration("015_focus_topic_authority.sql"),
     readFocusTopicMigration("017_focus_topic_management_authority.sql"),
+    readFocusTopicMigration("020_focus_topic_assignment_due_dates.sql"),
   ]);
   const client = await pool.connect();
   try {

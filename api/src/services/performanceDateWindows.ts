@@ -252,7 +252,7 @@ function getOffsetMs(date: Date, timeZone: string): number {
   return asUtc - date.getTime();
 }
 
-function localDateTimeToUtc(parts: LocalDateTimeParts, timeZone: string): Date {
+export function localDateTimeToUtc(parts: LocalDateTimeParts, timeZone: string): Date {
   assertValidIanaTimeZone(timeZone);
   let utcMs = Date.UTC(
     parts.year,

@@ -208,7 +208,7 @@ export async function listAuthorizedDashboardNotifications(params: {
     .map((topic) => topic.id);
   const topicUnreadCount = orgId && accessibleTopicIds.length > 0
     ? await params.store.countActionableUnread({
-        recipientUserId: params.recipient.id, orgId, kinds: ["topic_assigned"],
+        recipientUserId: params.recipient.id, orgId, kinds: ["topic_assigned", "topic_due_7d", "topic_due_1d", "topic_overdue"],
         subjectType: TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE, subjectIds: accessibleTopicIds,
       })
     : 0;
@@ -315,6 +315,9 @@ export async function markAuthorizedDashboardNotificationRead(params: {
 function toDashboardRow(notification: UserNotificationRecord): DashboardNotificationRow {
   if (notification.kind !== "access_request"
     && notification.kind !== "topic_assigned"
+    && notification.kind !== "topic_due_7d"
+    && notification.kind !== "topic_due_1d"
+    && notification.kind !== "topic_overdue"
     && notification.kind !== "content_added"
     && notification.kind !== "scenario_submitted"
     && notification.kind !== "scenario_reviewed") {

@@ -7,6 +7,7 @@ import type { UserNotificationRecord } from "../storage/userNotificationStore.js
 import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
 
 export const TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE = "focus_topic";
+const FOCUS_TOPIC_NOTIFICATION_KINDS = new Set(["topic_assigned", "topic_due_7d", "topic_due_1d", "topic_overdue"]);
 
 export function buildTopicAssignedNotificationInputs(params: {
   db: ApiDatabase;
@@ -53,7 +54,7 @@ export function shouldPreserveTopicAssignedNotificationInLegacyMode(params: {
   notification: UserNotificationRecord;
 }): boolean {
   const { db, recipient, notification } = params;
-  if (notification.kind !== "topic_assigned"
+  if (!FOCUS_TOPIC_NOTIFICATION_KINDS.has(notification.kind)
     || notification.subjectType !== TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE
     || notification.recipientUserId !== recipient.id
     || recipient.status !== "active"
@@ -74,7 +75,7 @@ export function canViewTopicAssignedNotification(params: {
   authority: FocusTopicAuthoritySnapshot | null;
 }): boolean {
   const { db, recipient, notification, authority } = params;
-  if (!authority || notification.kind !== "topic_assigned"
+  if (!authority || !FOCUS_TOPIC_NOTIFICATION_KINDS.has(notification.kind)
     || notification.subjectType !== TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE
     || notification.recipientUserId !== recipient.id) return false;
   const org = db.orgs.find((candidate) => candidate.id === notification.orgId);

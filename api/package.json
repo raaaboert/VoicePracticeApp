@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json && node ./scripts/copy-sql.mjs",
     "start": "node dist/index.js",
     "start:video-worker": "node dist/videoProcessingWorker.js",
+    "run:focus-topic-reminders": "node dist/focusTopicReminderWorker.js",
     "seed:dashboard-local": "node ./scripts/seed-dashboard-local.mjs",
     "db:sanitize-bootstrap": "tsx ./scripts/sanitize-bootstrap.ts",
     "force:mobile-reonboarding": "tsx ./scripts/force-mobile-reonboarding.ts",
