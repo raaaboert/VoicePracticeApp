@@ -2761,6 +2761,14 @@ function normalizeOrgCustomScenarioProvenance(
 
 function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: number, now: string): OrgCustomScenario | null {
   const candidate = (raw ?? {}) as Partial<OrgCustomScenario>;
+  const customerScenarioVersionId =
+    typeof candidate.customerScenarioVersionId === "string" && candidate.customerScenarioVersionId.trim()
+      ? candidate.customerScenarioVersionId.trim()
+      : null;
+  const customerScenarioId = customerScenarioVersionId
+    && typeof candidate.id === "string" && candidate.id.trim()
+    ? candidate.id.trim()
+    : null;
   const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
   if (!title) {
     return null;
@@ -2795,7 +2803,7 @@ function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: num
   };
 
   return {
-    id: normalizeIdentifier(candidate.id, `${segmentId}_custom_${index + 1}`),
+    id: customerScenarioId ?? normalizeIdentifier(candidate.id, `${segmentId}_custom_${index + 1}`),
     orgId: typeof candidate.orgId === "string" && candidate.orgId.trim() ? candidate.orgId.trim() : orgId,
     segmentId,
     title,
@@ -2816,10 +2824,7 @@ function normalizeOrgCustomScenarioEntry(raw: unknown, orgId: string, index: num
         : PLATFORM_ADMIN_ACTOR_ID,
     createdAt,
     updatedAt,
-    customerScenarioVersionId:
-      typeof candidate.customerScenarioVersionId === "string" && candidate.customerScenarioVersionId.trim()
-        ? candidate.customerScenarioVersionId.trim()
-        : null,
+    customerScenarioVersionId,
     customerScenarioVersionNumber:
       typeof candidate.customerScenarioVersionNumber === "number"
         && Number.isSafeInteger(candidate.customerScenarioVersionNumber)
@@ -9021,6 +9026,7 @@ async function buildTranscriptManagementPayload(params: {
       publicationState: detail.content.publicationState,
       archivedAt: detail.content.archivedAt,
       externalKind: detail.content.externalKind ?? null,
+      externalUrl: detail.content.externalUrl,
       nativeBody: detail.content.nativeBody,
       hasReadyPrimaryAsset: detail.currentAsset?.uploadState === "ready",
       currentPrimaryAssetId: detail.currentAsset?.id ?? null,
@@ -18346,11 +18352,15 @@ app.post(
           }
         });
         const projection = buildPublishedCustomerScenarioProjection(existing, nowValue);
-        context.management.org.customScenarios = sortOrgCustomScenariosByTitle([
+        const customScenarios = sortOrgCustomScenariosByTitle([
           ...ensureOrgCustomScenarioCollection(context.management.org)
             .filter((entry) => entry.id !== existing.id),
           projection,
         ]);
+        context.management.org.customScenarios = customScenarios;
+        db.orgs = db.orgs.map((organization) => organization.id === context.management.org.id
+          ? { ...organization, customScenarios }
+          : organization);
         appendWebAuditEvent(db, request.dashboard!.user, {
           action: "focus_topic.practice_scenario.published", orgId: context.management.org.id,
           message: "Published an approved customer Practice Scenario version.",

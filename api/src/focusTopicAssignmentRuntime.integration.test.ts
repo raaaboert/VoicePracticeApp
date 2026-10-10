@@ -1013,14 +1013,14 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
          WHERE content_id=$1 ORDER BY topic_id`, [contentId],
       );
       assert.deepEqual(attachmentRows.rows.map((entry) => [entry.topic_id, Boolean(entry.detached_at)]), [
-        [topic.id, true], [topic.id, true], [unmanagedTopic.id, false],
+        [topic.id, true], [topic.id, true], [topic.id, true], [unmanagedTopic.id, false],
       ]);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.content.attached'",
-      )).rowCount, 7);
+      )).rowCount, 8);
       assert.equal((await pool.query(
         "SELECT 1 FROM audit_events WHERE action='focus_topic.attachment.detached'",
-      )).rowCount, 6);
+      )).rowCount, 7);
       assert.ok(((await pool.query(
         "SELECT 1 FROM user_notifications WHERE kind='content_added' AND recipient_user_id=$1",
         [orgAdmin.id],
@@ -1173,6 +1173,93 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const general = await pool.query<{ training_id: string | null }>(
         "SELECT training_id FROM simulation_sessions WHERE simulation_session_id=$1", [generalSessionId]);
       assert.equal(general.rows[0]?.training_id, null);
+
+      // Regression: a registered assignment session is permanently pinned to
+      // its approved version even after a later revision is published.
+      const pinnedV1Draft = {
+        title: "Pinned V1 title", description: "PINNED_V1_RUNTIME_CONTENT must remain in the active session.",
+        desiredOutcome: "PINNED_V1_DESIRED_OUTCOME", aiRole: "PINNED_V1_COUNTERPART_ROLE",
+        scoringGuidance: "Score against PINNED_V1_RUNTIME_CONTENT.", segmentId: segment.id,
+        applicableIndustryIds: [org.activeIndustries[0]!],
+      };
+      const pinnedCreated = await orgAdminCall(practiceScenarioPath, "POST", pinnedV1Draft);
+      assert.equal(pinnedCreated.status, 201, JSON.stringify(pinnedCreated.body));
+      const pinnedScenarioId = String(pinnedCreated.body.id);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/submit`, "POST")).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/approve`, "POST", { reviewNote: "v1" })).status, 200);
+      const pinnedPublishedV1 = await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST");
+      assert.equal(pinnedPublishedV1.status, 200, JSON.stringify(pinnedPublishedV1.body));
+      const pinnedV1Id = String((pinnedPublishedV1.body.publishedVersion as { id: string }).id);
+      const pinnedSessionId = `pinned_customer_${randomUUID()}`;
+      const pinnedTopicDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      assert.equal(pinnedTopicDetail.status, 200, JSON.stringify(pinnedTopicDetail.body));
+      assert.deepEqual((pinnedTopicDetail.body.scenarios as Array<{ id: string; source: string; trainingId: string | null }>)
+        .filter((scenario) => scenario.id === pinnedScenarioId)
+        .map((scenario) => [scenario.id, scenario.source, scenario.trainingId]),
+      [[pinnedScenarioId, "custom", topic.id]]);
+      const pinnedStarted = await call(startPath, {
+        simulationSessionId: pinnedSessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
+        trainingId: topic.id, clientStartedAt: now,
+      });
+      assert.equal(pinnedStarted.status, 201, JSON.stringify(pinnedStarted.body));
+      assert.equal((await pool.query<{ scenario_version_id: string | null }>(
+        "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId],
+      )).rows[0]?.scenario_version_id, pinnedV1Id);
+      const pinnedV2Draft = {
+        ...pinnedV1Draft, title: "Pinned V2 title", description: "PINNED_V2_RUNTIME_CONTENT must never enter the v1 session.",
+        desiredOutcome: "PINNED_V2_DESIRED_OUTCOME", aiRole: "PINNED_V2_COUNTERPART_ROLE",
+        scoringGuidance: "Score against PINNED_V2_RUNTIME_CONTENT.",
+      };
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/revisions`, "POST", pinnedV2Draft)).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/submit`, "POST")).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/approve`, "POST", { reviewNote: "v2" })).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST")).status, 200);
+      const pinnedRequests: Array<{ input?: Array<{ content?: string }> }> = [];
+      const pinnedFetch = globalThis.fetch;
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (target === "https://api.openai.com/v1/responses") {
+          pinnedRequests.push(JSON.parse(String(init?.body)) as { input?: Array<{ content?: string }> });
+          const output = pinnedRequests.length === 1 ? "Pinned v1 turn." : JSON.stringify({
+            communicationScore: 80, outcomeScore: 75, overallScore: 78, completionLevel: "complete", objectiveAchieved: true,
+            persuasion: 8, clarity: 7, empathy: 9, assertiveness: 8, strengths: ["Clear framing"],
+            improvements: ["Tighter close"], summary: "Handled the conversation well.",
+          });
+          return Promise.resolve(new Response(JSON.stringify({ output_text: output, model: "local-test-model", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }), { status: 200, headers: { "Content-Type": "application/json" } }));
+        }
+        return pinnedFetch(input, init);
+      }) as typeof fetch;
+      try {
+        const pinnedTurn = await call(turnPath, {
+          scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: pinnedSessionId,
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
+          history: [{ role: "user", content: "Let's discuss the current account." }],
+        });
+        assert.equal(pinnedTurn.status, 200, JSON.stringify(pinnedTurn.body));
+        const pinnedScore = await call(`/mobile/users/${user.id}/ai/score`, {
+          scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: pinnedSessionId,
+          startedAt: now, endedAt: new Date(Date.now() + 1_000).toISOString(),
+          history: [
+            { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand the concern." },
+            { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify the blocker." },
+            { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose owners and a review date." },
+          ],
+        });
+        assert.equal(pinnedScore.status, 201, JSON.stringify(pinnedScore.body));
+      } finally { globalThis.fetch = pinnedFetch; }
+      assert.equal(pinnedRequests.length, 2);
+      const [runtimeRequest, scoringRequest] = pinnedRequests.map((request) =>
+        request.input?.map((message) => message.content ?? "").join("\n") ?? "",
+      );
+      assert.match(runtimeRequest!, /PINNED_V1_RUNTIME_CONTENT/);
+      assert.match(runtimeRequest!, /PINNED_V1_COUNTERPART_ROLE/);
+      assert.doesNotMatch(runtimeRequest!, /PINNED_V2_RUNTIME_CONTENT|PINNED_V2_COUNTERPART_ROLE/);
+      assert.match(scoringRequest!, /PINNED_V1_RUNTIME_CONTENT/);
+      assert.match(scoringRequest!, /PINNED_V1_DESIRED_OUTCOME/);
+      assert.doesNotMatch(scoringRequest!, /PINNED_V2_RUNTIME_CONTENT|PINNED_V2_DESIRED_OUTCOME/);
+      assert.equal((await pool.query<{ scenario_version_id: string | null }>(
+        "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId],
+      )).rows[0]?.scenario_version_id, pinnedV1Id);
       const unclaimedCustomScore = await call(`/mobile/users/${user.id}/ai/score`, {
         scenarioId: customScenarioId, startedAt: now, endedAt: new Date(Date.now() + 1000).toISOString(),
         history: [
