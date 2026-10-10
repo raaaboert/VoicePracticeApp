@@ -37,7 +37,7 @@ export async function generateCustomerPracticeScenarioDraft(input: {
   existingScenarios: readonly CustomerPracticeScenario[];
   modelConfig: OpenAiScoringModelConfig;
     complete: (params: { model: string; apiFamily: "chat_completions" | "responses"; messages: ChatMessage[];
-    maxOutputTokens: number; reasoningEffort: OpenAiScoringModelConfig["reasoningEffort"]; route: string }) => Promise<{ text: string; model?: string }>;
+    maxOutputTokens: number; reasoningEffort: OpenAiScoringModelConfig["reasoningEffort"]; route: string }) => Promise<{ text: string; model?: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }>;
 }): Promise<CustomerPracticeScenarioGenerationResult> {
   const practiceGuidance = normalizeGuidance(input.practiceGuidance);
   let completion: { text: string; model?: string };

@@ -22,6 +22,7 @@ const AI_USAGE_EVENT_KIND_SET = new Set<AiUsageEventKind>([
   "transcribe",
   "tts",
   "custom_scenario",
+  "customer_scenario_generation",
 ]);
 
 const AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY = 0x504149;

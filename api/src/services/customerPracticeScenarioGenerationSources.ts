@@ -10,6 +10,7 @@ import { extractDocxGenerationText, extractPdfGenerationText } from "./trainingC
 import type { TrainingContentAuthorityRecord } from "../storage/trainingContentStore.js";
 
 export const CUSTOMER_SCENARIO_GENERATION_MAX_BUNDLE_CHARACTERS = 200_000;
+export const CUSTOMER_SCENARIO_GENERATION_MAX_SELECTED_SOURCES = 12;
 
 export class CustomerPracticeScenarioGenerationSourceError extends Error {
   constructor(message: string, readonly code: "scenario_source_denied" | "generation_source_not_ready" | "generation_source_invalid") {
@@ -29,6 +30,30 @@ export interface CustomerPracticeScenarioGenerationSourceMetadata {
 export interface CustomerPracticeScenarioGenerationSourceBundle {
   text: string;
   sources: CustomerPracticeScenarioGenerationSourceMetadata[];
+}
+
+/** Rechecks mutable authority/fingerprint state without downloading or extracting source bodies. */
+export async function reauthorizeCustomerPracticeScenarioGenerationSources(input: {
+  orgId: string; homeFocusTopicId: string; selectedContentIds: unknown; actorCurrentlyAuthorized: boolean; moduleEnabled: boolean;
+  contentAuthority: readonly TrainingContentAuthorityRecord[];
+  getCurrentAsset: (contentId: string) => Promise<{ id: string; uploadState: string; finalObjectKey: string | null } | null>;
+  getCurrentTranscript: (contentId: string) => Promise<{ body: string; sourceFingerprint: string } | null>;
+}): Promise<void> {
+  if (!input.actorCurrentlyAuthorized) throw new CustomerPracticeScenarioGenerationSourceError("You are not authorized to use these source resources.", "scenario_source_denied");
+  let references;
+  try { references = resolveCustomerPracticeScenarioSourceReferences({ orgId: input.orgId, topicId: input.homeFocusTopicId, requestedContentIds: input.selectedContentIds, contentAuthority: input.contentAuthority }); }
+  catch { throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not available for this Focus Topic.", "scenario_source_denied"); }
+  if (references.length > CUSTOMER_SCENARIO_GENERATION_MAX_SELECTED_SOURCES) throw new CustomerPracticeScenarioGenerationSourceError("Too many sources were selected for one scenario.", "generation_source_invalid");
+  const records = new Map(input.contentAuthority.map((record) => [record.content.id, record]));
+  for (const reference of references) {
+    const contentId = reference.referenceId;
+    if (!contentId) throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not available for this Focus Topic.", "scenario_source_denied");
+    const record = records.get(contentId);
+    if (!record || record.content.orgId !== input.orgId) throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not available for this Focus Topic.", "scenario_source_denied");
+    const [asset, transcript] = await Promise.all([input.getCurrentAsset(contentId), input.getCurrentTranscript(contentId)]);
+    const eligibility = evaluateTrainingContentGenerationSource({ contentType: record.content.contentType, publicationState: record.content.publicationState, archivedAt: record.content.archivedAt, externalKind: record.content.externalKind, externalUrl: record.content.externalUrl, nativeBody: record.content.nativeBody, hasReadyPrimaryAsset: asset?.uploadState === "ready", currentPrimaryAssetId: asset?.id ?? null, currentTranscriptSourceFingerprint: transcript?.sourceFingerprint ?? null, moduleEnabled: input.moduleEnabled });
+    if (!eligibility.eligible) throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not currently ready for generation.", "generation_source_not_ready");
+  }
 }
 
 export async function buildCustomerPracticeScenarioGenerationSourceBundle(input: {
@@ -52,8 +77,11 @@ export async function buildCustomerPracticeScenarioGenerationSourceBundle(input:
   } catch {
     throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not available for this Focus Topic.", "scenario_source_denied");
   }
+  if (references.length > CUSTOMER_SCENARIO_GENERATION_MAX_SELECTED_SOURCES) {
+    throw new CustomerPracticeScenarioGenerationSourceError("Too many sources were selected for one scenario.", "generation_source_invalid");
+  }
   const records = new Map(input.contentAuthority.map((record) => [record.content.id, record]));
-  const parts: string[] = []; const sources: CustomerPracticeScenarioGenerationSourceMetadata[] = [];
+  const parts: string[] = []; const sources: CustomerPracticeScenarioGenerationSourceMetadata[] = []; let bundleCharacters = 0;
   for (const reference of references) {
     const contentId = reference.referenceId;
     if (!contentId) throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not available for this Focus Topic.", "scenario_source_denied");
@@ -61,10 +89,11 @@ export async function buildCustomerPracticeScenarioGenerationSourceBundle(input:
     if (!record || record.content.orgId !== input.orgId) throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not available for this Focus Topic.", "scenario_source_denied");
     const text = await prepareSourceText({ content: record.content, contentId, moduleEnabled: input.moduleEnabled,
       getCurrentAsset: input.getCurrentAsset, getCurrentTranscript: input.getCurrentTranscript, readAssetBytes: input.readAssetBytes });
-    const remaining = CUSTOMER_SCENARIO_GENERATION_MAX_BUNDLE_CHARACTERS - parts.join("\n\n").length;
+    const remaining = CUSTOMER_SCENARIO_GENERATION_MAX_BUNDLE_CHARACTERS - bundleCharacters;
     if (remaining <= 0) break;
     const bounded = text.slice(0, remaining);
     parts.push(bounded);
+    bundleCharacters += bounded.length + (parts.length > 1 ? 2 : 0);
     sources.push({ contentId, label: reference.label, sourceKind: sourceKind(record.content), characterCount: bounded.length });
   }
   if (references.length && !parts.length) throw new CustomerPracticeScenarioGenerationSourceError("No selected source is ready for generation.", "generation_source_not_ready");
@@ -87,7 +116,7 @@ async function prepareSourceText(input: {
   if (input.content.contentType === "video" || (input.content.contentType === "external_url" && input.content.externalKind === "youtube")) return transcript!.body.trim();
   if ((input.content.contentType === "pdf" || input.content.contentType === "docx") && asset?.finalObjectKey) {
     const bytes = await input.readAssetBytes(asset.finalObjectKey, 12 * 1024 * 1024);
-    try { return input.content.contentType === "pdf" ? extractPdfGenerationText(bytes) : await extractDocxGenerationText(bytes); }
+    try { return input.content.contentType === "pdf" ? await extractPdfGenerationText(bytes) : await extractDocxGenerationText(bytes); }
     catch { throw new CustomerPracticeScenarioGenerationSourceError("A selected document cannot be safely prepared for generation.", "generation_source_invalid"); }
   }
   throw new CustomerPracticeScenarioGenerationSourceError("A selected source is not currently ready for generation.", "generation_source_not_ready");
@@ -101,6 +130,7 @@ function sourceKind(content: TrainingContentItem): TrainingContentGenerationSour
 
 export const CUSTOMER_SCENARIO_GENERATION_SOURCE_BUNDLE_SECURITY_CONTRACT = Object.freeze({
   maximumCharacters: CUSTOMER_SCENARIO_GENERATION_MAX_BUNDLE_CHARACTERS,
+  maximumSelectedSources: CUSTOMER_SCENARIO_GENERATION_MAX_SELECTED_SOURCES,
   maximumPerExtraction: TRAINING_CONTENT_EXTRACTION_SECURITY_CONTRACT_V1.maximumExtractedCharacters,
   learnerDtoIncludesText: false,
   notificationsIncludeText: false,

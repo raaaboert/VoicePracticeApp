@@ -1230,7 +1230,7 @@ export interface SimulationScoreRecord {
   createdAt: string;
 }
 
-export type AiUsageEventKind = "opening" | "turn" | "score" | "transcribe" | "tts" | "custom_scenario";
+export type AiUsageEventKind = "opening" | "turn" | "score" | "transcribe" | "tts" | "custom_scenario" | "customer_scenario_generation";
 
 export interface AiUsageEvent {
   id: string;

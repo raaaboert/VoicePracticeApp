@@ -4,7 +4,7 @@ import { deflateRawSync } from "node:zlib";
 
 import type { TrainingContentItem } from "@voicepractice/shared";
 import type { TrainingContentAuthorityRecord } from "../storage/trainingContentStore.js";
-import { buildCustomerPracticeScenarioGenerationSourceBundle, CustomerPracticeScenarioGenerationSourceError } from "./customerPracticeScenarioGenerationSources.js";
+import { buildCustomerPracticeScenarioGenerationSourceBundle, CustomerPracticeScenarioGenerationSourceError, reauthorizeCustomerPracticeScenarioGenerationSources } from "./customerPracticeScenarioGenerationSources.js";
 import { extractDocxGenerationText, extractPdfGenerationText } from "./trainingContentTextExtraction.js";
 
 function item(id: string, patch: Partial<TrainingContentItem> = {}): TrainingContentItem {
@@ -39,15 +39,35 @@ test("stale transcript and unauthorized or detached source fail closed", async (
   await assert.rejects(bundle(["detached"], detached), /not available/);
 });
 
+test("post-model reauthorization rechecks attachment and transcript fingerprints without reading documents", async () => {
+  let reads = 0;
+  await reauthorizeCustomerPracticeScenarioGenerationSources({ orgId: "org_1", homeFocusTopicId: "topic_1", selectedContentIds: ["native"], actorCurrentlyAuthorized: true, moduleEnabled: true,
+    contentAuthority: authority(item("native")), getCurrentAsset: async () => { reads += 1; return null; }, getCurrentTranscript: async () => { reads += 1; return null; } });
+  assert.equal(reads, 2);
+  const detached = authority(item("native")); detached[0]!.topicAttachments[0]!.detachedAt = "2026-01-02T00:00:00.000Z";
+  await assert.rejects(reauthorizeCustomerPracticeScenarioGenerationSources({ orgId: "org_1", homeFocusTopicId: "topic_1", selectedContentIds: ["native"], actorCurrentlyAuthorized: true, moduleEnabled: true,
+    contentAuthority: detached, getCurrentAsset: async () => null, getCurrentTranscript: async () => null }), /not available/);
+});
+
 test("PDF and DOCX extraction is bounded and rejects unsafe DOCX relationships", async () => {
   const pdf = Buffer.from("%PDF-1.4\n1 0 obj <<>> stream\nBT (PDF source text) Tj ET\nendstream\nendobj\n%%EOF", "latin1");
-  assert.match(extractPdfGenerationText(pdf), /PDF source text/);
+  assert.match(await extractPdfGenerationText(pdf), /PDF source text/);
   const docx = zip({ "[Content_Types].xml": "<Types/>", "word/document.xml": "<w:document><w:t>DOCX source text</w:t></w:document>" });
   assert.match(await extractDocxGenerationText(docx), /DOCX source text/);
   const external = zip({ "[Content_Types].xml": "<Types/>", "word/document.xml": "<w:document/>", "word/_rels/document.xml.rels": '<Relationship TargetMode="External" Target="https://example.test" />' });
-  await assert.rejects(extractDocxGenerationText(external), /External DOCX relationships/);
+  await assert.rejects(extractDocxGenerationText(external), /cannot be safely prepared/);
   const entity = zip({ "[Content_Types].xml": "<Types/>", "word/document.xml": "<!DOCTYPE x [<!ENTITY boom 'x'>]><w:document><w:t>&boom;</w:t></w:document>" });
-  await assert.rejects(extractDocxGenerationText(entity), /entities/);
+  await assert.rejects(extractDocxGenerationText(entity), /cannot be safely prepared/);
+});
+
+test("adversarial PDF and DOCX structures fail in bounded isolated extraction", async () => {
+  await assert.rejects(extractPdfGenerationText(Buffer.from("%PDF-1.4\nstream\n".repeat(2_000), "latin1")), /safely prepared/);
+  const streams = Array.from({ length: 140 }, () => "stream\nBT (x) Tj ET\nendstream").join("\n");
+  await assert.rejects(extractPdfGenerationText(Buffer.from(`%PDF-1.4\n${streams}`, "latin1")), /safely prepared/);
+  const unclosed = zip({ "word/document.xml": `<w:document>${"<w:t>text".repeat(10_000)}` });
+  await assert.rejects(extractDocxGenerationText(unclosed), /safely prepared/);
+  const manyEntries = zip(Object.fromEntries(Array.from({ length: 520 }, (_, index) => [`word/extra-${index}.xml`, "x"])));
+  await assert.rejects(extractDocxGenerationText(manyEntries), /safely prepared/);
 });
 
 test("mixed document bundles respect the aggregate bound", async () => {

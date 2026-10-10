@@ -321,11 +321,13 @@ import {
 } from "./services/customerPracticeScenarioSources.js";
 import {
   buildCustomerPracticeScenarioGenerationSourceBundle,
+  reauthorizeCustomerPracticeScenarioGenerationSources,
   CustomerPracticeScenarioGenerationSourceError,
 } from "./services/customerPracticeScenarioGenerationSources.js";
 import {
   generateCustomerPracticeScenarioDraft,
   CustomerPracticeScenarioGenerationError,
+  CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION,
 } from "./services/customerPracticeScenarioGeneration.js";
 import { CustomerPracticeScenarioGenerationReceiptRegistry } from "./services/customerPracticeScenarioGenerationReceipt.js";
 import {
@@ -12990,6 +12992,11 @@ app.post("/web/auth/logout", requireWebAuth, async (request: WebAuthRequest, res
   }, "web-auth-logout");
   response.json({ ok: true });
 });
+const customerScenarioGenerationRateLimitOptions: RateLimiterOptions = {
+  name: "customer-scenario-generation",
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+};
 const trainingContentTranscriptStore = createTrainingContentTranscriptStore({
   provider: STORAGE_PROVIDER,
   databaseUrl: DATABASE_URL ?? undefined,
@@ -17802,6 +17809,26 @@ async function buildCurrentCustomerScenarioGenerationSources(params: {
   });
 }
 
+async function reauthorizeCurrentCustomerScenarioGenerationSources(params: {
+  orgId: string; topicId: string; selectedContentIds: unknown; actorCurrentlyAuthorized: boolean; moduleEnabled: boolean;
+}): Promise<void> {
+  const contentAuthority = await trainingContentStore.listContentAuthorityForOrg(params.orgId);
+  await reauthorizeCustomerPracticeScenarioGenerationSources({
+    orgId: params.orgId, homeFocusTopicId: params.topicId, selectedContentIds: params.selectedContentIds,
+    actorCurrentlyAuthorized: params.actorCurrentlyAuthorized, moduleEnabled: params.moduleEnabled, contentAuthority,
+    getCurrentAsset: async (contentId) => {
+      const detail = await trainingContentStore.getContentDetailForOrg(params.orgId, contentId);
+      if (!detail?.currentAsset) return null;
+      const asset = await trainingContentAssetStore.getAssetForOrg(params.orgId, contentId, detail.currentAsset.id);
+      return asset ? { id: asset.id, uploadState: asset.uploadState, finalObjectKey: asset.finalObjectKey } : null;
+    },
+    getCurrentTranscript: async (contentId) => {
+      const transcript = await trainingContentTranscriptStore.getCurrent({ orgId: params.orgId, contentId });
+      return transcript ? { body: transcript.text, sourceFingerprint: transcript.sourceFingerprint } : null;
+    },
+  });
+}
+
 function validateCustomerPracticeScenarioDraft(
   db: ApiDatabase,
   org: EnterpriseOrg,
@@ -17988,10 +18015,18 @@ app.post(
         return { context, sourceBundle, scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
       });
       if (!prepared || response.headersSent) return;
+      if (!consumeRateLimit(customerScenarioGenerationRateLimitOptions, request, response, `${prepared.context.management.org.id}:${prepared.context.actorId}`)) return;
       const generated = await generateCustomerPracticeScenarioDraft({
         sourceBundle: prepared.sourceBundle, practiceGuidance: requestInput.practiceGuidance,
         existingScenarios: prepared.scenarios, modelConfig: OPENAI_MODEL_CONFIG.scenarioGeneration,
-        complete: requestCompletion,
+        complete: async (params) => (await invokeAiProviderWithBudget({
+          context: { user: request.dashboard!.user, orgId: prepared.context.management.org.id },
+          kind: "customer_scenario_generation", model: params.model,
+          promptVersion: CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION, rubricVersion: null,
+          estimatedTokens: estimateCompletionReservationTokens(params.messages, params.maxOutputTokens),
+          invoke: async () => await requestCompletion(params),
+          resolveUsage: (completion) => completion.usage,
+        })).value,
       });
       // Re-read actor authority and source state after the model call. A generated draft is never persisted here.
       const stillAuthorized = await withFreshDatabaseSnapshotRead(async (db) => {
@@ -18000,11 +18035,12 @@ app.post(
         if (!context.settings.allowCustomerScenarioCreation) {
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
-        return buildCurrentCustomerScenarioGenerationSources({
+        await reauthorizeCurrentCustomerScenarioGenerationSources({
           orgId: context.management.org.id, topicId: context.topic.id,
           selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
           moduleEnabled: context.management.learningResourcesEnabled,
         });
+        return true;
       });
       if (!stillAuthorized || response.headersSent) return;
       const receipt = customerPracticeScenarioGenerationReceipts.issue({
