@@ -105,12 +105,17 @@ export function evaluateTrainingContentGenerationSource(input: {
   publicationState: TrainingContentPublicationState;
   archivedAt: string | null;
   externalKind?: TrainingContentExternalKind | null;
+  externalUrl?: string | null;
   nativeBody: string | null;
   hasReadyPrimaryAsset: boolean;
-  hasCurrentTranscript: boolean;
+  currentPrimaryAssetId?: string | null;
+  currentTranscriptSourceFingerprint?: string | null;
   moduleEnabled: boolean;
 }): TrainingContentGenerationEligibility {
   const sourceKind = resolveSourceKind(input.contentType, input.externalKind ?? null);
+  const expectedTranscriptSourceFingerprint = trainingContentSourceFingerprint(input);
+  const hasCurrentTranscript = expectedTranscriptSourceFingerprint !== null
+    && input.currentTranscriptSourceFingerprint === expectedTranscriptSourceFingerprint;
   if (!input.moduleEnabled) return { eligible: false, reasonCode: "module_disabled", sourceKind };
   if (input.archivedAt !== null || input.publicationState === "archived") {
     return { eligible: false, reasonCode: "archived", sourceKind };
@@ -128,12 +133,12 @@ export function evaluateTrainingContentGenerationSource(input: {
   }
   if (input.contentType === "video") {
     if (!input.hasReadyPrimaryAsset) return { eligible: false, reasonCode: "asset_not_ready", sourceKind };
-    return input.hasCurrentTranscript
+    return hasCurrentTranscript
       ? { eligible: true, reasonCode: "ready", sourceKind }
       : { eligible: false, reasonCode: "missing_transcript", sourceKind };
   }
   if (input.contentType === "external_url" && input.externalKind === "youtube") {
-    return input.hasCurrentTranscript
+    return hasCurrentTranscript
       ? { eligible: true, reasonCode: "ready", sourceKind }
       : { eligible: false, reasonCode: "missing_transcript", sourceKind };
   }

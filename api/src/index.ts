@@ -74,6 +74,7 @@ import {
   CreateUserRequest,
   CreateOrgCustomScenarioRequest,
   CustomerPracticeScenario,
+  CustomerPracticeScenarioVersion,
   CustomerPracticeScenarioDraftRequest,
   CustomerPracticeScenarioListResponse,
   CustomerTrainingPackOrderSummary,
@@ -356,7 +357,6 @@ import {
 import {
   evaluateTrainingContentGenerationSource,
   normalizeCustomerTranscript,
-  trainingContentSourceFingerprint,
 } from "./services/trainingContentGenerationSourcePolicy.js";
 import {
   createTrainingContentMobileService,
@@ -2053,16 +2053,9 @@ async function resolveSimulationRuntimeBundle(params: {
     resolvedScenario = {
       source: "custom",
       segment,
-      scenario: {
-        id: params.scenarioId,
-        segmentId: version.segmentId,
-        title: version.title,
-        summary: buildScenarioSummary(version.description),
-        description: version.description,
-        desiredOutcome: version.desiredOutcome ?? undefined,
-        aiRole: version.aiRole,
-        enabled: true,
-      },
+      scenario: buildRuntimeScenarioFromCustomerPracticeScenarioVersion(
+        params.scenarioId, version, segment.label,
+      ),
       scenarioVersionId: version.id,
       canonicalTrainingId: authoritativeTrainingId,
       allowedIndustryIds: version.applicableIndustryIds,
@@ -8977,9 +8970,11 @@ function topicScopedContentSummary(detail: {
       publicationState: detail.content.publicationState,
       archivedAt: detail.content.archivedAt,
       externalKind: detail.content.externalKind ?? null,
+      externalUrl: detail.content.externalUrl,
       nativeBody: detail.content.nativeBody,
       hasReadyPrimaryAsset: detail.currentAsset?.uploadState === "ready",
-      hasCurrentTranscript: false,
+      currentPrimaryAssetId: detail.currentAsset?.id ?? null,
+      currentTranscriptSourceFingerprint: null,
       moduleEnabled: true,
     }),
   };
@@ -9014,12 +9009,8 @@ async function buildTranscriptManagementPayload(params: {
       externalKind: detail.content.externalKind ?? null,
       nativeBody: detail.content.nativeBody,
       hasReadyPrimaryAsset: detail.currentAsset?.uploadState === "ready",
-      hasCurrentTranscript: transcript !== null && transcript.sourceFingerprint === trainingContentSourceFingerprint({
-        contentType: detail.content.contentType,
-        externalKind: detail.content.externalKind ?? null,
-        externalUrl: detail.content.externalUrl,
-        currentPrimaryAssetId: detail.currentAsset?.id ?? null,
-      }),
+      currentPrimaryAssetId: detail.currentAsset?.id ?? null,
+      currentTranscriptSourceFingerprint: transcript?.sourceFingerprint ?? null,
       moduleEnabled: params.moduleEnabled,
     }),
   };
@@ -10395,8 +10386,8 @@ function getConfigScenarioById(
   return null;
 }
 
-function buildRuntimeScenarioFromOrgCustomScenario(
-  customScenario: OrgCustomScenario,
+function buildRuntimeScenarioFromCustomerScenarioFields(
+  customScenario: Pick<OrgCustomScenario, "id" | "segmentId" | "title" | "summary" | "description" | "desiredOutcome" | "aiRole" | "enabled">,
   traineeSegmentLabel: string,
 ): Scenario {
   const rawAiRole = customScenario.aiRole?.trim() || "a realistic conversation partner";
@@ -10532,6 +10523,30 @@ function resolveMobileScenarioForUser(
     allowedIndustryIds: uniqueStrings(customScenario.applicableIndustryIds) as IndustryId[],
     scoringGuidance: customScenario.scoringGuidance?.trim() || null,
   };
+}
+
+function buildRuntimeScenarioFromOrgCustomScenario(
+  customScenario: OrgCustomScenario,
+  traineeSegmentLabel: string,
+): Scenario {
+  return buildRuntimeScenarioFromCustomerScenarioFields(customScenario, traineeSegmentLabel);
+}
+
+function buildRuntimeScenarioFromCustomerPracticeScenarioVersion(
+  scenarioId: string,
+  version: CustomerPracticeScenarioVersion,
+  traineeSegmentLabel: string,
+): Scenario {
+  return buildRuntimeScenarioFromCustomerScenarioFields({
+    id: scenarioId,
+    segmentId: version.segmentId,
+    title: version.title,
+    summary: buildScenarioSummary(version.description),
+    description: version.description,
+    desiredOutcome: version.desiredOutcome ?? undefined,
+    aiRole: version.aiRole,
+    enabled: true,
+  }, traineeSegmentLabel);
 }
 
 function resolveAssignmentModeTopicLaunch(params: {
@@ -17717,12 +17732,9 @@ app.get(
             externalKind: item.externalKind ?? null,
             nativeBody: item.nativeBody,
             hasReadyPrimaryAsset: currentAsset?.uploadState === "ready",
-            hasCurrentTranscript: transcript !== null && transcript.sourceFingerprint === trainingContentSourceFingerprint({
-              contentType: item.contentType,
-              externalKind: item.externalKind ?? null,
-              externalUrl: item.externalUrl,
-              currentPrimaryAssetId: currentAsset?.id ?? null,
-            }),
+            externalUrl: item.externalUrl,
+            currentPrimaryAssetId: currentAsset?.id ?? null,
+            currentTranscriptSourceFingerprint: transcript?.sourceFingerprint ?? null,
             moduleEnabled: management.learningResourcesEnabled,
           }),
         };
@@ -24348,11 +24360,9 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       resolvedScenario = {
         source: "custom",
         segment,
-        scenario: {
-          id: scenarioId, segmentId: version.segmentId, title: version.title,
-          summary: buildScenarioSummary(version.description), description: version.description,
-          desiredOutcome: version.desiredOutcome ?? undefined, aiRole: version.aiRole, enabled: true,
-        },
+        scenario: buildRuntimeScenarioFromCustomerPracticeScenarioVersion(
+          scenarioId, version, segment.label,
+        ),
         scenarioVersionId: version.id,
         canonicalTrainingId: authoritativeTrainingId,
         allowedIndustryIds: version.applicableIndustryIds,

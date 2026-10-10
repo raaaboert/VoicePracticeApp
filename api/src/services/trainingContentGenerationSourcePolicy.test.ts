@@ -42,30 +42,30 @@ test("one source evaluator keeps learner publication and generation readiness se
   const base = { publicationState: "published" as const, archivedAt: null,
     nativeBody: null, hasReadyPrimaryAsset: true, moduleEnabled: true };
   assert.deepEqual(evaluateTrainingContentGenerationSource({ ...base, contentType: "video",
-    hasCurrentTranscript: false }), {
+    currentPrimaryAssetId: "asset_1", currentTranscriptSourceFingerprint: null }), {
     eligible: false, reasonCode: "missing_transcript", sourceKind: "uploaded_video_transcript",
   });
   assert.deepEqual(evaluateTrainingContentGenerationSource({ ...base, contentType: "video",
-    hasCurrentTranscript: true }), {
+    currentPrimaryAssetId: "asset_1", currentTranscriptSourceFingerprint: "video_asset:asset_1" }), {
     eligible: true, reasonCode: "ready", sourceKind: "uploaded_video_transcript",
   });
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "pdf",
-    hasCurrentTranscript: false }).reasonCode, "text_not_extractable_yet");
+    currentTranscriptSourceFingerprint: null }).reasonCode, "text_not_extractable_yet");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "docx",
-    hasCurrentTranscript: false }).reasonCode, "text_not_extractable_yet");
+    currentTranscriptSourceFingerprint: null }).reasonCode, "text_not_extractable_yet");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "docx",
-    hasReadyPrimaryAsset: false, hasCurrentTranscript: false }).reasonCode, "asset_not_ready");
+    hasReadyPrimaryAsset: false, currentTranscriptSourceFingerprint: null }).reasonCode, "asset_not_ready");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "external_url",
-    externalKind: "youtube", hasCurrentTranscript: false }).reasonCode, "missing_transcript");
+    externalKind: "youtube", externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", currentTranscriptSourceFingerprint: null }).reasonCode, "missing_transcript");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "native",
-    nativeBody: "Customer text", hasCurrentTranscript: false }).eligible, true);
+    nativeBody: "Customer text", currentTranscriptSourceFingerprint: null }).eligible, true);
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "video",
-    publicationState: "draft", hasCurrentTranscript: true }).reasonCode, "draft");
+    publicationState: "draft", currentPrimaryAssetId: "asset_1", currentTranscriptSourceFingerprint: "video_asset:asset_1" }).reasonCode, "draft");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "audio",
-    hasCurrentTranscript: false }).reasonCode, "unsupported_type");
+    currentTranscriptSourceFingerprint: null }).reasonCode, "unsupported_type");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "native",
     nativeBody: "Customer text", moduleEnabled: false,
-    hasCurrentTranscript: false }).reasonCode, "module_disabled");
+    currentTranscriptSourceFingerprint: null }).reasonCode, "module_disabled");
 });
 
 test("transcript source fingerprints bind generation eligibility to the current video or YouTube source", () => {
@@ -74,6 +74,20 @@ test("transcript source fingerprints bind generation eligibility to the current 
   assert.equal(trainingContentSourceFingerprint({ contentType: "external_url", externalKind: "youtube", externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }), "youtube:https://www.youtube.com/watch?v=dQw4w9WgXcQ");
   assert.equal(trainingContentSourceFingerprint({ contentType: "external_url", externalKind: "youtube", externalUrl: "https://www.youtube.com/watch?v=9bZkp7q19f0" }), "youtube:https://www.youtube.com/watch?v=9bZkp7q19f0");
   assert.equal(trainingContentSourceFingerprint({ contentType: "native" }), null);
+  const video = { contentType: "video" as const, publicationState: "published" as const,
+    archivedAt: null, nativeBody: null, hasReadyPrimaryAsset: true, moduleEnabled: true,
+    currentPrimaryAssetId: "asset_v2" };
+  assert.equal(evaluateTrainingContentGenerationSource({ ...video,
+    currentTranscriptSourceFingerprint: "video_asset:asset_v1" }).eligible, false);
+  assert.equal(evaluateTrainingContentGenerationSource({ ...video,
+    currentTranscriptSourceFingerprint: "video_asset:asset_v2" }).eligible, true);
+  const youtube = { contentType: "external_url" as const, externalKind: "youtube" as const,
+    externalUrl: "https://www.youtube.com/watch?v=9bZkp7q19f0", publicationState: "published" as const,
+    archivedAt: null, nativeBody: null, hasReadyPrimaryAsset: false, moduleEnabled: true };
+  assert.equal(evaluateTrainingContentGenerationSource({ ...youtube,
+    currentTranscriptSourceFingerprint: "youtube:https://www.youtube.com/watch?v=dQw4w9WgXcQ" }).eligible, false);
+  assert.equal(evaluateTrainingContentGenerationSource({ ...youtube,
+    currentTranscriptSourceFingerprint: "youtube:https://www.youtube.com/watch?v=9bZkp7q19f0" }).eligible, true);
 });
 
 test("future document extraction is explicitly bounded and excludes unsafe expansion and OCR", () => {
