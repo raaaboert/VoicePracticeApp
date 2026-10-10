@@ -39,6 +39,23 @@ export interface TrainingContentGenerationEligibility {
   sourceKind: TrainingContentGenerationSourceKind;
 }
 
+export function trainingContentSourceFingerprint(input: {
+  contentType: TrainingContentType;
+  externalKind?: TrainingContentExternalKind | null;
+  externalUrl?: string | null;
+  currentPrimaryAssetId?: string | null;
+}): string | null {
+  if (input.contentType === "video") {
+    return input.currentPrimaryAssetId?.trim()
+      ? `video_asset:${input.currentPrimaryAssetId.trim()}`
+      : null;
+  }
+  if (input.contentType === "external_url" && input.externalKind === "youtube") {
+    return input.externalUrl?.trim() ? `youtube:${input.externalUrl.trim()}` : null;
+  }
+  return null;
+}
+
 export function canonicalizeYouTubeUrl(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) throw invalidYouTubeUrl();
   let parsed: URL;

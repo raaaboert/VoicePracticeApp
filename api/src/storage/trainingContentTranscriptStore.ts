@@ -2,9 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { Pool, type PoolClient } from "pg";
 
-import type { AuditActorType } from "@voicepractice/shared";
+import type { AuditActorType, TrainingContentType } from "@voicepractice/shared";
 
 import type { StorageProvider } from "../runtimeConfig.js";
+import { trainingContentSourceFingerprint } from "../services/trainingContentGenerationSourcePolicy.js";
 import { initializeTrainingContentSchema } from "./trainingContentMigrations.js";
 
 export interface TrainingContentTranscriptRecord {
@@ -15,6 +16,7 @@ export interface TrainingContentTranscriptRecord {
   text: string;
   characterCount: number;
   contentSha256: string;
+  sourceFingerprint: string;
   createdByActorId: string;
   createdAt: string;
 }
@@ -25,6 +27,7 @@ export interface TrainingContentTranscriptMetadata {
   version: number;
   characterCount: number;
   contentSha256: string;
+  sourceFingerprint: string;
   createdAt: string;
 }
 
@@ -61,7 +64,7 @@ export interface TrainingContentTranscriptStore {
 
 interface TranscriptRow {
   id: string; org_id: string; content_id: string; version: number;
-  transcript_text: string; content_sha256: string; created_by_actor_id: string;
+  transcript_text: string; content_sha256: string; source_fingerprint: string; created_by_actor_id: string;
   created_at: string | Date;
 }
 
@@ -71,6 +74,7 @@ interface TranscriptMetadataRow {
   version: number;
   character_count: number | string;
   content_sha256: string;
+  source_fingerprint: string;
   created_at: string | Date;
 }
 
@@ -89,7 +93,7 @@ class PostgresTrainingContentTranscriptStore implements TrainingContentTranscrip
     if (contentIds.length === 0) return [];
     const result = await this.pool.query<TranscriptMetadataRow>(
       `SELECT id,content_id,version,char_length(transcript_text) AS character_count,
-              content_sha256,created_at
+              content_sha256,source_fingerprint,created_at
        FROM org_content_transcripts
        WHERE org_id=$1 AND content_id=ANY($2::uuid[])
          AND superseded_at IS NULL AND removed_at IS NULL`,
@@ -107,7 +111,7 @@ class PostgresTrainingContentTranscriptStore implements TrainingContentTranscrip
       await lockAuthority(client, params.orgId, params.contentId);
       if (params.transactionGuard) await params.transactionGuard(client);
       const result = await client.query<TranscriptRow>(
-        `SELECT id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id,created_at
+        `SELECT id,org_id,content_id,version,transcript_text,content_sha256,source_fingerprint,created_by_actor_id,created_at
          FROM org_content_transcripts
          WHERE org_id=$1 AND content_id=$2 AND superseded_at IS NULL AND removed_at IS NULL
          FOR SHARE`,
@@ -132,7 +136,7 @@ class PostgresTrainingContentTranscriptStore implements TrainingContentTranscrip
       const content = await lockCurrentContent(client, params.orgId, params.contentId);
       if (params.transactionGuard) await params.transactionGuard(client);
       const current = await client.query<TranscriptRow>(
-        `SELECT id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id,created_at
+        `SELECT id,org_id,content_id,version,transcript_text,content_sha256,source_fingerprint,created_by_actor_id,created_at
          FROM org_content_transcripts
          WHERE org_id=$1 AND content_id=$2 AND superseded_at IS NULL AND removed_at IS NULL
          FOR UPDATE`, [params.orgId, params.contentId],
@@ -153,10 +157,10 @@ class PostgresTrainingContentTranscriptStore implements TrainingContentTranscrip
       const hash = createHash("sha256").update(params.text, "utf8").digest("hex");
       const inserted = await client.query<TranscriptRow>(
         `INSERT INTO org_content_transcripts
-         (id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id,created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         RETURNING id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id,created_at`,
-        [id, params.orgId, params.contentId, version, params.text, hash, actorId, now],
+         (id,org_id,content_id,version,transcript_text,content_sha256,source_fingerprint,created_by_actor_id,created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING id,org_id,content_id,version,transcript_text,content_sha256,source_fingerprint,created_by_actor_id,created_at`,
+        [id, params.orgId, params.contentId, version, params.text, hash, content.sourceFingerprint, actorId, now],
       );
       await insertAudit(client, { actor: params.actor, orgId: params.orgId,
         contentId: params.contentId, transcriptId: id, version,
@@ -181,7 +185,7 @@ class PostgresTrainingContentTranscriptStore implements TrainingContentTranscrip
       const content = await lockCurrentContent(client, params.orgId, params.contentId);
       if (params.transactionGuard) await params.transactionGuard(client);
       const current = await client.query<TranscriptRow>(
-        `SELECT id,org_id,content_id,version,transcript_text,content_sha256,created_by_actor_id,created_at
+        `SELECT id,org_id,content_id,version,transcript_text,content_sha256,source_fingerprint,created_by_actor_id,created_at
          FROM org_content_transcripts
          WHERE org_id=$1 AND content_id=$2 AND superseded_at IS NULL AND removed_at IS NULL
          FOR UPDATE`, [params.orgId, params.contentId],
@@ -231,13 +235,36 @@ async function lockAuthority(client: Pick<PoolClient, "query">, orgId: string, c
 }
 
 async function lockCurrentContent(client: Pick<PoolClient, "query">, orgId: string, contentId: string) {
-  const result = await client.query<{ content_type: string; archived_at: Date | string | null }>(
-    "SELECT content_type,archived_at FROM org_content_items WHERE org_id=$1 AND id=$2 FOR SHARE",
+  const result = await client.query<{
+    content_type: TrainingContentType;
+    external_kind: "youtube" | null;
+    external_url: string | null;
+    archived_at: Date | string | null;
+    current_primary_asset_id: string | null;
+  }>(
+    `SELECT content.content_type,content.external_kind,content.external_url,content.archived_at,
+            asset.id AS current_primary_asset_id
+     FROM org_content_items content
+     LEFT JOIN org_content_assets asset
+       ON asset.org_id=content.org_id AND asset.content_id=content.id
+      AND asset.asset_role='primary' AND asset.is_current=TRUE
+     WHERE content.org_id=$1 AND content.id=$2
+     FOR SHARE OF content`,
     [requiredId(orgId), requiredId(contentId)],
   );
   if (!result.rows[0]) throw new TrainingContentTranscriptStoreError("Learning Resource was not found.", "content_not_found");
   if (result.rows[0].archived_at) throw new TrainingContentTranscriptStoreError("Archived Learning Resources cannot change transcripts.", "content_archived");
-  return result.rows[0];
+  const content = result.rows[0];
+  const sourceFingerprint = trainingContentSourceFingerprint({
+    contentType: content.content_type,
+    externalKind: content.external_kind,
+    externalUrl: content.external_url,
+    currentPrimaryAssetId: content.current_primary_asset_id,
+  });
+  if (!sourceFingerprint) {
+    throw new TrainingContentTranscriptStoreError("Learning Resource does not have a current transcript source.", "content_not_found");
+  }
+  return { ...content, sourceFingerprint };
 }
 
 async function insertAudit(client: Pick<PoolClient, "query">, params: {
@@ -259,13 +286,13 @@ async function insertAudit(client: Pick<PoolClient, "query">, params: {
 function mapRow(row: TranscriptRow): TrainingContentTranscriptRecord {
   return { id: row.id, orgId: row.org_id, contentId: row.content_id, version: Number(row.version),
     text: row.transcript_text, characterCount: row.transcript_text.length,
-    contentSha256: row.content_sha256, createdByActorId: row.created_by_actor_id,
+    contentSha256: row.content_sha256, sourceFingerprint: row.source_fingerprint, createdByActorId: row.created_by_actor_id,
     createdAt: new Date(row.created_at).toISOString() };
 }
 
 function toMetadata(row: TranscriptMetadataRow): TrainingContentTranscriptMetadata {
   return { id: row.id, contentId: row.content_id, version: Number(row.version),
-    characterCount: Number(row.character_count), contentSha256: row.content_sha256,
+    characterCount: Number(row.character_count), contentSha256: row.content_sha256, sourceFingerprint: row.source_fingerprint,
     createdAt: new Date(row.created_at).toISOString() };
 }
 

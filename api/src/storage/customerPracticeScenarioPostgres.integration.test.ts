@@ -158,3 +158,51 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
     await setup.end();
   }
 });
+
+test("real PostgreSQL initialization never fabricates approval history for a rejected archived revision", {
+  skip: !databaseUrl,
+}, async () => {
+  assertSafeDatabase(databaseUrl);
+  const setup = new Pool({ connectionString: databaseUrl, max: 1 });
+  const schema = `customer_scenario_events_${randomBytes(8).toString("hex")}`;
+  const quoted = `"${schema}"`;
+  let pool: Pool | null = null;
+  try {
+    await setup.query(`CREATE SCHEMA ${quoted}`);
+    const scopedUrl = scopedDatabaseUrl(databaseUrl, schema);
+    pool = new Pool({ connectionString: scopedUrl, max: 2 });
+    const makeStore = () => createCustomerPracticeScenarioStore({
+      provider: "postgres", databaseUrl: scopedUrl, pgPoolMax: 2,
+      pgConnectTimeoutMs: 15_000, pgIdleTimeoutMs: 10_000, pool: pool!,
+    });
+    const store = makeStore();
+    await store.initialize();
+    const created = await store.createDraft({
+      orgId: "org_events", scenarioId: "scenario_events", versionId: "version_events",
+      homeFocusTopicId: "topic_events", actorId: "author", draft,
+      now: new Date("2026-10-09T12:00:00Z"),
+    });
+    await store.submit({ orgId: "org_events", scenarioId: created.id, actorId: "author",
+      approvalRequired: true, now: new Date("2026-10-09T12:01:00Z") });
+    await store.review({ orgId: "org_events", scenarioId: created.id, actorId: "reviewer",
+      decision: "reject", reviewNote: "Needs revision", now: new Date("2026-10-09T12:02:00Z") });
+    await store.archive({ orgId: "org_events", scenarioId: created.id, actorId: "reviewer",
+      now: new Date("2026-10-09T12:03:00Z") });
+
+    // A fresh store repeats schema initialization, as a new application boot would.
+    const reinitialized = makeStore();
+    await reinitialized.initialize();
+    const after = await reinitialized.get("org_events", created.id);
+    assert.ok(after);
+    assert.deepEqual(after.history.map((event) => event.eventType), ["created", "submitted", "rejected", "archived"]);
+    assert.equal(after.history.some((event) => event.eventType === "approved"), false);
+    await assert.rejects(
+      pool.query("UPDATE customer_practice_scenario_events SET comment='mutated' WHERE scenario_id='scenario_events'"),
+      (error: unknown) => (error as { code?: string }).code === "23514",
+    );
+  } finally {
+    if (pool) await pool.end();
+    await setup.query(`DROP SCHEMA IF EXISTS ${quoted} CASCADE`);
+    await setup.end();
+  }
+});

@@ -138,38 +138,99 @@ CREATE TABLE IF NOT EXISTS customer_practice_scenario_events (
 CREATE INDEX IF NOT EXISTS customer_practice_scenario_events_scenario_idx
   ON customer_practice_scenario_events (org_id, scenario_id, created_at, id);
 
-INSERT INTO customer_practice_scenario_events
-  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
-SELECT org_id,scenario_id,id,'created','draft',created_by_actor_id,NULL,created_at
-FROM customer_practice_scenario_versions
-ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+-- Earlier 019 deployments derived events on every application boot.  A rejected
+-- version that was subsequently archived then looked approved because its current
+-- status was no longer "rejected".  Remove only that provably fabricated duplicate:
+-- it has the same review metadata as an existing rejection for the same version.
+DELETE FROM customer_practice_scenario_events fabricated
+USING customer_practice_scenario_versions version
+WHERE fabricated.org_id = version.org_id
+  AND fabricated.scenario_id = version.scenario_id
+  AND fabricated.version_id = version.id
+  AND fabricated.event_type = 'approved'
+  AND version.status = 'archived'
+  AND fabricated.actor_id = version.reviewed_by_actor_id
+  AND fabricated.created_at = version.reviewed_at
+  AND fabricated.comment IS NOT DISTINCT FROM version.review_note
+  AND EXISTS (
+    SELECT 1 FROM customer_practice_scenario_events rejected
+    WHERE rejected.org_id = version.org_id
+      AND rejected.scenario_id = version.scenario_id
+      AND rejected.version_id = version.id
+      AND rejected.event_type = 'rejected'
+      AND rejected.actor_id = version.reviewed_by_actor_id
+      AND rejected.created_at = version.reviewed_at
+      AND rejected.comment IS NOT DISTINCT FROM version.review_note
+  );
 
-INSERT INTO customer_practice_scenario_events
-  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
-SELECT org_id,scenario_id,id,'submitted','in_review',submitted_by_actor_id,NULL,submitted_at
-FROM customer_practice_scenario_versions WHERE submitted_at IS NOT NULL AND submitted_by_actor_id IS NOT NULL
-ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+CREATE TABLE IF NOT EXISTS customer_practice_scenario_event_migration_state (
+  migration_key TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-INSERT INTO customer_practice_scenario_events
-  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
-SELECT org_id,scenario_id,id,
-  CASE WHEN status='rejected' THEN 'rejected' ELSE 'approved' END,
-  CASE WHEN status='rejected' THEN 'rejected' ELSE 'approved' END,
-  reviewed_by_actor_id,review_note,reviewed_at
-FROM customer_practice_scenario_versions WHERE reviewed_at IS NOT NULL AND reviewed_by_actor_id IS NOT NULL
-ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+-- Historical backfill is deliberately one-time.  New lifecycle operations append
+-- their own events through the store; initialization must never reconstruct them.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM customer_practice_scenario_event_migration_state
+    WHERE migration_key = '019_customer_practice_scenario_event_backfill_v2'
+  ) THEN
+    INSERT INTO customer_practice_scenario_events
+      (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+    SELECT org_id,scenario_id,id,'created','draft',created_by_actor_id,NULL,created_at
+    FROM customer_practice_scenario_versions
+    ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
 
-INSERT INTO customer_practice_scenario_events
-  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
-SELECT org_id,scenario_id,id,'published','published',published_by_actor_id,NULL,published_at
-FROM customer_practice_scenario_versions WHERE published_at IS NOT NULL AND published_by_actor_id IS NOT NULL
-ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+    INSERT INTO customer_practice_scenario_events
+      (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+    SELECT org_id,scenario_id,id,'submitted','in_review',submitted_by_actor_id,NULL,submitted_at
+    FROM customer_practice_scenario_versions WHERE submitted_at IS NOT NULL AND submitted_by_actor_id IS NOT NULL
+    ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
 
-INSERT INTO customer_practice_scenario_events
-  (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
-SELECT org_id,id,current_version_id,'archived','archived',archived_by_actor_id,NULL,archived_at
-FROM customer_practice_scenarios WHERE archived_at IS NOT NULL AND archived_by_actor_id IS NOT NULL
-ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+    -- An archived historical version no longer reveals whether its review was an
+    -- approval or rejection.  Do not invent either event in that ambiguous case.
+    INSERT INTO customer_practice_scenario_events
+      (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+    SELECT org_id,scenario_id,id,
+      CASE WHEN status='rejected' THEN 'rejected' ELSE 'approved' END,
+      CASE WHEN status='rejected' THEN 'rejected' ELSE 'approved' END,
+      reviewed_by_actor_id,review_note,reviewed_at
+    FROM customer_practice_scenario_versions
+    WHERE reviewed_at IS NOT NULL AND reviewed_by_actor_id IS NOT NULL
+      AND status IN ('rejected', 'approved', 'published')
+    ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+    INSERT INTO customer_practice_scenario_events
+      (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+    SELECT org_id,scenario_id,id,'published','published',published_by_actor_id,NULL,published_at
+    FROM customer_practice_scenario_versions WHERE published_at IS NOT NULL AND published_by_actor_id IS NOT NULL
+    ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+    INSERT INTO customer_practice_scenario_events
+      (org_id,scenario_id,version_id,event_type,status,actor_id,comment,created_at)
+    SELECT org_id,id,current_version_id,'archived','archived',archived_by_actor_id,NULL,archived_at
+    FROM customer_practice_scenarios WHERE archived_at IS NOT NULL AND archived_by_actor_id IS NOT NULL
+    ON CONFLICT ON CONSTRAINT customer_practice_scenario_events_natural_unique DO NOTHING;
+
+    INSERT INTO customer_practice_scenario_event_migration_state (migration_key)
+    VALUES ('019_customer_practice_scenario_event_backfill_v2');
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION prevent_customer_practice_scenario_event_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'customer Practice Scenario lifecycle history is append-only'
+    USING ERRCODE = '23514';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS customer_practice_scenario_event_append_only
+  ON customer_practice_scenario_events;
+CREATE TRIGGER customer_practice_scenario_event_append_only
+  BEFORE UPDATE OR DELETE ON customer_practice_scenario_events
+  FOR EACH ROW EXECUTE FUNCTION prevent_customer_practice_scenario_event_mutation();
 
 CREATE OR REPLACE FUNCTION prevent_customer_practice_scenario_version_content_update()
 RETURNS TRIGGER AS $$

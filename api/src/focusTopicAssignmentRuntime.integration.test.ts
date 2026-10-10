@@ -526,6 +526,41 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await scopedCall(attachmentsPath, "POST", {
         kind: "content", contentId: foreignContentId,
       })).status, 403);
+      await pool.query(`UPDATE organization_product_settings
+        SET allow_customer_scenario_creation=TRUE, updated_at=NOW() WHERE org_id=$1`, [org.id]);
+      const practiceScenarioPath = `/orgs/${org.id}/trainings/${topic.id}/practice-scenarios`;
+      const sourceDraft = {
+        title: "Source-backed scenario", description: "Use the attached resource.",
+        desiredOutcome: "Confirm a next step.", aiRole: "A skeptical counterpart",
+        scoringGuidance: "Assess clarity.", segmentId: scenario.segmentId,
+        applicableIndustryIds: [org.activeIndustries[0]!], sourceContentIds: [contentId],
+      };
+      const sourceCreated = await orgAdminCall(practiceScenarioPath, "POST", sourceDraft);
+      assert.equal(sourceCreated.status, 201, JSON.stringify(sourceCreated.body));
+      const sourceScenarioId = String(sourceCreated.body.id);
+      assert.deepEqual((sourceCreated.body.currentVersion as { sourceReferences: Array<{ referenceId: string }> })
+        .sourceReferences.map((reference) => reference.referenceId), [contentId]);
+      const sourceRevision = await orgAdminCall(
+        `${practiceScenarioPath}/${sourceScenarioId}/revisions`, "POST",
+        { ...sourceDraft, title: "Source-backed scenario revision" },
+      );
+      assert.equal(sourceRevision.status, 200, JSON.stringify(sourceRevision.body));
+      const foreignSource = await orgAdminCall(practiceScenarioPath, "POST", {
+        ...sourceDraft, title: "Foreign source denied", sourceContentIds: [foreignContentId],
+      });
+      assert.equal(foreignSource.status, 400);
+      assert.equal(JSON.stringify(foreignSource.body).includes("operator does not exist"), false);
+      assert.equal((await orgAdminCall(
+        `${attachmentsPath}/${scopedAttached.body.id as string}`, "DELETE",
+      )).status, 200);
+      const detachedSource = await orgAdminCall(
+        `${practiceScenarioPath}/${sourceScenarioId}/revisions`, "POST",
+        { ...sourceDraft, title: "Detached source denied" },
+      );
+      assert.equal(detachedSource.status, 400);
+      assert.equal(JSON.stringify(detachedSource.body).includes("operator does not exist"), false);
+      const sourceReattached = await scopedCall(attachmentsPath, "POST", { kind: "content", contentId });
+      assert.equal(sourceReattached.status, 201, JSON.stringify(sourceReattached.body));
       const topicContentPath = `/orgs/${org.id}/trainings/${topic.id}/content`;
       assert.equal((await scopedCall(topicContentPath, "POST", {
         contentType: "pdf", title: "Spoofed creator", description: "",
@@ -666,9 +701,27 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         [org.id, youtubeItem.id],
       );
       assert.deepEqual(transcriptRows.rows.map((row) => [row.version, row.current]), [[1, false], [2, true]]);
+      const changedYoutube = await orgAdminCall(`/dashboard/admin/training-content/${youtubeItem.id}`, "PATCH", {
+        expectedUpdatedAt: (publishedYoutube.body.item as { updatedAt: string }).updatedAt,
+        externalUrl: "https://www.youtube.com/watch?v=9bZkp7q19f0",
+      });
+      assert.equal(changedYoutube.status, 200, JSON.stringify(changedYoutube.body));
+      const staleYoutubeTranscript = await scopedCall(attachmentsPath);
+      assert.equal((staleYoutubeTranscript.body.contentItems as Array<{
+        id: string; generationSource: { reasonCode: string };
+      }>).find((entry) => entry.id === youtubeItem.id)?.generationSource.reasonCode, "missing_transcript");
+      assert.equal((await pool.query(
+        "SELECT 1 FROM org_content_transcripts WHERE org_id=$1 AND content_id=$2 AND superseded_at IS NULL AND removed_at IS NULL",
+        [org.id, youtubeItem.id],
+      )).rowCount, 1);
+      const currentYoutubeTranscript = await scopedCall(transcriptPath, "PUT", {
+        text: "CURRENT_YOUTUBE_TRANSCRIPT_SENTINEL",
+      });
+      assert.equal((currentYoutubeTranscript.body.generationSource as { eligible: boolean }).eligible, true);
       const youtubeLearnerDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
       const youtubeMobileDetail = await call(`/mobile/users/${user.id}/training-content/${youtubeItem.id}`);
-      assert.equal(((youtubeMobileDetail.body.item as { externalUrl: string }).externalUrl), youtubeItem.externalUrl);
+      assert.equal(((youtubeMobileDetail.body.item as { externalUrl: string }).externalUrl),
+        "https://www.youtube.com/watch?v=9bZkp7q19f0");
       for (const learnerPayload of [youtubeLearnerDetail.body, youtubeMobileDetail.body]) {
         const serialized = JSON.stringify(learnerPayload);
         assert.equal(serialized.includes("PRIVATE_TRANSCRIPT_SENTINEL"), false);
@@ -682,7 +735,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const readableSharedTranscript = await scopedCall(transcriptPath);
       assert.equal(readableSharedTranscript.status, 200, JSON.stringify(readableSharedTranscript.body));
       assert.equal((readableSharedTranscript.body.transcript as { text: string }).text,
-        "PRIVATE_TRANSCRIPT_SENTINEL_VERSION_TWO");
+        "CURRENT_YOUTUBE_TRANSCRIPT_SENTINEL");
       assert.equal((await scopedCall(transcriptPath, "PUT", { text: "Denied shared mutation" })).status, 403);
       const centralTranscriptPath = `/dashboard/admin/training-content/${youtubeItem.id}/transcript`;
       assert.equal((await orgAdminCall(centralTranscriptPath, "PUT", {
@@ -807,6 +860,34 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const learnerWithVideoTranscript = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
       assert.equal(JSON.stringify(learnerWithVideoTranscript.body)
         .includes("PRIVATE_VIDEO_TRANSCRIPT_SENTINEL"), false);
+      const replacementVideo = await assetStore.createPendingAsset({
+        orgId: org.id, contentId: videoItem.id, assetRole: "primary",
+        originalFilename: "replacement-video.mp4", declaredMimeType: "video/mp4",
+        fileExtension: "mp4", declaredByteSize: 8, replacementAssetId: finalizedVideo.asset.id,
+        uploadTtlSeconds: 600, maxPendingBytesForOrganization: 1_000_000,
+        actor: { actorType: "web_user", actorId: scopedUserAdmin.id },
+        authorizationScope: "focus_topic", authorizationTopicId: topic.id,
+      });
+      const queuedReplacementVideo = await assetStore.queueVideoProcessing({
+        orgId: org.id, contentId: videoItem.id, assetId: replacementVideo.asset.id,
+        actualByteSize: 8, detectedMimeType: "video/mp4", checksumOrEtag: "replacement-video-etag",
+        actor: { actorType: "web_user", actorId: scopedUserAdmin.id },
+      });
+      const finalizedReplacementVideo = await assetStore.completeFinalization({
+        orgId: org.id, contentId: videoItem.id, assetId: replacementVideo.asset.id,
+        finalObjectKey: queuedReplacementVideo.asset.finalObjectKey!, actualByteSize: 8,
+        detectedMimeType: "video/mp4", checksumOrEtag: "replacement-video-etag",
+        actor: { actorType: "system", actorId: "training-content-video-worker" },
+      });
+      assert.equal(finalizedReplacementVideo.asset.isCurrent, true);
+      const staleTranscript = await scopedCall(attachmentsPath);
+      assert.equal((staleTranscript.body.contentItems as Array<{
+        id: string; generationSource: { reasonCode: string };
+      }>).find((entry) => entry.id === videoItem.id)?.generationSource.reasonCode, "missing_transcript");
+      const replacementTranscript = await scopedCall(videoTranscriptPath, "PUT", {
+        text: "CURRENT_VIDEO_TRANSCRIPT_SENTINEL",
+      });
+      assert.equal((replacementTranscript.body.generationSource as { eligible: boolean }).eligible, true);
       const videoWithoutTranscript = await scopedCall(videoTranscriptPath, "DELETE");
       assert.equal((videoWithoutTranscript.body.generationSource as { reasonCode: string }).reasonCode,
         "missing_transcript");
@@ -924,7 +1005,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       });
       assert.equal(sharedAttachment.status, 201, JSON.stringify(sharedAttachment.body));
       const scopedDetached = await scopedCall(
-        `${attachmentsPath}/${scopedAttached.body.id as string}`, "DELETE",
+        `${attachmentsPath}/${sourceReattached.body.id as string}`, "DELETE",
       );
       assert.equal(scopedDetached.status, 200, JSON.stringify(scopedDetached.body));
       const attachmentRows = await pool.query<{ topic_id: string; detached_at: Date | null }>(

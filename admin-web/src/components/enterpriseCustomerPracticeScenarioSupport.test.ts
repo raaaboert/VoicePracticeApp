@@ -19,3 +19,11 @@ test("Master Utility exposes canonical customer Practice Scenario lifecycle read
   assert.match(source, /setPracticeScenarios\(payload\.practiceScenarios/);
   assert.match(source, /Read-only canonical scenario identities/);
 });
+
+test("Master Utility leaves lifecycle-managed legacy projections read-only", () => {
+  assert.match(source, /const lifecycleManaged = Boolean\(scenario\.customerScenarioVersionId\)/);
+  assert.match(source, /Managed in Focus Topic workspace/);
+  assert.equal(source.includes("onClick={() => openEditEditor(scenario)}"), true);
+  assert.equal(source.includes("!lifecycleManaged ? <button"), true);
+  assert.equal(source.includes(">\n                              Delete\n                            </button> : null"), true);
+});

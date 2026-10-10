@@ -5,6 +5,7 @@ import {
   canonicalizeYouTubeUrl,
   evaluateTrainingContentGenerationSource,
   normalizeCustomerTranscript,
+  trainingContentSourceFingerprint,
   TRAINING_CONTENT_EXTRACTION_SECURITY_CONTRACT_V1,
 } from "./trainingContentGenerationSourcePolicy.js";
 
@@ -65,6 +66,14 @@ test("one source evaluator keeps learner publication and generation readiness se
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "native",
     nativeBody: "Customer text", moduleEnabled: false,
     hasCurrentTranscript: false }).reasonCode, "module_disabled");
+});
+
+test("transcript source fingerprints bind generation eligibility to the current video or YouTube source", () => {
+  assert.equal(trainingContentSourceFingerprint({ contentType: "video", currentPrimaryAssetId: "asset_v1" }), "video_asset:asset_v1");
+  assert.equal(trainingContentSourceFingerprint({ contentType: "video", currentPrimaryAssetId: "asset_v2" }), "video_asset:asset_v2");
+  assert.equal(trainingContentSourceFingerprint({ contentType: "external_url", externalKind: "youtube", externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }), "youtube:https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(trainingContentSourceFingerprint({ contentType: "external_url", externalKind: "youtube", externalUrl: "https://www.youtube.com/watch?v=9bZkp7q19f0" }), "youtube:https://www.youtube.com/watch?v=9bZkp7q19f0");
+  assert.equal(trainingContentSourceFingerprint({ contentType: "native" }), null);
 });
 
 test("future document extraction is explicitly bounded and excludes unsafe expansion and OCR", () => {

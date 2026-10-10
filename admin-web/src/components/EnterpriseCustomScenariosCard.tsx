@@ -1509,6 +1509,7 @@ export function EnterpriseCustomScenariosCard({
                 ) : (
                   filteredScenarios.map((scenario) => {
                     const busy = togglingScenarioId === scenario.id || (deleting && deleteTargetId === scenario.id);
+                    const lifecycleManaged = Boolean(scenario.customerScenarioVersionId);
                     return (
                       <tr key={scenario.id}>
                         <td className="content-long-cell">
@@ -1525,25 +1526,29 @@ export function EnterpriseCustomScenariosCard({
                             .join(", ") || "-"}
                         </td>
                         <td>
-                          <select
-                            value={scenario.enabled === true ? "active" : "inactive"}
-                            disabled={busy}
-                            onChange={(event) => void toggleScenarioStatus(scenario, event.target.value === "active")}
-                          >
-                            <option value="active">active</option>
-                            <option value="inactive">inactive</option>
-                          </select>
+                          {lifecycleManaged ? (
+                            <span className="small">Managed in Focus Topic workspace</span>
+                          ) : (
+                            <select
+                              value={scenario.enabled === true ? "active" : "inactive"}
+                              disabled={busy}
+                              onChange={(event) => void toggleScenarioStatus(scenario, event.target.value === "active")}
+                            >
+                              <option value="active">active</option>
+                              <option value="inactive">inactive</option>
+                            </select>
+                          )}
                         </td>
                         <td>{formatDateTime(scenario.updatedAt)}</td>
                         <td>
                           <div className="content-actions content-actions-wrap">
-                            <button type="button" onClick={() => openEditEditor(scenario)} disabled={busy}>
+                            {!lifecycleManaged ? <button type="button" onClick={() => openEditEditor(scenario)} disabled={busy}>
                               Edit
-                            </button>
+                            </button> : null}
                             <button type="button" onClick={() => downloadSingleScenarioCsv(scenario)} disabled={busy}>
                               Download
                             </button>
-                            <button
+                            {!lifecycleManaged ? <button
                               type="button"
                               className="danger"
                               disabled={busy}
@@ -1555,7 +1560,7 @@ export function EnterpriseCustomScenariosCard({
                               }}
                             >
                               Delete
-                            </button>
+                            </button> : null}
                           </div>
                         </td>
                       </tr>

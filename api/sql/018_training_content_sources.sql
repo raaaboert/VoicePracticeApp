@@ -58,6 +58,21 @@ CREATE TABLE IF NOT EXISTS org_content_transcripts (
   UNIQUE (org_id, content_id, version)
 );
 
+ALTER TABLE org_content_transcripts
+  ADD COLUMN IF NOT EXISTS source_fingerprint TEXT NOT NULL DEFAULT 'legacy_unbound';
+
+-- Existing transcripts predate source binding.  They remain in history but are
+-- deliberately ineligible until replaced against the current source.
+UPDATE org_content_transcripts
+SET source_fingerprint = 'legacy_unbound'
+WHERE source_fingerprint IS NULL;
+
+ALTER TABLE org_content_transcripts
+  ALTER COLUMN source_fingerprint SET DEFAULT 'legacy_unbound';
+
+ALTER TABLE org_content_transcripts
+  ALTER COLUMN source_fingerprint SET NOT NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS org_content_transcripts_current_unique_idx
   ON org_content_transcripts (org_id, content_id)
   WHERE superseded_at IS NULL AND removed_at IS NULL;

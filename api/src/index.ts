@@ -356,6 +356,7 @@ import {
 import {
   evaluateTrainingContentGenerationSource,
   normalizeCustomerTranscript,
+  trainingContentSourceFingerprint,
 } from "./services/trainingContentGenerationSourcePolicy.js";
 import {
   createTrainingContentMobileService,
@@ -8761,7 +8762,7 @@ function createCustomerScenarioTransactionGuard(params: {
          INNER JOIN org_content_topic_attachments attachment
            ON attachment.org_id=content.org_id AND attachment.content_id=content.id
          WHERE content.org_id=$1 AND attachment.topic_id=$2
-           AND content.id=ANY($3::text[]) AND content.archived_at IS NULL
+           AND content.id=ANY($3::uuid[]) AND content.archived_at IS NULL
            AND category.archived_at IS NULL AND attachment.detached_at IS NULL
          FOR SHARE OF content,category,attachment`,
         [organization.id, topic.id, [...params.sourceContentIds]],
@@ -9013,7 +9014,12 @@ async function buildTranscriptManagementPayload(params: {
       externalKind: detail.content.externalKind ?? null,
       nativeBody: detail.content.nativeBody,
       hasReadyPrimaryAsset: detail.currentAsset?.uploadState === "ready",
-      hasCurrentTranscript: transcript !== null,
+      hasCurrentTranscript: transcript !== null && transcript.sourceFingerprint === trainingContentSourceFingerprint({
+        contentType: detail.content.contentType,
+        externalKind: detail.content.externalKind ?? null,
+        externalUrl: detail.content.externalUrl,
+        currentPrimaryAssetId: detail.currentAsset?.id ?? null,
+      }),
       moduleEnabled: params.moduleEnabled,
     }),
   };
@@ -17156,6 +17162,13 @@ app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (requ
       response.status(404).json({ error: "Custom scenario not found." });
       return;
     }
+    if (current.customerScenarioVersionId) {
+      response.status(409).json({
+        error: "Lifecycle-managed Practice Scenarios must be changed in their Focus Topic workspace.",
+        code: "customer_practice_scenario_lifecycle_managed",
+      });
+      return;
+    }
 
     if (patch.segmentId !== undefined) {
       const nextSegmentId = typeof patch.segmentId === "string" ? patch.segmentId.trim() : "";
@@ -17313,6 +17326,13 @@ app.delete("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (req
     const existing = scenarios.find((entry) => entry.id === scenarioId);
     if (!existing) {
       response.status(404).json({ error: "Custom scenario not found." });
+      return;
+    }
+    if (existing.customerScenarioVersionId) {
+      response.status(409).json({
+        error: "Lifecycle-managed Practice Scenarios must be changed in their Focus Topic workspace.",
+        code: "customer_practice_scenario_lifecycle_managed",
+      });
       return;
     }
 
@@ -17697,7 +17717,12 @@ app.get(
             externalKind: item.externalKind ?? null,
             nativeBody: item.nativeBody,
             hasReadyPrimaryAsset: currentAsset?.uploadState === "ready",
-            hasCurrentTranscript: transcript !== null,
+            hasCurrentTranscript: transcript !== null && transcript.sourceFingerprint === trainingContentSourceFingerprint({
+              contentType: item.contentType,
+              externalKind: item.externalKind ?? null,
+              externalUrl: item.externalUrl,
+              currentPrimaryAssetId: currentAsset?.id ?? null,
+            }),
             moduleEnabled: management.learningResourcesEnabled,
           }),
         };
