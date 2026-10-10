@@ -43,6 +43,30 @@ async function withMockResponses<T>(text: string, runner: () => Promise<T>): Pro
   finally { globalThis.fetch = originalFetch; }
 }
 
+async function withMockScenarioGeneration<T>(runner: (calls: { value: number }) => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  const calls = { value: 0 };
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (target === "https://api.openai.com/v1/chat/completions") {
+      calls.value += 1;
+      return Promise.resolve(new Response(JSON.stringify({
+        model: "server-issued-generation-model",
+        choices: [{ message: { content: JSON.stringify({
+          title: "Generated source-grounded scenario",
+          description: "Use the supplied Related Content to prepare the discussion.",
+          desiredOutcome: "Agree a concrete next step.",
+          aiRole: "A cautious stakeholder",
+        }) } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  try { return await runner(calls); }
+  finally { globalThis.fetch = originalFetch; }
+}
+
 test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocation",
   { skip: !databaseUrl }, async () => {
     const parsed = new URL(databaseUrl);
@@ -76,6 +100,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       process.env.SUPPORT_TRANSCRIPT_SECRET = "focus_runtime_local_support_secret_2026";
       process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
       process.env.OPENAI_API_KEY = "local-test-key";
+      // Keep budget limits finite so the HTTP budget-refusal regression can seed
+      // an exhausted global budget without affecting the rest of this harness.
+      process.env.OPENAI_MAX_DAILY_CALLS_PER_USER = "100";
+      process.env.OPENAI_MAX_DAILY_CALLS_GLOBAL = "100";
+      process.env.OPENAI_MAX_DAILY_TOKENS_PER_USER = "1000000";
+      process.env.OPENAI_MAX_DAILY_TOKENS_GLOBAL = "1000000";
       process.env.ENABLE_INTERNAL_DEBUG_ENDPOINTS = "false";
       const imported = await import("./index.js");
       const now = new Date().toISOString();
@@ -561,6 +591,117 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal(JSON.stringify(detachedSource.body).includes("operator does not exist"), false);
       const sourceReattached = await scopedCall(attachmentsPath, "POST", { kind: "content", contentId });
       assert.equal(sourceReattached.status, 201, JSON.stringify(sourceReattached.body));
+
+      // HTTP regressions for generation are deliberately exercised against the
+      // normal native Related Content path. Generation returns a receipt only;
+      // persistence begins only when the author saves through this route.
+      const generationPath = `${practiceScenarioPath}/generate`;
+      const generatedSaveInput = (draft: Record<string, unknown>, overrides: Record<string, unknown> = {}) => ({
+        title: draft.title, description: draft.description, desiredOutcome: draft.desiredOutcome,
+        aiRole: draft.aiRole, scoringGuidance: "Assess the proposed next step.", segmentId: scenario.segmentId,
+        applicableIndustryIds: [org.activeIndustries[0]!], sourceContentIds: [contentId],
+        generationToken: draft.generationToken,
+        ...overrides,
+      });
+      const scenarioCount = async () => Number((await pool!.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM customer_practice_scenarios WHERE org_id=$1 AND home_focus_topic_id=$2",
+        [org.id, topic.id],
+      )).rows[0]?.count ?? "0");
+      const generationInput = { sourceContentIds: [contentId], practiceGuidance: "Practice a concise next step." };
+
+      // A rate-limited request uses an otherwise unauthorized source. Receiving
+      // 429 before the source error proves the limiter runs before preparation.
+      imported.clearRateLimitsForTest();
+      await withMockScenarioGeneration(async (calls) => {
+        for (let index = 0; index < 12; index += 1) {
+          const generated = await orgAdminCall(generationPath, "POST", generationInput);
+          assert.equal(generated.status, 200, JSON.stringify(generated.body));
+        }
+        const limited = await orgAdminCall(generationPath, "POST", {
+          sourceContentIds: [foreignContentId],
+        });
+        assert.equal(limited.status, 429, JSON.stringify(limited.body));
+        assert.equal(calls.value, 12);
+      });
+      imported.clearRateLimitsForTest();
+      await pool.query("DELETE FROM ai_usage_events");
+
+      // Exhaust the configured global budget directly in the disposable test
+      // schema. The endpoint must refuse before it calls the provider or writes
+      // a scenario.
+      const beforeBudgetRefusal = await scenarioCount();
+      const budgetRows = Array.from({ length: 100 }, (_, index) => [
+        `generation_budget_${index}`, "turn", `budget_user_${index}`, org.id,
+        "budget-model", "budget-prompt", 0, 0, 0, now,
+      ]);
+      await pool.query(`INSERT INTO ai_usage_events
+        (id,kind,user_id,org_id,model,prompt_version,input_tokens,output_tokens,total_tokens,created_at)
+        SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[],
+          $7::int[],$8::int[],$9::int[],$10::timestamptz[])`, [
+        budgetRows.map((row) => row[0]), budgetRows.map((row) => row[1]), budgetRows.map((row) => row[2]),
+        budgetRows.map((row) => row[3]), budgetRows.map((row) => row[4]), budgetRows.map((row) => row[5]),
+        budgetRows.map((row) => row[6]), budgetRows.map((row) => row[7]), budgetRows.map((row) => row[8]),
+        budgetRows.map((row) => row[9]),
+      ]);
+      await withMockScenarioGeneration(async (calls) => {
+        const refused = await orgAdminCall(generationPath, "POST", generationInput);
+        // The generation route deliberately returns its generic safe provider
+        // failure payload for a refused reservation.
+        assert.equal(refused.status, 503, JSON.stringify(refused.body));
+        assert.equal(refused.body.code, "generation_failed");
+        assert.equal(calls.value, 0);
+      });
+      assert.equal(await scenarioCount(), beforeBudgetRefusal);
+      await pool.query("DELETE FROM ai_usage_events");
+
+      const generateDraft = async () => await withMockScenarioGeneration(async (calls) => {
+        const generated = await orgAdminCall(generationPath, "POST", generationInput);
+        assert.equal(generated.status, 200, JSON.stringify(generated.body));
+        assert.equal(calls.value, 1);
+        return generated.body;
+      });
+
+      // The save route must discard client-provided server provenance and bind
+      // the immutable version to the server-issued generation receipt instead.
+      const generatedForForgedProvenance = await generateDraft();
+      const forgedProvenanceSave = await orgAdminCall(practiceScenarioPath, "POST", generatedSaveInput(
+        generatedForForgedProvenance,
+        { serverProvenance: { sourceMode: "scratch", creationMethod: "manual", modelUsed: "forged-client-model" } },
+      ));
+      assert.equal(forgedProvenanceSave.status, 201, JSON.stringify(forgedProvenanceSave.body));
+      const savedProvenance = ((forgedProvenanceSave.body.currentVersion as { provenance?: Record<string, unknown> })
+        .provenance ?? {});
+      assert.equal(savedProvenance.creationMethod, "ai");
+      assert.equal(savedProvenance.modelUsed, "server-issued-generation-model");
+      assert.notEqual(savedProvenance.modelUsed, "forged-client-model");
+
+      const beforeCreationDisabledSave = await scenarioCount();
+      const generatedBeforeCreationDisabled = await generateDraft();
+      await pool.query(`UPDATE organization_product_settings
+        SET allow_customer_scenario_creation=FALSE, updated_at=NOW() WHERE org_id=$1`, [org.id]);
+      const creationDisabledSave = await orgAdminCall(
+        practiceScenarioPath, "POST", generatedSaveInput(generatedBeforeCreationDisabled),
+      );
+      assert.equal(creationDisabledSave.status, 403, JSON.stringify(creationDisabledSave.body));
+      assert.equal(await scenarioCount(), beforeCreationDisabledSave);
+      await pool.query(`UPDATE organization_product_settings
+        SET allow_customer_scenario_creation=TRUE, updated_at=NOW() WHERE org_id=$1`, [org.id]);
+
+      const beforeDetachedSourceSave = await scenarioCount();
+      const generatedBeforeDetach = await generateDraft();
+      await pool.query(
+        "UPDATE org_content_topic_attachments SET detached_at=NOW(), detached_by=$2 WHERE id=$1",
+        [sourceReattached.body.id, orgAdmin.id],
+      );
+      const detachedSourceSave = await orgAdminCall(
+        practiceScenarioPath, "POST", generatedSaveInput(generatedBeforeDetach),
+      );
+      assert.notEqual(detachedSourceSave.status, 201, JSON.stringify(detachedSourceSave.body));
+      assert.equal(await scenarioCount(), beforeDetachedSourceSave);
+      await pool.query("UPDATE org_content_topic_attachments SET detached_at=NULL, detached_by=NULL WHERE id=$1", [
+        sourceReattached.body.id,
+      ]);
+
       const topicContentPath = `/orgs/${org.id}/trainings/${topic.id}/content`;
       assert.equal((await scopedCall(topicContentPath, "POST", {
         contentType: "pdf", title: "Spoofed creator", description: "",
