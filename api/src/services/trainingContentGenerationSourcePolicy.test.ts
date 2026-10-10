@@ -50,9 +50,9 @@ test("one source evaluator keeps learner publication and generation readiness se
     eligible: true, reasonCode: "ready", sourceKind: "uploaded_video_transcript",
   });
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "pdf",
-    currentTranscriptSourceFingerprint: null }).reasonCode, "text_not_extractable_yet");
+    currentTranscriptSourceFingerprint: null }).reasonCode, "ready");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "docx",
-    currentTranscriptSourceFingerprint: null }).reasonCode, "text_not_extractable_yet");
+    currentTranscriptSourceFingerprint: null }).reasonCode, "ready");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "docx",
     hasReadyPrimaryAsset: false, currentTranscriptSourceFingerprint: null }).reasonCode, "asset_not_ready");
   assert.equal(evaluateTrainingContentGenerationSource({ ...base, contentType: "external_url",
@@ -90,7 +90,7 @@ test("transcript source fingerprints bind generation eligibility to the current 
     currentTranscriptSourceFingerprint: "youtube:https://www.youtube.com/watch?v=9bZkp7q19f0" }).eligible, true);
 });
 
-test("future document extraction is explicitly bounded and excludes unsafe expansion and OCR", () => {
+test("document extraction is explicitly bounded and excludes unsafe expansion and OCR", () => {
   assert.equal(TRAINING_CONTENT_EXTRACTION_SECURITY_CONTRACT_V1.maximumExtractedCharacters, 200_000);
   assert.deepEqual(TRAINING_CONTENT_EXTRACTION_SECURITY_CONTRACT_V1.pdf, {
     boundedInputRequired: true,

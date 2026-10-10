@@ -128,7 +128,7 @@ export function evaluateTrainingContentGenerationSource(input: {
   }
   if (input.contentType === "pdf" || input.contentType === "docx") {
     return input.hasReadyPrimaryAsset
-      ? { eligible: false, reasonCode: "text_not_extractable_yet", sourceKind }
+      ? { eligible: true, reasonCode: "ready", sourceKind }
       : { eligible: false, reasonCode: "asset_not_ready", sourceKind };
   }
   if (input.contentType === "video") {
