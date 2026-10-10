@@ -1022,6 +1022,21 @@ export interface CustomerPracticeScenarioDraftRequest {
   sourceContentIds?: string[];
 }
 
+export interface CustomerPracticeScenarioGenerationRequest {
+  sourceContentIds: string[];
+  practiceGuidance?: string | null;
+}
+
+export interface CustomerPracticeScenarioGeneratedDraft {
+  title: string;
+  description: string;
+  desiredOutcome: string | null;
+  aiRole: string;
+  sourceContentIds: string[];
+  similarity: { flagged: boolean; matchingScenarioIds: string[] };
+  promptVersion: string;
+}
+
 export interface OrgDivisionRecord {
   id: string;
   orgId: string;

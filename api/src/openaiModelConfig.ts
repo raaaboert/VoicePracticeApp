@@ -30,6 +30,7 @@ export interface OpenAiSimulationRequestConfig extends OpenAiSimulationRouteConf
 
 export interface OpenAiModelConfig {
   chat: OpenAiCompletionModelConfig;
+  scenarioGeneration: OpenAiScoringModelConfig;
   simulation: OpenAiSimulationModelConfig;
   scoring: OpenAiScoringModelConfig;
   transcription: {
@@ -170,6 +171,7 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
   const chatModel = env.OPENAI_CHAT_MODEL?.trim() || DEFAULT_CHAT_MODEL;
   const simulationModel = env.OPENAI_SIMULATION_MODEL?.trim() || DEFAULT_SIMULATION_MODEL;
   const scoringModel = env.OPENAI_SCORING_MODEL?.trim() || simulationModel;
+  const scenarioGenerationModel = env.OPENAI_SCENARIO_GENERATION_MODEL?.trim() || chatModel;
   const legacySimulationMaxOutputTokens = parseLegacySimulationMaxOutputTokens(
     env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS
   );
@@ -224,6 +226,21 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
         },
       },
     },
+    scenarioGeneration: {
+      model: scenarioGenerationModel,
+      apiFamily: parseApiFamily("OPENAI_SCENARIO_GENERATION_API_FAMILY", env.OPENAI_SCENARIO_GENERATION_API_FAMILY,
+        parseApiFamily("OPENAI_CHAT_API_FAMILY", env.OPENAI_CHAT_API_FAMILY, "chat_completions")),
+      maxOutputTokens: resolveSimulationMaxOutputTokens({
+        envName: "OPENAI_SCENARIO_GENERATION_MAX_OUTPUT_TOKENS",
+        routeValue: env.OPENAI_SCENARIO_GENERATION_MAX_OUTPUT_TOKENS,
+        legacyValue: null,
+        defaultValue: 1600,
+      }),
+      reasoningEffort: parseReasoningEffort(
+        "OPENAI_SCENARIO_GENERATION_REASONING_EFFORT", env.OPENAI_SCENARIO_GENERATION_REASONING_EFFORT,
+        parseReasoningEffort("OPENAI_CHAT_REASONING_EFFORT", env.OPENAI_CHAT_REASONING_EFFORT),
+      ),
+    },
     scoring: {
       model: scoringModel,
       apiFamily: parseApiFamily(
@@ -273,7 +290,7 @@ export function resolveSimulationRequestConfig(
   };
 }
 
-export function buildOpenAiRoutingStartupLogLines(config: OpenAiModelConfig): [string, string] {
+export function buildOpenAiRoutingStartupLogLines(config: OpenAiModelConfig): string[] {
   const opening = resolveSimulationRequestConfig(config, "opening");
   const turn = resolveSimulationRequestConfig(config, "turn");
   const score = resolveSimulationRequestConfig(config, "score");
@@ -284,6 +301,7 @@ export function buildOpenAiRoutingStartupLogLines(config: OpenAiModelConfig): [s
   return [
     `[openai-routing] simulation model=${opening.model} api=${opening.apiFamily} reasoning=${simulationReasoning}`,
     `[openai-routing] scoring model=${score.model} api=${score.apiFamily} reasoning=${formatReasoningEffort(score.reasoningEffort)}`,
+    `[openai-routing] scenario-generation model=${config.scenarioGeneration.model} api=${config.scenarioGeneration.apiFamily} reasoning=${formatReasoningEffort(config.scenarioGeneration.reasoningEffort)}`,
   ];
 }
 

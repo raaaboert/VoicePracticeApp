@@ -932,6 +932,16 @@ export async function createDashboardCustomerPracticeScenario(
   );
 }
 
+export async function generateDashboardCustomerPracticeScenario(
+  orgId: string, topicId: string, input: { sourceContentIds: string[]; practiceGuidance?: string | null },
+): Promise<import("@voicepractice/shared").CustomerPracticeScenarioGeneratedDraft> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/practice-scenarios/generate`,
+    { method: "POST", body: JSON.stringify(input), token },
+  );
+}
+
 export async function reviseDashboardCustomerPracticeScenario(
   orgId: string, topicId: string, scenarioId: string, input: CustomerPracticeScenarioDraftRequest,
 ): Promise<CustomerPracticeScenario> {

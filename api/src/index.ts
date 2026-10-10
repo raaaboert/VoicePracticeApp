@@ -76,6 +76,8 @@ import {
   CustomerPracticeScenario,
   CustomerPracticeScenarioVersion,
   CustomerPracticeScenarioDraftRequest,
+  CustomerPracticeScenarioGenerationRequest,
+  CustomerPracticeScenarioGeneratedDraft,
   CustomerPracticeScenarioListResponse,
   CustomerTrainingPackOrderSummary,
   DEFAULT_INDUSTRIES,
@@ -317,6 +319,14 @@ import {
   CustomerPracticeScenarioSourceError,
   resolveCustomerPracticeScenarioSourceReferences,
 } from "./services/customerPracticeScenarioSources.js";
+import {
+  buildCustomerPracticeScenarioGenerationSourceBundle,
+  CustomerPracticeScenarioGenerationSourceError,
+} from "./services/customerPracticeScenarioGenerationSources.js";
+import {
+  generateCustomerPracticeScenarioDraft,
+  CustomerPracticeScenarioGenerationError,
+} from "./services/customerPracticeScenarioGeneration.js";
 import {
   canScopedActorAttachContent,
   canScopedActorMutateContent,
@@ -17750,11 +17760,44 @@ app.get(
 );
 
 function respondWithCustomerPracticeScenarioError(error: unknown, response: Response): void {
+  if (error instanceof CustomerPracticeScenarioGenerationSourceError) {
+    response.status(error.code === "scenario_source_denied" ? 403 : 409).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof CustomerPracticeScenarioGenerationError) {
+    response.status(error.code === "generation_failed" ? 503 : 422).json({ error: error.message, code: error.code });
+    return;
+  }
   if (error instanceof CustomerPracticeScenarioStoreError) {
     response.status(error.statusCode).json({ error: error.message, code: error.code });
     return;
   }
   throw error;
+}
+
+async function buildCurrentCustomerScenarioGenerationSources(params: {
+  orgId: string;
+  topicId: string;
+  selectedContentIds: unknown;
+  actorCurrentlyAuthorized: boolean;
+  moduleEnabled: boolean;
+}) {
+  const contentAuthority = await trainingContentStore.listContentAuthorityForOrg(params.orgId);
+  return buildCustomerPracticeScenarioGenerationSourceBundle({
+    orgId: params.orgId, homeFocusTopicId: params.topicId, selectedContentIds: params.selectedContentIds,
+    actorCurrentlyAuthorized: params.actorCurrentlyAuthorized, moduleEnabled: params.moduleEnabled, contentAuthority,
+    getCurrentAsset: async (contentId) => {
+      const detail = await trainingContentStore.getContentDetailForOrg(params.orgId, contentId);
+      if (!detail?.currentAsset) return null;
+      const asset = await trainingContentAssetStore.getAssetForOrg(params.orgId, contentId, detail.currentAsset.id);
+      return asset ? { id: asset.id, uploadState: asset.uploadState, finalObjectKey: asset.finalObjectKey } : null;
+    },
+    getCurrentTranscript: async (contentId) => {
+      const transcript = await trainingContentTranscriptStore.getCurrent({ orgId: params.orgId, contentId });
+      return transcript ? { body: transcript.text, sourceFingerprint: transcript.sourceFingerprint } : null;
+    },
+    readAssetBytes: (key, maximumBytes) => trainingContentObjectStorage.readObjectBytes(key, maximumBytes),
+  });
 }
 
 function validateCustomerPracticeScenarioDraft(
@@ -17906,6 +17949,54 @@ app.get(
       },
     };
     response.json(payload);
+  },
+);
+
+app.post(
+  "/orgs/:orgId/trainings/:trainingId/practice-scenarios/generate",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    try {
+      const requestInput = request.body as CustomerPracticeScenarioGenerationRequest;
+      if (!Array.isArray(requestInput?.sourceContentIds) || requestInput.sourceContentIds.length === 0) {
+        throw new CustomerPracticeScenarioGenerationError("Select at least one eligible Related Content source.", "generation_invalid_response");
+      }
+      const prepared = await withFreshDatabaseSnapshotRead(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.settings.allowCustomerScenarioCreation) {
+          throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
+        }
+        const sourceBundle = await buildCurrentCustomerScenarioGenerationSources({
+          orgId: context.management.org.id, topicId: context.topic.id,
+          selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
+          moduleEnabled: context.management.learningResourcesEnabled,
+        });
+        return { context, sourceBundle, scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
+      });
+      if (!prepared || response.headersSent) return;
+      const generated = await generateCustomerPracticeScenarioDraft({
+        sourceBundle: prepared.sourceBundle, practiceGuidance: requestInput.practiceGuidance,
+        existingScenarios: prepared.scenarios, modelConfig: OPENAI_MODEL_CONFIG.scenarioGeneration,
+        complete: requestCompletion,
+      });
+      // Re-read actor authority and source state after the model call. A generated draft is never persisted here.
+      const stillAuthorized = await withFreshDatabaseSnapshotRead(async (db) => {
+        const context = await resolveCustomerScenarioRouteContext(db, request, response);
+        if (!context || response.headersSent) return null;
+        if (!context.settings.allowCustomerScenarioCreation) {
+          throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
+        }
+        return buildCurrentCustomerScenarioGenerationSources({
+          orgId: context.management.org.id, topicId: context.topic.id,
+          selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
+          moduleEnabled: context.management.learningResourcesEnabled,
+        });
+      });
+      if (!stillAuthorized || response.headersSent) return;
+      const payload: CustomerPracticeScenarioGeneratedDraft = generated;
+      response.json(payload);
+    } catch (error) { respondWithCustomerPracticeScenarioError(error, response); }
   },
 );
 

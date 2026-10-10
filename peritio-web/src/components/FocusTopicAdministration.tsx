@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type {
   CustomerPracticeScenario,
+  CustomerPracticeScenarioGeneratedDraft,
   CustomerPracticeScenarioListResponse,
   DashboardAdminUserRow,
   DashboardTrainingContentAssetFinalizationResponse,
@@ -77,6 +78,8 @@ export function FocusTopicAdministration({
   const [scenarioSegmentId, setScenarioSegmentId] = useState("");
   const [scenarioIndustryIds, setScenarioIndustryIds] = useState<string[]>([]);
   const [scenarioSourceContentIds, setScenarioSourceContentIds] = useState<string[]>([]);
+  const [scenarioPracticeGuidance, setScenarioPracticeGuidance] = useState("");
+  const [generatedScenario, setGeneratedScenario] = useState<CustomerPracticeScenarioGeneratedDraft | null>(null);
   const [scenarioReviewNotes, setScenarioReviewNotes] = useState<Record<string, string>>({});
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -122,6 +125,7 @@ export function FocusTopicAdministration({
     item.availableToAttach && !activeContentIds.has(item.id)) ?? [];
   const scenarioSourceOptions = attachedContent.flatMap(({ item }) =>
     item && !item.archivedAt ? [item] : []);
+  const eligibleScenarioSourceOptions = scenarioSourceOptions.filter((item) => item.generationSource.eligible);
   const orderedPracticeScenarios = [...(practiceScenarios?.scenarios ?? [])].sort((left, right) =>
     Number(right.status === "in_review") - Number(left.status === "in_review"));
 
@@ -362,7 +366,19 @@ export function FocusTopicAdministration({
     setEditingScenarioId(null); setScenarioTitle(""); setScenarioDescription("");
     setScenarioDesiredOutcome(""); setScenarioAiRole(""); setScenarioScoringGuidance("");
     setScenarioSegmentId(""); setScenarioIndustryIds([]); setScenarioSourceContentIds([]);
+    setScenarioPracticeGuidance(""); setGeneratedScenario(null);
   };
+  const generateScenarioDraft = () => void run(async () => {
+    if (!selected || scenarioSourceContentIds.length === 0) return;
+    const generated = await action<CustomerPracticeScenarioGeneratedDraft>({
+      action: "generate_practice_scenario", orgId, topicId: selected.id,
+      sourceContentIds: scenarioSourceContentIds, practiceGuidance: scenarioPracticeGuidance || null,
+    });
+    setEditingScenarioId(null); setScenarioTitle(generated.title); setScenarioDescription(generated.description);
+    setScenarioDesiredOutcome(generated.desiredOutcome ?? ""); setScenarioAiRole(generated.aiRole);
+    setScenarioSourceContentIds(generated.sourceContentIds); setGeneratedScenario(generated);
+    setMessage("Generated a draft for review. Complete the remaining fields, then save it as a normal draft.");
+  });
   const beginScenarioRevision = (scenario: CustomerPracticeScenario) => {
     const version = scenario.currentVersion;
     setEditingScenarioId(scenario.id); setScenarioTitle(version.title);
@@ -640,6 +656,24 @@ export function FocusTopicAdministration({
       </div>
       {practiceScenarios?.permissions.canAuthor && selected.status !== "archived"
         ? <div className="focus-topic-assignment-section focus-topic-upload-new">
+          <h4>Generate Scenario Draft</h4>
+          <p className="muted-copy">Select one or more generation-ready Related Content resources. Generation creates no scenario until you review and save the draft below.</p>
+          <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Eligible Related Content sources</legend>
+            <div className="focus-topic-content-mode">{eligibleScenarioSourceOptions.map((item) =>
+              <label key={`generate-${item.id}`}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
+                onChange={(event) => setScenarioSourceContentIds((current) => event.target.checked
+                  ? [...new Set([...current, item.id])]
+                  : current.filter((id) => id !== item.id))} /> {item.title}</label>)}</div>
+            {eligibleScenarioSourceOptions.length === 0 ? <small>No attached Related Content is currently generation-ready.</small> : null}
+          </fieldset>
+          <label className="focus-topic-field focus-topic-field-wide">Optional practice guidance
+            <textarea className="text-input" maxLength={2000} value={scenarioPracticeGuidance}
+              onChange={(event) => setScenarioPracticeGuidance(event.target.value)} /></label>
+          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || scenarioSourceContentIds.length === 0}
+            onClick={generateScenarioDraft}>Generate Scenario</button></div>
+          {generatedScenario?.similarity.flagged ? <div className="notice" role="status">
+            This draft is similar to an existing Topic scenario. Review it before saving.
+          </div> : null}
           <h4>{editingScenarioId ? "Create New Revision" : "Create Draft"}</h4>
           <p className="muted-copy">Content saves as a new immutable version. Submission and publication are separate actions.</p>
           <div className="focus-topic-details-grid">

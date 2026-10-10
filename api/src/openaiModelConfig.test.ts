@@ -30,6 +30,12 @@ test("uses the recommended OpenAI defaults", () => {
         },
       },
     },
+    scenarioGeneration: {
+      model: "gpt-4o-mini",
+      apiFamily: "chat_completions",
+      maxOutputTokens: 1600,
+      reasoningEffort: null,
+    },
     scoring: {
       model: "gpt-5.4",
       apiFamily: "responses",
@@ -134,6 +140,12 @@ test("applies explicit API families, reasoning efforts, and route-specific simul
           reasoningEffort: "minimal",
         },
       },
+    },
+    scenarioGeneration: {
+      model: "chat-model",
+      apiFamily: "responses",
+      maxOutputTokens: 1600,
+      reasoningEffort: "low",
     },
     scoring: {
       model: "scoring-model",
@@ -276,6 +288,7 @@ test("startup observability logs only the resolved non-secret routing values", (
   assert.deepEqual(lines, [
     "[openai-routing] simulation model=gpt-5.6-luna api=responses reasoning=low",
     "[openai-routing] scoring model=gpt-5.6-terra api=responses reasoning=medium",
+    "[openai-routing] scenario-generation model=gpt-4o-mini api=chat_completions reasoning=default",
   ]);
   assert.equal(lines.join("\n").includes("must-not-appear"), false);
 });

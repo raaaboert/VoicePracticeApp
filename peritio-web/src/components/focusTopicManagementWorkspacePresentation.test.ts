@@ -96,7 +96,11 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   assert.doesNotMatch(source, /Source reference \(optional\)/);
   assert.match(proxy, /case "list_practice_scenarios"/);
   assert.match(proxy, /case "create_practice_scenario"/);
+  assert.match(proxy, /case "generate_practice_scenario"/);
   assert.match(proxy, /case "submit_practice_scenario"/);
   assert.match(proxy, /transitionDashboardCustomerPracticeScenario/);
   assert.equal(source.includes("Generate with AI"), false);
+  assert.match(source, /Generate Scenario Draft/);
+  assert.match(source, /Generate Scenario/);
+  assert.match(source, /generatedScenario\?\.similarity\.flagged/);
 });

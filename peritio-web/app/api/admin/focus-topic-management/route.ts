@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   assertDashboardAuthConfig,
   createDashboardCustomerPracticeScenario,
+  generateDashboardCustomerPracticeScenario,
   attachDashboardFocusTopicContent,
   createDashboardFocusTopicContent,
   createDashboardFocusTopic,
@@ -63,6 +64,7 @@ type Action =
   | { action: "put_content_transcript"; orgId: string; topicId: string; contentId: string; text: string }
   | { action: "remove_content_transcript"; orgId: string; topicId: string; contentId: string }
   | { action: "list_practice_scenarios"; orgId: string; topicId: string }
+  | { action: "generate_practice_scenario"; orgId: string; topicId: string; sourceContentIds: string[]; practiceGuidance?: string | null }
   | { action: "create_practice_scenario" | "revise_practice_scenario"; orgId: string; topicId: string;
       scenarioId?: string; title: string; description: string; desiredOutcome?: string | null;
       aiRole: string; scoringGuidance: string; segmentId: string; applicableIndustryIds: string[];
@@ -155,6 +157,10 @@ export async function POST(request: NextRequest) {
       case "list_practice_scenarios":
         return noStore(NextResponse.json(await listDashboardCustomerPracticeScenarios(
           body.orgId, body.topicId,
+        )));
+      case "generate_practice_scenario":
+        return noStore(NextResponse.json(await generateDashboardCustomerPracticeScenario(
+          body.orgId, body.topicId, { sourceContentIds: body.sourceContentIds, practiceGuidance: body.practiceGuidance },
         )));
       case "create_practice_scenario":
         return noStore(NextResponse.json(await createDashboardCustomerPracticeScenario(
