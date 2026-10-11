@@ -37,3 +37,32 @@ test("Focus Topic reminder dynamic audiences resolve current members at send tim
   const result = buildFocusTopicReminderInputs({ db: { orgs: [{ id: "org", status: "active" }], orgTrainings: [topic], users: [manager, report] } as any, authority: { assignments: [assignment({ audience: "manager_with_team", subjectUserId: "manager" })], scenarioAttachments: [], contentAttachments: [] }, now: new Date("2026-06-03T08:00:00.000Z") });
   assert.deepEqual(result.map((row) => row.recipientUserId).sort(), ["manager", "report"]);
 });
+
+test("Focus Topic reminders stay scoped to the dated assignment audience", () => {
+  const alice = { ...user, id: "alice", timezone: "UTC" };
+  const bob = { ...user, id: "bob", timezone: "UTC" };
+  const db = { orgs: [{ id: "org", status: "active" }], orgTrainings: [topic], users: [alice, bob] } as any;
+  const now = new Date("2026-06-03T08:01:00.000Z");
+  const individualDue = assignment({ id: "alice-due", subjectUserId: "alice" });
+  const orgUndated = assignment({ id: "org-access", audience: "organization", subjectUserId: null, dueDate: null });
+  assert.deepEqual(
+    buildFocusTopicReminderInputs({ db, authority: { assignments: [individualDue, orgUndated], scenarioAttachments: [], contentAttachments: [] }, now }).map((row) => row.recipientUserId),
+    ["alice"],
+  );
+
+  const bobDue = assignment({ id: "bob-due", subjectUserId: "bob", dueDate: "2026-06-10" });
+  assert.deepEqual(
+    buildFocusTopicReminderInputs({ db, authority: { assignments: [individualDue, bobDue], scenarioAttachments: [], contentAttachments: [] }, now }).map((row) => row.recipientUserId).sort(),
+    ["alice", "bob"],
+  );
+});
+
+test("Focus Topic reminders catch up after 8 AM and remain deduplicated", async () => {
+  const store = createMemoryUserNotificationStoreForTest();
+  const late = new Date("2026-06-04T08:01:00.000Z");
+  const params = { ...input(), store, now: late };
+  assert.deepEqual(await runFocusTopicReminderSweep(params), { considered: 1, inserted: 1 });
+  assert.deepEqual(await runFocusTopicReminderSweep(params), { considered: 1, inserted: 0 });
+  const revoked = { ...params, authority: { assignments: [assignment({ revokedAt: late.toISOString() })], scenarioAttachments: [], contentAttachments: [] } };
+  assert.deepEqual(await runFocusTopicReminderSweep(revoked), { considered: 0, inserted: 0 });
+});

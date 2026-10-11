@@ -20,6 +20,14 @@ export function buildFocusTopicReminderInputs(params: {
     const topic = params.db.orgTrainings.find((candidate) => candidate.id === assignment.topicId && candidate.orgId === assignment.orgId);
     if (!org || !topic || org.status !== "active" || topic.status !== "active") continue;
     for (const recipient of params.db.users) {
+      // A reminder belongs to one dated assignment.  Resolve that assignment's
+      // audience first; another assignment for the same Topic must never widen
+      // its recipient set.  The second check keeps delivery subject to current
+      // effective learner access across the Topic's current assignments.
+      if (!canFutureLearnerAccessFocusTopic({
+        user: recipient, users: params.db.users, organization: org, topic,
+        assignments: [assignment],
+      })) continue;
       if (!canFutureLearnerAccessFocusTopic({
         user: recipient, users: params.db.users, organization: org, topic,
         assignments: params.authority.assignments,
@@ -47,12 +55,16 @@ export async function runFocusTopicReminderSweep(params: {
 export function dueMilestone(dueDate: string, now: Date, timeZone: string): FocusTopicReminderMilestone | null {
   const today = getDateKeyInTimeZone(now, timeZone);
   const candidates: Array<[FocusTopicReminderMilestone, string]> = [
-    ["due_7d", addDaysToDateKey(dueDate, -7)],
-    ["due_1d", addDaysToDateKey(dueDate, -1)],
     ["overdue", addDaysToDateKey(dueDate, 1)],
+    ["due_1d", addDaysToDateKey(dueDate, -1)],
+    ["due_7d", addDaysToDateKey(dueDate, -7)],
   ];
   for (const [milestone, date] of candidates) {
-    if (today !== date) continue;
+    // A scheduler may miss 08:00.  Deliver a not-yet-emitted pre-due reminder
+    // on a later sweep before its due date; durable deduplication prevents a
+    // second delivery.  Overdue begins the day after the due date and remains
+    // eligible until the assignment no longer applies.
+    if (milestone === "overdue" ? today < date : today < date || today >= dueDate) continue;
     const scheduledAt = localDateTimeToUtc({ ...dateParts(date), hour: 8, minute: 0, second: 0, millisecond: 0 }, timeZone);
     if (now.getTime() >= scheduledAt.getTime()) return milestone;
   }
