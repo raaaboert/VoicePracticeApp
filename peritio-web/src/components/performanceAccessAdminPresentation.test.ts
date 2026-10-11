@@ -41,3 +41,10 @@ test("Performance workspace presents authorization and search empty states disti
   assert.equal(performanceWorkspaceSource.includes("userSelectorEmptyState === \"authorization\""), true);
   assert.equal(performanceWorkspaceSource.includes("userSelectorEmptyState === \"search\""), true);
 });
+
+test("Performance Goal composer exposes modal and live-feedback semantics", () => {
+  assert.equal(performanceWorkspaceSource.includes('role="dialog" aria-modal="true"'), true);
+  assert.equal(performanceWorkspaceSource.includes('aria-labelledby="performance-goal-editor-title"'), true);
+  assert.equal(performanceWorkspaceSource.includes('aria-label="Close Performance goal editor"'), true);
+  assert.equal(performanceWorkspaceSource.includes('className="form-error" role="alert"'), true);
+});

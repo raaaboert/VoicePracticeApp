@@ -564,16 +564,17 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
 
       {showPlanComposer ? (
         <div className="performance-modal-backdrop" role="presentation">
-          <section className="section-card performance-composer-panel">
+          <section className="section-card performance-composer-panel" role="dialog" aria-modal="true"
+            aria-labelledby="performance-goal-editor-title">
         <div className="section-header">
           <div>
             <p className="eyebrow">{isEditing ? "Edit" : "Create"}</p>
-            <h2>{isEditing ? "Edit active Performance goal" : "Assign a Performance goal"}</h2>
+            <h2 id="performance-goal-editor-title">{isEditing ? "Edit active Performance goal" : "Assign a Performance goal"}</h2>
             <p className="section-copy">
               For {buildPerformanceUserDisplayName(selectedUser)} ({selectedUser.email})
             </p>
           </div>
-          <button type="button" className="ghost-button" onClick={cancelEdit}>Close</button>
+          <button type="button" className="ghost-button" aria-label="Close Performance goal editor" onClick={cancelEdit}>Close</button>
         </div>
 
         {workspace.users.length === 0 ? (
@@ -753,8 +754,8 @@ export function PerformanceWorkspace({ workspace, divisionId }: PerformanceWorks
           </div>
         )}
 
-        {actionError ? <p className="form-error">{actionError}</p> : null}
-        {actionNotice ? <p className="small-copy">{actionNotice}</p> : null}
+        {actionError ? <p className="form-error" role="alert">{actionError}</p> : null}
+        {actionNotice ? <p className="small-copy" role="status">{actionNotice}</p> : null}
         {preview ? (
           <div className="preview-panel">
             <span className={preview.valid ? "pill accent" : "pill"}>{preview.valid ? "Valid preview" : "Needs changes"}</span>

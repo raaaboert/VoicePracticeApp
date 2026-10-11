@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import type {
   DashboardAdminAccessRequestRow,
@@ -306,33 +306,58 @@ export function AdminWorkspace({
     }
   };
 
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, current: AdminTab) => {
+    const tabs: AdminTab[] = canManageAccessRequests ? ["users", "access"] : ["users"];
+    if (!(["ArrowLeft", "ArrowRight", "Home", "End"] as string[]).includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = tabs.indexOf(current);
+    const next = event.key === "Home" ? tabs[0]
+      : event.key === "End" ? tabs[tabs.length - 1]
+      : tabs[(currentIndex + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+    if (!next) return;
+    setActiveTab(next);
+    requestAnimationFrame(() => document.getElementById(`admin-${next}-tab`)?.focus());
+  };
+
   return (
     <div className="page-stack admin-workspace">
       <TrainingContentAdminNav orgId={orgId} active="admin" capabilities={usersPayload.viewer.capabilities} />
       <div className="tab-row admin-local-tabs" role="tablist" aria-label="Users and access views">
         <button
           type="button"
+          role="tab"
+          id="admin-users-tab"
+          aria-selected={activeTab === "users"}
+          aria-controls="admin-users-panel"
+          tabIndex={activeTab === "users" ? 0 : -1}
           className={`tab-button${activeTab === "users" ? " active" : ""}`}
           onClick={() => setActiveTab("users")}
+          onKeyDown={(event) => handleTabKeyDown(event, "users")}
         >
           Users
         </button>
         {canManageAccessRequests ? (
           <button
             type="button"
+            role="tab"
+            id="admin-access-tab"
+            aria-selected={activeTab === "access"}
+            aria-controls="admin-access-panel"
+            tabIndex={activeTab === "access" ? 0 : -1}
             className={`tab-button${activeTab === "access" ? " active" : ""}`}
             onClick={() => setActiveTab("access")}
+            onKeyDown={(event) => handleTabKeyDown(event, "access")}
           >
             Access Requests
           </button>
         ) : null}
       </div>
 
-      {actionMessage ? <div className="notice success">{actionMessage}</div> : null}
-      {actionError ? <div className="notice danger">{actionError}</div> : null}
+      {actionMessage ? <div className="notice success" role="status">{actionMessage}</div> : null}
+      {actionError ? <div className="notice danger" role="alert">{actionError}</div> : null}
 
       {activeTab === "users" ? (
-        <section className="section-card admin-section">
+        <section className="section-card admin-section" role="tabpanel" id="admin-users-panel" aria-labelledby="admin-users-tab">
           <div className="section-header">
             <div>
               <p className="eyebrow">Users</p>
@@ -345,12 +370,16 @@ export function AdminWorkspace({
             </div>
           </div>
 
-          <input
-            className="text-input admin-search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search name, email, or Employee ID"
-          />
+          <label className="field-label" htmlFor="admin-user-search">
+            Search organization users
+            <input
+              className="text-input admin-search"
+              id="admin-user-search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search name, email, or Employee ID"
+            />
+          </label>
 
           <div className="table-wrap">
             <table className="data-table admin-table">
@@ -555,7 +584,7 @@ export function AdminWorkspace({
           </div>
         </section>
       ) : canManageAccessRequests ? (
-        <div className="admin-access-request-stack">
+        <div className="admin-access-request-stack" role="tabpanel" id="admin-access-panel" aria-labelledby="admin-access-tab">
           <section className="section-card admin-section" aria-labelledby="pending-requests-heading">
             <div className="section-header">
               <div>

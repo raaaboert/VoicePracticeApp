@@ -457,7 +457,7 @@ export function FocusTopicAdministration({
       onClick={() => revokeAssignment(row.id, options.management === true)}>Revoke</button> : null}
   </div>);
 
-  return <section className="section-card focus-topic-admin" aria-label="Focus Topic administration">
+  return <section className="section-card focus-topic-admin" aria-label="Focus Topic administration" aria-busy={busy}>
     <div className="section-header"><div>
       <p className="eyebrow">Topic workspace</p><h2>Focus Topic administration</h2>
       <p className="muted-copy">Review Topic details, learner assignments, and directly related learning resources.</p>

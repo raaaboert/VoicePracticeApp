@@ -47,6 +47,18 @@ test("Users and Access Requests remain local views inside Users & Access", () =>
   assert.equal(admin.includes('href={`/app/admin/content-organization'), false);
 });
 
+test("Users and Access controls expose tab state, labeled search, and live mutation feedback", () => {
+  assert.match(admin, /role="tab"/);
+  assert.match(admin, /aria-selected=\{activeTab === "users"\}/);
+  assert.match(admin, /onKeyDown=\{\(event\) => handleTabKeyDown\(event, "users"\)\}/);
+  assert.match(admin, /requestAnimationFrame\(\(\) => document\.getElementById/);
+  assert.match(admin, /role="tabpanel" id="admin-users-panel"/);
+  assert.match(admin, /htmlFor="admin-user-search"/);
+  assert.match(admin, /id="admin-user-search"/);
+  assert.match(admin, /className="notice success" role="status"/);
+  assert.match(admin, /className="notice danger" role="alert"/);
+});
+
 test("Focus Topic fields and actions use shared controls with accessible labels", () => {
   for (const id of ["focus-topic-select", "focus-topic-name", "focus-topic-description", "focus-topic-status", "focus-topic-audience", "focus-topic-subject"]) {
     assert.match(focusTopics, new RegExp(`htmlFor="${id}"`));
@@ -58,6 +70,7 @@ test("Focus Topic fields and actions use shared controls with accessible labels"
   assert.match(focusTopics, /"Save Focus Topic"/);
   assert.match(focusTopics, />Archive Focus Topic</);
   assert.match(focusTopics, />Add Assignment</);
+  assert.match(focusTopics, /aria-busy=\{busy\}/);
   assert.match(styles, /\.focus-topic-assignment-composer\s*\{/);
   assert.match(styles, /\.focus-topic-assignment-fields\.targeted\s*\{/);
   assert.match(styles, /\.focus-topic-description\s*\{/);
