@@ -3641,6 +3641,11 @@ test("dashboard division route filtering stays tenant-bound and fails closed on 
     (userDetail.body.attempts as Array<{ activityId: string }>).map((attempt) => attempt.activityId),
     ["score_direct"],
   );
+  assert.equal(
+    (userDetail.body.attempts as Array<{ summary: string | null }>)[0]?.summary,
+    null,
+    "the detail response keeps legacy attempt rows compact; narratives load only from the attempt detail endpoint",
+  );
   assert.deepEqual(
     (userDetail.body.assignments as Array<{ assignmentId: string }>).map((assignment) => assignment.assignmentId),
     ["assign_direct"],
@@ -3670,6 +3675,65 @@ test("dashboard division route filtering stays tenant-bound and fails closed on 
   );
   assert.equal(inaccessibleAttemptWithMismatchedDivision.status, 404);
   assert.equal(inaccessibleAttemptWithMismatchedDivision.body.error, "Attempt detail not found.");
+});
+
+test("dashboard user attempt history filters before stable pagination and labels only recorded Focus Topics", async () => {
+  const scoreRecordsPath = extractedStorePath("score-records");
+  const originalScoreRecords = await readFile(scoreRecordsPath, "utf8");
+  try {
+  const scores = await readExtractedStoreRecords<SimulationScoreRecord>("score-records");
+  const updatedScores = scores
+    .filter((score) => score.id !== "score_direct")
+    .concat(
+      buildScoreRecord("score_direct", "learner", {
+        trainingId: "training_scope",
+        trainingPackId: null,
+        startedAt: "2026-08-03T10:00:00.000Z",
+        endedAt: "2026-08-03T10:05:00.000Z",
+        overallScore: 90,
+      }),
+      buildScoreRecord("score_history_unattributed", "learner", {
+        trainingId: "legacy_pack_like_value",
+        trainingPackId: null,
+        startedAt: "2026-08-02T10:00:00.000Z",
+        endedAt: "2026-08-02T10:05:00.000Z",
+        overallScore: 80,
+      }),
+    );
+  await writeFile(extractedStorePath("score-records"), JSON.stringify({ records: updatedScores }, null, 2), "utf8");
+
+  const firstPage = await dashboardRequest("/dashboard/users/learner/attempts?limit=1", orgAdminToken);
+  assert.equal(firstPage.status, 200, JSON.stringify(firstPage.body));
+  assert.equal((firstPage.body.attempts as Array<{ activityId: string }>)[0]?.activityId, "score_direct");
+  assert.equal((firstPage.body.attempts as Array<{ focusTopicId: string | null; focusTopicTitle: string | null }>)[0]?.focusTopicId, "training_scope");
+  assert.equal((firstPage.body.attempts as Array<{ summary: string | null }>)[0]?.summary, null);
+  assert.equal(firstPage.body.hasMore, true);
+  const nextCursor = firstPage.body.nextCursor as string;
+  assert.ok(nextCursor);
+
+  const secondPage = await dashboardRequest(`/dashboard/users/learner/attempts?limit=1&cursor=${encodeURIComponent(nextCursor)}`, orgAdminToken);
+  assert.equal(secondPage.status, 200);
+  assert.equal((secondPage.body.attempts as Array<{ activityId: string }>)[0]?.activityId, "score_history_unattributed");
+  assert.equal((secondPage.body.attempts as Array<{ focusTopicId: string | null }>)[0]?.focusTopicId, null);
+
+  const topicOnly = await dashboardRequest("/dashboard/users/learner/attempts?focusTopicId=training_scope", orgAdminToken);
+  assert.equal(topicOnly.status, 200);
+  assert.deepEqual((topicOnly.body.attempts as Array<{ activityId: string }>).map((attempt) => attempt.activityId), ["score_direct"]);
+  const dateOnly = await dashboardRequest("/dashboard/users/learner/attempts?startDate=2026-08-02&endDate=2026-08-02", orgAdminToken);
+  assert.equal(dateOnly.status, 200);
+  assert.deepEqual((dateOnly.body.attempts as Array<{ activityId: string }>).map((attempt) => attempt.activityId), ["score_history_unattributed"]);
+  const combined = await dashboardRequest("/dashboard/users/learner/attempts?scenario=scope&startDate=2026-08-03&endDate=2026-08-03", orgAdminToken);
+  assert.equal(combined.status, 200);
+  assert.deepEqual((combined.body.attempts as Array<{ activityId: string }>).map((attempt) => attempt.activityId), ["score_direct"]);
+
+  assert.equal((await dashboardRequest("/dashboard/users/unassigned_learner/attempts", userAdminToken)).status, 404);
+  assert.equal((await dashboardRequest("/dashboard/users/other_org_user/attempts", orgAdminToken)).status, 404);
+  } finally {
+    await writeFile(scoreRecordsPath, originalScoreRecords, "utf8");
+    // The file-backed score store retains an in-process snapshot. Refresh it after
+    // restoring this fixture so later route tests see their own seeded records.
+    await dashboardRequest("/dashboard/users/learner/attempts?limit=1", orgAdminToken);
+  }
 });
 
 test("mobile user-admin routes use organization-wide regular-user administration scope", async () => {

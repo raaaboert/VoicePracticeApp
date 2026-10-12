@@ -49,6 +49,7 @@ import {
   DashboardTrainingReportResponse,
   DashboardTrainingWorkspaceResponse,
   DashboardUserDetailResponse,
+  DashboardUserAttemptHistoryResponse,
   DashboardUserReportResponse,
   DashboardViewer,
   CancelPerformancePlanRequest,
@@ -779,6 +780,43 @@ export async function decideDashboardAdminAccessRequest(
       token,
     }
   );
+}
+
+export async function getDashboardUserAttemptHistory(
+  userId: string,
+  params: {
+    divisionId?: string | null;
+    focusTopicId?: string | null;
+    scenario?: string | null;
+    startDate?: string | null;
+    endDate?: string | null;
+    cursor?: string | null;
+    limit?: number | null;
+  } = {},
+): Promise<DashboardUserAttemptHistoryResponse | null> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const query = new URLSearchParams();
+  if (params.divisionId) query.set("divisionId", params.divisionId);
+  if (params.focusTopicId) query.set("focusTopicId", params.focusTopicId);
+  if (params.scenario) query.set("scenario", params.scenario);
+  if (params.startDate) query.set("startDate", params.startDate);
+  if (params.endDate) query.set("endDate", params.endDate);
+  if (params.cursor) query.set("cursor", params.cursor);
+  if (params.limit) query.set("limit", String(params.limit));
+
+  try {
+    return await fetchDashboardApi<DashboardUserAttemptHistoryResponse>(
+      `/dashboard/users/${encodeURIComponent(userId)}/attempts${query.size > 0 ? `?${query.toString()}` : ""}`,
+      { token },
+    );
+  } catch (error) {
+    if (error instanceof DashboardApiError) {
+      if (error.status === 404) return null;
+      if (isInvalidDashboardSessionError(error)) throw new DashboardSessionInvalidError(error.message);
+      if (error.status === 403) throw new DashboardAccessDeniedError(error.message);
+    }
+    throw error;
+  }
 }
 
 export async function getDashboardNotifications(limit = 20, offset = 0, includeDismissed = false): Promise<DashboardNotificationsResponse> {

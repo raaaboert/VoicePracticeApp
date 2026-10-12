@@ -2186,6 +2186,8 @@ export interface DashboardAttemptHistoryRow {
   trainingPackId: string | null;
   trainingPackTitle: string | null;
   packAttributed: boolean;
+  focusTopicId: string | null;
+  focusTopicTitle: string | null;
   assignmentId: string | null;
   assignmentContextStatus: DashboardAssignmentContextStatus;
   startedAt: string;
@@ -2356,12 +2358,26 @@ export interface DashboardUserAssignmentSummaryRow {
   completedScenarioCount: number;
 }
 
+export interface DashboardUserFocusTopicAccessRow {
+  topicId: string;
+  topicTitle: string;
+}
+
+export interface DashboardUserAttemptHistoryResponse {
+  attempts: DashboardAttemptHistoryRow[];
+  focusTopics: Array<{ topicId: string; topicTitle: string }>;
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
 export interface DashboardUserDetailResponse {
   viewer: DashboardViewer;
   user: DashboardUserReportRow;
   coachingInsights: DashboardCoachingInsights;
   assignments: DashboardUserAssignmentSummaryRow[];
   attempts: DashboardAttemptHistoryRow[];
+  learningAccessMode?: "training_pack_assignments" | "focus_topic_assignments";
+  currentFocusTopics?: DashboardUserFocusTopicAccessRow[];
   divisionScope?: DashboardDivisionScope;
 }
 

@@ -243,6 +243,8 @@ test("dashboard attempt detail helper preserves full route-faithful scored-attem
     trainingPackId: "pack_1",
     trainingPackTitle: "Pack One",
     packAttributed: true,
+    focusTopicId: null,
+    focusTopicTitle: null,
     assignmentId: "assignment_1",
     assignmentContextStatus: "counts_toward_completion",
     startedAt: "2026-03-31T10:00:00.000Z",

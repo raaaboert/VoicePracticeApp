@@ -3241,6 +3241,193 @@ input[type="radio"] {
   gap: 1rem;
 }
 
+.dashboard-history-disclosure {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+
+.dashboard-history-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.dashboard-history-disclosure > summary:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--brand-sage) 55%, transparent);
+  outline-offset: -3px;
+}
+
+.dashboard-history-disclosure-summary {
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.dashboard-history-disclosure-body {
+  border-top: 1px solid var(--border);
+  padding: 0 1rem 1rem;
+}
+
+@media (max-width: 640px) {
+  .dashboard-history-disclosure > summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+}
+.user-attempt-history {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.user-attempt-history-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(9rem, 1fr));
+  gap: 0.7rem;
+  align-items: end;
+}
+
+.user-attempt-history-filters label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.user-attempt-history-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.user-attempt-history-filter-actions .primary-button,
+.user-attempt-history-filter-actions .ghost-button {
+  width: auto;
+  white-space: nowrap;
+}
+
+.user-attempt-history-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.user-attempt-history-header,
+.user-attempt-history-row > summary {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) minmax(8rem, 1fr) minmax(10rem, 1.4fr) minmax(4.5rem, 0.5fr) minmax(5rem, 0.6fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.user-attempt-history-header {
+  padding: 0 0.8rem;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.user-attempt-history-row {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.user-attempt-history-row > summary {
+  padding: 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.user-attempt-history-row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.user-attempt-history-row > summary:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--brand-sage) 55%, transparent);
+  outline-offset: -3px;
+}
+
+.user-attempt-history-disclosure {
+  color: var(--brand-forest);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.user-attempt-history-row[open] .user-attempt-history-disclosure::after {
+  content: " · Hide";
+}
+
+.user-attempt-history-detail {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0.1rem 0.8rem 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.user-attempt-history-detail > p,
+.user-attempt-coaching p {
+  margin: 0;
+}
+
+.user-attempt-score-breakdown {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(7rem, 1fr));
+  gap: 0.55rem;
+  margin: 0;
+}
+
+.user-attempt-score-breakdown div {
+  padding: 0.6rem;
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.user-attempt-score-breakdown dt {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.user-attempt-score-breakdown dd {
+  margin: 0.2rem 0 0;
+  font-weight: 800;
+}
+
+.user-attempt-coaching {
+  display: grid;
+  gap: 0.45rem;
+}
+
+@media (max-width: 780px) {
+  .user-attempt-history-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .user-attempt-history-header {
+    display: none;
+  }
+
+  .user-attempt-history-row > summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .user-attempt-history-row > summary > span:not(:nth-child(3)):not(:last-child) {
+    display: none;
+  }
+
+  .user-attempt-score-breakdown {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .focus-topic-details-grid {
   display: grid;
   grid-template-columns: minmax(0, 44rem);

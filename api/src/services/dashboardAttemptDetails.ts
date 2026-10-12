@@ -47,10 +47,12 @@ export function buildDashboardAttemptHistoryRowFromScore(params: {
   org: EnterpriseOrg | null;
   scenarioCatalog: ReadonlyMap<string, DashboardAttemptScenarioCatalogEntry>;
   trainingPackTitles: ReadonlyMap<string, string>;
+  focusTopicTitles?: ReadonlyMap<string, string>;
   relatedSession: UsageSessionRecord | null;
   assignment: TrainingPackAssignmentRecord | null;
 }): DashboardAttemptHistoryRow {
   const { score, user, org, scenarioCatalog, trainingPackTitles, relatedSession, assignment } = params;
+  const focusTopicTitles = params.focusTopicTitles ?? new Map<string, string>();
   const scenarioMeta = scenarioCatalog.get(score.scenarioId);
 
   return {
@@ -68,6 +70,8 @@ export function buildDashboardAttemptHistoryRowFromScore(params: {
     trainingPackId: score.trainingPackId ?? null,
     trainingPackTitle: score.trainingPackId ? trainingPackTitles.get(score.trainingPackId) ?? score.trainingPackId : null,
     packAttributed: Boolean(score.trainingPackId),
+    focusTopicId: score.trainingId && focusTopicTitles.has(score.trainingId) ? score.trainingId : null,
+    focusTopicTitle: score.trainingId ? focusTopicTitles.get(score.trainingId) ?? null : null,
     assignmentId: assignment?.id ?? null,
     assignmentContextStatus: resolveDashboardAttemptActivityAssignmentStatus({
       assignment,
@@ -114,6 +118,7 @@ export function buildDashboardAttemptDetailAttempt(params: {
   org: EnterpriseOrg | null;
   scenarioCatalog: ReadonlyMap<string, DashboardAttemptScenarioCatalogEntry>;
   trainingPackTitles: ReadonlyMap<string, string>;
+  focusTopicTitles?: ReadonlyMap<string, string>;
   industryLabelById: ReadonlyMap<string, string>;
   relatedSession: UsageSessionRecord | null;
   assignment: TrainingPackAssignmentRecord | null;

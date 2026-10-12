@@ -63,7 +63,9 @@ import {
   DashboardTrainingWorkspaceUserRow,
   DashboardUnmappedCoachingPhraseSummary,
   DashboardUserAssignmentSummaryRow,
+  DashboardUserAttemptHistoryResponse,
   DashboardUserDetailResponse,
+  DashboardUserFocusTopicAccessRow,
   DashboardUserReportRow,
   DashboardUserReportResponse,
   DashboardViewer,
@@ -7551,6 +7553,14 @@ function buildTrainingPackTitleMap(packs: TrainingPack[]): Map<string, string> {
   return titles;
 }
 
+function buildFocusTopicTitleMap(db: ApiDatabase, orgId: string): Map<string, string> {
+  return new Map(
+    db.orgTrainings
+      .filter((topic) => topic.orgId === orgId)
+      .map((topic) => [topic.id, topic.name])
+  );
+}
+
 function findAssignmentForUserPackActivity(
   db: ApiDatabase,
   orgId: string,
@@ -7584,6 +7594,7 @@ function buildDashboardAttemptHistoryRowFromScore(params: {
   org: EnterpriseOrg | null;
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
   trainingPackTitles: Map<string, string>;
+  focusTopicTitles: Map<string, string>;
   relatedSession: UsageSessionRecord | null;
   assignment: TrainingPackAssignmentRecord | null;
 }): DashboardAttemptHistoryRow {
@@ -7593,6 +7604,7 @@ function buildDashboardAttemptHistoryRowFromScore(params: {
     org: params.org,
     scenarioCatalog: params.scenarioCatalog,
     trainingPackTitles: params.trainingPackTitles,
+    focusTopicTitles: params.focusTopicTitles,
     relatedSession: params.relatedSession,
     assignment: params.assignment
   });
@@ -7604,9 +7616,10 @@ function buildDashboardAttemptHistoryRowFromSession(params: {
   org: EnterpriseOrg | null;
   scenarioCatalog: Map<string, DashboardScenarioCatalogEntry>;
   trainingPackTitles: Map<string, string>;
+  focusTopicTitles: Map<string, string>;
   assignment: TrainingPackAssignmentRecord | null;
 }): DashboardAttemptHistoryRow {
-  const { session, user, org, scenarioCatalog, trainingPackTitles, assignment } = params;
+  const { session, user, org, scenarioCatalog, trainingPackTitles, focusTopicTitles, assignment } = params;
   const scenarioMeta = scenarioCatalog.get(session.scenarioId);
 
   return {
@@ -7624,6 +7637,8 @@ function buildDashboardAttemptHistoryRowFromSession(params: {
     trainingPackId: session.trainingPackId ?? null,
     trainingPackTitle: session.trainingPackId ? trainingPackTitles.get(session.trainingPackId) ?? session.trainingPackId : null,
     packAttributed: Boolean(session.trainingPackId),
+    focusTopicId: session.trainingId && focusTopicTitles.has(session.trainingId) ? session.trainingId : null,
+    focusTopicTitle: session.trainingId ? focusTopicTitles.get(session.trainingId) ?? null : null,
     assignmentId: assignment?.id ?? null,
     assignmentContextStatus: resolveDashboardAttemptActivityAssignmentStatus({
       assignment,
@@ -7728,6 +7743,7 @@ async function buildDashboardTrainingPackAssignmentDetail(
     return null;
   }
   const trainingPackTitles = buildTrainingPackTitleMap([pack]);
+  const focusTopicTitles = buildFocusTopicTitleMap(db, org.id);
   const usedSessionIds = new Set<string>();
   const attemptRows: DashboardAttemptHistoryRow[] = [];
 
@@ -7744,6 +7760,7 @@ async function buildDashboardTrainingPackAssignmentDetail(
         org,
         scenarioCatalog,
         trainingPackTitles,
+        focusTopicTitles,
         relatedSession,
         assignment: projectedAssignment
       })
@@ -7761,6 +7778,7 @@ async function buildDashboardTrainingPackAssignmentDetail(
         org,
         scenarioCatalog,
         trainingPackTitles,
+        focusTopicTitles,
         assignment: projectedAssignment
       })
     );
@@ -7815,6 +7833,25 @@ async function buildDashboardUserDetail(
   const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const trainingPackTitles = buildTrainingPackTitleMap(packs);
+  const focusTopicTitles = buildFocusTopicTitleMap(db, org.id);
+  const learningAccessMode = runtimeConfig.focusTopicAuthority === "assignments"
+    ? "focus_topic_assignments" as const
+    : "training_pack_assignments" as const;
+  const focusTopicAssignments = learningAccessMode === "focus_topic_assignments"
+    ? (await focusTopicAuthorityStore.listSnapshot(org.id)).assignments
+    : [];
+  const currentFocusTopics: DashboardUserFocusTopicAccessRow[] = learningAccessMode === "focus_topic_assignments"
+    ? db.orgTrainings
+      .filter((topic) => canFutureLearnerAccessFocusTopic({
+        user,
+        users: db.users,
+        organization: org,
+        topic,
+        assignments: focusTopicAssignments,
+      }))
+      .map((topic) => ({ topicId: topic.id, topicTitle: topic.name }))
+      .sort((left, right) => left.topicTitle.localeCompare(right.topicTitle) || left.topicId.localeCompare(right.topicId))
+    : [];
   const userSessions = filterRecordsByDivision(listUsageSessions(db, { userId: user.id, orgId: org.id }), divisionId);
   const userScores = filterRecordsByDivision(
     listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true }),
@@ -7889,6 +7926,7 @@ async function buildDashboardUserDetail(
         org,
         scenarioCatalog,
         trainingPackTitles,
+        focusTopicTitles,
         relatedSession: findRelatedUsageSessionForScore(userSessions, score),
         assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
       });
@@ -7902,9 +7940,145 @@ async function buildDashboardUserDetail(
       currentScores: recentUserScores,
       previousScores: previousUserScores
     }),
-    assignments: assignmentRows,
-    attempts: attemptRows,
+    assignments: learningAccessMode === "focus_topic_assignments" ? [] : assignmentRows,
+    // The detail view uses the paginated history endpoint. Keep this legacy field
+    // compact for existing consumers without returning score narratives upfront.
+    attempts: attemptRows.map((attempt) => ({
+      ...attempt,
+      summary: null,
+      coachingPriority: null,
+      model: null,
+      promptVersion: null,
+      rubricVersion: null,
+    })),
+    learningAccessMode,
+    currentFocusTopics,
     divisionScope: report.divisionScope
+  };
+}
+
+type DashboardUserAttemptHistoryFilters = {
+  focusTopicId: string | null;
+  scenarioQuery: string | null;
+  startAt: number | null;
+  endBefore: number | null;
+  cursor: { endedAt: number; activityId: string } | null;
+  limit: number;
+};
+
+function parseDashboardHistoryDate(value: string | null, endOfDay: boolean): number | null | "invalid" {
+  if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return "invalid";
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed.getTime())) return "invalid";
+  return parsed.getTime() + (endOfDay ? 24 * 60 * 60 * 1000 : 0);
+}
+
+function parseDashboardUserAttemptHistoryFilters(query: Request["query"]):
+  { filters: DashboardUserAttemptHistoryFilters } | { error: string } {
+  const topicId = getSingleQueryParam(query.focusTopicId)?.trim() || null;
+  const scenarioQuery = getSingleQueryParam(query.scenario)?.trim().toLocaleLowerCase() || null;
+  const startAt = parseDashboardHistoryDate(getSingleQueryParam(query.startDate), false);
+  const endBefore = parseDashboardHistoryDate(getSingleQueryParam(query.endDate), true);
+  if (startAt === "invalid" || endBefore === "invalid") {
+    return { error: "startDate and endDate must use YYYY-MM-DD." };
+  }
+  if (startAt !== null && endBefore !== null && startAt >= endBefore) {
+    return { error: "startDate must be on or before endDate." };
+  }
+
+  const rawLimit = getSingleQueryParam(query.limit);
+  const limit = rawLimit ? Number(rawLimit) : 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    return { error: "limit must be an integer from 1 through 50." };
+  }
+
+  const rawCursor = getSingleQueryParam(query.cursor);
+  let cursor: DashboardUserAttemptHistoryFilters["cursor"] = null;
+  if (rawCursor) {
+    try {
+      if (rawCursor.length > 512) throw new Error("cursor too long");
+      const decoded = JSON.parse(Buffer.from(rawCursor, "base64url").toString("utf8")) as unknown;
+      if (!decoded || typeof decoded !== "object") throw new Error("invalid cursor");
+      const candidate = decoded as { endedAt?: unknown; activityId?: unknown };
+      if (!Number.isFinite(candidate.endedAt) || typeof candidate.activityId !== "string" || !candidate.activityId) {
+        throw new Error("invalid cursor");
+      }
+      cursor = { endedAt: candidate.endedAt as number, activityId: candidate.activityId };
+    } catch {
+      return { error: "cursor is invalid." };
+    }
+  }
+
+  return { filters: { focusTopicId: topicId, scenarioQuery, startAt, endBefore, cursor, limit } };
+}
+
+function encodeDashboardUserAttemptHistoryCursor(row: DashboardAttemptHistoryRow): string {
+  return Buffer.from(JSON.stringify({ endedAt: new Date(row.endedAt).getTime(), activityId: row.activityId })).toString("base64url");
+}
+
+async function buildDashboardUserAttemptHistory(
+  db: ApiDatabase,
+  principal: DashboardRequestPrincipal,
+  userId: string,
+  divisionId: string | null,
+  filters: DashboardUserAttemptHistoryFilters,
+): Promise<DashboardUserAttemptHistoryResponse | null> {
+  const report = await buildDashboardUserReport(db, principal, divisionId);
+  const userRow = report.users.find((entry) => entry.userId === userId);
+  if (!userRow?.orgId) return null;
+  const org = getOrgById(db, userRow.orgId);
+  const user = getUserById(db, userId);
+  if (!org || !user || !canDashboardViewerAccessOrg(principal.viewer, org.id)) return null;
+
+  const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
+  const trainingPackTitles = buildTrainingPackTitleMap(await listTrainingPacksForDashboardOrg(org.id));
+  const focusTopicTitles = buildFocusTopicTitleMap(db, org.id);
+  const userSessions = filterRecordsByDivision(listUsageSessions(db, { userId: user.id, orgId: org.id }), divisionId);
+  const rows = sortDashboardAttemptHistoryRows(
+    filterRecordsByDivision(listScoreRecords(db, { userId: user.id, orgId: org.id, conclusiveOnly: true }), divisionId)
+      .map((score) => buildDashboardAttemptHistoryRowFromScore({
+        db,
+        score,
+        user,
+        org,
+        scenarioCatalog,
+        trainingPackTitles,
+        focusTopicTitles,
+        relatedSession: findRelatedUsageSessionForScore(userSessions, score),
+        assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt),
+      }))
+  );
+  const focusTopics = [...new Map(rows
+    .filter((row) => row.focusTopicId && row.focusTopicTitle)
+    .map((row) => [row.focusTopicId!, row.focusTopicTitle!] as const)).entries()]
+    .map(([topicId, topicTitle]) => ({ topicId, topicTitle }))
+    .sort((left, right) => left.topicTitle.localeCompare(right.topicTitle) || left.topicId.localeCompare(right.topicId));
+  const filteredRows = rows.filter((row) => {
+    const endedAt = new Date(row.endedAt).getTime();
+    if (filters.focusTopicId && row.focusTopicId !== filters.focusTopicId) return false;
+    if (filters.scenarioQuery && !(row.scenarioTitle ?? row.scenarioId).toLocaleLowerCase().includes(filters.scenarioQuery)) return false;
+    if (filters.startAt !== null && endedAt < filters.startAt) return false;
+    if (filters.endBefore !== null && endedAt >= filters.endBefore) return false;
+    if (!filters.cursor) return true;
+    return endedAt < filters.cursor.endedAt
+      || (endedAt === filters.cursor.endedAt && row.activityId.localeCompare(filters.cursor.activityId) > 0);
+  });
+  const pageRows = filteredRows.slice(0, filters.limit);
+  const hasMore = filteredRows.length > pageRows.length;
+
+  return {
+    attempts: pageRows.map((row) => ({
+      ...row,
+      summary: null,
+      coachingPriority: null,
+      model: null,
+      promptVersion: null,
+      rubricVersion: null,
+    })),
+    focusTopics,
+    hasMore,
+    nextCursor: hasMore && pageRows.length > 0 ? encodeDashboardUserAttemptHistoryCursor(pageRows[pageRows.length - 1]!) : null,
   };
 }
 
@@ -7941,6 +8115,7 @@ async function buildDashboardAttemptDetail(
   const scenarioCatalog = buildDashboardScenarioCatalog(db, org);
   const packs = await listTrainingPacksForDashboardOrg(org.id);
   const trainingPackTitles = buildTrainingPackTitleMap(packs);
+  const focusTopicTitles = buildFocusTopicTitleMap(db, org.id);
   const scopedSessions = filterRecordsByDivision(listUsageSessions(db, { userId: score.userId, orgId: org.id }), divisionId);
   const attempt = buildDashboardAttemptDetailAttemptPayload({
     score,
@@ -7948,6 +8123,7 @@ async function buildDashboardAttemptDetail(
     org,
     scenarioCatalog,
     trainingPackTitles,
+    focusTopicTitles,
     industryLabelById: new Map(Object.entries(INDUSTRY_LABELS)),
     relatedSession: findRelatedUsageSessionForScore(scopedSessions, score),
     assignment: findAssignmentForUserPackActivity(db, org.id, user.id, score.trainingPackId ?? null, score.endedAt)
@@ -13257,6 +13433,37 @@ app.get("/dashboard/users", requireDashboardAuth, async (request: DashboardAuthR
       return;
     }
     const payload = await buildDashboardUserReport(db, request.dashboard!, divisionFilter.appliedDivisionId);
+    response.json(payload);
+  });
+});
+
+app.get("/dashboard/users/:userId/attempts", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshReportingRead(async (db) => {
+    const divisionFilter = resolveDashboardDivisionFilter({
+      db,
+      viewer: request.dashboard!.viewer,
+      requestedDivisionId: getSingleQueryParam(request.query.divisionId),
+    });
+    if (divisionFilter.error) {
+      response.status(400).json({ error: divisionFilter.error });
+      return;
+    }
+    const parsedFilters = parseDashboardUserAttemptHistoryFilters(request.query);
+    if ("error" in parsedFilters) {
+      response.status(400).json({ error: parsedFilters.error });
+      return;
+    }
+    const payload = await buildDashboardUserAttemptHistory(
+      db,
+      request.dashboard!,
+      request.params.userId,
+      divisionFilter.appliedDivisionId,
+      parsedFilters.filters,
+    );
+    if (!payload) {
+      response.status(404).json({ error: "Dashboard user not found." });
+      return;
+    }
     response.json(payload);
   });
 });

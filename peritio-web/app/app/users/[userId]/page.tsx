@@ -11,15 +11,13 @@ import { DashboardSupportSignals } from "@/src/components/DashboardSupportSignal
 import { DashboardWhatMattersSection } from "@/src/components/DashboardWhatMattersSection";
 import { PageHeader } from "@/src/components/PageHeader";
 import { PerformanceNavigation } from "@/src/components/PerformanceNavigation";
+import { UserAttemptHistory } from "@/src/components/UserAttemptHistory";
 import { buildPerformanceViewHref } from "@/src/components/performanceViewRoutes";
-import {
-  buildDashboardScopedAttemptDetailHref,
-  buildDashboardScopedTrainingPackAssignmentHref,
-} from "@/src/components/dashboardDivisionFilterState";
+import { buildDashboardScopedTrainingPackAssignmentHref } from "@/src/components/dashboardDivisionFilterState";
 import { DashboardAccessDeniedError, DashboardSessionInvalidError, getDashboardUserDetail } from "@/src/lib/auth";
 import { buildUserDetailNarrative } from "@/src/lib/dashboardNarratives";
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
-import { formatDateTime, formatRawSeconds, formatScore } from "@/src/lib/formatters";
+import { formatDateTime } from "@/src/lib/formatters";
 
 function formatAssignmentStatus(status: string): string {
   if (status === "completed") {
@@ -29,19 +27,6 @@ function formatAssignmentStatus(status: string): string {
     return "In Progress";
   }
   return "Not Started";
-}
-
-function formatAssignmentContextStatus(status: string): string {
-  if (status === "counts_toward_completion") {
-    return "Counts Toward Completion";
-  }
-  if (status === "within_assignment_window") {
-    return "Within Assignment Window";
-  }
-  if (status === "outside_assignment_window") {
-    return "Outside Assignment Window";
-  }
-  return "Not Assignment Scoped";
 }
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -79,7 +64,7 @@ export default async function UserDetailPage({
     notFound();
   }
 
-  const { user, assignments, attempts } = payload;
+  const { user, assignments } = payload;
   const narrative = buildUserDetailNarrative(payload);
   const fromPerformance = query.performanceOrigin === "individuals";
   const appliedDivisionId = payload.divisionScope?.appliedDivisionId ?? null;
@@ -139,9 +124,22 @@ export default async function UserDetailPage({
 
           <div className="dashboard-proof-block">
             <h3>Current training progress</h3>
-            <p>Progress reflects activity linked to each training pack. Older unattributed activity does not count toward completion.</p>
-
-            {assignments.length > 0 ? (
+            {payload.learningAccessMode === "focus_topic_assignments" ? <>
+              <p>Current learning access reflects active Focus Topic assignments. Historical Training Pack links do not determine this access.</p>
+              {(payload.currentFocusTopics ?? []).length > 0 ? <div className="table-scroll">
+                <table className="data-table">
+                  <thead><tr><th>Focus Topic</th><th>Current access</th></tr></thead>
+                  <tbody>{payload.currentFocusTopics?.map((topic) => <tr key={topic.topicId}>
+                    <td>{topic.topicTitle}</td><td>Active learner access</td>
+                  </tr>)}</tbody>
+                </table>
+              </div> : <div className="empty-state-panel">
+                <h3>No current Focus Topic access</h3>
+                <p>This user has no active learner access through current Focus Topic assignments.</p>
+              </div>}
+            </> : <>
+              <p>Progress reflects activity linked to each training pack. Older unattributed activity does not count toward completion.</p>
+              {assignments.length > 0 ? (
               <div className="table-scroll">
                 <table className="data-table">
                   <thead>
@@ -180,64 +178,26 @@ export default async function UserDetailPage({
                   </tbody>
                 </table>
               </div>
-            ) : (
+              ) : (
               <div className="empty-state-panel">
                 <h3>No active assignments</h3>
                 <p>This user does not currently have an active training-pack assignment in the current dashboard scope.</p>
               </div>
-            )}
+              )}
+            </>}
           </div>
 
           <div className="dashboard-proof-block">
-            <h3>Scored attempt history</h3>
-            <p>These rows show scored attempts in this dashboard scope, newest first. Saved score notes appear when available.</p>
-
-            {attempts.length > 0 ? (
-              <div className="table-scroll">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>When</th>
-                      <th>Scenario</th>
-                      <th>Training pack</th>
-                      <th>Assignment status</th>
-                      <th>Score</th>
-                      <th>Duration</th>
-                      <th>Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {attempts.map((attempt) => (
-                      <tr key={attempt.activityId}>
-                        <td>{formatDateTime(attempt.endedAt)}</td>
-                        <td>
-                          <Link className="inline-link subtle" href={buildDashboardScopedAttemptDetailHref(attempt.activityId, divisionId)}>
-                            {attempt.scenarioTitle ?? attempt.scenarioId}
-                          </Link>
-                        </td>
-                        <td>{attempt.trainingPackTitle ?? "Unattributed"}</td>
-                        <td>{formatAssignmentContextStatus(attempt.assignmentContextStatus)}</td>
-                        <td>{attempt.overallScore !== null ? formatScore(attempt.overallScore) : "-"}</td>
-                        <td>{formatRawSeconds(attempt.rawDurationSeconds)}</td>
-                        <td className="attempt-history-notes">
-                          <div className={`attempt-history-summary${attempt.summary ? "" : " empty"}`}>
-                            {attempt.summary ?? "No saved summary."}
-                          </div>
-                          {attempt.coachingPriority ? (
-                            <div className="attempt-history-priority">Priority: {attempt.coachingPriority}</div>
-                          ) : null}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <details className="dashboard-history-disclosure" open>
+              <summary>
+                <span>Scored attempt history</span>
+                <span className="dashboard-history-disclosure-summary">Browse score records and expand feedback when needed.</span>
+              </summary>
+              <div className="dashboard-history-disclosure-body">
+                <p>Browse compact scored attempts in this dashboard scope. Expand a row to load its saved scoring narrative and details.</p>
+                <UserAttemptHistory userId={user.userId} divisionId={divisionId} />
               </div>
-            ) : (
-              <div className="empty-state-panel">
-                <h3>No scored attempts found</h3>
-                <p>No scored attempts were found for this user in the current dashboard scope.</p>
-              </div>
-            )}
+            </details>
           </div>
         </div>
       </DashboardProofSection>
