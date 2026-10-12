@@ -22,7 +22,7 @@ test("Focus Topic workspace separates details, learner access, scoped managers, 
     assert.equal(source.includes(copy), true, copy);
   }
   assert.match(source, /canManageAllTopics \? <div className="focus-topic-actions">/);
-  assert.match(source, /Scoped Topic managers can inspect assignments/);
+  assert.match(source, /Topic Managers can assign and revoke individual assignments for their current direct reports/);
   assert.match(source, /disabled=\{busy \|\| !canManageAllTopics/);
 });
 
@@ -103,4 +103,23 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   assert.match(source, /Generate Scenario Draft/);
   assert.match(source, /Generate Scenario/);
   assert.match(source, /generatedScenario\?\.similarity\.flagged/);
+});
+
+test("Focus Topic workspace uses accessible collapsible sections for its large management areas", () => {
+  assert.match(source, /function FocusTopicWorkspaceSection/);
+  assert.match(source, /aria-expanded=\{open\}/);
+  assert.match(source, /aria-controls=\{contentId\}/);
+  assert.match(source, /className="focus-topic-panel-body"/);
+  for (const heading of [
+    "focus-topic-assignments-heading",
+    "focus-topic-managers-heading",
+    "focus-topic-practice-heading",
+    "focus-topic-related-heading",
+  ]) {
+    assert.equal(source.includes(`headingId="${heading}"`), true, heading);
+  }
+  assert.match(source, /summary=\{`\$\{learnerParts\.activeAssignments\.length\} active/);
+  assert.match(source, /summary=\{`\$\{managerParts\.activeAssignments\.length\} active/);
+  assert.match(source, /awaiting review/);
+  assert.match(source, /defaultOpen=\{practiceScenarios\?\.permissions\.canAuthor === true/);
 });

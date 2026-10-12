@@ -3198,6 +3198,49 @@ input[type="radio"] {
   margin-top: 0.35rem;
 }
 
+.focus-topic-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.2rem 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  text-align: left;
+}
+
+.focus-topic-section-toggle:hover {
+  color: var(--brand-forest);
+}
+
+.focus-topic-section-toggle:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--brand-sage) 55%, transparent);
+  outline-offset: 3px;
+}
+
+.focus-topic-section-summary {
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.focus-topic-section-chevron {
+  margin-left: auto;
+  color: var(--brand-forest);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.focus-topic-panel-body {
+  display: grid;
+  gap: 1rem;
+}
+
 .focus-topic-details-grid {
   display: grid;
   grid-template-columns: minmax(0, 44rem);

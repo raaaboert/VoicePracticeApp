@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type {
   CustomerPracticeScenario,
   CustomerPracticeScenarioGeneratedDraft,
@@ -53,6 +53,44 @@ async function action<T>(body: Record<string, unknown>): Promise<T> {
   return fetchAdminApiJson<T>("/api/admin/focus-topic-management", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+}
+
+function FocusTopicWorkspaceSection({
+  headingId,
+  eyebrow,
+  title,
+  summary,
+  description,
+  defaultOpen = true,
+  children,
+}: {
+  headingId: string;
+  eyebrow: string;
+  title: string;
+  summary: string;
+  description: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const contentId = `${headingId}-content`;
+
+  return <section className="focus-topic-admin-panel" aria-labelledby={headingId}>
+    <div className="focus-topic-panel-heading">
+      <div>
+        <p className="eyebrow">{eyebrow}</p>
+        <h3 id={headingId}>
+          <button type="button" className="focus-topic-section-toggle" aria-expanded={open}
+            aria-controls={contentId} onClick={() => setOpen((current) => !current)}>
+            <span>{title}</span><span className="focus-topic-section-summary">{summary}</span>
+            <span className="focus-topic-section-chevron" aria-hidden="true">{open ? "⌃" : "⌄"}</span>
+          </button>
+        </h3>
+        <p className="muted-copy">{description}</p>
+      </div>
+    </div>
+    {open ? <div id={contentId} className="focus-topic-panel-body">{children}</div> : null}
+  </section>;
 }
 
 export function FocusTopicAdministration({
@@ -523,11 +561,10 @@ export function FocusTopicAdministration({
       </div> : null}
     </div> : null}
 
-    {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-assignments-heading">
-      <div className="focus-topic-panel-heading"><div><p className="eyebrow">Learner access</p>
-        <h3 id="focus-topic-assignments-heading">Learner assignments</h3>
-        <p className="muted-copy">Topic Managers can assign and revoke individual assignments for their current direct reports.</p>
-      </div></div>
+    {selected ? <FocusTopicWorkspaceSection headingId="focus-topic-assignments-heading" eyebrow="Learner access"
+      title="Learner assignments"
+      summary={`${learnerParts.activeAssignments.length} active · ${learnerParts.assignmentHistory.length} revoked`}
+      description="Topic Managers can assign and revoke individual assignments for their current direct reports.">
       <div className="focus-topic-assignment-composer">
         <div className={`focus-topic-assignment-fields${targeted ? " targeted" : ""}`}>
           <div className="focus-topic-field"><label htmlFor="focus-topic-audience">Audience</label>
@@ -561,14 +598,12 @@ export function FocusTopicAdministration({
           : <div className="focus-topic-assignment-list">
             {renderAssignments(learnerParts.assignmentHistory, { revoked: true })}</div>}
       </details>
-    </div> : null}
+    </FocusTopicWorkspaceSection> : null}
 
-    {selected && canManageAllTopics ? <div className="focus-topic-admin-panel"
-      aria-labelledby="focus-topic-managers-heading">
-      <div className="focus-topic-panel-heading"><div><p className="eyebrow">Scoped administration</p>
-        <h3 id="focus-topic-managers-heading">Topic managers</h3>
-        <p className="muted-copy">Grant management of this Topic to an eligible User Admin or current Manager. Learner access is assigned separately.</p>
-      </div></div>
+    {selected && canManageAllTopics ? <FocusTopicWorkspaceSection headingId="focus-topic-managers-heading"
+      eyebrow="Scoped administration" title="Topic managers"
+      summary={`${managerParts.activeAssignments.length} active · ${managerParts.assignmentHistory.length} revoked`}
+      description="Grant management of this Topic to an eligible User Admin or current Manager. Learner access is assigned separately.">
       <div className="focus-topic-assignment-composer">
         <div className="focus-topic-field"><label htmlFor="focus-topic-manager-subject">Responsible actor</label>
           <select className="text-input" id="focus-topic-manager-subject" value={managementSubjectUserId}
@@ -592,13 +627,14 @@ export function FocusTopicAdministration({
           : <div className="focus-topic-assignment-list">
             {renderAssignments(managerParts.assignmentHistory, { revoked: true, management: true })}</div>}
       </details>
-    </div> : null}
+    </FocusTopicWorkspaceSection> : null}
 
-    {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-practice-heading">
-      <div className="focus-topic-panel-heading"><div><p className="eyebrow">Practice Scenarios</p>
-        <h3 id="focus-topic-practice-heading">Practice Scenarios</h3>
-        <p className="muted-copy">Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version.</p>
-      </div></div>
+    {selected ? <FocusTopicWorkspaceSection headingId="focus-topic-practice-heading" eyebrow="Practice Scenarios"
+      title="Practice Scenarios"
+      summary={`${orderedPracticeScenarios.length} scenarios · ${practiceScenarios?.scenarios.filter((scenario) => scenario.status === "in_review").length ?? 0} awaiting review`}
+      description="Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version."
+      defaultOpen={practiceScenarios?.permissions.canAuthor === true
+        || practiceScenarios?.scenarios.some((scenario) => scenario.status === "in_review") === true}>
       {practiceScenarios && !practiceScenarios.permissions.creationEnabled
         ? <div className="notice" role="status">Customer Practice Scenario creation is not enabled for this organization. Existing scenarios remain visible.</div>
         : null}
@@ -740,13 +776,11 @@ export function FocusTopicAdministration({
               onClick={resetScenarioForm}>Cancel Revision</button> : null}
           </div>
         </div> : null}
-    </div> : null}
+    </FocusTopicWorkspaceSection> : null}
 
-    {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-related-heading">
-      <div className="focus-topic-panel-heading"><div><p className="eyebrow">Learning Resources</p>
-        <h3 id="focus-topic-related-heading">Related Content</h3>
-        <p className="muted-copy">Attach an existing organization resource or upload a new draft for this Topic.</p>
-      </div></div>
+    {selected ? <FocusTopicWorkspaceSection headingId="focus-topic-related-heading" eyebrow="Learning Resources"
+      title="Related Content" summary={`${attachedContent.length} attached · ${availableContent.length} available`}
+      description="Attach an existing organization resource or upload a new draft for this Topic.">
       {!learningResourcesEnabled || related?.permissions.learningResourcesEnabled === false
         ? <div className="notice" role="status">Learning Resources are not enabled for this organization. Related Content is read-only.</div>
         : null}
@@ -875,6 +909,6 @@ export function FocusTopicAdministration({
             {newSourceMode === "file" ? "Create Draft & Upload" : "Create Draft YouTube Resource"}
           </button>
         </div> : null}
-    </div> : null}
+    </FocusTopicWorkspaceSection> : null}
   </section>;
 }
