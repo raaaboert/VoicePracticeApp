@@ -178,6 +178,78 @@ test("real PostgreSQL fresh initialization preserves overlapping learner and man
     }
   });
 
+test("real PostgreSQL deadline retirement keeps historical dates inert and resolves only retired reminders",
+  { skip: !databaseUrl }, async () => {
+    assertThrowawayDatabase(databaseUrl);
+    const setup = new Pool({ connectionString: databaseUrl, max: 1 });
+    const schema = `focus_deadline_retirement_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let pool: Pool | null = null;
+    try {
+      await setup.query(`CREATE SCHEMA ${quotedSchema}`);
+      const url = scopedUrl(databaseUrl, schema);
+      pool = new Pool({ connectionString: url, max: 2 });
+      await pool.query(`CREATE TABLE org_content_items (org_id TEXT NOT NULL, id UUID NOT NULL,
+        PRIMARY KEY (org_id, id))`);
+      const initializeAuthority = () => createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool!,
+      }).initialize();
+      await initializeAuthority();
+      const notifications = createUserNotificationStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await notifications.initialize();
+      await pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at,due_date)
+        VALUES ('historical_due','org','topic','individual','learner',FALSE,'admin',$1,'2026-12-31')`, [NOW]);
+      await pool.query(`INSERT INTO user_notifications
+        (id,org_id,recipient_user_id,kind,subject_type,subject_id,dedup_key,payload,created_at)
+        VALUES
+          ('retired_7d','org','learner','topic_due_7d','focus_topic','topic','retired_7d','{}'::jsonb,$1),
+          ('retired_1d','org','learner','topic_due_1d','focus_topic','topic','retired_1d','{}'::jsonb,$1),
+          ('retired_overdue','org','learner','topic_overdue','focus_topic','topic','retired_overdue','{}'::jsonb,$1),
+          ('topic_assignment','org','learner','topic_assigned','focus_topic','topic','topic_assignment','{}'::jsonb,$1),
+          ('goal_update','org','learner','goal_updated','performance_goal','goal','goal_update','{}'::jsonb,$1)`, [NOW]);
+      await initializeAuthority();
+      const retired = await pool.query<{ id: string; resolution: string | null; resolved_at: string | null }>(
+        `SELECT id,resolution,resolved_at FROM user_notifications
+         WHERE id LIKE 'retired_%' ORDER BY id`,
+      );
+      assert.deepEqual(retired.rows.map(({ id, resolution }) => ({ id, resolution })), [
+        { id: "retired_1d", resolution: "retired_topic_deadline_reminder" },
+        { id: "retired_7d", resolution: "retired_topic_deadline_reminder" },
+        { id: "retired_overdue", resolution: "retired_topic_deadline_reminder" },
+      ]);
+      assert.ok(retired.rows.every((row) => row.resolved_at));
+      const unaffected = await pool.query<{ id: string; resolved_at: string | null }>(
+        `SELECT id,resolved_at FROM user_notifications WHERE id IN ('topic_assignment','goal_update') ORDER BY id`,
+      );
+      assert.deepEqual(unaffected.rows, [
+        { id: "goal_update", resolved_at: null },
+        { id: "topic_assignment", resolved_at: null },
+      ]);
+      const snapshot = await createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      }).listSnapshot("org");
+      assert.equal(Object.hasOwn(snapshot.assignments[0] ?? {}, "dueDate"), false);
+      assert.equal((await pool.query<{ due_date: string | null }>(
+        "SELECT due_date::text FROM focus_topic_assignments WHERE id='historical_due'",
+      )).rows[0]?.due_date, "2026-12-31");
+      const resolutionBeforeRetry = retired.rows.map((row) => row.resolved_at);
+      await initializeAuthority();
+      const resolutionAfterRetry = await pool.query<{ resolved_at: string | null }>(
+        `SELECT resolved_at FROM user_notifications WHERE id LIKE 'retired_%' ORDER BY id`,
+      );
+      assert.deepEqual(resolutionAfterRetry.rows.map((row) => row.resolved_at), resolutionBeforeRetry);
+    } finally {
+      await pool?.end();
+      await setup.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      await setup.end();
+    }
+  });
 function assertThrowawayDatabase(url: string): void {
   const parsed = new URL(url);
   const name = decodeURIComponent(parsed.pathname).replace(/^\/+/, "").toLowerCase();

@@ -344,6 +344,11 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const attachmentCountAfter = await pool.query<{ count: string }>(
         "SELECT COUNT(*)::text AS count FROM focus_topic_scenario_attachments");
       assert.equal(attachmentCountAfter.rows[0]?.count, attachmentCountBefore.rows[0]?.count);
+      const rejectedDueDate = await masterCall(assignmentsPath, "POST", {
+        audience: "individual", subjectUserId: secondReport.id, dueDate: "2026-12-31",
+      });
+      assert.equal(rejectedDueDate.status, 400, JSON.stringify(rejectedDueDate.body));
+      assert.equal(rejectedDueDate.body.error, "Focus Topic assignments do not support due dates.");
       const invalidSubject = await masterCall(assignmentsPath, "POST", {
         audience: "individual", subjectUserId: "foreign_user",
       });
@@ -524,6 +529,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         audience: "individual", subjectUserId: secondReport.id,
       });
       assert.equal(managerAssignedReport.status, 201, JSON.stringify(managerAssignedReport.body));
+      assert.equal(Object.hasOwn(managerAssignedReport.body, "dueDate"), false);
       assert.equal((await managerCall(
         `${assignmentsPath}/${managerAssignedReport.body.id as string}`, "DELETE",
       )).status, 200);

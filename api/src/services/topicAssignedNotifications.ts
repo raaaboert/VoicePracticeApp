@@ -7,7 +7,7 @@ import type { UserNotificationRecord } from "../storage/userNotificationStore.js
 import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
 
 export const TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE = "focus_topic";
-const FOCUS_TOPIC_NOTIFICATION_KINDS = new Set(["topic_assigned", "topic_due_7d", "topic_due_1d", "topic_overdue"]);
+const FOCUS_TOPIC_NOTIFICATION_KINDS = new Set(["topic_assigned"]);
 
 export function buildTopicAssignedNotificationInputs(params: {
   db: ApiDatabase;

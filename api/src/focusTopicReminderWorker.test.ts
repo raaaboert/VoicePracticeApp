@@ -1,30 +1,41 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import test from "node:test";
 
-import { runFocusTopicReminderWorkerSweep } from "./focusTopicReminderWorkerBootstrap.js";
-import { createMemoryUserNotificationStoreForTest } from "./storage/userNotificationStore.js";
+import { runRetiredFocusTopicReminderShim } from "./focusTopicReminderShim.js";
 
-test("Focus Topic reminder executable uses the side-effect-free worker bootstrap", async () => {
+test("retired Focus Topic reminder executable is a side-effect-free compatibility shim", async () => {
   const source = await readFile(new URL("./focusTopicReminderWorker.ts", import.meta.url), "utf8");
-  assert.match(source, /focusTopicReminderWorkerBootstrap/);
+  assert.match(source, /runRetiredFocusTopicReminderShim/);
   assert.doesNotMatch(source, /from "\.\/index\.js"/);
+  assert.doesNotMatch(source, /runtimeConfig/);
+  assert.doesNotMatch(source, /storage\//);
   assert.doesNotMatch(source, /startApiServer/);
 });
 
-test("Focus Topic reminder worker completes one sweep without starting an API listener", async () => {
-  let initialized = 0;
-  let asserted = 0;
-  const result = await runFocusTopicReminderWorkerSweep({
-    authority: {
-      async initialize() { initialized += 1; },
-      async assertAssignmentsReady() { asserted += 1; },
-      async listSnapshot() { return { assignments: [], scenarioAttachments: [], contentAttachments: [] }; },
-    } as any,
-    notifications: createMemoryUserNotificationStoreForTest(),
-    async loadDatabase() { return { orgs: [], orgTrainings: [], users: [] } as any; },
+test("retired Focus Topic reminder command exits successfully without configuration or database work", async () => {
+  const messages: string[] = [];
+  assert.deepEqual(runRetiredFocusTopicReminderShim((message) => messages.push(message)), {
+    considered: 0, inserted: 0,
   });
-  assert.deepEqual(result, { considered: 0, inserted: 0 });
-  assert.equal(initialized, 1);
-  assert.equal(asserted, 1);
+  assert.deepEqual(messages, ["[focus-topic-reminders] retired; no action taken"]);
+
+  const apiRoot = path.dirname(fileURLToPath(new URL(".", import.meta.url)));
+  const child = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
+    const childProcess = spawn(process.execPath, ["--import", "tsx", "src/focusTopicReminderWorker.ts"], {
+      cwd: apiRoot,
+      env: {},
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    childProcess.stdout.on("data", (chunk) => { output += chunk; });
+    childProcess.stderr.on("data", (chunk) => { output += chunk; });
+    childProcess.once("error", reject);
+    childProcess.once("close", (code) => resolve({ code, output }));
+  });
+  assert.equal(child.code, 0, child.output);
+  assert.match(child.output, /retired; no action taken/);
 });

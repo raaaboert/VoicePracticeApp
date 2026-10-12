@@ -23,7 +23,6 @@ export interface FocusTopicAssignment {
   audience: FocusTopicAssignmentAudience;
   subjectUserId: string | null;
   grantsManagement: boolean;
-  dueDate?: string | null;
   createdBy: string;
   createdAt: string;
   revokedBy: string | null;

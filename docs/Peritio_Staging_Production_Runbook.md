@@ -27,9 +27,11 @@ Last updated: 2026-07-13
 
 Production API deploys are manual only. Do not enable production auto-deploy. Do not deploy production unless the operator explicitly asks for a production deploy and the production verification checklist below is complete.
 
-## Focus Topic reminder schedule
+## Retired Focus Topic reminder schedule
 
-Run `npm run run:focus-topic-reminders --workspace @voicepractice/api` once per hour in a separate one-shot scheduler using the same PostgreSQL and `FOCUS_TOPIC_AUTHORITY=assignments` configuration as the API. The worker does not start the API server and exits after one sweep. Milestones are eligible at 08:00 in each learner's effective timezone; a later hourly sweep catches up a missed run while the assignment remains applicable. Durable notification deduplication permits each assignment, milestone, due date, and recipient combination only once.
+Focus Topic assignments have no due dates, and Focus Topic deadline reminders are retired. Disable or delete any external scheduler that invokes `npm run run:focus-topic-reminders --workspace @voicepractice/api`.
+
+The command remains temporarily as a credential-free, side-effect-free compatibility shim so a scheduler that has not yet been removed exits successfully without starting the API, connecting to PostgreSQL, or creating notifications. Remove the shim only after external scheduler cleanup is confirmed.
 
 ## Branch / Release Strategy
 

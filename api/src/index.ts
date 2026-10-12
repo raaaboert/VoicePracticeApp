@@ -17580,6 +17580,10 @@ app.post(
     }
     const grantsManagement = response.locals.focusTopicGrantsManagement === true;
     const body = request.body as { audience?: unknown; subjectUserId?: unknown; dueDate?: unknown };
+    if (Object.hasOwn(body, "dueDate")) {
+      response.status(400).json({ error: "Focus Topic assignments do not support due dates." });
+      return;
+    }
     if (!FOCUS_TOPIC_ASSIGNMENT_AUDIENCES.includes(body.audience as FocusTopicAssignmentAudience)) {
       response.status(400).json({ error: "Invalid Focus Topic audience." });
       return;
@@ -17587,11 +17591,6 @@ app.post(
     const audience = body.audience as FocusTopicAssignmentAudience;
     const targeted = audience === "manager_only" || audience === "manager_with_team" || audience === "individual";
     const subjectUserId = typeof body.subjectUserId === "string" ? body.subjectUserId.trim() : null;
-    const dueDate = typeof body.dueDate === "string" && body.dueDate.trim() ? body.dueDate.trim() : null;
-    if (dueDate && !isDateKey(dueDate)) {
-      response.status(400).json({ error: "Due date must use YYYY-MM-DD format." });
-      return;
-    }
     if (targeted !== Boolean(subjectUserId)) {
       response.status(400).json({ error: "Audience subject is invalid." });
       return;
@@ -17643,7 +17642,7 @@ app.post(
       const createdAt = new Date();
       const assignment: FocusTopicAssignment = {
         id: `fta_${uuid()}`, orgId: org.id, topicId: topic.id, audience, subjectUserId,
-        grantsManagement, dueDate: grantsManagement ? null : dueDate, createdBy: actorId, createdAt: createdAt.toISOString(),
+        grantsManagement, createdBy: actorId, createdAt: createdAt.toISOString(),
         revokedBy: null, revokedAt: null,
       };
       const authorityBefore = grantsManagement
@@ -17666,7 +17665,7 @@ app.post(
         message: grantsManagement
           ? `Created Focus Topic management grant for ${topic.name}.`
           : `Created Focus Topic learner assignment for ${topic.name}.`,
-        metadata: { topicId: topic.id, assignmentId: assignment.id, audience, subjectUserId, grantsManagement, dueDate: assignment.dueDate },
+        metadata: { topicId: topic.id, assignmentId: assignment.id, audience, subjectUserId, grantsManagement },
       };
       if (request.dashboard) appendWebAuditEvent(db, request.dashboard.user, audit);
       else appendPlatformAuditEvent(db, audit);
