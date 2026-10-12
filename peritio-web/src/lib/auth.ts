@@ -781,11 +781,27 @@ export async function decideDashboardAdminAccessRequest(
   );
 }
 
-export async function getDashboardNotifications(limit = 20, offset = 0): Promise<DashboardNotificationsResponse> {
+export async function getDashboardNotifications(limit = 20, offset = 0, includeDismissed = false): Promise<DashboardNotificationsResponse> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return await fetchDashboardApi<DashboardNotificationsResponse>(
-    `/dashboard/notifications?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+    `/dashboard/notifications?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${includeDismissed ? "&view=all" : ""}`,
     { token },
+  );
+}
+
+export async function dismissDashboardNotification(notificationId: string): Promise<DashboardNotificationMutationResponse> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<DashboardNotificationMutationResponse>(
+    `/dashboard/notifications/${encodeURIComponent(notificationId)}/dismiss`,
+    { method: "PATCH", token },
+  );
+}
+
+export async function markAllDashboardNotificationsRead(): Promise<{ ok: true; markedCount: number }> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return await fetchDashboardApi<{ ok: true; markedCount: number }>(
+    "/dashboard/notifications/mark-all-read",
+    { method: "PATCH", token },
   );
 }
 

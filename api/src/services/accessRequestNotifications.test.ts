@@ -6,7 +6,9 @@ import { createMemoryUserNotificationStoreForTest } from "../storage/userNotific
 import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
 import {
   buildAccessRequestNotificationInputs,
+  dismissAuthorizedDashboardNotification,
   listAuthorizedDashboardNotifications,
+  markAllAuthorizedDashboardNotificationsRead,
   markAuthorizedDashboardNotificationRead,
   resolveAccessRequestNotifications,
 } from "./accessRequestNotifications.js";
@@ -212,6 +214,30 @@ test("cross-user notification lookup is denied and an authorized open marks read
   });
   assert.ok(opened?.readAt);
   assert.equal(opened?.resolvedAt, null);
+});
+
+test("dismissal and mark-all preserve authorized history while revoked access stays hidden", async () => {
+  const adminA = user("admin_a", { orgRole: "org_admin" });
+  const adminB = user("admin_b", { orgRole: "user_admin" });
+  const source = db([adminA, adminB], [request({ id: "request_1" }), request({ id: "request_2" })]);
+  const store = createMemoryUserNotificationStoreForTest();
+  for (const row of source.enterpriseJoinRequests) await store.enqueueMany(buildAccessRequestNotificationInputs({ db: source, request: row }));
+  const before = await listAuthorizedDashboardNotifications({ db: source, recipient: adminA, store, limit: 20 });
+  assert.equal(before.unreadCount, 2);
+  assert.equal(await dismissAuthorizedDashboardNotification({ db: source, recipient: adminB, store, notificationId: before.notifications[0]!.id }), null);
+  const dismissed = await dismissAuthorizedDashboardNotification({ db: source, recipient: adminA, store, notificationId: before.notifications[0]!.id });
+  assert.ok(dismissed?.dismissedAt);
+  const active = await listAuthorizedDashboardNotifications({ db: source, recipient: adminA, store, limit: 20 });
+  assert.equal(active.notifications.length, 1);
+  assert.equal(active.unreadCount, 1);
+  const history = await listAuthorizedDashboardNotifications({ db: source, recipient: adminA, store, limit: 20, includeDismissed: true });
+  assert.equal(history.notifications.length, 2);
+  assert.equal(history.notifications.some((row) => row.dismissedAt !== null), true);
+  assert.equal(await markAllAuthorizedDashboardNotificationsRead({ db: source, recipient: adminA, store }), 1);
+  assert.equal(await markAllAuthorizedDashboardNotificationsRead({ db: source, recipient: adminA, store }), 0);
+  assert.equal((await listAuthorizedDashboardNotifications({ db: source, recipient: adminA, store, limit: 20 })).unreadCount, 0);
+  const revoked = user("admin_a", { orgRole: "user" });
+  assert.equal((await listAuthorizedDashboardNotifications({ db: source, recipient: revoked, store, limit: 20, includeDismissed: true })).notifications.length, 0);
 });
 
 test("request completion resolves every recipient row while retaining inbox history", async () => {

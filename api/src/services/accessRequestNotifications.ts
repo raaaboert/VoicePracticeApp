@@ -128,6 +128,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   performancePlanStore?: PerformancePlanStore;
   limit: number;
   offset?: number;
+  includeDismissed?: boolean;
 }): Promise<DashboardNotificationsResponse> {
   const limit = Math.min(Math.max(Math.trunc(params.limit), 1), 50);
   const offset = params.offset ?? 0;
@@ -136,6 +137,7 @@ export async function listAuthorizedDashboardNotifications(params: {
     recipientUserId: params.recipient.id,
     limit: queryLimit,
     offset,
+    includeDismissed: params.includeDismissed === true,
   });
   const visible: UserNotificationRecord[] = [];
   const hiddenIds: string[] = [];
@@ -349,6 +351,60 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   return updated ? toDashboardRow(updated) : null;
 }
 
+export async function dismissAuthorizedDashboardNotification(params: {
+  db: ApiDatabase;
+  recipient: UserProfile;
+  store: UserNotificationStore;
+  topicAuthority?: FocusTopicAuthoritySnapshot | null;
+  topicAuthorityMode?: "legacy" | "assignments";
+  practiceScenarios?: readonly CustomerPracticeScenario[];
+  performancePlanStore?: PerformancePlanStore;
+  notificationId: string;
+  dismissedAt?: Date;
+}): Promise<DashboardNotificationRow | null> {
+  const notification = await markAuthorizedDashboardNotificationRead({
+    ...params,
+    readAt: params.dismissedAt,
+  });
+  if (!notification) return null;
+  const dismissed = await params.store.dismiss({
+    id: params.notificationId,
+    recipientUserId: params.recipient.id,
+    dismissedAt: params.dismissedAt,
+  });
+  return dismissed ? toDashboardRow(dismissed) : null;
+}
+
+export async function markAllAuthorizedDashboardNotificationsRead(params: {
+  db: ApiDatabase;
+  recipient: UserProfile;
+  store: UserNotificationStore;
+  topicAuthority?: FocusTopicAuthoritySnapshot | null;
+  topicAuthorityMode?: "legacy" | "assignments";
+  practiceScenarios?: readonly CustomerPracticeScenario[];
+  performancePlanStore?: PerformancePlanStore;
+  readAt?: Date;
+}): Promise<number> {
+  const unreadIds: string[] = [];
+  let offset = 0;
+  do {
+    const page = await listAuthorizedDashboardNotifications({
+      ...params,
+      limit: 50,
+      offset,
+      includeDismissed: false,
+    });
+    unreadIds.push(...page.notifications.filter((notification) => notification.readAt === null).map((notification) => notification.id));
+    if (!page.hasMore || page.nextOffset === null || page.nextOffset <= offset) break;
+    offset = page.nextOffset;
+  } while (offset <= 10_000);
+  return await params.store.markReadIds({
+    ids: unreadIds,
+    recipientUserId: params.recipient.id,
+    readAt: params.readAt,
+  });
+}
+
 function toDashboardRow(notification: UserNotificationRecord): DashboardNotificationRow {
   if (notification.kind !== "access_request"
     && notification.kind !== "topic_assigned"
@@ -368,6 +424,7 @@ function toDashboardRow(notification: UserNotificationRecord): DashboardNotifica
     payload: { ...notification.payload },
     createdAt: notification.createdAt,
     readAt: notification.readAt,
+    dismissedAt: notification.dismissedAt ?? null,
     resolvedAt: notification.resolvedAt,
     resolution: notification.resolution,
   };

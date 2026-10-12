@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { assertDashboardAuthConfig, getDashboardNotifications, markDashboardNotificationRead } from "@/src/lib/auth";
+import { assertDashboardAuthConfig, dismissDashboardNotification, getDashboardNotifications, markAllDashboardNotificationsRead, markDashboardNotificationRead } from "@/src/lib/auth";
 import { handleNotificationMarkRead } from "@/src/lib/notificationProxyHandlers";
 
 export async function PATCH(
@@ -12,5 +12,7 @@ export async function PATCH(
   return handleNotificationMarkRead(request, notificationId, {
     list: getDashboardNotifications,
     markRead: markDashboardNotificationRead,
+    dismiss: dismissDashboardNotification,
+    markAllRead: markAllDashboardNotificationsRead,
   });
 }

@@ -437,7 +437,9 @@ import type { PostCommitEffect } from "./services/postCommitEffects.js";
 import { commitAuthoritativeAppState } from "./services/authoritativeAppStateCommit.js";
 import {
   buildAccessRequestNotificationInputs,
+  dismissAuthorizedDashboardNotification,
   listAuthorizedDashboardNotifications,
+  markAllAuthorizedDashboardNotificationsRead,
   markAuthorizedDashboardNotificationRead,
   resolveAccessRequestNotifications,
 } from "./services/accessRequestNotifications.js";
@@ -14539,6 +14541,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
 app.get("/dashboard/notifications", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
   const rawLimit = getSingleQueryParam(request.query.limit);
   const rawOffset = getSingleQueryParam(request.query.offset);
+  const rawView = getSingleQueryParam(request.query.view);
   const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 20;
   const parsedOffset = rawOffset ? Number.parseInt(rawOffset, 10) : 0;
   if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 50) {
@@ -14547,6 +14550,10 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
   }
   if (!Number.isInteger(parsedOffset) || parsedOffset < 0 || parsedOffset > 10_000) {
     response.status(400).json({ error: "offset must be an integer from 0 to 10000." });
+    return;
+  }
+  if (rawView && rawView !== "all") {
+    response.status(400).json({ error: "view must be all when provided." });
     return;
   }
   await withFreshDatabaseRead(async (db) => {
@@ -14567,8 +14574,31 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
       performancePlanStore,
       limit: parsedLimit,
       offset: parsedOffset,
+      includeDismissed: rawView === "all",
     });
     response.json(payload);
+  });
+});
+
+app.patch("/dashboard/notifications/mark-all-read", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshDatabaseRead(async (db) => {
+    const recipient = getUserById(db, request.dashboard!.user.id);
+    if (!recipient) {
+      response.status(404).json({ error: "Notifications not found." });
+      return;
+    }
+    const markedCount = await markAllAuthorizedDashboardNotificationsRead({
+      db,
+      recipient,
+      store: userNotificationStore,
+      topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
+        ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
+      topicAuthorityMode: runtimeConfig.focusTopicAuthority,
+      practiceScenarios: recipient.orgId
+        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+      performancePlanStore,
+    });
+    response.json({ ok: true, markedCount });
   });
 });
 
@@ -14603,6 +14633,34 @@ app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth,
       return;
     }
     const notification = await markAuthorizedDashboardNotificationRead({
+      db,
+      recipient,
+      store: userNotificationStore,
+      topicAuthority: runtimeConfig.focusTopicAuthority === "assignments" && recipient.orgId
+        ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
+      topicAuthorityMode: runtimeConfig.focusTopicAuthority,
+      practiceScenarios: recipient.orgId
+        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+      performancePlanStore,
+      notificationId: request.params.notificationId,
+    });
+    if (!notification) {
+      response.status(404).json({ error: "Notification not found." });
+      return;
+    }
+    const payload: DashboardNotificationMutationResponse = { ok: true, notification };
+    response.json(payload);
+  });
+});
+
+app.patch("/dashboard/notifications/:notificationId/dismiss", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {
+  await withFreshDatabaseRead(async (db) => {
+    const recipient = getUserById(db, request.dashboard!.user.id);
+    if (!recipient) {
+      response.status(404).json({ error: "Notification not found." });
+      return;
+    }
+    const notification = await dismissAuthorizedDashboardNotification({
       db,
       recipient,
       store: userNotificationStore,

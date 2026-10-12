@@ -3743,3 +3743,104 @@ input[type="radio"] {
     flex: 1 1 10rem;
   }
 }
+
+.notification-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.notification-action {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.notification-action:disabled,
+.notification-dismiss:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.notification-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  padding: 0;
+  overflow: hidden;
+}
+
+.notification-row-open {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.85rem 0.35rem 0.85rem 0.85rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notification-dismiss {
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  margin: 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.notification-dismiss:hover,
+.notification-dismiss:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--surface-accent);
+  color: var(--text);
+}
+
+.notification-row-open:focus-visible,
+.notification-dismiss:focus-visible,
+.notification-history-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.notification-history-link {
+  display: inline-block;
+  margin-top: 0.85rem;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.notification-history {
+  display: grid;
+  gap: 1rem;
+  max-width: 50rem;
+}
+
+.notification-history-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.notification-history-row {
+  display: grid;
+  gap: 0.3rem;
+  width: 100%;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-muted);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.notification-history-row.is-unread { box-shadow: inset 3px 0 0 var(--accent); }
+.notification-history-row.is-dismissed { opacity: 0.72; }

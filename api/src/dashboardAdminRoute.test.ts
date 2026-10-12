@@ -5244,6 +5244,12 @@ test("company-code join requests accept Gmail, are duplicate-safe, and still req
     { method: "PATCH" },
   );
   assert.equal(crossUserRead.status, 404);
+  const crossUserDismiss = await dashboardRequest(
+    `/dashboard/notifications/${encodeURIComponent(orgAdminNotification.id)}/dismiss`,
+    userAdminToken,
+    { method: "PATCH" },
+  );
+  assert.equal(crossUserDismiss.status, 404);
   const ownRead = await dashboardRequest(
     `/dashboard/notifications/${encodeURIComponent(orgAdminNotification.id)}/read`,
     orgAdminToken,
@@ -5251,6 +5257,19 @@ test("company-code join requests accept Gmail, are duplicate-safe, and still req
   );
   assert.equal(ownRead.status, 200);
   assert.equal((ownRead.body.notification as { readAt: string | null }).readAt !== null, true);
+  const ownDismiss = await dashboardRequest(
+    `/dashboard/notifications/${encodeURIComponent(orgAdminNotification.id)}/dismiss`,
+    orgAdminToken,
+    { method: "PATCH" },
+  );
+  assert.equal(ownDismiss.status, 200);
+  assert.equal((ownDismiss.body.notification as { dismissedAt: string | null }).dismissedAt !== null, true);
+  assert.equal(((await dashboardRequest("/dashboard/notifications", orgAdminToken)).body.notifications as Array<{ id: string }>).some(
+    (notification) => notification.id === orgAdminNotification.id,
+  ), false);
+  assert.equal(((await dashboardRequest("/dashboard/notifications?view=all", orgAdminToken)).body.notifications as Array<{ id: string }>).some(
+    (notification) => notification.id === orgAdminNotification.id,
+  ), true);
   assert.equal((await dashboardRequest("/dashboard/notifications/unread-count", orgAdminToken)).body.unreadCount, 0);
 
   const db = await readDb();

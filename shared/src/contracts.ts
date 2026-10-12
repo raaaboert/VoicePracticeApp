@@ -2842,6 +2842,7 @@ export interface DashboardNotificationRow {
   payload: UserNotificationPayload;
   createdAt: string;
   readAt: string | null;
+  dismissedAt: string | null;
   resolvedAt: string | null;
   resolution: string | null;
 }
@@ -2861,6 +2862,11 @@ export interface DashboardNotificationUnreadCountResponse {
 export interface DashboardNotificationMutationResponse {
   ok: true;
   notification: DashboardNotificationRow;
+}
+
+export interface DashboardNotificationMarkAllReadResponse {
+  ok: true;
+  markedCount: number;
 }
 
 export interface RecordUsageSessionRequest {

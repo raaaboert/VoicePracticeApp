@@ -27,6 +27,12 @@ test("notification migration defines durable recipient rows and recipient-scoped
   assert.match(sql, /payload JSONB NOT NULL DEFAULT '\{\}'::jsonb/i);
 });
 
+test("inbox-controls migration adds a repeatable dismissal field and active-inbox index", async () => {
+  const sql = await readFile(new URL("../../sql/023_user_notification_inbox_controls.sql", import.meta.url), "utf8");
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS dismissed_at/i);
+  assert.match(sql, /WHERE dismissed_at IS NULL/i);
+});
+
 test("recipient dedup is idempotent while the same semantic key is allowed for another recipient", async () => {
   const store = createMemoryUserNotificationStoreForTest();
   assert.equal((await store.enqueueMany([input("admin_a", "access-request:1"), input("admin_a", "access-request:1")])).length, 1);
@@ -64,11 +70,35 @@ test("read and resolved state remain distinct and resolved rows stop actionable 
   assert.equal((await store.listForRecipient({ recipientUserId: "admin_a", limit: 10 })).length, 2);
 });
 
+test("dismiss clears unread state, hides only the active inbox row, and remains idempotent in history", async () => {
+  const store = createMemoryUserNotificationStoreForTest();
+  await store.enqueueMany([input("admin_a", "one"), input("admin_a", "two")]);
+  const dismissed = await store.dismiss({ id: "notification_admin_a_one", recipientUserId: "admin_a", dismissedAt: new Date("2026-10-07T00:00:00Z") });
+  assert.ok(dismissed?.readAt);
+  assert.ok(dismissed?.dismissedAt);
+  assert.equal(await store.countActionableUnread({ recipientUserId: "admin_a", orgId: "org_1", kinds: ["access_request"] }), 1);
+  assert.deepEqual((await store.listForRecipient({ recipientUserId: "admin_a", limit: 10 })).map((row) => row.dedupKey), ["two"]);
+  const history = await store.listForRecipient({ recipientUserId: "admin_a", limit: 10, includeDismissed: true });
+  assert.equal(history.length, 2);
+  const retried = await store.dismiss({ id: "notification_admin_a_one", recipientUserId: "admin_a", dismissedAt: new Date("2026-10-08T00:00:00Z") });
+  assert.equal(retried?.dismissedAt, dismissed?.dismissedAt);
+});
+
+test("mark-read-many is recipient-scoped and safe to repeat", async () => {
+  const store = createMemoryUserNotificationStoreForTest();
+  await store.enqueueMany([input("admin_a", "one"), input("admin_a", "two"), input("admin_b", "three")]);
+  assert.equal(await store.markReadIds({ ids: ["notification_admin_a_one", "notification_admin_a_two", "notification_admin_b_three"], recipientUserId: "admin_a" }), 2);
+  assert.equal(await store.markReadIds({ ids: ["notification_admin_a_one", "notification_admin_a_two"], recipientUserId: "admin_a" }), 0);
+  assert.equal(await store.countActionableUnread({ recipientUserId: "admin_a", orgId: "org_1", kinds: ["access_request"] }), 0);
+  assert.equal(await store.countActionableUnread({ recipientUserId: "admin_b", orgId: "org_1", kinds: ["access_request"] }), 1);
+});
+
 test("unknown recipients and cross-recipient mutations are non-disclosing", async () => {
   const store = createMemoryUserNotificationStoreForTest();
   await store.enqueueOne(input("admin_a", "one"));
   assert.equal(await store.getForRecipient({ id: "notification_admin_a_one", recipientUserId: "unknown" }), null);
   assert.equal(await store.markRead({ id: "notification_admin_a_one", recipientUserId: "admin_b" }), null);
+  assert.equal(await store.dismiss({ id: "notification_admin_a_one", recipientUserId: "admin_b" }), null);
   assert.equal(await store.resolveOne({ id: "notification_admin_a_one", recipientUserId: "admin_b", resolution: "dismissed" }), null);
 });
 

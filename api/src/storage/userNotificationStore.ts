@@ -17,6 +17,7 @@ export interface UserNotificationRecord {
   payload: UserNotificationPayload;
   createdAt: string;
   readAt: string | null;
+  dismissedAt?: string | null;
   resolvedAt: string | null;
   resolution: string | null;
 }
@@ -43,7 +44,7 @@ export interface UserNotificationStore {
     inputs: readonly EnqueueUserNotificationInput[],
     options?: { client?: NotificationTransactionClient | null },
   ): Promise<UserNotificationRecord[]>;
-  listForRecipient(input: { recipientUserId: string; limit: number; offset?: number }): Promise<UserNotificationRecord[]>;
+  listForRecipient(input: { recipientUserId: string; limit: number; offset?: number; includeDismissed?: boolean }): Promise<UserNotificationRecord[]>;
   countActionableUnread(input: {
     recipientUserId: string;
     orgId: string;
@@ -53,6 +54,8 @@ export interface UserNotificationStore {
   }): Promise<number>;
   getForRecipient(input: { id: string; recipientUserId: string }): Promise<UserNotificationRecord | null>;
   markRead(input: { id: string; recipientUserId: string; readAt?: Date }): Promise<UserNotificationRecord | null>;
+  markReadIds(input: { ids: readonly string[]; recipientUserId: string; readAt?: Date }): Promise<number>;
+  dismiss(input: { id: string; recipientUserId: string; dismissedAt?: Date }): Promise<UserNotificationRecord | null>;
   resolveOne(input: { id: string; recipientUserId: string; resolution: string; resolvedAt?: Date }): Promise<UserNotificationRecord | null>;
   resolveIds(input: { ids: readonly string[]; resolution: string; resolvedAt?: Date }): Promise<number>;
   resolveMatching(input: {
@@ -79,6 +82,7 @@ interface NotificationRow {
   payload: unknown;
   created_at: Date | string;
   read_at: Date | string | null;
+  dismissed_at: Date | string | null;
   resolved_at: Date | string | null;
   resolution: string | null;
 }
@@ -86,7 +90,7 @@ interface NotificationRow {
 const KIND_SET = new Set<string>(USER_NOTIFICATION_KINDS);
 const SELECT_COLUMNS = `
   id, org_id, recipient_user_id, kind, subject_type, subject_id, dedup_key,
-  payload, created_at, read_at, resolved_at, resolution`;
+  payload, created_at, read_at, dismissed_at, resolved_at, resolution`;
 
 class MemoryUserNotificationStore implements UserNotificationStore {
   private readonly rows = new Map<string, UserNotificationRecord>();
@@ -107,6 +111,7 @@ class MemoryUserNotificationStore implements UserNotificationStore {
       const record: UserNotificationRecord = {
         ...normalized,
         readAt: null,
+        dismissedAt: null,
         resolvedAt: null,
         resolution: null,
       };
@@ -117,11 +122,12 @@ class MemoryUserNotificationStore implements UserNotificationStore {
     return inserted;
   }
 
-  async listForRecipient(input: { recipientUserId: string; limit: number; offset?: number }): Promise<UserNotificationRecord[]> {
+  async listForRecipient(input: { recipientUserId: string; limit: number; offset?: number; includeDismissed?: boolean }): Promise<UserNotificationRecord[]> {
     const recipientUserId = requiredText(input.recipientUserId, "Recipient user id");
     const limit = normalizeLimit(input.limit);
     return [...this.rows.values()]
       .filter((row) => row.recipientUserId === recipientUserId)
+      .filter((row) => input.includeDismissed || row.dismissedAt == null)
       .sort(compareNewestFirst)
       .slice(normalizeOffset(input.offset), normalizeOffset(input.offset) + limit)
       .map(cloneRecord);
@@ -143,6 +149,7 @@ class MemoryUserNotificationStore implements UserNotificationStore {
       && (!input.subjectType || row.subjectType === input.subjectType)
       && (!subjectIds || subjectIds.has(row.subjectId))
       && row.readAt === null
+      && row.dismissedAt === null
       && row.resolvedAt === null
     ).length;
   }
@@ -156,6 +163,27 @@ class MemoryUserNotificationStore implements UserNotificationStore {
     const row = this.rows.get(input.id);
     if (!row || row.recipientUserId !== input.recipientUserId) return null;
     row.readAt ??= validDate(input.readAt ?? new Date(), "Read timestamp").toISOString();
+    return cloneRecord(row);
+  }
+
+  async markReadIds(input: { ids: readonly string[]; recipientUserId: string; readAt?: Date }): Promise<number> {
+    const ids = new Set(input.ids.map((id) => requiredText(id, "Notification id")));
+    const at = validDate(input.readAt ?? new Date(), "Read timestamp").toISOString();
+    let count = 0;
+    for (const row of this.rows.values()) {
+      if (row.recipientUserId !== input.recipientUserId || !ids.has(row.id) || row.readAt) continue;
+      row.readAt = at;
+      count += 1;
+    }
+    return count;
+  }
+
+  async dismiss(input: { id: string; recipientUserId: string; dismissedAt?: Date }): Promise<UserNotificationRecord | null> {
+    const row = this.rows.get(input.id);
+    if (!row || row.recipientUserId !== input.recipientUserId) return null;
+    const at = validDate(input.dismissedAt ?? new Date(), "Dismissal timestamp").toISOString();
+    row.readAt ??= at;
+    row.dismissedAt ??= at;
     return cloneRecord(row);
   }
 
@@ -235,14 +263,15 @@ class PostgresUserNotificationStore implements UserNotificationStore {
     return inserted;
   }
 
-  async listForRecipient(input: { recipientUserId: string; limit: number; offset?: number }): Promise<UserNotificationRecord[]> {
+  async listForRecipient(input: { recipientUserId: string; limit: number; offset?: number; includeDismissed?: boolean }): Promise<UserNotificationRecord[]> {
     const result = await this.pool.query<NotificationRow>(
       `SELECT ${SELECT_COLUMNS}
        FROM user_notifications
-       WHERE recipient_user_id = $1
+       WHERE recipient_user_id = $1 AND ($2::boolean OR dismissed_at IS NULL)
        ORDER BY created_at DESC, id DESC
-       LIMIT $2 OFFSET $3`,
-      [requiredText(input.recipientUserId, "Recipient user id"), normalizeLimit(input.limit), normalizeOffset(input.offset)],
+       LIMIT $3 OFFSET $4`,
+      [requiredText(input.recipientUserId, "Recipient user id"), input.includeDismissed === true,
+        normalizeLimit(input.limit), normalizeOffset(input.offset)],
     );
     return result.rows.map(mapRow);
   }
@@ -261,7 +290,7 @@ class PostgresUserNotificationStore implements UserNotificationStore {
        WHERE recipient_user_id = $1 AND org_id = $2 AND kind = ANY($3::text[])
          AND ($4::text IS NULL OR subject_type = $4)
          AND ($5::text[] IS NULL OR subject_id = ANY($5::text[]))
-         AND read_at IS NULL AND resolved_at IS NULL`,
+         AND read_at IS NULL AND dismissed_at IS NULL AND resolved_at IS NULL`,
       [
         requiredText(input.recipientUserId, "Recipient user id"),
         requiredText(input.orgId, "Organization id"),
@@ -287,6 +316,29 @@ class PostgresUserNotificationStore implements UserNotificationStore {
        WHERE id = $1 AND recipient_user_id = $2 RETURNING ${SELECT_COLUMNS}`,
       [requiredText(input.id, "Notification id"), requiredText(input.recipientUserId, "Recipient user id"),
         validDate(input.readAt ?? new Date(), "Read timestamp")],
+    );
+    return result.rows[0] ? mapRow(result.rows[0]) : null;
+  }
+
+  async markReadIds(input: { ids: readonly string[]; recipientUserId: string; readAt?: Date }): Promise<number> {
+    if (input.ids.length === 0) return 0;
+    const result = await this.pool.query(
+      `UPDATE user_notifications SET read_at = COALESCE(read_at, $3::timestamptz)
+       WHERE id = ANY($1::text[]) AND recipient_user_id = $2 AND read_at IS NULL`,
+      [input.ids.map((id) => requiredText(id, "Notification id")),
+        requiredText(input.recipientUserId, "Recipient user id"), validDate(input.readAt ?? new Date(), "Read timestamp")],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async dismiss(input: { id: string; recipientUserId: string; dismissedAt?: Date }): Promise<UserNotificationRecord | null> {
+    const result = await this.pool.query<NotificationRow>(
+      `UPDATE user_notifications
+       SET read_at = COALESCE(read_at, $3::timestamptz),
+           dismissed_at = COALESCE(dismissed_at, $3::timestamptz)
+       WHERE id = $1 AND recipient_user_id = $2 RETURNING ${SELECT_COLUMNS}`,
+      [requiredText(input.id, "Notification id"), requiredText(input.recipientUserId, "Recipient user id"),
+        validDate(input.dismissedAt ?? new Date(), "Dismissal timestamp")],
     );
     return result.rows[0] ? mapRow(result.rows[0]) : null;
   }
@@ -382,6 +434,7 @@ function mapRow(row: NotificationRow): UserNotificationRecord {
     payload: normalizePayload(row.payload && typeof row.payload === "object" ? row.payload as UserNotificationPayload : {}),
     createdAt: iso(row.created_at, "Notification creation timestamp"),
     readAt: row.read_at ? iso(row.read_at, "Notification read timestamp") : null,
+    dismissedAt: row.dismissed_at ? iso(row.dismissed_at, "Notification dismissal timestamp") : null,
     resolvedAt: row.resolved_at ? iso(row.resolved_at, "Notification resolution timestamp") : null,
     resolution: row.resolution,
   };
@@ -437,25 +490,28 @@ function normalizeOffset(value: number | undefined): number {
   return value;
 }
 
-async function readMigration(): Promise<string> {
+async function readMigration(filename: string): Promise<string> {
   const candidates = [
-    new URL("../../sql/016_user_notifications.sql", import.meta.url),
-    new URL("../sql/016_user_notifications.sql", import.meta.url),
+    new URL(`../../sql/${filename}`, import.meta.url),
+    new URL(`../sql/${filename}`, import.meta.url),
   ];
   let lastError: unknown;
   for (const candidate of candidates) {
     try { return await readFile(candidate, "utf8"); } catch (error) { lastError = error; }
   }
-  throw new Error("User notification migration is missing from the runtime artifact.", { cause: lastError });
+  throw new Error(`User notification migration ${filename} is missing from the runtime artifact.`, { cause: lastError });
 }
 
 async function initializeSchema(pool: Pick<Pool, "connect">): Promise<void> {
-  const sql = await readMigration();
+  const migrations = await Promise.all([
+    readMigration("016_user_notifications.sql"),
+    readMigration("023_user_notification_inbox_controls.sql"),
+  ]);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended('peritio_user_notifications_v1', 0))");
-    await client.query(sql);
+    for (const sql of migrations) await client.query(sql);
     await client.query("COMMIT");
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch {}
