@@ -3075,11 +3075,13 @@ test("team performance HTTP route keeps 400, 403, 404, and generic 500 distinct"
   for (const extra of ["&month=10", "&dimension=division&dimensionId=division_a", "&from=2026-09-01"]) {
     assert.equal((await dashboardRequest(route + extra, regularTeamToken)).status, 400);
   }
-  for (const [label, token] of [["org admin none", orgAdminNoneToken], ["user admin none", userAdminNoneToken]] as const) {
-    const denied = await dashboardRequest(route, token);
-    assert.equal(denied.status, 403, label);
-    assert.equal(denied.body.code, "dashboard_scope_denied");
-  }
+  const denied = await dashboardRequest(route, orgAdminNoneToken);
+  assert.equal(denied.status, 403, "org admin none");
+  assert.equal(denied.body.code, "dashboard_scope_denied");
+
+  const managerDerived = await dashboardRequest(route, userAdminNoneToken);
+  assert.equal(managerDerived.status, 200);
+  assert.equal(managerDerived.body.historicalScope, "current_population");
   const crossOrg = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_2"), regularTeamToken);
   assert.equal(crossOrg.status, 404);
   const nonexistent = await dashboardRequest(route.replace("orgId=org_1", "orgId=org_missing"), regularTeamToken);
@@ -3141,11 +3143,13 @@ test("team intelligence HTTP route enforces input, access, existence hiding, saf
     assert.equal((await dashboardRequest(route + extra, regularTeamToken)).status, 400);
   }
 
-  for (const [label, token] of [["org admin none", orgAdminNoneToken], ["user admin none", userAdminNoneToken]] as const) {
-    const denied = await dashboardRequest(route, token);
-    assert.equal(denied.status, 403, label);
-    assert.equal(denied.body.code, "dashboard_scope_denied");
-  }
+  const denied = await dashboardRequest(route, orgAdminNoneToken);
+  assert.equal(denied.status, 403, "org admin none");
+  assert.equal(denied.body.code, "dashboard_scope_denied");
+
+  const managerDerived = await dashboardRequest(route, userAdminNoneToken);
+  assert.equal(managerDerived.status, 200);
+  assert.equal(managerDerived.body.scope, "team");
   assert.equal(
     (await dashboardRequest(route.replace("orgId=org_1", "orgId=org_2"), regularTeamToken)).status,
     404,
