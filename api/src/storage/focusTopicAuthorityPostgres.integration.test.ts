@@ -56,6 +56,67 @@ test("real PostgreSQL authority correction rejects incompatible existing managem
     }
   });
 
+test("real PostgreSQL migration 021 deduplicates active management grants by person and is idempotent",
+  { skip: !databaseUrl }, async () => {
+    assertThrowawayDatabase(databaseUrl);
+    const setup = new Pool({ connectionString: databaseUrl, max: 1 });
+    const schema = `focus_authority_grant_dedup_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let pool: Pool | null = null;
+    try {
+      await setup.query(`CREATE SCHEMA ${quotedSchema}`);
+      const url = scopedUrl(databaseUrl, schema);
+      pool = new Pool({ connectionString: url, max: 2 });
+      await pool.query(`CREATE TABLE org_content_items (org_id TEXT NOT NULL, id UUID NOT NULL,
+        PRIMARY KEY (org_id, id))`);
+      for (const filename of [
+        "015_focus_topic_authority.sql",
+        "017_focus_topic_management_authority.sql",
+        "020_focus_topic_assignment_due_dates.sql",
+      ]) {
+        await pool.query(await readFile(new URL(`../../sql/${filename}`, import.meta.url), "utf8"));
+      }
+      await pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+        VALUES
+          ('grant_first','org','topic','individual','person',TRUE,'admin','2026-10-07T12:00:00.000Z'),
+          ('grant_second','org','topic','manager_only','person',TRUE,'admin','2026-10-07T12:01:00.000Z')`);
+      const authority = createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await authority.initialize();
+      const afterMigration = await pool.query<{ id: string; revoked_by: string | null }>(
+        `SELECT id,revoked_by FROM focus_topic_assignments
+         WHERE org_id='org' AND topic_id='topic' ORDER BY id`,
+      );
+      assert.deepEqual(afterMigration.rows, [
+        { id: "grant_first", revoked_by: null },
+        { id: "grant_second", revoked_by: "system:management-grant-deduplication" },
+      ]);
+      await assert.rejects(pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+        VALUES ('grant_duplicate','org','topic','individual','person',TRUE,'admin',NOW())`),
+      (error: unknown) => (error as { code?: string; constraint?: string }).code === "23505"
+        && (error as { constraint?: string }).constraint === "focus_topic_assignments_active_management_person_uidx");
+      const retryAuthority = createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await retryAuthority.initialize();
+      const afterRetry = await pool.query<{ active_count: string; revoked_count: string }>(
+        `SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL)::text AS active_count,
+          COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::text AS revoked_count
+         FROM focus_topic_assignments WHERE org_id='org' AND topic_id='topic'`,
+      );
+      assert.deepEqual(afterRetry.rows[0], { active_count: "1", revoked_count: "1" });
+    } finally {
+      await pool?.end();
+      await setup.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      await setup.end();
+    }
+  });
+
 function assertThrowawayDatabase(url: string): void {
   const parsed = new URL(url);
   const name = decodeURIComponent(parsed.pathname).replace(/^\/+/, "").toLowerCase();
