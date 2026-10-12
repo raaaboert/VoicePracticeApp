@@ -9082,6 +9082,26 @@ function requireAllFocusTopicManagement(
   return false;
 }
 
+function isCurrentTopicManagerDirectReport(params: {
+  actor: UserProfile;
+  subject: UserProfile | null;
+  orgId: string;
+}): boolean {
+  const { actor, subject, orgId } = params;
+  return Boolean(subject)
+    && actor.id !== subject!.id
+    && actor.accountType === "enterprise"
+    && actor.orgId === orgId
+    && actor.status === "active"
+    && Boolean(actor.emailVerifiedAt)
+    && subject!.accountType === "enterprise"
+    && subject!.orgId === orgId
+    && subject!.orgRole === "user"
+    && subject!.status === "active"
+    && Boolean(subject!.emailVerifiedAt)
+    && normalizeManagerUserId(subject!.managerUserId) === actor.id;
+}
+
 const TRAINING_CONTENT_CLIENT_OWNED_FIELDS = new Set([
   "orgid",
   "organizationid",
@@ -14285,10 +14305,8 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
       nextOrgRole = requestedOrgRole;
       if (nextOrgRole === "user_admin") {
         nextManagerUserId = null;
-        nextDashboardAccessEnabled = true;
       } else if (beforeOrgRole === "user_admin") {
         nextManagerUserId = null;
-        nextDashboardAccessEnabled = false;
       }
     }
 
@@ -14372,7 +14390,7 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
 
     const shouldRevokeDashboardSessions =
       nextStatus !== "active" ||
-      (beforeOrgRole === "user_admin" && nextOrgRole !== "user_admin") ||
+      beforeOrgRole !== nextOrgRole ||
       (beforeDashboardAccessEnabled && !nextDashboardAccessEnabled);
 
     target.firstName = nextFirstName;
@@ -17490,6 +17508,10 @@ app.get(
         const subject = db.users.find((user) => user.id === userId);
         return subject ? resolveStoredUserDisplayName(subject) : "Former organization member";
       };
+      const emailFor = (userId: string | null): string | null => {
+        if (!userId) return null;
+        return db.users.find((user) => user.id === userId)?.email ?? null;
+      };
       return {
         topicId: topic.id,
         assignments: snapshot.assignments
@@ -17497,6 +17519,7 @@ app.get(
           .map((row) => ({
             ...row,
             subjectDisplayName: displayNameFor(row.subjectUserId),
+            subjectEmail: emailFor(row.subjectUserId),
           })),
       };
     });
@@ -17506,6 +17529,28 @@ app.get(
       return;
     }
     response.json(payload);
+  },
+);
+
+app.get(
+  "/orgs/:orgId/trainings/:trainingId/assignable-learners",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    const payload = await withFreshDatabaseSnapshotRead(async (db) => {
+      const management = await resolveFocusTopicManagementContext(
+        db, request, request.params.orgId, response, request.params.trainingId,
+      );
+      if (!management || !request.dashboard) return null;
+      const actor = request.dashboard.user;
+      const learners = db.users.filter((user) => management.scope.canManageAllTopics
+        ? user.accountType === "enterprise" && user.orgId === management.org.id && user.orgRole === "user"
+          && user.status === "active" && Boolean(user.emailVerifiedAt)
+        : isCurrentTopicManagerDirectReport({ actor, subject: user ?? null, orgId: management.org.id }));
+      return { topicId: request.params.trainingId, learners: learners.map((user) => ({
+        userId: user.id, displayName: resolveStoredUserDisplayName(user), email: user.email,
+      })) };
+    });
+    if (!response.headersSent && payload) response.json(payload);
   },
 );
 
@@ -17550,14 +17595,14 @@ app.post(
       const management = await resolveFocusTopicManagementContext(
         db, request, request.params.orgId, response, request.params.trainingId,
       );
-      if (!management || !requireAllFocusTopicManagement(management, response)) return null;
+      if (!management) return null;
       const { org } = management;
       const topic = findOrgTrainingRecord(db, org.id, request.params.trainingId);
       if (!topic || topic.status === "archived") {
         response.status(404).json({ error: "Focus Topic not found." });
         return null;
       }
-      const subject = subjectUserId ? getUserById(db, subjectUserId) : null;
+      const subject = subjectUserId ? getUserById(db, subjectUserId) ?? null : null;
       if (targeted && (!subject || subject.accountType !== "enterprise"
         || subject.orgId !== org.id || subject.status !== "active" || !subject.emailVerifiedAt)) {
         response.status(400).json({ error: "Audience subject is not an active organization member." });
@@ -17570,11 +17615,22 @@ app.post(
         return null;
       }
       if (grantsManagement) {
+        if (!requireAllFocusTopicManagement(management, response)) return null;
         const validation = validateFocusTopicManagementGrant({
           db, organization: org, audience, subjectUserId,
         });
         if (!validation.ok) {
           response.status(400).json({ error: validation.error });
+          return null;
+        }
+      } else if (!management.scope.canManageAllTopics) {
+        const actor = request.dashboard?.user ?? null;
+        if (audience !== "individual" || !actor
+          || !isCurrentTopicManagerDirectReport({ actor, subject, orgId: org.id })) {
+          response.status(403).json({
+            error: "Topic Managers can assign only their current direct reports individually.",
+            code: "focus_topic_assignment_scope_denied",
+          });
           return null;
         }
       }
@@ -17598,9 +17654,6 @@ app.post(
         if (!client) throw new Error("Focus Topic assignment transaction requires PostgreSQL.");
         await focusTopicAuthorityStore.createAssignment(assignment, client);
         await userNotificationStore.enqueueMany(notificationInputs, { client });
-        if (grantsManagement && subjectUserId) {
-          await webAuthSessionStore.revokeUserSessions(subjectUserId, client);
-        }
       });
       const audit = {
         action: grantsManagement ? "focus_topic.management_grant.created" : "focus_topic.assignment.created",
@@ -17617,8 +17670,12 @@ app.post(
     }).catch((error: unknown) => {
       if (isDuplicateActiveFocusTopicAssignmentError(error)) {
         response.status(409).json({
-          error: "An active Focus Topic assignment already exists for this audience.",
-          code: "focus_topic_assignment_already_active",
+          error: grantsManagement
+            ? "This person already has an active management grant for this Focus Topic."
+            : "An active Focus Topic assignment already exists for this audience.",
+          code: grantsManagement
+            ? "focus_topic_management_grant_already_active"
+            : "focus_topic_assignment_already_active",
         });
         return null;
       }
@@ -17653,7 +17710,7 @@ app.delete(
       const management = await resolveFocusTopicManagementContext(
         db, request, request.params.orgId, response, request.params.trainingId,
       );
-      if (!management || !requireAllFocusTopicManagement(management, response)) return null;
+      if (!management) return null;
       const { org } = management;
       const topic = findOrgTrainingRecord(db, org.id, request.params.trainingId);
       if (!topic) {
@@ -17668,6 +17725,20 @@ app.delete(
         response.status(404).json({ error: "Active Focus Topic assignment not found." });
         return null;
       }
+      if (assignment.grantsManagement) {
+        if (!requireAllFocusTopicManagement(management, response)) return null;
+      } else if (!management.scope.canManageAllTopics) {
+        const actor = request.dashboard?.user ?? null;
+        const subject = assignment.subjectUserId ? getUserById(db, assignment.subjectUserId) ?? null : null;
+        if (assignment.audience !== "individual" || !actor
+          || !isCurrentTopicManagerDirectReport({ actor, subject, orgId: org.id })) {
+          response.status(403).json({
+            error: "Topic Managers can revoke only individual assignments for their current direct reports.",
+            code: "focus_topic_assignment_scope_denied",
+          });
+          return null;
+        }
+      }
       const actorId = request.dashboard?.user.id ?? "platform_admin";
       const at = new Date();
       queueRequiredTransactionSideWrite(db, async (client) => {
@@ -17675,9 +17746,6 @@ app.delete(
         await focusTopicAuthorityStore.revokeAssignment({
           orgId: org.id, topicId: topic.id, assignmentId: assignment.id, actorId, at,
         }, client);
-        if (assignment.grantsManagement && assignment.subjectUserId) {
-          await webAuthSessionStore.revokeUserSessions(assignment.subjectUserId, client);
-        }
       });
       const audit = {
         action: assignment.grantsManagement

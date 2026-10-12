@@ -68,6 +68,8 @@ export interface FocusTopicAuthorityStore {
 const ACTIVE_ASSIGNMENT_UNIQUE_CONSTRAINTS = new Set([
   "focus_topic_assignments_active_broad_uidx",
   "focus_topic_assignments_active_targeted_uidx",
+  "focus_topic_assignments_active_learner_targeted_uidx",
+  "focus_topic_assignments_active_management_person_uidx",
 ]);
 
 export function isDuplicateActiveFocusTopicAssignmentError(error: unknown): boolean {
@@ -375,6 +377,7 @@ async function initializeSchema(pool: QueryPool): Promise<void> {
     readFocusTopicMigration("015_focus_topic_authority.sql"),
     readFocusTopicMigration("017_focus_topic_management_authority.sql"),
     readFocusTopicMigration("020_focus_topic_assignment_due_dates.sql"),
+    readFocusTopicMigration("021_focus_topic_management_grant_person_uniqueness.sql"),
   ]);
   const client = await pool.connect();
   try {

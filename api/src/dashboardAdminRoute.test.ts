@@ -3389,7 +3389,10 @@ test("dashboard performance-access mutation is authorized, audited, isolated, an
   await refreshWebAuthTokens(await readDb());
   const nextRequestNoneScope = await dashboardRequest("/dashboard/users", userAdminNoneToken);
   assert.equal(nextRequestNoneScope.status, 200);
-  assert.deepEqual(nextRequestNoneScope.body.users, []);
+  assert.deepEqual(
+    (nextRequestNoneScope.body.users as Array<{ userId: string }>).map((user) => user.userId).sort(),
+    ["unassigned_learner", "user_admin_none"],
+  );
   assert.equal((await readUser("unassigned_learner"))?.managerUserId, reportBefore.managerUserId);
 
   const dashboardDisabledTarget = await dashboardRequest(
@@ -3502,7 +3505,7 @@ test("org admins without performance scope receive organization billing usage wi
   assert.deepEqual(overview.body.topScenarios, []);
 });
 
-test("user admin with no performance access gets empty reporting scope without losing admin scope", async () => {
+test("current manager with no performance access gets direct-team reporting without broader scope", async () => {
   const overview = await dashboardRequest("/dashboard/overview", userAdminNoneToken);
   assert.equal(overview.status, 200);
   const summary = overview.body.summary as {
@@ -3510,17 +3513,19 @@ test("user admin with no performance access gets empty reporting scope without l
     simulationsLast30Days: number;
     averageScoreThisPeriod: number | null;
   };
-  assert.equal(summary.activeUsers, 0);
-  assert.equal(summary.simulationsLast30Days, 0);
-  assert.equal(summary.averageScoreThisPeriod, null);
+  assert.equal(summary.activeUsers, 2);
+  assert.equal(summary.simulationsLast30Days, 1);
+  assert.equal(summary.averageScoreThisPeriod, 10);
 
   const users = await dashboardRequest("/dashboard/users", userAdminNoneToken);
   assert.equal(users.status, 200);
-  assert.deepEqual(users.body.users, []);
+  assert.deepEqual(
+    (users.body.users as Array<{ userId: string }>).map((user) => user.userId).sort(),
+    ["unassigned_learner", "user_admin_none"],
+  );
 
   const directReportAttempt = await dashboardRequest("/dashboard/attempts/score_unassigned", userAdminNoneToken);
-  assert.equal(directReportAttempt.status, 404);
-  assert.equal(directReportAttempt.body.error, "Attempt detail not found.");
+  assert.equal(directReportAttempt.status, 200);
 
   const adminDirectory = await dashboardRequest("/dashboard/admin/users", userAdminNoneToken);
   assert.equal(adminDirectory.status, 200);
@@ -4203,7 +4208,7 @@ test("role changes preserve reports while eligibility loss clears manager assign
   };
   assert.equal(promotedRow.orgRole, "user_admin");
   assert.equal(promotedRow.performanceAccess, "none");
-  assert.equal(promotedRow.dashboardAccessEnabled, true);
+  assert.equal(promotedRow.dashboardAccessEnabled, false);
   assert.equal(promotedRow.managerUserId, null);
 
   const demoted = await dashboardRequest("/dashboard/admin/users/manager_to_demote", orgAdminToken, {
@@ -4219,7 +4224,7 @@ test("role changes preserve reports while eligibility loss clears manager assign
   };
   assert.equal(demotedRow.orgRole, "user");
   assert.equal(demotedRow.performanceAccess, "team");
-  assert.equal(demotedRow.dashboardAccessEnabled, false);
+  assert.equal(demotedRow.dashboardAccessEnabled, true);
   assert.equal(demotedRow.assignedReportCount, 1);
   const demoteReport = await waitForPersistedUserState(
     "manager_to_demote_report",

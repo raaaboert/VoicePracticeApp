@@ -67,6 +67,7 @@ export function FocusTopicAdministration({
   const [topics, setTopics] = useState<TopicRow[]>(initialTopics);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<DashboardFocusTopicAssignment[]>([]);
+  const [assignableLearners, setAssignableLearners] = useState<Array<{ userId: string; displayName: string; email: string }>>([]);
   const [related, setRelated] = useState<DashboardFocusTopicRelatedContentResponse | null>(null);
   const [practiceScenarios, setPracticeScenarios] = useState<CustomerPracticeScenarioListResponse | null>(null);
   const [editingScenarioId, setEditingScenarioId] = useState<string | null>(null);
@@ -105,14 +106,18 @@ export function FocusTopicAdministration({
   const [transcriptText, setTranscriptText] = useState("");
   const selected = topics.find((topic) => topic.id === selectedId) ?? null;
   const targeted = ["manager_only", "manager_with_team", "individual"].includes(audience);
-  const subjectOptions = users.filter((user) => user.status === "active"
-    && (audience === "individual" || user.assignedReportCount > 0));
+  const subjectOptions = (canManageAllTopics ? users.filter((user) => user.status === "active"
+    && (audience === "individual" || user.assignedReportCount > 0))
+    : assignableLearners.map((user) => ({ ...user, status: "active", assignedReportCount: 0 }))) as Array<{
+      userId: string; displayName: string; email?: string; status: string; assignedReportCount: number;
+    }>;
   const managerOptions = users.filter((user) => user.status === "active"
     && (user.orgRole === "user_admin" || user.assignedReportCount > 0));
   const userLabel = (id: string | null) => users.find((user) => user.userId === id)?.displayName
     ?? (id ? "Assigned organization member" : "All eligible members");
   const learnerRows = assignments.filter((row) => !row.grantsManagement);
   const managerRows = assignments.filter((row) => row.grantsManagement);
+  const assignableLearnerIds = new Set(assignableLearners.map((user) => user.userId));
   const learnerParts = partitionFocusTopicAssignments(learnerRows);
   const managerParts = partitionFocusTopicAssignments(managerRows);
   const activeAttachments = related?.content.filter((row) => row.detachedAt === null) ?? [];
@@ -137,7 +142,7 @@ export function FocusTopicAdministration({
   };
 
   const selectTopic = (topic: TopicRow) => void run(async () => {
-    const [assignmentResult, relatedResult, scenarioResult] = await Promise.all([
+    const [assignmentResult, relatedResult, scenarioResult, assignableResult] = await Promise.all([
       action<{ assignments: DashboardFocusTopicAssignment[] }>({
         action: "list_assignments", orgId, topicId: topic.id,
       }),
@@ -147,9 +152,13 @@ export function FocusTopicAdministration({
       action<CustomerPracticeScenarioListResponse>({
         action: "list_practice_scenarios", orgId, topicId: topic.id,
       }),
+      action<{ learners: Array<{ userId: string; displayName: string; email: string }> }>({
+        action: "list_assignable_learners", orgId, topicId: topic.id,
+      }),
     ]);
     setSelectedId(topic.id); setName(topic.name); setDescription(topic.description); setStatus(topic.status);
     setAssignments(assignmentResult.assignments); setRelated(relatedResult);
+    setAssignableLearners(assignableResult.learners);
     setPracticeScenarios(scenarioResult); setEditingScenarioId(null);
   });
 
@@ -448,11 +457,12 @@ export function FocusTopicAdministration({
           {options.revoked ? "Revoked" : "Active"}
         </span>
       </div>
-      <small>{row.subjectDisplayName ?? userLabel(row.subjectUserId)}</small>
+      <small>{row.subjectDisplayName ?? userLabel(row.subjectUserId)}
+        {row.subjectEmail ? ` (${row.subjectEmail})` : ""}</small>
       <small>Assigned {formatDateTime(row.createdAt)}
         {options.revoked ? ` · Revoked ${formatDateTime(row.revokedAt)}` : ""}</small>
     </div>
-    {!options.revoked && canManageAllTopics ? <button type="button"
+    {!options.revoked && (canManageAllTopics || (!options.management && assignableLearnerIds.has(row.subjectUserId ?? ""))) ? <button type="button"
       className="ghost-button danger-button compact-button" disabled={busy}
       onClick={() => revokeAssignment(row.id, options.management === true)}>Revoke</button> : null}
   </div>);
@@ -516,28 +526,31 @@ export function FocusTopicAdministration({
     {selected ? <div className="focus-topic-admin-panel" aria-labelledby="focus-topic-assignments-heading">
       <div className="focus-topic-panel-heading"><div><p className="eyebrow">Learner access</p>
         <h3 id="focus-topic-assignments-heading">Learner assignments</h3>
-        <p className="muted-copy">Scoped Topic managers can inspect assignments. Organization Admins control learner access.</p>
+        <p className="muted-copy">Topic Managers can assign and revoke individual assignments for their current direct reports.</p>
       </div></div>
-      {canManageAllTopics ? <div className="focus-topic-assignment-composer">
+      <div className="focus-topic-assignment-composer">
         <div className={`focus-topic-assignment-fields${targeted ? " targeted" : ""}`}>
           <div className="focus-topic-field"><label htmlFor="focus-topic-audience">Audience</label>
             <select className="text-input" id="focus-topic-audience" value={audience}
               disabled={busy || selected.status === "archived"}
               onChange={(event) => { setAudience(event.target.value as Audience); setSubjectUserId(""); }}>
-              {AUDIENCES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              {(canManageAllTopics ? AUDIENCES : AUDIENCES.filter((option) => option.value === "individual"))
+                .map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select><small>{AUDIENCES.find((option) => option.value === audience)?.description}</small></div>
           {targeted ? <div className="focus-topic-field"><label htmlFor="focus-topic-subject">
             {audience === "individual" ? "Learner" : "Manager"}</label>
             <select className="text-input" id="focus-topic-subject" value={subjectUserId}
               disabled={busy || selected.status === "archived"} onChange={(event) => setSubjectUserId(event.target.value)}>
-              <option value="">Select an active organization member</option>
-              {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>{user.displayName}</option>)}
+              <option value="">Select an eligible learner</option>
+              {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>
+                {user.displayName}{user.email ? ` (${user.email})` : ""}
+              </option>)}
             </select></div> : null}
         </div>
         <button type="button" className="primary-button focus-topic-add-assignment"
           disabled={busy || selected.status === "archived" || (targeted && !subjectUserId)}
           onClick={createAssignment}>Add Assignment</button>
-      </div> : null}
+      </div>
       <div className="focus-topic-assignment-section"><h4>Active assignments</h4>
         {learnerParts.activeAssignments.length === 0 ? <p className="muted-copy">No active learner assignments.</p> : null}
         <div className="focus-topic-assignment-list">{renderAssignments(learnerParts.activeAssignments, {})}</div>

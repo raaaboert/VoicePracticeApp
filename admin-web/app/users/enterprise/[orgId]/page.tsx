@@ -1283,12 +1283,13 @@ export default function EnterpriseOrgPage() {
             <div className="enterprise-summary-grid">
               <EnterpriseSummaryPill label="Pending Requests" value={String(joinRequests.length)} />
               <EnterpriseSummaryPill label="Total Users" value={String(dashboard?.users.length ?? 0)} />
-              <EnterpriseSummaryPill label="Dashboard Access Enabled" value={String(dashboardEnabledUserCount)} />
+              <EnterpriseSummaryPill label="Manual Dashboard Entry" value={String(dashboardEnabledUserCount)} />
               <EnterpriseSummaryPill label="Locked Out" value={String(lockedUserCount)} />
             </div>
             <p className="small enterprise-note">
-              Usage shown below is billed time within the current monthly billing period. Dashboard access is an explicit
-              authorization toggle and sign-in still requires a verified email.
+              Usage shown below is billed time within the current monthly billing period. Manual Dashboard Entry is the
+              explicit checkbox only; effective access can also derive from an eligible role, current direct reports, or
+              a valid Focus Topic management grant. Sign-in still requires a verified email.
             </p>
           </div>
 
@@ -1449,7 +1450,7 @@ export default function EnterpriseOrgPage() {
                       <th>Role</th>
                       <th>Performance Access</th>
                       <th>Division</th>
-                      <th>Dashboard Access</th>
+                      <th>Manual Dashboard Entry</th>
                       <th>Locked Out</th>
                       <th>Daily Allotment</th>
                       <th>Daily Overage</th>
@@ -1540,7 +1541,7 @@ export default function EnterpriseOrgPage() {
                                   });
                                 }}
                               />
-                              Enabled
+                              Manual entry
                             </label>
                           </td>
                           <td>

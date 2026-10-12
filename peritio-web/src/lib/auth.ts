@@ -833,6 +833,7 @@ export interface DashboardFocusTopicAssignment {
   audience: "organization" | "managers_and_admins" | "manager_only" | "manager_with_team" | "individual";
   subjectUserId: string | null;
   subjectDisplayName?: string | null;
+  subjectEmail?: string | null;
   grantsManagement: boolean;
   createdAt: string;
   revokedAt: string | null;
@@ -972,6 +973,13 @@ export async function listDashboardFocusTopicAssignments(orgId: string, topicId:
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<{ topicId: string; assignments: DashboardFocusTopicAssignment[] }>(
     `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignments`, { token },
+  );
+}
+
+export async function listDashboardFocusTopicAssignableLearners(orgId: string, topicId: string) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<{ topicId: string; learners: Array<{ userId: string; displayName: string; email: string }> }>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/assignable-learners`, { token },
   );
 }
 

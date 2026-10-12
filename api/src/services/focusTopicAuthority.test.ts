@@ -77,7 +77,7 @@ test("future management requires explicit targeted grants plus current role/mana
   assert.equal(evaluate(userAdmin,[row("individual","user_admin",{grantsManagement:true})],{allowUserAdminFocusTopicManagement:false}),false);
   assert.equal(evaluate(manager,[row("manager_with_team","manager",{grantsManagement:true})]),false);
   assert.equal(evaluate(manager,[row("manager_only","manager",{grantsManagement:true})]),true);
-  assert.equal(evaluate(userAdmin,[row("manager_only","user_admin",{grantsManagement:true})]),false);
+  assert.equal(evaluate(userAdmin,[row("manager_only","user_admin",{grantsManagement:true})]),true);
   assert.equal(evaluate(user("demoted"),[row("individual","demoted",{grantsManagement:true})]),false);
   assert.equal(canFutureActorManageFocusTopic({actor:manager,users:[manager],organization:org,topic,assignments:[row("manager_only","manager",{grantsManagement:true})],productSettings:settings}),false);
   assert.equal(evaluate(report,[row("manager_with_team","manager",{grantsManagement:true})]),false);

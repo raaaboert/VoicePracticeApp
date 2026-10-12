@@ -15,6 +15,7 @@ import {
   getDashboardFocusTopicRelatedContent,
   listDashboardCustomerPracticeScenarios,
   listDashboardFocusTopicAssignments,
+  listDashboardFocusTopicAssignableLearners,
   initiateDashboardFocusTopicContentUpload,
   putDashboardFocusTopicContentTranscript,
   removeDashboardFocusTopicContentTranscript,
@@ -38,6 +39,7 @@ type Action =
   | { action: "create_topic"; orgId: string; name: string; description: string; status: string }
   | { action: "update_topic"; orgId: string; topicId: string; name?: string; description?: string; status?: string }
   | { action: "list_assignments"; orgId: string; topicId: string }
+  | { action: "list_assignable_learners"; orgId: string; topicId: string }
   | { action: "create_assignment"; orgId: string; topicId: string;
       audience: DashboardFocusTopicAssignment["audience"]; subjectUserId: string | null }
   | { action: "create_management_grant"; orgId: string; topicId: string;
@@ -89,6 +91,8 @@ export async function POST(request: NextRequest) {
         return noStore(NextResponse.json(await updateDashboardFocusTopic(body.orgId, body.topicId, body)));
       case "list_assignments":
         return noStore(NextResponse.json(await listDashboardFocusTopicAssignments(body.orgId, body.topicId)));
+      case "list_assignable_learners":
+        return noStore(NextResponse.json(await listDashboardFocusTopicAssignableLearners(body.orgId, body.topicId)));
       case "create_assignment":
         return noStore(NextResponse.json(await createDashboardFocusTopicAssignment(body.orgId, body.topicId, body), { status: 201 }));
       case "create_management_grant":

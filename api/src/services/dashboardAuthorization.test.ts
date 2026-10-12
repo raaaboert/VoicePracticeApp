@@ -175,6 +175,16 @@ test("org admin has inherent dashboard entry and the resolver accepts a future m
   assert.equal(scopedViewer?.capabilities.manageOrganizationContent, false);
 });
 
+test("manual dashboard access and current-manager access are independent entry paths", () => {
+  const manager = createUser({ id: "manager", orgRole: "user", dashboardAccessEnabled: false, performanceAccess: "none" });
+  const report = createUser({ id: "report", orgRole: "user", managerUserId: manager.id });
+  const manualOnly = createUser({ id: "manual", orgRole: "user", dashboardAccessEnabled: true });
+  const db = createDb({ users: [manager, report, manualOnly], orgs: [{ id: "org_a", name: "Org A", status: "active" }] });
+  assert.equal(resolveDashboardAccessEligibility(db, manager).eligible, true);
+  assert.equal(resolveDashboardAccessEligibility(db, manualOnly).eligible, true);
+  assert.equal(resolveDashboardAccessEligibility(createDb({ users: [manager], orgs: [{ id: "org_a", name: "Org A", status: "active" }] }), manager).eligible, false);
+});
+
 test("legacy platform_admin alone no longer resolves to a dashboard viewer", () => {
   const user = createUser({
     id: "user_platform_admin",

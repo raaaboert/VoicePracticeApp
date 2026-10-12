@@ -220,7 +220,7 @@ export function AdminWorkspace({
       user.orgRole === "user_admin" &&
       body.orgRole === "user" &&
       !window.confirm(
-        `Demote ${user.email} to User? Dashboard access will be removed and sessions revoked.`
+        `Demote ${user.email} to User? Their role will change and they will need to sign in again. Any manual dashboard access, current-manager access, and valid Topic grants are evaluated separately.`
       )
     ) {
       return;

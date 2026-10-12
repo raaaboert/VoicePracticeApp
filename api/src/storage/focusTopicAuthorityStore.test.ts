@@ -12,6 +12,8 @@ test("duplicate active assignment classifier accepts only the two known PostgreS
     constraint: "focus_topic_assignments_active_broad_uidx" }), true);
   assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "23505",
     constraint: "focus_topic_assignments_active_targeted_uidx" }), true);
+  assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "23505",
+    constraint: "focus_topic_assignments_active_management_person_uidx" }), true);
   assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "23505", constraint: "other_uidx" }), false);
   assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "40001",
     constraint: "focus_topic_assignments_active_broad_uidx" }), false);
@@ -29,6 +31,7 @@ test("duplicate active content attachment classifier accepts only its PostgreSQL
 test("authority schema enforces audience subjects, management scope, historical uniqueness, and content organization FK",async()=>{
   const sql=await readFile(new URL("../../sql/015_focus_topic_authority.sql",import.meta.url),"utf8");
   const correction=await readFile(new URL("../../sql/017_focus_topic_management_authority.sql",import.meta.url),"utf8");
+  const personUniqueness=await readFile(new URL("../../sql/021_focus_topic_management_grant_person_uniqueness.sql",import.meta.url),"utf8");
   assert.match(sql,/focus_topic_assignments_subject_check/); assert.match(sql,/focus_topic_assignments_management_check/);
   assert.match(sql,/WHERE revoked_at IS NULL AND audience IN/); assert.match(sql,/focus_topic_scenario_attachments_active_uidx/);
   assert.match(sql,/FOREIGN KEY \(org_id, content_id\)[\s\S]*REFERENCES org_content_items \(org_id, id\)[\s\S]*ON DELETE RESTRICT/);
@@ -38,6 +41,9 @@ test("authority schema enforces audience subjects, management scope, historical 
   assert.match(correction,/subject_user_id,[\s\S]*grants_management/);
   assert.match(correction,/DROP INDEX IF EXISTS focus_topic_assignments_active_targeted_uidx/);
   assert.doesNotMatch(correction,/UPDATE focus_topic_assignments/);
+  assert.match(personUniqueness,/PARTITION BY org_id, topic_id, subject_user_id/);
+  assert.match(personUniqueness,/revoked_by = 'system:management-grant-deduplication'/);
+  assert.match(personUniqueness,/focus_topic_assignments_active_management_person_uidx/);
 });
 
 test("store initialization applies additive schema and topic reference lookup covers all relation history",async()=>{

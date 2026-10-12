@@ -68,9 +68,9 @@ function scope(actor: UserProfile, users: UserProfile[], orgIds = new Set(["org_
   return Array.from(resolvePerformanceScope({ db: { users }, actor, viewer: viewer(actor), orgIds })).sort();
 }
 
-test("none grants no dashboard performance or Performance Goal target scope", () => {
+test("none grants no dashboard performance or Performance Goal target scope without current reports", () => {
   const actor = user("actor", { orgRole: "org_admin", performanceAccess: "none" });
-  const target = user("target", { managerUserId: actor.id });
+  const target = user("target");
 
   assert.deepEqual(scope(actor, [actor, target]), []);
   assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target }), false);
@@ -144,8 +144,8 @@ test("organization includes the current same-org performance population and neve
 test("performance scope follows performanceAccess independently from admin and content eligibility", () => {
   const report = user("report", { managerUserId: "actor" });
   const cases = [
-    { orgRole: "user", performanceAccess: "none", expected: [] },
-    { orgRole: "user_admin", performanceAccess: "none", expected: [] },
+    { orgRole: "user", performanceAccess: "none", expected: ["actor", "report"] },
+    { orgRole: "user_admin", performanceAccess: "none", expected: ["actor", "report"] },
     { orgRole: "user", performanceAccess: "team", expected: ["actor", "report"] },
     { orgRole: "user_admin", performanceAccess: "team", expected: ["actor", "report"] },
     { orgRole: "user", performanceAccess: "organization", expected: ["actor", "report", "unrelated"] },
@@ -180,7 +180,7 @@ test("performance scope follows performanceAccess independently from admin and c
   const regularNoneManager = user("regular_none_manager", { performanceAccess: "none" });
   const regularNoneReport = user("regular_none_report", { managerUserId: regularNoneManager.id });
   assert.equal(canBeAssignedAsManager(regularNoneManager, "org_1"), true);
-  assert.deepEqual(scope(regularNoneManager, [regularNoneManager, regularNoneReport]), []);
+  assert.deepEqual(scope(regularNoneManager, [regularNoneManager, regularNoneReport]), ["regular_none_manager", "regular_none_report"]);
   assert.equal(regularNoneManager.performanceAccess, "none");
 });
 

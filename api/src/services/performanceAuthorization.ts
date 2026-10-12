@@ -102,6 +102,10 @@ export function resolvePerformanceScope(params: {
 }): Set<string> {
   const validOrganizationIds = params.orgIds ?? undefined;
   const permitted = new Set<string>();
+  // A current manager receives the direct-team dashboard view independently of
+  // the broader, explicitly configured performanceAccess scope.
+  const managerDerivedTeam = params.actor.performanceAccess === "none"
+    && params.db.users.some((candidate) => isCurrentDirectPerformanceReport(params.actor, candidate));
 
   for (const target of params.db.users) {
     if (
@@ -110,7 +114,8 @@ export function resolvePerformanceScope(params: {
         viewer: params.viewer,
         target,
         validOrganizationIds,
-      })
+      }) || (managerDerivedTeam && (target.id === params.actor.id
+        || isCurrentDirectPerformanceReport(params.actor, target)))
     ) {
       permitted.add(target.id);
     }

@@ -82,16 +82,12 @@ export function validateFocusTopicManagementGrant(params: {
     || !subject.emailVerifiedAt) {
     return { ok: false, error: "Management grant subject is not an active organization member." };
   }
-  if (params.audience === "individual") {
-    return subject.orgRole === "user_admin"
-      ? { ok: true, audience: "individual", subject }
-      : { ok: false, error: "Individual management grants require a User Admin subject." };
-  }
   const hasActiveDirectReport = params.db.users.some((user) => user.accountType === "enterprise"
     && user.orgId === params.organization.id
     && user.status === "active"
     && user.managerUserId === subject.id);
-  return hasActiveDirectReport
-    ? { ok: true, audience: "manager_only", subject }
-    : { ok: false, error: "Manager management grants require an active direct report." };
+  if (subject.orgRole === "user_admin" || hasActiveDirectReport) {
+    return { ok: true, audience: params.audience, subject };
+  }
+  return { ok: false, error: "Management grant subjects must be a User Admin or current Manager." };
 }

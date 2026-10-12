@@ -136,18 +136,18 @@ test("Manager management disappears with the switch, grant, or final active repo
   }).manageableTopicIds.size, 0);
 });
 
-test("management grants are never reinterpreted across User Admin and Manager role paths", () => {
+test("management grants remain effective when a valid subject changes between User Admin and Manager paths", () => {
   const report = user("report", { managerUserId: "actor" });
   const individualGrant = grant({ audience: "individual", subjectUserId: "actor" });
   const managerGrant = grant({ audience: "manager_only", subjectUserId: "actor" });
-  assert.equal(scope({
+  assert.deepEqual([...scope({
     actor: user("actor"), users: [user("actor"), report], assignments: [individualGrant],
     managerSwitch: true,
-  }).manageableTopicIds.size, 0);
-  assert.equal(scope({
+  }).manageableTopicIds], ["topic_a"]);
+  assert.deepEqual([...scope({
     actor: user("actor", { orgRole: "user_admin" }), assignments: [managerGrant],
     userAdminSwitch: true,
-  }).manageableTopicIds.size, 0);
+  }).manageableTopicIds], ["topic_a"]);
 });
 
 test("management grant validation permits only explicit User Admin and current Manager subjects", () => {

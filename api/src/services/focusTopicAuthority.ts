@@ -67,23 +67,15 @@ export function canFutureActorManageFocusTopic(params: {
   if (topic.orgId !== organization.id || topic.status !== "active") return false;
   if (actor.orgRole === "org_admin") return true;
 
-  if (actor.orgRole === "user_admin") {
-    return params.productSettings.allowUserAdminFocusTopicManagement
-      && params.assignments.some((assignment) =>
-        isActiveSameTopicAssignment(assignment, organization.id, topic.id)
-        && assignment.grantsManagement
-        && assignment.audience === "individual"
-        && assignment.subjectUserId === actor.id
-      );
-  }
-  return params.productSettings.allowManagerFocusTopicManagement
-    && hasActiveDirectReport(actor.id, params.users, organization.id)
-    && params.assignments.some((assignment) =>
-      isActiveSameTopicAssignment(assignment, organization.id, topic.id)
-      && assignment.grantsManagement
-      && assignment.audience === "manager_only"
-      && assignment.subjectUserId === actor.id
-    );
+  const hasGrant = params.assignments.some((assignment) =>
+    isActiveSameTopicAssignment(assignment, organization.id, topic.id)
+    && assignment.grantsManagement
+    && (assignment.audience === "individual" || assignment.audience === "manager_only")
+    && assignment.subjectUserId === actor.id);
+  if (!hasGrant) return false;
+  return (actor.orgRole === "user_admin" && params.productSettings.allowUserAdminFocusTopicManagement)
+    || (params.productSettings.allowManagerFocusTopicManagement
+      && hasActiveDirectReport(actor.id, params.users, organization.id));
 }
 
 export function isActiveVerifiedMember(

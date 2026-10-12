@@ -19,10 +19,15 @@ export interface DashboardAccessEligibility {
 
 export function hasDashboardEntryAuthority(
   user: Pick<UserProfile, "orgRole" | "dashboardAccessEnabled">,
-  options?: { hasEffectiveFocusTopicManagementGrant?: boolean },
+  options?: {
+    hasEffectiveFocusTopicManagementGrant?: boolean;
+    hasActiveDirectReports?: boolean;
+  },
 ): boolean {
   return user.orgRole === "org_admin"
+    || user.orgRole === "user_admin"
     || user.dashboardAccessEnabled === true
+    || options?.hasActiveDirectReports === true
     || options?.hasEffectiveFocusTopicManagementGrant === true;
 }
 
@@ -72,7 +77,12 @@ export function resolveDashboardAccessEligibility(
     };
   }
 
-  if (!hasDashboardEntryAuthority(user, options)) {
+  const hasActiveDirectReports = user.accountType === "enterprise" && Boolean(user.orgId)
+    && db.users.some((candidate) => candidate.accountType === "enterprise"
+      && candidate.orgId === user.orgId
+      && candidate.status === "active"
+      && candidate.managerUserId === user.id);
+  if (!hasDashboardEntryAuthority(user, { ...options, hasActiveDirectReports })) {
     return {
       eligible: false,
       reason: "dashboard_access_disabled",
