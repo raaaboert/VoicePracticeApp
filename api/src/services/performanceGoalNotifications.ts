@@ -19,7 +19,7 @@ function canCurrentAuthorViewPlan(db: ApiDatabase, recipient: UserProfile, plan:
   const target = db.users.find((user) => user.id === plan.userId);
   return Boolean(target && isCurrentMember(db, target, plan.orgId)
     && recipient.dashboardAccessEnabled
-    && canViewPerformanceTarget({ actor: recipient, target }));
+    && canViewPerformanceTarget({ actor: recipient, target, users: db.users }));
 }
 
 export function isMaterialPerformanceGoalUpdate(before: PerformancePlan, after: PerformancePlan): boolean {

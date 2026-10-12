@@ -94,6 +94,9 @@ test("real PostgreSQL migration 021 deduplicates active management grants by per
         { id: "grant_first", revoked_by: null },
         { id: "grant_second", revoked_by: "system:management-grant-deduplication" },
       ]);
+      await pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+        VALUES ('learner_overlap','org','topic','individual','person',FALSE,'admin',NOW())`);
       await assert.rejects(pool.query(`INSERT INTO focus_topic_assignments
         (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
         VALUES ('grant_duplicate','org','topic','individual','person',TRUE,'admin',NOW())`),
@@ -104,12 +107,70 @@ test("real PostgreSQL migration 021 deduplicates active management grants by per
         pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
       });
       await retryAuthority.initialize();
+      const thirdAuthority = createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool,
+      });
+      await thirdAuthority.initialize();
       const afterRetry = await pool.query<{ active_count: string; revoked_count: string }>(
         `SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL)::text AS active_count,
           COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::text AS revoked_count
          FROM focus_topic_assignments WHERE org_id='org' AND topic_id='topic'`,
       );
-      assert.deepEqual(afterRetry.rows[0], { active_count: "1", revoked_count: "1" });
+      assert.deepEqual(afterRetry.rows[0], { active_count: "2", revoked_count: "1" });
+      const activeRows = await pool.query<{ id: string; grants_management: boolean }>(
+        `SELECT id,grants_management FROM focus_topic_assignments
+         WHERE org_id='org' AND topic_id='topic' AND revoked_at IS NULL ORDER BY id`,
+      );
+      assert.deepEqual(activeRows.rows, [
+        { id: "grant_first", grants_management: true },
+        { id: "learner_overlap", grants_management: false },
+      ]);
+    } finally {
+      await pool?.end();
+      await setup.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      await setup.end();
+    }
+  });
+
+test("real PostgreSQL fresh initialization preserves overlapping learner and management rows across repeated startup",
+  { skip: !databaseUrl }, async () => {
+    assertThrowawayDatabase(databaseUrl);
+    const setup = new Pool({ connectionString: databaseUrl, max: 1 });
+    const schema = `focus_authority_fresh_${randomBytes(8).toString("hex")}`;
+    const quotedSchema = `"${schema}"`;
+    let pool: Pool | null = null;
+    try {
+      await setup.query(`CREATE SCHEMA ${quotedSchema}`);
+      const url = scopedUrl(databaseUrl, schema);
+      pool = new Pool({ connectionString: url, max: 2 });
+      await pool.query(`CREATE TABLE org_content_items (org_id TEXT NOT NULL, id UUID NOT NULL,
+        PRIMARY KEY (org_id, id))`);
+      const initialize = () => createFocusTopicAuthorityStore({
+        provider: "postgres", databaseUrl: url, pgPoolMax: 2,
+        pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool!,
+      }).initialize();
+      await initialize();
+      await pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+        VALUES
+          ('fresh_management','org','topic','individual','person',TRUE,'admin',NOW()),
+          ('fresh_learner','org','topic','individual','person',FALSE,'admin',NOW())`);
+      await initialize();
+      await initialize();
+      const rows = await pool.query<{ id: string; grants_management: boolean }>(
+        `SELECT id,grants_management FROM focus_topic_assignments
+         WHERE revoked_at IS NULL ORDER BY id`,
+      );
+      assert.deepEqual(rows.rows, [
+        { id: "fresh_learner", grants_management: false },
+        { id: "fresh_management", grants_management: true },
+      ]);
+      await assert.rejects(pool.query(`INSERT INTO focus_topic_assignments
+        (id,org_id,topic_id,audience,subject_user_id,grants_management,created_by,created_at)
+        VALUES ('fresh_management_duplicate','org','topic','manager_only','person',TRUE,'admin',NOW())`),
+      (error: unknown) => (error as { constraint?: string }).constraint
+        === "focus_topic_assignments_active_management_person_uidx");
     } finally {
       await pool?.end();
       await setup.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);

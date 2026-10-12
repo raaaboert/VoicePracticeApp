@@ -181,16 +181,20 @@ test("a valid team viewer with no reports gets a legitimate empty aggregate", ()
   assert.equal(result.historicalScope, "current_population");
 });
 
-test("performance access is independent of manager assignment and admin role", () => {
+test("an active manager with explicit none receives only current direct-report performance authority", () => {
   const report = user("direct", { managerUserId: "manager" });
+  const unrelated = user("unrelated");
   for (const actor of [
     user("manager", { performanceAccess: "none" }),
     user("manager", { orgRole: "org_admin", performanceAccess: "none" }),
     user("manager", { orgRole: "user_admin", performanceAccess: "none" }),
   ]) {
-    assert.throws(() => query([report], [score("direct", report.id)], actor),
-      (error) => error instanceof AuthorizedTeamPerformanceDeniedError && error.reason === "performance_scope_denied");
+    assert.equal(query([report, unrelated], [score("direct", report.id), score("unrelated", unrelated.id)], actor)
+      .activity?.attemptCount, 1);
   }
+  assert.throws(() => query([unrelated], [score("unrelated", unrelated.id)],
+    user("manager", { performanceAccess: "none" })),
+  (error) => error instanceof AuthorizedTeamPerformanceDeniedError && error.reason === "performance_scope_denied");
   const orgAccess = query([report], [score("direct", report.id)],
     user("manager", { performanceAccess: "organization" }));
   assert.equal(orgAccess.activity?.attemptCount, 1);
@@ -198,12 +202,12 @@ test("performance access is independent of manager assignment and admin role", (
     user("manager", { orgRole: "org_admin", performanceAccess: "team" })).activity?.attemptCount, 1);
 });
 
-test("snapshot performance access overrides stale viewer access metadata", () => {
+test("snapshot access still governs explicit scopes while active-manager authority is derived from current reports", () => {
   const report = user("direct", { managerUserId: "manager" });
   const noneActor = user("manager", { performanceAccess: "none" });
-  assert.throws(() => query([report], [score("direct", report.id)], noneActor, {
+  assert.equal(query([report], [score("direct", report.id)], noneActor, {
     viewer: { ...viewer(noneActor), performanceAccess: "team" },
-  }), (error) => error instanceof AuthorizedTeamPerformanceDeniedError && error.reason === "performance_scope_denied");
+  }).activity?.attemptCount, 1);
 
   const teamActor = user("manager", { performanceAccess: "team" });
   assert.equal(query([report], [score("direct", report.id)], teamActor, {

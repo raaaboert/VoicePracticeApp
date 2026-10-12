@@ -147,6 +147,15 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         emailVerifiedAt: now,
         status: "active" as const,
       };
+      const foreignPerformanceUser = {
+        ...sourceUser,
+        id: "user_focus_foreign_performance",
+        orgId: foreignOrg.id,
+        email: "foreign-performance@focus-runtime.integration.test",
+        orgRole: "user" as const,
+        emailVerifiedAt: now,
+        status: "active" as const,
+      };
       const scopedManager = {
         ...sourceUser,
         id: "user_focus_scoped_manager",
@@ -156,6 +165,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         emailVerifiedAt: now,
         status: "active" as const,
         dashboardAccessEnabled: true,
+        performanceAccess: "none" as const,
       };
       const secondReport = {
         ...sourceUser,
@@ -168,7 +178,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         status: "active" as const,
       };
       user.managerUserId = scopedManager.id;
-      db.users = [user, secondReport, scopedManager, scopedUserAdmin, orgAdmin];
+      db.users = [user, secondReport, scopedManager, scopedUserAdmin, orgAdmin, foreignPerformanceUser];
       user.firstName = "Test";
       user.lastName = "Learner";
       user.emailVerifiedAt = now;
@@ -448,6 +458,55 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
         body?: Record<string, unknown>,
       ) => dashboardCall(managerSession.token, path, method, body);
+      const managerWorkspace = await managerCall(`/dashboard/performance?orgId=${org.id}`);
+      assert.equal(managerWorkspace.status, 200, JSON.stringify(managerWorkspace.body));
+      assert.deepEqual(
+        (managerWorkspace.body.users as Array<{ userId?: string }>).map((entry) => entry.userId).sort(),
+        [scopedManager.id, secondReport.id, user.id].sort(),
+      );
+      const managerTeam = await managerCall(
+        `/dashboard/performance/team?orgId=${org.id}&year=2026&month=10`,
+      );
+      assert.equal(managerTeam.status, 200, JSON.stringify(managerTeam.body));
+      const managerCreatedGoal = await managerCall("/dashboard/performance/plans", "POST", {
+        userId: secondReport.id,
+        orgId: org.id,
+        startDate: "2099-10-01",
+        endDate: "2099-11-01",
+        timeZone: "UTC",
+        activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 1 },
+        performanceGoal: {
+          enabled: false, metricType: null, targetScore: null,
+          improvementAmount: null, comparisonMonthCount: null,
+        },
+        scopeSelection: { allAssignedScenarios: true, selectedFocusTopicIds: [], selectedScenarioIds: [] },
+      });
+      assert.equal(managerCreatedGoal.status, 201, JSON.stringify(managerCreatedGoal.body));
+      const managerGoalId = String((managerCreatedGoal.body.plan as { id?: string }).id);
+      assert.ok(managerGoalId);
+      const managerUpdatedGoal = await managerCall(`/dashboard/performance/plans/${managerGoalId}`, "PATCH", {
+        userId: secondReport.id,
+        orgId: org.id,
+        startDate: "2099-10-01",
+        endDate: "2099-11-15",
+        timeZone: "UTC",
+        activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 1 },
+        performanceGoal: {
+          enabled: false, metricType: null, targetScore: null,
+          improvementAmount: null, comparisonMonthCount: null,
+        },
+        scopeSelection: { allAssignedScenarios: true, selectedFocusTopicIds: [], selectedScenarioIds: [] },
+      });
+      assert.equal(managerUpdatedGoal.status, 200, JSON.stringify(managerUpdatedGoal.body));
+      assert.equal((await managerCall(`/dashboard/performance/plans/${managerGoalId}/updates`, "POST", {
+        body: "Current direct-report check-in.",
+      })).status, 201);
+      assert.equal((await managerCall("/dashboard/performance/preview", "POST", {
+        userId: scopedUserAdmin.id, orgId: org.id,
+      })).status, 404);
+      assert.equal((await managerCall("/dashboard/performance/preview", "POST", {
+        userId: foreignPerformanceUser.id, orgId: foreignOrg.id,
+      })).status, 404);
       const managerCreated = await managerCall(
         `/orgs/${org.id}/trainings/${topic.id}/content`, "POST", {
           contentType: "pdf", title: "Manager draft", description: "",
@@ -496,6 +555,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await dashboardCall(
         managerSession.token, `/orgs/${org.id}/trainings`,
       )).status, 403);
+      const managerPerformanceAfterLastReport = await managerCall(
+        `/dashboard/performance/team?orgId=${org.id}&year=2026&month=10`,
+      );
+      assert.notEqual(managerPerformanceAfterLastReport.status, 200, JSON.stringify(managerPerformanceAfterLastReport.body));
       assert.equal((await managerCall(
         `/orgs/${org.id}/trainings/${topic.id}/content`, "POST", {
           contentType: "pdf", title: "Denied after manager-derived access loss", description: "",

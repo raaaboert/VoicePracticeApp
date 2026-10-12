@@ -12,6 +12,7 @@ export interface PerformanceAuthorizationUser {
   readonly accountType: UserProfile["accountType"];
   readonly orgId: string | null;
   readonly orgRole: UserProfile["orgRole"];
+  readonly status?: UserProfile["status"];
   readonly isSuperUser?: boolean;
   readonly managerUserId?: string | null;
   readonly performanceAccess?: PerformanceAccessLevel;
@@ -40,6 +41,41 @@ export function isCurrentDirectPerformanceReport(
   );
 }
 
+/** Current active reporting relationship used for manager-derived authority. */
+export function isCurrentActiveDirectPerformanceReport(
+  actor: PerformanceAuthorizationUser,
+  target: PerformanceAuthorizationUser,
+): boolean {
+  return actor.status === "active"
+    && target.status === "active"
+    && actor.accountType === "enterprise"
+    && target.accountType === "enterprise"
+    && Boolean(actor.orgId)
+    && actor.orgId === target.orgId
+    && target.id !== actor.id
+    && normalizeManagerUserId(target.managerUserId) === actor.id;
+}
+
+export function hasManagerDerivedPerformanceAuthority(
+  actor: PerformanceAuthorizationUser,
+  users: readonly PerformanceAuthorizationUser[],
+): boolean {
+  return actor.performanceAccess === "none"
+    && users.some((candidate) => isCurrentActiveDirectPerformanceReport(actor, candidate));
+}
+
+function canUseManagerDerivedPerformanceAuthority(params: {
+  actor: PerformanceAuthorizationUser;
+  target: PerformanceAuthorizationUser;
+  users?: readonly PerformanceAuthorizationUser[];
+}): boolean {
+  if (!params.users) return false;
+  const users = params.users;
+  return hasManagerDerivedPerformanceAuthority(params.actor, users)
+    && (params.target.id === params.actor.id
+      || isCurrentActiveDirectPerformanceReport(params.actor, params.target));
+}
+
 function isDashboardSuperUser(actor: PerformanceAuthorizationUser, viewer: DashboardViewer): boolean {
   return viewer.accessType === "super_user" && actor.isSuperUser === true;
 }
@@ -49,6 +85,7 @@ export function canViewPerformanceTarget(params: {
   viewer?: DashboardViewer;
   target: PerformanceAuthorizationUser;
   validOrganizationIds?: ReadonlySet<string>;
+  users?: readonly PerformanceAuthorizationUser[];
 }): boolean {
   if (params.viewer && isDashboardSuperUser(params.actor, params.viewer)) {
     return (
@@ -84,7 +121,7 @@ export function canViewPerformanceTarget(params: {
     return true;
   }
   if (accessLevel !== "team") {
-    return false;
+    return canUseManagerDerivedPerformanceAuthority(params);
   }
 
   if (params.target.id === params.actor.id) {
@@ -104,8 +141,7 @@ export function resolvePerformanceScope(params: {
   const permitted = new Set<string>();
   // A current manager receives the direct-team dashboard view independently of
   // the broader, explicitly configured performanceAccess scope.
-  const managerDerivedTeam = params.actor.performanceAccess === "none"
-    && params.db.users.some((candidate) => isCurrentDirectPerformanceReport(params.actor, candidate));
+  const managerDerivedTeam = hasManagerDerivedPerformanceAuthority(params.actor, params.db.users);
 
   for (const target of params.db.users) {
     if (
@@ -114,8 +150,9 @@ export function resolvePerformanceScope(params: {
         viewer: params.viewer,
         target,
         validOrganizationIds,
+        users: params.db.users,
       }) || (managerDerivedTeam && (target.id === params.actor.id
-        || isCurrentDirectPerformanceReport(params.actor, target)))
+        || isCurrentActiveDirectPerformanceReport(params.actor, target)))
     ) {
       permitted.add(target.id);
     }
@@ -137,8 +174,9 @@ export function canActorManagePerformanceUser(params: {
   actor: PerformanceAuthorizationUser;
   viewer: DashboardViewer;
   target: PerformanceAuthorizationUser;
+  users?: readonly PerformanceAuthorizationUser[];
 }): boolean {
-  return canViewPerformanceTarget(params);
+  return canViewPerformanceTarget({ ...params, users: params.users });
 }
 
 export function canViewOrganizationPerformance(params: {

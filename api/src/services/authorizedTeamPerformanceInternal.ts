@@ -8,6 +8,7 @@ import {
 import { canDashboardViewerAccessOrg } from "./dashboardAuthorization.js";
 import {
   getDashboardPermittedUserIds,
+  hasManagerDerivedPerformanceAuthority,
   isCurrentDirectPerformanceReport,
   resolvePerformanceAccessLevel,
 } from "./performanceAuthorization.js";
@@ -71,7 +72,8 @@ export function resolveAuthorizedTeamPerformanceScope(
   }
 
   const access = resolvePerformanceAccessLevel(actor, new Set([organizationId]));
-  if (access !== "team" && access !== "organization") {
+  if (access !== "team" && access !== "organization"
+    && !hasManagerDerivedPerformanceAuthority(actor, users)) {
     throw new AuthorizedTeamPerformanceDeniedError("performance_scope_denied");
   }
 

@@ -33,13 +33,13 @@ test("authority schema enforces audience subjects, management scope, historical 
   const correction=await readFile(new URL("../../sql/017_focus_topic_management_authority.sql",import.meta.url),"utf8");
   const personUniqueness=await readFile(new URL("../../sql/021_focus_topic_management_grant_person_uniqueness.sql",import.meta.url),"utf8");
   assert.match(sql,/focus_topic_assignments_subject_check/); assert.match(sql,/focus_topic_assignments_management_check/);
-  assert.match(sql,/WHERE revoked_at IS NULL AND audience IN/); assert.match(sql,/focus_topic_scenario_attachments_active_uidx/);
+  assert.match(sql,/focus_topic_assignments_active_learner_targeted_uidx/); assert.match(sql,/grants_management = FALSE/); assert.doesNotMatch(sql,/CREATE UNIQUE INDEX IF NOT EXISTS focus_topic_assignments_active_targeted_uidx/); assert.match(sql,/focus_topic_scenario_attachments_active_uidx/);
   assert.match(sql,/FOREIGN KEY \(org_id, content_id\)[\s\S]*REFERENCES org_content_items \(org_id, id\)[\s\S]*ON DELETE RESTRICT/);
   assert.match(sql,/focus_topic_backfill_runs_signoff_check/); assert.doesNotMatch(sql,/CREATE TABLE IF NOT EXISTS focus_topics/);
   assert.doesNotMatch(sql,/ON DELETE CASCADE/);
   assert.match(correction,/audience NOT IN \('individual', 'manager_only'\)/);
-  assert.match(correction,/subject_user_id,[\s\S]*grants_management/);
-  assert.match(correction,/DROP INDEX IF EXISTS focus_topic_assignments_active_targeted_uidx/);
+  assert.match(correction,/org_id, topic_id, audience, subject_user_id/);
+  assert.match(correction,/DROP INDEX IF EXISTS focus_topic_assignments_active_targeted_uidx/); assert.match(correction,/focus_topic_assignments_active_learner_targeted_uidx/); assert.match(correction,/grants_management = FALSE/); assert.doesNotMatch(correction,/CREATE UNIQUE INDEX focus_topic_assignments_active_targeted_uidx/);
   assert.doesNotMatch(correction,/UPDATE focus_topic_assignments/);
   assert.match(personUniqueness,/PARTITION BY org_id, topic_id, subject_user_id/);
   assert.match(personUniqueness,/revoked_by = 'system:management-grant-deduplication'/);

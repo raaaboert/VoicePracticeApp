@@ -77,6 +77,22 @@ test("none grants no dashboard performance or Performance Goal target scope with
   assert.equal(canViewOrganizationPerformance({ actor, orgId: "org_1" }), false);
 });
 
+test("explicit none derives a current active direct-team scope without broadening performance access", () => {
+  const actor = user("manager", { performanceAccess: "none" });
+  const activeReport = user("active_report", { managerUserId: actor.id });
+  const inactiveReport = user("inactive_report", { managerUserId: actor.id, status: "disabled" });
+  const unrelated = user("unrelated");
+  const crossOrg = user("cross_org", { orgId: "org_2", managerUserId: actor.id });
+  const users = [actor, activeReport, inactiveReport, unrelated, crossOrg];
+
+  assert.deepEqual(scope(actor, users), ["active_report", "manager"]);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: activeReport, users }), true);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: unrelated, users }), false);
+  assert.equal(canActorManagePerformanceUser({ actor, viewer: viewer(actor), target: crossOrg, users }), false);
+  assert.equal(canViewOrganizationPerformance({ actor, orgId: "org_1" }), false);
+  assert.deepEqual(scope(actor, [actor, inactiveReport]), []);
+});
+
 test("team includes self and regular direct reports regardless of status without recursion or division expansion", () => {
   const actor = user("actor", { performanceAccess: "team", divisionId: "division_a" });
   const direct = user("direct", { managerUserId: actor.id, divisionId: "division_a" });

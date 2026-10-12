@@ -106,6 +106,7 @@ test("goal notification visibility reauthorizes the target and creator against c
   };
   assert.equal(canViewPerformanceGoalNotification({ db, recipient: manager, notification, plan: goal }), true);
   manager.performanceAccess = "none";
+  learner.managerUserId = null;
   assert.equal(canViewPerformanceGoalNotification({ db, recipient: manager, notification, plan: goal }), false);
   const ownerNotification = { ...notification, recipientUserId: learner.id };
   assert.equal(canViewPerformanceGoalNotification({ db, recipient: learner, notification: ownerNotification, plan: goal }), true);
@@ -130,6 +131,7 @@ test("revoked Performance access hides and resolves a goal notification before a
   });
   assert.equal(visible.notifications.length, 1);
   manager.performanceAccess = "none";
+  learner.managerUserId = null;
   const hidden = await listAuthorizedDashboardNotifications({
     db, recipient: manager, store, performancePlanStore: planStore as never, limit: 20,
   });

@@ -6915,8 +6915,13 @@ function getPerformancePlanRowContext(
   };
 }
 
-function canManagePerformancePlanForUser(actor: UserProfile, viewer: DashboardViewer, target: UserProfile): boolean {
-  return canActorManagePerformanceUser({ actor, viewer, target });
+function canManagePerformancePlanForUser(
+  db: ApiDatabase,
+  actor: UserProfile,
+  viewer: DashboardViewer,
+  target: UserProfile,
+): boolean {
+  return canActorManagePerformanceUser({ actor, viewer, target, users: db.users });
 }
 
 function resolvePerformanceDashboardAuditActorType(viewer: DashboardViewer): AuditActorType {
@@ -14785,7 +14790,7 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
           selectedOrg: { orgId: org.id, orgName: org.name },
           canManageUser: (userContext) => {
             const target = getUserById(db, userContext.userId);
-            return Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
+            return Boolean(target && canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target));
           }
         });
         organizationSummaries.push({
@@ -14857,7 +14862,7 @@ app.get("/dashboard/performance", requireDashboardAuth, async (request: Dashboar
       divisionScope: divisionFilter.divisionScope,
       canManageUser: (userContext) => {
         const target = getUserById(db, userContext.userId);
-        return Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
+        return Boolean(target && canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target));
       }
     });
     response.json(payload);
@@ -15047,7 +15052,7 @@ app.post("/dashboard/performance/preview", requireDashboardAuth, async (request:
       response.status(404).json({ error: "Dashboard user not found." });
       return;
     }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (!canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
@@ -15152,7 +15157,7 @@ app.post("/dashboard/performance/plans", requireDashboardAuth, async (request: D
       response.status(404).json({ error: "Dashboard user not found." });
       return;
     }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (!canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
@@ -15278,7 +15283,7 @@ app.patch("/dashboard/performance/plans/:planId", requireDashboardAuth, async (r
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (!canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
@@ -15420,7 +15425,7 @@ app.get("/dashboard/performance/plans/:planId", requireDashboardAuth, async (req
     }
     const canCancel =
       detail.plan.status === "active" &&
-      Boolean(target && canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target));
+      Boolean(target && canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target));
     const payload: DashboardPerformancePlanDetailResponse = buildDashboardPerformancePlanDetailResponse({
       viewer: request.dashboard!.viewer,
       detail,
@@ -15502,7 +15507,7 @@ app.post("/dashboard/performance/plans/:planId/updates", requireDashboardAuth, a
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (!canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
@@ -15588,7 +15593,7 @@ app.post("/dashboard/performance/plans/:planId/cancel", requireDashboardAuth, as
       response.status(404).json({ error: "Performance goal not found." });
       return;
     }
-    if (!canManagePerformancePlanForUser(request.dashboard!.user, request.dashboard!.viewer, target)) {
+    if (!canManagePerformancePlanForUser(db, request.dashboard!.user, request.dashboard!.viewer, target)) {
       response.status(403).json({
         error: "Performance goal management requires authorized performance access to the target user.",
         code: "dashboard_scope_denied"
@@ -26082,7 +26087,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       return;
     }
 
-    const canViewTargetPerformance = canViewPerformanceTarget({ actor, target });
+    const canViewTargetPerformance = canViewPerformanceTarget({ actor, target, users: db.users });
     const now = new Date();
     const periodEndAt = now.toISOString();
     const periodStartAt = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();

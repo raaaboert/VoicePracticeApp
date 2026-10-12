@@ -29,9 +29,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS focus_topic_assignments_active_broad_uidx
   ON focus_topic_assignments (org_id, topic_id, audience)
   WHERE revoked_at IS NULL AND audience IN ('organization', 'managers_and_admins');
 
-CREATE UNIQUE INDEX IF NOT EXISTS focus_topic_assignments_active_targeted_uidx
+CREATE UNIQUE INDEX IF NOT EXISTS focus_topic_assignments_active_learner_targeted_uidx
   ON focus_topic_assignments (org_id, topic_id, audience, subject_user_id)
-  WHERE revoked_at IS NULL AND audience IN ('manager_only', 'manager_with_team', 'individual');
+  WHERE revoked_at IS NULL
+    AND grants_management = FALSE
+    AND audience IN ('manager_only', 'manager_with_team', 'individual');
 
 CREATE INDEX IF NOT EXISTS focus_topic_assignments_active_lookup_idx
   ON focus_topic_assignments (org_id, topic_id, subject_user_id)
