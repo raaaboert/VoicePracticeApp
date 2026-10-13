@@ -3143,13 +3143,14 @@ input[type="radio"] {
 
 .training-content-category-groups {
   display: grid;
-  gap: 1.5rem;
+  gap: 0.85rem;
 }
 
 .training-content-category-group {
   min-width: 0;
-  padding: 0 0 1.25rem;
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-muted);
 }
 
 .training-content-category-heading {
@@ -3157,7 +3158,7 @@ input[type="radio"] {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 0.85rem;
+  padding: 0.9rem 1rem;
 }
 
 .training-content-category-heading h2,
@@ -3167,7 +3168,7 @@ input[type="radio"] {
 }
 
 .training-content-category-heading p,
-.training-content-category-heading > span {
+.training-content-category-heading > div > span {
   color: var(--text-muted);
 }
 
@@ -3176,9 +3177,119 @@ input[type="radio"] {
   line-height: 1.5;
 }
 
-.training-content-category-heading > span {
-  flex: 0 0 auto;
+.training-content-category-heading > div > span {
   font-weight: 700;
+}
+
+.training-content-category-heading > div {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.training-content-category-heading > div > span {
+  font-size: 0.88rem;
+}
+
+.training-content-category-toggle {
+  flex: 0 0 auto;
+}
+
+.training-content-category-body {
+  padding: 0 1rem 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.training-content-category-body[hidden],
+.training-content-compact-details[hidden] {
+  display: none;
+}
+
+.training-content-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 1rem 0 0;
+}
+
+.training-content-showing-count {
+  margin: 0.85rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.training-content-compact-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.training-content-compact-row {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.training-content-compact-row-main {
+  display: grid;
+  grid-template-columns: minmax(13rem, 2fr) minmax(7rem, 1fr) auto minmax(10rem, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.training-content-compact-title {
+  min-width: 0;
+  color: var(--text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.training-content-compact-title:hover {
+  color: var(--accent);
+}
+
+.training-content-compact-type,
+.training-content-compact-row time {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.training-content-row-toggle {
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.training-content-compact-details {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0.85rem;
+  border-top: 1px solid var(--border);
+  background: var(--panel-muted);
+}
+
+.training-content-compact-details p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.training-content-compact-details dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.4rem 0.9rem;
+  margin: 0;
+}
+
+.training-content-compact-details dt {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.training-content-compact-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .training-content-category-create {
@@ -4568,3 +4679,43 @@ input[type="radio"] {
 
 .notification-history-row.is-unread { box-shadow: inset 3px 0 0 var(--accent); }
 .notification-history-row.is-dismissed { opacity: 0.72; }
+
+@media (max-width: 1040px) {
+  .training-content-compact-row-main {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .training-content-compact-title,
+  .training-content-compact-type,
+  .training-content-compact-row-main .status-badge,
+  .training-content-compact-row-main time {
+    grid-column: 1;
+  }
+
+  .training-content-row-toggle {
+    grid-column: 2;
+    grid-row: 1 / -1;
+  }
+}
+
+@media (max-width: 720px) {
+  .training-content-compact-row-main {
+    grid-template-columns: 1fr auto;
+    gap: 0.55rem;
+  }
+
+  .training-content-compact-type,
+  .training-content-compact-row-main time {
+    grid-column: 1;
+  }
+
+  .training-content-row-toggle {
+    grid-column: 2;
+    grid-row: 1 / -1;
+  }
+
+  .training-content-compact-details dl {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+}

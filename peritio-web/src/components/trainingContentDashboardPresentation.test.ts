@@ -25,6 +25,10 @@ const librarySource = readFileSync(
   join(webRoot, "app", "app", "admin", "training-content", "page.tsx"),
   "utf8"
 );
+const libraryClientSource = readFileSync(
+  join(componentsDir, "TrainingContentCategoryList.tsx"),
+  "utf8"
+);
 
 test("Training Content navigation uses the shared Admin navigation and dedicated pages", () => {
   assert.equal(adminSource.includes("<TrainingContentAdminNav"), true);
@@ -94,15 +98,48 @@ test("Learning Resource forms place the accessible Related Scenarios selector af
   assert.equal(scenarioSelectorSource.includes("fetch("), false);
 });
 
-test("Training Content library groups the default view and exposes category-aware filters", () => {
-  assert.equal(librarySource.includes("sort === \"library_order\""), true);
-  assert.equal(librarySource.includes("training-content-category-groups"), true);
-  assert.equal(librarySource.includes("Content Category"), true);
-  assert.equal(librarySource.includes("Related Focus Topic"), true);
+test("Training Content library supplies authorized categories and filters to its lazy client list", () => {
+  assert.equal(librarySource.includes("<TrainingContentCategoryList"), true);
+  assert.equal(librarySource.includes("getDashboardTrainingContentCategories"), true);
+  assert.equal(librarySource.includes("getDashboardTrainingContentFocusTopics"), true);
+  assert.equal(librarySource.includes("getDashboardTrainingContent({"), false);
+  assert.equal(libraryClientSource.includes("Content Category"), true);
+  assert.equal(libraryClientSource.includes("Related Focus Topic"), true);
   assert.equal(librarySource.includes("Manage Categories"), true);
   assert.equal(librarySource.includes("Reorder Content"), true);
   assert.equal(librarySource.includes("Add Learning Resource"), true);
-  assert.equal(librarySource.includes("showCategory"), true);
+});
+
+test("Training Content categories are independently lazy, collapsed, and paginated at ten rows", () => {
+  assert.equal(libraryClientSource.includes("const PAGE_SIZE = 10"), true);
+  assert.equal(libraryClientSource.includes("return { open: false, page: 1"), true);
+  assert.equal(libraryClientSource.includes("categoryId,"), true);
+  assert.equal(libraryClientSource.includes("pageSize: PAGE_SIZE"), true);
+  assert.equal(libraryClientSource.includes("aria-expanded={state.open}"), true);
+  assert.equal(libraryClientSource.includes("onPage={(page) => void loadCategory(category.id, page)}"), true);
+  assert.equal(libraryClientSource.includes("Showing ${first}–${last} of ${response.total}"), true);
+  assert.equal(libraryClientSource.includes("AbortController"), true);
+  assert.equal(libraryClientSource.includes("categoryRequestIds"), true);
+});
+
+test("Training Content filters use compact authorized flat results with reset pagination", () => {
+  assert.equal(libraryClientSource.includes("isDefaultLibraryView(filters)"), true);
+  assert.equal(libraryClientSource.includes("...filters,"), true);
+  assert.equal(libraryClientSource.includes("setFlatPage(1);"), true);
+  assert.equal(libraryClientSource.includes("onPage={setFlatPage}"), true);
+  assert.equal(libraryClientSource.includes("No Learning Resources found"), true);
+  assert.equal(libraryClientSource.includes("Loading Learning Resources"), true);
+  assert.equal(libraryClientSource.includes(">Retry</button>"), true);
+});
+
+test("Training Content compact rows retain authorized edit links and hidden secondary details", () => {
+  assert.equal(libraryClientSource.includes("training-content-compact-row"), true);
+  assert.equal(libraryClientSource.includes("training-content-compact-details"), true);
+  assert.equal(libraryClientSource.includes("hidden={!open}"), true);
+  assert.equal(libraryClientSource.includes('`${open ? "Hide" : "Show"} details for ${item.title}`'), true);
+  assert.equal(libraryClientSource.includes("Related Focus Topic"), true);
+  assert.equal(libraryClientSource.includes("Availability"), true);
+  assert.equal(libraryClientSource.includes("File"), true);
 });
 
 test("video processing status persists in the editor and is visible in the library", () => {
@@ -112,9 +149,9 @@ test("video processing status persists in the editor and is visible in the libra
   assert.equal(editorSource.includes("Video processing failed."), true);
   assert.equal(editorSource.includes("Current published file"), true);
   assert.equal(editorSource.includes("disabled={uploading || videoUploadBlocked}"), true);
-  assert.equal(librarySource.includes("item.hasActiveVideoProcessing"), true);
-  assert.equal(librarySource.includes("status-processing"), true);
-  assert.equal(librarySource.includes(">Processing</span>"), true);
+  assert.equal(libraryClientSource.includes("item.hasActiveVideoProcessing"), true);
+  assert.equal(libraryClientSource.includes("status-processing"), true);
+  assert.equal(libraryClientSource.includes(">Processing</span>"), true);
 });
 
 test("category and content ordering use accessible controls and optimistic revisions", () => {
