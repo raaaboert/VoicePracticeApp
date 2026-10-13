@@ -1,11 +1,13 @@
 "use client";
 
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleHelp } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import type {
   CustomerPracticeScenario,
   CustomerPracticeScenarioGeneratedDraft,
+  CustomerPracticeScenarioHistoryEvent,
   CustomerPracticeScenarioListResponse,
+  CustomerPracticeScenarioVersion,
   DashboardAdminUserRow,
   DashboardTrainingContentAssetFinalizationResponse,
   DashboardTrainingContentUploadInitiationResponse,
@@ -54,6 +56,30 @@ async function action<T>(body: Record<string, unknown>): Promise<T> {
   return fetchAdminApiJson<T>("/api/admin/focus-topic-management", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+}
+
+function latestApplicableRejectionFeedback(scenario: CustomerPracticeScenario): CustomerPracticeScenarioHistoryEvent | null {
+  if (scenario.status !== "rejected") return null;
+  return [...scenario.history]
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .find((event) => event.eventType === "rejected" && event.versionId === scenario.currentVersion.id) ?? null;
+}
+
+function scenarioProvenanceLabel(scenario: CustomerPracticeScenario, version: CustomerPracticeScenarioVersion): string {
+  const origin = [...scenario.versions]
+    .sort((left, right) => left.versionNumber - right.versionNumber)[0] ?? version;
+  const baseLabel = origin.provenance.baseScenarioTitle
+    ? ` based on ${origin.provenance.baseScenarioTitle}`
+    : "";
+
+  if (version.versionNumber > 1) {
+    if (origin.provenance.creationMethod === "ai") return "Manual revision of an AI-generated scenario.";
+    if (origin.provenance.sourceMode === "standard_base") return `Manual revision of a scenario${baseLabel}.`;
+    return "Manual revision of a manually authored scenario.";
+  }
+  if (version.provenance.creationMethod === "ai") return "AI-generated draft from selected Related Content.";
+  if (version.provenance.sourceMode === "standard_base") return `Manually authored from an existing scenario${baseLabel}.`;
+  return "Manually authored from a blank draft.";
 }
 
 function FocusTopicWorkspaceSection({
@@ -188,6 +214,8 @@ export function FocusTopicAdministration({
   const eligibleScenarioSourceOptions = scenarioSourceOptions.filter((item) => item.generationSource.eligible);
   const orderedPracticeScenarios = [...(practiceScenarios?.scenarios ?? [])].sort((left, right) =>
     Number(right.status === "in_review") - Number(left.status === "in_review"));
+  const editingScenario = practiceScenarios?.scenarios.find((scenario) => scenario.id === editingScenarioId) ?? null;
+  const editingRejectionFeedback = editingScenario ? latestApplicableRejectionFeedback(editingScenario) : null;
 
   const run = async (operation: () => Promise<void>) => {
     setBusy(true); setError(null); setMessage(null);
@@ -583,7 +611,7 @@ export function FocusTopicAdministration({
             onChange={(event) => setName(event.target.value)} /></div>
         <div className="focus-topic-field focus-topic-field-wide"><label htmlFor="focus-topic-description">Description</label>
           <textarea className="text-input focus-topic-description" id="focus-topic-description" value={description}
-            maxLength={4000} disabled={busy || !canManageAllTopics || selected?.status === "archived"}
+            rows={5} maxLength={4000} disabled={busy || !canManageAllTopics || selected?.status === "archived"}
             onChange={(event) => setDescription(event.target.value)} /></div>
         {selected ? <div className="focus-topic-field focus-topic-status-field"><label htmlFor="focus-topic-status">Status</label>
           <select className="text-input" id="focus-topic-status" value={status}
@@ -696,64 +724,91 @@ export function FocusTopicAdministration({
           const version = scenario.currentVersion;
           const editable = practiceScenarios.editableScenarioIds.includes(scenario.id)
             && practiceScenarios.permissions.canAuthor && scenario.status !== "archived";
-          return <div key={scenario.id} className="focus-topic-assignment-row">
-            <div className="training-content-order-copy">
-              <div className="focus-topic-assignment-title"><strong>{version.title}</strong>
-                <span className={`status-badge${scenario.status === "published" ? " status-active" : ""}`}>
-                  {scenario.status.replaceAll("_", " ")}
-                </span>
+          const rejectionFeedback = latestApplicableRejectionFeedback(scenario);
+          const history = [...scenario.history]
+            .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+          return <article key={scenario.id} className="focus-topic-scenario-card">
+            <div className="focus-topic-scenario-card-header">
+              <div className="focus-topic-scenario-summary">
+                <div className="focus-topic-assignment-title"><strong>{version.title}</strong>
+                  <span className={`status-badge${scenario.status === "published" ? " status-active" : ""}`}>
+                    {scenario.status.replaceAll("_", " ")}
+                  </span>
+                </div>
+                <small>Version {version.versionNumber} - {version.segmentId}</small>
+                <small>{version.applicableIndustryIds.length} applicable {version.applicableIndustryIds.length === 1 ? "industry" : "industries"}</small>
+                {scenario.publishedVersion && scenario.publishedVersion.id !== version.id
+                  ? <small>Published learner version: {scenario.publishedVersion.versionNumber}</small> : null}
               </div>
-              <small>Version {version.versionNumber} · {version.segmentId}</small>
-              <small>{version.description}</small>
-              <small>{version.applicableIndustryIds.length} applicable {version.applicableIndustryIds.length === 1 ? "industry" : "industries"}</small>
-              {version.sourceReferences.length > 0
-                ? <small>Related Content: {version.sourceReferences.map((source) => source.label).join(" · ")}</small>
-                : <small>Provenance: Manual authoring, no source selected</small>}
-              <small>Created manually from {version.provenance.sourceMode === "scratch" ? "a blank draft" : "an existing scenario"}.</small>
-              {version.reviewNote ? <small>Review comment: {version.reviewNote}</small> : null}
-              {scenario.publishedVersion && scenario.publishedVersion.id !== version.id
-                ? <small>Published learner version: {scenario.publishedVersion.versionNumber}</small> : null}
-              <details><summary>Version and review history ({scenario.history.length})</summary>
-                <div>{scenario.history.map((event) => <small key={event.id}>
-                  Version {scenario.versions.find((candidate) => candidate.id === event.versionId)?.versionNumber ?? "?"}
-                  {` · ${event.eventType.replaceAll("_", " ")} → ${event.status.replaceAll("_", " ")} · ${formatDateTime(event.createdAt)} · ${userLabel(event.actorId)}`}
-                  {event.comment ? ` · ${event.comment}` : ""}
-                </small>)}</div>
-              </details>
+              <div className="focus-topic-scenario-actions" aria-label={`Actions for ${version.title}`}>
+                {editable && scenario.status !== "in_review"
+                  ? <button type="button" className="ghost-button compact-button" disabled={busy}
+                    onClick={() => beginScenarioRevision(scenario)}>Edit / New Revision</button> : null}
+                {editable && (scenario.status === "draft" || scenario.status === "rejected")
+                  ? <button type="button" className="primary-button compact-button" disabled={busy}
+                    onClick={() => transitionScenario(scenario, "submit")}>
+                    {practiceScenarios.permissions.approvalRequired ? "Submit for Review" : "Approve Draft"}
+                  </button> : null}
+                {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <>
+                  <button type="button" className="primary-button compact-button" disabled={busy}
+                    onClick={() => transitionScenario(scenario, "approve", scenarioReviewNotes[scenario.id])}>Approve</button>
+                  <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
+                    onClick={() => transitionScenario(scenario, "reject", scenarioReviewNotes[scenario.id])}>Reject</button>
+                </> : null}
+                {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "approved"
+                  ? <button type="button" className="primary-button compact-button" disabled={busy}
+                    onClick={() => transitionScenario(scenario, "publish")}>Publish Approved Version</button> : null}
+              </div>
             </div>
-            {editable && scenario.status !== "in_review"
-              ? <button type="button" className="ghost-button compact-button" disabled={busy}
-                onClick={() => beginScenarioRevision(scenario)}>Edit / New Revision</button> : null}
-            {editable && (scenario.status === "draft" || scenario.status === "rejected")
-              ? <button type="button" className="primary-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "submit")}>
-                {practiceScenarios.permissions.approvalRequired ? "Submit for Review" : "Approve Draft"}
-              </button> : null}
-            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <>
-              <label className="focus-topic-field">Review comment (optional)
-                <input className="text-input" maxLength={2000}
-                  value={scenarioReviewNotes[scenario.id] ?? ""}
-                  onChange={(event) => setScenarioReviewNotes((current) => ({
-                    ...current, [scenario.id]: event.target.value,
-                  }))} />
-              </label>
-              <button type="button" className="primary-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "approve", scenarioReviewNotes[scenario.id])}>Approve</button>
-              <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "reject", scenarioReviewNotes[scenario.id])}>Reject</button>
-            </> : null}
-            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "approved"
-              ? <button type="button" className="primary-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "publish")}>Publish Approved Version</button> : null}
+            <dl className="focus-topic-scenario-version-details">
+              <div><dt>Scenario context</dt><dd>{version.description}</dd></div>
+              <div><dt>Desired outcome</dt><dd>{version.desiredOutcome || "Not specified"}</dd></div>
+              <div><dt>AI counterpart role</dt><dd>{version.aiRole}</dd></div>
+              <div><dt>Scoring guidance</dt><dd>{version.scoringGuidance}</dd></div>
+            </dl>
+            {version.sourceReferences.length > 0
+              ? <p className="focus-topic-scenario-provenance">Related Content: {version.sourceReferences.map((source) => source.label).join(" - ")}</p>
+              : <p className="focus-topic-scenario-provenance">No Related Content source selected.</p>}
+            <p className="focus-topic-scenario-provenance">{scenarioProvenanceLabel(scenario, version)}</p>
+            {rejectionFeedback ? <aside className="focus-topic-scenario-feedback" aria-label="Latest rejection feedback">
+              <strong>Latest rejection feedback</strong>
+              <small>Reviewer: {userLabel(rejectionFeedback.actorId)} - {formatDateTime(rejectionFeedback.createdAt)}</small>
+              <p>{rejectionFeedback.comment || "No written feedback was provided."}</p>
+            </aside> : null}
+            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <label
+              className="focus-topic-field focus-topic-review-comment">Review comment (optional)
+              <textarea className="text-input focus-topic-review-textarea" rows={3} maxLength={2000}
+                value={scenarioReviewNotes[scenario.id] ?? ""}
+                onChange={(event) => setScenarioReviewNotes((current) => ({
+                  ...current, [scenario.id]: event.target.value,
+                }))} />
+            </label> : null}
+            <details className="focus-topic-scenario-history"><summary>Version and review history ({history.length})</summary>
+              <div>{history.map((event) => <div key={event.id} className="focus-topic-scenario-history-event">
+                <strong>{event.status.replaceAll("_", " ")}</strong>
+                <small>Version {scenario.versions.find((candidate) => candidate.id === event.versionId)?.versionNumber ?? "?"}
+                  - {event.eventType.replaceAll("_", " ")} - {userLabel(event.actorId)} - {formatDateTime(event.createdAt)}</small>
+                {event.comment ? <p>{event.comment}</p> : null}
+              </div>)}</div>
+            </details>
             {practiceScenarios.permissions.canReviewAndPublish && scenario.status !== "archived"
-              ? <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "archive")}>Archive</button> : null}
-          </div>;
+              ? <div className="focus-topic-scenario-archive-action"><button type="button"
+                className="ghost-button danger-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "archive")}>Archive</button></div> : null}
+          </article>;
         })}</div>
       </div>
       {practiceScenarios?.permissions.canAuthor && selected.status !== "archived"
         ? <div className="focus-topic-assignment-section focus-topic-upload-new">
-          <h4>Generate Scenario Draft</h4>
+          <div className="focus-topic-scenario-generation-heading"><h4>Generate Scenario Draft</h4>
+            <span className="focus-topic-generation-help">
+              <button type="button" className="focus-topic-generation-help-button" aria-label="How scenario generation works"
+                aria-describedby="focus-topic-generation-help-tooltip"><CircleHelp aria-hidden="true" size={18} /></button>
+              <span id="focus-topic-generation-help-tooltip" role="tooltip" className="focus-topic-generation-tooltip">
+                Choose one or more generation-ready sources and optionally add practice guidance. Generating creates one unsaved draft. Review and edit it, then save a version; your organization&apos;s review and publication workflow still applies. Nothing is published automatically.
+              </span>
+            </span>
+          </div>
           <p className="muted-copy">Select one or more generation-ready Related Content resources. Generation creates no scenario until you review and save the draft below.</p>
           <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Eligible Related Content sources</legend>
             <div className="focus-topic-content-mode">{eligibleScenarioSourceOptions.map((item) =>
@@ -764,13 +819,18 @@ export function FocusTopicAdministration({
             {eligibleScenarioSourceOptions.length === 0 ? <small>No attached Related Content is currently generation-ready.</small> : null}
           </fieldset>
           <label className="focus-topic-field focus-topic-field-wide">Optional practice guidance
-            <textarea className="text-input" maxLength={2000} value={scenarioPracticeGuidance}
+            <textarea className="text-input focus-topic-long-textarea" rows={4} maxLength={2000} value={scenarioPracticeGuidance}
               onChange={(event) => setScenarioPracticeGuidance(event.target.value)} /></label>
           <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || scenarioSourceContentIds.length === 0}
             onClick={generateScenarioDraft}>Generate Scenario</button></div>
           {generatedScenario?.similarity.flagged ? <div className="notice" role="status">
             This draft is similar to an existing Topic scenario. Review it before saving.
           </div> : null}
+          {editingRejectionFeedback ? <aside className="focus-topic-scenario-feedback" aria-label="Latest rejection feedback">
+            <strong>Latest rejection feedback</strong>
+            <small>Reviewer: {userLabel(editingRejectionFeedback.actorId)} - {formatDateTime(editingRejectionFeedback.createdAt)}</small>
+            <p>{editingRejectionFeedback.comment || "No written feedback was provided."}</p>
+          </aside> : null}
           <h4>{editingScenarioId ? "Create New Revision" : "Create Draft"}</h4>
           <p className="muted-copy">Content saves as a new immutable version. Submission and publication are separate actions.</p>
           <div className="focus-topic-details-grid">
@@ -778,16 +838,16 @@ export function FocusTopicAdministration({
               <input className="text-input" value={scenarioTitle} maxLength={300}
                 onChange={(event) => setScenarioTitle(event.target.value)} /></label>
             <label className="focus-topic-field focus-topic-field-wide">Scenario context
-              <textarea className="text-input" value={scenarioDescription} maxLength={12000}
+              <textarea className="text-input focus-topic-scenario-textarea" rows={8} value={scenarioDescription} maxLength={12000}
                 onChange={(event) => setScenarioDescription(event.target.value)} /></label>
             <label className="focus-topic-field focus-topic-field-wide">Desired outcome
-              <textarea className="text-input" value={scenarioDesiredOutcome} maxLength={4000}
+              <textarea className="text-input focus-topic-long-textarea" rows={5} value={scenarioDesiredOutcome} maxLength={4000}
                 onChange={(event) => setScenarioDesiredOutcome(event.target.value)} /></label>
             <label className="focus-topic-field focus-topic-field-wide">AI counterpart role
-              <textarea className="text-input" value={scenarioAiRole} maxLength={2000}
+              <textarea className="text-input focus-topic-long-textarea" rows={4} value={scenarioAiRole} maxLength={2000}
                 onChange={(event) => setScenarioAiRole(event.target.value)} /></label>
             <label className="focus-topic-field focus-topic-field-wide">Scoring guidance
-              <textarea className="text-input" value={scenarioScoringGuidance} maxLength={8000}
+              <textarea className="text-input focus-topic-scenario-textarea" rows={8} value={scenarioScoringGuidance} maxLength={8000}
                 onChange={(event) => setScenarioScoringGuidance(event.target.value)} /></label>
             <label className="focus-topic-field">Role
               <select className="text-input" value={scenarioSegmentId}
@@ -859,7 +919,7 @@ export function FocusTopicAdministration({
                     {item.transcript.status === "ready" ? "Review Transcript" : "Add Transcript"}
                   </button> : null}
                   {transcriptContentId === item.id ? <div className="focus-topic-transcript-editor">
-                    <label>Private customer transcript<textarea className="text-input" value={transcriptText}
+                    <label>Private customer transcript<textarea className="text-input focus-topic-transcript-input" rows={12} value={transcriptText}
                       maxLength={200000} readOnly={!item.transcript.canMutate}
                       onChange={(event) => setTranscriptText(event.target.value)} /></label>
                     {item.transcript.canMutate ? <div className="focus-topic-actions">
@@ -878,7 +938,7 @@ export function FocusTopicAdministration({
               {item && editingContentId === item.id ? <div className="focus-topic-content-editor">
                 <label>Title<input className="text-input" value={editingTitle} maxLength={200}
                   onChange={(event) => setEditingTitle(event.target.value)} /></label>
-                <label>Description<textarea className="text-input" value={editingDescription} maxLength={2000}
+                <label>Description<textarea className="text-input focus-topic-long-textarea" rows={5} value={editingDescription} maxLength={2000}
                   onChange={(event) => setEditingDescription(event.target.value)} /></label>
                 {item.contentType !== "external_url" ? <label>Replace file (optional)
                   <input type="file" accept="video/mp4,audio/*,image/*,.pdf,.docx"
@@ -952,7 +1012,7 @@ export function FocusTopicAdministration({
           <div className="focus-topic-details-grid">
             <label className="focus-topic-field">Title<input className="text-input" value={uploadTitle} maxLength={200}
               onChange={(event) => setUploadTitle(event.target.value)} /></label>
-            <label className="focus-topic-field focus-topic-field-wide">Description<textarea className="text-input"
+            <label className="focus-topic-field focus-topic-field-wide">Description<textarea className="text-input focus-topic-long-textarea" rows={5}
               value={uploadDescription} maxLength={2000}
               onChange={(event) => setUploadDescription(event.target.value)} /></label>
             {newSourceMode === "file" ? <label className="focus-topic-field focus-topic-field-wide">File

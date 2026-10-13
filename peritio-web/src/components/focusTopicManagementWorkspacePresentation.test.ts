@@ -112,6 +112,43 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   assert.match(source, /generatedScenario\?\.similarity\.flagged/);
 });
 
+test("Practice Scenario authoring and review expose guidance, provenance, and current rejection feedback", () => {
+  assert.match(source, /CircleHelp aria-hidden="true" size=\{18\}/);
+  assert.match(source, /aria-label="How scenario generation works"/);
+  assert.match(source, /role="tooltip" className="focus-topic-generation-tooltip"/);
+  assert.match(source, /Generating creates one unsaved draft/);
+  assert.match(styles, /\.focus-topic-generation-help:hover \.focus-topic-generation-tooltip/);
+  assert.match(styles, /\.focus-topic-generation-help:focus-within \.focus-topic-generation-tooltip/);
+  assert.match(source, /rows=\{8\} value=\{scenarioDescription\}/);
+  assert.match(source, /rows=\{8\} value=\{scenarioScoringGuidance\}/);
+  assert.match(source, /rows=\{3\} maxLength=\{2000\}/);
+  assert.match(styles, /\.focus-topic-admin textarea\.text-input\s*\{[\s\S]*?resize: vertical;/);
+  assert.match(styles, /\.focus-topic-admin textarea\.focus-topic-scenario-textarea/);
+  assert.match(source, /function latestApplicableRejectionFeedback/);
+  assert.match(source, /if \(scenario\.status !== "rejected"\) return null/);
+  assert.match(source, /Latest rejection feedback/);
+  assert.match(source, /function scenarioProvenanceLabel/);
+  assert.match(source, /Manual revision of an AI-generated scenario/);
+  assert.match(source, /AI-generated draft from selected Related Content/);
+  assert.match(source, /Manually authored from an existing scenario/);
+});
+
+test("Practice Scenario cards separate review details, actions, archive, and ordered history", () => {
+  assert.match(source, /className="focus-topic-scenario-card-header"/);
+  assert.match(source, /className="focus-topic-scenario-actions"/);
+  assert.match(source, /className="focus-topic-scenario-version-details"/);
+  for (const detail of ["Scenario context", "Desired outcome", "AI counterpart role", "Scoring guidance"]) {
+    assert.equal(source.includes(`<dt>${detail}</dt>`), true, detail);
+  }
+  assert.match(source, /className="focus-topic-field focus-topic-review-comment"/);
+  assert.match(source, /className="focus-topic-scenario-archive-action"/);
+  assert.match(source, /\[\.\.\.scenario\.history\][\s\S]*?Date\.parse\(right\.createdAt\) - Date\.parse\(left\.createdAt\)/);
+  assert.match(source, /className="focus-topic-scenario-history-event"/);
+  assert.match(styles, /\.focus-topic-scenario-card-header\s*\{[\s\S]*?justify-content: space-between;/);
+  assert.match(styles, /\.focus-topic-scenario-version-details\s*\{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /\.focus-topic-scenario-archive-action\s*\{[\s\S]*?border-top/);
+});
+
 test("Focus Topic workspace keeps accessible disclosure bodies mounted per selected Topic", () => {
   assert.match(source, /function FocusTopicWorkspaceSection/);
   assert.match(source, /className="focus-topic-section-copy"/);
