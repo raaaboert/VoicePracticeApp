@@ -33,6 +33,7 @@ import { partitionFocusTopicAssignments } from "@/src/components/focusTopicAssig
 
 type TopicRow = Pick<OrgTrainingSummary, "id" | "name" | "description" | "status">;
 type Audience = DashboardFocusTopicAssignment["audience"];
+type ScenarioGroup = "active" | "archived";
 const AUDIENCES: Array<{ value: Audience; label: string; description: string }> = [
   { value: "organization", label: "Entire organization", description: "Every active learner in this organization." },
   { value: "managers_and_admins", label: "Managers & Admins", description: "Organization admins, user admins, and current managers." },
@@ -151,6 +152,8 @@ export function FocusTopicAdministration({
   const [scenarioPracticeGuidance, setScenarioPracticeGuidance] = useState("");
   const [generatedScenario, setGeneratedScenario] = useState<CustomerPracticeScenarioGeneratedDraft | null>(null);
   const [scenarioReviewNotes, setScenarioReviewNotes] = useState<Record<string, string>>({});
+  const [scenarioGroupOpenByTopic, setScenarioGroupOpenByTopic] = useState<Record<string, Record<ScenarioGroup, boolean>>>({});
+  const [expandedScenarioIdsByTopic, setExpandedScenarioIdsByTopic] = useState<Record<string, string[]>>({});
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState<"draft" | "active" | "archived">("draft");
@@ -214,6 +217,12 @@ export function FocusTopicAdministration({
   const eligibleScenarioSourceOptions = scenarioSourceOptions.filter((item) => item.generationSource.eligible);
   const orderedPracticeScenarios = [...(practiceScenarios?.scenarios ?? [])].sort((left, right) =>
     Number(right.status === "in_review") - Number(left.status === "in_review"));
+  const activePracticeScenarios = orderedPracticeScenarios.filter((scenario) => scenario.status !== "archived");
+  const archivedPracticeScenarios = orderedPracticeScenarios.filter((scenario) => scenario.status === "archived");
+  const selectedScenarioGroupOpen = selected
+    ? scenarioGroupOpenByTopic[selected.id] ?? { active: true, archived: false }
+    : { active: true, archived: false };
+  const expandedScenarioIds = new Set(selected ? expandedScenarioIdsByTopic[selected.id] ?? [] : []);
   const editingScenario = practiceScenarios?.scenarios.find((scenario) => scenario.id === editingScenarioId) ?? null;
   const editingRejectionFeedback = editingScenario ? latestApplicableRejectionFeedback(editingScenario) : null;
 
@@ -222,6 +231,26 @@ export function FocusTopicAdministration({
     try { await operation(); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Focus Topic action failed."); }
     finally { setBusy(false); }
+  };
+
+  const setScenarioGroupOpen = (group: ScenarioGroup, open: boolean) => {
+    if (!selected) return;
+    setScenarioGroupOpenByTopic((current) => ({
+      ...current,
+      [selected.id]: { active: current[selected.id]?.active ?? true, archived: current[selected.id]?.archived ?? false, [group]: open },
+    }));
+  };
+  const toggleScenarioDisclosure = (scenarioId: string) => {
+    if (!selected) return;
+    setExpandedScenarioIdsByTopic((current) => {
+      const expanded = current[selected.id] ?? [];
+      return {
+        ...current,
+        [selected.id]: expanded.includes(scenarioId)
+          ? expanded.filter((id) => id !== scenarioId)
+          : [...expanded, scenarioId],
+      };
+    });
   };
 
   const loadAssignableLearners = async (topicId: string) => {
@@ -540,6 +569,7 @@ export function FocusTopicAdministration({
       ...(reviewNote?.trim() ? { reviewNote: reviewNote.trim() } : {}),
     });
     setScenarioReviewNotes((current) => ({ ...current, [scenario.id]: "" }));
+    if (next === "archive") setScenarioGroupOpen("archived", true);
     setPracticeScenarios({
       ...practiceScenarios,
       scenarios: practiceScenarios.scenarios.map((row) => row.id === updated.id ? updated : row),
@@ -550,6 +580,103 @@ export function FocusTopicAdministration({
       : next === "publish" ? "published" : "archived"}.`);
   });
 
+  const renderPracticeScenarioRows = (scenarios: CustomerPracticeScenario[]) => scenarios.map((scenario) => {
+    if (!practiceScenarios) return null;
+    const version = scenario.currentVersion;
+    const editable = practiceScenarios.editableScenarioIds.includes(scenario.id)
+      && practiceScenarios.permissions.canAuthor && scenario.status !== "archived";
+    const rejectionFeedback = latestApplicableRejectionFeedback(scenario);
+    const history = [...scenario.history]
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    const contentId = `focus-topic-scenario-${scenario.id}-content`;
+    const open = expandedScenarioIds.has(scenario.id);
+    const industryLabels = version.applicableIndustryIds.map((industryId) =>
+      practiceScenarios.industryOptions.find((industry) => industry.id === industryId)?.label ?? industryId,
+    );
+
+    return <article key={scenario.id} className="focus-topic-scenario-card">
+      <div className="focus-topic-scenario-row">
+        <div className="focus-topic-scenario-row-copy">
+          <div className="focus-topic-assignment-title"><strong>{version.title}</strong>
+            <span className={`status-badge${scenario.status === "published" ? " status-active" : ""}`}>
+              {scenario.status.replaceAll("_", " ")}
+            </span>
+          </div>
+          <small>Version {version.versionNumber} · Updated {formatDateTime(scenario.updatedAt)}</small>
+        </div>
+        <button type="button" className="ghost-button compact-button focus-topic-scenario-toggle"
+          aria-expanded={open} aria-controls={contentId}
+          aria-label={`${open ? "Collapse" : "Expand"} ${version.title}`}
+          onClick={() => toggleScenarioDisclosure(scenario.id)}>
+          <span>{open ? "Collapse" : "Expand"}</span>
+          {open ? <ChevronUp aria-hidden="true" size={18} /> : <ChevronDown aria-hidden="true" size={18} />}
+        </button>
+      </div>
+      <div id={contentId} className="focus-topic-scenario-detail" hidden={!open}>
+        <div className="focus-topic-scenario-detail-header">
+          <div className="focus-topic-scenario-summary">
+            <small>{industryLabels.length} applicable {industryLabels.length === 1 ? "industry" : "industries"}: {industryLabels.join(" · ")}</small>
+            {scenario.publishedVersion && scenario.publishedVersion.id !== version.id
+              ? <small>Published learner version: {scenario.publishedVersion.versionNumber}</small> : null}
+          </div>
+          <div className="focus-topic-scenario-actions" aria-label={`Actions for ${version.title}`}>
+            {editable && scenario.status !== "in_review"
+              ? <button type="button" className="ghost-button compact-button" disabled={busy}
+                onClick={() => beginScenarioRevision(scenario)}>Edit / New Revision</button> : null}
+            {editable && (scenario.status === "draft" || scenario.status === "rejected")
+              ? <button type="button" className="primary-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "submit")}>
+                {practiceScenarios.permissions.approvalRequired ? "Submit for Review" : "Approve Draft"}
+              </button> : null}
+            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <>
+              <button type="button" className="primary-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "approve", scenarioReviewNotes[scenario.id])}>Approve</button>
+              <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "reject", scenarioReviewNotes[scenario.id])}>Reject</button>
+            </> : null}
+            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "approved"
+              ? <button type="button" className="primary-button compact-button" disabled={busy}
+                onClick={() => transitionScenario(scenario, "publish")}>Publish Approved Version</button> : null}
+          </div>
+        </div>
+        <dl className="focus-topic-scenario-version-details">
+          <div><dt>Scenario context</dt><dd>{version.description}</dd></div>
+          <div><dt>Desired outcome</dt><dd>{version.desiredOutcome || "Not specified"}</dd></div>
+          <div><dt>AI counterpart role</dt><dd>{version.aiRole}</dd></div>
+          <div><dt>Scoring guidance</dt><dd>{version.scoringGuidance}</dd></div>
+        </dl>
+        {version.sourceReferences.length > 0
+          ? <p className="focus-topic-scenario-provenance">Related Content: {version.sourceReferences.map((source) => source.label).join(" · ")}</p>
+          : <p className="focus-topic-scenario-provenance">No Related Content source selected.</p>}
+        <p className="focus-topic-scenario-provenance">{scenarioProvenanceLabel(scenario, version)}</p>
+        {rejectionFeedback ? <aside className="focus-topic-scenario-feedback" aria-label="Latest rejection feedback">
+          <strong>Latest rejection feedback</strong>
+          <small>Reviewer: {userLabel(rejectionFeedback.actorId)} · {formatDateTime(rejectionFeedback.createdAt)}</small>
+          <p>{rejectionFeedback.comment || "No written feedback was provided."}</p>
+        </aside> : null}
+        {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <label
+          className="focus-topic-field focus-topic-review-comment">Review comment (optional)
+          <textarea className="text-input focus-topic-review-textarea" rows={3} maxLength={2000}
+            value={scenarioReviewNotes[scenario.id] ?? ""}
+            onChange={(event) => setScenarioReviewNotes((current) => ({
+              ...current, [scenario.id]: event.target.value,
+            }))} />
+        </label> : null}
+        <details className="focus-topic-scenario-history"><summary>Version and review history ({history.length})</summary>
+          <div>{history.map((event) => <div key={event.id} className="focus-topic-scenario-history-event">
+            <strong>{event.status.replaceAll("_", " ")}</strong>
+            <small>Version {scenario.versions.find((candidate) => candidate.id === event.versionId)?.versionNumber ?? "?"}
+              · {event.eventType.replaceAll("_", " ")} · {userLabel(event.actorId)} · {formatDateTime(event.createdAt)}</small>
+            {event.comment ? <p>{event.comment}</p> : null}
+          </div>)}</div>
+        </details>
+        {practiceScenarios.permissions.canReviewAndPublish && scenario.status !== "archived"
+          ? <div className="focus-topic-scenario-archive-action"><button type="button"
+            className="ghost-button danger-button compact-button" disabled={busy}
+            onClick={() => transitionScenario(scenario, "archive")}>Archive</button></div> : null}
+      </div>
+    </article>;
+  });
   const renderAssignments = (
     rows: DashboardFocusTopicAssignment[],
     options: { revoked?: boolean; management?: boolean },
@@ -715,88 +842,49 @@ export function FocusTopicAdministration({
       {practiceScenarios?.permissions.canReviewAndPublish ? <p className="muted-copy">
         Awaiting review: {practiceScenarios.scenarios.filter((scenario) => scenario.status === "in_review").length}
       </p> : null}
-      <div className="focus-topic-assignment-section"><h4>Topic scenarios</h4>
-        {!practiceScenarios ? <p className="muted-copy">Select this Topic to load Practice Scenarios.</p> : null}
-        {practiceScenarios?.scenarios.length === 0
-          ? <p className="muted-copy">No customer Practice Scenarios have been created for this Topic.</p> : null}
-        <div className="focus-topic-assignment-list">{orderedPracticeScenarios.map((scenario) => {
-          if (!practiceScenarios) return null;
-          const version = scenario.currentVersion;
-          const editable = practiceScenarios.editableScenarioIds.includes(scenario.id)
-            && practiceScenarios.permissions.canAuthor && scenario.status !== "archived";
-          const rejectionFeedback = latestApplicableRejectionFeedback(scenario);
-          const history = [...scenario.history]
-            .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
-          return <article key={scenario.id} className="focus-topic-scenario-card">
-            <div className="focus-topic-scenario-card-header">
-              <div className="focus-topic-scenario-summary">
-                <div className="focus-topic-assignment-title"><strong>{version.title}</strong>
-                  <span className={`status-badge${scenario.status === "published" ? " status-active" : ""}`}>
-                    {scenario.status.replaceAll("_", " ")}
-                  </span>
-                </div>
-                <small>Version {version.versionNumber} - {version.segmentId}</small>
-                <small>{version.applicableIndustryIds.length} applicable {version.applicableIndustryIds.length === 1 ? "industry" : "industries"}</small>
-                {scenario.publishedVersion && scenario.publishedVersion.id !== version.id
-                  ? <small>Published learner version: {scenario.publishedVersion.versionNumber}</small> : null}
-              </div>
-              <div className="focus-topic-scenario-actions" aria-label={`Actions for ${version.title}`}>
-                {editable && scenario.status !== "in_review"
-                  ? <button type="button" className="ghost-button compact-button" disabled={busy}
-                    onClick={() => beginScenarioRevision(scenario)}>Edit / New Revision</button> : null}
-                {editable && (scenario.status === "draft" || scenario.status === "rejected")
-                  ? <button type="button" className="primary-button compact-button" disabled={busy}
-                    onClick={() => transitionScenario(scenario, "submit")}>
-                    {practiceScenarios.permissions.approvalRequired ? "Submit for Review" : "Approve Draft"}
-                  </button> : null}
-                {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <>
-                  <button type="button" className="primary-button compact-button" disabled={busy}
-                    onClick={() => transitionScenario(scenario, "approve", scenarioReviewNotes[scenario.id])}>Approve</button>
-                  <button type="button" className="ghost-button danger-button compact-button" disabled={busy}
-                    onClick={() => transitionScenario(scenario, "reject", scenarioReviewNotes[scenario.id])}>Reject</button>
-                </> : null}
-                {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "approved"
-                  ? <button type="button" className="primary-button compact-button" disabled={busy}
-                    onClick={() => transitionScenario(scenario, "publish")}>Publish Approved Version</button> : null}
-              </div>
+      <div className="focus-topic-scenario-groups">
+        {!practiceScenarios ? <p className="muted-copy">Select this Topic to load Practice Scenarios.</p> : <>
+          <section className="focus-topic-scenario-group" aria-labelledby={`focus-topic-${selected.id}-active-scenarios-heading`}>
+            <div className="focus-topic-scenario-group-heading">
+              <div><h4 id={`focus-topic-${selected.id}-active-scenarios-heading`}>Active Scenarios ({activePracticeScenarios.length})</h4>
+                <p className="muted-copy">Draft, review, approved, rejected, and published scenarios.</p></div>
+              <button type="button" className="ghost-button compact-button focus-topic-scenario-toggle"
+                aria-expanded={selectedScenarioGroupOpen.active}
+                aria-controls={`focus-topic-${selected.id}-active-scenarios-content`}
+                aria-label={`${selectedScenarioGroupOpen.active ? "Collapse" : "Expand"} Active Scenarios`}
+                onClick={() => setScenarioGroupOpen("active", !selectedScenarioGroupOpen.active)}>
+                <span>{selectedScenarioGroupOpen.active ? "Collapse" : "Expand"}</span>
+                {selectedScenarioGroupOpen.active ? <ChevronUp aria-hidden="true" size={18} /> : <ChevronDown aria-hidden="true" size={18} />}
+              </button>
             </div>
-            <dl className="focus-topic-scenario-version-details">
-              <div><dt>Scenario context</dt><dd>{version.description}</dd></div>
-              <div><dt>Desired outcome</dt><dd>{version.desiredOutcome || "Not specified"}</dd></div>
-              <div><dt>AI counterpart role</dt><dd>{version.aiRole}</dd></div>
-              <div><dt>Scoring guidance</dt><dd>{version.scoringGuidance}</dd></div>
-            </dl>
-            {version.sourceReferences.length > 0
-              ? <p className="focus-topic-scenario-provenance">Related Content: {version.sourceReferences.map((source) => source.label).join(" - ")}</p>
-              : <p className="focus-topic-scenario-provenance">No Related Content source selected.</p>}
-            <p className="focus-topic-scenario-provenance">{scenarioProvenanceLabel(scenario, version)}</p>
-            {rejectionFeedback ? <aside className="focus-topic-scenario-feedback" aria-label="Latest rejection feedback">
-              <strong>Latest rejection feedback</strong>
-              <small>Reviewer: {userLabel(rejectionFeedback.actorId)} - {formatDateTime(rejectionFeedback.createdAt)}</small>
-              <p>{rejectionFeedback.comment || "No written feedback was provided."}</p>
-            </aside> : null}
-            {practiceScenarios.permissions.canReviewAndPublish && scenario.status === "in_review" ? <label
-              className="focus-topic-field focus-topic-review-comment">Review comment (optional)
-              <textarea className="text-input focus-topic-review-textarea" rows={3} maxLength={2000}
-                value={scenarioReviewNotes[scenario.id] ?? ""}
-                onChange={(event) => setScenarioReviewNotes((current) => ({
-                  ...current, [scenario.id]: event.target.value,
-                }))} />
-            </label> : null}
-            <details className="focus-topic-scenario-history"><summary>Version and review history ({history.length})</summary>
-              <div>{history.map((event) => <div key={event.id} className="focus-topic-scenario-history-event">
-                <strong>{event.status.replaceAll("_", " ")}</strong>
-                <small>Version {scenario.versions.find((candidate) => candidate.id === event.versionId)?.versionNumber ?? "?"}
-                  - {event.eventType.replaceAll("_", " ")} - {userLabel(event.actorId)} - {formatDateTime(event.createdAt)}</small>
-                {event.comment ? <p>{event.comment}</p> : null}
-              </div>)}</div>
-            </details>
-            {practiceScenarios.permissions.canReviewAndPublish && scenario.status !== "archived"
-              ? <div className="focus-topic-scenario-archive-action"><button type="button"
-                className="ghost-button danger-button compact-button" disabled={busy}
-                onClick={() => transitionScenario(scenario, "archive")}>Archive</button></div> : null}
-          </article>;
-        })}</div>
+            <div id={`focus-topic-${selected.id}-active-scenarios-content`} className="focus-topic-scenario-group-body"
+              hidden={!selectedScenarioGroupOpen.active}>
+              {activePracticeScenarios.length === 0
+                ? <p className="muted-copy">No active Practice Scenarios. Archived scenarios remain available below.</p>
+                : <div className="focus-topic-scenario-list">{renderPracticeScenarioRows(activePracticeScenarios)}</div>}
+            </div>
+          </section>
+          <section className="focus-topic-scenario-group" aria-labelledby={`focus-topic-${selected.id}-archived-scenarios-heading`}>
+            <div className="focus-topic-scenario-group-heading">
+              <div><h4 id={`focus-topic-${selected.id}-archived-scenarios-heading`}>Archived Scenarios ({archivedPracticeScenarios.length})</h4>
+                <p className="muted-copy">Archived scenarios are retained for review and history.</p></div>
+              <button type="button" className="ghost-button compact-button focus-topic-scenario-toggle"
+                aria-expanded={selectedScenarioGroupOpen.archived}
+                aria-controls={`focus-topic-${selected.id}-archived-scenarios-content`}
+                aria-label={`${selectedScenarioGroupOpen.archived ? "Collapse" : "Expand"} Archived Scenarios`}
+                onClick={() => setScenarioGroupOpen("archived", !selectedScenarioGroupOpen.archived)}>
+                <span>{selectedScenarioGroupOpen.archived ? "Collapse" : "Expand"}</span>
+                {selectedScenarioGroupOpen.archived ? <ChevronUp aria-hidden="true" size={18} /> : <ChevronDown aria-hidden="true" size={18} />}
+              </button>
+            </div>
+            <div id={`focus-topic-${selected.id}-archived-scenarios-content`} className="focus-topic-scenario-group-body"
+              hidden={!selectedScenarioGroupOpen.archived}>
+              {archivedPracticeScenarios.length === 0
+                ? <p className="muted-copy">No archived Practice Scenarios.</p>
+                : <div className="focus-topic-scenario-list">{renderPracticeScenarioRows(archivedPracticeScenarios)}</div>}
+            </div>
+          </section>
+        </>}
       </div>
       {practiceScenarios?.permissions.canAuthor && selected.status !== "archived"
         ? <div className="focus-topic-assignment-section focus-topic-upload-new">

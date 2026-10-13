@@ -133,18 +133,38 @@ test("Practice Scenario authoring and review expose guidance, provenance, and cu
   assert.match(source, /Manually authored from an existing scenario/);
 });
 
-test("Practice Scenario cards separate review details, actions, archive, and ordered history", () => {
-  assert.match(source, /className="focus-topic-scenario-card-header"/);
+test("Practice Scenario rows group active and archived scenarios behind accessible disclosures", () => {
+  assert.match(source, /const activePracticeScenarios = orderedPracticeScenarios\.filter\(\(scenario\) => scenario\.status !== "archived"\)/);
+  assert.match(source, /const archivedPracticeScenarios = orderedPracticeScenarios\.filter\(\(scenario\) => scenario\.status === "archived"\)/);
+  assert.match(source, /scenarioGroupOpenByTopic/);
+  assert.match(source, /expandedScenarioIdsByTopic/);
+  assert.match(source, /\?\? \{ active: true, archived: false \}/);
+  assert.match(source, />Active Scenarios \(\{activePracticeScenarios\.length\}\)</);
+  assert.match(source, />Archived Scenarios \(\{archivedPracticeScenarios\.length\}\)</);
+  assert.match(source, /No active Practice Scenarios\. Archived scenarios remain available below\./);
+  assert.match(source, /aria-controls=\{`focus-topic-\$\{selected\.id\}-active-scenarios-content`\}/);
+  assert.match(source, /aria-controls=\{contentId\}/);
+  assert.match(source, /className="focus-topic-scenario-group-body"[\s\S]*?hidden=\{!selectedScenarioGroupOpen\.active\}/);
+  assert.match(source, /className="focus-topic-scenario-detail" hidden=\{!open\}/);
+  assert.match(source, /if \(next === "archive"\) setScenarioGroupOpen\("archived", true\)/);
+  assert.match(styles, /\.focus-topic-scenario-group-body\[hidden\],[\s\S]*?\.focus-topic-scenario-detail\[hidden\][\s\S]*?display: none;/);
+  assert.match(styles, /\.focus-topic-scenario-row\s*\{[\s\S]*?padding: 0\.75rem 0\.85rem;/);
+});
+
+test("Practice Scenario expanded details retain actions, review state, and history", () => {
+  assert.match(source, /const renderPracticeScenarioRows/);
+  assert.match(source, /className="focus-topic-scenario-detail-header"/);
   assert.match(source, /className="focus-topic-scenario-actions"/);
   assert.match(source, /className="focus-topic-scenario-version-details"/);
   for (const detail of ["Scenario context", "Desired outcome", "AI counterpart role", "Scoring guidance"]) {
     assert.equal(source.includes(`<dt>${detail}</dt>`), true, detail);
   }
+  assert.match(source, /applicable \{industryLabels\.length === 1 \? "industry" : "industries"\}: \{industryLabels\.join/);
   assert.match(source, /className="focus-topic-field focus-topic-review-comment"/);
   assert.match(source, /className="focus-topic-scenario-archive-action"/);
   assert.match(source, /\[\.\.\.scenario\.history\][\s\S]*?Date\.parse\(right\.createdAt\) - Date\.parse\(left\.createdAt\)/);
   assert.match(source, /className="focus-topic-scenario-history-event"/);
-  assert.match(styles, /\.focus-topic-scenario-card-header\s*\{[\s\S]*?justify-content: space-between;/);
+  assert.match(styles, /\.focus-topic-scenario-detail-header[\s\S]*?justify-content: space-between;/);
   assert.match(styles, /\.focus-topic-scenario-version-details\s*\{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(styles, /\.focus-topic-scenario-archive-action\s*\{[\s\S]*?border-top/);
 });
