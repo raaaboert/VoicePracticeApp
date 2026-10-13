@@ -72,3 +72,15 @@ test("middleware treats dashboard admin API as app-owned on the public host", ()
   assert.equal(response.status, 307);
   assert.equal(response.headers.get("location"), "https://app.peritio.ai/api/admin/users");
 });
+test("middleware keeps dashboard history APIs on the configured app host", () => {
+  const appResponse = proxy(appHostRequest("/api/dashboard/users/user_1/attempts?limit=20"));
+  assert.equal(appResponse.status, 200);
+  assert.equal(appResponse.headers.get("x-middleware-next"), "1");
+
+  const publicResponse = proxy(publicHostRequest("/api/dashboard/users/user_1/attempts?limit=20"));
+  assert.equal(publicResponse.status, 307);
+  assert.equal(
+    publicResponse.headers.get("location"),
+    "https://app.peritio.ai/api/dashboard/users/user_1/attempts?limit=20",
+  );
+});

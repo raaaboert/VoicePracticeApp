@@ -106,6 +106,8 @@ export function FocusTopicAdministration({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<DashboardFocusTopicAssignment[]>([]);
   const [assignableLearners, setAssignableLearners] = useState<Array<{ userId: string; displayName: string; email: string }>>([]);
+  const [assignableLearnersLoading, setAssignableLearnersLoading] = useState(false);
+  const [assignableLearnersError, setAssignableLearnersError] = useState<string | null>(null);
   const [related, setRelated] = useState<DashboardFocusTopicRelatedContentResponse | null>(null);
   const [practiceScenarios, setPracticeScenarios] = useState<CustomerPracticeScenarioListResponse | null>(null);
   const [editingScenarioId, setEditingScenarioId] = useState<string | null>(null);
@@ -143,9 +145,13 @@ export function FocusTopicAdministration({
   const [transcriptContentId, setTranscriptContentId] = useState<string | null>(null);
   const [transcriptText, setTranscriptText] = useState("");
   const selected = topics.find((topic) => topic.id === selectedId) ?? null;
-  const targeted = ["manager_only", "manager_with_team", "individual"].includes(audience);
+  // Scoped Topic managers may create only individual learner assignments. Their
+  // selector has one visible option, so derive the effective value rather than
+  // retaining the initial organization-wide default in hidden component state.
+  const assignmentAudience: Audience = canManageAllTopics ? audience : "individual";
+  const targeted = ["manager_only", "manager_with_team", "individual"].includes(assignmentAudience);
   const subjectOptions = (canManageAllTopics ? users.filter((user) => user.status === "active"
-    && (audience === "individual" || user.assignedReportCount > 0))
+    && (assignmentAudience === "individual" || user.assignedReportCount > 0))
     : assignableLearners.map((user) => ({ ...user, status: "active", assignedReportCount: 0 }))) as Array<{
       userId: string; displayName: string; email?: string; status: string; assignedReportCount: number;
     }>;
@@ -179,8 +185,25 @@ export function FocusTopicAdministration({
     finally { setBusy(false); }
   };
 
+  const loadAssignableLearners = async (topicId: string) => {
+    if (canManageAllTopics) return;
+    setAssignableLearnersLoading(true);
+    setAssignableLearnersError(null);
+    setAssignableLearners([]);
+    try {
+      const result = await action<{ learners: Array<{ userId: string; displayName: string; email: string }> }>({
+        action: "list_assignable_learners", orgId, topicId,
+      });
+      setAssignableLearners(result.learners);
+    } catch {
+      setAssignableLearnersError("Eligible direct reports could not be loaded. Refresh the Topic and try again.");
+    } finally {
+      setAssignableLearnersLoading(false);
+    }
+  };
+
   const selectTopic = (topic: TopicRow) => void run(async () => {
-    const [assignmentResult, relatedResult, scenarioResult, assignableResult] = await Promise.all([
+    const [assignmentResult, relatedResult, scenarioResult] = await Promise.all([
       action<{ assignments: DashboardFocusTopicAssignment[] }>({
         action: "list_assignments", orgId, topicId: topic.id,
       }),
@@ -190,14 +213,11 @@ export function FocusTopicAdministration({
       action<CustomerPracticeScenarioListResponse>({
         action: "list_practice_scenarios", orgId, topicId: topic.id,
       }),
-      action<{ learners: Array<{ userId: string; displayName: string; email: string }> }>({
-        action: "list_assignable_learners", orgId, topicId: topic.id,
-      }),
     ]);
     setSelectedId(topic.id); setName(topic.name); setDescription(topic.description); setStatus(topic.status);
     setAssignments(assignmentResult.assignments); setRelated(relatedResult);
-    setAssignableLearners(assignableResult.learners);
     setPracticeScenarios(scenarioResult); setEditingScenarioId(null);
+    void loadAssignableLearners(topic.id);
   });
 
   const createTopic = () => void run(async () => {
@@ -225,7 +245,7 @@ export function FocusTopicAdministration({
   const createAssignment = () => void run(async () => {
     if (!selected) return;
     const created = await action<DashboardFocusTopicAssignment>({
-      action: "create_assignment", orgId, topicId: selected.id, audience,
+      action: "create_assignment", orgId, topicId: selected.id, audience: assignmentAudience,
       subjectUserId: targeted ? subjectUserId : null,
     });
     setAssignments((current) => [...current, created]); setSubjectUserId("");
@@ -520,7 +540,7 @@ export function FocusTopicAdministration({
           const topic = topics.find((row) => row.id === event.target.value);
           if (topic) selectTopic(topic);
           else { setSelectedId(null); setName(""); setDescription(""); setAssignments([]);
-            setRelated(null); setPracticeScenarios(null); resetScenarioForm(); }
+            setRelated(null); setPracticeScenarios(null); setAssignableLearners([]); setAssignableLearnersError(null); resetScenarioForm(); }
         }}>
         <option value="">{canManageAllTopics ? "Create a new Focus Topic" : "Select a Focus Topic"}</option>
         {topics.map((topic) => <option key={topic.id} value={topic.id}>{topic.name} ({topic.status})</option>)}
@@ -568,21 +588,27 @@ export function FocusTopicAdministration({
       <div className="focus-topic-assignment-composer">
         <div className={`focus-topic-assignment-fields${targeted ? " targeted" : ""}`}>
           <div className="focus-topic-field"><label htmlFor="focus-topic-audience">Audience</label>
-            <select className="text-input" id="focus-topic-audience" value={audience}
-              disabled={busy || selected.status === "archived"}
+            <select className="text-input" id="focus-topic-audience" value={assignmentAudience}
+              disabled={busy || selected.status === "archived" || !canManageAllTopics}
               onChange={(event) => { setAudience(event.target.value as Audience); setSubjectUserId(""); }}>
               {(canManageAllTopics ? AUDIENCES : AUDIENCES.filter((option) => option.value === "individual"))
                 .map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select><small>{AUDIENCES.find((option) => option.value === audience)?.description}</small></div>
+            </select><small>{AUDIENCES.find((option) => option.value === assignmentAudience)?.description}</small></div>
           {targeted ? <div className="focus-topic-field"><label htmlFor="focus-topic-subject">
-            {audience === "individual" ? "Learner" : "Manager"}</label>
+            {assignmentAudience === "individual" ? "Learner" : "Manager"}</label>
             <select className="text-input" id="focus-topic-subject" value={subjectUserId}
-              disabled={busy || selected.status === "archived"} onChange={(event) => setSubjectUserId(event.target.value)}>
-              <option value="">Select an eligible learner</option>
+              disabled={busy || selected.status === "archived" || assignableLearnersLoading || Boolean(assignableLearnersError)}
+              onChange={(event) => setSubjectUserId(event.target.value)}>
+              <option value="">{assignableLearnersLoading ? "Loading eligible direct reports..." : "Select an eligible learner"}</option>
               {subjectOptions.map((user) => <option key={user.userId} value={user.userId}>
                 {user.displayName}{user.email ? ` (${user.email})` : ""}
               </option>)}
-            </select></div> : null}
+            </select>
+            {!canManageAllTopics && assignableLearnersLoading ? <small role="status">Loading current eligible direct reports...</small> : null}
+            {!canManageAllTopics && assignableLearnersError ? <small className="notice danger" role="alert">{assignableLearnersError}</small> : null}
+            {!canManageAllTopics && !assignableLearnersLoading && !assignableLearnersError && subjectOptions.length === 0
+              ? <small>No current eligible direct reports are available for this Topic.</small> : null}
+          </div> : null}
         </div>
         <button type="button" className="primary-button focus-topic-add-assignment"
           disabled={busy || selected.status === "archived" || (targeted && !subjectUserId)}

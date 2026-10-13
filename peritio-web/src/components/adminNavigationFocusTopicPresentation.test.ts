@@ -66,7 +66,7 @@ test("Focus Topic fields and actions use shared controls with accessible labels"
   }
   assert.match(focusTopics, /className="text-input" id="focus-topic-select"/);
   assert.match(focusTopics, /className="text-input" id="focus-topic-audience"/);
-  assert.match(focusTopics, /audience === "individual" \? "Learner" : "Manager"/);
+  assert.match(focusTopics, /assignmentAudience === "individual" \? "Learner" : "Manager"/);
   assert.match(focusTopics, /"Save Focus Topic"/);
   assert.match(focusTopics, />Archive Focus Topic</);
   assert.match(focusTopics, />Add Assignment</);

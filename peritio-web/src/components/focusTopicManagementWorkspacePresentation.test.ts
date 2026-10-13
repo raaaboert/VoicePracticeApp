@@ -123,3 +123,13 @@ test("Focus Topic workspace uses accessible collapsible sections for its large m
   assert.match(source, /awaiting review/);
   assert.match(source, /defaultOpen=\{practiceScenarios\?\.permissions\.canAuthor === true/);
 });
+test("scoped Topic managers always receive the individual learner picker with bounded feedback", () => {
+  assert.match(source, /const assignmentAudience: Audience = canManageAllTopics \? audience : "individual"/);
+  assert.match(source, /value=\{assignmentAudience\}/);
+  assert.match(source, /action: "list_assignable_learners"/);
+  assert.match(source, /Loading current eligible direct reports/);
+  assert.match(source, /No current eligible direct reports are available for this Topic/);
+  assert.match(source, /Eligible direct reports could not be loaded/);
+  assert.match(source, /: assignableLearners\.map/);
+  assert.match(source, /audience: assignmentAudience/);
+});

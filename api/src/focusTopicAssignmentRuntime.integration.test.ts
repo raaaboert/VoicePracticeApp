@@ -463,6 +463,21 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
         body?: Record<string, unknown>,
       ) => dashboardCall(managerSession.token, path, method, body);
+      const assignableLearnersPath = `/orgs/${org.id}/trainings/${topic.id}/assignable-learners`;
+      const managerAssignableLearners = await managerCall(assignableLearnersPath);
+      assert.equal(managerAssignableLearners.status, 200, JSON.stringify(managerAssignableLearners.body));
+      assert.deepEqual(
+        (managerAssignableLearners.body.learners as Array<{ userId: string }>).map((row) => row.userId).sort(),
+        [secondReport.id, user.id].sort(),
+      );
+      const orgAdminAssignableLearners = await orgAdminCall(assignableLearnersPath);
+      assert.equal(orgAdminAssignableLearners.status, 200, JSON.stringify(orgAdminAssignableLearners.body));
+      const orgAdminAssignableIds = new Set((orgAdminAssignableLearners.body.learners as Array<{ userId: string }>).map((row) => row.userId));
+      assert.equal(orgAdminAssignableIds.has(user.id), true);
+      assert.equal(orgAdminAssignableIds.has(secondReport.id), true);
+      assert.equal(orgAdminAssignableIds.has(scopedManager.id), true);
+      assert.equal(orgAdminAssignableIds.has(scopedUserAdmin.id), false);
+      assert.equal(orgAdminAssignableIds.has(foreignPerformanceUser.id), false);
       const managerWorkspace = await managerCall(`/dashboard/performance?orgId=${org.id}`);
       assert.equal(managerWorkspace.status, 200, JSON.stringify(managerWorkspace.body));
       assert.deepEqual(
@@ -561,6 +576,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await dashboardCall(
         managerSession.token, `/orgs/${org.id}/trainings`,
       )).status, 403);
+      assert.equal((await managerCall(assignableLearnersPath)).status, 404);
       const managerPerformanceAfterLastReport = await managerCall(
         `/dashboard/performance/team?orgId=${org.id}&year=2026&month=10`,
       );

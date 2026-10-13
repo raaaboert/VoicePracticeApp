@@ -3683,7 +3683,7 @@ test("dashboard user attempt history filters before stable pagination and labels
   try {
   const scores = await readExtractedStoreRecords<SimulationScoreRecord>("score-records");
   const updatedScores = scores
-    .filter((score) => score.id !== "score_direct")
+    .filter((score) => score.userId !== "learner")
     .concat(
       buildScoreRecord("score_direct", "learner", {
         trainingId: "training_scope",
@@ -3699,8 +3699,20 @@ test("dashboard user attempt history filters before stable pagination and labels
         endedAt: "2026-08-02T10:05:00.000Z",
         overallScore: 80,
       }),
+      ...Array.from({ length: 11 }, (_, index) => buildScoreRecord(`score_history_existing_${index}`, "learner", {
+        trainingId: null,
+        trainingPackId: null,
+        startedAt: `2026-07-${String(20 - index).padStart(2, "0")}T10:00:00.000Z`,
+        endedAt: `2026-07-${String(20 - index).padStart(2, "0")}T10:05:00.000Z`,
+        overallScore: 70 + index,
+      })),
     );
   await writeFile(extractedStorePath("score-records"), JSON.stringify({ records: updatedScores }, null, 2), "utf8");
+
+  const initialHistory = await dashboardRequest("/dashboard/users/learner/attempts?limit=20", orgAdminToken);
+  assert.equal(initialHistory.status, 200, JSON.stringify(initialHistory.body));
+  assert.equal((initialHistory.body.attempts as Array<unknown>).length, 13);
+  assert.equal(initialHistory.body.hasMore, false);
 
   const firstPage = await dashboardRequest("/dashboard/users/learner/attempts?limit=1", orgAdminToken);
   assert.equal(firstPage.status, 200, JSON.stringify(firstPage.body));

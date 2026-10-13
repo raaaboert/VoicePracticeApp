@@ -44,7 +44,7 @@ test("two different active individual subjects remain distinct", () => {
 test("active rows show created time and revoke while history shows both times without revoke", () => {
   assert.match(source, /Assigned \{formatDateTime\(row\.createdAt\)\}/);
   assert.match(source, /Revoked \$\{formatDateTime\(row\.revokedAt\)\}/);
-  assert.match(source, /!options\.revoked && canManageAllTopics/);
+  assert.match(source, /!options\.revoked && \(canManageAllTopics \|\| \(!options\.management && assignableLearnerIds\.has\(row\.subjectUserId \?\? ""\)\)\)/);
   assert.match(source, /onClick=\{\(\) => revokeAssignment\(row\.id, options\.management === true\)\}/);
 });
 

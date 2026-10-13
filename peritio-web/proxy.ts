@@ -9,6 +9,7 @@ import {
   isAppExperiencePath,
   isAuthApiPath,
   isPerformanceApiPath,
+  isDashboardApiPath,
   isNotificationApiPath,
   isSystemPath,
 } from "@/src/lib/domain";
@@ -66,7 +67,8 @@ export function proxy(request: NextRequest) {
       isAuthApiPath(pathname) ||
       isAdminApiPath(pathname) ||
       isNotificationApiPath(pathname) ||
-      isPerformanceApiPath(pathname)
+      isPerformanceApiPath(pathname) ||
+      isDashboardApiPath(pathname)
     ) {
       return NextResponse.redirect(
         buildAbsoluteUrlForHost({
@@ -106,7 +108,8 @@ export function proxy(request: NextRequest) {
       isAuthApiPath(pathname) ||
       isAdminApiPath(pathname) ||
       isNotificationApiPath(pathname) ||
-      isPerformanceApiPath(pathname)
+      isPerformanceApiPath(pathname) ||
+      isDashboardApiPath(pathname)
     ) {
       return NextResponse.next();
     }
