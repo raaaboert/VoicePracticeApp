@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import type {
   CustomerPracticeScenario,
@@ -11,7 +12,7 @@ import type {
   OrgTrainingSummary,
 } from "@voicepractice/shared";
 
-import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
+import { AdminApiClientError, fetchAdminApiJson } from "@/src/lib/adminApiClient";
 import type {
   DashboardFocusTopicAssignment,
   DashboardFocusTopicContentAttachment,
@@ -77,19 +78,21 @@ function FocusTopicWorkspaceSection({
 
   return <section className="focus-topic-admin-panel" aria-labelledby={headingId}>
     <div className="focus-topic-panel-heading">
-      <div>
+      <div className="focus-topic-section-copy">
         <p className="eyebrow">{eyebrow}</p>
-        <h3 id={headingId}>
-          <button type="button" className="focus-topic-section-toggle" aria-expanded={open}
-            aria-controls={contentId} onClick={() => setOpen((current) => !current)}>
-            <span>{title}</span><span className="focus-topic-section-summary">{summary}</span>
-            <span className="focus-topic-section-chevron" aria-hidden="true">{open ? "⌃" : "⌄"}</span>
-          </button>
-        </h3>
+        <h3 id={headingId}>{title}</h3>
+        <span className="focus-topic-section-summary">{summary}</span>
         <p className="muted-copy">{description}</p>
       </div>
+      <button type="button" className="ghost-button compact-button focus-topic-section-toggle"
+        aria-expanded={open} aria-controls={contentId}
+        aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
+        onClick={() => setOpen((current) => !current)}>
+        <span>{open ? "Collapse" : "Expand"}</span>
+        {open ? <ChevronUp aria-hidden="true" size={18} /> : <ChevronDown aria-hidden="true" size={18} />}
+      </button>
     </div>
-    {open ? <div id={contentId} className="focus-topic-panel-body">{children}</div> : null}
+    <div id={contentId} className="focus-topic-panel-body" hidden={!open}>{children}</div>
   </section>;
 }
 
@@ -131,7 +134,9 @@ export function FocusTopicAdministration({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [contentMode, setContentMode] = useState<"attach" | "upload">("attach");
+  const [contentMode, setContentMode] = useState<"attach" | "upload" | null>(null);
+  const [availableContentSearch, setAvailableContentSearch] = useState("");
+  const [availableContentVisibleCount, setAvailableContentVisibleCount] = useState(50);
   const [newSourceMode, setNewSourceMode] = useState<"file" | "youtube">("file");
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadDescription, setUploadDescription] = useState("");
@@ -172,6 +177,12 @@ export function FocusTopicAdministration({
   }));
   const availableContent = related?.contentItems.filter((item) =>
     item.availableToAttach && !activeContentIds.has(item.id)) ?? [];
+  const normalizedAvailableContentSearch = availableContentSearch.trim().toLocaleLowerCase();
+  const matchingAvailableContent = normalizedAvailableContentSearch
+    ? availableContent.filter((item) => [item.title, item.description, item.contentType]
+      .some((value) => value.toLocaleLowerCase().includes(normalizedAvailableContentSearch)))
+    : availableContent;
+  const visibleAvailableContent = matchingAvailableContent.slice(0, availableContentVisibleCount);
   const scenarioSourceOptions = attachedContent.flatMap(({ item }) =>
     item && !item.archivedAt ? [item] : []);
   const eligibleScenarioSourceOptions = scenarioSourceOptions.filter((item) => item.generationSource.eligible);
@@ -203,6 +214,7 @@ export function FocusTopicAdministration({
   };
 
   const selectTopic = (topic: TopicRow) => void run(async () => {
+    setContentMode(null); setAvailableContentSearch(""); setAvailableContentVisibleCount(50);
     const [assignmentResult, relatedResult, scenarioResult] = await Promise.all([
       action<{ assignments: DashboardFocusTopicAssignment[] }>({
         action: "list_assignments", orgId, topicId: topic.id,
@@ -276,11 +288,18 @@ export function FocusTopicAdministration({
     setMessage(management ? "Topic management grant revoked." : "Learner assignment revoked.");
   });
   const attachContent = (contentId: string) => void run(async () => {
-    if (!selected || !related) return;
-    const attachment = await action<DashboardFocusTopicContentAttachment>({
-      action: "attach_content", orgId, topicId: selected.id, contentId,
-    });
-    setRelated({ ...related, content: [...related.content, attachment] });
+    if (!selected) return;
+    try {
+      await action<DashboardFocusTopicContentAttachment>({
+        action: "attach_content", orgId, topicId: selected.id, contentId,
+      });
+    } catch (caught) {
+      if (!(caught instanceof AdminApiClientError) || caught.status !== 409) throw caught;
+      await refreshRelatedContent();
+      setMessage("Learning Resource is already attached. The current list was refreshed.");
+      return;
+    }
+    await refreshRelatedContent();
     setMessage("Learning Resource attached to this Focus Topic.");
   });
   const detachContent = (attachmentId: string) => void run(async () => {
@@ -540,7 +559,8 @@ export function FocusTopicAdministration({
           const topic = topics.find((row) => row.id === event.target.value);
           if (topic) selectTopic(topic);
           else { setSelectedId(null); setName(""); setDescription(""); setAssignments([]);
-            setRelated(null); setPracticeScenarios(null); setAssignableLearners([]); setAssignableLearnersError(null); resetScenarioForm(); }
+            setRelated(null); setPracticeScenarios(null); setAssignableLearners([]); setAssignableLearnersError(null);
+            setContentMode(null); setAvailableContentSearch(""); setAvailableContentVisibleCount(50); resetScenarioForm(); }
         }}>
         <option value="">{canManageAllTopics ? "Create a new Focus Topic" : "Select a Focus Topic"}</option>
         {topics.map((topic) => <option key={topic.id} value={topic.id}>{topic.name} ({topic.status})</option>)}
@@ -581,7 +601,7 @@ export function FocusTopicAdministration({
       </div> : null}
     </div> : null}
 
-    {selected ? <FocusTopicWorkspaceSection headingId="focus-topic-assignments-heading" eyebrow="Learner access"
+    {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-assignments`} headingId="focus-topic-assignments-heading" eyebrow="Learner access"
       title="Learner assignments"
       summary={`${learnerParts.activeAssignments.length} active · ${learnerParts.assignmentHistory.length} revoked`}
       description="Topic Managers can assign and revoke individual assignments for their current direct reports.">
@@ -626,7 +646,7 @@ export function FocusTopicAdministration({
       </details>
     </FocusTopicWorkspaceSection> : null}
 
-    {selected && canManageAllTopics ? <FocusTopicWorkspaceSection headingId="focus-topic-managers-heading"
+    {selected && canManageAllTopics ? <FocusTopicWorkspaceSection key={`${selected.id}-managers`} headingId="focus-topic-managers-heading"
       eyebrow="Scoped administration" title="Topic managers"
       summary={`${managerParts.activeAssignments.length} active · ${managerParts.assignmentHistory.length} revoked`}
       description="Grant management of this Topic to an eligible User Admin or current Manager. Learner access is assigned separately.">
@@ -655,7 +675,7 @@ export function FocusTopicAdministration({
       </details>
     </FocusTopicWorkspaceSection> : null}
 
-    {selected ? <FocusTopicWorkspaceSection headingId="focus-topic-practice-heading" eyebrow="Practice Scenarios"
+    {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-practice`} headingId="focus-topic-practice-heading" eyebrow="Practice Scenarios"
       title="Practice Scenarios"
       summary={`${orderedPracticeScenarios.length} scenarios · ${practiceScenarios?.scenarios.filter((scenario) => scenario.status === "in_review").length ?? 0} awaiting review`}
       description="Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version."
@@ -804,7 +824,7 @@ export function FocusTopicAdministration({
         </div> : null}
     </FocusTopicWorkspaceSection> : null}
 
-    {selected ? <FocusTopicWorkspaceSection headingId="focus-topic-related-heading" eyebrow="Learning Resources"
+    {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-related`} headingId="focus-topic-related-heading" eyebrow="Learning Resources"
       title="Related Content" summary={`${attachedContent.length} attached · ${availableContent.length} available`}
       description="Attach an existing organization resource or upload a new draft for this Topic.">
       {!learningResourcesEnabled || related?.permissions.learningResourcesEnabled === false
@@ -888,13 +908,26 @@ export function FocusTopicAdministration({
       {related?.permissions.canManageRelatedContent ? <div className="focus-topic-content-mode" role="group"
         aria-label="Add Content">
         <button type="button" className={contentMode === "attach" ? "primary-button" : "ghost-button"}
-          disabled={busy} onClick={() => setContentMode("attach")}>Attach Existing</button>
+          disabled={busy} aria-expanded={contentMode === "attach"} aria-controls="focus-topic-available-content"
+          aria-pressed={contentMode === "attach"}
+          onClick={() => setContentMode((current) => current === "attach" ? null : "attach")}>Attach Existing</button>
         <button type="button" className={contentMode === "upload" ? "primary-button" : "ghost-button"}
-          disabled={busy} onClick={() => setContentMode("upload")}>Upload New</button>
+          disabled={busy} aria-expanded={contentMode === "upload"} aria-controls="focus-topic-upload-content"
+          aria-pressed={contentMode === "upload"}
+          onClick={() => setContentMode((current) => current === "upload" ? null : "upload")}>Upload New</button>
       </div> : null}
-      {contentMode === "attach" ? <div className="focus-topic-assignment-section"><h4>Available Content</h4>
-        {availableContent.length === 0 ? <p className="muted-copy">No additional current Learning Resources are available.</p> : null}
-        <div className="focus-topic-assignment-list">{availableContent.map((item) =>
+      {contentMode === "attach" ? <div id="focus-topic-available-content" className="focus-topic-assignment-section"><h4>Available Content</h4>
+        {availableContent.length === 0 ? <p className="muted-copy">No additional current Learning Resources are available.</p> : <>
+          <label className="focus-topic-field" htmlFor="focus-topic-available-content-search">Search available Learning Resources
+            <input className="text-input" id="focus-topic-available-content-search" type="search"
+              value={availableContentSearch} placeholder="Search title, description, or type"
+              onChange={(event) => { setAvailableContentSearch(event.target.value); setAvailableContentVisibleCount(50); }} />
+          </label>
+          {matchingAvailableContent.length === 0
+            ? <p className="muted-copy">No available Learning Resources match this search.</p>
+            : <p className="muted-copy">Showing {visibleAvailableContent.length} of {matchingAvailableContent.length} available Learning Resources.</p>}
+        </>}
+        <div className="focus-topic-assignment-list">{visibleAvailableContent.map((item) =>
           <div key={item.id} className="focus-topic-assignment-row">
             <div className="training-content-order-copy"><strong>{item.title}</strong>
               <small>{item.contentType} · {item.publicationState}</small>
@@ -903,9 +936,12 @@ export function FocusTopicAdministration({
               className="primary-button compact-button" disabled={busy}
               onClick={() => attachContent(item.id)}>Attach</button> : null}
           </div>)}</div>
+        {visibleAvailableContent.length < matchingAvailableContent.length ? <button type="button"
+          className="ghost-button compact-button" disabled={busy}
+          onClick={() => setAvailableContentVisibleCount((count) => count + 50)}>Show More</button> : null}
       </div> : null}
       {contentMode === "upload" && related?.permissions.canManageRelatedContent
-        ? <div className="focus-topic-assignment-section focus-topic-upload-new"><h4>Upload New</h4>
+        ? <div id="focus-topic-upload-content" className="focus-topic-assignment-section focus-topic-upload-new"><h4>Upload New</h4>
           <p className="muted-copy">The new organization resource starts as a draft and is attached here automatically.</p>
           <div className="focus-topic-content-mode" role="group" aria-label="New resource source">
             <button type="button" className={newSourceMode === "file" ? "primary-button" : "ghost-button"}

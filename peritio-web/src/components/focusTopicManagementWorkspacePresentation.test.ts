@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(componentsDir, "FocusTopicAdministration.tsx"), "utf8");
+const styles = readFileSync(join(componentsDir, "../../app/globals.css"), "utf8");
 const page = readFileSync(join(componentsDir, "../../app/app/admin/focus-topics/page.tsx"), "utf8");
 const proxy = readFileSync(join(componentsDir, "../../app/api/admin/focus-topic-management/route.ts"), "utf8");
 
@@ -26,7 +27,7 @@ test("Focus Topic workspace separates details, learner access, scoped managers, 
   assert.match(source, /disabled=\{busy \|\| !canManageAllTopics/);
 });
 
-test("Related Content separates attach-existing from scoped draft upload and editing", () => {
+test("Related Content uses toggleable authorized attach and upload panels", () => {
   assert.match(source, /action: "list_related_content"/);
   assert.match(source, /action: "attach_content"/);
   assert.match(source, /action: "detach_content"/);
@@ -39,6 +40,12 @@ test("Related Content separates attach-existing from scoped draft upload and edi
   assert.match(source, /item\.mutationRestriction/);
   assert.match(source, /related\?\.permissions\.canManageRelatedContent/);
   assert.match(source, /Learning Resources are not enabled for this organization/);
+  assert.match(source, /useState<"attach" \| "upload" \| null>\(null\)/);
+  assert.match(source, /current === "attach" \? null : "attach"/);
+  assert.match(source, /current === "upload" \? null : "upload"/);
+  assert.match(source, /aria-controls="focus-topic-available-content"/);
+  assert.match(source, /aria-controls="focus-topic-upload-content"/);
+  assert.match(source, /aria-pressed=\{contentMode === "attach"\}/);
   assert.match(proxy, /case "list_related_content"/);
   assert.match(proxy, /case "attach_content"/);
   assert.match(proxy, /case "detach_content"/);
@@ -105,11 +112,18 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   assert.match(source, /generatedScenario\?\.similarity\.flagged/);
 });
 
-test("Focus Topic workspace uses accessible collapsible sections for its large management areas", () => {
+test("Focus Topic workspace keeps accessible disclosure bodies mounted per selected Topic", () => {
   assert.match(source, /function FocusTopicWorkspaceSection/);
+  assert.match(source, /className="focus-topic-section-copy"/);
+  assert.match(source, /<h3 id=\{headingId\}>\{title\}<\/h3>/);
   assert.match(source, /aria-expanded=\{open\}/);
   assert.match(source, /aria-controls=\{contentId\}/);
-  assert.match(source, /className="focus-topic-panel-body"/);
+  assert.match(source, /aria-label=\{`\$\{open \? "Collapse" : "Expand"\} \$\{title\}`\}/);
+  assert.match(source, /<ChevronUp aria-hidden="true" size=\{18\} \/>/);
+  assert.match(source, /<ChevronDown aria-hidden="true" size=\{18\} \/>/);
+  assert.match(source, /className="focus-topic-panel-body" hidden=\{!open\}/);
+  assert.match(styles, /\.focus-topic-panel-body\[hidden\]\s*\{\s*display: none;/);
+  assert.match(styles, /\.focus-topic-section-toggle:hover\s*\{[\s\S]*?var\(--brand-forest\)/);
   for (const heading of [
     "focus-topic-assignments-heading",
     "focus-topic-managers-heading",
@@ -122,6 +136,24 @@ test("Focus Topic workspace uses accessible collapsible sections for its large m
   assert.match(source, /summary=\{`\$\{managerParts\.activeAssignments\.length\} active/);
   assert.match(source, /awaiting review/);
   assert.match(source, /defaultOpen=\{practiceScenarios\?\.permissions\.canAuthor === true/);
+  for (const sectionKey of ["assignments", "managers", "practice", "related"]) {
+    assert.equal(source.includes("key={`${selected.id}-" + sectionKey + "`}"), true, sectionKey);
+  }
+});
+
+test("available Related Content searches authorized candidates and refreshes after attach", () => {
+  assert.match(source, /const matchingAvailableContent = normalizedAvailableContentSearch/);
+  assert.match(source, /\[item\.title, item\.description, item\.contentType\]/);
+  assert.match(source, /id="focus-topic-available-content-search" type="search"/);
+  assert.match(source, /Search available Learning Resources/);
+  assert.match(source, /Showing \{visibleAvailableContent\.length\} of \{matchingAvailableContent\.length\}/);
+  assert.match(source, /No available Learning Resources match this search/);
+  assert.match(source, /slice\(0, availableContentVisibleCount\)/);
+  assert.match(source, /setAvailableContentVisibleCount\(\(count\) => count \+ 50\)/);
+  assert.match(source, />Show More<\/button>/);
+  assert.match(source, /caught\.status !== 409/);
+  assert.match(source, /await refreshRelatedContent\(\);/);
+  assert.match(source, /setContentMode\(null\); setAvailableContentSearch\(""\); setAvailableContentVisibleCount\(50\);/);
 });
 test("scoped Topic managers always receive the individual learner picker with bounded feedback", () => {
   assert.match(source, /const assignmentAudience: Audience = canManageAllTopics \? audience : "individual"/);

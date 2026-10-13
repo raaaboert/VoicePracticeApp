@@ -3198,24 +3198,32 @@ input[type="radio"] {
   margin-top: 0.35rem;
 }
 
+.focus-topic-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.focus-topic-section-copy {
+  min-width: 0;
+}
+
+.focus-topic-section-copy h3 {
+  color: var(--text);
+}
+
 .focus-topic-section-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  padding: 0.2rem 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
+  flex: 0 0 auto;
+  gap: 0.35rem;
   color: var(--text);
-  cursor: pointer;
-  font: inherit;
-  font-weight: 800;
-  text-align: left;
 }
 
 .focus-topic-section-toggle:hover {
-  color: var(--brand-forest);
+  background: color-mix(in srgb, var(--brand-forest) 14%, var(--surface-raised));
+  color: var(--text);
 }
 
 .focus-topic-section-toggle:focus-visible {
@@ -3229,16 +3237,13 @@ input[type="radio"] {
   font-weight: 700;
 }
 
-.focus-topic-section-chevron {
-  margin-left: auto;
-  color: var(--brand-forest);
-  font-size: 1.1rem;
-  line-height: 1;
-}
-
 .focus-topic-panel-body {
   display: grid;
   gap: 1rem;
+}
+
+.focus-topic-panel-body[hidden] {
+  display: none;
 }
 
 .dashboard-history-disclosure {
