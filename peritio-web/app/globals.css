@@ -3860,22 +3860,109 @@ input[type="radio"] {
   width: 1.75rem;
   height: 1.75rem;
   padding: 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
   background: var(--surface-raised);
-  color: var(--brand-forest);
+  color: var(--text-secondary);
   cursor: help;
 }
 
 .focus-topic-generation-help-button:hover,
 .focus-topic-generation-help-button:focus-visible {
   color: var(--text);
-  background: color-mix(in srgb, var(--brand-sage) 22%, var(--surface-raised));
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .focus-topic-generation-help-button:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--brand-sage) 55%, transparent);
+  outline: 2px solid var(--accent);
   outline-offset: 3px;
+}
+
+.focus-topic-scenario-option-group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.focus-topic-scenario-option-group > legend {
+  padding: 0;
+  margin-bottom: 0.55rem;
+}
+
+.focus-topic-scenario-option-list {
+  max-height: 13rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-muted);
+}
+
+.focus-topic-scenario-option-row {
+  border-color: var(--border);
+  background: var(--surface-raised);
+}
+
+.focus-topic-scenario-option-row:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.focus-topic-scenario-option-row.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.focus-topic-scenario-option-row input {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.25rem;
+  background: var(--surface-raised);
+}
+
+.focus-topic-scenario-option-row input::before {
+  width: 0.55rem;
+  height: 0.3rem;
+  border: solid var(--surface-raised);
+  border-width: 0 0.14rem 0.14rem 0;
+  content: "";
+  opacity: 0;
+  transform: rotate(45deg) translate(-0.04rem, -0.08rem);
+}
+
+.focus-topic-scenario-option-row input:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.focus-topic-scenario-option-row input:checked::before {
+  opacity: 1;
+}
+
+.focus-topic-scenario-option-row input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  .focus-topic-scenario-option-row input {
+    appearance: auto;
+    forced-color-adjust: auto;
+  }
+
+  .focus-topic-scenario-option-row input::before {
+    content: none;
+  }
+
+  .focus-topic-scenario-option-row.is-selected {
+    outline: 1px solid CanvasText;
+  }
 }
 
 .focus-topic-generation-tooltip {

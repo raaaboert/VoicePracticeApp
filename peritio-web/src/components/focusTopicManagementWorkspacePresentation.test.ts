@@ -119,6 +119,9 @@ test("Practice Scenario authoring and review expose guidance, provenance, and cu
   assert.match(source, /Generating creates one unsaved draft/);
   assert.match(styles, /\.focus-topic-generation-help:hover \.focus-topic-generation-tooltip/);
   assert.match(styles, /\.focus-topic-generation-help:focus-within \.focus-topic-generation-tooltip/);
+  assert.match(styles, /\.focus-topic-generation-help-button\s*\{[\s\S]*?border: 1px solid var\(--border-strong\);[\s\S]*?color: var\(--text-secondary\);/);
+  assert.match(styles, /\.focus-topic-generation-help-button:hover,[\s\S]*?color: var\(--text\);[\s\S]*?border-color: var\(--accent\);[\s\S]*?background: var\(--accent-soft\);/);
+  assert.match(styles, /\.focus-topic-generation-help-button:focus-visible\s*\{[\s\S]*?outline: 2px solid var\(--accent\);/);
   assert.match(source, /rows=\{8\} value=\{scenarioDescription\}/);
   assert.match(source, /rows=\{8\} value=\{scenarioScoringGuidance\}/);
   assert.match(source, /rows=\{3\} maxLength=\{2000\}/);
@@ -207,10 +210,23 @@ test("Focus Topic workspace keeps accessible disclosure bodies mounted per selec
   assert.match(source, /summary=\{`\$\{learnerParts\.activeAssignments\.length\} active/);
   assert.match(source, /summary=\{`\$\{managerParts\.activeAssignments\.length\} active/);
   assert.match(source, /awaiting review/);
-  assert.match(source, /defaultOpen=\{practiceScenarios\?\.permissions\.canAuthor === true/);
+  assert.match(source, /defaultOpen = false/);
+  assert.doesNotMatch(source, /defaultOpen=\{practiceScenarios/);
   for (const sectionKey of ["assignments", "managers", "practice", "related"]) {
     assert.equal(source.includes("key={`${selected.id}-" + sectionKey + "`}"), true, sectionKey);
   }
+});
+
+test("Practice Scenario source selectors retain native inputs with scoped polished option rows", () => {
+  assert.equal((source.match(/focus-topic-scenario-option-group/g) ?? []).length >= 3, true);
+  assert.match(source, /className="scenario-option-list focus-topic-scenario-option-list"/);
+  assert.match(source, /className=\{`scenario-option-row focus-topic-scenario-option-row\$\{scenarioSourceContentIds\.includes\(item\.id\)/);
+  assert.match(source, /className=\{`scenario-option-row focus-topic-scenario-option-row\$\{scenarioIndustryIds\.includes\(option\.id\)/);
+  assert.equal((source.match(/type="checkbox"/g) ?? []).length >= 3, true);
+  assert.match(styles, /\.focus-topic-scenario-option-group\s*\{[\s\S]*?border: 0;/);
+  assert.match(styles, /\.focus-topic-scenario-option-row\.is-selected\s*\{[\s\S]*?background: var\(--accent-soft\);/);
+  assert.match(styles, /\.focus-topic-scenario-option-row input\s*\{[\s\S]*?appearance: none;/);
+  assert.match(styles, /@media \(forced-colors: active\)\s*\{[\s\S]*?\.focus-topic-scenario-option-row input\s*\{[\s\S]*?appearance: auto;/);
 });
 
 test("available Related Content searches authorized candidates and refreshes after attach", () => {

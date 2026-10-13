@@ -89,7 +89,7 @@ function FocusTopicWorkspaceSection({
   title,
   summary,
   description,
-  defaultOpen = true,
+  defaultOpen = false,
   children,
 }: {
   headingId: string;
@@ -839,9 +839,7 @@ export function FocusTopicAdministration({
     {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-practice`} headingId="focus-topic-practice-heading" eyebrow="Practice Scenarios"
       title="Practice Scenarios"
       summary={`${orderedPracticeScenarios.length} scenarios · ${practiceScenarios?.scenarios.filter((scenario) => scenario.status === "in_review").length ?? 0} awaiting review`}
-      description="Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version."
-      defaultOpen={practiceScenarios?.permissions.canAuthor === true
-        || practiceScenarios?.scenarios.some((scenario) => scenario.status === "in_review") === true}>
+      description="Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version.">
       {practiceScenarios && !practiceScenarios.permissions.creationEnabled
         ? <div className="notice" role="status">Customer Practice Scenario creation is not enabled for this organization. Existing scenarios remain visible.</div>
         : null}
@@ -904,12 +902,12 @@ export function FocusTopicAdministration({
             </span>
           </div>
           <p className="muted-copy">Select one or more generation-ready Related Content resources. Generation creates no scenario until you review and save the draft below.</p>
-          <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Eligible Related Content sources</legend>
-            <div className="focus-topic-content-mode">{eligibleScenarioSourceOptions.map((item) =>
-              <label key={`generate-${item.id}`}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
+          <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Eligible Related Content sources</legend>
+            <div className="scenario-option-list focus-topic-scenario-option-list">{eligibleScenarioSourceOptions.map((item) =>
+              <label key={`generate-${item.id}`} className={`scenario-option-row focus-topic-scenario-option-row${scenarioSourceContentIds.includes(item.id) ? " is-selected" : ""}`}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
                 onChange={(event) => setScenarioSourceContentIds((current) => event.target.checked
                   ? [...new Set([...current, item.id])]
-                  : current.filter((id) => id !== item.id))} /> {item.title}</label>)}</div>
+                  : current.filter((id) => id !== item.id))} /> <span>{item.title}</span></label>)}</div>
             {eligibleScenarioSourceOptions.length === 0 ? <small>No attached Related Content is currently generation-ready.</small> : null}
           </fieldset>
           <label className="focus-topic-field focus-topic-field-wide">Optional practice guidance
@@ -958,20 +956,20 @@ export function FocusTopicAdministration({
                 {practiceScenarios.roleOptions.map((option) =>
                   <option key={option.id} value={option.id}>{option.label}</option>)}
               </select></label>
-            <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Applicable industries</legend>
-              <div className="focus-topic-content-mode">{practiceScenarios.industryOptions.map((option) =>
-                <label key={option.id}><input type="checkbox" checked={scenarioIndustryIds.includes(option.id)}
+            <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Applicable industries</legend>
+              <div className="scenario-option-list focus-topic-scenario-option-list">{practiceScenarios.industryOptions.map((option) =>
+                <label key={option.id} className={`scenario-option-row focus-topic-scenario-option-row${scenarioIndustryIds.includes(option.id) ? " is-selected" : ""}`}><input type="checkbox" checked={scenarioIndustryIds.includes(option.id)}
                   onChange={(event) => setScenarioIndustryIds((current) => event.target.checked
                     ? [...new Set([...current, option.id])]
-                    : current.filter((id) => id !== option.id))} /> {option.label}</label>)}</div>
+                    : current.filter((id) => id !== option.id))} /> <span>{option.label}</span></label>)}</div>
             </fieldset>
-            <fieldset className="focus-topic-field focus-topic-field-wide"><legend>Related Content sources (optional)</legend>
+            <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Related Content sources (optional)</legend>
               <p className="muted-copy">Select resources currently attached to this Focus Topic. Manual scenarios do not require a source.</p>
-              <div className="focus-topic-content-mode">{scenarioSourceOptions.map((item) =>
-                <label key={item.id}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
+              <div className="scenario-option-list focus-topic-scenario-option-list">{scenarioSourceOptions.map((item) =>
+                <label key={item.id} className={`scenario-option-row focus-topic-scenario-option-row${scenarioSourceContentIds.includes(item.id) ? " is-selected" : ""}`}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
                   onChange={(event) => setScenarioSourceContentIds((current) => event.target.checked
                     ? [...new Set([...current, item.id])]
-                    : current.filter((id) => id !== item.id))} /> {item.title}</label>)}</div>
+                    : current.filter((id) => id !== item.id))} /> <span>{item.title}</span></label>)}</div>
               {scenarioSourceOptions.length === 0 ? <small>No current Related Content is available.</small> : null}
             </fieldset>
           </div>
