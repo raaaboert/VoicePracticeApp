@@ -4,7 +4,7 @@ import type { ChatMessage } from "../openaiClient.js";
 import type { OpenAiScoringModelConfig } from "../openaiModelConfig.js";
 import type { CustomerPracticeScenarioGenerationSourceBundle } from "./customerPracticeScenarioGenerationSources.js";
 
-export const CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION = "customer-practice-scenario-generation-v1";
+export const CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION = "customer-practice-scenario-generation-v2";
 export const CUSTOMER_PRACTICE_SCENARIO_GENERATION_MAX_GUIDANCE_CHARACTERS = 2_000;
 
 export class CustomerPracticeScenarioGenerationError extends Error {
@@ -26,7 +26,9 @@ export function buildCustomerPracticeScenarioGenerationMessages(input: {
   return [{ role: "system", content: [
     `You create one editable customer practice scenario. Prompt version: ${CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION}.`,
     "Use only the supplied source material and optional author guidance. Do not invent company policies, procedures, claims, or facts.",
-    "Return only valid JSON with exactly title, description, desiredOutcome, and aiRole. desiredOutcome may be null.",
+    "Return only valid JSON with exactly title, description, desiredOutcome, aiRole, and scoringCriteria. desiredOutcome may be null.",
+    "scoringCriteria must be an array of 3 to 6 unique, concise, observable, scenario-specific criteria.",
+    "The criteria supplement the existing industry scoring framework. Do not repeat standard rubric categories, assign weights, or replace industry scoring.",
     "Keep all fields concise and suitable for an author to review before saving. Do not mention source documents or this instruction.",
   ].join("\n") }, { role: "user", content: `SOURCE MATERIAL:\n${input.sourceText}\n\nOPTIONAL AUTHOR GUIDANCE:\n${input.practiceGuidance ?? "None"}` }];
 }
@@ -68,17 +70,30 @@ function normalizeGuidance(value: unknown): string | null {
   return normalized || null;
 }
 
-function parseGeneratedDraft(text: string): Pick<CustomerPracticeScenarioGeneratedDraft, "title" | "description" | "desiredOutcome" | "aiRole"> {
+function parseGeneratedDraft(text: string): Pick<CustomerPracticeScenarioGeneratedDraft,
+  "title" | "description" | "desiredOutcome" | "aiRole" | "scoringGuidance"> {
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { throw new CustomerPracticeScenarioGenerationError("Scenario generation returned an invalid draft.", "generation_invalid_response"); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw invalid();
   const record = parsed as Record<string, unknown>;
-  const expected = new Set(["title", "description", "desiredOutcome", "aiRole"]);
+  const expected = new Set(["title", "description", "desiredOutcome", "aiRole", "scoringCriteria"]);
   if (Object.keys(record).some((key) => !expected.has(key))) throw invalid();
   const title = field(record.title, "Title", 300); const description = field(record.description, "Description", 12_000);
   const aiRole = field(record.aiRole, "AI role", 2_000);
   const desiredOutcome = record.desiredOutcome == null ? null : field(record.desiredOutcome, "Desired outcome", 4_000);
-  return { title, description, desiredOutcome, aiRole };
+  const scoringCriteria = criteria(record.scoringCriteria);
+  return { title, description, desiredOutcome, aiRole,
+    scoringGuidance: scoringCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n") };
+}
+function criteria(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length < 3 || value.length > 6) {
+    throw invalid("Scoring criteria must contain 3 to 6 items.");
+  }
+  const normalized = value.map((criterion) => field(criterion, "Scoring criterion", 500));
+  if (new Set(normalized.map((criterion) => criterion.toLocaleLowerCase())).size !== normalized.length) {
+    throw invalid("Scoring criteria must be unique.");
+  }
+  return normalized;
 }
 function field(value: unknown, label: string, maximum: number): string {
   if (typeof value !== "string" || !value.trim() || value.trim().length > maximum) throw invalid(`${label} is invalid.`);

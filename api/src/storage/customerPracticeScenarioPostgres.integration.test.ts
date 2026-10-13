@@ -100,11 +100,12 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
 
     const revised = await store.createRevision({
       orgId: "org_a", scenarioId: created.id, versionId: "version_2", actorId: "scoped_author",
-      draft: { ...draft, title: "Discovery call revision" },
+      draft: { ...draft, title: "Discovery call revision", scoringGuidance: "" },
       now: new Date("2026-10-09T11:00:00Z"),
     });
     assert.equal(revised.id, created.id);
     assert.equal(revised.currentVersion.versionNumber, 2);
+    assert.equal(revised.currentVersion.scoringGuidance, "");
     assert.equal(revised.publishedVersion?.id, "version_1");
     assert.equal(revised.publishedVersion?.title, "Discovery call");
 
@@ -133,12 +134,15 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
       now: new Date("2026-10-09T11:10:00Z"),
     });
     assert.equal(publishedV2.publishedVersionId, "version_2");
+    assert.equal(publishedV2.publishedVersion?.scoringGuidance, "");
     assert.deepEqual(publishedV2.versions.map((version) => version.id), ["version_1", "version_2"]);
     assert.deepEqual(publishedV2.history.map((event) => event.eventType), [
       "created", "submitted", "approved", "published", "created", "submitted", "rejected",
       "submitted", "approved", "published",
     ]);
     assert.equal((await store.getVersion("org_a", created.id, "version_1"))?.title, "Discovery call");
+    assert.equal((await store.getVersion("org_a", created.id, "version_1"))?.scoringGuidance,
+      "Assess discovery and next-step clarity.");
     assert.equal(await store.get("org_b", created.id), null);
 
     await assert.rejects(

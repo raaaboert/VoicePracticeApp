@@ -57,6 +57,11 @@ async function withMockScenarioGeneration<T>(runner: (calls: { value: number }) 
           description: "Use the supplied Related Content to prepare the discussion.",
           desiredOutcome: "Agree a concrete next step.",
           aiRole: "A cautious stakeholder",
+          scoringCriteria: [
+            "Identifies the stakeholder's primary concern.",
+            "Connects the proposal to the supplied source material.",
+            "Secures agreement on a concrete next step.",
+          ],
         }) } }],
         usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
@@ -736,7 +741,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const generationPath = `${practiceScenarioPath}/generate`;
       const generatedSaveInput = (draft: Record<string, unknown>, overrides: Record<string, unknown> = {}) => ({
         title: draft.title, description: draft.description, desiredOutcome: draft.desiredOutcome,
-        aiRole: draft.aiRole, scoringGuidance: "Assess the proposed next step.", segmentId: scenario.segmentId,
+        aiRole: draft.aiRole, scoringGuidance: draft.scoringGuidance, segmentId: scenario.segmentId,
         applicableIndustryIds: [org.activeIndustries[0]!], sourceContentIds: [contentId],
         generationToken: draft.generationToken,
         ...overrides,
@@ -796,6 +801,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         const generated = await orgAdminCall(generationPath, "POST", generationInput);
         assert.equal(generated.status, 200, JSON.stringify(generated.body));
         assert.equal(calls.value, 1);
+        assert.match(String(generated.body.scoringGuidance), /Identifies the stakeholder's primary concern/);
+        assert.equal(String(generated.body.promptVersion), "customer-practice-scenario-generation-v2");
         return generated.body;
       });
 
@@ -811,7 +818,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         .provenance ?? {});
       assert.equal(savedProvenance.creationMethod, "ai");
       assert.equal(savedProvenance.modelUsed, "server-issued-generation-model");
+      assert.equal(savedProvenance.generatedPrompt, "customer-practice-scenario-generation-v2");
       assert.notEqual(savedProvenance.modelUsed, "forged-client-model");
+      assert.equal((forgedProvenanceSave.body.currentVersion as { scoringGuidance: string }).scoringGuidance,
+        generatedForForgedProvenance.scoringGuidance);
 
       const beforeCreationDisabledSave = await scenarioCount();
       const generatedBeforeCreationDisabled = await generateDraft();
@@ -1487,19 +1497,30 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const pinnedV2Draft = {
         ...pinnedV1Draft, title: "Pinned V2 title", description: "PINNED_V2_RUNTIME_CONTENT must never enter the v1 session.",
         desiredOutcome: "PINNED_V2_DESIRED_OUTCOME", aiRole: "PINNED_V2_COUNTERPART_ROLE",
-        scoringGuidance: "Score against PINNED_V2_RUNTIME_CONTENT.",
+        scoringGuidance: "",
       };
       assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/revisions`, "POST", pinnedV2Draft)).status, 200);
       assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/submit`, "POST")).status, 200);
       assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/approve`, "POST", { reviewNote: "v2" })).status, 200);
-      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST")).status, 200);
+      const pinnedPublishedV2 = await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST");
+      assert.equal(pinnedPublishedV2.status, 200, JSON.stringify(pinnedPublishedV2.body));
+      const pinnedV2Id = String((pinnedPublishedV2.body.publishedVersion as { id: string }).id);
+      const industryOnlySessionId = `industry_only_customer_${randomUUID()}`;
+      const industryOnlyStarted = await call(startPath, {
+        simulationSessionId: industryOnlySessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
+        trainingId: topic.id, clientStartedAt: now,
+      });
+      assert.equal(industryOnlyStarted.status, 201, JSON.stringify(industryOnlyStarted.body));
+      assert.equal((await pool.query<{ scenario_version_id: string | null }>(
+        "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [industryOnlySessionId],
+      )).rows[0]?.scenario_version_id, pinnedV2Id);
       const pinnedRequests: Array<{ input?: Array<{ content?: string }> }> = [];
       const pinnedFetch = globalThis.fetch;
       globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
         const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
         if (target === "https://api.openai.com/v1/responses") {
           pinnedRequests.push(JSON.parse(String(init?.body)) as { input?: Array<{ content?: string }> });
-          const output = pinnedRequests.length === 1 ? "Pinned v1 turn." : JSON.stringify({
+          const output = pinnedRequests.length % 2 === 1 ? "Pinned scenario turn." : JSON.stringify({
             communicationScore: 80, outcomeScore: 75, overallScore: 78, completionLevel: "complete", objectiveAchieved: true,
             persuasion: 8, clarity: 7, empathy: 9, assertiveness: 8, strengths: ["Clear framing"],
             improvements: ["Tighter close"], summary: "Handled the conversation well.",
@@ -1525,9 +1546,25 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           ],
         });
         assert.equal(pinnedScore.status, 201, JSON.stringify(pinnedScore.body));
+        const industryOnlyTurn = await call(turnPath, {
+          scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: industryOnlySessionId,
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
+          history: [{ role: "user", content: "Let's discuss the current account." }],
+        });
+        assert.equal(industryOnlyTurn.status, 200, JSON.stringify(industryOnlyTurn.body));
+        const industryOnlyScore = await call(`/mobile/users/${user.id}/ai/score`, {
+          scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: industryOnlySessionId,
+          startedAt: now, endedAt: new Date(Date.now() + 2_000).toISOString(),
+          history: [
+            { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand the concern." },
+            { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify the blocker." },
+            { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose owners and a review date." },
+          ],
+        });
+        assert.equal(industryOnlyScore.status, 201, JSON.stringify(industryOnlyScore.body));
       } finally { globalThis.fetch = pinnedFetch; }
-      assert.equal(pinnedRequests.length, 2);
-      const [runtimeRequest, scoringRequest] = pinnedRequests.map((request) =>
+      assert.equal(pinnedRequests.length, 4);
+      const [runtimeRequest, scoringRequest, industryOnlyRuntimeRequest, industryOnlyScoringRequest] = pinnedRequests.map((request) =>
         request.input?.map((message) => message.content ?? "").join("\n") ?? "",
       );
       assert.match(runtimeRequest!, /PINNED_V1_RUNTIME_CONTENT/);
@@ -1539,6 +1576,16 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await pool.query<{ scenario_version_id: string | null }>(
         "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId],
       )).rows[0]?.scenario_version_id, pinnedV1Id);
+      assert.match(industryOnlyRuntimeRequest!, /PINNED_V2_RUNTIME_CONTENT/);
+      assert.match(industryOnlyRuntimeRequest!, /PINNED_V2_COUNTERPART_ROLE/);
+      assert.doesNotMatch(industryOnlyRuntimeRequest!, /Scenario coaching priorities|PINNED_V1_RUNTIME_CONTENT/);
+      assert.match(industryOnlyScoringRequest!, /PINNED_V2_RUNTIME_CONTENT/);
+      assert.match(industryOnlyScoringRequest!, /PINNED_V2_DESIRED_OUTCOME/);
+      assert.match(industryOnlyScoringRequest!, /INDUSTRY STANDARD SCENARIO SCORING GUIDANCE/);
+      assert.doesNotMatch(industryOnlyScoringRequest!, /CUSTOM SCENARIO SCORING GUIDANCE|PINNED_V1_RUNTIME_CONTENT/);
+      assert.equal((await pool.query<{ scenario_version_id: string | null }>(
+        "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [industryOnlySessionId],
+      )).rows[0]?.scenario_version_id, pinnedV2Id);
       const unclaimedCustomScore = await call(`/mobile/users/${user.id}/ai/score`, {
         scenarioId: customScenarioId, startedAt: now, endedAt: new Date(Date.now() + 1000).toISOString(),
         history: [

@@ -146,6 +146,7 @@ export function FocusTopicAdministration({
   const [scenarioDesiredOutcome, setScenarioDesiredOutcome] = useState("");
   const [scenarioAiRole, setScenarioAiRole] = useState("");
   const [scenarioScoringGuidance, setScenarioScoringGuidance] = useState("");
+  const [scenarioUseIndustryScoringOnly, setScenarioUseIndustryScoringOnly] = useState(false);
   const [scenarioSegmentId, setScenarioSegmentId] = useState("");
   const [scenarioIndustryIds, setScenarioIndustryIds] = useState<string[]>([]);
   const [scenarioSourceContentIds, setScenarioSourceContentIds] = useState<string[]>([]);
@@ -508,6 +509,7 @@ export function FocusTopicAdministration({
   const resetScenarioForm = () => {
     setEditingScenarioId(null); setScenarioTitle(""); setScenarioDescription("");
     setScenarioDesiredOutcome(""); setScenarioAiRole(""); setScenarioScoringGuidance("");
+    setScenarioUseIndustryScoringOnly(false);
     setScenarioSegmentId(""); setScenarioIndustryIds([]); setScenarioSourceContentIds([]);
     setScenarioPracticeGuidance(""); setGeneratedScenario(null);
   };
@@ -519,6 +521,7 @@ export function FocusTopicAdministration({
     });
     setEditingScenarioId(null); setScenarioTitle(generated.title); setScenarioDescription(generated.description);
     setScenarioDesiredOutcome(generated.desiredOutcome ?? ""); setScenarioAiRole(generated.aiRole);
+    setScenarioScoringGuidance(generated.scoringGuidance); setScenarioUseIndustryScoringOnly(false);
     setScenarioSourceContentIds(generated.sourceContentIds); setGeneratedScenario(generated);
     setMessage("Generated a draft for review. Complete the remaining fields, then save it as a normal draft.");
   });
@@ -528,6 +531,7 @@ export function FocusTopicAdministration({
     setEditingScenarioId(scenario.id); setScenarioTitle(version.title);
     setScenarioDescription(version.description); setScenarioDesiredOutcome(version.desiredOutcome ?? "");
     setScenarioAiRole(version.aiRole); setScenarioScoringGuidance(version.scoringGuidance);
+    setScenarioUseIndustryScoringOnly(!version.scoringGuidance.trim());
     setScenarioSegmentId(version.segmentId); setScenarioIndustryIds(version.applicableIndustryIds);
     setScenarioSourceContentIds(version.sourceReferences.flatMap((source) =>
       source.kind === "training_content" && source.referenceId ? [source.referenceId] : []));
@@ -540,7 +544,7 @@ export function FocusTopicAdministration({
       ...(editingScenarioId ? { scenarioId: editingScenarioId } : {}),
       title: scenarioTitle, description: scenarioDescription,
       desiredOutcome: scenarioDesiredOutcome || null,
-      aiRole: scenarioAiRole, scoringGuidance: scenarioScoringGuidance,
+      aiRole: scenarioAiRole, scoringGuidance: scenarioUseIndustryScoringOnly ? "" : scenarioScoringGuidance,
       segmentId: scenarioSegmentId, applicableIndustryIds: scenarioIndustryIds,
       sourceContentIds: scenarioSourceContentIds,
       ...(generatedScenario ? { generationToken: generatedScenario.generationToken } : {}),
@@ -643,7 +647,7 @@ export function FocusTopicAdministration({
           <div><dt>Scenario context</dt><dd>{version.description}</dd></div>
           <div><dt>Desired outcome</dt><dd>{version.desiredOutcome || "Not specified"}</dd></div>
           <div><dt>AI counterpart role</dt><dd>{version.aiRole}</dd></div>
-          <div><dt>Scoring guidance</dt><dd>{version.scoringGuidance}</dd></div>
+          <div><dt>Scoring guidance</dt><dd>{version.scoringGuidance || "Existing industry scoring only"}</dd></div>
         </dl>
         {version.sourceReferences.length > 0
           ? <p className="focus-topic-scenario-provenance">Related Content: {version.sourceReferences.map((source) => source.label).join(" · ")}</p>
@@ -936,7 +940,15 @@ export function FocusTopicAdministration({
                 onChange={(event) => setScenarioAiRole(event.target.value)} /></label>
             <label className="focus-topic-field focus-topic-field-wide">Scoring guidance
               <textarea className="text-input focus-topic-scenario-textarea" rows={8} value={scenarioScoringGuidance} maxLength={8000}
+                disabled={scenarioUseIndustryScoringOnly} aria-describedby="focus-topic-scoring-mode-help"
                 onChange={(event) => setScenarioScoringGuidance(event.target.value)} /></label>
+            <label className="focus-topic-field focus-topic-field-wide focus-topic-scoring-mode">
+              <span><input type="checkbox" checked={scenarioUseIndustryScoringOnly}
+                onChange={(event) => setScenarioUseIndustryScoringOnly(event.target.checked)} /> Use existing industry scoring only</span>
+              <small id="focus-topic-scoring-mode-help">{scenarioUseIndustryScoringOnly
+                ? "This version will use the existing industry scoring framework without custom scenario criteria. Your unsaved guidance is retained if you switch back."
+                : "Custom guidance supplements the existing industry scoring framework and remains editable."}</small>
+            </label>
             <label className="focus-topic-field">Role
               <select className="text-input" value={scenarioSegmentId}
                 onChange={(event) => setScenarioSegmentId(event.target.value)}>
@@ -963,7 +975,8 @@ export function FocusTopicAdministration({
           </div>
           <div className="focus-topic-actions">
             <button type="button" className="primary-button" disabled={busy || !scenarioTitle.trim()
-              || !scenarioDescription.trim() || !scenarioAiRole.trim() || !scenarioScoringGuidance.trim()
+              || !scenarioDescription.trim() || !scenarioAiRole.trim()
+              || (!scenarioUseIndustryScoringOnly && !scenarioScoringGuidance.trim())
               || !scenarioSegmentId || scenarioIndustryIds.length === 0}
               onClick={saveScenarioDraft}>{editingScenarioId ? "Save New Revision" : "Create Draft"}</button>
             {editingScenarioId ? <button type="button" className="ghost-button" disabled={busy}

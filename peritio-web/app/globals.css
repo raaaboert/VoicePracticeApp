@@ -3480,6 +3480,25 @@ input[type="radio"] {
   max-height: 32rem;
 }
 
+.focus-topic-scoring-mode {
+  gap: 0.35rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.focus-topic-scoring-mode > span {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  color: var(--text);
+}
+
+.focus-topic-scoring-mode input {
+  margin: 0;
+}
+
 .focus-topic-admin textarea.focus-topic-review-textarea {
   min-height: 6rem;
   max-height: 16rem;

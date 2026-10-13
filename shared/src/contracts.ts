@@ -1033,6 +1033,7 @@ export interface CustomerPracticeScenarioGeneratedDraft {
   description: string;
   desiredOutcome: string | null;
   aiRole: string;
+  scoringGuidance: string;
   sourceContentIds: string[];
   similarity: { flagged: boolean; matchingScenarioIds: string[] };
   promptVersion: string;

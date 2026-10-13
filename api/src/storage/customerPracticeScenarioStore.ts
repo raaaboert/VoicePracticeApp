@@ -584,7 +584,7 @@ export function normalizeCustomerPracticeScenarioStoredDraft(input: CustomerPrac
   const title = requiredText(input.title, "Title", 300);
   const description = requiredText(input.description, "Description", 12_000);
   const aiRole = requiredText(input.aiRole, "AI role", 2_000);
-  const scoringGuidance = requiredText(input.scoringGuidance, "Scoring guidance", 8_000);
+  const scoringGuidance = lifecycleScoringGuidance(input.scoringGuidance);
   const segmentId = id(input.segmentId, "Role");
   const applicableIndustryIds = strings(input.applicableIndustryIds);
   if (applicableIndustryIds.length === 0) {
@@ -635,6 +635,16 @@ function object(value: unknown): Record<string, unknown> {
 function requiredText(value: unknown, label: string, max: number): string {
   const normalized = typeof value === "string" ? value.trim().slice(0, max) : "";
   if (!normalized) throw new CustomerPracticeScenarioStoreError(`${label} is required.`, "scenario_validation_failed");
+  return normalized;
+}
+function lifecycleScoringGuidance(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new CustomerPracticeScenarioStoreError("Scoring guidance must be text.", "scenario_validation_failed");
+  }
+  const normalized = value.trim();
+  if (normalized.length > 8_000) {
+    throw new CustomerPracticeScenarioStoreError("Scoring guidance is too long.", "scenario_validation_failed");
+  }
   return normalized;
 }
 function text(value: unknown, max: number): string | null {

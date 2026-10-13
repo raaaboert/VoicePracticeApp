@@ -74,6 +74,15 @@ test("custom evaluation guidance is additive rather than replacing the industry 
   assert.match(prompt, /timeline repair and stakeholder alignment/i);
 });
 
+test("industry-only evaluation keeps the standard rubric and omits custom guidance", () => {
+  const guidance = buildAdditiveEvaluationScoringGuidance({
+    standardGuidance: "Measure performance using the configured industry rubric.",
+    customGuidance: "",
+  });
+  assert.match(guidance!, /INDUSTRY STANDARD SCENARIO SCORING GUIDANCE/);
+  assert.doesNotMatch(guidance!, /CUSTOM SCENARIO SCORING GUIDANCE/);
+});
+
 test("evaluation prompt no longer embeds legacy output-schema instructions inside layered scoring guidance", () => {
   const prompt = buildEvaluationSystemPrompt({
     scenario: {

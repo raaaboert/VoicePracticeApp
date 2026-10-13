@@ -133,6 +133,19 @@ test("Practice Scenario authoring and review expose guidance, provenance, and cu
   assert.match(source, /Manually authored from an existing scenario/);
 });
 
+test("Practice Scenario scoring mode preserves editable guidance and submits explicit industry-only guidance", () => {
+  assert.match(source, /Use existing industry scoring only/);
+  assert.match(source, /useState\(false\)/);
+  assert.match(source, /setScenarioScoringGuidance\(generated\.scoringGuidance\); setScenarioUseIndustryScoringOnly\(false\)/);
+  assert.match(source, /setScenarioUseIndustryScoringOnly\(!version\.scoringGuidance\.trim\(\)\)/);
+  assert.match(source, /disabled=\{scenarioUseIndustryScoringOnly\} aria-describedby="focus-topic-scoring-mode-help"/);
+  assert.match(source, /scoringGuidance: scenarioUseIndustryScoringOnly \? "" : scenarioScoringGuidance/);
+  assert.match(source, /!scenarioUseIndustryScoringOnly && !scenarioScoringGuidance\.trim\(\)/);
+  assert.match(source, /Your unsaved guidance is retained if you switch back/);
+  assert.match(source, /version\.scoringGuidance \|\| "Existing industry scoring only"/);
+  assert.match(styles, /\.focus-topic-scoring-mode/);
+});
+
 test("Practice Scenario rows group active and archived scenarios behind accessible disclosures", () => {
   assert.match(source, /const activePracticeScenarios = orderedPracticeScenarios\.filter\(\(scenario\) => scenario\.status !== "archived"\)/);
   assert.match(source, /const archivedPracticeScenarios = orderedPracticeScenarios\.filter\(\(scenario\) => scenario\.status === "archived"\)/);
