@@ -134,7 +134,7 @@ function buildOrg(overrides: Partial<EnterpriseOrg> = {}): EnterpriseOrg {
       {
         id: "custom_1",
         orgId: "org_1",
-        segmentId: "manager",
+        segmentId: "solution_manager",
         title: "Coaching Follow-up",
         summary: "Follow up with a teammate after a missed milestone.",
         description: "Practice a focused coaching conversation.",
@@ -213,7 +213,8 @@ function buildDatabase(): ApiDatabase {
         managerUserId: "dashboard_other_manager"
       }),
       buildUser("user_inactive", "inactive@example.com", {
-        status: "disabled"
+        status: "disabled",
+        managerUserId: "dashboard_user_admin_none"
       }),
       buildUser("user_inactive_division_b", "inactive-south@example.com", {
         status: "disabled",
@@ -811,6 +812,29 @@ test("GET /mobile/users/:userId/performance/current rejects another user's mobil
   assert.equal(result.body.error, "Invalid mobile token.");
 });
 
+test("learner config and update responses omit internal scenario scoring and generation provenance", async () => {
+  const configResult = await mobileRequest("/mobile/users/user_manage/config", "token_manage");
+  assert.equal(configResult.status, 200);
+  const scenario = (configResult.body.orgCustomScenarios as Array<Record<string, unknown>>)
+    .find((candidate) => candidate.id === "custom_1");
+  assert.ok(scenario);
+  assert.equal(scenario.title, "Coaching Follow-up");
+  assert.equal(scenario.aiRole, "team member");
+  assert.equal(scenario.scoringGuidance, undefined);
+  assert.equal(scenario.provenance, undefined);
+
+  const updateResult = await mobileRequest(
+    "/mobile/users/user_manage/updates?cursor=999999&timeoutMs=1000",
+    "token_manage",
+  );
+  assert.equal(updateResult.status, 200);
+  const updateScenario = ((updateResult.body.config as { orgCustomScenarios?: Array<Record<string, unknown>> })
+    .orgCustomScenarios ?? []).find((candidate) => candidate.id === "custom_1");
+  assert.ok(updateScenario);
+  assert.equal(updateScenario.scoringGuidance, undefined);
+  assert.equal(updateScenario.provenance, undefined);
+});
+
 test("GET /mobile/users/:userId/performance/current returns a successful empty response when there is no active plan", async () => {
   const result = await getCurrentPerformance("user_empty", "token_empty");
 
@@ -1231,7 +1255,7 @@ test("dashboard Performance user-admins are scoped to self and direct reports", 
   assert.equal(otherManagerReportPreview.status, 404);
 });
 
-test("dashboard Performance Goals follow performance access independently from org role", async () => {
+test("dashboard Performance Goals combine explicit scope with current direct-report manager scope", async () => {
   const organizationWorkspace = await dashboardRequest(
     "/dashboard/performance",
     undefined,
@@ -1288,27 +1312,42 @@ test("dashboard Performance Goals follow performance access independently from o
     },
     dashboardUserAdminNoneToken
   );
-  assert.equal(userAdminNonePreview.status, 404);
+  assert.equal(userAdminNonePreview.status, 200);
+
+  for (const userId of ["user_manage", "user_other_manager_report", "user_inactive", "user_other_org"]) {
+    const denied = await dashboardRequest(
+      "/dashboard/performance/preview",
+      {
+        method: "POST",
+        body: JSON.stringify(buildCreatePlanRequest({
+          userId,
+          ...(userId === "user_other_org" ? { orgId: "org_2" } : {}),
+        })),
+      },
+      dashboardUserAdminNoneToken,
+    );
+    assert.equal(denied.status, 404, `${userId} must remain outside manager-derived scope`);
+  }
 });
 
-test("user admin with no performance access cannot reach direct-report Performance Goal routes", async () => {
+test("current manager with no stored performance access can manage a direct-report Performance Goal", async () => {
   const planPath = "/dashboard/performance/plans/perf_plan_none_report";
 
   const detail = await dashboardRequest(planPath, undefined, dashboardUserAdminNoneToken);
-  assert.equal(detail.status, 404);
+  assert.equal(detail.status, 200);
 
   const updates = await dashboardRequest(`${planPath}/updates`, undefined, dashboardUserAdminNoneToken);
-  assert.equal(updates.status, 404);
+  assert.equal(updates.status, 200);
 
   const comment = await dashboardRequest(
     `${planPath}/updates`,
     {
       method: "POST",
-      body: JSON.stringify({ body: "This role must not bypass performance access." })
+      body: JSON.stringify({ body: "Manager coaching note for a current direct report." })
     },
     dashboardUserAdminNoneToken
   );
-  assert.equal(comment.status, 404);
+  assert.equal(comment.status, 201);
 
   const edit = await dashboardRequest(
     planPath,
@@ -1318,17 +1357,17 @@ test("user admin with no performance access cannot reach direct-report Performan
     },
     dashboardUserAdminNoneToken
   );
-  assert.equal(edit.status, 404);
+  assert.equal(edit.status, 200);
 
   const cancel = await dashboardRequest(
     `${planPath}/cancel`,
     {
       method: "POST",
-      body: JSON.stringify({ reason: "This role must not bypass performance access." })
+      body: JSON.stringify({ reason: "Goal replaced after manager review." })
     },
     dashboardUserAdminNoneToken
   );
-  assert.equal(cancel.status, 404);
+  assert.equal(cancel.status, 200);
 });
 
 test("org admin with no performance access cannot reach another user's Performance Goal routes", async () => {

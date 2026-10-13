@@ -143,6 +143,8 @@ test("Practice Scenario scoring mode preserves editable guidance and submits exp
   assert.match(source, /!scenarioUseIndustryScoringOnly && !scenarioScoringGuidance\.trim\(\)/);
   assert.match(source, /Your unsaved guidance is retained if you switch back/);
   assert.match(source, /version\.scoringGuidance \|\| "Existing industry scoring only"/);
+  assert.match(source, /className="focus-topic-scenario-scoring-guidance"/);
+  assert.match(styles, /\.focus-topic-scenario-scoring-guidance\s*\{[\s\S]*?white-space: pre-wrap;/);
   assert.match(styles, /\.focus-topic-scoring-mode/);
 });
 

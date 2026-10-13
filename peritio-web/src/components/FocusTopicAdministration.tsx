@@ -647,7 +647,9 @@ export function FocusTopicAdministration({
           <div><dt>Scenario context</dt><dd>{version.description}</dd></div>
           <div><dt>Desired outcome</dt><dd>{version.desiredOutcome || "Not specified"}</dd></div>
           <div><dt>AI counterpart role</dt><dd>{version.aiRole}</dd></div>
-          <div><dt>Scoring guidance</dt><dd>{version.scoringGuidance || "Existing industry scoring only"}</dd></div>
+          <div><dt>Scoring guidance</dt><dd className="focus-topic-scenario-scoring-guidance">
+            {version.scoringGuidance || "Existing industry scoring only"}
+          </dd></div>
         </dl>
         {version.sourceReferences.length > 0
           ? <p className="focus-topic-scenario-provenance">Related Content: {version.sourceReferences.map((source) => source.label).join(" · ")}</p>

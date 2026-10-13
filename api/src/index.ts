@@ -15,6 +15,7 @@ import {
   AiUsageEvent,
   AiUsageEventKind,
   AppConfig,
+  MobileAppConfig,
   DashboardAdminAccessRequestsResponse,
   DashboardAdminAccessRequestRow,
   DashboardAdminCapabilities,
@@ -391,6 +392,7 @@ import {
   MobileFocusTopicCatalogService,
 } from "./services/mobileFocusTopicCatalog.js";
 import { resolveCanonicalMobileScenarioSetupSelection } from "./services/mobileScenarioSetupSelection.js";
+import { serializeMobileLearnerConfig } from "./services/mobileLearnerConfig.js";
 import {
   parseTrainingPackScenarioSelection,
   TRAINING_PACK_SCENARIO_OPT_IN_PREFIX,
@@ -12375,7 +12377,7 @@ interface MobileUpdatesResponse {
   reason: MobileUpdateReason | null;
   generatedAt: string;
   user?: UserProfile;
-  config?: AppConfig;
+  config?: MobileAppConfig;
   entitlements?: UserEntitlementsResponse;
 }
 
@@ -12416,7 +12418,7 @@ function buildMobileUpdatesPayload(
     reason,
     generatedAt: now.toISOString(),
     user,
-    config: resolveConfigForUser(db, user),
+    config: serializeMobileLearnerConfig(resolveConfigForUser(db, user)),
     entitlements: computeEntitlements(db, user, now),
   };
 }
@@ -21789,7 +21791,7 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
   });
   if (!snapshot) return;
   if (runtimeConfig.focusTopicAuthority !== "assignments" || !snapshot.org || snapshot.user.isSuperUser) {
-    response.json(snapshot.baseConfig);
+    response.json(serializeMobileLearnerConfig(snapshot.baseConfig));
     return;
   }
   const authority = await focusTopicAuthorityStore.listSnapshot(snapshot.org.id);
@@ -21807,7 +21809,7 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
     .map((row) => row.scenarioId));
   const generalStandardIds = new Set(snapshot.baseConfig.segments.flatMap((segment) =>
     (segment.scenarios ?? []).map((scenario) => scenario.id)));
-  response.json({
+  response.json(serializeMobileLearnerConfig({
     ...snapshot.topicConfig,
     segments: snapshot.topicConfig.segments.map((segment) => ({
       ...segment,
@@ -21828,7 +21830,7 @@ app.get("/mobile/users/:userId/config", async (request: Request, response: Respo
       })),
     orgCustomScenarios: (snapshot.topicConfig.orgCustomScenarios ?? [])
       .filter((scenario) => directCustomIds.has(scenario.id)),
-  });
+  }));
 });
 
 app.get("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {

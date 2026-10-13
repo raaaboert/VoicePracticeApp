@@ -1,7 +1,7 @@
 import {
-  AppConfig,
   Difficulty,
-  OrgCustomScenario,
+  MobileAppConfig,
+  MobileOrgCustomScenario,
   PersonaStyle,
   SimulationCompletionLevel,
   Scenario,
@@ -13,9 +13,7 @@ import {
 } from "@voicepractice/shared";
 
 export type {
-  AppConfig,
   Difficulty,
-  OrgCustomScenario,
   PersonaStyle,
   Scenario,
   SegmentDefinition,
@@ -24,6 +22,9 @@ export type {
   UserEntitlementsResponse,
   UserProfile,
 };
+
+export type AppConfig = MobileAppConfig;
+export type OrgCustomScenario = MobileOrgCustomScenario;
 
 export type TrainingSegmentId = string;
 

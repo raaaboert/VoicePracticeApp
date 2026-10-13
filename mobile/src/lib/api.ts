@@ -3,6 +3,7 @@ import {
   Difficulty,
   EnterpriseDomainMatch,
   MobileOnboardRequest,
+  MobileAppConfig,
   MobileOnboardResponse,
   MobileResendVerificationRequest,
   MobilePerformanceCurrentResponse,
@@ -556,8 +557,8 @@ export async function fetchSuperUserOrgOptions(
   );
 }
 
-export async function fetchMobileConfig(userId: string, authToken: string): Promise<AppConfig> {
-  return requestJson<AppConfig>(`/mobile/users/${encodeURIComponent(userId)}/config`, undefined, authToken);
+export async function fetchMobileConfig(userId: string, authToken: string): Promise<MobileAppConfig> {
+  return requestJson<MobileAppConfig>(`/mobile/users/${encodeURIComponent(userId)}/config`, undefined, authToken);
 }
 
 export async function updateMobileSettings(
@@ -1490,7 +1491,7 @@ export async function longPollMobileUpdates(
   reason: string | null;
   generatedAt: string;
   user?: UserProfile;
-  config?: AppConfig;
+  config?: MobileAppConfig;
   entitlements?: UserEntitlementsResponse;
 }> {
   const serverTimeoutMs = Math.max(1_000, Math.min(30_000, Math.floor(options.timeoutMs ?? 25_000)));

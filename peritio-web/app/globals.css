@@ -3499,6 +3499,10 @@ input[type="radio"] {
   margin: 0;
 }
 
+.focus-topic-scenario-scoring-guidance {
+  white-space: pre-wrap;
+}
+
 .focus-topic-admin textarea.focus-topic-review-textarea {
   min-height: 6rem;
   max-height: 16rem;

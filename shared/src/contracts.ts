@@ -757,6 +757,9 @@ export interface OrgCustomScenario {
   homeFocusTopicId?: string | null;
 }
 
+/** Customer scenario fields safe and necessary for learner scenario selection. */
+export type MobileOrgCustomScenario = Omit<OrgCustomScenario, "scoringGuidance" | "provenance">;
+
 export interface SegmentDefinition {
   id: string;
   label: string;
@@ -905,6 +908,11 @@ export interface OrgTrainingRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+/** Learner-facing config never includes internal scoring instructions or generation provenance. */
+export type MobileAppConfig = Omit<AppConfig, "orgCustomScenarios"> & {
+  orgCustomScenarios?: MobileOrgCustomScenario[];
+};
 
 export const CUSTOMER_PRACTICE_SCENARIO_STATUSES = [
   "draft",
