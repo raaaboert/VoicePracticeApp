@@ -2323,6 +2323,7 @@ export interface DashboardTrainingPackAssignmentDetailResponse {
 
 export interface DashboardUserReportRow {
   userId: string;
+  displayName: string | null;
   email: string;
   employeeId: string | null;
   orgId: string | null;

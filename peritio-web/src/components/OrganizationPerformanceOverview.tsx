@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, LoaderCircle } from "lucide-react";
 
 import { ManagerInsights, type ManagerInsightsState } from "./ManagerInsights";
 import { LeadershipInsights, type LeadershipInsightsState } from "./LeadershipInsights";
+import { PerformanceCardDisclosure } from "./PerformanceCardDisclosure";
 
 import {
   type OrganizationPerformanceCalendarMonth,
@@ -62,6 +63,10 @@ function formatRate(value: number | null): string {
 
 function readableGeneration(value: string): string {
   return value.replaceAll("_", " ");
+}
+
+function GenerationSummary({ children }: { children: ReactNode }) {
+  return <span className="performance-generation-summary">{children}</span>;
 }
 
 export function PerformanceDimensionGroups({ metrics }: { metrics: readonly OrganizationPerformanceMetricGroup[] }) {
@@ -305,14 +310,18 @@ export function PerformanceGroupSummary({
               ) : null}
 
               {data.completionGroups.length > 0 ? (
-                <section className="section-card" aria-labelledby="completion-title">
-                  <div className="section-header">
-                    <div>
-                      <p className="eyebrow">Outcomes</p>
-                      <h2 id="completion-title">Completion and objectives</h2>
-                      <p className="section-copy">Results stay separated by scoring generation.</p>
-                    </div>
-                  </div>
+                <PerformanceCardDisclosure
+                  eyebrow="Outcomes"
+                  title="Completion and objectives"
+                  headingId="completion-title"
+                  contentId="completion-content"
+                  description="Results stay separated by scoring generation."
+                  summary={data.completionGroups.map((group) => (
+                    <GenerationSummary key={group.scoringGeneration}>
+                      {readableGeneration(group.scoringGeneration)}: Completion {formatRate(group.completion?.completionRate ?? null)} · Objectives {formatRate(group.objective?.objectiveAchievementRate ?? null)}
+                    </GenerationSummary>
+                  ))}
+                >
                   <div className="generation-stack">
                     {data.completionGroups.map((group) => (
                       <div className="generation-group" key={group.scoringGeneration}>
@@ -340,18 +349,27 @@ export function PerformanceGroupSummary({
                       </div>
                     ))}
                   </div>
-                </section>
+                </PerformanceCardDisclosure>
               ) : null}
 
               {metricGenerations.length > 0 ? (
-                <section className="section-card" aria-labelledby="dimensions-title">
-                  <div className="section-header">
-                    <div>
-                      <p className="eyebrow">Scores</p>
-                      <h2 id="dimensions-title">Performance dimensions</h2>
-                      <p className="section-copy">Each score is shown in its original scoring generation and weight profile.</p>
-                    </div>
-                  </div>
+                <PerformanceCardDisclosure
+                  eyebrow="Scores"
+                  title="Performance dimensions"
+                  headingId="dimensions-title"
+                  contentId="dimensions-content"
+                  description="Each score is shown in its original scoring generation and weight profile."
+                  summary={metricGenerations.map((generation) => {
+                    const overallScores = generation.metrics.filter((metric) => metric.metric === "overall");
+                    return (
+                      <GenerationSummary key={generation.scoringGeneration}>
+                        {readableGeneration(generation.scoringGeneration)}: {overallScores.length > 0
+                          ? `Overall ${overallScores.map((metric) => formatOrganizationPerformanceScore(metric.metric, metric.mean)).join(" · ")}`
+                          : `${generation.metrics.length} score${generation.metrics.length === 1 ? "" : "s"}`}
+                      </GenerationSummary>
+                    );
+                  })}
+                >
                   <div className="generation-stack">
                     {metricGenerations.map((generation) => (
                       <div className="generation-group" key={generation.scoringGeneration}>
@@ -360,7 +378,7 @@ export function PerformanceGroupSummary({
                       </div>
                     ))}
                   </div>
-                </section>
+                </PerformanceCardDisclosure>
               ) : null}
             </>
           )}

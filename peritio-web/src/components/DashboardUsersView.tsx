@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import React, { useMemo, useState } from "react";
 import type { DashboardUserReportResponse } from "@voicepractice/shared";
 
 import { DashboardProofSection } from "@/src/components/DashboardProofSection";
@@ -12,6 +15,22 @@ function formatOrgRole(orgRole: string): string {
   return "User";
 }
 
+export function filterDashboardUsers(
+  users: DashboardUserReportResponse["users"],
+  query: string,
+  isSuperUser: boolean,
+): DashboardUserReportResponse["users"] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return users;
+  return users.filter((user) => {
+    const searchable = [user.displayName, user.email, isSuperUser ? user.orgName : null]
+      .filter((value): value is string => Boolean(value))
+      .join(" ")
+      .toLocaleLowerCase();
+    return searchable.includes(normalizedQuery);
+  });
+}
+
 export function DashboardUsersView({
   users,
   trainingCountByUser,
@@ -21,12 +40,15 @@ export function DashboardUsersView({
   primary = false,
 }: {
   users: DashboardUserReportResponse["users"];
-  trainingCountByUser: ReadonlyMap<string, number>;
+  trainingCountByUser: Readonly<Record<string, number>>;
   divisionId: string | null;
   isSuperUser: boolean;
   isDemoData?: boolean;
   primary?: boolean;
 }) {
+  const [query, setQuery] = useState("");
+  const filteredUsers = useMemo(() => filterDashboardUsers(users, query, isSuperUser), [isSuperUser, query, users]);
+
   const content = (
       <div className="dashboard-proof-stack">
         <div className="dashboard-proof-block">
@@ -37,7 +59,23 @@ export function DashboardUsersView({
             </>
           ) : null}
           {users.length > 0 ? (
-            <div className="table-scroll">
+            <div className="dashboard-user-search">
+              <label className="field-label" htmlFor={`dashboard-user-search-${primary ? "primary" : "report"}`}>
+                Search users
+              </label>
+              <input
+                id={`dashboard-user-search-${primary ? "primary" : "report"}`}
+                className="text-input"
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={isSuperUser ? "Search by name, email, or organization" : "Search by name or email"}
+              />
+              <p className="small-copy" aria-live="polite">Showing {filteredUsers.length} of {users.length}</p>
+            </div>
+          ) : null}
+          {users.length > 0 ? (
+            filteredUsers.length > 0 ? <div className="table-scroll">
               <table className="data-table dashboard-table">
                 <thead>
                   <tr>
@@ -49,11 +87,11 @@ export function DashboardUsersView({
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((user) => (
+                  {filteredUsers.map((user) => (
                     <tr key={user.userId}>
                       <td>
                         {isDemoData ? (
-                          <strong>{user.email}</strong>
+                          <strong>{user.displayName ?? user.email}</strong>
                         ) : (
                           <Link
                             className="inline-link subtle"
@@ -61,22 +99,27 @@ export function DashboardUsersView({
                               ? buildPerformanceIndividualDetailHref(user.userId, divisionId)
                               : buildDashboardScopedUserDetailHref(user.userId, divisionId)}
                           >
-                            <strong>{user.email}</strong>
+                            <strong>{user.displayName ?? user.email}</strong>
                           </Link>
                         )}
                         <div className="table-subcopy">
-                          {user.orgName ?? "Unknown company"} - {formatOrgRole(user.orgRole)}
+                          {user.displayName ? `${user.email} · ` : ""}{user.orgName ?? "Unknown company"} - {formatOrgRole(user.orgRole)}
                         </div>
                       </td>
                       <td>{user.simulationsLast30Days}</td>
                       <td>{user.averageScoreLast30Days !== null ? formatScore(user.averageScoreLast30Days) : "-"}</td>
-                      <td>{trainingCountByUser.get(user.userId) ?? 0}</td>
+                      <td>{trainingCountByUser[user.userId] ?? 0}</td>
                       <td>{formatDateTime(user.latestActivityAt)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
+            </div> : (
+              <div className="empty-state-panel" role="status">
+                <h3>No users match your search</h3>
+                <p>Try a different name or email{isSuperUser ? ", or search by organization" : ""}.</p>
+              </div>
+            )
           ) : (
             <div className="empty-state-panel">
               <h3>No user reporting yet</h3>

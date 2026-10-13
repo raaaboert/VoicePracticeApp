@@ -726,6 +726,83 @@ select.text-input {
   text-transform: uppercase;
 }
 
+.performance-disclosure-header {
+  align-items: flex-start;
+}
+
+.performance-disclosure-heading {
+  min-width: 0;
+}
+
+.performance-disclosure-heading h2,
+.performance-disclosure-heading .section-copy {
+  margin-bottom: 0;
+}
+
+.performance-disclosure-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+
+.performance-generation-summary {
+  display: inline-flex;
+  min-width: 0;
+  padding: 0.28rem 0.62rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.performance-disclosure-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-width: 7rem;
+}
+
+.performance-disclosure-body {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.performance-disclosure-body[hidden] {
+  display: none;
+}
+
+.dashboard-user-search {
+  display: grid;
+  grid-template-columns: minmax(14rem, 28rem) auto;
+  grid-template-areas:
+    "label count"
+    "input count";
+  gap: 0.35rem 1rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.dashboard-user-search .field-label {
+  grid-area: label;
+}
+
+.dashboard-user-search .text-input {
+  grid-area: input;
+}
+
+.dashboard-user-search .small-copy {
+  grid-area: count;
+  margin: 0 0 0.75rem;
+  white-space: nowrap;
+}
+
 .data-table tbody tr:hover td {
   background: var(--accent-soft);
 }
@@ -1239,6 +1316,7 @@ select.text-input {
 }
 
 .leadership-insights-basis-copy {
+  display: block;
   max-width: 78ch;
   margin: 0.35rem 0 0;
   color: var(--text-muted);
@@ -4098,6 +4176,22 @@ input[type="radio"] {
 }
 
 @media (max-width: 720px) {
+  .performance-disclosure-toggle {
+    width: 100%;
+  }
+
+  .dashboard-user-search {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "label"
+      "input"
+      "count";
+  }
+
+  .dashboard-user-search .small-copy {
+    margin: 0;
+  }
+
   .focus-topic-details-grid,
   .focus-topic-assignment-fields,
   .focus-topic-assignment-fields.targeted {

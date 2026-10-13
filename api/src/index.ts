@@ -10345,6 +10345,7 @@ async function buildDashboardUserReport(
         email: user.email,
         employeeId: user.employeeId ?? null,
         orgId,
+        displayName: [getUserFirstName(user), getUserLastName(user)].filter((part): part is string => Boolean(part)).join(" ") || null,
         orgName: orgId ? orgById.get(orgId)?.name ?? null : null,
         status: user.status,
         orgRole: user.orgRole,

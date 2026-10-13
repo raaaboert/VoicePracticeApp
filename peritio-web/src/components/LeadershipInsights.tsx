@@ -13,6 +13,7 @@ import type {
 } from "@/src/lib/teamPerformanceIntelligence";
 import type { OrganizationPerformanceIntelligenceResponse } from "@/src/lib/organizationPerformanceIntelligence";
 import type { OrganizationPerformanceMetric } from "@/src/lib/organizationPerformance";
+import { PerformanceCardDisclosure } from "./PerformanceCardDisclosure";
 
 const METRIC_LABELS: Record<OrganizationPerformanceMetric, string> = {
   persuasion: "Persuasion",
@@ -314,21 +315,27 @@ function RateMovementRows({ rows }: { rows: readonly LeadershipRateMovementRow[]
 }
 
 export function LeadershipInsights({ state }: { state: LeadershipInsightsState }) {
+  const summary = state.kind === "loading"
+    ? "Loading current-member signals…"
+    : state.kind === "error"
+      ? "Insights unavailable"
+      : `${state.data.population.currentMemberCount} current member${state.data.population.currentMemberCount === 1 ? "" : "s"} · ${state.data.facts.activity.current.attemptCount} attempt${state.data.facts.activity.current.attemptCount === 1 ? "" : "s"}`;
   return (
-    <section className="section-card manager-insights leadership-insights" aria-labelledby="leadership-insights-title">
-      <div className="section-header manager-insights-header">
-        <div>
-          <p className="eyebrow">Organization intelligence</p>
-          <h2 id="leadership-insights-title">Leadership insights</h2>
-          {state.kind === "success" ? (
-            <p className="leadership-insights-basis-copy">
+    <PerformanceCardDisclosure
+      eyebrow="Organization intelligence"
+      title="Leadership insights"
+      headingId="leadership-insights-title"
+      contentId="leadership-insights-content"
+      className="manager-insights leadership-insights"
+      summary={<span className="performance-generation-summary">{summary}</span>}
+      description={state.kind === "success" ? (
+            <span className="leadership-insights-basis-copy">
               Based on current members, including their qualifying earlier activity in this organization. Figures may differ from Group Summary because that view can include eligible historical contributions.
-            </p>
+            </span>
           ) : (
-            <p className="section-copy">Relative score context and month-to-month movement for current organization members.</p>
+            "Relative score context and month-to-month movement for current organization members."
           )}
-        </div>
-      </div>
+    >
 
       {state.kind === "loading" ? (
         <div className="manager-insights-status" role="status" aria-live="polite">
@@ -365,7 +372,7 @@ export function LeadershipInsights({ state }: { state: LeadershipInsightsState }
         && hasUsableCurrentEvidence(state.data) ? (
           <LeadershipInsightsContent data={state.data} />
         ) : null}
-    </section>
+    </PerformanceCardDisclosure>
   );
 }
 

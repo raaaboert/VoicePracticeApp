@@ -149,6 +149,8 @@ function render(data: TeamPerformanceIntelligenceResponse): string {
 
 test("differentiated dimensions preserve high and low ties using only /10 core metrics", () => {
   const markup = render(response());
+  assert.equal(markup.includes("3 current reports · 12 attempts"), true);
+  assert.equal(markup.includes('aria-controls="manager-insights-content"'), true);
   assert.equal(markup.includes("Highest-scoring dimensions"), true);
   assert.equal(markup.includes("Clarity</span><strong>8.4 / 10"), true);
   assert.equal(markup.includes("Empathy</span><strong>8.4 / 10"), true);

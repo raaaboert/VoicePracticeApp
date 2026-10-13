@@ -14,6 +14,7 @@ import type {
   TeamPerformanceWeightProfile,
 } from "@/src/lib/teamPerformanceIntelligence";
 import type { OrganizationPerformanceMetric } from "@/src/lib/organizationPerformance";
+import { PerformanceCardDisclosure } from "./PerformanceCardDisclosure";
 
 const METRIC_LABELS: Record<OrganizationPerformanceMetric, string> = {
   persuasion: "Persuasion",
@@ -294,15 +295,21 @@ function RateMovementRows({ rows }: { rows: readonly ManagerRateMovementRow[] })
 }
 
 export function ManagerInsights({ state }: { state: ManagerInsightsState }) {
+  const summary = state.kind === "loading"
+    ? "Loading direct-team signals…"
+    : state.kind === "error"
+      ? "Insights unavailable"
+      : `${state.data.population.currentReportCount} current report${state.data.population.currentReportCount === 1 ? "" : "s"} · ${state.data.facts.activity.current.attemptCount} attempt${state.data.facts.activity.current.attemptCount === 1 ? "" : "s"}`;
   return (
-    <section className="section-card manager-insights" aria-labelledby="manager-insights-title">
-      <div className="section-header manager-insights-header">
-        <div>
-          <p className="eyebrow">Team intelligence</p>
-          <h2 id="manager-insights-title">Manager insights</h2>
-          <p className="section-copy">Relative score context and month-to-month movement for your current team.</p>
-        </div>
-      </div>
+    <PerformanceCardDisclosure
+      eyebrow="Team intelligence"
+      title="Manager insights"
+      headingId="manager-insights-title"
+      contentId="manager-insights-content"
+      className="manager-insights"
+      description="Relative score context and month-to-month movement for your current team."
+      summary={<span className="performance-generation-summary">{summary}</span>}
+    >
 
       {state.kind === "loading" ? (
         <div className="manager-insights-status" role="status" aria-live="polite">
@@ -339,7 +346,7 @@ export function ManagerInsights({ state }: { state: ManagerInsightsState }) {
         && hasUsableCurrentEvidence(state.data) ? (
           <ManagerInsightsContent data={state.data} />
         ) : null}
-    </section>
+    </PerformanceCardDisclosure>
   );
 }
 

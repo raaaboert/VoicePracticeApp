@@ -3523,10 +3523,16 @@ test("current manager with no performance access gets direct-team reporting with
 
   const users = await dashboardRequest("/dashboard/users", userAdminNoneToken);
   assert.equal(users.status, 200);
+  const authorizedUserRows = users.body.users as Array<{ userId: string; displayName: string | null; email: string }>;
   assert.deepEqual(
-    (users.body.users as Array<{ userId: string }>).map((user) => user.userId).sort(),
+    authorizedUserRows.map((user) => user.userId).sort(),
     ["unassigned_learner", "user_admin_none"],
   );
+  assert.deepEqual(
+    Object.fromEntries(authorizedUserRows.map((user) => [user.userId, user.displayName])),
+    { unassigned_learner: "Test User", user_admin_none: "Nina No Performance" },
+  );
+  assert.equal(authorizedUserRows.every((user) => user.email.endsWith("@acme.example")), true);
 
   const directReportAttempt = await dashboardRequest("/dashboard/attempts/score_unassigned", userAdminNoneToken);
   assert.equal(directReportAttempt.status, 200);

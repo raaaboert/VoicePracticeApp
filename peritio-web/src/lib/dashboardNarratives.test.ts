@@ -84,6 +84,7 @@ function createUserReportRow(
 ): DashboardUserReportResponse["users"][number] {
   return {
     userId: overrides.userId ?? "user-1",
+    displayName: overrides.displayName ?? "Example Person",
     email: overrides.email ?? "user-1@example.com",
     employeeId: overrides.employeeId ?? null,
     orgId: overrides.orgId ?? "org-1",

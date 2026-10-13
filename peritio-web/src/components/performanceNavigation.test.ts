@@ -112,14 +112,14 @@ test("Performance person links carry origin and detail offers a scoped back link
 
 test("the Individuals list is a primary section while dashboard reporting keeps its evidence view", () => {
   const user: DashboardUserReportRow = {
-    userId: "user_1", email: "person@example.test", employeeId: null,
+    userId: "user_1", displayName: "Person Example", email: "person@example.test", employeeId: null,
     orgId: "org_1", orgName: "Example", status: "active", orgRole: "user",
     dashboardAccessEnabled: false, simulationsLast30Days: 1, usedMinutesLast30Days: 2,
     scoredAttemptsLast30Days: 1, averageScoreLast30Days: 80, scoreDeltaLast30Days: null,
     uniqueScenariosLast30Days: 1, trainingPackAttemptsLast30Days: 0,
     latestActivityAt: null, latestScenarioTitle: null, latestTrainingPackTitle: null,
   };
-  const props = { users: [user], trainingCountByUser: new Map<string, number>(), divisionId: "division_2", isSuperUser: false };
+  const props = { users: [user], trainingCountByUser: {}, divisionId: "division_2", isSuperUser: false };
   const individuals = renderToStaticMarkup(createElement(DashboardUsersView, { ...props, primary: true }));
   const dashboard = renderToStaticMarkup(createElement(DashboardUsersView, props));
   assert.equal(individuals.includes("People in scope"), true);

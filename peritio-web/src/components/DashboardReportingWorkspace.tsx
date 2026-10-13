@@ -100,10 +100,10 @@ export function DashboardReportingWorkspace({
 
   const selectedTraining = trainings.find((training) => training.id === selectedTrainingId) ?? trainings[0] ?? null;
 
-  const trainingCountByUser = new Map<string, number>();
+  const trainingCountByUser: Record<string, number> = {};
   for (const training of trainings) {
     for (const user of training.users) {
-      trainingCountByUser.set(user.userId, (trainingCountByUser.get(user.userId) ?? 0) + 1);
+      trainingCountByUser[user.userId] = (trainingCountByUser[user.userId] ?? 0) + 1;
     }
   }
 

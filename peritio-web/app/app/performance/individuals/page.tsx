@@ -72,11 +72,11 @@ export default async function PerformanceIndividualsPage({
 
   const users = (report?.users ?? []).filter((user) => user.orgId === orgId);
   const appliedDivisionId = report?.divisionScope?.appliedDivisionId ?? null;
-  const trainingCountByUser = new Map<string, number>();
+  const trainingCountByUser: Record<string, number> = {};
   for (const training of trainingWorkspace?.trainings ?? []) {
     if (training.orgId !== orgId) continue;
     for (const user of training.users) {
-      trainingCountByUser.set(user.userId, (trainingCountByUser.get(user.userId) ?? 0) + 1);
+      trainingCountByUser[user.userId] = (trainingCountByUser[user.userId] ?? 0) + 1;
     }
   }
 

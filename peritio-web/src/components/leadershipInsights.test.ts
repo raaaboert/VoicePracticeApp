@@ -153,6 +153,8 @@ test("current-members basis and Group Summary population distinction are explici
   const markup = render(response());
   assert.equal(markup.includes("Organization intelligence"), true);
   assert.equal(markup.includes("Leadership insights"), true);
+  assert.equal(markup.includes("3 current members · 12 attempts"), true);
+  assert.equal(markup.includes('aria-controls="leadership-insights-content"'), true);
   assert.equal(markup.includes("Based on current members"), true);
   assert.equal(markup.includes("including their qualifying earlier activity in this organization"), true);
   assert.equal(markup.includes("may differ from Group Summary"), true);

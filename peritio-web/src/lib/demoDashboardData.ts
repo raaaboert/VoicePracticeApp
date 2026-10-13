@@ -724,6 +724,7 @@ function buildDemoUserReportRows(): DashboardUserReportRow[] {
 
     return {
       userId: `demo_sampleco_user_${String(index + 1).padStart(2, "0")}`,
+      displayName: seed.name,
       email: seed.email,
       employeeId: null,
       orgId: DASHBOARD_DEMO_ACCOUNT_ID,
