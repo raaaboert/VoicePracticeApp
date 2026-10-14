@@ -1262,7 +1262,7 @@ async function materializePlanIfEnded(params: BuildPerformancePlanDetailParams):
   });
 }
 
-function hasPlanEndBoundaryPassed(plan: PerformancePlan, now: Date): boolean {
+export function hasPlanEndBoundaryPassed(plan: PerformancePlan, now: Date): boolean {
   const window = buildPlanWindow({
     startDate: plan.startDate,
     endDate: plan.endDate,

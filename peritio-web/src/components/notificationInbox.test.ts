@@ -39,6 +39,10 @@ test("opening a notification marks it read and routes to the existing access-req
 test("inbox uses the lightweight active feed while history requests dismissed rows with paging", () => {
   assert.match(inboxSource, /\/api\/notifications\?limit=20/);
   assert.match(inboxSource, /POLL_INTERVAL_MS = 60_000/);
+  assert.match(inboxSource, /startNotificationPolling\(\{/);
+  assert.match(inboxSource, /visibility: document, scheduler: window/);
+  assert.match(inboxSource, /if \(!open\) polling.current\?\.refresh\(\)/);
+  assert.match(inboxSource, /controller.stop\(\)/);
   assert.match(historySource, /view=all/);
   assert.match(historySource, /Load more/);
   assert.match(historySource, /notification\.dismissedAt/);

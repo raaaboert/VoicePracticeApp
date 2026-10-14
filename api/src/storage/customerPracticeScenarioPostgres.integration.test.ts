@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { Pool } from "pg";
 
 import { createCustomerPracticeScenarioStore } from "./customerPracticeScenarioStore.js";
@@ -85,6 +85,21 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
     assert.equal(submitted.status, "in_review");
     assert.equal(submitted.approvedVersionId, null);
 
+    // Notification authorization needs only current aggregate state, not immutable
+    // versions, source references or review history. Exactly one scoped query.
+    const visibilityQuery = mock.method(pool, "query");
+    try {
+      assert.deepEqual(await store.listVisibilityByOrg("org_a"), [{
+        id: created.id, orgId: "org_a", status: "in_review", createdByActorId: "scoped_author",
+      }]);
+      assert.equal(visibilityQuery.mock.callCount(), 1);
+      assert.match(String(visibilityQuery.mock.calls[0]!.arguments[0]),
+        /^SELECT id, org_id, status, created_by_actor_id FROM customer_practice_scenarios WHERE org_id = \$1$/);
+      assert.deepEqual(await store.listVisibilityByOrg("org_b"), []);
+    } finally {
+      visibilityQuery.mock.restore();
+    }
+
     const approved = await store.review({
       orgId: "org_a", scenarioId: created.id, actorId: "org_admin",
       decision: "approve", reviewNote: "Ready", now: new Date("2026-10-09T10:10:00Z"),
@@ -97,6 +112,7 @@ test("real PostgreSQL preserves stable scenario identity across immutable approv
     });
     assert.equal(publishedV1.publishedVersionId, "version_1");
     assert.equal(publishedV1.status, "published");
+    assert.equal((await store.listVisibilityByOrg("org_a"))[0]?.status, "published");
 
     const revised = await store.createRevision({
       orgId: "org_a", scenarioId: created.id, versionId: "version_2", actorId: "scoped_author",

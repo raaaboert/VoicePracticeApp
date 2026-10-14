@@ -1,4 +1,5 @@
 import type { ApiDatabase, CustomerPracticeScenario, UserProfile } from "@voicepractice/shared";
+import type { CustomerPracticeScenarioVisibility } from "../storage/customerPracticeScenarioStore.js";
 import type { EnqueueUserNotificationInput, UserNotificationRecord } from "../storage/userNotificationStore.js";
 
 export const CUSTOMER_PRACTICE_SCENARIO_NOTIFICATION_SUBJECT_TYPE = "customer_practice_scenario";
@@ -50,7 +51,7 @@ export function buildScenarioDecisionNotificationInputs(params: {
 
 export function canViewCustomerPracticeScenarioNotification(params: {
   db: ApiDatabase; recipient: UserProfile; notification: UserNotificationRecord;
-  scenarios: readonly CustomerPracticeScenario[];
+  scenarios: readonly CustomerPracticeScenarioVisibility[];
 }): boolean {
   const { recipient, notification } = params;
   if ((notification.kind !== "scenario_submitted" && notification.kind !== "scenario_reviewed")

@@ -805,6 +805,26 @@ test("GET /mobile/users/:userId/performance/current lets a valid mobile token re
   assert.equal((result.body.displayState as { state?: string }).state, "active_plans_on_track");
 });
 
+test("ordinary mobile goal GETs and denied reads never save full app state", async () => {
+  let saves = 0;
+  setDatabaseSaveBarrierForTest(async () => { saves++; });
+  try {
+    for (const suffix of ["current", "plans", "plans/perf_plan_current", "plans/perf_plan_current/updates"]) {
+      const result = await mobileRequest(`/mobile/users/user_current/performance/${suffix}`, "token_current");
+      assert.equal(result.status, 200, suffix);
+      const denied = await mobileRequest(`/mobile/users/user_current/performance/${suffix}`, "token_other");
+      assert.equal(denied.status, 401, suffix);
+    }
+    const otherPlan = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_expired", "token_current");
+    assert.equal(otherPlan.status, 404);
+    const empty = await getCurrentPerformance("user_empty", "token_empty");
+    assert.equal(empty.status, 200);
+    assert.equal(saves, 0);
+  } finally {
+    setDatabaseSaveBarrierForTest(null);
+  }
+});
+
 test("GET /mobile/users/:userId/performance/current rejects another user's mobile token", async () => {
   const result = await getCurrentPerformance("user_current", "token_other");
 
@@ -1030,6 +1050,33 @@ test("mobile Performance history and detail return only the authenticated user's
 
   const crossUser = await mobileRequest("/mobile/users/user_current/performance/plans/perf_plan_current", "token_other");
   assert.equal(crossUser.status, 401);
+});
+
+test("mobile history and detail finalize ended goals once, then remain read-only", async () => {
+  for (const view of ["history", "detail"]) {
+    const id = `perf_read_first_${view}`;
+    await planStore.createPlan({
+      plan: buildPlan({ id, userId: "user_expired", endDate: "2026-07-02" }),
+      scopeItems: [buildScopeItem({ id: `scope_${id}`, planId: id, userId: "user_expired" })],
+      auditEvents: [],
+    });
+    const url = `/mobile/users/user_expired/performance/plans${view === "detail" ? `/${id}` : ""}`;
+    const results = await Promise.all([
+      mobileRequest(url, "token_expired"), mobileRequest(url, "token_expired"),
+    ]);
+    assert.ok(results.every((result) => result.status === 200));
+    const finalized = await planStore.getPlanById(id);
+    assert.equal(finalized?.plan.status, "completed");
+    assert.equal(finalized.auditEvents.filter((event) => event.action === "completed").length, 1);
+    let saves = 0;
+    setDatabaseSaveBarrierForTest(async () => { saves++; });
+    try {
+      assert.equal((await mobileRequest(url, "token_expired")).status, 200);
+      assert.equal(saves, 0);
+    } finally {
+      setDatabaseSaveBarrierForTest(null);
+    }
+  }
 });
 
 test("mobile Performance cancellation is denied for mobile users without leaking other plans", async () => {

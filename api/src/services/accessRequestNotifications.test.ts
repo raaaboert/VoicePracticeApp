@@ -4,6 +4,7 @@ import type { ApiDatabase, CustomerPracticeScenario, EnterpriseJoinRequestRecord
 
 import { createMemoryUserNotificationStoreForTest } from "../storage/userNotificationStore.js";
 import type { FocusTopicAuthoritySnapshot } from "../storage/focusTopicAuthorityStore.js";
+import { createCustomerPracticeScenarioStore, type CustomerPracticeScenarioVisibility } from "../storage/customerPracticeScenarioStore.js";
 import {
   buildAccessRequestNotificationInputs,
   dismissAuthorizedDashboardNotification,
@@ -16,6 +17,53 @@ import { TOPIC_ASSIGNED_NOTIFICATION_SUBJECT_TYPE } from "./topicAssignedNotific
 import { buildScenarioSubmittedNotificationInputs } from "./customerPracticeScenarioNotifications.js";
 
 const NOW = "2026-10-06T12:00:00.000Z";
+
+test("lightweight scenario facts preserve notification visibility, unread counts, paging and mark-all scope", async () => {
+  const admin = user("reviewer", { orgRole: "org_admin" });
+  const author = user("author");
+  const source = db([admin, author], []);
+  const store = createMemoryUserNotificationStoreForTest();
+  const scenarios: CustomerPracticeScenarioVisibility[] = [
+    { id: "review_1", orgId: "org_1", status: "in_review", createdByActorId: author.id },
+    { id: "review_2", orgId: "org_1", status: "in_review", createdByActorId: author.id },
+    { id: "closed", orgId: "org_1", status: "approved", createdByActorId: "another_author" },
+    { id: "foreign", orgId: "org_2", status: "in_review", createdByActorId: author.id },
+  ];
+  for (const [index, scenario] of scenarios.entries()) {
+    await store.enqueueOne({
+      orgId: "org_1", recipientUserId: admin.id, kind: "scenario_submitted",
+      subjectType: "customer_practice_scenario", subjectId: scenario.id, dedupKey: scenario.id,
+      payload: { title: "Awaiting review" }, createdAt: new Date(Date.parse(NOW) + index),
+    });
+    await store.enqueueOne({
+      orgId: "org_1", recipientUserId: author.id, kind: "scenario_reviewed",
+      subjectType: "customer_practice_scenario", subjectId: scenario.id, dedupKey: scenario.id,
+      payload: { title: "Review completed" }, createdAt: new Date(Date.parse(NOW) + index),
+    });
+  }
+  const params = { db: source, recipient: admin, store, practiceScenarios: scenarios };
+  const first = await listAuthorizedDashboardNotifications({ ...params, limit: 1 });
+  assert.equal(first.unreadCount, 2);
+  assert.equal(first.notifications.length, 1);
+  assert.equal(first.hasMore, true);
+  const second = await listAuthorizedDashboardNotifications({ ...params, limit: 1, offset: first.nextOffset! });
+  assert.equal(second.notifications.length, 1);
+  assert.notEqual(second.notifications[0]!.id, first.notifications[0]!.id);
+  assert.equal(await markAllAuthorizedDashboardNotificationsRead(params), 2);
+  assert.equal((await listAuthorizedDashboardNotifications({ ...params, limit: 1 })).unreadCount, 0);
+  const authorPage = await listAuthorizedDashboardNotifications({ ...params, recipient: author, limit: 20 });
+  assert.equal(authorPage.unreadCount, 2); // Reviewer mark-all never affects the author.
+  assert.deepEqual(authorPage.notifications.map((row) => row.subjectId).sort(), ["review_1", "review_2"]);
+  assert.equal((await listAuthorizedDashboardNotifications({ ...params,
+    recipient: { ...admin, orgRole: "user" }, limit: 20, includeDismissed: true,
+  })).notifications.length, 0);
+});
+
+test("non-PostgreSQL scenario storage supports empty visibility reads", async () => {
+  const store = createCustomerPracticeScenarioStore({ provider: "file", databaseUrl: null,
+    pgPoolMax: 1, pgConnectTimeoutMs: 1, pgIdleTimeoutMs: 1 });
+  assert.deepEqual(await store.listVisibilityByOrg("org_1"), []);
+});
 
 function user(id: string, overrides: Partial<UserProfile> = {}): UserProfile {
   return {

@@ -5,6 +5,7 @@ import { Bell, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { DashboardNotificationRow, DashboardNotificationsResponse } from "@voicepractice/shared";
+import { startNotificationPolling } from "../lib/notificationPolling";
 
 const POLL_INTERVAL_MS = 60_000;
 
@@ -24,23 +25,26 @@ export function NotificationInbox() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [acting, setActing] = useState<string | null>(null);
   const mounted = useRef(true);
+  const polling = useRef<ReturnType<typeof startNotificationPolling> | null>(null);
 
-  const load = async () => {
+  const load = async (signal: AbortSignal) => {
     try {
-      const response = await fetch("/api/notifications?limit=20", { cache: "no-store" });
+      const response = await fetch("/api/notifications?limit=20", { cache: "no-store", signal });
       if (!response.ok) throw new Error("Could not load notifications.");
       const next = await response.json() as DashboardNotificationsResponse;
-      if (mounted.current) { setPayload(next); setError(null); }
+      if (mounted.current && !signal.aborted) { setPayload(next); setError(null); }
     } catch {
-      if (mounted.current) setError("Notifications are temporarily unavailable.");
+      if (mounted.current && !signal.aborted) setError("Notifications are temporarily unavailable.");
     }
   };
 
   useEffect(() => {
     mounted.current = true;
-    void load();
-    const timer = window.setInterval(() => { void load(); }, POLL_INTERVAL_MS);
-    return () => { mounted.current = false; window.clearInterval(timer); };
+    const controller = startNotificationPolling({
+      visibility: document, scheduler: window, intervalMs: POLL_INTERVAL_MS, load,
+    });
+    polling.current = controller;
+    return () => { mounted.current = false; controller.stop(); polling.current = null; };
   }, []);
 
   const openNotification = async (notification: DashboardNotificationRow) => {
@@ -100,7 +104,7 @@ export function NotificationInbox() {
       <button type="button" className="notification-bell"
         aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
         aria-expanded={open} aria-controls="dashboard-notification-panel"
-        onClick={() => setOpen((current) => !current)}>
+        onClick={() => { if (!open) polling.current?.refresh(); setOpen(!open); }}>
         <Bell aria-hidden="true" size={20} />
         {unreadCount > 0 ? <span className="notification-badge" aria-hidden="true">{unreadCount > 99 ? "99+" : unreadCount}</span> : null}
       </button>

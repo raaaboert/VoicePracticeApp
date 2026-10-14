@@ -23,9 +23,14 @@ export type CustomerPracticeScenarioStoredDraft = CustomerPracticeScenarioDraftR
   serverProvenance?: OrgCustomScenarioProvenance;
 };
 
+/** Minimal current-state projection for notification authorization; no version content or history. */
+export type CustomerPracticeScenarioVisibility = Pick<CustomerPracticeScenario,
+  "id" | "orgId" | "status" | "createdByActorId">;
+
 export interface CustomerPracticeScenarioStore {
   initialize(): Promise<void>;
   listByOrg(orgId: string): Promise<CustomerPracticeScenario[]>;
+  listVisibilityByOrg(orgId: string): Promise<CustomerPracticeScenarioVisibility[]>;
   listByTopic(orgId: string, topicId: string): Promise<CustomerPracticeScenario[]>;
   get(orgId: string, scenarioId: string): Promise<CustomerPracticeScenario | null>;
   getVersion(orgId: string, scenarioId: string, versionId: string): Promise<CustomerPracticeScenarioVersion | null>;
@@ -154,6 +159,7 @@ export class CustomerPracticeScenarioStoreError extends Error {
 class NullCustomerPracticeScenarioStore implements CustomerPracticeScenarioStore {
   async initialize(): Promise<void> {}
   async listByOrg(): Promise<CustomerPracticeScenario[]> { return []; }
+  async listVisibilityByOrg(): Promise<CustomerPracticeScenarioVisibility[]> { return []; }
   async listByTopic(): Promise<CustomerPracticeScenario[]> { return []; }
   async get(): Promise<CustomerPracticeScenario | null> { return null; }
   async getVersion(): Promise<CustomerPracticeScenarioVersion | null> { return null; }
@@ -182,6 +188,17 @@ class PostgresCustomerPracticeScenarioStore implements CustomerPracticeScenarioS
       [id(orgId, "Organization id"), id(topicId, "Focus Topic id")],
     );
     return await hydrate(this.pool, result.rows);
+  }
+
+  async listVisibilityByOrg(orgId: string): Promise<CustomerPracticeScenarioVisibility[]> {
+    await this.initialize();
+    const result = await this.pool.query<Pick<ScenarioRow, "id" | "org_id" | "status" | "created_by_actor_id">>(
+      "SELECT id, org_id, status, created_by_actor_id FROM customer_practice_scenarios WHERE org_id = $1",
+      [id(orgId, "Organization id")],
+    );
+    return result.rows.map((row) => ({
+      id: row.id, orgId: row.org_id, status: status(row.status), createdByActorId: row.created_by_actor_id,
+    }));
   }
 
   async listByOrg(orgId: string): Promise<CustomerPracticeScenario[]> {

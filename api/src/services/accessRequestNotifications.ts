@@ -1,12 +1,13 @@
 import type {
   ApiDatabase,
-  CustomerPracticeScenario,
   DashboardNotificationRow,
   DashboardNotificationsResponse,
   EnterpriseJoinRequestRecord,
   PerformancePlan,
   UserProfile,
 } from "@voicepractice/shared";
+
+import type { CustomerPracticeScenarioVisibility } from "../storage/customerPracticeScenarioStore.js";
 
 import { canDecideCustomerAccessRequests } from "./customerUserAdministrationPolicy.js";
 import type {
@@ -124,7 +125,7 @@ export async function listAuthorizedDashboardNotifications(params: {
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
-  practiceScenarios?: readonly CustomerPracticeScenario[];
+  practiceScenarios?: readonly CustomerPracticeScenarioVisibility[];
   performancePlanStore?: PerformancePlanStore;
   limit: number;
   offset?: number;
@@ -288,7 +289,7 @@ export async function markAuthorizedDashboardNotificationRead(params: {
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
-  practiceScenarios?: readonly CustomerPracticeScenario[];
+  practiceScenarios?: readonly CustomerPracticeScenarioVisibility[];
   performancePlanStore?: PerformancePlanStore;
   notificationId: string;
   readAt?: Date;
@@ -357,7 +358,7 @@ export async function dismissAuthorizedDashboardNotification(params: {
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
-  practiceScenarios?: readonly CustomerPracticeScenario[];
+  practiceScenarios?: readonly CustomerPracticeScenarioVisibility[];
   performancePlanStore?: PerformancePlanStore;
   notificationId: string;
   dismissedAt?: Date;
@@ -381,7 +382,7 @@ export async function markAllAuthorizedDashboardNotificationsRead(params: {
   store: UserNotificationStore;
   topicAuthority?: FocusTopicAuthoritySnapshot | null;
   topicAuthorityMode?: "legacy" | "assignments";
-  practiceScenarios?: readonly CustomerPracticeScenario[];
+  practiceScenarios?: readonly CustomerPracticeScenarioVisibility[];
   performancePlanStore?: PerformancePlanStore;
   readAt?: Date;
 }): Promise<number> {

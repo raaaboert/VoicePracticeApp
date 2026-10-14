@@ -538,6 +538,7 @@ import {
   buildDashboardPerformancePlanDetailResponse,
   buildDashboardPerformanceWorkspaceResponse,
   buildMobilePerformanceCurrentResponse,
+  hasPlanEndBoundaryPassed,
   buildMobilePerformancePlanOptionsResponse,
   buildMobilePerformancePlanHistoryResponse,
   buildPerformancePlanDetailResponse,
@@ -4951,6 +4952,17 @@ async function commitDatabaseWrite<T>(
     });
   }
   return completed.result;
+}
+
+// Goal GETs only enter the serialized mutation path when an ended plan needs finalization.
+// Retry the entire handler so authentication, organization scope and plan state are checked again.
+async function withReadFirstMobilePerformanceRead(
+  handler: (db: ApiDatabase, allowFinalization: boolean) => Promise<"finalize" | void>
+): Promise<void> {
+  const result = await withFreshReportingSnapshotRead((db) => handler(db, false));
+  if (result === "finalize") {
+    await withFreshReportingWrite((db) => handler(db, true));
+  }
 }
 
 async function withFreshReportingWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
@@ -14988,7 +15000,7 @@ app.get("/dashboard/notifications", requireDashboardAuth, async (request: Dashbo
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
-        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+        ? await customerPracticeScenarioStore.listVisibilityByOrg(recipient.orgId) : [],
       performancePlanStore,
       limit: parsedLimit,
       offset: parsedOffset,
@@ -15013,7 +15025,7 @@ app.patch("/dashboard/notifications/mark-all-read", requireDashboardAuth, async 
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
-        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+        ? await customerPracticeScenarioStore.listVisibilityByOrg(recipient.orgId) : [],
       performancePlanStore,
     });
     response.json({ ok: true, markedCount });
@@ -15035,7 +15047,7 @@ app.get("/dashboard/notifications/unread-count", requireDashboardAuth, async (re
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
-        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+        ? await customerPracticeScenarioStore.listVisibilityByOrg(recipient.orgId) : [],
       performancePlanStore,
       limit: 1,
     });
@@ -15058,7 +15070,7 @@ app.patch("/dashboard/notifications/:notificationId/read", requireDashboardAuth,
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
-        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+        ? await customerPracticeScenarioStore.listVisibilityByOrg(recipient.orgId) : [],
       performancePlanStore,
       notificationId: request.params.notificationId,
     });
@@ -15086,7 +15098,7 @@ app.patch("/dashboard/notifications/:notificationId/dismiss", requireDashboardAu
         ? await focusTopicAuthorityStore.listSnapshot(recipient.orgId) : null,
       topicAuthorityMode: runtimeConfig.focusTopicAuthority,
       practiceScenarios: recipient.orgId
-        ? await customerPracticeScenarioStore.listByOrg(recipient.orgId) : [],
+        ? await customerPracticeScenarioStore.listVisibilityByOrg(recipient.orgId) : [],
       performancePlanStore,
       notificationId: request.params.notificationId,
     });
@@ -25696,7 +25708,7 @@ app.get("/mobile/users/:userId/performance/current", async (request: Request, re
 
   const userId = request.params.userId;
 
-  await withFreshReportingWrite(async (db) => {
+  await withReadFirstMobilePerformanceRead(async (db, allowFinalization) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -25714,6 +25726,13 @@ app.get("/mobile/users/:userId/performance/current", async (request: Request, re
     }
 
     const orgId = accessContext.actingOrgId;
+    const now = new Date();
+    if (!allowFinalization && orgId) {
+      const plans = await performancePlanStore.listPlansForUser(orgId, user.id);
+      if (plans.some(({ plan }) => plan.status === "active" && hasPlanEndBoundaryPassed(plan, now))) {
+        return "finalize";
+      }
+    }
     const usageSessions = orgId ? listUsageSessions(db, { orgId, userId: user.id }) : [];
     const scoreRecords = orgId ? listScoreRecords(db, { orgId, userId: user.id, conclusiveOnly: true }) : [];
     const payload = await buildMobilePerformanceCurrentResponse({
@@ -25722,7 +25741,7 @@ app.get("/mobile/users/:userId/performance/current", async (request: Request, re
       userId: user.id,
       usageSessions,
       scoreRecords,
-      now: new Date()
+      now
     });
 
     response.json(payload);
@@ -25952,7 +25971,7 @@ app.get("/mobile/users/:userId/performance/plans", async (request: Request, resp
 
   const userId = request.params.userId;
 
-  await withFreshReportingWrite(async (db) => {
+  await withReadFirstMobilePerformanceRead(async (db, allowFinalization) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -25970,13 +25989,20 @@ app.get("/mobile/users/:userId/performance/plans", async (request: Request, resp
     }
 
     const orgId = accessContext.actingOrgId;
+    const now = new Date();
+    if (!allowFinalization && orgId) {
+      const plans = await performancePlanStore.listPlansForUser(orgId, user.id);
+      if (plans.some(({ plan }) => plan.status === "active" && hasPlanEndBoundaryPassed(plan, now))) {
+        return "finalize";
+      }
+    }
     const payload: MobilePerformancePlanHistoryResponse = await buildMobilePerformancePlanHistoryResponse({
       store: performancePlanStore,
       orgId,
       userId: user.id,
       usageSessions: orgId ? listUsageSessions(db, { orgId, userId: user.id }) : [],
       scoreRecords: orgId ? listScoreRecords(db, { orgId, userId: user.id, conclusiveOnly: true }) : [],
-      now: new Date()
+      now
     });
 
     response.json(payload);
@@ -25992,7 +26018,7 @@ app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Reque
 
   const userId = request.params.userId;
 
-  await withFreshReportingWrite(async (db) => {
+  await withReadFirstMobilePerformanceRead(async (db, allowFinalization) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
@@ -26019,12 +26045,17 @@ app.get("/mobile/users/:userId/performance/plans/:planId", async (request: Reque
       return;
     }
 
+    const now = new Date();
+    if (!allowFinalization && loaded.plan.status === "active" && hasPlanEndBoundaryPassed(loaded.plan, now)) {
+      return "finalize";
+    }
+
     const payload: MobilePerformancePlanDetailResponse | null = await buildPerformancePlanDetailResponse({
       store: performancePlanStore,
       planId: loaded.plan.id,
       usageSessions: listUsageSessions(db, { orgId: loaded.plan.orgId, userId: user.id }),
       scoreRecords: listScoreRecords(db, { orgId: loaded.plan.orgId, userId: user.id, conclusiveOnly: true }),
-      now: new Date(),
+      now,
       auditDisplayContext: {
         viewer: "mobile_user",
         currentUserId: user.id,
@@ -26050,7 +26081,7 @@ app.get("/mobile/users/:userId/performance/plans/:planId/updates", async (reques
 
   const userId = request.params.userId;
 
-  await withFreshReportingWrite(async (db) => {
+  await withFreshReportingSnapshotRead(async (db) => {
     const user = getUserById(db, userId);
     if (!user) {
       response.status(404).json({ error: "User not found." });
