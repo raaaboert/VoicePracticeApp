@@ -64,6 +64,23 @@ test("strictly parses only current structurally valid snapshots", () => {
   })?.eligibleIndustries[0]?.label, "");
 });
 
+test("parses snapshots persisted before scenarioKind as an unambiguous legacy representation", () => {
+  const snapshot = buildSimulationSessionIndustrySnapshot({
+    eligibleIndustryIds: ["industry_one"], industries, scenarioKind: "standard",
+    capturedAt: new Date("2026-10-13T12:00:00.000Z"),
+  });
+  const { scenarioKind: _scenarioKind, ...preScenarioKindSnapshot } = snapshot;
+
+  assert.deepEqual(parseSimulationSessionIndustrySnapshot(preScenarioKindSnapshot), {
+    ...snapshot,
+    scenarioKind: null,
+  });
+  assert.deepEqual(resolveSnapshotIndustry(
+    parseSimulationSessionIndustrySnapshot(preScenarioKindSnapshot)!,
+    "industry_one",
+  ), snapshot.eligibleIndustries[0]);
+});
+
 test("uses the established configured, canonical, then default prompt-baseline fallback", () => {
   const canonical: IndustryDefinition[] = [{
     id: "industry_one",

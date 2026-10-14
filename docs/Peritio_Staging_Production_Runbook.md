@@ -35,7 +35,11 @@ The command remains temporarily as a credential-free, side-effect-free compatibi
 
 ## Organization-industry enforcement prerequisite
 
-Deploy durable simulation-session industry snapshots to production before introducing organization-industry eligibility enforcement. Wait at least 48 hours after the snapshot deployment, then verify that no recently active, unfinished legacy sessions with a SQL `NULL` snapshot remain before enabling enforcement. Newer sessions carry a server-captured industry snapshot and can preserve their originally authorized industry context after later configuration changes. Do not backfill or retroactively reinterpret legacy sessions.
+Snapshot-based continuation is active only when the running API uses `FOCUS_TOPIC_AUTHORITY=assignments`. For staging and production, verify the deployed environment's actual authority-mode value and the running API revision; do not infer either from a documentation default or source configuration.
+
+Before organization-industry eligibility enforcement in production, separately verify: (1) durable simulation-session snapshot code is deployed, (2) the running API is in the snapshot-aware `assignments` authority mode, (3) the 48-hour legacy-session drain has elapsed while that path is active, and (4) the proposed industry enforcement is ready for its own approval. Never switch production from `legacy` to `assignments` automatically as part of this release process.
+
+Only after the first three conditions are true, wait at least 48 hours after the snapshot-aware deployment and verify that no recently active, unfinished legacy sessions with a SQL `NULL` snapshot remain before enabling enforcement. A zero `NULL`-snapshot count alone does not demonstrate that the running authority mode is snapshot-aware. Newer sessions carry a server-captured industry snapshot and can preserve their originally authorized industry context after later configuration changes. Do not backfill or retroactively reinterpret legacy sessions.
 
 Before finalizing the readiness query for that deployment, inspect the production `simulation_sessions` schema and verify the actual column names used for status, last activity, and `industry_snapshot`. Build the read-only SQL against that observed schema rather than assuming the current source names.
 

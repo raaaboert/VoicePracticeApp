@@ -201,6 +201,11 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const unattachedScenario = segment.scenarios.find((candidate) =>
         candidate.enabled !== false && candidate.id !== scenario.id);
       assert.ok(unattachedScenario);
+      const snapshotIndustryId = org.activeIndustries[0]!;
+      const snapshotOriginalIndustry = db.config.industries.find((entry) => entry.id === snapshotIndustryId);
+      assert.ok(snapshotOriginalIndustry);
+      snapshotOriginalIndustry.aiBaseline = "SNAPSHOT_ORIGINAL_BASELINE";
+      snapshotOriginalIndustry.standardScoringGuidance = "SNAPSHOT_ORIGINAL_SCORING";
       db.orgDivisions.push(
         { id: "division_runtime_a", orgId: org.id, name: "Division A", active: true,
           createdAt: now, updatedAt: now, deletedAt: null },
@@ -1604,7 +1609,6 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       // A recognized session retains its server-captured industry context after
       // the live definition changes. The fresh persona variant forces a runtime
       // cache miss.
-      const snapshotIndustryId = pinnedV1Draft.applicableIndustryIds[0]!;
       const originalIndustry = db.config.industries.find((entry) => entry.id === snapshotIndustryId);
       assert.ok(originalIndustry);
       const snapshotCustomerSessionId = `snapshot_customer_${randomUUID()}`;
@@ -1628,6 +1632,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         trainingId: topic.id, clientStartedAt: now,
       })).status, 201);
       await pool.query("UPDATE simulation_sessions SET industry_snapshot=NULL WHERE simulation_session_id=$1", [parityLegacySessionId]);
+      // Existing snapshots predate scenarioKind. Remove it from one persisted
+      // snapshot to prove its current, unambiguous org scenario still resolves.
+      await pool.query(
+        "UPDATE simulation_sessions SET industry_snapshot=industry_snapshot - 'scenarioKind' WHERE simulation_session_id=$1",
+        [snapshotUnversionedCustomSessionId],
+      );
       const snapshotV3Draft = {
         ...pinnedV2Draft,
         title: "Snapshot V3 title",
@@ -1662,6 +1672,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         [snapshotCustomerSessionId],
       )).rows[0]?.locked_industry, null);
       const snapshotRequests: string[] = [];
+      const postDeactivationRequests: string[] = [];
+      let capturePostDeactivationRequests = false;
       const snapshotFetch = globalThis.fetch;
       globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
         const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -1669,6 +1681,9 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           const parsed = JSON.parse(String(init?.body)) as { input?: Array<{ content?: string }> };
           const prompt = parsed.input?.map((message) => message.content ?? "").join("\n") ?? "";
           snapshotRequests.push(prompt);
+          if (capturePostDeactivationRequests) {
+            postDeactivationRequests.push(prompt);
+          }
           const output = prompt.includes("expert communication coach")
             ? JSON.stringify({ communicationScore: 80, outcomeScore: 75, overallScore: 78,
               completionLevel: "complete", objectiveAchieved: true, persuasion: 8, clarity: 7,
@@ -1733,22 +1748,40 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           history: [{ role: "user", content: "Please help with the account." }],
         });
         assert.equal(conflictingSelection.status, 400, JSON.stringify(conflictingSelection.body));
-        const snapshots = await pool.query<{ simulation_session_id: string; industry_snapshot: { selection?: { industryId?: string } } }>(
+        const snapshots = await pool.query<{
+          simulation_session_id: string;
+          industry_snapshot: {
+            selection?: { industryId?: string };
+            eligibleIndustries?: Array<{
+              id?: string;
+              promptBaseline?: string;
+              rawScoringAiBaseline?: string;
+              standardScoringGuidance?: string;
+            }>;
+          };
+        }>(
           "SELECT simulation_session_id,industry_snapshot FROM simulation_sessions WHERE simulation_session_id = ANY($1::text[])",
           [[snapshotCustomerSessionId, snapshotStandardSessionId, snapshotUnversionedCustomSessionId]],
         );
         assert.equal(snapshots.rows.length, 3);
         assert.deepEqual(snapshots.rows.map((row) => row.industry_snapshot.selection?.industryId).sort(),
           [snapshotIndustryId, snapshotIndustryId, snapshotIndustryId]);
+        assert.equal(snapshots.rows.every((row) => row.industry_snapshot.eligibleIndustries?.some((industry) =>
+          industry.id === snapshotIndustryId
+          && industry.promptBaseline === "SNAPSHOT_ORIGINAL_BASELINE"
+          && industry.rawScoringAiBaseline === "SNAPSHOT_ORIGINAL_BASELINE"
+          && industry.standardScoringGuidance === "SNAPSHOT_ORIGINAL_SCORING",
+        )), true);
         await storage.updateAppStateWithLock((raw) => {
           const state = imported.ensureDatabaseShape(raw);
           state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId
             ? { ...entry, enabled: false,
-                aiBaseline: "MUTATED INDUSTRY BASELINE MUST NOT REACH PINNED SESSIONS",
-                standardScoringGuidance: "MUTATED INDUSTRY SCORING MUST NOT REACH PINNED SESSIONS" }
+                aiBaseline: "SNAPSHOT_MUTATED_BASELINE",
+                standardScoringGuidance: "SNAPSHOT_MUTATED_SCORING" }
             : entry);
           return { result: undefined, shouldSave: true, state };
         });
+        capturePostDeactivationRequests = true;
         for (const [simulationSessionId, scenarioId] of [
           [snapshotCustomerSessionId, pinnedScenarioId],
           [snapshotStandardSessionId, scenario.id],
@@ -1801,19 +1834,21 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           "SELECT industry_id FROM score_records WHERE simulation_session_id=$1",
           [snapshotCustomerSessionId],
         )).rows[0]?.industry_id, snapshotIndustryId);
-        assert.equal(snapshotRequests.some((prompt) => prompt.includes("MUTATED INDUSTRY BASELINE")), false);
-        assert.equal(snapshotRequests.some((prompt) => prompt.includes("MUTATED INDUSTRY SCORING")), false);
-        assert.equal(snapshotRequests.some((prompt) => prompt.includes("CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT")), false);
-        assert.equal(snapshotRequests.some((prompt) => /SNAPSHOT_V3_RUNTIME_CONTENT|SNAPSHOT_V3_COUNTERPART_ROLE/.test(prompt)), false);
-        assert.equal(snapshotRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_RUNTIME_MARKER")), true);
-        assert.equal(snapshotRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_SCORING_GUIDANCE")), true);
-        if (originalIndustry.aiBaseline?.trim()) {
-          assert.equal(snapshotRequests.some((prompt) => prompt.includes(originalIndustry.aiBaseline!.trim())), true);
-        }
-        if (originalIndustry.standardScoringGuidance?.trim()) {
-          assert.equal(snapshotRequests.some((prompt) => prompt.includes(originalIndustry.standardScoringGuidance!.trim())), true);
-        }
-        assert.equal(snapshotRequests.some((prompt) => prompt.includes(originalIndustry.label)), true);
+        const postDeactivationRoleplay = postDeactivationRequests.filter((prompt) => !prompt.includes("expert communication coach"));
+        const postDeactivationScoring = postDeactivationRequests.filter((prompt) => prompt.includes("expert communication coach"));
+        assert.ok(postDeactivationRoleplay.length > 0);
+        assert.ok(postDeactivationScoring.length > 0);
+        assert.equal(postDeactivationRoleplay.some((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
+        assert.equal(postDeactivationRoleplay.some((prompt) => prompt.includes(originalIndustry.label)), true);
+        assert.equal(postDeactivationScoring.some((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
+        assert.equal(postDeactivationScoring.some((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_SCORING")), true);
+        assert.equal(postDeactivationScoring.some((prompt) => prompt.includes(originalIndustry.label)), true);
+        assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("SNAPSHOT_MUTATED_BASELINE")), false);
+        assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("SNAPSHOT_MUTATED_SCORING")), false);
+        assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT")), false);
+        assert.equal(postDeactivationRequests.some((prompt) => /SNAPSHOT_V3_RUNTIME_CONTENT|SNAPSHOT_V3_COUNTERPART_ROLE/.test(prompt)), false);
+        assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_RUNTIME_MARKER")), true);
+        assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_SCORING_GUIDANCE")), true);
         assert.equal(snapshotRequests.filter((prompt) => prompt.includes("expert communication coach")).length, 5);
       } finally {
         globalThis.fetch = snapshotFetch;
