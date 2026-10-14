@@ -828,6 +828,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       // The save route must discard client-provided server provenance and bind
       // the immutable version to the server-issued generation receipt instead.
       const generatedForForgedProvenance = await generateDraft();
+      const rejectedGeneratedIndustry = await orgAdminCall(practiceScenarioPath, "POST", generatedSaveInput(
+        generatedForForgedProvenance, { applicableIndustryIds: [snapshotIndustryId, "unassigned_industry"] },
+      ));
+      assert.equal(rejectedGeneratedIndustry.status, 400, JSON.stringify(rejectedGeneratedIndustry.body));
       const forgedProvenanceSave = await orgAdminCall(practiceScenarioPath, "POST", generatedSaveInput(
         generatedForForgedProvenance,
         { serverProvenance: { sourceMode: "scratch", creationMethod: "manual", modelUsed: "forged-client-model" } },
@@ -1772,6 +1776,17 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           && industry.rawScoringAiBaseline === "SNAPSHOT_ORIGINAL_BASELINE"
           && industry.standardScoringGuidance === "SNAPSHOT_ORIGINAL_SCORING",
         )), true);
+        const alternateIndustry = db.config.industries.find((industry) => industry.enabled && industry.id !== snapshotIndustryId);
+        assert.ok(alternateIndustry);
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [alternateIndustry.id] })).status, 200);
+        const deactivatedDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+        assert.equal(deactivatedDetail.status, 200);
+        assert.equal((deactivatedDetail.body.scenarios as Array<{ id: string }>).some((entry) =>
+          entry.id === pinnedScenarioId || entry.id === snapshotCustomScenarioId), false);
+        assert.equal((await call(startPath, {
+          simulationSessionId: `stale_industry_${randomUUID()}`, segmentId: segment.id,
+          scenarioId: pinnedScenarioId, trainingId: topic.id,
+        })).status, 400);
         await storage.updateAppStateWithLock((raw) => {
           const state = imported.ensureDatabaseShape(raw);
           state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId
@@ -1836,13 +1851,13 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         )).rows[0]?.industry_id, snapshotIndustryId);
         const postDeactivationRoleplay = postDeactivationRequests.filter((prompt) => !prompt.includes("expert communication coach"));
         const postDeactivationScoring = postDeactivationRequests.filter((prompt) => prompt.includes("expert communication coach"));
-        assert.ok(postDeactivationRoleplay.length > 0);
-        assert.ok(postDeactivationScoring.length > 0);
-        assert.equal(postDeactivationRoleplay.some((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
-        assert.equal(postDeactivationRoleplay.some((prompt) => prompt.includes(originalIndustry.label)), true);
-        assert.equal(postDeactivationScoring.some((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
-        assert.equal(postDeactivationScoring.some((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_SCORING")), true);
-        assert.equal(postDeactivationScoring.some((prompt) => prompt.includes(originalIndustry.label)), true);
+        assert.equal(postDeactivationRoleplay.length, 3);
+        assert.equal(postDeactivationScoring.length, 3);
+        assert.equal(postDeactivationRoleplay.every((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
+        assert.equal(postDeactivationRoleplay.every((prompt) => prompt.includes(originalIndustry.label)), true);
+        assert.equal(postDeactivationScoring.every((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
+        assert.equal(postDeactivationScoring.every((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_SCORING")), true);
+        assert.equal(postDeactivationScoring.every((prompt) => prompt.includes(originalIndustry.label)), true);
         assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("SNAPSHOT_MUTATED_BASELINE")), false);
         assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("SNAPSHOT_MUTATED_SCORING")), false);
         assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT")), false);
@@ -1859,7 +1874,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
             : entry);
           return { result: undefined, shouldSave: true, state };
         });
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: org.activeIndustries })).status, 200);
       }
+      const reactivatedDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+      assert.equal((reactivatedDetail.body.scenarios as Array<{ id: string }>).some((entry) => entry.id === pinnedScenarioId), true);
       const emptyIndustrySessionId = `snapshot_empty_${randomUUID()}`;
       assert.equal((await call(startPath, {
         simulationSessionId: emptyIndustrySessionId, segmentId: segment.id, scenarioId: scenario.id,
@@ -1934,6 +1952,185 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         ],
       });
       assert.equal(unclaimedCustomScore.status, 404, JSON.stringify(unclaimedCustomScore.body));
+
+      // Organization industry authority is exercised through real HTTP routes
+      // and durable scenario versions, without changing historical versions/scores.
+      const industryStateBefore = await storage.load();
+      const originalIndustryIds = [...industryStateBefore.orgs.find((row) => row.id === org.id)!.activeIndustries];
+      const originalConfig = structuredClone(industryStateBefore.config);
+      const originalCustom = structuredClone(industryStateBefore.orgs.find((row) => row.id === org.id)!.customScenarios);
+      const altIndustryId = "integration_second_industry";
+      const unrelatedIndustryId = "integration_foreign_industry";
+      const restrictedRoleId = "integration_restricted_role";
+      const restrictedStandardId = "integration_restricted_standard";
+      const expandedCustomId = "integration_role_expanding_custom";
+      const historicalScoresBefore = (await pool.query("SELECT * FROM score_records ORDER BY id")).rows;
+      try {
+        await storage.updateAppStateWithLock((raw) => {
+          const state = imported.ensureDatabaseShape(raw);
+          state.config.industries.push(
+            { id: altIndustryId, label: "Second organization industry", enabled: true },
+            { id: unrelatedIndustryId, label: "Other organization industry", enabled: true },
+          );
+          state.config.roleIndustries.push(
+            { roleId: segment.id, industryId: altIndustryId, active: true },
+            { roleId: restrictedRoleId, industryId: unrelatedIndustryId, active: true },
+          );
+          state.config.segments.push({ id: restrictedRoleId, label: "Restricted role", summary: "Test", enabled: true,
+            scenarios: [{ id: restrictedStandardId, segmentId: restrictedRoleId, title: "Must stay hidden",
+              description: "Not authorized by the organization industry set", aiRole: "Counterpart", enabled: true }] });
+          state.orgs.find((row) => row.id === org.id)!.customScenarios!.push({
+            ...org.customScenarios![0]!, id: expandedCustomId, segmentId: restrictedRoleId,
+            applicableIndustryIds: [snapshotIndustryId], enabled: true,
+          });
+          return { result: undefined, shouldSave: true, state };
+        });
+        // An HTTP read refreshes the API process after direct fixture writes.
+        assert.equal((await orgAdminCall(practiceScenarioPath)).status, 200);
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [] })).status, 400);
+        assert.equal((await masterCall("/orgs", "POST", { name: "Empty industry rejected", activeIndustries: [] })).status, 400);
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [snapshotIndustryId, altIndustryId] })).status, 200);
+        assert.equal((await orgAdminCall(`/dashboard/admin/users/${secondReport.id}?orgId=${org.id}`, "PATCH", {
+          managerUserId: scopedManager.id,
+        })).status, 200);
+        const currentManagerCall = (path: string, method: "GET" | "POST" = "GET", body?: Record<string, unknown>) =>
+          dashboardCall(manualDashboardSession.token, path, method, body);
+        for (const authorCall of [orgAdminCall, currentManagerCall]) {
+          const options = await authorCall(practiceScenarioPath);
+          assert.equal(options.status, 200, JSON.stringify(options.body));
+          assert.deepEqual((options.body.industryOptions as Array<{ id: string }>).map((row) => row.id).sort(),
+            [snapshotIndustryId, altIndustryId].sort());
+          assert.equal((options.body.roleOptions as Array<{ id: string }>).some((row) => row.id === restrictedRoleId), false);
+          for (const ids of [[unrelatedIndustryId], [snapshotIndustryId, unrelatedIndustryId], []]) {
+            const denied = await authorCall(practiceScenarioPath, "POST", { ...pinnedV1Draft, applicableIndustryIds: ids });
+            assert.equal(denied.status, 400, JSON.stringify(denied.body));
+          }
+          assert.equal((await authorCall(practiceScenarioPath, "POST", {
+            ...pinnedV1Draft, segmentId: restrictedRoleId,
+          })).status, 400);
+        }
+        const managerIndustryDraft = await currentManagerCall(practiceScenarioPath, "POST", pinnedV1Draft);
+        assert.equal(managerIndustryDraft.status, 201, JSON.stringify(managerIndustryDraft.body));
+        assert.equal((await currentManagerCall(
+          `${practiceScenarioPath}/${managerIndustryDraft.body.id}/revisions`, "POST",
+          { ...pinnedV1Draft, applicableIndustryIds: [snapshotIndustryId, unrelatedIndustryId] },
+        )).status, 400);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/revisions`, "POST", {
+          ...pinnedV1Draft, applicableIndustryIds: [unrelatedIndustryId],
+        })).status, 400);
+        assert.equal((await orgAdminCall(`/orgs/${foreignOrg.id}/trainings/${foreignTopic.id}/practice-scenarios`)).status, 404);
+
+        const masterDraft = { ...pinnedV1Draft, title: "Master valid industry", enabled: true };
+        for (const path of [`/orgs/${org.id}/custom-scenarios`, `/orgs/${org.id}/custom-scenarios/generate`]) {
+          for (const ids of [[unrelatedIndustryId], [snapshotIndustryId, unrelatedIndustryId]]) {
+            assert.equal((await masterCall(path, "POST", { ...masterDraft, applicableIndustryIds: ids })).status, 400);
+          }
+          assert.equal((await masterCall(path, "POST", { ...masterDraft, segmentId: restrictedRoleId })).status, 400);
+        }
+        const masterCreated = await masterCall(`/orgs/${org.id}/custom-scenarios`, "POST", masterDraft);
+        assert.equal(masterCreated.status, 201, JSON.stringify(masterCreated.body));
+        await withMockScenarioGeneration(async (calls) => {
+          const masterGenerated = await masterCall(`/orgs/${org.id}/custom-scenarios/generate`, "POST", masterDraft);
+          assert.equal(masterGenerated.status, 200, JSON.stringify(masterGenerated.body));
+          assert.equal(calls.value, 1);
+        });
+
+        const partialCreated = await orgAdminCall(practiceScenarioPath, "POST", {
+          ...pinnedV1Draft, title: "Partial industry availability", applicableIndustryIds: [snapshotIndustryId, altIndustryId],
+        });
+        assert.equal(partialCreated.status, 201, JSON.stringify(partialCreated.body));
+        const partialId = String(partialCreated.body.id);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${partialId}/submit`, "POST")).status, 200);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${partialId}/approve`, "POST")).status, 200);
+        // Deactivate one industry before publication: the other keeps it usable.
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [snapshotIndustryId] })).status, 200);
+        const partialPublished = await orgAdminCall(`${practiceScenarioPath}/${partialId}/publish`, "POST");
+        assert.equal(partialPublished.status, 200, JSON.stringify(partialPublished.body));
+        const publishedVersionBefore = (await pool.query(
+          "SELECT * FROM customer_practice_scenario_versions WHERE id=$1", [(partialPublished.body.currentVersion as { id: string }).id],
+        )).rows[0];
+        const partialStartId = `partial_industry_${randomUUID()}`;
+        assert.equal((await call(startPath, { simulationSessionId: partialStartId, segmentId: segment.id,
+          scenarioId: partialId, trainingId: topic.id })).status, 201);
+        const partialSnapshot = (await pool.query<{ industry_snapshot: { eligibleIndustries: Array<{ id: string }> } }>(
+          "SELECT industry_snapshot FROM simulation_sessions WHERE simulation_session_id=$1", [partialStartId],
+        )).rows[0]!.industry_snapshot;
+        assert.deepEqual(partialSnapshot.eligibleIndustries.map((row) => row.id), [snapshotIndustryId]);
+
+        const blockedCreated = await orgAdminCall(practiceScenarioPath, "POST", { ...pinnedV1Draft, title: "Publication must fail" });
+        const blockedId = String(blockedCreated.body.id);
+        assert.equal(blockedCreated.status, 201);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${blockedId}/submit`, "POST")).status, 200);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${blockedId}/approve`, "POST")).status, 200);
+        const restrictedClient = await pool.connect();
+        try {
+          for (const [kind, id] of [["standard", restrictedStandardId], ["org", expandedCustomId]] as const) {
+            await authority.attachScenario({ id: `industry_attachment_${id}`, orgId: org.id, topicId: topic.id,
+              scenarioKind: kind, scenarioId: id, attachedBy: "platform_admin", attachedAt: now,
+              detachedBy: null, detachedAt: null }, restrictedClient);
+          }
+        } finally { restrictedClient.release(); }
+        const roleLeakDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+        const visibleIds = (roleLeakDetail.body.scenarios as Array<{ id: string }>).map((row) => row.id);
+        assert.equal(visibleIds.includes(expandedCustomId), true);
+        assert.equal(visibleIds.includes(restrictedStandardId), false);
+        assert.equal((await call(startPath, { simulationSessionId: `role_leak_${randomUUID()}`,
+          segmentId: restrictedRoleId, scenarioId: restrictedStandardId, trainingId: topic.id })).status, 400);
+
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [unrelatedIndustryId] })).status, 200);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${blockedId}/publish`, "POST")).status, 409);
+        assert.equal((await call(startPath, { simulationSessionId: `deactivated_${randomUUID()}`,
+          segmentId: segment.id, scenarioId: partialId, trainingId: topic.id })).status, 400);
+        assert.equal((await orgAdminCall(practiceScenarioPath)).body.scenarios instanceof Array, true);
+        assert.deepEqual((await pool.query("SELECT * FROM customer_practice_scenario_versions WHERE id=$1",
+          [publishedVersionBefore.id])).rows[0], publishedVersionBefore);
+        assert.equal((await pool.query<{ status: string }>("SELECT status FROM customer_practice_scenarios WHERE id=$1", [partialId])).rows[0]?.status, "published");
+        assert.deepEqual((await pool.query("SELECT * FROM score_records ORDER BY id")).rows, historicalScoresBefore);
+
+        // Global disable (and then an empty selection persisted by older code)
+        // must not be repaired into broad learner access during normalization.
+        await storage.updateAppStateWithLock((raw) => {
+          const state = imported.ensureDatabaseShape(raw);
+          state.config.industries = state.config.industries.map((entry) => ({ ...entry, enabled: false }));
+          return { result: undefined, shouldSave: true, state };
+        });
+        const noIndustriesConfig = await call(`/mobile/users/${user.id}/config`);
+        assert.equal(noIndustriesConfig.status, 200);
+        const configPayload = (noIndustriesConfig.body.config ?? noIndustriesConfig.body) as {
+          industries: unknown[]; orgCustomScenarios: unknown[]; segments: unknown[];
+        };
+        assert.deepEqual(configPayload.industries, []);
+        assert.deepEqual(configPayload.orgCustomScenarios, []);
+        assert.deepEqual(configPayload.segments, []);
+        assert.deepEqual((await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`)).body.scenarios, []);
+        assert.equal((await orgAdminCall(practiceScenarioPath, "POST", pinnedV1Draft)).status, 400);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/${blockedId}/publish`, "POST")).status, 409);
+        await storage.updateAppStateWithLock((raw) => {
+          const state = imported.ensureDatabaseShape(raw);
+          state.config = originalConfig;
+          state.orgs.find((row) => row.id === org.id)!.activeIndustries = [];
+          return { result: undefined, shouldSave: true, state };
+        });
+        assert.deepEqual((await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`)).body.scenarios, []);
+        assert.equal((await call(startPath, { simulationSessionId: `empty_industry_${randomUUID()}`,
+          segmentId: segment.id, scenarioId: partialId, trainingId: topic.id })).status, 400);
+        assert.equal((await orgAdminCall(`${practiceScenarioPath}/generate`, "POST", { sourceContentIds: [contentId] })).status, 409);
+        assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [snapshotIndustryId] })).status, 200);
+        const restoredIndustryDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+        assert.equal((restoredIndustryDetail.body.scenarios as Array<{ id: string }>).some((row) => row.id === partialId), true);
+        assert.equal((await call(startPath, { simulationSessionId: `reactivated_${randomUUID()}`,
+          segmentId: segment.id, scenarioId: partialId, trainingId: topic.id })).status, 201);
+      } finally {
+        await storage.updateAppStateWithLock((raw) => {
+          const state = imported.ensureDatabaseShape(raw);
+          state.config = originalConfig;
+          const organization = state.orgs.find((row) => row.id === org.id)!;
+          organization.activeIndustries = originalIndustryIds;
+          organization.customScenarios = originalCustom;
+          return { result: undefined, shouldSave: true, state };
+        });
+      }
+      assert.equal((await orgAdminCall(practiceScenarioPath)).status, 200);
       const disabledUserSessionId = `disabled_user_${randomUUID()}`;
       const disabledOrgSessionId = `disabled_org_${randomUUID()}`;
       const movedMemberSessionId = `moved_member_${randomUUID()}`;

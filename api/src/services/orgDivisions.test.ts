@@ -14,6 +14,7 @@ import {
   clearDivisionAssignmentsForDeletedDivision,
   isDivisionVisibleToUser,
   listOrgVisibleStandardScenarios,
+  resolveEffectiveOrgIndustryIds,
   resolveLiveDivisionAttribution,
 } from "./orgDivisions.js";
 
@@ -380,4 +381,22 @@ test("listOrgVisibleStandardScenarios scopes standard scenarios to active compan
   });
 
   assert.deepEqual(rows.map((row) => row.scenarioId), ["scenario_sales"]);
+  for (const ids of [[], ["unknown"], ["medical"]]) {
+    const config = { ...db.config, industries: db.config.industries.map((industry) =>
+      ({ ...industry, enabled: industry.id !== "medical" })) };
+    assert.deepEqual(listOrgVisibleStandardScenarios({ config, org: createOrg({ activeIndustries: ids }) }), []);
+  }
+});
+
+test("effective organization industries never fall back and remain organization-isolated", () => {
+  const config = { industries: [
+    { id: "sales", label: "Sales", enabled: true },
+    { id: "medical", label: "Medical", enabled: false },
+    { id: "people_management", label: "People", enabled: true },
+  ] };
+  assert.deepEqual(resolveEffectiveOrgIndustryIds(config, createOrg({ activeIndustries: ["sales", "medical"] })), ["sales"]);
+  assert.deepEqual(resolveEffectiveOrgIndustryIds(config, createOrg({ activeIndustries: [] })), []);
+  assert.deepEqual(resolveEffectiveOrgIndustryIds(config, createOrg({ activeIndustries: ["medical"] })), []);
+  assert.deepEqual(resolveEffectiveOrgIndustryIds({ industries: [] }, createOrg({ activeIndustries: ["sales"] })), []);
+  assert.deepEqual(resolveEffectiveOrgIndustryIds(config, createOrg({ activeIndustries: ["people_management"] })), ["people_management"]);
 });

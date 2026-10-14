@@ -239,6 +239,14 @@ test("Practice Scenario source selectors retain native inputs with scoped polish
   assert.match(styles, /@media \(forced-colors: active\)\s*\{[\s\S]*?\.focus-topic-scenario-option-row input\s*\{[\s\S]*?appearance: auto;/);
 });
 
+test("scenario editor restricts options and explains editable versus saved industry state", () => {
+  assert.match(source, /editableScenarioIndustries\(version\.applicableIndustryIds/);
+  assert.match(source, /scenarioRolesForIndustries\(practiceScenarios\.roleOptions, scenarioIndustryIds\)/);
+  assert.match(source, /The saved version is unchanged/);
+  assert.match(source, /No industries are currently available for this organization/);
+  assert.match(source, /currently unavailable/);
+});
+
 test("available Related Content searches authorized candidates and refreshes after attach", () => {
   assert.match(source, /const matchingAvailableContent = normalizedAvailableContentSearch/);
   assert.match(source, /\[item\.title, item\.description, item\.contentType\]/);

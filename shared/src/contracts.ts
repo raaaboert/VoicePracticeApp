@@ -1008,7 +1008,7 @@ export interface CustomerPracticeScenario {
 export interface CustomerPracticeScenarioListResponse {
   topicId: string;
   scenarios: CustomerPracticeScenario[];
-  roleOptions: Array<{ id: string; label: string }>;
+  roleOptions: Array<{ id: string; label: string; industryIds: IndustryId[] }>;
   industryOptions: Array<{ id: IndustryId; label: string }>;
   editableScenarioIds: string[];
   permissions: {

@@ -30,6 +30,7 @@ import {
   validateTrainingContentFileSelection,
 } from "@/src/lib/trainingContentPresentation";
 import { partitionFocusTopicAssignments } from "@/src/components/focusTopicAssignmentPresentation";
+import { editableScenarioIndustries, scenarioRolesForIndustries } from "./practiceScenarioIndustryOptions";
 
 type TopicRow = Pick<OrgTrainingSummary, "id" | "name" | "description" | "status">;
 type Audience = DashboardFocusTopicAssignment["audience"];
@@ -541,7 +542,14 @@ export function FocusTopicAdministration({
     setScenarioDescription(version.description); setScenarioDesiredOutcome(version.desiredOutcome ?? "");
     setScenarioAiRole(version.aiRole); setScenarioScoringGuidance(version.scoringGuidance);
     setScenarioUseIndustryScoringOnly(!version.scoringGuidance.trim());
-    setScenarioSegmentId(version.segmentId); setScenarioIndustryIds(version.applicableIndustryIds);
+    const editableIndustryIds = editableScenarioIndustries(version.applicableIndustryIds, practiceScenarios?.industryOptions ?? []);
+    setScenarioIndustryIds(editableIndustryIds);
+    const roleAvailable = scenarioRolesForIndustries(practiceScenarios?.roleOptions ?? [], editableIndustryIds)
+      .some((role) => role.id === version.segmentId);
+    setScenarioSegmentId(roleAvailable ? version.segmentId : "");
+    if (editableIndustryIds.length !== version.applicableIndustryIds.length || !roleAvailable) {
+      setMessage("Unavailable industries were removed from this editable revision. Choose currently available industries and a role before saving. The saved version is unchanged.");
+    }
     setScenarioSourceContentIds(version.sourceReferences.flatMap((source) =>
       source.kind === "training_content" && source.referenceId ? [source.referenceId] : []));
   };
@@ -604,7 +612,8 @@ export function FocusTopicAdministration({
     const contentId = `focus-topic-scenario-${scenario.id}-content`;
     const open = expandedScenarioIds.has(scenario.id);
     const industryLabels = version.applicableIndustryIds.map((industryId) =>
-      practiceScenarios.industryOptions.find((industry) => industry.id === industryId)?.label ?? industryId,
+      practiceScenarios.industryOptions.find((industry) => industry.id === industryId)?.label
+        ?? `${industryId.replaceAll("_", " ")} (currently unavailable)`,
     );
 
     return <article key={scenario.id} className="focus-topic-scenario-card">
@@ -911,6 +920,9 @@ export function FocusTopicAdministration({
             </span>
           </div>
           <p className="muted-copy">Select one or more generation-ready Related Content resources. Generation creates no scenario until you review and save the draft below.</p>
+          {practiceScenarios.industryOptions.length === 0 ? <div className="notice" role="status">
+            No industries are currently available for this organization. An administrator must enable an organization industry before a scenario can be authored or published.
+          </div> : null}
           <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Eligible Related Content sources</legend>
             <div className="scenario-option-list focus-topic-scenario-option-list">{eligibleScenarioSourceOptions.map((item) =>
               <label key={`generate-${item.id}`} className={`scenario-option-row focus-topic-scenario-option-row${scenarioSourceContentIds.includes(item.id) ? " is-selected" : ""}`}><input type="checkbox" checked={scenarioSourceContentIds.includes(item.id)}
@@ -922,7 +934,7 @@ export function FocusTopicAdministration({
           <label className="focus-topic-field focus-topic-field-wide">Optional practice guidance
             <textarea className="text-input focus-topic-long-textarea" rows={4} maxLength={2000} value={scenarioPracticeGuidance}
               onChange={(event) => setScenarioPracticeGuidance(event.target.value)} /></label>
-          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || generatingScenario || scenarioSourceContentIds.length === 0}
+          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || generatingScenario || scenarioSourceContentIds.length === 0 || practiceScenarios.industryOptions.length === 0}
             onClick={generateScenarioDraft}>
             {generatingScenario ? <><LoaderCircle aria-hidden="true" className="spin" size={18} /> Generating scenario…</> : "Generate Scenario"}
           </button></div>
@@ -967,15 +979,20 @@ export function FocusTopicAdministration({
               <select className="text-input" value={scenarioSegmentId}
                 onChange={(event) => setScenarioSegmentId(event.target.value)}>
                 <option value="">Select a role</option>
-                {practiceScenarios.roleOptions.map((option) =>
+                {scenarioRolesForIndustries(practiceScenarios.roleOptions, scenarioIndustryIds).map((option) =>
                   <option key={option.id} value={option.id}>{option.label}</option>)}
               </select></label>
             <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Applicable industries</legend>
               <div className="scenario-option-list focus-topic-scenario-option-list">{practiceScenarios.industryOptions.map((option) =>
                 <label key={option.id} className={`scenario-option-row focus-topic-scenario-option-row${scenarioIndustryIds.includes(option.id) ? " is-selected" : ""}`}><input type="checkbox" checked={scenarioIndustryIds.includes(option.id)}
-                  onChange={(event) => setScenarioIndustryIds((current) => event.target.checked
-                    ? [...new Set([...current, option.id])]
-                    : current.filter((id) => id !== option.id))} /> <span>{option.label}</span></label>)}</div>
+                  onChange={(event) => {
+                    const next = event.target.checked ? [...new Set([...scenarioIndustryIds, option.id])]
+                      : scenarioIndustryIds.filter((id) => id !== option.id);
+                    setScenarioIndustryIds(next);
+                    if (!scenarioRolesForIndustries(practiceScenarios.roleOptions, next).some((role) => role.id === scenarioSegmentId)) {
+                      setScenarioSegmentId("");
+                    }
+                  }} /> <span>{option.label}</span></label>)}</div>
             </fieldset>
             <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Related Content sources (optional)</legend>
               <p className="muted-copy">Select resources currently attached to this Focus Topic. Manual scenarios do not require a source.</p>

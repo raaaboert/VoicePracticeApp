@@ -2,6 +2,7 @@ import {
   ApiDatabase,
   AppConfig,
   EnterpriseOrg,
+  IndustryId,
   getRoleSegmentIdsForIndustries,
   OrgDivisionRecord,
   OrgStandardScenarioDivisionAssignmentRecord,
@@ -319,33 +320,13 @@ export function clearDivisionAssignmentsForDeletedDivision(params: {
   };
 }
 
-function getConfiguredActiveIndustryIds(config: Pick<AppConfig, "industries">): string[] {
-  const activeIds = (config.industries ?? [])
-    .filter((entry) => entry.enabled)
-    .map((entry) => entry.id)
-    .filter((id, index, values) => values.indexOf(id) === index);
-  if (activeIds.length > 0) {
-    return activeIds;
-  }
-  return (config.industries ?? [])
-    .map((entry) => entry.id)
-    .filter((id, index, values) => values.indexOf(id) === index);
-}
-
-function normalizeIndustryIds(
-  value: unknown,
-  fallback: string[],
-  allowed: ReadonlySet<string>
-): string[] {
-  if (!Array.isArray(value)) {
-    return [...fallback];
-  }
-  const unique = value
-    .filter((entry): entry is string => typeof entry === "string")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry && allowed.has(entry))
-    .filter((entry, index, values) => values.indexOf(entry) === index);
-  return unique.length > 0 ? unique : [...fallback];
+/** Organization selections are authoritative; an empty intersection grants nothing. */
+export function resolveEffectiveOrgIndustryIds(
+  config: Pick<AppConfig, "industries">,
+  org: Pick<EnterpriseOrg, "activeIndustries">,
+): IndustryId[] {
+  const enabled = new Set(config.industries.filter((entry) => entry.enabled).map((entry) => entry.id));
+  return [...new Set(org.activeIndustries ?? [])].filter((id) => enabled.has(id));
 }
 
 export interface OrgVisibleStandardScenarioRow {
@@ -360,14 +341,7 @@ export function listOrgVisibleStandardScenarios(params: {
   config: Pick<AppConfig, "segments" | "industries" | "roleIndustries">;
   org: Pick<EnterpriseOrg, "activeIndustries">;
 }): OrgVisibleStandardScenarioRow[] {
-  const enabledIndustryIds = new Set(
-    (params.config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id)
-  );
-  const scopedIndustryIds = normalizeIndustryIds(
-    params.org.activeIndustries,
-    getConfiguredActiveIndustryIds(params.config),
-    enabledIndustryIds.size > 0 ? enabledIndustryIds : new Set(getConfiguredActiveIndustryIds(params.config))
-  );
+  const scopedIndustryIds = resolveEffectiveOrgIndustryIds(params.config, params.org);
   const allowedRoleSegmentIds = new Set(
     getRoleSegmentIdsForIndustries(scopedIndustryIds, params.config.roleIndustries)
   );

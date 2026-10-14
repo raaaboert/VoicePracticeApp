@@ -598,6 +598,7 @@ import {
   isDivisionVisibleToUser,
   listOrgVisibleStandardScenarios,
   listOrgDivisions,
+  resolveEffectiveOrgIndustryIds,
   normalizeOrgDivisionRecords,
   normalizeOrgStandardScenarioDivisionAssignments,
   resolveLiveDivisionAttribution,
@@ -2573,7 +2574,7 @@ function getConfiguredActiveIndustryIds(config: AppConfig): IndustryId[] {
   const activeIds = uniqueStrings(
     (config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id)
   );
-  return activeIds.length > 0 ? activeIds : getConfiguredIndustryIds(config);
+  return activeIds;
 }
 
 function normalizeIndustryIds(
@@ -2586,7 +2587,7 @@ function normalizeIndustryIds(
   }
 
   const unique = uniqueStrings(value, allowed);
-  return unique.length > 0 ? (unique as IndustryId[]) : [...fallback];
+  return unique as IndustryId[];
 }
 
 function isValidIsoDate(value: unknown): value is string {
@@ -3028,12 +3029,8 @@ function normalizeIndustryDefinitions(
     });
   }
 
-  if (normalized.length === 0) {
+  if (normalized.length === 0 && !Array.isArray(value)) {
     return fallback.map((entry) => ({ ...entry }));
-  }
-
-  if (!normalized.some((entry) => entry.enabled)) {
-    normalized[0].enabled = true;
   }
 
   return normalized.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
@@ -4450,7 +4447,6 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
   };
 
   const configuredIndustryIds = new Set(getConfiguredIndustryIds(config));
-  const fallbackOrgIndustryIds = getConfiguredActiveIndustryIds(config);
 
   const normalizedOrgs = ensureOrgJoinCodes(
     (Array.isArray(candidate.orgs) && candidate.orgs.length > 0 ? candidate.orgs : fallback.orgs)
@@ -4461,7 +4457,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
           contactEmail: normalizeContactEmail((org as Partial<EnterpriseOrg>).contactEmail),
           activeIndustries: normalizeIndustryIds(
             (org as Partial<EnterpriseOrg>).activeIndustries,
-            fallbackOrgIndustryIds,
+            [],
             configuredIndustryIds
           )
         } as EnterpriseOrg);
@@ -8954,6 +8950,8 @@ function createCustomerScenarioTransactionGuard(params: {
   requireFullAuthority: boolean;
   requireCreationEnabled: boolean;
   sourceContentIds?: readonly string[];
+  industryDraft?: CustomerPracticeScenarioDraftRequest;
+  publicationIndustryIds?: readonly string[];
 }): (client: AppStateTransactionClient) => Promise<void> {
   return async (client) => {
     const stateResult = await client.query<{ state_json: unknown }>(
@@ -8969,6 +8967,10 @@ function createCustomerScenarioTransactionGuard(params: {
         "Practice Scenario administration is no longer available for this account.",
         "scenario_scope_denied", 403,
       );
+    }
+    if (params.industryDraft) validateCustomerPracticeScenarioDraft(currentDb, organization, params.industryDraft);
+    if (params.publicationIndustryIds) {
+      assertCustomerScenarioPublicationIndustries(currentDb, organization, params.publicationIndustryIds);
     }
     const topic = findOrgTrainingRecord(currentDb, organization.id, params.topicId);
     if (!topic || topic.status === "archived") {
@@ -10712,7 +10714,7 @@ function getMobileReadyOrgCustomScenarios(
     return [];
   }
 
-  const enabledIndustryIds = new Set((config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id));
+  const enabledIndustryIds = new Set(resolveEffectiveOrgIndustryIds(config, org));
   const enabledSegmentIds = new Set(config.segments.filter((segment) => segment.enabled).map((segment) => segment.id));
 
   const filtered = raw
@@ -12003,14 +12005,7 @@ function resolveConfigForUser(
     return db.config;
   }
 
-  const enabledIndustryIds = new Set(
-    (db.config.industries ?? []).filter((entry) => entry.enabled).map((entry) => entry.id)
-  );
-  const scopedIndustryIds = normalizeIndustryIds(
-    org.activeIndustries,
-    getConfiguredActiveIndustryIds(db.config),
-    enabledIndustryIds
-  );
+  const scopedIndustryIds = resolveEffectiveOrgIndustryIds(db.config, org);
   const scopedIndustryIdSet = new Set(scopedIndustryIds);
   const divisionsEnabled = org.divisionsEnabled === true;
   const userDivisionId = divisionsEnabled ? resolveUserActiveDivisionId(db, org.id, user) : null;
@@ -12032,18 +12027,19 @@ function resolveConfigForUser(
     options?.forAssignedTopic ||
     mobileTrainingScenarioIdSet.has(scenario.id)
   );
-  const customIndustryIdSet = new Set(
-    trainingScopedCustomScenarios.flatMap((scenario) => scenario.applicableIndustryIds ?? []),
-  );
   const allowedRoleSegmentIds = new Set(
     getRoleSegmentIdsForIndustries(scopedIndustryIds, db.config.roleIndustries)
   );
+  const standardRoleSegmentIds = new Set(allowedRoleSegmentIds);
   for (const customScenario of trainingScopedCustomScenarios) {
     allowedRoleSegmentIds.add(customScenario.segmentId);
   }
   const filteredSegments = db.config.segments
     .filter((segment) => allowedRoleSegmentIds.has(segment.id))
     .map((segment) => {
+      if (!standardRoleSegmentIds.has(segment.id)) {
+        return { ...segment, scenarios: [] };
+      }
       if (!divisionsEnabled || options?.forAssignedTopic) {
         return segment;
       }
@@ -12059,7 +12055,7 @@ function resolveConfigForUser(
       };
     });
   const filteredIndustries = (db.config.industries ?? []).filter(
-    (entry) => entry.enabled && (scopedIndustryIdSet.has(entry.id) || customIndustryIdSet.has(entry.id))
+    (entry) => entry.enabled && scopedIndustryIdSet.has(entry.id)
   );
   const filteredRoleIndustries = (db.config.roleIndustries ?? []).filter(
     (entry) =>
@@ -16312,6 +16308,11 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
   const createdOrg = await withDatabase(async (db) => {
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
+    if (body.activeIndustries !== undefined
+      && (!Array.isArray(body.activeIndustries) || uniqueStrings(body.activeIndustries, allowedIndustryIds).length === 0)) {
+      response.status(400).json({ error: "Select at least one organization industry." });
+      return;
+    }
     const contactEmail = normalizeContactEmail(body.contactEmail);
     const existingCodes = new Set(db.orgs.map((org) => normalizeJoinCode(org.joinCode)).filter(Boolean));
     const requestedJoinCode = normalizeJoinCode(body.joinCode);
@@ -16391,6 +16392,11 @@ app.patch("/orgs/:orgId", requireAdmin, async (request: Request, response: Respo
       return;
     }
     const previousStatus = org.status;
+    if (patch.activeIndustries !== undefined
+      && (!Array.isArray(patch.activeIndustries) || uniqueStrings(patch.activeIndustries, allowedIndustryIds).length === 0)) {
+      response.status(400).json({ error: "Select at least one organization industry." });
+      return;
+    }
 
     if (typeof patch.name === "string" && patch.name.trim()) {
       org.name = patch.name.trim();
@@ -17398,12 +17404,14 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
       return null;
     }
 
-    const allowedIndustryMap = new Map((db.config.industries ?? []).map((industry) => [industry.id, industry]));
+    const effectiveIndustryIds = new Set(resolveEffectiveOrgIndustryIds(db.config, org));
+    const allowedIndustryMap = new Map(db.config.industries.filter((industry) => effectiveIndustryIds.has(industry.id))
+      .map((industry) => [industry.id, industry]));
     const requestedIndustryIds = uniqueStrings(Array.isArray(body.applicableIndustryIds) ? body.applicableIndustryIds : []);
     const selectedIndustries = requestedIndustryIds
       .map((id) => allowedIndustryMap.get(id))
       .filter((entry): entry is IndustryDefinition => Boolean(entry));
-    if (selectedIndustries.length === 0) {
+    if (selectedIndustries.length === 0 || selectedIndustries.length !== requestedIndustryIds.length) {
       response.status(400).json({ error: "Select at least one valid applicable industry." });
       return null;
     }
@@ -17430,7 +17438,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
     }
 
     const segment = getConfigSegmentById(db.config, segmentId);
-    if (!segment) {
+    if (!segment || getOrgScenarioIndustryError(db.config, org, segmentId, requestedIndustryIds)) {
       response.status(400).json({ error: "Selected role is not valid." });
       return null;
     }
@@ -17624,13 +17632,12 @@ app.post("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request,
       return;
     }
 
-    const allowedIndustryIds = new Set((db.config.industries ?? []).map((industry) => industry.id));
     const applicableIndustryIds = uniqueStrings(
       Array.isArray(body.applicableIndustryIds) ? body.applicableIndustryIds : [],
-      allowedIndustryIds,
     ) as IndustryId[];
-    if (applicableIndustryIds.length === 0) {
-      response.status(400).json({ error: "Select at least one valid applicable industry." });
+    const industryError = getOrgScenarioIndustryError(db.config, org, segmentId, applicableIndustryIds);
+    if (industryError) {
+      response.status(400).json({ error: industryError });
       return;
     }
 
@@ -17749,6 +17756,16 @@ app.patch("/orgs/:orgId/custom-scenarios/:scenarioId", requireAdmin, async (requ
         code: "customer_practice_scenario_lifecycle_managed",
       });
       return;
+    }
+
+    if (patch.segmentId !== undefined || patch.applicableIndustryIds !== undefined) {
+      const industryError = getOrgScenarioIndustryError(db.config, org,
+        patch.segmentId ?? current.segmentId,
+        patch.applicableIndustryIds ?? current.applicableIndustryIds);
+      if (industryError) {
+        response.status(400).json({ error: industryError });
+        return;
+      }
     }
 
     if (patch.segmentId !== undefined) {
@@ -18440,27 +18457,36 @@ function validateCustomerPracticeScenarioDraft(
   if (!segment) {
     throw new CustomerPracticeScenarioStoreError("The selected role is not available.", "scenario_validation_failed");
   }
-  const allowedIndustryIds = new Set((db.config.industries ?? [])
-    .filter((entry) => entry.enabled)
-    .map((entry) => entry.id));
-  const requestedIndustryIds = Array.isArray(input.applicableIndustryIds)
-    ? uniqueStrings(input.applicableIndustryIds)
-    : [];
-  if (requestedIndustryIds.length === 0
-    || requestedIndustryIds.some((industryId) => !allowedIndustryIds.has(industryId))) {
-    throw new CustomerPracticeScenarioStoreError(
-      "Choose at least one enabled industry for this organization.", "scenario_validation_failed",
-    );
-  }
-  const roleAvailable = (db.config.roleIndustries ?? []).some((entry) => entry.active
-    && entry.roleId === segment.id && requestedIndustryIds.includes(entry.industryId));
-  if (!roleAvailable) {
-    throw new CustomerPracticeScenarioStoreError(
-      "The selected role and industries are not available together.", "scenario_validation_failed",
-    );
-  }
+  const industryError = getOrgScenarioIndustryError(db.config, org, segmentId, input.applicableIndustryIds);
+  if (industryError) throw new CustomerPracticeScenarioStoreError(industryError, "scenario_validation_failed");
   if (org.status !== "active") {
     throw new CustomerPracticeScenarioStoreError("Organization not found.", "scenario_scope_denied", 404);
+  }
+}
+
+function getOrgScenarioIndustryError(
+  config: AppConfig, org: EnterpriseOrg, segmentId: unknown, requested: unknown,
+): string | null {
+  const allowed = new Set(resolveEffectiveOrgIndustryIds(config, org));
+  const ids = Array.isArray(requested) ? uniqueStrings(requested) : [];
+  if (!Array.isArray(requested) || requested.some((id) => typeof id !== "string" || !id.trim())
+    || !ids.length || ids.some((id) => !allowed.has(id))) {
+    return "Select only currently active industries assigned to this organization.";
+  }
+  if (!config.segments.some((segment) => segment.enabled && segment.id === segmentId)
+    || !ids.some((id) => config.roleIndustries.some((link) =>
+      link.active && link.roleId === segmentId && link.industryId === id))) {
+    return "The selected role is not available for the selected industries.";
+  }
+  return null;
+}
+
+function assertCustomerScenarioPublicationIndustries(db: ApiDatabase, org: EnterpriseOrg, ids: readonly string[]): void {
+  const active = new Set(resolveEffectiveOrgIndustryIds(db.config, org));
+  if (!ids.some((id) => active.has(id))) {
+    throw new CustomerPracticeScenarioStoreError(
+      "Publication requires at least one currently active organization industry.", "scenario_industry_unavailable", 409,
+    );
   }
 }
 
@@ -18561,11 +18587,19 @@ app.get(
   async (request: ContentOrganizationAuthRequest, response: Response) => {
     const context = await withFreshDatabaseSnapshotRead(async (db) => {
       const routeContext = await resolveCustomerScenarioRouteContext(db, request, response);
+      if (!routeContext) return null;
+      const effectiveIndustryIds = new Set(resolveEffectiveOrgIndustryIds(db.config, routeContext.management.org));
       return routeContext ? {
         ...routeContext,
-        roleOptions: db.config.segments.filter((entry) => entry.enabled)
-          .map((entry) => ({ id: entry.id, label: entry.label })),
-        industryOptions: (db.config.industries ?? []).filter((entry) => entry.enabled)
+        roleOptions: db.config.segments.filter((entry) => entry.enabled
+          && db.config.roleIndustries.some((link) => link.active && link.roleId === entry.id
+            && effectiveIndustryIds.has(link.industryId)))
+          .map((entry) => ({ id: entry.id, label: entry.label,
+            industryIds: db.config.roleIndustries.filter((link) => link.active && link.roleId === entry.id
+              && effectiveIndustryIds.has(link.industryId))
+              .map((link) => link.industryId) })),
+        industryOptions: (db.config.industries ?? []).filter((entry) =>
+          effectiveIndustryIds.has(entry.id))
           .map((entry) => ({ id: entry.id, label: entry.label })),
       } : null;
     });
@@ -18610,6 +18644,7 @@ app.post(
         if (!context.settings.allowCustomerScenarioCreation) {
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org));
         return { context };
       });
       if (!prepared || response.headersSent) return;
@@ -18625,6 +18660,7 @@ app.post(
         const context = await resolveCustomerScenarioRouteContext(db, request, response);
         if (!context || response.headersSent) return null;
         if (!context.settings.allowCustomerScenarioCreation) throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org));
         await reauthorizeCurrentCustomerScenarioGenerationSources({ orgId: context.management.org.id, topicId: context.topic.id, selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true, moduleEnabled: context.management.learningResourcesEnabled });
         return { scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
       });
@@ -18648,6 +18684,7 @@ app.post(
         if (!context.settings.allowCustomerScenarioCreation) {
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org));
         await reauthorizeCurrentCustomerScenarioGenerationSources({
           orgId: context.management.org.id, topicId: context.topic.id,
           selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
@@ -18699,6 +18736,7 @@ app.post(
               orgId: context.management.org.id, actorId: context.actorId,
               topicId: context.topic.id, requireFullAuthority: false,
               requireCreationEnabled: true,
+              industryDraft: requestDraft,
               sourceContentIds: draft.sourceReferences.map((source) => source.referenceId)
                 .filter((contentId): contentId is string => Boolean(contentId)),
             }),
@@ -18759,6 +18797,7 @@ app.post(
               orgId: context.management.org.id, actorId: context.actorId,
               topicId: context.topic.id, requireFullAuthority: false,
               requireCreationEnabled: true,
+              industryDraft: requestDraft,
               sourceContentIds: draft.sourceReferences.map((source) => source.referenceId)
                 .filter((contentId): contentId is string => Boolean(contentId)),
             }),
@@ -18915,6 +18954,7 @@ app.post(
             "Only the approved current revision can be published.", "scenario_not_approved", 409,
           );
         }
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, existing.currentVersion.applicableIndustryIds);
         const now = new Date();
         const nowValue = now.toISOString();
         queueRequiredTransactionSideWrite(db, async (client) => {
@@ -18926,6 +18966,7 @@ app.post(
               orgId: context.management.org.id, actorId: context.actorId,
               topicId: context.topic.id, requireFullAuthority: true,
               requireCreationEnabled: true,
+              publicationIndustryIds: existing.currentVersion.applicableIndustryIds,
             }),
           }, client);
           await userNotificationStore.enqueueMany(buildScenarioDecisionNotificationInputs({
