@@ -16,7 +16,7 @@ import {
   UpdateOrgCustomScenarioRequest,
 } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";
-import { effectiveScenarioEditorConfig, editableMasterScenarioIndustries } from "./enterpriseScenarioIndustryOptions";
+import { effectiveScenarioEditorConfig, editableMasterScenarioIndustries, masterScenarioIndustriesUnavailable } from "./enterpriseScenarioIndustryOptions";
 
 interface EnterpriseCustomScenariosCardProps {
   orgId: string;
@@ -1534,6 +1534,8 @@ export function EnterpriseCustomScenariosCard({
                   filteredScenarios.map((scenario) => {
                     const busy = togglingScenarioId === scenario.id || (deleting && deleteTargetId === scenario.id);
                     const lifecycleManaged = Boolean(scenario.customerScenarioVersionId);
+                    const industriesUnavailable = !loading && industryScope?.orgId === orgId
+                      && masterScenarioIndustriesUnavailable(scenario, industryScope.ids);
                     return (
                       <tr key={scenario.id}>
                         <td className="content-long-cell">
@@ -1548,6 +1550,9 @@ export function EnterpriseCustomScenariosCard({
                           {(scenario.applicableIndustryIds ?? [])
                             .map((id) => industryById.get(id)?.label ?? id)
                             .join(", ") || "-"}
+                          {industriesUnavailable ? <div className="small">
+                            Unavailable to learners: no active applicable industries.
+                          </div> : null}
                         </td>
                         <td>
                           {lifecycleManaged ? (

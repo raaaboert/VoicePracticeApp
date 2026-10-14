@@ -11,3 +11,9 @@ export function effectiveScenarioEditorConfig(config: AppConfig | null, effectiv
 export function editableMasterScenarioIndustries(scenario: OrgCustomScenario, config: AppConfig | null): string[] {
   return scenario.applicableIndustryIds.filter((id) => config?.industries.some((industry) => industry.id === id));
 }
+
+export function masterScenarioIndustriesUnavailable(
+  scenario: Pick<OrgCustomScenario, "applicableIndustryIds">, effectiveIndustryIds: readonly string[],
+): boolean {
+  return !scenario.applicableIndustryIds.some((id) => effectiveIndustryIds.includes(id));
+}

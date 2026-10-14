@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { createDefaultConfig, type OrgCustomScenario } from "@voicepractice/shared";
-import { effectiveScenarioEditorConfig, editableMasterScenarioIndustries } from "./enterpriseScenarioIndustryOptions";
+import { effectiveScenarioEditorConfig, editableMasterScenarioIndustries, masterScenarioIndustriesUnavailable } from "./enterpriseScenarioIndustryOptions";
 
 test("Master authoring, generation and editing offer only the selected organization's effective industries", () => {
   const config = createDefaultConfig("2026-10-14T00:00:00Z");
@@ -29,4 +29,18 @@ test("Master editor uses server-scoped options, explains replacements and disabl
   assert.match(source, /saved scenario is unchanged until you save/);
   assert.match(source, /No industries are currently available for this organization/);
   assert.match(source, /generatingPreview \|\| industries\.length === 0/);
+});
+
+test("Master scenario availability labels use effective industries without changing saved status or content", () => {
+  const scenario = { applicableIndustryIds: ["medical", "sales"], enabled: true };
+  const before = structuredClone(scenario);
+  assert.equal(masterScenarioIndustriesUnavailable(scenario, ["sales"]), false);
+  assert.equal(masterScenarioIndustriesUnavailable(scenario, ["people_management"]), true);
+  assert.equal(masterScenarioIndustriesUnavailable(scenario, []), true);
+  assert.deepEqual(scenario, before);
+  const source = readFileSync(new URL("./EnterpriseCustomScenariosCard.tsx", import.meta.url), "utf8");
+  assert.match(source, /!loading && industryScope\?\.orgId === orgId/);
+  assert.match(source, /masterScenarioIndustriesUnavailable\(scenario, industryScope\.ids\)/);
+  assert.match(source, /Unavailable to learners: no active applicable industries\./);
+  assert.match(source, /scenario\.enabled === true \? "active" : "inactive"/);
 });

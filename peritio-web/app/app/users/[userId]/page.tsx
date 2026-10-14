@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { notFound, redirect } from "next/navigation";
 
 import { CoachingInsightsSection } from "@/src/components/CoachingInsightsSection";
+import { CurrentTrainingProgressDisclosure } from "@/src/components/CurrentTrainingProgressDisclosure";
 import { DashboardDivisionFilter } from "@/src/components/DashboardDivisionFilter";
 import { DashboardNarrativePanel } from "@/src/components/DashboardNarrativePanel";
 import { DashboardProofSection } from "@/src/components/DashboardProofSection";
@@ -68,6 +69,10 @@ export default async function UserDetailPage({
   const narrative = buildUserDetailNarrative(payload);
   const fromPerformance = query.performanceOrigin === "individuals";
   const appliedDivisionId = payload.divisionScope?.appliedDivisionId ?? null;
+  const currentFocusTopicCount = (payload.currentFocusTopics ?? []).length;
+  const trainingProgressSummary = payload.learningAccessMode === "focus_topic_assignments"
+    ? `${currentFocusTopicCount} currently accessible Focus ${currentFocusTopicCount === 1 ? "Topic" : "Topics"}`
+    : `${assignments.length} active training-pack ${assignments.length === 1 ? "assignment" : "assignments"}`;
 
   return (
     <>
@@ -122,8 +127,7 @@ export default async function UserDetailPage({
             />
           </div>
 
-          <div className="dashboard-proof-block">
-            <h3>Current training progress</h3>
+          <CurrentTrainingProgressDisclosure key={user.userId} summary={trainingProgressSummary}>
             {payload.learningAccessMode === "focus_topic_assignments" ? <>
               <p>Current learning access reflects active Focus Topic assignments. Historical Training Pack links do not determine this access.</p>
               {(payload.currentFocusTopics ?? []).length > 0 ? <div className="table-scroll">
@@ -185,7 +189,7 @@ export default async function UserDetailPage({
               </div>
               )}
             </>}
-          </div>
+          </CurrentTrainingProgressDisclosure>
 
           <div className="dashboard-proof-block">
             <details className="dashboard-history-disclosure" open>
