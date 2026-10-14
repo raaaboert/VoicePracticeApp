@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { SimulationSessionRecord, UsageSessionRecord } from "@voicepractice/shared";
+import { SimulationSessionRecord, SimulationSessionIndustrySnapshot, UsageSessionRecord } from "@voicepractice/shared";
 
 import type { UserUsageSnapshot, UsageSessionAccess } from "./usageSessionAccess.js";
 import { computeUsageSessionBilledSecondsAdded } from "./usageSessionWriteModel.js";
@@ -39,6 +39,7 @@ export interface BuildSimulationSessionStartRecordParams {
   segmentId: string;
   scenarioId: string;
   scenarioVersionId?: string | null;
+  industrySnapshot?: SimulationSessionIndustrySnapshot | null;
   trainingId: string | null;
   trainingPackId: string | null;
   clientStartedAt: string | null;
@@ -102,6 +103,7 @@ export function buildSimulationSessionStartRecord(
     segmentId: params.segmentId,
     scenarioId: params.scenarioId,
     scenarioVersionId: params.scenarioVersionId ?? undefined,
+    industrySnapshot: params.industrySnapshot ?? undefined,
     trainingId: params.trainingId ?? undefined,
     trainingPackId: params.trainingPackId ?? undefined,
     clientStartedAt: params.clientStartedAt ?? undefined,

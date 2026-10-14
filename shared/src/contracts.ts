@@ -1183,6 +1183,31 @@ export interface UsageSessionRecord {
 
 export type SimulationSessionStatus = "started" | "usage_recorded";
 
+/**
+ * Server-captured industry context for a recognized simulation session. This is
+ * deliberately separate from the live organization configuration: an active
+ * session must retain the context that was authorized when it began.
+ */
+export interface SimulationSessionIndustrySnapshotIndustry {
+  id: string;
+  label: string;
+  /** Prompt-safe baseline after the established fallback and truncation policy. */
+  promptBaseline: string;
+  /** Raw baseline used by standard scoring guidance. */
+  rawScoringAiBaseline: string;
+  standardScoringGuidance: string;
+}
+
+export interface SimulationSessionIndustrySnapshot {
+  version: 1;
+  capturedAt: string;
+  eligibleIndustries: SimulationSessionIndustrySnapshotIndustry[];
+  selection: {
+    industryId: string | null;
+    lockedAt: string | null;
+  };
+}
+
 export interface SimulationSessionRecord {
   simulationSessionId: string;
   userId: string;
@@ -1191,6 +1216,7 @@ export interface SimulationSessionRecord {
   segmentId: string;
   scenarioId: string;
   scenarioVersionId?: string | null;
+  industrySnapshot?: SimulationSessionIndustrySnapshot | null;
   trainingId?: string | null;
   trainingPackId?: string | null;
   clientStartedAt?: string | null;

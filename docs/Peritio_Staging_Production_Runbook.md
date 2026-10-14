@@ -33,6 +33,10 @@ Focus Topic assignments have no due dates, and Focus Topic deadline reminders ar
 
 The command remains temporarily as a credential-free, side-effect-free compatibility shim so a scheduler that has not yet been removed exits successfully without starting the API, connecting to PostgreSQL, or creating notifications. Remove the shim only after external scheduler cleanup is confirmed.
 
+## Organization-industry enforcement prerequisite
+
+When organization-industry eligibility enforcement is introduced, allow recognized sessions created before that deployment to drain under their existing legacy resolution path. Newer sessions carry a server-captured industry snapshot and can preserve their originally authorized industry context after later configuration changes. Do not backfill or retroactively reinterpret legacy sessions; schedule enforcement after the remaining active legacy sessions have expired or completed.
+
 ## Branch / Release Strategy
 
 Current state: staging and production can both deploy from `main`. That works only when production deploys are manual and disciplined, but it has a weak seam: if `main` moves after staging verification, a later manual production deploy can accidentally include untested commits.

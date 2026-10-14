@@ -1586,6 +1586,123 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await pool.query<{ scenario_version_id: string | null }>(
         "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [industryOnlySessionId],
       )).rows[0]?.scenario_version_id, pinnedV2Id);
+
+      // A recognized session retains its server-captured industry context after
+      // the live definition changes. The fresh persona variant forces a runtime
+      // cache miss.
+      const snapshotIndustryId = pinnedV1Draft.applicableIndustryIds[0]!;
+      const originalIndustry = db.config.industries.find((entry) => entry.id === snapshotIndustryId);
+      assert.ok(originalIndustry);
+      const snapshotCustomerSessionId = `snapshot_customer_${randomUUID()}`;
+      const snapshotStandardSessionId = `snapshot_standard_${randomUUID()}`;
+      assert.equal((await call(startPath, {
+        simulationSessionId: snapshotCustomerSessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      assert.equal((await call(startPath, {
+        simulationSessionId: snapshotStandardSessionId, segmentId: segment.id, scenarioId: scenario.id,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      const snapshotV3Draft = {
+        ...pinnedV2Draft,
+        title: "Snapshot V3 title",
+        description: "SNAPSHOT_V3_RUNTIME_CONTENT must never enter the v2 session.",
+        desiredOutcome: "SNAPSHOT_V3_DESIRED_OUTCOME",
+        aiRole: "SNAPSHOT_V3_COUNTERPART_ROLE",
+      };
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/revisions`, "POST", snapshotV3Draft)).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/submit`, "POST")).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/approve`, "POST", { reviewNote: "v3" })).status, 200);
+      assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST")).status, 200);
+      const snapshotRequests: string[] = [];
+      const snapshotFetch = globalThis.fetch;
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (target === "https://api.openai.com/v1/responses") {
+          const parsed = JSON.parse(String(init?.body)) as { input?: Array<{ content?: string }> };
+          const prompt = parsed.input?.map((message) => message.content ?? "").join("\n") ?? "";
+          snapshotRequests.push(prompt);
+          const output = prompt.includes("expert communication coach")
+            ? JSON.stringify({ communicationScore: 80, outcomeScore: 75, overallScore: 78,
+              completionLevel: "complete", objectiveAchieved: true, persuasion: 8, clarity: 7,
+              empathy: 9, assertiveness: 8, strengths: ["Clear framing"], improvements: ["Tighter close"],
+              summary: "Handled the conversation well." })
+            : "Snapshot continuation response.";
+          return Promise.resolve(new Response(JSON.stringify({ output_text: output, model: "local-test-model",
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }));
+        }
+        return snapshotFetch(input, init);
+      }) as typeof fetch;
+      try {
+        for (const [simulationSessionId, scenarioId] of [
+          [snapshotCustomerSessionId, pinnedScenarioId],
+          [snapshotStandardSessionId, scenario.id],
+        ]) {
+          const locked = await call(turnPath, {
+            scenarioId, trainingId: topic.id, simulationSessionId, industryId: snapshotIndustryId,
+            difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
+            history: [{ role: "user", content: "Please help with the account." }],
+          });
+          assert.equal(locked.status, 200, JSON.stringify(locked.body));
+        }
+        const conflictingSelection = await call(turnPath, {
+          scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: snapshotCustomerSessionId,
+          industryId: "invalid_industry", difficulty: db.config.defaultDifficulty,
+          personaStyle: db.config.defaultPersonaStyle,
+          history: [{ role: "user", content: "Please help with the account." }],
+        });
+        assert.equal(conflictingSelection.status, 400, JSON.stringify(conflictingSelection.body));
+        const snapshots = await pool.query<{ simulation_session_id: string; industry_snapshot: { selection?: { industryId?: string } } }>(
+          "SELECT simulation_session_id,industry_snapshot FROM simulation_sessions WHERE simulation_session_id = ANY($1::text[])",
+          [[snapshotCustomerSessionId, snapshotStandardSessionId]],
+        );
+        assert.equal(snapshots.rows.length, 2);
+        assert.deepEqual(snapshots.rows.map((row) => row.industry_snapshot.selection?.industryId).sort(),
+          [snapshotIndustryId, snapshotIndustryId]);
+        await storage.updateAppStateWithLock((raw) => {
+          const state = imported.ensureDatabaseShape(raw);
+          state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId
+            ? { ...entry, enabled: false, aiBaseline: "MUTATED INDUSTRY BASELINE MUST NOT REACH PINNED SESSIONS" }
+            : entry);
+          return { result: undefined, shouldSave: true, state };
+        });
+        for (const [simulationSessionId, scenarioId] of [
+          [snapshotCustomerSessionId, pinnedScenarioId],
+          [snapshotStandardSessionId, scenario.id],
+        ]) {
+          const continued = await call(turnPath, {
+            scenarioId, trainingId: topic.id, simulationSessionId, industryId: snapshotIndustryId,
+            industryBaseline: "CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT",
+            difficulty: db.config.defaultDifficulty, personaStyle: "defensive",
+            history: [{ role: "user", content: "Please help with the account." }],
+          });
+          assert.equal(continued.status, 200, JSON.stringify(continued.body));
+          const scored = await call(`/mobile/users/${user.id}/ai/score`, {
+            scenarioId, trainingId: topic.id, simulationSessionId, industryId: snapshotIndustryId,
+            startedAt: now, endedAt: new Date(Date.now() + 3_000).toISOString(),
+            history: [
+              { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand the concern." },
+              { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify the blocker." },
+              { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose owners and a review date." },
+            ],
+          });
+          assert.equal(scored.status, 201, JSON.stringify(scored.body));
+        }
+        assert.equal(snapshotRequests.some((prompt) => prompt.includes("MUTATED INDUSTRY BASELINE")), false);
+        assert.equal(snapshotRequests.some((prompt) => prompt.includes("CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT")), false);
+        assert.equal(snapshotRequests.some((prompt) => /SNAPSHOT_V3_RUNTIME_CONTENT|SNAPSHOT_V3_COUNTERPART_ROLE/.test(prompt)), false);
+        assert.equal(snapshotRequests.filter((prompt) => prompt.includes("expert communication coach")).length, 2);
+      } finally {
+        globalThis.fetch = snapshotFetch;
+        await storage.updateAppStateWithLock((raw) => {
+          const state = imported.ensureDatabaseShape(raw);
+          state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId
+            ? originalIndustry
+            : entry);
+          return { result: undefined, shouldSave: true, state };
+        });
+      }
       const unclaimedCustomScore = await call(`/mobile/users/${user.id}/ai/score`, {
         scenarioId: customScenarioId, startedAt: now, endedAt: new Date(Date.now() + 1000).toISOString(),
         history: [

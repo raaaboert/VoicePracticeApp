@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { SimulationSessionRecord } from "@voicepractice/shared";
 
 import { StorageProvider } from "../runtimeConfig.js";
+import { parseSimulationSessionIndustrySnapshot } from "../services/simulationSessionIndustrySnapshot.js";
 
 export interface SimulationSessionTouchParams {
   simulationSessionId: string;
@@ -19,11 +20,18 @@ export interface SimulationSessionFinalizeParams {
   lastSeenAt: string;
 }
 
+export interface SimulationSessionIndustrySelectionLockParams {
+  simulationSessionId: string;
+  industryId: string;
+  lockedAt: string;
+}
+
 export interface SimulationSessionStore {
   initialize(): Promise<void>;
   getById(simulationSessionId: string): Promise<SimulationSessionRecord | null>;
   listSessions(): Promise<SimulationSessionRecord[]>;
   upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord>;
+  lockIndustrySelection(params: SimulationSessionIndustrySelectionLockParams): Promise<SimulationSessionRecord | null>;
   touchSession(params: SimulationSessionTouchParams): Promise<SimulationSessionRecord | null>;
   markUsageRecorded(params: SimulationSessionFinalizeParams): Promise<SimulationSessionRecord | null>;
   pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number>;
@@ -52,6 +60,7 @@ interface SimulationSessionRow {
   segment_id: string;
   scenario_id: string;
   scenario_version_id: string | null;
+  industry_snapshot: unknown;
   training_id: string | null;
   training_pack_id: string | null;
   client_started_at: string | Date | null;
@@ -123,6 +132,11 @@ function normalizeSimulationSessionRecord(candidate: unknown): SimulationSession
     segmentId,
     scenarioId,
     scenarioVersionId: normalizeNullableString((candidate as { scenarioVersionId?: unknown }).scenarioVersionId) ?? undefined,
+    industrySnapshot: (() => {
+      const raw = (candidate as { industrySnapshot?: unknown }).industrySnapshot;
+      if (raw === undefined || raw === null) return undefined;
+      return parseSimulationSessionIndustrySnapshot(raw) ?? undefined;
+    })(),
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
     trainingPackId: normalizeNullableString((candidate as { trainingPackId?: unknown }).trainingPackId) ?? undefined,
     clientStartedAt: normalizeIsoString((candidate as { clientStartedAt?: unknown }).clientStartedAt) ?? undefined,
@@ -145,6 +159,7 @@ function mapSimulationSessionRow(row: SimulationSessionRow): SimulationSessionRe
     segmentId: row.segment_id,
     scenarioId: row.scenario_id,
     scenarioVersionId: row.scenario_version_id,
+    industrySnapshot: row.industry_snapshot,
     trainingId: row.training_id,
     trainingPackId: row.training_pack_id,
     clientStartedAt: row.client_started_at,
@@ -202,6 +217,7 @@ function mergeStartedSession(existing: SimulationSessionRecord, incoming: Simula
 
   return {
     ...existing,
+    industrySnapshot: existing.industrySnapshot ?? incoming.industrySnapshot,
     trainingPackId: existing.trainingPackId ?? incoming.trainingPackId,
     clientStartedAt: compareIsoAscending(existing.clientStartedAt, incoming.clientStartedAt),
     serverStartedAt: compareIsoAscending(existing.serverStartedAt, incoming.serverStartedAt) ?? existing.serverStartedAt,
@@ -270,6 +286,7 @@ abstract class BaseSimulationSessionStore implements SimulationSessionStore {
   abstract getById(simulationSessionId: string): Promise<SimulationSessionRecord | null>;
   abstract listSessions(): Promise<SimulationSessionRecord[]>;
   abstract upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord>;
+  abstract lockIndustrySelection(params: SimulationSessionIndustrySelectionLockParams): Promise<SimulationSessionRecord | null>;
   abstract touchSession(params: SimulationSessionTouchParams): Promise<SimulationSessionRecord | null>;
   abstract markUsageRecorded(params: SimulationSessionFinalizeParams): Promise<SimulationSessionRecord | null>;
   abstract pruneStartedSessionsLastSeenBefore(cutoff: Date): Promise<number>;
@@ -332,6 +349,32 @@ class FileSimulationSessionStore extends BaseSimulationSessionStore {
       const nextRecords = payload.records.filter((entry) => entry.simulationSessionId !== normalized.simulationSessionId);
       nextRecords.push(nextRecord);
       await this.savePayload({ records: normalizeSimulationSessionCollection(nextRecords) });
+      return nextRecord;
+    });
+  }
+
+  async lockIndustrySelection(params: SimulationSessionIndustrySelectionLockParams): Promise<SimulationSessionRecord | null> {
+    const normalizedId = normalizeNullableString(params.simulationSessionId);
+    const industryId = normalizeNullableString(params.industryId);
+    const lockedAt = normalizeIsoString(params.lockedAt);
+    if (!normalizedId || !industryId || !lockedAt) return null;
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      const existing = payload.records.find((entry) => entry.simulationSessionId === normalizedId) ?? null;
+      const snapshot = existing?.industrySnapshot ? parseSimulationSessionIndustrySnapshot(existing.industrySnapshot) : null;
+      if (!existing || !snapshot || snapshot.selection.industryId) return existing;
+      if (!snapshot.eligibleIndustries.some((industry) => industry.id === industryId)) return existing;
+      const nextRecord: SimulationSessionRecord = {
+        ...existing,
+        industrySnapshot: {
+          ...snapshot,
+          selection: { industryId, lockedAt },
+        },
+      };
+      await this.savePayload({ records: payload.records.map((entry) => (
+        entry.simulationSessionId === normalizedId ? nextRecord : entry
+      )) });
       return nextRecord;
     });
   }
@@ -553,6 +596,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           segment_id,
           scenario_id,
           scenario_version_id,
+          industry_snapshot,
           training_id,
           training_pack_id,
           client_started_at,
@@ -581,6 +625,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           segment_id,
           scenario_id,
           scenario_version_id,
+          industry_snapshot,
           training_id,
           training_pack_id,
           client_started_at,
@@ -617,6 +662,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           segment_id,
           scenario_id,
           scenario_version_id,
+          industry_snapshot,
           training_id,
           training_pack_id,
           client_started_at,
@@ -627,8 +673,8 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           usage_session_record_id
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9,
-          $10::timestamptz, $11::timestamptz, $12::timestamptz, $13, $14::timestamptz, $15
+          $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9,
+          $10, $11::timestamptz, $12::timestamptz, $13::timestamptz, $14, $15::timestamptz, $16
         )
         ON CONFLICT (simulation_session_id) DO UPDATE
           SET user_id = EXCLUDED.user_id,
@@ -637,6 +683,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               segment_id = EXCLUDED.segment_id,
               scenario_id = EXCLUDED.scenario_id,
               scenario_version_id = EXCLUDED.scenario_version_id,
+              industry_snapshot = COALESCE(simulation_sessions.industry_snapshot, EXCLUDED.industry_snapshot),
               training_id = EXCLUDED.training_id,
               training_pack_id = COALESCE(simulation_sessions.training_pack_id, EXCLUDED.training_pack_id),
               client_started_at = COALESCE(simulation_sessions.client_started_at, EXCLUDED.client_started_at),
@@ -654,6 +701,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
         nextRecord.segmentId,
         nextRecord.scenarioId,
         nextRecord.scenarioVersionId ?? null,
+        nextRecord.industrySnapshot ? JSON.stringify(nextRecord.industrySnapshot) : null,
         nextRecord.trainingId ?? null,
         nextRecord.trainingPackId ?? null,
         nextRecord.clientStartedAt ?? null,
@@ -665,6 +713,34 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
       ]
     );
     return (await this.getById(nextRecord.simulationSessionId)) ?? nextRecord;
+  }
+
+  async lockIndustrySelection(params: SimulationSessionIndustrySelectionLockParams): Promise<SimulationSessionRecord | null> {
+    const simulationSessionId = normalizeNullableString(params.simulationSessionId);
+    const industryId = normalizeNullableString(params.industryId);
+    const lockedAt = normalizeIsoString(params.lockedAt);
+    if (!simulationSessionId || !industryId || !lockedAt) return null;
+    await this.ensureTable();
+    await this.pool.query(
+      `
+        UPDATE simulation_sessions
+        SET industry_snapshot = jsonb_set(
+          jsonb_set(industry_snapshot, '{selection,industryId}', to_jsonb($2::text), true),
+          '{selection,lockedAt}', to_jsonb($3::text), true
+        )
+        WHERE simulation_session_id = $1
+          AND industry_snapshot IS NOT NULL
+          AND industry_snapshot #>> '{selection,industryId}' IS NULL
+          AND industry_snapshot #>> '{selection,lockedAt}' IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(industry_snapshot->'eligibleIndustries') AS industry
+            WHERE industry->>'id' = $2
+          )
+      `,
+      [simulationSessionId, industryId, lockedAt],
+    );
+    return await this.getById(simulationSessionId);
   }
 
   async touchSession(params: SimulationSessionTouchParams): Promise<SimulationSessionRecord | null> {
@@ -774,6 +850,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               segment_id TEXT NOT NULL,
               scenario_id TEXT NOT NULL,
               scenario_version_id TEXT NULL,
+              industry_snapshot JSONB NULL,
               training_id TEXT NULL,
               training_pack_id TEXT NULL,
               client_started_at TIMESTAMPTZ NULL,
@@ -789,6 +866,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_org_id ON simulation_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_id ON simulation_sessions (scenario_id);
             ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS scenario_version_id TEXT NULL;
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS industry_snapshot JSONB NULL;
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_version_id
               ON simulation_sessions (scenario_version_id) WHERE scenario_version_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_status ON simulation_sessions (status);
@@ -816,6 +894,10 @@ class UnsupportedSimulationSessionStore extends BaseSimulationSessionStore {
   }
 
   async upsertStartedSession(): Promise<SimulationSessionRecord> {
+    throw new Error("Simulation session storage provider is not supported.");
+  }
+
+  async lockIndustrySelection(): Promise<SimulationSessionRecord | null> {
     throw new Error("Simulation session storage provider is not supported.");
   }
 

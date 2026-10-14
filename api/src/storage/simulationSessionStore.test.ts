@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { SimulationSessionRecord } from "@voicepractice/shared";
 
+import { buildSimulationSessionIndustrySnapshot } from "../services/simulationSessionIndustrySnapshot.js";
 import { createSimulationSessionStore } from "./simulationSessionStore.js";
 
 function createSession(overrides: Partial<SimulationSessionRecord> = {}): SimulationSessionRecord {
@@ -16,6 +17,8 @@ function createSession(overrides: Partial<SimulationSessionRecord> = {}): Simula
     divisionId: overrides.divisionId ?? null,
     segmentId: overrides.segmentId ?? "segment_1",
     scenarioId: overrides.scenarioId ?? "scenario_1",
+    scenarioVersionId: overrides.scenarioVersionId ?? null,
+    industrySnapshot: overrides.industrySnapshot ?? null,
     trainingId: overrides.trainingId ?? null,
     trainingPackId: overrides.trainingPackId ?? null,
     clientStartedAt: overrides.clientStartedAt ?? "2026-04-01T10:00:00.000Z",
@@ -103,6 +106,41 @@ test("file simulation session store upserts, touches, finalizes, and deletes by 
     assert.equal(await store.deleteSessionsForUser("user_1"), 1);
     assert.equal(await store.getById("sim_1"), null);
     assert.equal((await store.getById("sim_2"))?.userId, "user_2");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("industry snapshot is immutable across repeated starts and locks one selection atomically", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-simulation-session-industry-store-"));
+  try {
+    const store = createSimulationSessionStore({
+      provider: "file", dbPath: path.join(tempDir, "db.local.json"), databaseUrl: null,
+      pgPoolMax: 1, pgConnectTimeoutMs: 1_000, pgIdleTimeoutMs: 1_000,
+    });
+    await store.initialize();
+    const snapshot = buildSimulationSessionIndustrySnapshot({
+      eligibleIndustryIds: ["industry_a", "industry_b"],
+      industries: [
+        { id: "industry_a", label: "Industry A", enabled: true, aiBaseline: "A", standardScoringGuidance: "A score" },
+        { id: "industry_b", label: "Industry B", enabled: true, aiBaseline: "B", standardScoringGuidance: "B score" },
+      ],
+      capturedAt: new Date("2026-04-01T10:00:00.000Z"),
+    });
+    await store.upsertStartedSession(createSession({ industrySnapshot: snapshot }));
+    const replay = await store.upsertStartedSession(createSession({
+      industrySnapshot: { ...snapshot, capturedAt: "2026-04-02T10:00:00.000Z" },
+    }));
+    assert.equal(replay.industrySnapshot?.capturedAt, snapshot.capturedAt);
+
+    const [first, second] = await Promise.all([
+      store.lockIndustrySelection({ simulationSessionId: "sim_1", industryId: "industry_a", lockedAt: "2026-04-01T10:01:00.000Z" }),
+      store.lockIndustrySelection({ simulationSessionId: "sim_1", industryId: "industry_b", lockedAt: "2026-04-01T10:01:01.000Z" }),
+    ]);
+    const lockedId = first?.industrySnapshot?.selection.industryId;
+    assert.ok(lockedId === "industry_a" || lockedId === "industry_b");
+    assert.equal(second?.industrySnapshot?.selection.industryId, lockedId);
+    assert.equal((await store.getById("sim_1"))?.industrySnapshot?.selection.industryId, lockedId);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

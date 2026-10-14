@@ -158,6 +158,7 @@ import {
   SuperUserOrgOptionsResponse,
   SupportCaseRecord,
   SimulationScoreRecord,
+  SimulationSessionRecord,
   TrainingPack,
   TrainingPackAssignmentRecord,
   TrainingPackAssignmentProgressStatus,
@@ -514,6 +515,12 @@ import {
   SimulationSessionValidationError,
   touchRecognizedSimulationSession
 } from "./services/simulationSessionLifecycle.js";
+import {
+  buildSimulationSessionIndustrySnapshot,
+  normalizeIndustryPromptBaseline,
+  resolveServerIndustryPromptBaseline,
+  resolveSnapshotIndustry,
+} from "./services/simulationSessionIndustrySnapshot.js";
 import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/simulationHotPath.js";
 import { createSimulationRuntimeCache, type SimulationRuntimeCacheStatus } from "./services/simulationRuntimeCache.js";
 import {
@@ -664,7 +671,6 @@ const MAX_MAX_SIMULATION_MINUTES = 240;
 const MAX_ACTIVE_ADMIN_SESSIONS = 100;
 const MAX_AUDIT_EVENTS = 20_000;
 const PLATFORM_ADMIN_ACTOR_ID = "platform_admin";
-const MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS = 30_000;
 const MAX_ROLEPLAY_BEHAVIOR_GUIDANCE_PROMPT_CHARS = 4_000;
 const OPENAI_TTS_MODEL = OPENAI_MODEL_CONFIG.speech.model;
 const TTS_TEXT_MAX_CHARS = 4_000;
@@ -1968,6 +1974,7 @@ async function resolveSimulationRuntimeBundle(params: {
   let anchoredTrainingPackId: string | null = null;
   let hasRegisteredAssignmentSession = false;
   let registeredScenarioVersionId: string | null = null;
+  let registeredSession: SimulationSessionRecord | null = null;
   let assignmentAuthorizedScenario: ResolvedMobileScenarioContext | null = null;
   let assignmentUsesTopicConfig = false;
   if (runtimeConfig.focusTopicAuthority === "assignments" && !params.isSuperUser) {
@@ -1982,6 +1989,7 @@ async function resolveSimulationRuntimeBundle(params: {
       : null;
     if (registered) {
       hasRegisteredAssignmentSession = true;
+      registeredSession = registered;
       if (registered.userId !== params.user.id || registered.orgId !== params.org.id
         || registered.scenarioId !== params.scenarioId
         || (params.trainingId && params.trainingId !== (registered.trainingId ?? null))) {
@@ -2023,6 +2031,13 @@ async function resolveSimulationRuntimeBundle(params: {
     typeof params.requestedIndustryId === "string" && params.requestedIndustryId.trim()
       ? params.requestedIndustryId.trim()
       : null;
+  if (registeredSession?.industrySnapshot?.selection.industryId
+    && requestedIndustryId
+    && requestedIndustryId !== registeredSession.industrySnapshot.selection.industryId) {
+    params.response.status(400).json({ error: "Simulation session industry selection is already locked." });
+    return null;
+  }
+  const cacheIndustryId = registeredSession?.industrySnapshot?.selection.industryId ?? requestedIndustryId;
   const submittedTrainingPackId =
     runtimeConfig.focusTopicAuthority === "assignments" && !params.isSuperUser
       ? anchoredTrainingPackId
@@ -2039,7 +2054,7 @@ async function resolveSimulationRuntimeBundle(params: {
           trainingId: authoritativeTrainingId,
           difficulty: params.difficulty,
           personaStyle: params.personaStyle,
-          requestedIndustryId,
+          requestedIndustryId: cacheIndustryId,
           submittedTrainingPackId,
           useModularPromptArchitecture,
         })
@@ -2069,8 +2084,12 @@ async function resolveSimulationRuntimeBundle(params: {
     const version = await customerPracticeScenarioStore.getVersion(
       params.actingOrgId, params.scenarioId, registeredScenarioVersionId,
     );
+    const segmentsForPinnedVersion = runtimeConfig.focusTopicAuthority === "assignments"
+      && registeredSession?.industrySnapshot?.eligibleIndustries.length
+      ? params.db.config.segments
+      : configForUser.segments;
     const segment = version
-      ? configForUser.segments.find((entry) => entry.id === version.segmentId && entry.enabled === true)
+      ? segmentsForPinnedVersion.find((entry) => entry.id === version.segmentId && entry.enabled === true)
       : null;
     if (!version || !segment) {
       params.response.status(404).json({ error: "Simulation scenario version is not available." });
@@ -2088,6 +2107,27 @@ async function resolveSimulationRuntimeBundle(params: {
       scoringGuidance: version.scoringGuidance,
     };
   }
+  if (runtimeConfig.focusTopicAuthority === "assignments"
+    && registeredSession?.industrySnapshot?.eligibleIndustries.length
+    && !registeredScenarioVersionId) {
+    const snapshotSession = registeredSession;
+    const industrySnapshot = registeredSession.industrySnapshot;
+    const segment = params.db.config.segments.find((entry) => entry.id === snapshotSession.segmentId && entry.enabled === true);
+    const scenario = segment?.scenarios.find((entry) => entry.id === params.scenarioId && entry.enabled !== false) ?? null;
+    if (!segment || !scenario) {
+      params.response.status(404).json({ error: "Simulation scenario is not available." });
+      return null;
+    }
+    resolvedScenario = {
+      source: "standard",
+      segment,
+      scenario,
+      scenarioVersionId: null,
+      canonicalTrainingId: authoritativeTrainingId,
+      allowedIndustryIds: industrySnapshot.eligibleIndustries.map((industry) => industry.id),
+      scoringGuidance: null,
+    };
+  }
   if (!resolvedScenario) {
     const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
       configForUser,
@@ -2103,7 +2143,7 @@ async function resolveSimulationRuntimeBundle(params: {
     return null;
   }
 
-  const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
+  let industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
     configForUser,
     resolvedScenario.allowedIndustryIds,
     params.requestedIndustryId,
@@ -2113,6 +2153,27 @@ async function resolveSimulationRuntimeBundle(params: {
       canonicalIndustryDefinitions: params.db.config.industries,
     },
   );
+  if (registeredSession?.industrySnapshot) {
+    try {
+      const snapshotContext = await resolveSessionIndustrySnapshotContext({
+        session: registeredSession,
+        requestedIndustryId: params.requestedIndustryId,
+      });
+      if (snapshotContext) {
+        registeredSession = snapshotContext.session;
+        industryPromptContext = {
+          industryId: snapshotContext.industryId,
+          industryLabel: snapshotContext.industryLabel,
+          industryBaseline: snapshotContext.industryBaseline,
+        };
+      }
+    } catch (error) {
+      params.response.status(400).json({
+        error: error instanceof Error ? error.message : "Simulation session industry context is unavailable.",
+      });
+      return null;
+    }
+  }
   const counterpartBehaviorGuidance = resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario);
   const trainingPackLookupStartedAtMs = Date.now();
   const activeTrainingPack = hasRegisteredAssignmentSession
@@ -2187,7 +2248,7 @@ async function resolveSimulationRuntimeBundle(params: {
       trainingId: authoritativeTrainingId,
       difficulty: effectiveDifficulty,
       personaStyle: effectivePersonaStyle,
-      requestedIndustryId,
+      requestedIndustryId: industryPromptContext.industryId ?? cacheIndustryId,
       submittedTrainingPackId,
       useModularPromptArchitecture,
     },
@@ -10897,10 +10958,29 @@ function buildScoringIndustryContextsForIds(configForUser: AppConfig, industryId
   });
 }
 
+function buildScoringIndustryContextsFromSessionSnapshot(
+  session: SimulationSessionRecord,
+): Array<{ id: string; label: string; aiBaseline: string; standardScoringGuidance: string }> | null {
+  const snapshot = session.industrySnapshot;
+  if (!snapshot) {
+    return null;
+  }
+  const industries = snapshot.selection.industryId
+    ? snapshot.eligibleIndustries.filter((industry) => industry.id === snapshot.selection.industryId)
+    : snapshot.eligibleIndustries;
+  return industries.map((industry) => ({
+    id: industry.id,
+    label: industry.label,
+    aiBaseline: industry.rawScoringAiBaseline,
+    standardScoringGuidance: industry.standardScoringGuidance,
+  }));
+}
+
 function resolveScenarioScoringGuidanceForEvaluation(
   configForUser: AppConfig,
   resolvedScenario: ResolvedMobileScenarioContext,
-  selectedIndustryId: string | null
+  selectedIndustryId: string | null,
+  snapshotIndustryContexts?: Array<{ id: string; label: string; aiBaseline: string; standardScoringGuidance: string }> | null,
 ): string | null {
   const allowedIndustryIds = uniqueStrings(resolvedScenario.allowedIndustryIds);
   const selectedIndustryIdTrimmed = typeof selectedIndustryId === "string" ? selectedIndustryId.trim() : "";
@@ -10908,7 +10988,7 @@ function resolveScenarioScoringGuidanceForEvaluation(
     selectedIndustryIdTrimmed && allowedIndustryIds.includes(selectedIndustryIdTrimmed)
       ? [selectedIndustryIdTrimmed]
       : allowedIndustryIds;
-  const industryContexts = buildScoringIndustryContextsForIds(configForUser, scopedIndustryIds);
+  const industryContexts = snapshotIndustryContexts ?? buildScoringIndustryContextsForIds(configForUser, scopedIndustryIds);
 
   const standardGuidance = buildDefaultScoringGuidance({
     scenarioTitle: resolvedScenario.scenario.title,
@@ -11946,16 +12026,8 @@ function resolveConfigForUser(
 }
 
 function normalizeAiIndustryBaselineForPrompt(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  return trimmed.slice(0, MAX_AI_INDUSTRY_BASELINE_PROMPT_CHARS);
+  const normalized = normalizeIndustryPromptBaseline(value);
+  return normalized || null;
 }
 
 function resolveAiIndustryPromptContextForAllowedIndustries(
@@ -12000,14 +12072,10 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
       (industry) => industry.id === selectedIndustry.id
     );
     const canonicalServerBaseline = normalizeAiIndustryBaselineForPrompt(canonicalIndustry?.aiBaseline);
-    const defaultIndustryBaseline = normalizeAiIndustryBaselineForPrompt(
-      DEFAULT_INDUSTRIES.find((industry) => industry.id === selectedIndustry.id)?.aiBaseline
-    );
-    const serverAuthoritativeBaseline =
-      configuredBaseline ??
-      canonicalServerBaseline ??
-      defaultIndustryBaseline ??
-      null;
+    const serverAuthoritativeBaseline = resolveServerIndustryPromptBaseline({
+      industry: selectedIndustry,
+      canonicalIndustries: options?.canonicalIndustryDefinitions,
+    }) || configuredBaseline || canonicalServerBaseline || null;
 
     return {
       industryId: selectedIndustry.id,
@@ -12023,6 +12091,56 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
     industryId: selectedIndustry.id,
     industryLabel: selectedIndustry.label,
     industryBaseline: resolvedBaseline
+  };
+}
+
+class SessionIndustrySnapshotSelectionError extends Error {}
+
+async function resolveSessionIndustrySnapshotContext(params: {
+  session: SimulationSessionRecord;
+  requestedIndustryId: unknown;
+}): Promise<{
+  session: SimulationSessionRecord;
+  industryId: string | null;
+  industryLabel: string | null;
+  industryBaseline: string | null;
+} | null> {
+  let session = params.session;
+  let snapshot = session.industrySnapshot;
+  if (!snapshot) {
+    return null;
+  }
+  const requestedIndustryId = typeof params.requestedIndustryId === "string" && params.requestedIndustryId.trim()
+    ? params.requestedIndustryId.trim()
+    : null;
+  if (snapshot.selection.industryId) {
+    if (requestedIndustryId && requestedIndustryId !== snapshot.selection.industryId) {
+      throw new SessionIndustrySnapshotSelectionError("Simulation session industry selection is already locked.");
+    }
+  } else if (requestedIndustryId) {
+    if (!resolveSnapshotIndustry(snapshot, requestedIndustryId)) {
+      throw new SessionIndustrySnapshotSelectionError("Selected industry is not available for this simulation session.");
+    }
+    const locked = await simulationSessionStore.lockIndustrySelection({
+      simulationSessionId: session.simulationSessionId,
+      industryId: requestedIndustryId,
+      lockedAt: new Date().toISOString(),
+    });
+    if (!locked?.industrySnapshot) {
+      throw new SessionIndustrySnapshotSelectionError("Simulation session industry context is unavailable.");
+    }
+    session = locked;
+    snapshot = locked.industrySnapshot;
+    if (snapshot.selection.industryId !== requestedIndustryId) {
+      throw new SessionIndustrySnapshotSelectionError("Simulation session industry selection is already locked.");
+    }
+  }
+  const selected = resolveSnapshotIndustry(snapshot, snapshot.selection.industryId);
+  return {
+    session,
+    industryId: selected?.id ?? null,
+    industryLabel: selected?.label ?? null,
+    industryBaseline: selected?.promptBaseline ?? null,
   };
 }
 
@@ -24850,8 +24968,11 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       return null;
     }
 
-    const assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser && recognizedSessionId
+    const recognizedSession = recognizedSessionId && !accessContext.isSuperUser
       ? await simulationSessionStore.getById(recognizedSessionId)
+      : null;
+    let assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+      ? recognizedSession
       : null;
     let configForUser = baseConfigForUser;
     let authoritativeTrainingId = trainingId;
@@ -24894,8 +25015,12 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       const version = await customerPracticeScenarioStore.getVersion(
         accessContext.actingOrgId, scenarioId, assignmentSession.scenarioVersionId,
       );
+      const segmentsForPinnedVersion = runtimeConfig.focusTopicAuthority === "assignments"
+        && recognizedSession?.industrySnapshot?.eligibleIndustries.length
+        ? db.config.segments
+        : configForUser.segments;
       const segment = version
-        ? configForUser.segments.find((entry) => entry.id === version.segmentId && entry.enabled === true)
+        ? segmentsForPinnedVersion.find((entry) => entry.id === version.segmentId && entry.enabled === true)
         : null;
       if (!version || !segment) {
         response.status(404).json({ error: "Simulation scenario version is not available." });
@@ -24913,6 +25038,25 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         scoringGuidance: version.scoringGuidance,
       };
     }
+    if (runtimeConfig.focusTopicAuthority === "assignments"
+      && recognizedSession?.industrySnapshot?.eligibleIndustries.length
+      && !assignmentSession?.scenarioVersionId) {
+      const segment = db.config.segments.find((entry) => entry.id === recognizedSession.segmentId && entry.enabled === true);
+      const scenario = segment?.scenarios.find((entry) => entry.id === scenarioId && entry.enabled !== false) ?? null;
+      if (!segment || !scenario) {
+        response.status(404).json({ error: "Simulation scenario is not available." });
+        return null;
+      }
+      resolvedScenario = {
+        source: "standard",
+        segment,
+        scenario,
+        scenarioVersionId: null,
+        canonicalTrainingId: authoritativeTrainingId,
+        allowedIndustryIds: recognizedSession.industrySnapshot.eligibleIndustries.map((industry) => industry.id),
+        scoringGuidance: null,
+      };
+    }
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
       return null;
@@ -24923,7 +25067,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
 
-    const industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
+    let industryPromptContext = resolveAiIndustryPromptContextForAllowedIndustries(
       configForUser,
       resolvedScenario.allowedIndustryIds,
       body.industryId,
@@ -24933,10 +25077,36 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         canonicalIndustryDefinitions: db.config.industries
       }
     );
+    let snapshotSession = recognizedSession;
+    if (snapshotSession?.industrySnapshot) {
+      try {
+        const snapshotContext = await resolveSessionIndustrySnapshotContext({
+          session: snapshotSession,
+          requestedIndustryId: body.industryId,
+        });
+        if (snapshotContext) {
+          snapshotSession = snapshotContext.session;
+          if (assignmentSession?.simulationSessionId === snapshotSession.simulationSessionId) {
+            assignmentSession = snapshotSession;
+          }
+          industryPromptContext = {
+            industryId: snapshotContext.industryId,
+            industryLabel: snapshotContext.industryLabel,
+            industryBaseline: snapshotContext.industryBaseline,
+          };
+        }
+      } catch (error) {
+        response.status(400).json({
+          error: error instanceof Error ? error.message : "Simulation session industry context is unavailable.",
+        });
+        return null;
+      }
+    }
     const scoringGuidance = resolveScenarioScoringGuidanceForEvaluation(
       configForUser,
       resolvedScenario,
-      industryPromptContext.industryId
+      industryPromptContext.industryId,
+      snapshotSession?.industrySnapshot ? buildScoringIndustryContextsFromSessionSnapshot(snapshotSession) : null,
     );
 
     return {
@@ -26903,6 +27073,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
 
     let session;
     try {
+      const sessionNow = new Date();
       session = await registerRecognizedSimulationSessionStart(simulationSessionStore, {
         simulationSessionId,
         userId: user.id,
@@ -26914,7 +27085,13 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         trainingId: canonicalTrainingId,
         trainingPackId: persistedTrainingPack?.id ?? null,
         clientStartedAt: parsedClientStartedAt?.toISOString() ?? null,
-        now: new Date()
+        industrySnapshot: buildSimulationSessionIndustrySnapshot({
+          eligibleIndustryIds: resolvedScenario.allowedIndustryIds,
+          industries: configForUser.industries,
+          canonicalIndustries: db.config.industries,
+          capturedAt: sessionNow,
+        }),
+        now: sessionNow,
       });
     } catch (error) {
       if (error instanceof SimulationSessionValidationError) {
