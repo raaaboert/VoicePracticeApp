@@ -109,6 +109,16 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   assert.equal(source.includes("Generate with AI"), false);
   assert.match(source, /Generate Scenario Draft/);
   assert.match(source, /Generate Scenario/);
+  assert.match(source, /const scenarioGenerationInFlight = useRef\(false\)/);
+  assert.match(source, /if \(scenarioGenerationInFlight\.current \|\| !selected \|\| scenarioSourceContentIds\.length === 0\) return/);
+  assert.match(source, /scenarioGenerationInFlight\.current = true/);
+  assert.match(source, /setGeneratingScenario\(true\)/);
+  assert.match(source, /\.finally\(\(\) => \{[\s\S]*?scenarioGenerationInFlight\.current = false;[\s\S]*?setGeneratingScenario\(false\)/);
+  assert.match(source, /LoaderCircle aria-hidden="true" className="spin" size=\{18\}/);
+  assert.match(source, /Generating scenario…/);
+  assert.match(source, /role="status" aria-live="polite"/);
+  assert.match(source, /Generating a draft from the selected sources…/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\.spin\s*\{[\s\S]*?animation: none;/);
   assert.match(source, /generatedScenario\?\.similarity\.flagged/);
 });
 

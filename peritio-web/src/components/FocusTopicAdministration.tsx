@@ -1,7 +1,7 @@
 "use client";
 
-import { ChevronDown, ChevronUp, CircleHelp } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { ChevronDown, ChevronUp, CircleHelp, LoaderCircle } from "lucide-react";
+import { useRef, useState, type ReactNode } from "react";
 import type {
   CustomerPracticeScenario,
   CustomerPracticeScenarioGeneratedDraft,
@@ -152,6 +152,7 @@ export function FocusTopicAdministration({
   const [scenarioSourceContentIds, setScenarioSourceContentIds] = useState<string[]>([]);
   const [scenarioPracticeGuidance, setScenarioPracticeGuidance] = useState("");
   const [generatedScenario, setGeneratedScenario] = useState<CustomerPracticeScenarioGeneratedDraft | null>(null);
+  const [generatingScenario, setGeneratingScenario] = useState(false);
   const [scenarioReviewNotes, setScenarioReviewNotes] = useState<Record<string, string>>({});
   const [scenarioGroupOpenByTopic, setScenarioGroupOpenByTopic] = useState<Record<string, Record<ScenarioGroup, boolean>>>({});
   const [expandedScenarioIdsByTopic, setExpandedScenarioIdsByTopic] = useState<Record<string, string[]>>({});
@@ -179,6 +180,7 @@ export function FocusTopicAdministration({
   const [replacementFile, setReplacementFile] = useState<File | null>(null);
   const [transcriptContentId, setTranscriptContentId] = useState<string | null>(null);
   const [transcriptText, setTranscriptText] = useState("");
+  const scenarioGenerationInFlight = useRef(false);
   const selected = topics.find((topic) => topic.id === selectedId) ?? null;
   // Scoped Topic managers may create only individual learner assignments. Their
   // selector has one visible option, so derive the effective value rather than
@@ -513,18 +515,25 @@ export function FocusTopicAdministration({
     setScenarioSegmentId(""); setScenarioIndustryIds([]); setScenarioSourceContentIds([]);
     setScenarioPracticeGuidance(""); setGeneratedScenario(null);
   };
-  const generateScenarioDraft = () => void run(async () => {
-    if (!selected || scenarioSourceContentIds.length === 0) return;
-    const generated = await action<CustomerPracticeScenarioGeneratedDraft>({
-      action: "generate_practice_scenario", orgId, topicId: selected.id,
-      sourceContentIds: scenarioSourceContentIds, practiceGuidance: scenarioPracticeGuidance || null,
+  const generateScenarioDraft = () => {
+    if (scenarioGenerationInFlight.current || !selected || scenarioSourceContentIds.length === 0) return;
+    scenarioGenerationInFlight.current = true;
+    setGeneratingScenario(true);
+    void run(async () => {
+      const generated = await action<CustomerPracticeScenarioGeneratedDraft>({
+        action: "generate_practice_scenario", orgId, topicId: selected.id,
+        sourceContentIds: scenarioSourceContentIds, practiceGuidance: scenarioPracticeGuidance || null,
+      });
+      setEditingScenarioId(null); setScenarioTitle(generated.title); setScenarioDescription(generated.description);
+      setScenarioDesiredOutcome(generated.desiredOutcome ?? ""); setScenarioAiRole(generated.aiRole);
+      setScenarioScoringGuidance(generated.scoringGuidance); setScenarioUseIndustryScoringOnly(false);
+      setScenarioSourceContentIds(generated.sourceContentIds); setGeneratedScenario(generated);
+      setMessage("Generated a draft for review. Complete the remaining fields, then save it as a normal draft.");
+    }).finally(() => {
+      scenarioGenerationInFlight.current = false;
+      setGeneratingScenario(false);
     });
-    setEditingScenarioId(null); setScenarioTitle(generated.title); setScenarioDescription(generated.description);
-    setScenarioDesiredOutcome(generated.desiredOutcome ?? ""); setScenarioAiRole(generated.aiRole);
-    setScenarioScoringGuidance(generated.scoringGuidance); setScenarioUseIndustryScoringOnly(false);
-    setScenarioSourceContentIds(generated.sourceContentIds); setGeneratedScenario(generated);
-    setMessage("Generated a draft for review. Complete the remaining fields, then save it as a normal draft.");
-  });
+  };
   const beginScenarioRevision = (scenario: CustomerPracticeScenario) => {
     setGeneratedScenario(null);
     const version = scenario.currentVersion;
@@ -913,8 +922,13 @@ export function FocusTopicAdministration({
           <label className="focus-topic-field focus-topic-field-wide">Optional practice guidance
             <textarea className="text-input focus-topic-long-textarea" rows={4} maxLength={2000} value={scenarioPracticeGuidance}
               onChange={(event) => setScenarioPracticeGuidance(event.target.value)} /></label>
-          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || scenarioSourceContentIds.length === 0}
-            onClick={generateScenarioDraft}>Generate Scenario</button></div>
+          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || generatingScenario || scenarioSourceContentIds.length === 0}
+            onClick={generateScenarioDraft}>
+            {generatingScenario ? <><LoaderCircle aria-hidden="true" className="spin" size={18} /> Generating scenario…</> : "Generate Scenario"}
+          </button></div>
+          {generatingScenario ? <p className="focus-topic-generation-status" role="status" aria-live="polite">
+            Generating a draft from the selected sources…
+          </p> : null}
           {generatedScenario?.similarity.flagged ? <div className="notice" role="status">
             This draft is similar to an existing Topic scenario. Review it before saving.
           </div> : null}

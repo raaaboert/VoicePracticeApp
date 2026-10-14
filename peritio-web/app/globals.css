@@ -4285,6 +4285,12 @@ input[type="radio"] {
   animation: training-content-spin 0.8s linear infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
+
 @keyframes training-content-spin {
   to {
     transform: rotate(360deg);
