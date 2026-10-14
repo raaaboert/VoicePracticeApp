@@ -75,6 +75,53 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
       return { status: response.status, body: await response.json() as Record<string, unknown> };
     };
     const persisted = async () => (await pool!.query("SELECT state_json FROM app_state WHERE id='primary'")).rows[0].state_json;
+    await t.test("legacy config and updates remain identical through industry changes without assignment grants", async () => {
+      const before = structuredClone(await storage.load());
+      const seeded = structuredClone(before);
+      const topicId = "legacy_config_topic";
+      const customId = "legacy_config_scenario";
+      const legacyOrg = seeded.orgs.find((row) => row.id === org.id)!;
+      legacyOrg.customScenarios = [...(legacyOrg.customScenarios ?? []), {
+        id: customId, orgId: org.id, segmentId: segment.id, title: "Legacy practice",
+        description: "Legacy learner content", desiredOutcome: "Agree a plan", aiRole: "Counterpart",
+        scoringGuidance: "Observe clarity", applicableIndustryIds: [original.id], enabled: true,
+        provenance: { sourceMode: "scratch", creationMethod: "manual" }, createdBy: "platform_admin",
+        createdAt: now, updatedAt: now,
+      }];
+      seeded.orgTrainings.push({ id: topicId, orgId: org.id, name: "Legacy Topic", description: "",
+        status: "active", createdAt: now, updatedAt: now });
+      seeded.orgTrainingScenarioAttachments.push({ id: "legacy_config_attachment", orgId: org.id,
+        trainingId: topicId, scenarioId: customId, createdAt: now, updatedAt: now });
+      const parity = async () => {
+        const config = await call(`/mobile/users/${user.id}/config`);
+        const update = await call(`/mobile/users/${user.id}/updates?cursor=999999&timeoutMs=1000`);
+        assert.equal(config.status, 200);
+        assert.equal(update.status, 200);
+        assert.equal(update.body.changed, true);
+        assert.deepEqual(update.body.config, config.body);
+        return config.body;
+      };
+      try {
+        await storage.save(seeded);
+        const visible = await parity();
+        assert.ok((visible.orgTrainings as Array<{ id: string }>).some((row) => row.id === topicId));
+        assert.ok((visible.orgCustomScenarios as Array<{ id: string }>).some((row) => row.id === customId));
+        const inactive = structuredClone(seeded);
+        inactive.config.industries.forEach((row) => { row.enabled = false; });
+        await storage.save(inactive);
+        assert.deepEqual((await parity()).industries, []);
+        const empty = structuredClone(seeded);
+        empty.orgs.find((row) => row.id === org.id)!.activeIndustries = [];
+        await storage.save(empty);
+        assert.deepEqual((await parity()).orgCustomScenarios, []);
+      } finally {
+        await storage.save(before);
+        // Fixture writes bypass the API; refresh its app-state view before the
+        // next legacy mutation, which intentionally uses the existing cache.
+        assert.equal((await call(`/mobile/users/${user.id}/config`)).status, 200);
+      }
+      assert.equal(process.env.FOCUS_TOPIC_AUTHORITY, "legacy");
+    });
     // Complete lazy session-store initialization before unregistered provider
     // requests can schedule best-effort session touches in the background.
     assert.equal((await call(`/mobile/users/${user.id}/simulation-sessions/start`, {

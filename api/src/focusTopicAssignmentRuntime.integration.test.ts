@@ -28,11 +28,12 @@ function scopedUrl(url: string, schema: string): string {
   return parsed.toString();
 }
 
-async function withMockResponses<T>(text: string, runner: () => Promise<T>): Promise<T> {
+async function withMockResponses<T>(text: string, runner: () => Promise<T>, capture?: (request: string) => void): Promise<T> {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (target === "https://api.openai.com/v1/responses") {
+      capture?.(String(init?.body));
       return Promise.resolve(new Response(JSON.stringify({
         output_text: text, model: "local-test-model",
         usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
@@ -334,6 +335,134 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           ...(body ? { body: JSON.stringify(body) } : {}) });
         return { status: response.status, body: await response.json() as Record<string, unknown> };
       };
+      const configParity = async (label: string, who = user.id, auth = token, selectedOrg?: string) => {
+        const read = async (suffix: string) => {
+          const response = await fetch(base + `/mobile/users/${who}/${suffix}`, {
+            headers: { Authorization: `Bearer ${auth}`, ...(selectedOrg ? { "X-Superuser-Org-Id": selectedOrg } : {}) },
+          });
+          return { status: response.status, body: await response.json() as Record<string, any> };
+        };
+        const config = await read("config");
+        const update = await read("updates?cursor=999999&timeoutMs=1000");
+        assert.equal(update.status, config.status, label);
+        if (config.status !== 200) { assert.deepEqual(update.body, config.body, label); return config; }
+        assert.deepEqual(update.body.config, config.body, label);
+        assert.equal(update.body.changed, true);
+        assert.equal(typeof update.body.cursor, "number");
+        assert.equal(update.body.user.id, who);
+        assert.ok(update.body.generatedAt && update.body.entitlements);
+        return config;
+      };
+      await t.test("config and updates share assignment scope, resource-only Topics and current delivery authorization", async () => {
+        const before = structuredClone(await storage.load());
+        const state = structuredClone(before);
+        const resourceTopic = { ...topic, id: "config_resource_only", name: "Resource only" };
+        state.orgTrainings.push(resourceTopic);
+        await storage.save(state);
+        const client = await pool!.connect();
+        try {
+          await authority.createAssignment({ ...assignment, id: "config_resource_assignment", topicId: resourceTopic.id }, client);
+          await authority.attachContent({ id: "config_resource_attachment", orgId: org.id, topicId: resourceTopic.id,
+            contentId, attachedBy: "platform_admin", attachedAt: now, detachedBy: null, detachedAt: null }, client);
+        } finally { client.release(); }
+        try {
+          const active = await configParity("direct assignments");
+          const topics = active.body.orgTrainings as Array<{ id: string }>;
+          assert.ok(topics.some((entry) => entry.id === topic.id));
+          assert.ok(topics.some((entry) => entry.id === resourceTopic.id));
+          assert.ok(topics.every((entry) => entry.id !== unmanagedTopic.id && entry.id !== foreignTopic.id));
+          const resourceDetail = await call(`/mobile/users/${user.id}/focus-topics/${resourceTopic.id}`);
+          assert.equal(resourceDetail.status, 200);
+          assert.deepEqual(resourceDetail.body.scenarios, []);
+          assert.equal((resourceDetail.body.resources as unknown[]).length, 1);
+          await configParity("foreign organization", foreignPerformanceUser.id, foreignMobileToken);
+          await configParity("foreign token rejected", user.id, foreignMobileToken);
+          assert.equal((await configParity("missing token rejected", user.id, "")).status, 401);
+          const forgedOrg = await configParity("normal learner cannot select another organization", user.id, token, foreignOrg.id);
+          assert.ok((forgedOrg.body.orgTrainings as Array<{ orgId: string }>).every((row) => row.orgId === org.id));
+          const waitUntilRegistered = async () => {
+            const deadline = Date.now() + 5000;
+            while (imported.getMobileUpdateWaiterCountForTest(user.id) === 0) {
+              assert.ok(Date.now() < deadline, "long-poll waiter was not registered");
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
+          };
+          const initial = await call(`/mobile/users/${user.id}/updates?cursor=999999&timeoutMs=1000`);
+          const pending = call(`/mobile/users/${user.id}/updates?cursor=${initial.body.cursor}&timeoutMs=1000`);
+          await waitUntilRegistered();
+          await pool!.query("UPDATE focus_topic_assignments SET revoked_at=NOW(),revoked_by='platform_admin' WHERE id='config_resource_assignment'");
+          const idle = await pending;
+          assert.equal(idle.status, 200);
+          assert.equal(idle.body.changed, false);
+          assert.equal(idle.body.config, undefined);
+          const revoked = await configParity("revocation cannot reuse prior payload");
+          assert.ok(!(revoked.body.orgTrainings as Array<{ id: string }>).some((row) => row.id === resourceTopic.id));
+
+          const login = await fetch(base + "/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: process.env.ADMIN_BOOTSTRAP_PASSWORD }) });
+          assert.equal(login.status, 200);
+          const masterToken = (await login.json() as { token: string }).token;
+          const beforeEvent = await call(`/mobile/users/${user.id}/updates?cursor=999999&timeoutMs=1000`);
+          const eventPending = call(`/mobile/users/${user.id}/updates?cursor=${beforeEvent.body.cursor}&timeoutMs=1000`);
+          await waitUntilRegistered();
+          const mutation = await fetch(base + "/config", { method: "PATCH",
+            headers: { Authorization: `Bearer ${masterToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ defaultDifficulty: state.config.defaultDifficulty }) });
+          assert.equal(mutation.status, 200);
+          const delivered = await eventPending;
+          assert.equal(delivered.status, 200);
+          assert.equal(delivered.body.changed, true);
+          assert.equal(delivered.body.reason, "config");
+          assert.deepEqual(delivered.body.config, (await call(`/mobile/users/${user.id}/config`)).body);
+          assert.ok((delivered.body.cursor as number) > (beforeEvent.body.cursor as number));
+          assert.equal(imported.getMobileUpdateWaiterCountForTest(user.id), 0);
+
+          const current = await call(`/mobile/users/${user.id}/updates?cursor=999999&timeoutMs=1000`);
+          const deniedPending = call(`/mobile/users/${user.id}/updates?cursor=${current.body.cursor}&timeoutMs=1000`);
+          await waitUntilRegistered();
+          const disabled = structuredClone(await storage.load());
+          disabled.users.find((row) => row.id === user.id)!.status = "disabled";
+          await storage.save(disabled);
+          assert.equal((await deniedPending).status, 401);
+          await configParity("disabled user denied");
+
+          const unverified = structuredClone(state);
+          unverified.users.find((row) => row.id === user.id)!.emailVerifiedAt = null;
+          await storage.save(unverified);
+          const unverifiedConfig = await configParity("unverified learner");
+          assert.equal(unverifiedConfig.status, 401);
+
+          const noIndustries = structuredClone(state);
+          noIndustries.orgs.find((row) => row.id === org.id)!.activeIndustries = [];
+          await storage.save(noIndustries);
+          const empty = await configParity("zero effective industries");
+          assert.deepEqual(empty.body.industries, []);
+          assert.deepEqual(empty.body.segments, []);
+          const inactiveIndustries = structuredClone(state);
+          inactiveIndustries.config.industries.forEach((row) => { row.enabled = false; });
+          await storage.save(inactiveIndustries);
+          assert.deepEqual((await configParity("inactive industries")).body.industries, []);
+
+          const superState = structuredClone(state);
+          const superId = "config_superuser";
+          const superToken = `super_${randomUUID()}`;
+          superState.users.push({ ...user, id: superId, email: "config-super@integration.test", isSuperUser: true });
+          superState.mobileAuthTokens.push({ userId: superId,
+            tokenHash: createHmac("sha256", tokenSecret).update(superToken).digest("hex"), createdAt: now, updatedAt: now });
+          await storage.save(superState);
+          const a = await configParity("acting organization A", superId, superToken, org.id);
+          const b = await configParity("acting organization B", superId, superToken, foreignOrg.id);
+          assert.ok((a.body.orgCustomScenarios as Array<{ id: string }>).some((row) => row.id === customScenarioId));
+          assert.ok(!(b.body.orgCustomScenarios as Array<{ id: string }>).some((row) => row.id === customScenarioId));
+          assert.ok((a.body.orgTrainings as Array<{ orgId: string }>).every((row) => row.orgId === org.id));
+          assert.ok((b.body.orgTrainings as Array<{ orgId: string }>).every((row) => row.orgId === foreignOrg.id));
+          await configParity("invalid acting organization", superId, superToken, "org_missing");
+        } finally {
+          await pool!.query("DELETE FROM org_content_topic_attachments WHERE id='config_resource_attachment'");
+          await pool!.query("DELETE FROM focus_topic_assignments WHERE id='config_resource_assignment'");
+          await storage.save(before);
+        }
+      });
       const catalog = await call(`/mobile/users/${user.id}/focus-topics`);
       assert.equal(catalog.status, 200, JSON.stringify(catalog.body));
       assert.deepEqual((catalog.body.topics as Array<{ id: string }>).map((row) => row.id), [topic.id]);
@@ -1500,6 +1629,89 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           patch: (path, body) => masterCall(path, "PATCH", body),
           pool: pool!, call, userId: user.id, otherUserId: scopedUserAdmin.id, orgId: org.id, segmentId: segment.id, scenarioId: scenario.id,
           industryId: snapshotIndustryId, alternateIndustryId: alternate.id });
+      });
+
+      await t.test("publication window exposes v1 cached opening and turn versus v2 registered runtime and scoring", async () => {
+        const draft = { title: "Opening window", description: "OPENING_WINDOW_V1_CONTEXT",
+          desiredOutcome: "OPENING_WINDOW_V1_OUTCOME", aiRole: "OPENING_WINDOW_V1_ROLE",
+          scoringGuidance: "Observe the next step.", segmentId: segment.id,
+          applicableIndustryIds: [org.activeIndustries[0]!] };
+        const created = await orgAdminCall(practiceScenarioPath, "POST", draft);
+        assert.equal(created.status, 201);
+        const id = String(created.body.id);
+        const path = `${practiceScenarioPath}/${id}`;
+        const contains = async (label: string, expected: boolean) => {
+          const config = await configParity(label);
+          assert.equal((config.body.orgCustomScenarios as Array<{ id: string }>).some((row) => row.id === id), expected, label);
+        };
+        await contains("draft not published", false);
+        assert.equal((await orgAdminCall(`${path}/submit`, "POST")).status, 200);
+        await contains("submitted not published", false);
+        assert.equal((await orgAdminCall(`${path}/approve`, "POST")).status, 200);
+        await contains("approved not published", false);
+        const v1 = await orgAdminCall(`${path}/publish`, "POST");
+        assert.equal(v1.status, 200);
+        await contains("published v1 visible", true);
+        const sessionId = `opening_window_${randomUUID()}`;
+        const prompts: string[] = [];
+        const capture = (request: string) => {
+          const parsed = JSON.parse(request) as { input: Array<{ content: string }> };
+          prompts.push(parsed.input.map((message) => message.content).join("\n"));
+        };
+        const opening = await withMockResponses("What shall we discuss?", () => call(`/mobile/users/${user.id}/ai/opening`, {
+          simulationSessionId: sessionId, scenarioId: id, trainingId: topic.id, industryId: org.activeIndustries[0],
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
+        }), capture);
+        assert.equal(opening.status, 200, JSON.stringify(opening.body));
+        assert.match(prompts[0]!, /OPENING_WINDOW_V1_CONTEXT/);
+        assert.equal((await pool!.query("SELECT 1 FROM simulation_sessions WHERE simulation_session_id=$1", [sessionId])).rowCount, 0);
+        assert.equal((await orgAdminCall(`${path}/revisions`, "POST", { ...draft,
+          description: "OPENING_WINDOW_V2_CONTEXT", desiredOutcome: "OPENING_WINDOW_V2_OUTCOME",
+          aiRole: "OPENING_WINDOW_V2_ROLE" })).status, 200);
+        assert.equal((await orgAdminCall(`${path}/submit`, "POST")).status, 200);
+        assert.equal((await orgAdminCall(`${path}/approve`, "POST")).status, 200);
+        const v2 = await orgAdminCall(`${path}/publish`, "POST");
+        assert.equal(v2.status, 200);
+        const v2Id = (v2.body.publishedVersion as { id: string }).id;
+        assert.equal((await call(startPath, { simulationSessionId: sessionId, segmentId: segment.id,
+          scenarioId: id, trainingId: topic.id, clientStartedAt: now })).status, 201);
+        const turn = await withMockResponses("We should agree a plan.", () => call(turnPath, {
+          simulationSessionId: sessionId, scenarioId: id, trainingId: topic.id, industryId: org.activeIndustries[0],
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
+          history: [{ role: "user", content: "Let us agree a plan." }],
+        }), capture);
+        assert.equal(turn.status, 200, JSON.stringify(turn.body));
+        // Characterize the confirmed race without changing startup/cache behavior:
+        // the pre-registration cache entry still serves v1; a cache miss resolves v2.
+        const coldTurn = await withMockResponses("We should agree a plan.", () => call(turnPath, {
+          simulationSessionId: sessionId, scenarioId: id, trainingId: topic.id, industryId: org.activeIndustries[0],
+          difficulty: db.config.defaultDifficulty, personaStyle: "defensive",
+          history: [{ role: "user", content: "Let us agree a plan." }],
+        }), capture);
+        assert.equal(coldTurn.status, 200, JSON.stringify(coldTurn.body));
+        const score = await withMockResponses(JSON.stringify({ communicationScore: 80, outcomeScore: 75,
+          overallScore: 78, completionLevel: "complete", objectiveAchieved: true,
+          persuasion: 8, clarity: 7, empathy: 9, assertiveness: 8,
+          strengths: ["Clear"], improvements: ["Close"], summary: "Agreed a plan." }),
+        () => call(`/mobile/users/${user.id}/ai/score`, {
+          simulationSessionId: sessionId, scenarioId: id, trainingId: topic.id,
+          industryId: org.activeIndustries[0], startedAt: now, endedAt: new Date(Date.now() + 1000).toISOString(),
+          history: [
+            { role: "assistant", content: "What shall we discuss?" }, { role: "user", content: "Let us agree a plan." },
+            { role: "assistant", content: "What needs doing?" }, { role: "user", content: "Identify a clear owner." },
+            { role: "assistant", content: "What next?" }, { role: "user", content: "Review progress tomorrow." },
+          ],
+        }), capture);
+        assert.equal(score.status, 201, JSON.stringify(score.body));
+        assert.equal(prompts.length, 4);
+        assert.match(prompts[1]!, /OPENING_WINDOW_V1_CONTEXT/);
+        assert.doesNotMatch(prompts[1]!, /OPENING_WINDOW_V2_CONTEXT/);
+        for (const prompt of prompts.slice(2)) {
+          assert.match(prompt, /OPENING_WINDOW_V2_CONTEXT/);
+          assert.doesNotMatch(prompt, /OPENING_WINDOW_V1_CONTEXT|OPENING_WINDOW_V1_ROLE/);
+        }
+        assert.equal((await pool!.query("SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [sessionId])).rows[0].scenario_version_id, v2Id);
+        assert.notEqual(v2Id, (v1.body.publishedVersion as { id: string }).id);
       });
 
       // Regression: a registered assignment session is permanently pinned to

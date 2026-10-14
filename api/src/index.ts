@@ -12603,6 +12603,7 @@ interface MobileUpdatesResponse {
 }
 
 interface MobileUpdateWaiter {
+  request: Request;
   since: number;
   resolved: boolean;
   response: Response;
@@ -12611,7 +12612,6 @@ interface MobileUpdateWaiter {
 
 const mobileUpdateCursorByUserId = new Map<string, number>();
 const mobileUpdateReasonByUserId = new Map<string, MobileUpdateReason>();
-const mobileUpdatePayloadByUserId = new Map<string, MobileUpdatesResponse>();
 const mobileUpdateWaitersByUserId = new Map<string, Set<MobileUpdateWaiter>>();
 
 function getMobileUpdateCursor(userId: string): number {
@@ -12625,12 +12625,79 @@ function bumpMobileUpdateCursor(userId: string, reason: MobileUpdateReason): num
   return nextCursor;
 }
 
-function buildMobileUpdatesPayload(
+function resolveAuthenticatedMobileConfigContext(
+  db: ApiDatabase, userId: string, request: Request, response: Response,
+): MobileAccessContext | null {
+  const token = getIncomingMobileToken(request);
+  if (!token) { response.status(401).json({ error: "Missing mobile token." }); return null; }
+  const user = getUserById(db, userId);
+  if (!user) { response.status(404).json({ error: "User not found." }); return null; }
+  if (!hasValidMobileTokenForUser(db, user.id, token)) {
+    response.status(401).json({ error: "Invalid mobile token." }); return null;
+  }
+  return resolveMobileAccessContext(db, user, request, response);
+}
+
+// Called within an existing fresh read; no nested database lock or cached authorization.
+async function buildAuthoritativeMobileLearnerConfig(
+  db: ApiDatabase, context: MobileAccessContext,
+): Promise<MobileAppConfig> {
+  const baseConfig = resolveConfigForUser(db, context.user, context.actingOrgId);
+  const snapshot = {
+    baseConfig,
+    topicConfig: runtimeConfig.focusTopicAuthority === "assignments"
+      ? resolveConfigForUser(db, context.user, context.actingOrgId, { forAssignedTopic: true }) : baseConfig,
+    user: context.user, org: context.actingOrg, users: db.users, topics: db.orgTrainings,
+  };
+  if (runtimeConfig.focusTopicAuthority !== "assignments" || !snapshot.org || snapshot.user.isSuperUser) {
+    return serializeMobileLearnerConfig(snapshot.baseConfig);
+  }
+  const authority = await focusTopicAuthorityStore.listSnapshot(snapshot.org.id);
+  const visibleTopicIds = new Set(snapshot.topics
+    .filter((topic) => canFutureLearnerAccessFocusTopic({
+      user: snapshot.user, users: snapshot.users, organization: snapshot.org!, topic,
+      assignments: authority.assignments,
+    }))
+    .map((topic) => topic.id));
+  const directScenarios = authority.scenarioAttachments.filter((row) => row.detachedAt === null
+    && row.orgId === snapshot.org!.id && visibleTopicIds.has(row.topicId));
+  const directStandardIds = new Set(directScenarios.filter((row) => row.scenarioKind === "standard")
+    .map((row) => row.scenarioId));
+  const directCustomIds = new Set(directScenarios.filter((row) => row.scenarioKind === "org")
+    .map((row) => row.scenarioId));
+  const generalStandardIds = new Set(snapshot.baseConfig.segments.flatMap((segment) =>
+    (segment.scenarios ?? []).map((scenario) => scenario.id)));
+  return serializeMobileLearnerConfig({
+    ...snapshot.topicConfig,
+    segments: snapshot.topicConfig.segments.map((segment) => ({
+      ...segment,
+      scenarios: (segment.scenarios ?? []).filter((scenario) =>
+        generalStandardIds.has(scenario.id) || directStandardIds.has(scenario.id)),
+    })),
+    orgTrainings: (snapshot.topicConfig.orgTrainings ?? [])
+      .filter((topic) => visibleTopicIds.has(topic.id))
+      .map((topic) => ({
+        ...topic,
+        attachedTrainingPackIds: [],
+        attachedTrainingPackCount: 0,
+        attachedCustomScenarioIds: directScenarios
+          .filter((row) => row.topicId === topic.id && row.scenarioKind === "org")
+          .map((row) => row.scenarioId),
+        attachedCustomScenarioCount: directScenarios.filter((row) =>
+          row.topicId === topic.id && row.scenarioKind === "org").length,
+      })),
+    orgCustomScenarios: (snapshot.topicConfig.orgCustomScenarios ?? [])
+      .filter((scenario) => directCustomIds.has(scenario.id)),
+  });
+}
+
+async function buildMobileUpdatesPayload(
   db: ApiDatabase,
-  user: UserProfile,
+  context: MobileAccessContext,
   cursor: number,
   reason: MobileUpdateReason,
-): MobileUpdatesResponse {
+): Promise<MobileUpdatesResponse> {
+  const user = context.user;
   const now = new Date();
   materializeUserTimezone(user, now);
   return {
@@ -12639,8 +12706,8 @@ function buildMobileUpdatesPayload(
     reason,
     generatedAt: now.toISOString(),
     user,
-    config: serializeMobileLearnerConfig(resolveConfigForUser(db, user)),
-    entitlements: computeEntitlements(db, user, now),
+    config: await buildAuthoritativeMobileLearnerConfig(db, context),
+    entitlements: computeEntitlements(db, user, now, { actingOrgId: context.actingOrgId }),
   };
 }
 
@@ -12666,20 +12733,26 @@ function cleanupWaiter(userId: string, waiter: MobileUpdateWaiter): void {
   }
 }
 
-function resolveWaiter(userId: string, waiter: MobileUpdateWaiter, payload: MobileUpdatesResponse): void {
-  if (waiter.resolved) {
-    return;
-  }
-
+async function deliverMobileUpdateWaiter(userId: string, waiter: MobileUpdateWaiter): Promise<void> {
+  if (waiter.resolved) return;
   waiter.resolved = true;
   clearTimeout(waiter.timeoutHandle);
   cleanupWaiter(userId, waiter);
-
   try {
-    waiter.response.setHeader("Cache-Control", "no-store");
-    waiter.response.json(payload);
-  } catch {
-    // Ignore broken pipe / disconnected clients.
+    await withFreshDatabaseSnapshotRead(async (db) => {
+      const context = resolveAuthenticatedMobileConfigContext(db, userId, waiter.request, waiter.response);
+      if (!context) return;
+      const cursor = getMobileUpdateCursor(userId);
+      const payload: MobileUpdatesResponse = cursor > waiter.since
+        ? await buildMobileUpdatesPayload(db, context, cursor, mobileUpdateReasonByUserId.get(userId) ?? "unknown")
+        : { cursor, changed: false, reason: null, generatedAt: nowIso() };
+      waiter.response.setHeader("Cache-Control", "no-store");
+      waiter.response.json(payload);
+    });
+  } catch (error) {
+    if (!waiter.response.headersSent && !waiter.response.destroyed) {
+      respondWithUnexpectedError(waiter.response, error, { route: "/mobile/users/:userId/updates" });
+    }
   }
 }
 
@@ -12706,7 +12779,6 @@ function revokeMobileAccessForUser(db: ApiDatabase, userId: string, reason: stri
       }
 
       mobileUpdateWaitersByUserId.delete(userId);
-      mobileUpdatePayloadByUserId.delete(userId);
       mobileUpdateCursorByUserId.delete(userId);
       mobileUpdateReasonByUserId.delete(userId);
     }
@@ -12739,8 +12811,6 @@ function emitMobileUpdateForUser(db: ApiDatabase, userId: string, reason: Mobile
   }
 
   const cursor = bumpMobileUpdateCursor(userId, reason);
-  const payload = buildMobileUpdatesPayload(db, user, cursor, reason);
-  mobileUpdatePayloadByUserId.set(userId, payload);
 
   const waiters = mobileUpdateWaitersByUserId.get(userId);
   if (!waiters || waiters.size === 0) {
@@ -12749,7 +12819,7 @@ function emitMobileUpdateForUser(db: ApiDatabase, userId: string, reason: Mobile
 
   for (const waiter of Array.from(waiters)) {
     if (cursor > waiter.since) {
-      resolveWaiter(userId, waiter, payload);
+      void deliverMobileUpdateWaiter(userId, waiter);
     }
   }
 }
@@ -21020,7 +21090,6 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     }
 
     mobileUpdateWaitersByUserId.delete(user.id);
-    mobileUpdatePayloadByUserId.delete(user.id);
     mobileUpdateCursorByUserId.delete(user.id);
     mobileUpdateReasonByUserId.delete(user.id);
 
@@ -21630,7 +21699,6 @@ app.delete("/mobile/users/:userId", async (request: Request, response: Response)
       }
     }
     mobileUpdateWaitersByUserId.delete(deletedUserId);
-    mobileUpdatePayloadByUserId.delete(deletedUserId);
     mobileUpdateCursorByUserId.delete(deletedUserId);
     mobileUpdateReasonByUserId.delete(deletedUserId);
   }
@@ -22029,83 +22097,15 @@ app.get("/mobile/users/:userId/superuser/orgs", async (request: Request, respons
 });
 
 app.get("/mobile/users/:userId/config", async (request: Request, response: Response) => {
-  const authToken = getIncomingMobileToken(request);
-  if (!authToken) {
+  if (!getIncomingMobileToken(request)) {
     response.status(401).json({ error: "Missing mobile token." });
     return;
   }
-
-  const snapshot = await withFreshDatabaseSnapshotRead((db) => {
-    const user = getUserById(db, request.params.userId);
-    if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return null;
-    }
-
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return null;
-    }
-
-    const accessContext = resolveMobileAccessContext(db, user, request, response);
-    if (!accessContext) {
-      return null;
-    }
-
-    const baseConfig = resolveConfigForUser(db, user, accessContext.actingOrgId);
-    return structuredClone({
-      baseConfig,
-      topicConfig: runtimeConfig.focusTopicAuthority === "assignments"
-        ? resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true })
-        : baseConfig,
-      user,
-      org: accessContext.actingOrg,
-      users: db.users,
-      topics: db.orgTrainings,
-    });
+  await withFreshDatabaseSnapshotRead(async (db) => {
+    const context = resolveAuthenticatedMobileConfigContext(db, request.params.userId, request, response);
+    if (!context) return;
+    response.json(await buildAuthoritativeMobileLearnerConfig(db, context));
   });
-  if (!snapshot) return;
-  if (runtimeConfig.focusTopicAuthority !== "assignments" || !snapshot.org || snapshot.user.isSuperUser) {
-    response.json(serializeMobileLearnerConfig(snapshot.baseConfig));
-    return;
-  }
-  const authority = await focusTopicAuthorityStore.listSnapshot(snapshot.org.id);
-  const visibleTopicIds = new Set(snapshot.topics
-    .filter((topic) => canFutureLearnerAccessFocusTopic({
-      user: snapshot.user, users: snapshot.users, organization: snapshot.org!, topic,
-      assignments: authority.assignments,
-    }))
-    .map((topic) => topic.id));
-  const directScenarios = authority.scenarioAttachments.filter((row) => row.detachedAt === null
-    && row.orgId === snapshot.org!.id && visibleTopicIds.has(row.topicId));
-  const directStandardIds = new Set(directScenarios.filter((row) => row.scenarioKind === "standard")
-    .map((row) => row.scenarioId));
-  const directCustomIds = new Set(directScenarios.filter((row) => row.scenarioKind === "org")
-    .map((row) => row.scenarioId));
-  const generalStandardIds = new Set(snapshot.baseConfig.segments.flatMap((segment) =>
-    (segment.scenarios ?? []).map((scenario) => scenario.id)));
-  response.json(serializeMobileLearnerConfig({
-    ...snapshot.topicConfig,
-    segments: snapshot.topicConfig.segments.map((segment) => ({
-      ...segment,
-      scenarios: (segment.scenarios ?? []).filter((scenario) =>
-        generalStandardIds.has(scenario.id) || directStandardIds.has(scenario.id)),
-    })),
-    orgTrainings: (snapshot.topicConfig.orgTrainings ?? [])
-      .filter((topic) => visibleTopicIds.has(topic.id))
-      .map((topic) => ({
-        ...topic,
-        attachedTrainingPackIds: [],
-        attachedTrainingPackCount: 0,
-        attachedCustomScenarioIds: directScenarios
-          .filter((row) => row.topicId === topic.id && row.scenarioKind === "org")
-          .map((row) => row.scenarioId),
-        attachedCustomScenarioCount: directScenarios.filter((row) =>
-          row.topicId === topic.id && row.scenarioKind === "org").length,
-      })),
-    orgCustomScenarios: (snapshot.topicConfig.orgCustomScenarios ?? [])
-      .filter((scenario) => directCustomIds.has(scenario.id)),
-  }));
 });
 
 app.get("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
@@ -22558,83 +22558,38 @@ app.post("/mobile/users/:userId/support/cases", async (request: Request, respons
 });
 
 app.get("/mobile/users/:userId/updates", async (request: Request, response: Response) => {
-  const authToken = getIncomingMobileToken(request);
-  if (!authToken) {
+  if (!getIncomingMobileToken(request)) {
     response.status(401).json({ error: "Missing mobile token." });
     return;
   }
-
   const timeoutMs = Math.max(1_000, Math.min(30_000, clampNonNegativeInteger(request.query.timeoutMs, 25_000)));
   const since = Math.max(0, clampNonNegativeInteger(request.query.cursor, 0));
-
-  const waitContext = await withDatabaseRead(async (db) => {
-    const user = getUserById(db, request.params.userId);
-    if (!user) {
-      response.status(404).json({ error: "User not found." });
-      return null;
+  await withFreshDatabaseSnapshotRead(async (db) => {
+    const context = resolveAuthenticatedMobileConfigContext(db, request.params.userId, request, response);
+    if (!context) return;
+    let cursor = getMobileUpdateCursor(context.user.id);
+    const resync = since > cursor || (since === 0 && cursor === 0);
+    if (resync) {
+      cursor = bumpMobileUpdateCursor(context.user.id, "resync");
     }
-
-    if (!hasValidMobileTokenForUser(db, user.id, authToken)) {
-      response.status(401).json({ error: "Invalid mobile token." });
-      return null;
-    }
-
-    const currentCursor = getMobileUpdateCursor(user.id);
-    const hasCachedPayload = mobileUpdatePayloadByUserId.has(user.id);
-
-    if (since > currentCursor || (since === 0 && currentCursor === 0 && !hasCachedPayload)) {
-      const resyncCursor = bumpMobileUpdateCursor(user.id, "resync");
-      const payload = buildMobileUpdatesPayload(db, user, resyncCursor, "resync");
-      mobileUpdatePayloadByUserId.set(user.id, payload);
+    if (resync || cursor > since) {
+      const payload = await buildMobileUpdatesPayload(db, context, cursor,
+        mobileUpdateReasonByUserId.get(context.user.id) ?? "unknown");
       response.setHeader("Cache-Control", "no-store");
       response.json(payload);
-      return null;
-    }
-
-    if (currentCursor > since) {
-      const cached = mobileUpdatePayloadByUserId.get(user.id);
-      const reason = mobileUpdateReasonByUserId.get(user.id) ?? "unknown";
-      response.setHeader("Cache-Control", "no-store");
-      response.json(
-        cached && cached.cursor === currentCursor
-          ? cached
-          : buildMobileUpdatesPayload(db, user, currentCursor, reason),
-      );
-      return null;
-    }
-
-    return { userId: user.id };
-  });
-
-  if (!waitContext) {
-    return;
-  }
-
-  const waiter: MobileUpdateWaiter = {
-    since,
-    resolved: false,
-    response,
-    timeoutHandle: setTimeout(() => {
-      const cursor = getMobileUpdateCursor(waitContext.userId);
-      resolveWaiter(waitContext.userId, waiter, {
-        cursor,
-        changed: false,
-        reason: null,
-        generatedAt: nowIso(),
-      });
-    }, timeoutMs),
-  };
-
-  resolveMobileWaitersSet(waitContext.userId).add(waiter);
-
-  request.on("close", () => {
-    if (waiter.resolved) {
       return;
     }
-
-    waiter.resolved = true;
-    clearTimeout(waiter.timeoutHandle);
-    cleanupWaiter(waitContext.userId, waiter);
+    const waiter: MobileUpdateWaiter = {
+      request, since, resolved: false, response,
+      timeoutHandle: setTimeout(() => { void deliverMobileUpdateWaiter(context.user.id, waiter); }, timeoutMs),
+    };
+    resolveMobileWaitersSet(context.user.id).add(waiter);
+    request.on("close", () => {
+      if (waiter.resolved) return;
+      waiter.resolved = true;
+      clearTimeout(waiter.timeoutHandle);
+      cleanupWaiter(context.user.id, waiter);
+    });
   });
 });
 
@@ -28184,6 +28139,13 @@ export async function refreshDatabaseReadinessForTest(): Promise<void> {
     throw new Error("refreshDatabaseReadinessForTest is only available in test.");
   }
   await refreshDatabaseReadiness();
+}
+
+export function getMobileUpdateWaiterCountForTest(userId: string): number {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("getMobileUpdateWaiterCountForTest is only available in test.");
+  }
+  return mobileUpdateWaitersByUserId.get(userId)?.size ?? 0;
 }
 
 export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) => Promise<TrainingPack[]>) | null): void {
