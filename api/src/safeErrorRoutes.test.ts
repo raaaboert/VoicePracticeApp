@@ -4,6 +4,7 @@ import { startPromptRouteHarness, ROUTE_USER_ID, STANDARD_ORG_ID, STANDARD_SCENA
   type PromptRouteHarness } from "./simulationPromptRoutes.testSupport.js";
 import { AiBudgetLimitError, classifyAiRouteError, safeErrorDiagnostics } from "./services/safeErrors.js";
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
+import { createOrganizationProductSettingsStore } from "./storage/organizationProductSettingsStore.js";
 import { AuthCodeDeliveryError } from "./services/authCodeDelivery.js";
 
 const secret = "sk-proj-DO_NOT_DISCLOSE_PROVIDER_CREDENTIAL";
@@ -90,6 +91,66 @@ test("global database-style exceptions return generic 500 with matching safe dia
     await checkFailure(result, 500, "internal_error");
     assert.ok(logs.some(([label, detail]) => label === "[api-error]" && (detail as { databaseCode?: string }).databaseCode === "23505"));
   } finally { api.setDatabaseSaveBarrierForTest(null); }
+});
+
+test("public readiness sanitizes database failures, retains safe diagnostics and recovers without changing monitoring fields", async () => {
+  const store = createOrganizationProductSettingsStore({ provider: "file", databaseUrl: null,
+    pgPoolMax: 1, pgConnectTimeoutMs: 1000, pgIdleTimeoutMs: 1000 });
+  api.setOrganizationProductSettingsStoreForTest(store);
+  const initialize = store.initialize;
+  const read = async () => {
+    const response = await harness.request("/ready", { headers: { Authorization: "" } });
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  try {
+    await api.refreshDatabaseReadinessForTest();
+    const healthy = await read();
+    assert.equal(healthy.status, 200);
+    assert.equal(healthy.body.ok, true);
+    assert.equal(healthy.body.consecutiveFailures, 0);
+    assert.ok(healthy.body.now);
+    assert.ok(healthy.body.checkedAt);
+    assert.equal("error" in healthy.body, false);
+
+    const hostname = "private-db.internal.example";
+    const username = "private_database_user";
+    store.initialize = async () => {
+      throw Object.assign(new Error(`Connection to ${hostname} failed for ${username}: ${internal}`), { code: "28P01" });
+    };
+    // A previously healthy service retains the established transient-failure grace.
+    await api.refreshDatabaseReadinessForTest();
+    const transient = await read();
+    assert.equal(transient.status, 200);
+    assert.equal(transient.body.consecutiveFailures, 1);
+    await api.refreshDatabaseReadinessForTest();
+    await api.refreshDatabaseReadinessForTest();
+    const failed = await read();
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.ok, false);
+    assert.equal(failed.body.error, "Database is not ready.");
+    assert.equal(failed.body.consecutiveFailures, 3);
+    assert.equal(failed.body.failureThreshold, 3);
+    assert.ok(failed.body.now);
+    assert.ok(failed.body.checkedAt);
+    assertSafe(failed.body);
+    for (const sensitive of [hostname, username]) {
+      assert.equal(JSON.stringify(failed.body).includes(sensitive), false);
+      assert.equal(JSON.stringify(logs).includes(sensitive), false);
+    }
+    assert.ok(logs.some(([message]) => typeof message === "string"
+      && message.startsWith("[readiness] database unavailable (3/3)")
+      && message.includes('"databaseCode":"28P01"')));
+    assertSafe(logs);
+  } finally {
+    store.initialize = initialize;
+    await api.refreshDatabaseReadinessForTest();
+  }
+  const recovered = await read();
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.ok, true);
+  assert.equal(recovered.body.consecutiveFailures, 0);
+  assert.equal("error" in recovered.body, false);
+  assert.ok(logs.some(([message]) => message === "[readiness] database connectivity restored."));
 });
 
 test("authentication delivery server failures retain status without disclosing upstream text", async () => {

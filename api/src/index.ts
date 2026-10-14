@@ -5197,7 +5197,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
       databaseReadyError !== lastReadinessLoggedError;
     if (shouldLog) {
       logWarn(
-        `[readiness] database unavailable (${databaseReadyConsecutiveFailures}/${READINESS_FAILURE_THRESHOLD}): ${databaseReadyError}`
+        `[readiness] database unavailable (${databaseReadyConsecutiveFailures}/${READINESS_FAILURE_THRESHOLD}): ${JSON.stringify(safeErrorDiagnostics(error))}`
       );
       lastReadinessLoggedError = databaseReadyError;
     }
@@ -12991,7 +12991,7 @@ app.get("/ready", (_request, response) => {
     ok: false,
     now: nowIso(),
     checkedAt: databaseReadyCheckedAt,
-    error: databaseReadyError || "Database is not ready.",
+    error: "Database is not ready.",
     consecutiveFailures: databaseReadyConsecutiveFailures,
     failureThreshold: READINESS_FAILURE_THRESHOLD
   });
@@ -28177,6 +28177,13 @@ export async function startApiServer(): Promise<void> {
     queueDatabaseReadinessRefresh();
   }, READINESS_REFRESH_MS);
   readinessInterval.unref();
+}
+
+export async function refreshDatabaseReadinessForTest(): Promise<void> {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("refreshDatabaseReadinessForTest is only available in test.");
+  }
+  await refreshDatabaseReadiness();
 }
 
 export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) => Promise<TrainingPack[]>) | null): void {
