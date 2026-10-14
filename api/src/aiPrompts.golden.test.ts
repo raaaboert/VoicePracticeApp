@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { buildDefaultScoringGuidance, type Scenario } from "@voicepractice/shared";
 
 import {
+  AI_PROMPT_VERSION,
+  AI_RUBRIC_VERSION,
   buildEvaluationSystemPrompt,
   buildOpeningPrompt,
   buildRoleplaySystemPrompt,
@@ -36,6 +38,9 @@ function assertGoldenPrompts(
   expected: PromptGolden,
 ): void {
   assert.deepEqual(actual, expected);
+  assert.ok(actual.evaluation.includes("Paraphrase; do not quote the user verbatim or repeat names, contact details or other personal identifiers in strengths, improvements or summary."));
+  assert.equal(AI_PROMPT_VERSION, "2026-10-14.v1");
+  assert.equal(AI_RUBRIC_VERSION, "2026-04-09.v1");
 }
 
 test("Phase 0 golden: standard non-modular prompts preserve current composition", () => {

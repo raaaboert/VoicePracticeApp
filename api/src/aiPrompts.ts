@@ -1,6 +1,6 @@
 import { Difficulty, PersonaStyle, Scenario } from "@voicepractice/shared";
 
-export const AI_PROMPT_VERSION = "2026-04-09.v1";
+export const AI_PROMPT_VERSION = "2026-10-14.v1";
 export const AI_RUBRIC_VERSION = "2026-04-09.v1";
 
 const DIFFICULTY_BEHAVIOR: Record<Difficulty, string> = {
@@ -132,7 +132,8 @@ export function buildEvaluationSystemPrompt(params: {
     "Return ONLY strict JSON with this exact schema:",
     '{"communicationScore":number(0-100),"outcomeScore":number(0-100),"overallScore":number(0-100),"completionLevel":"inconclusive"|"partial"|"complete","objectiveAchieved":boolean,"persuasion":number(1-10),"clarity":number(1-10),"empathy":number(1-10),"assertiveness":number(1-10),"strengths":[string,string,string],"improvements":[string,string,string],"summary":string}',
     "Use higher standards for hard difficulty.",
-    "Keep strengths and improvements concrete and actionable."
+    "Keep strengths and improvements concrete and actionable.",
+    "Paraphrase; do not quote the user verbatim or repeat names, contact details or other personal identifiers in strengths, improvements or summary."
   );
 
   return lines.join("\n");

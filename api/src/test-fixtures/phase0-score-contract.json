@@ -49,7 +49,7 @@
     },
     "rubricVersion": "2026-04-09.v1",
     "model": "route-scoring-model",
-    "promptVersion": "2026-04-09.v1",
+    "promptVersion": "2026-10-14.v1",
     "scoringWeightsApplied": {
       "persuasion": 0.25,
       "clarity": 0.25,

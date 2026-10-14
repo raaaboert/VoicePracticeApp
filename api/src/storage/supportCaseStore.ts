@@ -11,6 +11,7 @@ import { StorageProvider } from "../runtimeConfig.js";
 
 export interface SupportCaseStore {
   initialize(options?: { now?: Date }): Promise<void>;
+  purgeExpiredTranscripts(now: Date): Promise<void>;
   importLegacyCases(
     records: SupportCaseRecord[],
     options?: { now?: Date }
@@ -122,7 +123,7 @@ function normalizeTranscriptMeta(value: unknown): SupportCaseRecord["transcriptM
 }
 
 function clearExpiredTranscript(record: SupportCaseRecord, now: Date): { record: SupportCaseRecord; changed: boolean } {
-  if (!record.transcriptEncrypted || !record.transcriptExpiresAt) {
+  if (!record.transcriptExpiresAt) {
     return { record, changed: false };
   }
 
@@ -136,7 +137,8 @@ function clearExpiredTranscript(record: SupportCaseRecord, now: Date): { record:
       ...record,
       transcriptEncrypted: null,
       transcriptExpiresAt: null,
-      transcriptFileName: null
+      transcriptFileName: null,
+      transcriptMeta: null
     },
     changed: true
   };
@@ -224,7 +226,7 @@ function normalizeSupportCaseCollection(
   let changed = false;
   const normalized = dedupeSupportCases(
     records
-      .map((entry) => normalizeSupportCaseRecord(entry, now))
+      .map((entry) => normalizeSupportCaseRecord(entry))
       .filter((entry): entry is SupportCaseRecord => entry !== null)
   ).map((entry) => {
     const cleared = clearExpiredTranscript(entry, now);
@@ -242,7 +244,7 @@ function normalizeSupportCaseCollection(
 function ensureFilePayload(candidate: unknown, now: Date): { payload: SupportCaseFilePayload; changed: boolean } {
   const cases = Array.isArray((candidate as { cases?: unknown } | null)?.cases)
     ? ((candidate as { cases?: unknown[] }).cases ?? [])
-        .map((entry) => normalizeSupportCaseRecord(entry, now))
+        .map((entry) => normalizeSupportCaseRecord(entry))
         .filter((entry): entry is SupportCaseRecord => entry !== null)
     : [];
 
@@ -269,6 +271,10 @@ class FileSupportCaseStore implements SupportCaseStore {
     await this.withLock(async () => {
       await this.loadPayload(options?.now ?? new Date());
     });
+  }
+
+  async purgeExpiredTranscripts(now: Date): Promise<void> {
+    await this.withLock(async () => { await this.loadPayload(now); });
   }
 
   async importLegacyCases(
@@ -608,16 +614,17 @@ class PostgresSupportCaseStore implements SupportCaseStore {
     await this.ensureTablePromise;
   }
 
-  private async purgeExpiredTranscripts(now: Date): Promise<void> {
+  async purgeExpiredTranscripts(now: Date): Promise<void> {
+    await this.ensureTable();
     await this.pool.query(
       `
         UPDATE support_cases
         SET
           transcript_encrypted = NULL,
           transcript_expires_at = NULL,
-          transcript_file_name = NULL
-        WHERE transcript_encrypted IS NOT NULL
-          AND transcript_expires_at IS NOT NULL
+          transcript_file_name = NULL,
+          transcript_meta = NULL
+        WHERE transcript_expires_at IS NOT NULL
           AND transcript_expires_at <= $1
       `,
       [now.toISOString()]
@@ -680,6 +687,10 @@ class PostgresSupportCaseStore implements SupportCaseStore {
 }
 
 class UnsupportedSupportCaseStore implements SupportCaseStore {
+  async purgeExpiredTranscripts(): Promise<void> {
+    throw new Error("Support case storage provider is not supported.");
+  }
+
   async initialize(): Promise<void> {
     throw new Error("Support case storage provider is not supported.");
   }

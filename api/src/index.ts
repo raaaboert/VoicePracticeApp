@@ -245,6 +245,7 @@ import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createSimulationSessionStore, SimulationSessionConflictError } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
+import { scheduleSupportTranscriptExpiration } from "./services/supportTranscriptExpiration.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
@@ -28123,10 +28124,11 @@ export async function startApiServer(): Promise<void> {
     await focusTopicAuthorityStore.assertAssignmentsReady();
   }
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
+  scheduleSupportTranscriptExpiration(supportCaseStore, server);
 
   const trainingContentStorageStatus = await trainingContentStorageReadiness.refresh();
   if (trainingContentStorageStatus.enabled && !trainingContentStorageStatus.available) {
