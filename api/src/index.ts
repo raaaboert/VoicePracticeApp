@@ -2065,22 +2065,9 @@ async function resolveSimulationRuntimeBundle(params: {
           useModularPromptArchitecture,
         })
       : ({ status: "bypass", value: null, reason: "missing_effective_variant" } as const);
-  if (cacheResult.status === "hit" && cacheResult.value) {
-    // A client-provided session ID and cached prompt do not establish session
-    // authority. Recheck current eligibility unless the assignment session was
-    // authenticated above; durable-session continuation retains its old path.
-    if (params.org && !hasRegisteredAssignmentSession) {
-      const currentConfig = resolveConfigForUser(params.db, params.user, params.actingOrgId,
-        { forAssignedTopic: assignmentUsesTopicConfig });
-      const currentScenario = assignmentAuthorizedScenario ?? resolveMobileScenarioForUser(
-        currentConfig, params.scenarioId, authoritativeTrainingId, { directTopicScenarioAttached },
-      );
-      if (!currentScenario || (cacheResult.value.industryId
-        && !currentScenario.allowedIndustryIds.includes(cacheResult.value.industryId))) {
-        params.response.status(400).json({ error: "Invalid scenario for this account." });
-        return null;
-      }
-    }
+  if (cacheResult.status === "hit" && cacheResult.value && registeredSession?.industrySnapshot) {
+    // Only an authenticated durable snapshot can retain its pinned context
+    // without resolving current catalog eligibility below.
     return {
       ...cacheResult.value,
       scenarioVersionId: cacheResult.value.scenarioVersionId ?? null,
@@ -2192,6 +2179,21 @@ async function resolveSimulationRuntimeBundle(params: {
       return null;
     }
   }
+  if (cacheResult.status === "hit" && cacheResult.value
+    && cacheResult.value.industryId === industryPromptContext.industryId
+    && cacheResult.value.industryLabel === industryPromptContext.industryLabel
+    && cacheResult.value.industryBaseline === industryPromptContext.industryBaseline) {
+    return {
+      ...cacheResult.value,
+      scenarioVersionId: cacheResult.value.scenarioVersionId ?? null,
+      cacheStatus: "hit",
+      cacheReason: null,
+      contextBuildMs: 0,
+      trainingPackLookupMs: 0,
+    };
+  }
+  // Non-snapshot hits use the authoritative miss-path scenario and industry
+  // resolution above. Rebuild when the live context changed, including null.
   const counterpartBehaviorGuidance = resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario);
   const trainingPackLookupStartedAtMs = Date.now();
   const activeTrainingPack = hasRegisteredAssignmentSession
@@ -2252,7 +2254,7 @@ async function resolveSimulationRuntimeBundle(params: {
     systemPrompt: prompts.systemPrompt,
     openingPrompt: prompts.openingPrompt,
     cacheStatus: cacheResult.status === "bypass" ? "bypass" : "miss",
-    cacheReason: cacheResult.reason ?? null,
+    cacheReason: cacheResult.status === "hit" ? "eligibility_changed" : cacheResult.reason ?? null,
     contextBuildMs: Math.max(0, Date.now() - contextBuildStartedAtMs),
     trainingPackLookupMs,
   } satisfies SimulationRuntimeBundle;

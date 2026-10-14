@@ -18,6 +18,7 @@ import {
   TrainingContentAssetStoreError,
 } from "./storage/trainingContentAssetStore.js";
 import { createWebAuthService } from "./services/webAuth.js";
+import { assertIndustryCacheParity } from "./industryRuntimeCache.testSupport.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
 
@@ -73,7 +74,7 @@ async function withMockScenarioGeneration<T>(runner: (calls: { value: number }) 
 }
 
 test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocation",
-  { skip: !databaseUrl }, async () => {
+  { skip: !databaseUrl }, async (t) => {
     const parsed = new URL(databaseUrl);
     assert.ok(["localhost", "127.0.0.1", "::1"].includes(parsed.hostname.toLowerCase()));
     assert.match(parsed.pathname.toLowerCase(), /(test|integration|throwaway)/);
@@ -1492,6 +1493,15 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         "SELECT training_id FROM simulation_sessions WHERE simulation_session_id=$1", [generalSessionId]);
       assert.equal(general.rows[0]?.training_id, null);
 
+      await t.test("assignments general-catalog and registered NULL-snapshot cache parity across live industry changes", async () => {
+        const alternate = db.config.industries.find((industry) => industry.enabled && industry.id !== snapshotIndustryId)!;
+        assert.ok(alternate);
+        await assertIndustryCacheParity({ mode: "assignments", storage,
+          patch: (path, body) => masterCall(path, "PATCH", body),
+          pool: pool!, call, userId: user.id, otherUserId: scopedUserAdmin.id, orgId: org.id, segmentId: segment.id, scenarioId: scenario.id,
+          industryId: snapshotIndustryId, alternateIndustryId: alternate.id });
+      });
+
       // Regression: a registered assignment session is permanently pinned to
       // its approved version even after a later revision is published.
       const pinnedV1Draft = {
@@ -1625,6 +1635,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const snapshotStandardSessionId = `snapshot_standard_${randomUUID()}`;
       const snapshotUnversionedCustomSessionId = `snapshot_unversioned_custom_${randomUUID()}`;
       const parityLegacySessionId = `snapshot_parity_legacy_${randomUUID()}`;
+      const parityLegacyColdSessionId = `snapshot_parity_legacy_cold_${randomUUID()}`;
       assert.equal((await call(startPath, {
         simulationSessionId: snapshotCustomerSessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
         trainingId: topic.id, clientStartedAt: now,
@@ -1642,6 +1653,11 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         trainingId: topic.id, clientStartedAt: now,
       })).status, 201);
       await pool.query("UPDATE simulation_sessions SET industry_snapshot=NULL WHERE simulation_session_id=$1", [parityLegacySessionId]);
+      assert.equal((await call(startPath, {
+        simulationSessionId: parityLegacyColdSessionId, segmentId: segment.id, scenarioId: scenario.id,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      await pool.query("UPDATE simulation_sessions SET industry_snapshot=NULL WHERE simulation_session_id=$1", [parityLegacyColdSessionId]);
       // Existing snapshots predate scenarioKind. Remove it from one persisted
       // snapshot to prove its current, unambiguous org scenario still resolves.
       await pool.query(
@@ -1682,15 +1698,24 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         [snapshotCustomerSessionId],
       )).rows[0]?.locked_industry, null);
       const snapshotRequests: string[] = [];
+      const snapshotSystemRequests: string[] = [];
+      const snapshotCacheEvents: Array<{ cacheStatus?: string }> = [];
       const postDeactivationRequests: string[] = [];
       let capturePostDeactivationRequests = false;
       const snapshotFetch = globalThis.fetch;
+      const snapshotLog = console.log;
+      console.log = (...args: unknown[]) => {
+        const event = args[1] as { route?: string; cacheStatus?: string } | undefined;
+        if (args[0] === "[simulation-route]" && event?.route === "turn" && event.cacheStatus) snapshotCacheEvents.push(event);
+        snapshotLog(...args);
+      };
       globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
         const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
         if (target === "https://api.openai.com/v1/responses") {
-          const parsed = JSON.parse(String(init?.body)) as { input?: Array<{ content?: string }> };
+          const parsed = JSON.parse(String(init?.body)) as { input?: Array<{ role?: string; content?: string }> };
           const prompt = parsed.input?.map((message) => message.content ?? "").join("\n") ?? "";
           snapshotRequests.push(prompt);
+          snapshotSystemRequests.push(parsed.input?.filter((message) => message.role === "system").map((message) => message.content ?? "").join("\n") ?? "");
           if (capturePostDeactivationRequests) {
             postDeactivationRequests.push(prompt);
           }
@@ -1826,13 +1851,21 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           [snapshotCustomerSessionId, pinnedScenarioId],
           [snapshotStandardSessionId, scenario.id],
         ]) {
-          const continued = await call(turnPath, {
+          const continuationBody = {
             scenarioId, trainingId: topic.id, simulationSessionId, industryId: snapshotIndustryId,
             industryBaseline: "CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT",
             difficulty: db.config.defaultDifficulty, personaStyle: "defensive",
             history: [{ role: "user", content: "Please help with the account." }],
-          });
+          };
+          const continued = await call(turnPath, continuationBody);
           assert.equal(continued.status, 200, JSON.stringify(continued.body));
+          assert.equal(snapshotCacheEvents.at(-1)?.cacheStatus, "miss");
+          const missSystem = snapshotSystemRequests.at(-1)!;
+          assert.match(missSystem, /SNAPSHOT_ORIGINAL_BASELINE/);
+          const continuedHit = await call(turnPath, continuationBody);
+          assert.equal(continuedHit.status, 200, JSON.stringify(continuedHit.body));
+          assert.equal(snapshotCacheEvents.at(-1)?.cacheStatus, "hit");
+          assert.equal(snapshotSystemRequests.at(-1), missSystem, "snapshot cache hit and miss system prompts remain byte-identical after deactivation");
           const scored = await call(`/mobile/users/${user.id}/ai/score`, {
             scenarioId, trainingId: topic.id, simulationSessionId, industryId: snapshotIndustryId,
             startedAt: now, endedAt: new Date(Date.now() + 3_000).toISOString(),
@@ -1874,9 +1907,13 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           "SELECT industry_id FROM score_records WHERE simulation_session_id=$1",
           [snapshotCustomerSessionId],
         )).rows[0]?.industry_id, snapshotIndustryId);
+        assert.equal((await pool.query<{ industry_id: string | null }>(
+          "SELECT industry_id FROM score_records WHERE simulation_session_id=$1",
+          [snapshotStandardSessionId],
+        )).rows[0]?.industry_id, snapshotIndustryId);
         const postDeactivationRoleplay = postDeactivationRequests.filter((prompt) => !prompt.includes("expert communication coach"));
         const postDeactivationScoring = postDeactivationRequests.filter((prompt) => prompt.includes("expert communication coach"));
-        assert.equal(postDeactivationRoleplay.length, 3);
+        assert.equal(postDeactivationRoleplay.length, 5);
         assert.equal(postDeactivationScoring.length, 3);
         assert.equal(postDeactivationRoleplay.every((prompt) => prompt.includes("SNAPSHOT_ORIGINAL_BASELINE")), true);
         assert.equal(postDeactivationRoleplay.every((prompt) => prompt.includes(originalIndustry.label)), true);
@@ -1890,8 +1927,34 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_RUNTIME_MARKER")), true);
         assert.equal(postDeactivationRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_SCORING_GUIDANCE")), true);
         assert.equal(snapshotRequests.filter((prompt) => prompt.includes("expert communication coach")).length, 5);
+        const beforeDeniedRequests = snapshotRequests.length;
+        // A NULL-snapshot registered session must revalidate current scenario
+        // eligibility on both hits and misses, unlike durable snapshot sessions.
+        for (const simulationSessionId of [parityLegacySessionId, parityLegacyColdSessionId]) {
+          const deniedTurn = await call(turnPath, {
+            scenarioId: scenario.id, trainingId: topic.id, simulationSessionId,
+            industryId: snapshotIndustryId, difficulty: db.config.defaultDifficulty,
+            personaStyle: db.config.defaultPersonaStyle,
+            history: [{ role: "user", content: "Please help with the account." }],
+          });
+          assert.equal(deniedTurn.status, 400, JSON.stringify(deniedTurn.body));
+          const deniedScore = await call(`/mobile/users/${user.id}/ai/score`, { ...parityScoreBody, simulationSessionId });
+          assert.equal(deniedScore.status, 400, JSON.stringify(deniedScore.body));
+        }
+        // Valid credentials for a different user cannot replay a cached,
+        // authorized snapshot session through either provider route.
+        for (const route of ["turn", "score"]) {
+          const replay = await fetch(`${base}/mobile/users/${scopedUserAdmin.id}/ai/${route}`, {
+            method: "POST", headers: { Authorization: `Bearer ${scopedMobileToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ ...parityScoreBody, simulationSessionId: snapshotStandardSessionId,
+              difficulty: db.config.defaultDifficulty, personaStyle: "defensive" }),
+          });
+          assert.equal(replay.status, 404);
+        }
+        assert.equal(snapshotRequests.length, beforeDeniedRequests, "denied NULL-snapshot/replayed sessions never reach the provider");
       } finally {
         globalThis.fetch = snapshotFetch;
+        console.log = snapshotLog;
         await storage.updateAppStateWithLock((raw) => {
           const state = imported.ensureDatabaseShape(raw);
           state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId

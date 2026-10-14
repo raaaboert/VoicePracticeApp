@@ -6,6 +6,7 @@ import test from "node:test";
 import { Pool } from "pg";
 import { createDatabaseStorage } from "./storage.js";
 import { createOrgModuleEntitlementStore } from "./storage/orgModuleEntitlementStore.js";
+import { assertIndustryCacheParity } from "./industryRuntimeCache.testSupport.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
 
@@ -21,6 +22,7 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
     await setup.query(`CREATE SCHEMA "${schema}"`);
     const scoped = new URL(databaseUrl);
     scoped.searchParams.set("options", `-c search_path=${schema}`);
+    scoped.searchParams.set("application_name", schema);
     const url = scoped.toString();
     pool = new Pool({ connectionString: url, max: 3 });
     const entitlements = createOrgModuleEntitlementStore({ provider: "postgres", databaseUrl: url,
@@ -45,7 +47,8 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
     const user = { ...sourceUser, id: "user_industry_legacy", orgId: org.id, orgRole: "user" as const,
       firstName: "Legacy", lastName: "Learner",
       status: "active" as const, emailVerifiedAt: now, mobileProfileReonboardingRequired: false };
-    db.orgs = [org]; db.users = [user]; db.orgTrainings = [];
+    const otherUser = { ...user, id: "user_industry_other", email: "other@industry.integration.test" };
+    db.orgs = [org]; db.users = [user, otherUser]; db.orgTrainings = [];
     const segment = db.config.segments.find((role) => role.id === "solution_manager")!;
     const scenario = segment.scenarios.find((row) => row.enabled)!;
     const original = db.config.industries.find((row) => row.id === "people_management")!;
@@ -72,6 +75,12 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
       return { status: response.status, body: await response.json() as Record<string, unknown> };
     };
     const persisted = async () => (await pool!.query("SELECT state_json FROM app_state WHERE id='primary'")).rows[0].state_json;
+    // Complete lazy session-store initialization before unregistered provider
+    // requests can schedule best-effort session touches in the background.
+    assert.equal((await call(`/mobile/users/${user.id}/simulation-sessions/start`, {
+      simulationSessionId: `separate_registered_session_${randomUUID()}`,
+      segmentId: segment.id, scenarioId: scenario.id,
+    })).status, 201);
 
     await t.test("empty global save and final-industry deletion reject before any definitions, mappings or selections change", async () => {
       const before = await persisted();
@@ -97,14 +106,53 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
       assert.deepEqual(restored.orgs.map((row: typeof org) => row.activeIndustries), one.orgs.map((row: typeof org) => row.activeIndustries));
     });
 
+    await t.test("referenced active and inactive organization industries cannot be deleted; unreferenced deletion and enable toggles preserve relationships", async () => {
+      const inactive = await call("/orgs", { name: "Inactive industry reference", activeIndustries: [alternate.id] }, true);
+      assert.equal(inactive.status, 201, JSON.stringify(inactive.body));
+      assert.equal((await call(`/orgs/${inactive.body.id}`, { status: "disabled" }, true, "PATCH")).status, 200);
+      for (const industryId of [original.id, alternate.id]) {
+        const before = await persisted();
+        const rejected = await call("/config", {
+          industries: before.config.industries.filter((row: { id: string }) => row.id !== industryId),
+        }, true, "PATCH");
+        assert.equal(rejected.status, 409, JSON.stringify(rejected.body));
+        assert.deepEqual(await persisted(), before, "rejected deletion leaves definitions, role mappings and org selections unchanged");
+      }
+      const selected = await persisted();
+      assert.equal(selected.orgs.find((row: { id: string }) => row.id === org.id).status, "active");
+      assert.equal(selected.orgs.find((row: { id: string }) => row.id === inactive.body.id).status, "disabled");
+      assert.deepEqual(selected.orgs.filter((row: { activeIndustries: string[] }) => row.activeIndustries.includes(alternate.id))
+        .map((row: { id: string }) => row.id), [inactive.body.id]);
+      for (const enabled of [false, true]) {
+        assert.equal((await call("/config", { industries: [
+          { ...original, enabled }, alternate,
+        ] }, true, "PATCH")).status, 200);
+        const state = await persisted();
+        assert.equal(state.config.industries.find((row: { id: string }) => row.id === original.id).enabled, enabled);
+        assert.deepEqual(state.config.roleIndustries, selected.config.roleIndustries);
+        assert.deepEqual(state.orgs, selected.orgs);
+      }
+      const unused = { ...alternate, id: "unreferenced_industry", label: "Unreferenced industry" };
+      assert.equal((await call("/config", { industries: [original, alternate, unused] }, true, "PATCH")).status, 200);
+      const beforeDelete = await persisted();
+      assert.equal((await call("/config", { industries: [original, alternate] }, true, "PATCH")).status, 200);
+      const afterDelete = await persisted();
+      assert.equal(afterDelete.config.industries.some((row: { id: string }) => row.id === unused.id), false);
+      assert.deepEqual(afterDelete.orgs, beforeDelete.orgs);
+      assert.deepEqual(afterDelete.config.roleIndustries, beforeDelete.config.roleIndustries);
+    });
+
+    await t.test("legacy cache hits and misses have identical live industry context after deactivation, reactivation and scenario revocation", async () => {
+      await assertIndustryCacheParity({ mode: "legacy", storage,
+        patch: (path, body) => call(path, body, true, "PATCH"),
+        pool: pool!, call, userId: user.id, otherUserId: otherUser.id, orgId: org.id, segmentId: segment.id, scenarioId: scenario.id,
+        industryId: original.id, alternateIndustryId: alternate.id });
+    });
+
     await t.test("legacy active configuration works and deactivation rejects unregistered stale turn and score without provider calls", async () => {
       const config = await call(`/mobile/users/${user.id}/config`);
       assert.equal(config.status, 200);
       assert.equal(((config.body.config ?? config.body) as { industries: Array<{ id: string }> }).industries.some((row) => row.id === original.id), true);
-      assert.equal((await call(`/mobile/users/${user.id}/simulation-sessions/start`, {
-        simulationSessionId: `separate_registered_session_${randomUUID()}`,
-        segmentId: segment.id, scenarioId: scenario.id,
-      })).status, 201);
       let providerCalls = 0;
       const savedFetch = globalThis.fetch;
       globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -148,6 +196,19 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
   } finally {
     if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
     await pool?.end();
-    try { await setup.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`); } finally { await setup.end(); }
+    try {
+      // Provider routes persist usage after sending the response. Wait for this
+      // harness's tagged connections to become idle before destructive teardown;
+      // otherwise DROP can deadlock with employee-claim/app-state writes.
+      const deadline = Date.now() + 10_000;
+      let idleSamples = 0;
+      while (idleSamples < 3) {
+        const active = await setup.query("SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND state <> 'idle'", [schema]);
+        idleSamples = active.rowCount === 0 ? idleSamples + 1 : 0;
+        assert.ok(Date.now() < deadline, "local integration database writes did not settle before teardown");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await setup.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    } finally { await setup.end(); }
   }
 });
