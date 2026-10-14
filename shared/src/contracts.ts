@@ -1201,6 +1201,8 @@ export interface SimulationSessionIndustrySnapshotIndustry {
 export interface SimulationSessionIndustrySnapshot {
   version: 1;
   capturedAt: string;
+  /** Server-resolved scenario kind when it was available at session start. */
+  scenarioKind: "standard" | "org" | null;
   eligibleIndustries: SimulationSessionIndustrySnapshotIndustry[];
   selection: {
     industryId: string | null;

@@ -53,8 +53,8 @@ function parseSnapshotIndustry(value: unknown): SimulationSessionIndustrySnapsho
   }
   const candidate = value as Record<string, unknown>;
   const id = normalizedText(candidate.id);
-  const label = normalizedText(candidate.label);
-  if (!id || !label || typeof candidate.promptBaseline !== "string"
+  const label = typeof candidate.label === "string" ? candidate.label : null;
+  if (!id || label === null || typeof candidate.promptBaseline !== "string"
     || typeof candidate.rawScoringAiBaseline !== "string"
     || typeof candidate.standardScoringGuidance !== "string") {
     return null;
@@ -96,13 +96,20 @@ export function parseSimulationSessionIndustrySnapshot(value: unknown): Simulati
     return null;
   }
   const industries = eligibleIndustries as SimulationSessionIndustrySnapshotIndustry[];
+  const scenarioKind = candidate.scenarioKind === undefined || candidate.scenarioKind === null
+    ? null
+    : candidate.scenarioKind === "standard" || candidate.scenarioKind === "org"
+      ? candidate.scenarioKind
+      : undefined;
   if (new Set(industries.map((industry) => industry.id)).size !== industries.length
+    || scenarioKind === undefined
     || (industryId !== null && !industries.some((industry) => industry.id === industryId))) {
     return null;
   }
   return {
     version: SIMULATION_SESSION_INDUSTRY_SNAPSHOT_VERSION,
     capturedAt,
+    scenarioKind,
     eligibleIndustries: industries,
     selection: { industryId, lockedAt },
   };
@@ -112,6 +119,7 @@ export function buildSimulationSessionIndustrySnapshot(params: {
   eligibleIndustryIds: readonly string[];
   industries: readonly IndustryDefinition[];
   canonicalIndustries?: readonly IndustryDefinition[];
+  scenarioKind?: "standard" | "org" | null;
   capturedAt: Date;
 }): SimulationSessionIndustrySnapshot {
   const seen = new Set<string>();
@@ -139,6 +147,7 @@ export function buildSimulationSessionIndustrySnapshot(params: {
   return {
     version: SIMULATION_SESSION_INDUSTRY_SNAPSHOT_VERSION,
     capturedAt: params.capturedAt.toISOString(),
+    scenarioKind: params.scenarioKind ?? null,
     eligibleIndustries,
     selection: { industryId: null, lockedAt: null },
   };

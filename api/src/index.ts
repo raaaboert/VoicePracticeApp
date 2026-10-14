@@ -2001,6 +2001,11 @@ async function resolveSimulationRuntimeBundle(params: {
       anchoredTrainingPackId = registered.trainingPackId ?? null;
       registeredScenarioVersionId = registered.scenarioVersionId ?? null;
       assignmentUsesTopicConfig = true;
+      if (isMalformedSessionIndustrySnapshot(registered)) {
+        logMalformedSessionIndustrySnapshot(registered);
+        params.response.status(409).json({ error: "Simulation session industry context is invalid." });
+        return null;
+      }
     } else {
       if (params.requireRegisteredSession && params.trainingId) {
         params.response.status(404).json({ error: "Simulation session is not available." });
@@ -2110,23 +2115,20 @@ async function resolveSimulationRuntimeBundle(params: {
   if (runtimeConfig.focusTopicAuthority === "assignments"
     && registeredSession?.industrySnapshot?.eligibleIndustries.length
     && !registeredScenarioVersionId) {
-    const snapshotSession = registeredSession;
-    const industrySnapshot = registeredSession.industrySnapshot;
-    const segment = params.db.config.segments.find((entry) => entry.id === snapshotSession.segmentId && entry.enabled === true);
-    const scenario = segment?.scenarios.find((entry) => entry.id === params.scenarioId && entry.enabled !== false) ?? null;
-    if (!segment || !scenario) {
+    const snapshotScenario = params.org
+      ? resolveSnapshotBackedUnversionedScenario({
+          db: params.db,
+          org: params.org,
+          session: registeredSession,
+          authorizedScenario: resolvedScenario,
+          canonicalTrainingId: authoritativeTrainingId,
+        })
+      : null;
+    if (!snapshotScenario) {
       params.response.status(404).json({ error: "Simulation scenario is not available." });
       return null;
     }
-    resolvedScenario = {
-      source: "standard",
-      segment,
-      scenario,
-      scenarioVersionId: null,
-      canonicalTrainingId: authoritativeTrainingId,
-      allowedIndustryIds: industrySnapshot.eligibleIndustries.map((industry) => industry.id),
-      scoringGuidance: null,
-    };
+    resolvedScenario = snapshotScenario;
   }
   if (!resolvedScenario) {
     const shouldBootstrapTrainingWorkspace = shouldBootstrapTrainingWorkspaceForSimulationRoute({
@@ -10818,6 +10820,74 @@ function resolveMobileScenarioForUser(
   };
 }
 
+function resolveSnapshotBackedUnversionedScenario(params: {
+  db: ApiDatabase;
+  org: EnterpriseOrg;
+  session: SimulationSessionRecord;
+  authorizedScenario: ResolvedMobileScenarioContext | null;
+  canonicalTrainingId: string | null;
+}): ResolvedMobileScenarioContext | null {
+  const snapshot = params.session.industrySnapshot;
+  if (!snapshot || params.session.orgId !== params.org.id) {
+    return null;
+  }
+  const segment = params.db.config.segments.find(
+    (entry) => entry.id === params.session.segmentId && entry.enabled === true,
+  );
+  if (!segment) {
+    return null;
+  }
+  const standardScenario = segment.scenarios.find(
+    (entry) => entry.id === params.session.scenarioId && entry.enabled !== false,
+  ) ?? null;
+  const customScenario = normalizeOrgCustomScenarioList(
+    params.org.customScenarios,
+    params.org.id,
+    nowIso(),
+  ).find((entry) => entry.id === params.session.scenarioId
+    && entry.segmentId === segment.id
+    && entry.enabled === true) ?? null;
+  const preferredSource = snapshot.scenarioKind === "org"
+    ? "custom"
+    : snapshot.scenarioKind === "standard"
+      ? "standard"
+      : params.authorizedScenario?.source ?? null;
+  const useCustom = preferredSource === "custom"
+    ? Boolean(customScenario)
+    : preferredSource === "standard"
+      ? false
+      : Boolean(customScenario && !standardScenario);
+  const useStandard = preferredSource === "standard"
+    ? Boolean(standardScenario)
+    : preferredSource === "custom"
+      ? false
+      : Boolean(standardScenario && !customScenario);
+  const allowedIndustryIds = snapshot.eligibleIndustries.map((industry) => industry.id) as IndustryId[];
+  if (useCustom && customScenario) {
+    return {
+      source: "custom",
+      segment,
+      scenario: buildRuntimeScenarioFromOrgCustomScenario(customScenario, segment.label),
+      scenarioVersionId: null,
+      canonicalTrainingId: params.canonicalTrainingId,
+      allowedIndustryIds,
+      scoringGuidance: customScenario.scoringGuidance?.trim() || null,
+    };
+  }
+  if (useStandard && standardScenario) {
+    return {
+      source: "standard",
+      segment,
+      scenario: standardScenario,
+      scenarioVersionId: null,
+      canonicalTrainingId: params.canonicalTrainingId,
+      allowedIndustryIds,
+      scoringGuidance: null,
+    };
+  }
+  return null;
+}
+
 function buildRuntimeScenarioFromOrgCustomScenario(
   customScenario: OrgCustomScenario,
   traineeSegmentLabel: string,
@@ -12096,6 +12166,17 @@ function resolveAiIndustryPromptContextForAllowedIndustries(
 
 class SessionIndustrySnapshotSelectionError extends Error {}
 
+function isMalformedSessionIndustrySnapshot(session: SimulationSessionRecord): boolean {
+  return session.industrySnapshot === undefined;
+}
+
+function logMalformedSessionIndustrySnapshot(session: SimulationSessionRecord): void {
+  logWarnThrottled(
+    `simulation-industry-snapshot:${session.simulationSessionId}`,
+    `[simulation-industry-snapshot] malformed or unsupported snapshot for session ${session.simulationSessionId}`,
+  );
+}
+
 async function resolveSessionIndustrySnapshotContext(params: {
   session: SimulationSessionRecord;
   requestedIndustryId: unknown;
@@ -12107,6 +12188,10 @@ async function resolveSessionIndustrySnapshotContext(params: {
 } | null> {
   let session = params.session;
   let snapshot = session.industrySnapshot;
+  if (snapshot === undefined) {
+    logMalformedSessionIndustrySnapshot(session);
+    throw new SessionIndustrySnapshotSelectionError("Simulation session industry context is invalid.");
+  }
   if (!snapshot) {
     return null;
   }
@@ -12132,6 +12217,21 @@ async function resolveSessionIndustrySnapshotContext(params: {
     session = locked;
     snapshot = locked.industrySnapshot;
     if (snapshot.selection.industryId !== requestedIndustryId) {
+      throw new SessionIndustrySnapshotSelectionError("Simulation session industry selection is already locked.");
+    }
+  } else if (snapshot.eligibleIndustries.length === 1) {
+    const soleIndustryId = snapshot.eligibleIndustries[0]!.id;
+    const locked = await simulationSessionStore.lockIndustrySelection({
+      simulationSessionId: session.simulationSessionId,
+      industryId: soleIndustryId,
+      lockedAt: new Date().toISOString(),
+    });
+    if (!locked?.industrySnapshot) {
+      throw new SessionIndustrySnapshotSelectionError("Simulation session industry context is unavailable.");
+    }
+    session = locked;
+    snapshot = locked.industrySnapshot;
+    if (snapshot.selection.industryId !== soleIndustryId) {
       throw new SessionIndustrySnapshotSelectionError("Simulation session industry selection is already locked.");
     }
   }
@@ -24986,6 +25086,11 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         response.status(404).json({ error: "Simulation session is not available." });
         return null;
       }
+      if (assignmentSession && isMalformedSessionIndustrySnapshot(assignmentSession)) {
+        logMalformedSessionIndustrySnapshot(assignmentSession);
+        response.status(409).json({ error: "Simulation session industry context is invalid." });
+        return null;
+      }
       const topicConfig = resolveConfigForUser(db, user, accessContext.actingOrgId, { forAssignedTopic: true });
       if (assignmentSession) {
         authoritativeTrainingId = assignmentSession.trainingId ?? null;
@@ -25016,7 +25121,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         accessContext.actingOrgId, scenarioId, assignmentSession.scenarioVersionId,
       );
       const segmentsForPinnedVersion = runtimeConfig.focusTopicAuthority === "assignments"
-        && recognizedSession?.industrySnapshot?.eligibleIndustries.length
+        && assignmentSession?.industrySnapshot?.eligibleIndustries.length
         ? db.config.segments
         : configForUser.segments;
       const segment = version
@@ -25039,23 +25144,22 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       };
     }
     if (runtimeConfig.focusTopicAuthority === "assignments"
-      && recognizedSession?.industrySnapshot?.eligibleIndustries.length
+      && assignmentSession?.industrySnapshot?.eligibleIndustries.length
       && !assignmentSession?.scenarioVersionId) {
-      const segment = db.config.segments.find((entry) => entry.id === recognizedSession.segmentId && entry.enabled === true);
-      const scenario = segment?.scenarios.find((entry) => entry.id === scenarioId && entry.enabled !== false) ?? null;
-      if (!segment || !scenario) {
+      const snapshotScenario = org
+        ? resolveSnapshotBackedUnversionedScenario({
+            db,
+            org,
+            session: assignmentSession,
+            authorizedScenario: resolvedScenario,
+            canonicalTrainingId: authoritativeTrainingId,
+          })
+        : null;
+      if (!snapshotScenario) {
         response.status(404).json({ error: "Simulation scenario is not available." });
         return null;
       }
-      resolvedScenario = {
-        source: "standard",
-        segment,
-        scenario,
-        scenarioVersionId: null,
-        canonicalTrainingId: authoritativeTrainingId,
-        allowedIndustryIds: recognizedSession.industrySnapshot.eligibleIndustries.map((industry) => industry.id),
-        scoringGuidance: null,
-      };
+      resolvedScenario = snapshotScenario;
     }
     if (!resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for this account." });
@@ -25077,7 +25181,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         canonicalIndustryDefinitions: db.config.industries
       }
     );
-    let snapshotSession = recognizedSession;
+    let snapshotSession = assignmentSession;
     if (snapshotSession?.industrySnapshot) {
       try {
         const snapshotContext = await resolveSessionIndustrySnapshotContext({
@@ -27089,6 +27193,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
           eligibleIndustryIds: resolvedScenario.allowedIndustryIds,
           industries: configForUser.industries,
           canonicalIndustries: db.config.industries,
+          scenarioKind: resolvedScenario.source === "standard" ? "standard" : "org",
           capturedAt: sessionNow,
         }),
         now: sessionNow,

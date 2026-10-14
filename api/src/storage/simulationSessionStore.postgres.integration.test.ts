@@ -52,7 +52,7 @@ test("real PostgreSQL simulation-session industry snapshot migration preserves l
       WHERE table_schema = current_schema() AND table_name = 'simulation_sessions' AND column_name = 'industry_snapshot'
     `);
     assert.equal(column.rowCount, 1);
-    assert.equal((await store.getById("legacy"))?.industrySnapshot, undefined);
+    assert.equal((await store.getById("legacy"))?.industrySnapshot, null);
 
     const snapshot = buildSimulationSessionIndustrySnapshot({
       eligibleIndustryIds: ["industry_a", "industry_b"],
@@ -63,9 +63,32 @@ test("real PostgreSQL simulation-session industry snapshot migration preserves l
       capturedAt: new Date("2026-10-13T12:00:00.000Z"),
     });
     await store.upsertStartedSession({
+      simulationSessionId: "legacy", userId: "user_1", orgId: "org_1", segmentId: "segment_1", scenarioId: "scenario_1",
+      industrySnapshot: snapshot, serverStartedAt: "2026-10-13T12:00:00.000Z", lastSeenAt: "2026-10-13T12:00:00.000Z", status: "started",
+    });
+    assert.equal((await store.getById("legacy"))?.industrySnapshot, null);
+    await store.upsertStartedSession({
       simulationSessionId: "new", userId: "user_1", orgId: "org_1", segmentId: "segment_1", scenarioId: "scenario_1",
       industrySnapshot: snapshot, serverStartedAt: "2026-10-13T12:00:00.000Z", lastSeenAt: "2026-10-13T12:00:00.000Z", status: "started",
     });
+    const replacementSnapshot = buildSimulationSessionIndustrySnapshot({
+      eligibleIndustryIds: ["industry_b"],
+      industries: [
+        { id: "industry_b", label: "Industry B", enabled: true, aiBaseline: "Replacement", standardScoringGuidance: "Replacement score" },
+      ],
+      capturedAt: new Date("2026-10-14T12:00:00.000Z"),
+    });
+    await store.upsertStartedSession({
+      simulationSessionId: "new", userId: "user_1", orgId: "org_1", segmentId: "segment_1", scenarioId: "scenario_1",
+      industrySnapshot: replacementSnapshot, serverStartedAt: "2026-10-14T12:00:00.000Z", lastSeenAt: "2026-10-14T12:00:00.000Z", status: "started",
+    });
+    assert.equal((await store.getById("new"))?.industrySnapshot?.capturedAt, snapshot.capturedAt);
+    await pool.query(`
+      INSERT INTO simulation_sessions (
+        simulation_session_id,user_id,org_id,segment_id,scenario_id,industry_snapshot,server_started_at,last_seen_at,status
+      ) VALUES ('malformed','user_1','org_1','segment_1','scenario_1','{"version":999}'::jsonb,NOW(),NOW(),'started')
+    `);
+    assert.equal((await store.getById("malformed"))?.industrySnapshot, undefined);
     await Promise.all([
       store.lockIndustrySelection({ simulationSessionId: "new", industryId: "industry_a", lockedAt: "2026-10-13T12:01:00.000Z" }),
       store.lockIndustrySelection({ simulationSessionId: "new", industryId: "industry_b", lockedAt: "2026-10-13T12:01:01.000Z" }),

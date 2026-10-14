@@ -58,6 +58,10 @@ test("strictly parses only current structurally valid snapshots", () => {
     eligibleIndustries: [{ ...snapshot.eligibleIndustries[0], promptBaseline: "x".repeat(30_001) }],
   }), null);
   assert.equal(resolveSnapshotIndustry(snapshot, "missing"), null);
+  assert.equal(parseSimulationSessionIndustrySnapshot({
+    ...snapshot,
+    eligibleIndustries: [{ ...snapshot.eligibleIndustries[0], label: "" }],
+  })?.eligibleIndustries[0]?.label, "");
 });
 
 test("uses the established configured, canonical, then default prompt-baseline fallback", () => {

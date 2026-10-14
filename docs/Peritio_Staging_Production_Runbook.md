@@ -35,7 +35,9 @@ The command remains temporarily as a credential-free, side-effect-free compatibi
 
 ## Organization-industry enforcement prerequisite
 
-When organization-industry eligibility enforcement is introduced, allow recognized sessions created before that deployment to drain under their existing legacy resolution path. Newer sessions carry a server-captured industry snapshot and can preserve their originally authorized industry context after later configuration changes. Do not backfill or retroactively reinterpret legacy sessions; schedule enforcement after the remaining active legacy sessions have expired or completed.
+Deploy durable simulation-session industry snapshots to production before introducing organization-industry eligibility enforcement. Wait at least 48 hours after the snapshot deployment, then verify that no recently active, unfinished legacy sessions with a SQL `NULL` snapshot remain before enabling enforcement. Newer sessions carry a server-captured industry snapshot and can preserve their originally authorized industry context after later configuration changes. Do not backfill or retroactively reinterpret legacy sessions.
+
+Before finalizing the readiness query for that deployment, inspect the production `simulation_sessions` schema and verify the actual column names used for status, last activity, and `industry_snapshot`. Build the read-only SQL against that observed schema rather than assuming the current source names.
 
 ## Branch / Release Strategy
 

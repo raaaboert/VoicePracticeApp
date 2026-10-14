@@ -134,7 +134,9 @@ function normalizeSimulationSessionRecord(candidate: unknown): SimulationSession
     scenarioVersionId: normalizeNullableString((candidate as { scenarioVersionId?: unknown }).scenarioVersionId) ?? undefined,
     industrySnapshot: (() => {
       const raw = (candidate as { industrySnapshot?: unknown }).industrySnapshot;
-      if (raw === undefined || raw === null) return undefined;
+      // NULL/missing is a legitimate legacy session. Undefined after this
+      // branch is reserved for a non-null malformed/unsupported snapshot.
+      if (raw === undefined || raw === null) return null;
       return parseSimulationSessionIndustrySnapshot(raw) ?? undefined;
     })(),
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
@@ -217,7 +219,7 @@ function mergeStartedSession(existing: SimulationSessionRecord, incoming: Simula
 
   return {
     ...existing,
-    industrySnapshot: existing.industrySnapshot ?? incoming.industrySnapshot,
+    industrySnapshot: existing.industrySnapshot,
     trainingPackId: existing.trainingPackId ?? incoming.trainingPackId,
     clientStartedAt: compareIsoAscending(existing.clientStartedAt, incoming.clientStartedAt),
     serverStartedAt: compareIsoAscending(existing.serverStartedAt, incoming.serverStartedAt) ?? existing.serverStartedAt,
@@ -683,7 +685,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               segment_id = EXCLUDED.segment_id,
               scenario_id = EXCLUDED.scenario_id,
               scenario_version_id = EXCLUDED.scenario_version_id,
-              industry_snapshot = COALESCE(simulation_sessions.industry_snapshot, EXCLUDED.industry_snapshot),
+              industry_snapshot = simulation_sessions.industry_snapshot,
               training_id = EXCLUDED.training_id,
               training_pack_id = COALESCE(simulation_sessions.training_pack_id, EXCLUDED.training_pack_id),
               client_started_at = COALESCE(simulation_sessions.client_started_at, EXCLUDED.client_started_at),

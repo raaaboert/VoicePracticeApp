@@ -216,10 +216,20 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         name: "Runtime Topic", description: "", status: "active", createdAt: now, updatedAt: now };
       db.orgTrainings.push(topic);
       const customScenarioId = "custom_legacy_only";
+      const snapshotCustomScenarioId = "custom_snapshot_platform_admin";
       org.customScenarios = [...(org.customScenarios ?? []), {
         id: customScenarioId, orgId: org.id, segmentId: segment.id, title: "Legacy-only custom scenario",
         description: "A legacy Topic relationship must not authorize scoring.", aiRole: "Counterpart",
         scoringGuidance: "", applicableIndustryIds: [...org.activeIndustries], enabled: true,
+        provenance: { sourceMode: "scratch", creationMethod: "manual" }, createdBy: "platform_admin",
+        createdAt: now, updatedAt: now,
+      }, {
+        id: snapshotCustomScenarioId, orgId: org.id, segmentId: segment.id,
+        title: "Platform-admin snapshot custom scenario",
+        description: "UNVERSIONED_CUSTOM_RUNTIME_MARKER must remain resolvable from the organization scenario.",
+        desiredOutcome: "UNVERSIONED_CUSTOM_OUTCOME", aiRole: "UNVERSIONED_CUSTOM_COUNTERPART",
+        scoringGuidance: "UNVERSIONED_CUSTOM_SCORING_GUIDANCE",
+        applicableIndustryIds: [org.activeIndustries[0]!], enabled: true,
         provenance: { sourceMode: "scratch", creationMethod: "manual" }, createdBy: "platform_admin",
         createdAt: now, updatedAt: now,
       }];
@@ -291,6 +301,9 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         await authority.attachScenario({ id: "runtime_attachment", orgId: org.id,
           topicId: topic.id, scenarioKind: "standard", scenarioId: scenario.id,
           attachedBy: "platform_admin", attachedAt: now, detachedBy: null, detachedAt: null }, client);
+        await authority.attachScenario({ id: "runtime_custom_snapshot_attachment", orgId: org.id,
+          topicId: topic.id, scenarioKind: "org", scenarioId: snapshotCustomScenarioId,
+          attachedBy: "platform_admin", attachedAt: now, detachedBy: null, detachedAt: null }, client);
         await authority.createAssignment({ ...assignment, id: "foreign_runtime_assignment",
           orgId: foreignOrg.id, topicId: foreignTopic.id }, client);
         await authority.attachScenario({ id: "foreign_runtime_attachment", orgId: foreignOrg.id,
@@ -316,14 +329,15 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal(detail.status, 200, JSON.stringify(detail.body));
       assert.equal((await call(`/mobile/users/${user.id}/focus-topics/${foreignTopic.id}`)).status, 404);
       assert.deepEqual((detail.body.scenarios as Array<{ id: string; trainingId: string | null }>).map((row) =>
-        [row.id, row.trainingId]), [[scenario.id, null]]);
+        [row.id, row.trainingId]).sort(), [[scenario.id, null], [snapshotCustomScenarioId, topic.id]].sort());
       const installedParserUrl = new URL("../../mobile/src/focusTopics/model.ts", import.meta.url).href;
       const installedParser = await import(installedParserUrl) as {
         parseFocusTopicCatalogResponse: (value: unknown) => { topics: Array<{ id: string }> };
         parseFocusTopicDetailResponse: (value: unknown) => { scenarios: Array<{ id: string }> };
       };
       assert.deepEqual(installedParser.parseFocusTopicCatalogResponse(catalog.body).topics.map((row) => row.id), [topic.id]);
-      assert.deepEqual(installedParser.parseFocusTopicDetailResponse(detail.body).scenarios.map((row) => row.id), [scenario.id]);
+      assert.deepEqual(installedParser.parseFocusTopicDetailResponse(detail.body).scenarios.map((row) => row.id).sort(),
+        [scenario.id, snapshotCustomScenarioId].sort());
       const login = await fetch(`${base}/auth/login`, { method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: process.env.ADMIN_BOOTSTRAP_PASSWORD }) });
@@ -1595,6 +1609,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.ok(originalIndustry);
       const snapshotCustomerSessionId = `snapshot_customer_${randomUUID()}`;
       const snapshotStandardSessionId = `snapshot_standard_${randomUUID()}`;
+      const snapshotUnversionedCustomSessionId = `snapshot_unversioned_custom_${randomUUID()}`;
+      const parityLegacySessionId = `snapshot_parity_legacy_${randomUUID()}`;
       assert.equal((await call(startPath, {
         simulationSessionId: snapshotCustomerSessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
         trainingId: topic.id, clientStartedAt: now,
@@ -1603,6 +1619,15 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         simulationSessionId: snapshotStandardSessionId, segmentId: segment.id, scenarioId: scenario.id,
         trainingId: topic.id, clientStartedAt: now,
       })).status, 201);
+      assert.equal((await call(startPath, {
+        simulationSessionId: snapshotUnversionedCustomSessionId, segmentId: segment.id,
+        scenarioId: snapshotCustomScenarioId, trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      assert.equal((await call(startPath, {
+        simulationSessionId: parityLegacySessionId, segmentId: segment.id, scenarioId: scenario.id,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      await pool.query("UPDATE simulation_sessions SET industry_snapshot=NULL WHERE simulation_session_id=$1", [parityLegacySessionId]);
       const snapshotV3Draft = {
         ...pinnedV2Draft,
         title: "Snapshot V3 title",
@@ -1614,6 +1639,28 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/submit`, "POST")).status, 200);
       assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/approve`, "POST", { reviewNote: "v3" })).status, 200);
       assert.equal((await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST")).status, 200);
+      const unauthorizedScoreResponse = await fetch(
+        `${base}/mobile/users/${scopedUserAdmin.id}/ai/score`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${scopedMobileToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scenarioId: pinnedScenarioId, trainingId: topic.id,
+            simulationSessionId: snapshotCustomerSessionId, industryId: snapshotIndustryId,
+            startedAt: now, endedAt: new Date(Date.now() + 1_000).toISOString(),
+            history: [
+              { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand." },
+              { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify it." },
+              { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose next steps." },
+            ],
+          }),
+        },
+      );
+      assert.equal(unauthorizedScoreResponse.status, 404);
+      assert.equal((await pool.query<{ locked_industry: string | null }>(
+        "SELECT industry_snapshot #>> '{selection,industryId}' AS locked_industry FROM simulation_sessions WHERE simulation_session_id=$1",
+        [snapshotCustomerSessionId],
+      )).rows[0]?.locked_industry, null);
       const snapshotRequests: string[] = [];
       const snapshotFetch = globalThis.fetch;
       globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1646,6 +1693,39 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           });
           assert.equal(locked.status, 200, JSON.stringify(locked.body));
         }
+        const autoLockedCustom = await call(turnPath, {
+          scenarioId: snapshotCustomScenarioId, trainingId: topic.id,
+          simulationSessionId: snapshotUnversionedCustomSessionId,
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
+          history: [{ role: "user", content: "Please help with the unversioned scenario." }],
+        });
+        assert.equal(autoLockedCustom.status, 200, JSON.stringify(autoLockedCustom.body));
+        const parityLegacyTurn = await call(turnPath, {
+          scenarioId: scenario.id, trainingId: topic.id, simulationSessionId: parityLegacySessionId,
+          industryId: snapshotIndustryId, difficulty: db.config.defaultDifficulty,
+          personaStyle: db.config.defaultPersonaStyle,
+          history: [{ role: "user", content: "Please help with the account." }],
+        });
+        assert.equal(parityLegacyTurn.status, 200, JSON.stringify(parityLegacyTurn.body));
+        assert.equal(snapshotRequests[1], snapshotRequests[3]);
+        const parityScoreBody = {
+          scenarioId: scenario.id, trainingId: topic.id, industryId: snapshotIndustryId,
+          startedAt: now, endedAt: new Date(Date.now() + 2_500).toISOString(),
+          history: [
+            { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand the concern." },
+            { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify the blocker." },
+            { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose owners and a review date." },
+          ],
+        };
+        const snapshotParityScore = await call(`/mobile/users/${user.id}/ai/score`, {
+          ...parityScoreBody, simulationSessionId: snapshotStandardSessionId,
+        });
+        assert.equal(snapshotParityScore.status, 201, JSON.stringify(snapshotParityScore.body));
+        const legacyParityScore = await call(`/mobile/users/${user.id}/ai/score`, {
+          ...parityScoreBody, simulationSessionId: parityLegacySessionId,
+        });
+        assert.equal(legacyParityScore.status, 201, JSON.stringify(legacyParityScore.body));
+        assert.equal(snapshotRequests[4], snapshotRequests[5]);
         const conflictingSelection = await call(turnPath, {
           scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: snapshotCustomerSessionId,
           industryId: "invalid_industry", difficulty: db.config.defaultDifficulty,
@@ -1655,15 +1735,17 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.equal(conflictingSelection.status, 400, JSON.stringify(conflictingSelection.body));
         const snapshots = await pool.query<{ simulation_session_id: string; industry_snapshot: { selection?: { industryId?: string } } }>(
           "SELECT simulation_session_id,industry_snapshot FROM simulation_sessions WHERE simulation_session_id = ANY($1::text[])",
-          [[snapshotCustomerSessionId, snapshotStandardSessionId]],
+          [[snapshotCustomerSessionId, snapshotStandardSessionId, snapshotUnversionedCustomSessionId]],
         );
-        assert.equal(snapshots.rows.length, 2);
+        assert.equal(snapshots.rows.length, 3);
         assert.deepEqual(snapshots.rows.map((row) => row.industry_snapshot.selection?.industryId).sort(),
-          [snapshotIndustryId, snapshotIndustryId]);
+          [snapshotIndustryId, snapshotIndustryId, snapshotIndustryId]);
         await storage.updateAppStateWithLock((raw) => {
           const state = imported.ensureDatabaseShape(raw);
           state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId
-            ? { ...entry, enabled: false, aiBaseline: "MUTATED INDUSTRY BASELINE MUST NOT REACH PINNED SESSIONS" }
+            ? { ...entry, enabled: false,
+                aiBaseline: "MUTATED INDUSTRY BASELINE MUST NOT REACH PINNED SESSIONS",
+                standardScoringGuidance: "MUTATED INDUSTRY SCORING MUST NOT REACH PINNED SESSIONS" }
             : entry);
           return { result: undefined, shouldSave: true, state };
         });
@@ -1689,10 +1771,50 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           });
           assert.equal(scored.status, 201, JSON.stringify(scored.body));
         }
+        const unversionedContinued = await call(turnPath, {
+          scenarioId: snapshotCustomScenarioId, trainingId: topic.id,
+          simulationSessionId: snapshotUnversionedCustomSessionId,
+          difficulty: db.config.defaultDifficulty, personaStyle: "defensive",
+          history: [{ role: "user", content: "Continue the original unversioned scenario." }],
+        });
+        assert.equal(unversionedContinued.status, 200, JSON.stringify(unversionedContinued.body));
+        const unversionedScored = await call(`/mobile/users/${user.id}/ai/score`, {
+          scenarioId: snapshotCustomScenarioId, trainingId: topic.id,
+          simulationSessionId: snapshotUnversionedCustomSessionId,
+          startedAt: now, endedAt: new Date(Date.now() + 4_000).toISOString(),
+          history: [
+            { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand the concern." },
+            { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify the blocker." },
+            { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose owners and a review date." },
+          ],
+        });
+        assert.equal(unversionedScored.status, 201, JSON.stringify(unversionedScored.body));
+        assert.equal((await pool.query<{ industry_id: string | null }>(
+          "SELECT industry_id FROM score_records WHERE simulation_session_id=$1",
+          [snapshotUnversionedCustomSessionId],
+        )).rows[0]?.industry_id, snapshotIndustryId);
+        assert.deepEqual((await pool.query<{ scenario_version_id: string | null }>(
+          "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1",
+          [snapshotCustomerSessionId],
+        )).rows[0], { scenario_version_id: pinnedV2Id });
+        assert.equal((await pool.query<{ industry_id: string | null }>(
+          "SELECT industry_id FROM score_records WHERE simulation_session_id=$1",
+          [snapshotCustomerSessionId],
+        )).rows[0]?.industry_id, snapshotIndustryId);
         assert.equal(snapshotRequests.some((prompt) => prompt.includes("MUTATED INDUSTRY BASELINE")), false);
+        assert.equal(snapshotRequests.some((prompt) => prompt.includes("MUTATED INDUSTRY SCORING")), false);
         assert.equal(snapshotRequests.some((prompt) => prompt.includes("CLIENT BASELINE MUST NOT OVERRIDE SERVER SNAPSHOT")), false);
         assert.equal(snapshotRequests.some((prompt) => /SNAPSHOT_V3_RUNTIME_CONTENT|SNAPSHOT_V3_COUNTERPART_ROLE/.test(prompt)), false);
-        assert.equal(snapshotRequests.filter((prompt) => prompt.includes("expert communication coach")).length, 2);
+        assert.equal(snapshotRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_RUNTIME_MARKER")), true);
+        assert.equal(snapshotRequests.some((prompt) => prompt.includes("UNVERSIONED_CUSTOM_SCORING_GUIDANCE")), true);
+        if (originalIndustry.aiBaseline?.trim()) {
+          assert.equal(snapshotRequests.some((prompt) => prompt.includes(originalIndustry.aiBaseline!.trim())), true);
+        }
+        if (originalIndustry.standardScoringGuidance?.trim()) {
+          assert.equal(snapshotRequests.some((prompt) => prompt.includes(originalIndustry.standardScoringGuidance!.trim())), true);
+        }
+        assert.equal(snapshotRequests.some((prompt) => prompt.includes(originalIndustry.label)), true);
+        assert.equal(snapshotRequests.filter((prompt) => prompt.includes("expert communication coach")).length, 5);
       } finally {
         globalThis.fetch = snapshotFetch;
         await storage.updateAppStateWithLock((raw) => {
@@ -1703,6 +1825,68 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           return { result: undefined, shouldSave: true, state };
         });
       }
+      const emptyIndustrySessionId = `snapshot_empty_${randomUUID()}`;
+      assert.equal((await call(startPath, {
+        simulationSessionId: emptyIndustrySessionId, segmentId: segment.id, scenarioId: scenario.id,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      await pool.query(
+        "UPDATE simulation_sessions SET industry_snapshot=$2::jsonb WHERE simulation_session_id=$1",
+        [emptyIndustrySessionId, JSON.stringify({
+          version: 1, capturedAt: now, scenarioKind: "standard", eligibleIndustries: [],
+          selection: { industryId: null, lockedAt: null },
+        })],
+      );
+      const emptyIndustryTurn = await withMockResponses("Empty-industry continuation.", () => call(turnPath, {
+        scenarioId: scenario.id, trainingId: topic.id, simulationSessionId: emptyIndustrySessionId,
+        difficulty: db.config.defaultDifficulty, personaStyle: "skeptical",
+        history: [{ role: "user", content: "Continue without an industry." }],
+      }));
+      assert.equal(emptyIndustryTurn.status, 200, JSON.stringify(emptyIndustryTurn.body));
+
+      const legacyNullSessionId = `snapshot_legacy_null_${randomUUID()}`;
+      assert.equal((await call(startPath, {
+        simulationSessionId: legacyNullSessionId, segmentId: segment.id, scenarioId: scenario.id,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      await pool.query(
+        "UPDATE simulation_sessions SET industry_snapshot=NULL WHERE simulation_session_id=$1",
+        [legacyNullSessionId],
+      );
+      const legacyNullTurn = await withMockResponses("Legacy continuation.", () => call(turnPath, {
+        scenarioId: scenario.id, trainingId: topic.id, simulationSessionId: legacyNullSessionId,
+        difficulty: db.config.defaultDifficulty, personaStyle: "skeptical",
+        history: [{ role: "user", content: "Continue the legacy session." }],
+      }));
+      assert.equal(legacyNullTurn.status, 200, JSON.stringify(legacyNullTurn.body));
+
+      const malformedSnapshotSessionId = `snapshot_malformed_${randomUUID()}`;
+      assert.equal((await call(startPath, {
+        simulationSessionId: malformedSnapshotSessionId, segmentId: segment.id, scenarioId: scenario.id,
+        trainingId: topic.id, clientStartedAt: now,
+      })).status, 201);
+      await pool.query(
+        "UPDATE simulation_sessions SET industry_snapshot='{\"version\":999}'::jsonb WHERE simulation_session_id=$1",
+        [malformedSnapshotSessionId],
+      );
+      const malformedTurn = await call(turnPath, {
+        scenarioId: scenario.id, trainingId: topic.id, simulationSessionId: malformedSnapshotSessionId,
+        difficulty: db.config.defaultDifficulty, personaStyle: "skeptical",
+        history: [{ role: "user", content: "This must fail safely." }],
+      });
+      assert.equal(malformedTurn.status, 409, JSON.stringify(malformedTurn.body));
+      assert.equal(malformedTurn.body.error, "Simulation session industry context is invalid.");
+      const malformedScore = await call(`/mobile/users/${user.id}/ai/score`, {
+        scenarioId: scenario.id, trainingId: topic.id, simulationSessionId: malformedSnapshotSessionId,
+        startedAt: now, endedAt: new Date(Date.now() + 5_000).toISOString(),
+        history: [
+          { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand." },
+          { role: "assistant", content: "The team is behind." }, { role: "user", content: "Let us identify it." },
+          { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose next steps." },
+        ],
+      });
+      assert.equal(malformedScore.status, 409, JSON.stringify(malformedScore.body));
+      assert.equal(malformedScore.body.error, "Simulation session industry context is invalid.");
       const unclaimedCustomScore = await call(`/mobile/users/${user.id}/ai/score`, {
         scenarioId: customScenarioId, startedAt: now, endedAt: new Date(Date.now() + 1000).toISOString(),
         history: [
