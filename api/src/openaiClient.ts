@@ -1,4 +1,5 @@
 import type { OpenAiCompletionApiFamily, OpenAiReasoningEffort } from "./openaiModelConfig.js";
+import { safeErrorDiagnostics } from "./services/safeErrors.js";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
@@ -116,10 +117,6 @@ function formatTimeoutSeconds(timeoutMs: number): number {
   return Math.ceil(timeoutMs / 1000);
 }
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -177,13 +174,13 @@ async function runOpenAiRequestWithTimeout<T>(params: OpenAiRequestLogContext & 
     if (timedOut || isAbortError(error)) {
       const timeoutError = params.createTimeoutError(timeoutMs);
       logOpenAiRequest("openai_request_timeout", params, startedAtMs, timeoutMs, {
-        error: timeoutError.message,
+        ...safeErrorDiagnostics(timeoutError),
       });
       throw timeoutError;
     }
 
     logOpenAiRequest("openai_request_error", params, startedAtMs, timeoutMs, {
-      error: getErrorMessage(error),
+      ...safeErrorDiagnostics(error),
     });
     throw error;
   } finally {

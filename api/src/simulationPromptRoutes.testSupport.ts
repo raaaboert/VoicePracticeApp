@@ -60,6 +60,7 @@ interface ProviderRequestBody {
 }
 
 export interface PromptRouteHarness {
+  request(path: string, init?: RequestInit): Promise<Response>;
   captureFamily(params: {
     orgId: string;
     scenarioId: string;
@@ -484,6 +485,7 @@ export async function startPromptRouteHarness(params: {
   trainingPacks?: TrainingPack[];
   scoringModel?: string;
   scoringReasoningEffort?: string;
+  remoteTtsEnabled?: boolean;
 }): Promise<PromptRouteHarness> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "simulation-prompt-routes-"));
   const dbPath = path.join(tempDir, "db.local.json");
@@ -504,6 +506,7 @@ export async function startPromptRouteHarness(params: {
     scoringModel,
     params.scoringReasoningEffort,
   );
+  if (params.remoteTtsEnabled) process.env.ENABLE_REMOTE_TTS = "true";
 
   const imported = await import("./index.js");
   const trainingPacks = params.trainingPacks ?? [];
@@ -588,6 +591,12 @@ export async function startPromptRouteHarness(params: {
   }
 
   return {
+    async request(requestPath, init = {}) {
+      const headers = new Headers(init.headers);
+      if (!headers.has("Authorization")) headers.set("Authorization", `Bearer ${MOBILE_TOKEN}`);
+      if (!headers.has("X-Superuser-Org-Id")) headers.set("X-Superuser-Org-Id", STANDARD_ORG_ID);
+      return originalFetch(baseUrl + requestPath, { ...init, headers });
+    },
     async captureFamily(familyParams): Promise<CapturedPromptFamily> {
       const commonBody = {
         scenarioId: familyParams.scenarioId,

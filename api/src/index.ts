@@ -216,8 +216,6 @@ import {
   formatDialogueForEvaluation
 } from "./aiPrompts.js";
 import {
-  OpenAiSpeechRequestError,
-  OpenAiResponsesRequestError,
   requestCompletion,
   requestSpeechSynthesis,
   requestTranscription
@@ -245,7 +243,7 @@ import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
-import { createSimulationSessionStore } from "./storage/simulationSessionStore.js";
+import { createSimulationSessionStore, SimulationSessionConflictError } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
@@ -523,6 +521,8 @@ import {
 } from "./services/simulationSessionIndustrySnapshot.js";
 import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/simulationHotPath.js";
 import { createSimulationRuntimeCache, type SimulationRuntimeCacheStatus } from "./services/simulationRuntimeCache.js";
+import { AiBudgetLimitError, SafeAiRouteError, classifyAiRouteError, isAiTimeoutError, respondWithAiRouteError,
+  respondWithUnexpectedError, safeErrorDiagnostics } from "./services/safeErrors.js";
 import {
   buildAdditiveEvaluationScoringGuidance,
   assertValidSimulationScorePayload,
@@ -1055,7 +1055,7 @@ function logSimulationAiMetrics(params: {
   };
 
   if (params.error) {
-    logPayload.error = params.error instanceof Error ? params.error.message : String(params.error);
+    logPayload.error = safeErrorDiagnostics(params.error);
   }
 
   // eslint-disable-next-line no-console
@@ -1121,21 +1121,6 @@ async function requestSimulationCompletion(params: {
     return { completion, latencyMs, apiPathUsed, usageEventId: budgetedCompletion.usageEventId };
   } catch (error) {
     if (apiPathUsed === "responses") {
-      const details =
-        error instanceof OpenAiResponsesRequestError
-          ? {
-              statusCode: error.statusCode ?? null,
-              errorType: error.errorType ?? null,
-              errorCode: error.errorCode ?? null,
-              errorMessage: error.errorMessage ?? error.message
-            }
-          : {
-              statusCode: null,
-              errorType: null,
-              errorCode: null,
-              errorMessage: error instanceof Error ? error.message : String(error)
-            };
-
       // eslint-disable-next-line no-console
       console.error(
         `[ai-responses-error] ${JSON.stringify({
@@ -1143,12 +1128,7 @@ async function requestSimulationCompletion(params: {
           correlationId: params.correlationId,
           route: params.route,
           requestedModel,
-          statusCode: details.statusCode,
-          openAiError: {
-            type: details.errorType,
-            code: details.errorCode,
-            message: details.errorMessage
-          }
+          ...safeErrorDiagnostics(error),
         })}`
       );
     }
@@ -1361,7 +1341,7 @@ function resolveSimulationCorrelationId(request: Request): string {
       : Array.isArray(request.headers["x-correlation-id"])
         ? request.headers["x-correlation-id"][0]?.trim() ?? ""
         : "";
-  if (correlationHeader) {
+  if (/^[A-Za-z0-9_-]{1,80}$/.test(correlationHeader) && !/^sk[-_]/i.test(correlationHeader)) {
     return correlationHeader.slice(0, 80);
   }
 
@@ -1371,7 +1351,7 @@ function resolveSimulationCorrelationId(request: Request): string {
       : Array.isArray(request.headers["x-request-id"])
         ? request.headers["x-request-id"][0]?.trim() ?? ""
         : "";
-  if (requestHeader) {
+  if (/^[A-Za-z0-9_-]{1,80}$/.test(requestHeader) && !/^sk[-_]/i.test(requestHeader)) {
     return requestHeader.slice(0, 80);
   }
 
@@ -1478,6 +1458,8 @@ type PendingUnifiedSubmitTurnResult =
   | {
       outcome: "error";
       error: string;
+      status: number;
+      code: string;
     };
 
 interface PendingUnifiedSubmitTurnEntry {
@@ -1536,18 +1518,18 @@ function registerPendingUnifiedSubmitTurn(params: {
       return result;
     },
     (error) => {
-      const message = error instanceof Error ? error.message : "Unified simulation turn failed.";
+      const failure = classifyAiRouteError(error);
       // eslint-disable-next-line no-console
       console.warn("[simulation-route]", {
         route: "submit-turn",
         correlationId: params.correlationId,
         stage: "pending_turn_rejected",
         elapsedMs: Date.now() - createdAtMs,
-        error: message,
+        ...safeErrorDiagnostics(error),
       });
       return {
         outcome: "error" as const,
-        error: message,
+        ...failure,
       };
     },
   );
@@ -1861,8 +1843,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       ttsLatencyMs,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Speech prefetch failed.";
-    const timedOut = message.toLowerCase().includes("timed out");
+    const timedOut = isAiTimeoutError(error);
     // eslint-disable-next-line no-console
     console.log("[simulation-speech-prefetch]", {
       route: params.route,
@@ -1876,7 +1857,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       responseFormat: ttsConfig.responseFormat,
       firstChunkChars: firstChunk.length,
       chunkCount: chunks.length,
-      error: message,
+      ...safeErrorDiagnostics(error),
     });
     return null;
   }
@@ -1894,14 +1875,13 @@ async function resolveSpeechPrefetchForAssistantPayload(params: {
     const guardedPrefetchPromise = params.promise
       .then((speechPrefetch) => ({ kind: "prefetch" as const, speechPrefetch }))
       .catch((error) => {
-        const message = error instanceof Error ? error.message : "Speech prefetch failed.";
         // eslint-disable-next-line no-console
         console.warn("[simulation-speech-prefetch]", {
           route: params.route,
           correlationId: params.correlationId,
           stage: "speech_prefetch_error",
           source: "payload_window_guard",
-          error: message,
+          ...safeErrorDiagnostics(error),
         });
         return { kind: "prefetch" as const, speechPrefetch: null };
       });
@@ -2173,9 +2153,11 @@ async function resolveSimulationRuntimeBundle(params: {
         };
       }
     } catch (error) {
-      params.response.status(400).json({
-        error: error instanceof Error ? error.message : "Simulation session industry context is unavailable.",
-      });
+      if (error instanceof SessionIndustrySnapshotSelectionError) {
+        params.response.status(400).json({ error: error.message });
+      } else {
+        respondWithUnexpectedError(params.response, error, { route: "simulation_runtime" });
+      }
       return null;
     }
   }
@@ -3666,7 +3648,7 @@ function extractJsonObject(text: string): string {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) {
-    throw new Error("Evaluator returned invalid JSON.");
+    throw new SimulationScorePayloadValidationError("Evaluator returned invalid JSON.");
   }
 
   return text.slice(start, end + 1);
@@ -11840,13 +11822,6 @@ interface AiProviderTokenUsage {
   totalTokens: number;
 }
 
-class AiBudgetLimitError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "AiBudgetLimitError";
-  }
-}
-
 function getAiBudgetLimitMessage(
   limitCode: "user_calls" | "user_tokens" | "global_calls" | "global_tokens"
 ): string {
@@ -11937,7 +11912,7 @@ async function invokeAiProviderWithBudget<T>(params: {
         totalTokens: toUsageEventToken(usage.totalTokens),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = JSON.stringify(safeErrorDiagnostics(error));
       logWarnThrottled(
         "ai-budget:finalize",
         `[ai-budget] failed to finalize provider reservation ${usageEventId}; conservative reservation retained: ${message}`
@@ -11948,7 +11923,7 @@ async function invokeAiProviderWithBudget<T>(params: {
     try {
       await aiUsageEventAccess.deleteEvent(usageEventId);
     } catch (releaseError) {
-      const message = releaseError instanceof Error ? releaseError.message : String(releaseError);
+      const message = JSON.stringify(safeErrorDiagnostics(releaseError));
       logWarnThrottled(
         "ai-budget:release",
         `[ai-budget] failed to release provider reservation ${usageEventId}: ${message}`
@@ -16911,8 +16886,7 @@ app.get(
       orderRevision: getTrainingPackOrderRevision(authoritativePacks)
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not load training packs.";
-    response.status(503).json({ error: message });
+    respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
   }
   }
 );
@@ -16981,8 +16955,7 @@ app.put(
         });
         return;
       }
-      const message = error instanceof Error ? error.message : "Could not update Training Pack order.";
-      response.status(503).json({ error: message });
+      respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
     }
   }
 );
@@ -17028,8 +17001,7 @@ app.get("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
       };
       response.json(payload);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not load training pack assignments.";
-      response.status(503).json({ error: message });
+      respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
     }
   });
 });
@@ -17149,8 +17121,7 @@ app.put("/orgs/:orgId/training-packs/:trainingPackId/assignments", requireAdmin,
       };
       return payload;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not update training pack assignments.";
-      response.status(503).json({ error: message });
+      respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
     }
   });
   if (payload === undefined) return;
@@ -17229,8 +17200,7 @@ app.post("/orgs/:orgId/training-packs", requireAdmin, async (request: Request, r
 
     response.status(201).json(outcome.trainingPack);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not create training pack.";
-    response.status(503).json({ error: message });
+    respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
   }
 });
 
@@ -17337,8 +17307,7 @@ app.patch("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (re
 
     response.json(outcome.trainingPack);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not update training pack.";
-    response.status(503).json({ error: message });
+    respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
   }
 });
 
@@ -17382,8 +17351,7 @@ app.delete("/orgs/:orgId/training-packs/:trainingPackId", requireAdmin, async (r
 
       return { deleted: true, trainingPackId };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not delete training pack.";
-      response.status(503).json({ error: message });
+      respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
     }
   });
   if (payload === undefined) return;
@@ -17411,6 +17379,7 @@ app.get("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, 
 });
 
 app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request: Request, response: Response) => {
+  const correlationId = resolveSimulationCorrelationId(request);
   if (!isRemoteAiConfigured()) {
     response.status(503).json({ error: "Remote AI is disabled for this environment." });
     return;
@@ -17544,6 +17513,8 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
         maxOutputTokens: customScenarioMaxOutputTokens,
         temperature: 0.4,
         reasoningEffort: OPENAI_MODEL_CONFIG.chat.reasoningEffort,
+        route: "custom_scenario_generation",
+        correlationId,
       }),
       resolveUsage: (completion) => completion.usage,
     });
@@ -17551,7 +17522,9 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
 
     const parsed = extractFirstJsonObject(completion.text);
     if (!parsed) {
-      response.status(502).json({ error: "AI response could not be parsed into JSON. Please retry." });
+      respondWithAiRouteError(response, new Error("Invalid generated scenario."), {
+        route: "custom_scenario_generation", correlationId,
+      });
       return;
     }
 
@@ -17622,8 +17595,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
 
     response.json(payload);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "AI request failed.";
-    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, error, { route: "custom_scenario_generation", correlationId });
   }
 });
 
@@ -20004,8 +19976,7 @@ app.put("/orgs/:orgId/trainings/:trainingId/training-packs", requireAdmin, async
     try {
       packs = await trainingPackStore.listTrainingPacksForOrg(org.id);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not load training packs.";
-      response.status(503).json({ error: message });
+      respondWithUnexpectedError(response, error, { route: "training_packs", status: 503, correlationId: resolveSimulationCorrelationId(request) });
       return;
     }
     const requestedPackIds = Array.from(
@@ -22923,18 +22894,7 @@ app.post(
       });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Transcription failed.";
-    // eslint-disable-next-line no-console
-    console.log("[simulation-route]", {
-      route: "transcribe",
-      correlationId,
-      stage: "error",
-      elapsedMs: Math.max(0, Date.now() - transcriptionStartedAtMs),
-      bytes: file.buffer.byteLength,
-      mimeType: file.mimetype || "audio/m4a",
-      error: message,
-    });
-    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, error, { route: "transcribe", correlationId: correlationId });
   }
 });
 
@@ -23145,29 +23105,11 @@ app.post(
   }
 
   if (!transcriptionResult.ok) {
-    const message = transcriptionResult.error instanceof Error ? transcriptionResult.error.message : "Transcription failed.";
-    const pendingError = transcriptionResult.error instanceof Error ? transcriptionResult.error : new Error(message);
-    // eslint-disable-next-line no-console
-    console.warn("[simulation-route]", {
-      route: "submit-turn",
-      correlationId,
-      stage: "transcription_error",
-      elapsedMs: Date.now() - routeStartedAtMs,
-      bytes: file.buffer.byteLength,
-      mimeType: file.mimetype || "audio/m4a",
-      error: message,
-    });
-
     if (responseMode === "transcript_first_v1") {
-      registerPendingUnifiedSubmitTurn({
-        correlationId,
-        userId: accessContext.userId,
-        resultPromise: Promise.reject(pendingError),
-      });
+      registerPendingUnifiedSubmitTurn({ correlationId, userId: accessContext.userId,
+        resultPromise: Promise.reject(transcriptionResult.error) });
     }
-
-    response.setHeader("X-Correlation-Id", correlationId);
-    response.status(transcriptionResult.error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, transcriptionResult.error, { route: "submit-turn", correlationId });
     return;
   }
 
@@ -23499,23 +23441,13 @@ app.post(
   try {
     const assistantPayload = await assistantResultPromise;
     if (assistantPayload.outcome !== "assistant_reply") {
-      throw new Error(assistantPayload.outcome === "error" ? assistantPayload.error : "Unified simulation turn failed.");
+      if (assistantPayload.outcome === "error") throw new SafeAiRouteError(assistantPayload);
+      throw new Error("Unified simulation turn failed.");
     }
     response.setHeader("X-Correlation-Id", correlationId);
     response.json(assistantPayload);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "AI request failed.";
-    // eslint-disable-next-line no-console
-    console.log("[simulation-route]", {
-      route: "submit-turn",
-      correlationId,
-      stage: "error",
-      elapsedMs: Date.now() - routeStartedAtMs,
-      cacheStatus: runtime.cacheStatus,
-      historyCount: turnHistory.length,
-      error: message,
-    });
-    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, error, { route: "submit-turn", correlationId: correlationId });
   }
 });
 
@@ -23611,7 +23543,7 @@ app.get("/mobile/users/:userId/ai/submit-turn-await/:correlationId", requireMobi
       stage: "error",
       elapsedMs: Date.now() - routeStartedAtMs,
     });
-    response.status(503).json({ error: result.error });
+    respondWithAiRouteError(response, new SafeAiRouteError(result), { route: "submit-turn-await", correlationId: requestedCorrelationId });
     cleanupPendingUnifiedSubmitTurn({
       correlationId: requestedCorrelationId,
       userId: authenticatedUserId,
@@ -23650,8 +23582,6 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     message: string;
     code?: string | null;
     type?: string | null;
-    openaiStatus?: number;
-    openaiMessage?: string;
   }) => {
     const payload: {
       userId: string;
@@ -23661,8 +23591,6 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       message: string;
       route: "tts";
       correlationId: string;
-      openaiStatus?: number;
-      openaiMessage?: string;
     } = {
       userId,
       status: params.status,
@@ -23672,12 +23600,6 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       route: "tts",
       correlationId
     };
-    if (typeof params.openaiStatus === "number") {
-      payload.openaiStatus = params.openaiStatus;
-    }
-    if (typeof params.openaiMessage === "string" && params.openaiMessage.trim()) {
-      payload.openaiMessage = params.openaiMessage.trim();
-    }
     // eslint-disable-next-line no-console
     console.error("[tts-error]", payload);
     response.status(params.status).json({
@@ -23939,66 +23861,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       responseFormat: ttsConfig.responseFormat,
     });
   } catch (error) {
-    if (typeof ttsCallStartedAtMs === "number") {
-      const ttsCallEndedAtMs = Date.now();
-      // eslint-disable-next-line no-console
-      console.log("[tts-call]", {
-        route: "tts",
-        correlationId,
-        userId,
-        preset,
-        provider: "openai",
-        model: ttsConfig.model,
-        voice: ttsConfig.voice,
-        speed: ttsConfig.speed,
-        instructionsIncluded: ttsConfig.instructionsIncluded,
-        responseFormat: ttsConfig.responseFormat,
-        audioSource: "foreground_generation",
-        stage: "error",
-        endedAtMs: ttsCallEndedAtMs,
-        durationMs: ttsCallEndedAtMs - ttsCallStartedAtMs
-      });
-    }
-    const message = error instanceof Error ? error.message : "Text-to-speech failed.";
-    // eslint-disable-next-line no-console
-    console.log("[simulation-route]", {
-      route: "tts",
-      correlationId,
-      stage: "error",
-      elapsedMs: Math.max(0, Date.now() - routeStartedAtMs),
-      textChars: text.length,
-      preset,
-      model: ttsConfig.model,
-      voice: ttsConfig.voice,
-      speed: ttsConfig.speed,
-      instructionsIncluded: ttsConfig.instructionsIncluded,
-      responseFormat: ttsConfig.responseFormat,
-      error: message,
-    });
-    if (error instanceof OpenAiSpeechRequestError) {
-      respondWithTtsError({
-        status: 503,
-        code: error.errorCode ?? null,
-        type: error.errorType ?? null,
-        message,
-        openaiStatus: error.statusCode,
-        openaiMessage: error.errorMessage
-      });
-      return;
-    }
-
-    if (error instanceof AiBudgetLimitError) {
-      respondWithTtsError({
-        status: 429,
-        message
-      });
-      return;
-    }
-
-    respondWithTtsError({
-      status: 503,
-      message
-    });
+    respondWithAiRouteError(response, error, { route: "tts", correlationId: correlationId });
   }
 });
 
@@ -24625,16 +24488,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
       description: "failed to touch recognized session after opening"
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "AI request failed.";
-    // eslint-disable-next-line no-console
-    console.log("[simulation-route]", {
-      route: "opening",
-      correlationId,
-      stage: "error",
-      elapsedMs: Date.now() - routeStartedAtMs,
-      error: message,
-    });
-    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, error, { route: "opening", correlationId: correlationId });
   }
 });
 
@@ -24959,17 +24813,7 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
       description: "failed to touch recognized session after turn"
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "AI request failed.";
-    // eslint-disable-next-line no-console
-    console.log("[simulation-route]", {
-      route: "turn",
-      correlationId,
-      stage: "error",
-      elapsedMs: Date.now() - routeStartedAtMs,
-      historyCount: history.length,
-      error: message,
-    });
-    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, error, { route: "turn", correlationId: correlationId });
   }
 });
 
@@ -25272,9 +25116,11 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
           };
         }
       } catch (error) {
-        response.status(400).json({
-          error: error instanceof Error ? error.message : "Simulation session industry context is unavailable.",
-        });
+        if (error instanceof SessionIndustrySnapshotSelectionError) {
+          response.status(400).json({ error: error.message });
+        } else {
+          respondWithUnexpectedError(response, error, { route: "score_industry_selection", correlationId });
+        }
         return null;
       }
     }
@@ -25502,7 +25348,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
           });
         });
       } catch (persistError) {
-        const message = persistError instanceof Error ? persistError.message : String(persistError);
+        const message = JSON.stringify(safeErrorDiagnostics(persistError));
         logWarnThrottled("ai-usage:score", `[ai-usage] failed to persist score artifacts: ${message}`);
         // eslint-disable-next-line no-console
         console.warn("[simulation-score-persist-failed]", {
@@ -25551,24 +25397,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     clearSimulationAiBudgetGrace(context.user.id);
     clearSimulationOrgMonthlyOverrunGrace(context.user.id);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Score generation failed.";
-    // eslint-disable-next-line no-console
-    console.warn("[simulation-score-failed]", {
-      route: "score",
-      correlationId,
-      sessionId,
-      simulationSessionId: recognizedSessionId ?? null,
-      userId: context.user.id,
-      orgId: context.actingOrgId,
-      scenarioId: context.scenario.id,
-      scoringStage: error instanceof SimulationScorePayloadValidationError ? "score_payload_validation" : "score_generation",
-      errorCategory:
-        error instanceof SyntaxError || error instanceof SimulationScorePayloadValidationError
-          ? "invalid_score_payload"
-          : "score_generation_failed",
-      reason: message
-    });
-    response.status(error instanceof AiBudgetLimitError ? 429 : 503).json({ error: message });
+    respondWithAiRouteError(response, error, { route: "score", correlationId: correlationId, invalidScorePayload: error instanceof SyntaxError || error instanceof SimulationScorePayloadValidationError });
   }
 });
 
@@ -27275,7 +27104,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         response.status(error.statusCode).json({ error: error.message, code: error.code });
         return;
       }
-      if (error instanceof Error && error.message.toLowerCase().includes("simulation session")) {
+      if (error instanceof SimulationSessionConflictError) {
         response.status(409).json({ error: error.message });
         return;
       }
@@ -28222,7 +28051,7 @@ function isJsonBodyParseError(error: unknown): boolean {
   return candidate.type === "entity.parse.failed" && status === 400;
 }
 
-app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
   if (error instanceof multer.MulterError) {
     response.status(400).json({
       error: "Multipart upload is invalid or exceeds the allowed limits.",
@@ -28237,7 +28066,12 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   }
 
   if (error instanceof AuthCodeDeliveryError) {
-    response.status(error.statusCode).json({ error: error.message });
+    if (error.statusCode >= 500) {
+      respondWithUnexpectedError(response, error, { route: "auth_delivery", status: error.statusCode,
+        correlationId: resolveSimulationCorrelationId(request) });
+    } else {
+      response.status(error.statusCode).json({ error: error.message });
+    }
     return;
   }
 
@@ -28246,8 +28080,10 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
     return;
   }
 
-  const message = error instanceof Error ? error.message : "Unknown API error.";
-  response.status(500).json({ error: message });
+  respondWithUnexpectedError(response, error, {
+    route: typeof request.route?.path === "string" ? request.route.path : "unmatched",
+    correlationId: resolveSimulationCorrelationId(request),
+  });
 });
 
 export async function startApiServer(): Promise<void> {

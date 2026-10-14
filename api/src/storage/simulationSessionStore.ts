@@ -7,6 +7,8 @@ import { SimulationSessionRecord } from "@voicepractice/shared";
 import { StorageProvider } from "../runtimeConfig.js";
 import { parseSimulationSessionIndustrySnapshot } from "../services/simulationSessionIndustrySnapshot.js";
 
+export class SimulationSessionConflictError extends Error {}
+
 export interface SimulationSessionTouchParams {
   simulationSessionId: string;
   lastSeenAt: string;
@@ -204,13 +206,13 @@ function assertSessionIdentityCompatibility(existing: SimulationSessionRecord, i
     (existing.scenarioVersionId ?? null) !== (incoming.scenarioVersionId ?? null) ||
     existingTrainingId !== incomingTrainingId
   ) {
-    throw new Error("Simulation session identity does not match the previously recognized session.");
+    throw new SimulationSessionConflictError("Simulation session identity does not match the previously recognized session.");
   }
 
   const existingTrainingPackId = existing.trainingPackId ?? null;
   const incomingTrainingPackId = incoming.trainingPackId ?? null;
   if (existingTrainingPackId && incomingTrainingPackId && existingTrainingPackId !== incomingTrainingPackId) {
-    throw new Error("Simulation session training-pack context does not match the previously recognized session.");
+    throw new SimulationSessionConflictError("Simulation session training-pack context does not match the previously recognized session.");
   }
 }
 
@@ -247,7 +249,7 @@ function applyUsageRecorded(
     existing.usageSessionRecordId &&
     existing.usageSessionRecordId !== params.usageSessionRecordId
   ) {
-    throw new Error("Simulation session was already finalized with a different usage record.");
+    throw new SimulationSessionConflictError("Simulation session was already finalized with a different usage record.");
   }
 
   return {
@@ -340,7 +342,7 @@ class FileSimulationSessionStore extends BaseSimulationSessionStore {
   async upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord> {
     const normalized = normalizeSimulationSessionRecord(record);
     if (!normalized) {
-      throw new Error("Simulation session is invalid.");
+      throw new SimulationSessionConflictError("Simulation session is invalid.");
     }
 
     return await this.withLock(async () => {
@@ -648,7 +650,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
   async upsertStartedSession(record: SimulationSessionRecord): Promise<SimulationSessionRecord> {
     const normalized = normalizeSimulationSessionRecord(record);
     if (!normalized) {
-      throw new Error("Simulation session is invalid.");
+      throw new SimulationSessionConflictError("Simulation session is invalid.");
     }
 
     await this.ensureTable();

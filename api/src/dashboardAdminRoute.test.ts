@@ -2953,7 +2953,9 @@ test("organization performance route keeps mixed-organization invariants on the 
   try {
     const response = await dashboardRequest(organizationPerformancePath(), orgAdminToken);
     assert.equal(response.status, 500);
-    assert.equal(response.body.error, "Organization performance query failed.");
+    assert.equal(response.body.error, "Something went wrong. Please try again.");
+    assert.equal(response.body.code, "internal_error");
+    assert.equal(typeof response.body.correlationId, "string");
   } finally {
     setDashboardOrganizationPerformanceQueryForTest(null);
   }
@@ -3027,7 +3029,9 @@ test("organization intelligence HTTP route enforces inputs, scope, existence hid
   try {
     const failure = await dashboardRequest(route, orgAdminToken);
     assert.equal(failure.status, 500);
-    assert.equal(failure.body.error, "Organization performance intelligence query failed.");
+    assert.equal(failure.body.error, "Something went wrong. Please try again.");
+    assert.equal(failure.body.code, "internal_error");
+    assert.equal(typeof failure.body.correlationId, "string");
     assert.equal(JSON.stringify(failure.body).includes("internal organization intelligence secret"), false);
   } finally {
     setDashboardOrganizationPerformanceIntelligenceQueryForTest(null);
@@ -3165,7 +3169,9 @@ test("team intelligence HTTP route enforces input, access, existence hiding, saf
   try {
     const failure = await dashboardRequest(route, regularTeamToken);
     assert.equal(failure.status, 500);
-    assert.equal(failure.body.error, "Team performance intelligence query failed.");
+    assert.equal(failure.body.error, "Something went wrong. Please try again.");
+    assert.equal(failure.body.code, "internal_error");
+    assert.equal(typeof failure.body.correlationId, "string");
     assert.equal(JSON.stringify(failure.body).includes("internal intelligence secret"), false);
   } finally {
     setDashboardTeamPerformanceIntelligenceQueryForTest(null);
