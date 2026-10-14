@@ -1631,7 +1631,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           industryId: snapshotIndustryId, alternateIndustryId: alternate.id });
       });
 
-      await t.test("publication window exposes v1 cached opening and turn versus v2 registered runtime and scoring", async () => {
+      await t.test("older-client v1 opening cache cannot override registered v2 turns or scoring", async () => {
         const draft = { title: "Opening window", description: "OPENING_WINDOW_V1_CONTEXT",
           desiredOutcome: "OPENING_WINDOW_V1_OUTCOME", aiRole: "OPENING_WINDOW_V1_ROLE",
           scoringGuidance: "Observe the next step.", segmentId: segment.id,
@@ -1681,11 +1681,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           history: [{ role: "user", content: "Let us agree a plan." }],
         }), capture);
         assert.equal(turn.status, 200, JSON.stringify(turn.body));
-        // Characterize the confirmed race without changing startup/cache behavior:
-        // the pre-registration cache entry still serves v1; a cache miss resolves v2.
+        // Repeat the identical request after a forced cache miss. Both paths must
+        // honor registration, even though this older client already heard v1.
+        imported.clearSimulationRuntimeCacheForTest(sessionId);
         const coldTurn = await withMockResponses("We should agree a plan.", () => call(turnPath, {
           simulationSessionId: sessionId, scenarioId: id, trainingId: topic.id, industryId: org.activeIndustries[0],
-          difficulty: db.config.defaultDifficulty, personaStyle: "defensive",
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle,
           history: [{ role: "user", content: "Let us agree a plan." }],
         }), capture);
         assert.equal(coldTurn.status, 200, JSON.stringify(coldTurn.body));
@@ -1704,9 +1705,8 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         }), capture);
         assert.equal(score.status, 201, JSON.stringify(score.body));
         assert.equal(prompts.length, 4);
-        assert.match(prompts[1]!, /OPENING_WINDOW_V1_CONTEXT/);
-        assert.doesNotMatch(prompts[1]!, /OPENING_WINDOW_V2_CONTEXT/);
-        for (const prompt of prompts.slice(2)) {
+        assert.equal(prompts[1], prompts[2], "registered hit/rebuild and miss produce identical AI context");
+        for (const prompt of prompts.slice(1)) {
           assert.match(prompt, /OPENING_WINDOW_V2_CONTEXT/);
           assert.doesNotMatch(prompt, /OPENING_WINDOW_V1_CONTEXT|OPENING_WINDOW_V1_ROLE/);
         }
@@ -1756,6 +1756,33 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const pinnedPublishedV2 = await orgAdminCall(`${practiceScenarioPath}/${pinnedScenarioId}/publish`, "POST");
       assert.equal(pinnedPublishedV2.status, 200, JSON.stringify(pinnedPublishedV2.body));
       const pinnedV2Id = String((pinnedPublishedV2.body.publishedVersion as { id: string }).id);
+      await t.test("registered v1 opening survives v2 publication with identical hit/miss industry context", async () => {
+        const before = (await pool!.query("SELECT industry_snapshot FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId])).rows[0].industry_snapshot;
+        assert.equal(before.selection.industryId, null, "registration does not assume the selected industry");
+        const openingPrompts: string[] = [];
+        const capture = (request: string) => {
+          const parsed = JSON.parse(request) as { input: Array<{ content: string }> };
+          openingPrompts.push(parsed.input.map((message) => message.content).join("\n"));
+        };
+        const body = { simulationSessionId: pinnedSessionId, scenarioId: pinnedScenarioId,
+          trainingId: topic.id, industryId: org.activeIndustries[0],
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle };
+        for (let index = 0; index < 3; index++) {
+          if (index === 2) imported.clearSimulationRuntimeCacheForTest(pinnedSessionId);
+          const opened = await withMockResponses("Pinned opening.", () => call(`/mobile/users/${user.id}/ai/opening`, body), capture);
+          assert.equal(opened.status, 200, JSON.stringify(opened.body));
+        }
+        assert.equal(openingPrompts[0], openingPrompts[1], "cache hit preserves opening context");
+        assert.equal(openingPrompts[0], openingPrompts[2], "cache miss preserves opening context");
+        assert.match(openingPrompts[0]!, /PINNED_V1_RUNTIME_CONTENT/);
+        assert.match(openingPrompts[0]!, /PINNED_V1_COUNTERPART_ROLE/);
+        assert.ok(openingPrompts[0]!.includes(`Counterpart rule: you are speaking with a ${segment.label}; do not act as ${segment.label}.`));
+        assert.match(openingPrompts[0]!, /SNAPSHOT_ORIGINAL_BASELINE/);
+        assert.doesNotMatch(openingPrompts[0]!, /PINNED_V2_RUNTIME_CONTENT|PINNED_V2_COUNTERPART_ROLE/);
+        const after = (await pool!.query("SELECT industry_snapshot,scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId])).rows[0];
+        assert.equal(after.industry_snapshot.selection.industryId, org.activeIndustries[0]);
+        assert.equal(after.scenario_version_id, pinnedV1Id);
+      });
       const industryOnlySessionId = `industry_only_customer_${randomUUID()}`;
       const industryOnlyStarted = await call(startPath, {
         simulationSessionId: industryOnlySessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
@@ -1820,13 +1847,18 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       );
       assert.match(runtimeRequest!, /PINNED_V1_RUNTIME_CONTENT/);
       assert.match(runtimeRequest!, /PINNED_V1_COUNTERPART_ROLE/);
+      assert.ok(runtimeRequest!.includes(`Counterpart rule: you are speaking with a ${segment.label}; do not act as ${segment.label}.`));
+      assert.match(runtimeRequest!, /SNAPSHOT_ORIGINAL_BASELINE/);
       assert.doesNotMatch(runtimeRequest!, /PINNED_V2_RUNTIME_CONTENT|PINNED_V2_COUNTERPART_ROLE/);
       assert.match(scoringRequest!, /PINNED_V1_RUNTIME_CONTENT/);
       assert.match(scoringRequest!, /PINNED_V1_DESIRED_OUTCOME/);
+      assert.match(scoringRequest!, /SNAPSHOT_ORIGINAL_SCORING/);
       assert.doesNotMatch(scoringRequest!, /PINNED_V2_RUNTIME_CONTENT|PINNED_V2_DESIRED_OUTCOME/);
       assert.equal((await pool.query<{ scenario_version_id: string | null }>(
         "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId],
       )).rows[0]?.scenario_version_id, pinnedV1Id);
+      assert.equal((await pool.query("SELECT industry_id FROM score_records WHERE simulation_session_id=$1", [pinnedSessionId])).rows[0]?.industry_id,
+        org.activeIndustries[0], "scoring retains the industry selected by the registered opening");
       assert.match(industryOnlyRuntimeRequest!, /PINNED_V2_RUNTIME_CONTENT/);
       assert.match(industryOnlyRuntimeRequest!, /PINNED_V2_COUNTERPART_ROLE/);
       assert.doesNotMatch(industryOnlyRuntimeRequest!, /Scenario coaching priorities|PINNED_V1_RUNTIME_CONTENT/);

@@ -85,6 +85,7 @@ import {
 import type { MobileOrgAccessRequestSummary } from "./src/lib/api";
 import { loadOrgAdminDashboardData } from "./src/lib/orgAdminDashboardLoad";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
+import { createSimulationStartupCoordinator } from "./src/lib/simulationStartup";
 import {
   buildInsufficientEvidenceMessage,
   buildScoreUnavailableMessage,
@@ -864,6 +865,9 @@ export default function App() {
   const organizationPlanSupportSubmittingRef = useRef(false);
 
   const [simulationConfig, setSimulationConfig] = useState<SimulationConfig | null>(null);
+  const simulationStartup = useMemo(() => createSimulationStartupCoordinator(), [
+    simulationConfig?.simulationSessionId, user?.id, mobileAuthToken, activeSuperUserOrgId,
+  ]);
   const [lastCompletedConfig, setLastCompletedConfig] = useState<SimulationConfig | null>(null);
   const [scorecard, setScorecard] = useState<SimulationScorecard | null>(null);
   const [scorecardError, setScorecardError] = useState<string | null>(null);
@@ -7236,6 +7240,7 @@ export default function App() {
     if (screen === "simulation" && simulationConfig && user && mobileAuthToken) {
       return (
         <SimulationScreen
+          startup={simulationStartup}
           config={simulationConfig}
           colorScheme={colorScheme}
           userId={user.id}

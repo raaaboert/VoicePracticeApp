@@ -2047,19 +2047,6 @@ async function resolveSimulationRuntimeBundle(params: {
           useModularPromptArchitecture,
         })
       : ({ status: "bypass", value: null, reason: "missing_effective_variant" } as const);
-  if (cacheResult.status === "hit" && cacheResult.value && registeredSession?.industrySnapshot) {
-    // Only an authenticated durable snapshot can retain its pinned context
-    // without resolving current catalog eligibility below.
-    return {
-      ...cacheResult.value,
-      scenarioVersionId: cacheResult.value.scenarioVersionId ?? null,
-      cacheStatus: "hit",
-      cacheReason: null,
-      contextBuildMs: 0,
-      trainingPackLookupMs: 0,
-    };
-  }
-
   const contextBuildStartedAtMs = Date.now();
   const configForUser = resolveConfigForUser(
     params.db, params.user, params.actingOrgId,
@@ -2164,6 +2151,10 @@ async function resolveSimulationRuntimeBundle(params: {
     }
   }
   if (cacheResult.status === "hit" && cacheResult.value
+    && (cacheResult.value.scenarioVersionId ?? null) === (resolvedScenario.scenarioVersionId ?? null)
+    && cacheResult.value.source === resolvedScenario.source
+    && cacheResult.value.scenario.id === resolvedScenario.scenario.id
+    && cacheResult.value.segment.id === resolvedScenario.segment.id
     && cacheResult.value.industryId === industryPromptContext.industryId
     && cacheResult.value.industryLabel === industryPromptContext.industryLabel
     && cacheResult.value.industryBaseline === industryPromptContext.industryBaseline) {
@@ -2176,8 +2167,9 @@ async function resolveSimulationRuntimeBundle(params: {
       trainingPackLookupMs: 0,
     };
   }
-  // Non-snapshot hits use the authoritative miss-path scenario and industry
-  // resolution above. Rebuild when the live context changed, including null.
+  // All hits must match authoritative scenario/version and industry resolution.
+  // Snapshot selection is validated/locked above even when an older client has
+  // already populated this cache before durable registration.
   const counterpartBehaviorGuidance = resolveRoleplayCounterpartBehaviorGuidance(resolvedScenario);
   const trainingPackLookupStartedAtMs = Date.now();
   const activeTrainingPack = hasRegisteredAssignmentSession
@@ -28146,6 +28138,13 @@ export function getMobileUpdateWaiterCountForTest(userId: string): number {
     throw new Error("getMobileUpdateWaiterCountForTest is only available in test.");
   }
   return mobileUpdateWaitersByUserId.get(userId)?.size ?? 0;
+}
+
+export function clearSimulationRuntimeCacheForTest(sessionId: string): void {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("clearSimulationRuntimeCacheForTest is only available in test.");
+  }
+  simulationRuntimeCache.clear(sessionId);
 }
 
 export function setDashboardTrainingPackLoaderForTest(loader: ((orgId: string) => Promise<TrainingPack[]>) | null): void {

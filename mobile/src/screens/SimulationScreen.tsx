@@ -120,8 +120,10 @@ import {
 import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from "../types";
 import { fetchRelatedTrainingContent } from "../trainingContent/api";
 import { buildRelatedTrainingContentPresentation } from "../trainingContent/relatedTrainingContent";
+import type { SimulationStartupCoordinator } from "../lib/simulationStartup";
 
 interface SimulationScreenProps {
+  startup: SimulationStartupCoordinator;
   config: SimulationConfig;
   colorScheme: AppColorScheme;
   userId: string;
@@ -465,6 +467,7 @@ function isSimulationLifecycleInterruptedError(error: unknown): boolean {
 }
 
 export function SimulationScreen({
+  startup,
   config,
   colorScheme,
   userId,
@@ -868,7 +871,7 @@ export function SimulationScreen({
     logSimulationApiCall(params.apiCallLabel);
 
     let openingPromise: Promise<OpeningLinePayload>;
-    openingPromise = createOpeningLine({
+    openingPromise = startup.prepareOpening(() => createOpeningLine({
       userId,
       authToken,
       simulationSessionId: config.simulationSessionId,
@@ -881,7 +884,7 @@ export function SimulationScreen({
       personaStyle: config.personaStyle,
       speechPrefetchPreset: shouldUseFastStartRemoteTts ? params.remoteTtsPreset : null,
       correlationId: params.correlationId,
-    }).then((openingPayload) => {
+    })).then((openingPayload) => {
       if (isStartupGenerationCurrent(params.generation)) {
         storePendingOpeningPayload(openingPayload, params.correlationId);
         logSimulationTiming({
@@ -938,6 +941,7 @@ export function SimulationScreen({
     openingPrefetchGenerationRef.current = params.generation;
     return openingPromise;
   }, [
+    startup,
     authToken,
     config.difficulty,
     config.industryBaseline,
@@ -961,6 +965,7 @@ export function SimulationScreen({
   const appendMessage = (message: DialogueMessage) => {
     transcriptAutoFollowRef.current = shouldFollowTranscriptAfterMessage(transcriptNearBottomRef.current);
     messagesRef.current = [...messagesRef.current, message];
+    startup.messages = messagesRef.current;
     setMessages(messagesRef.current);
   };
 
@@ -3451,6 +3456,51 @@ export function SimulationScreen({
         "session-start",
       );
 
+      // Registration pins the version and eligible industries. The subsequent
+      // opening request still supplies (and locks) the selected industry.
+      if (startPlan.shouldRegisterRecognizedStart) {
+        setStatus("Starting simulation...");
+        logSimulationTiming({
+          correlationId: startRegistrationCorrelationId,
+          phase: "recognized_start_request_start",
+        });
+
+        try {
+          await startup.register(() => startSimulationSession(
+            userId,
+            {
+              simulationSessionId: config.simulationSessionId,
+              segmentId: config.scenario.segmentId,
+              scenarioId: config.scenario.id,
+              trainingId: config.trainingId ?? null,
+              trainingPackId: sessionTrainingPackIdRef.current,
+              clientStartedAt: new Date().toISOString(),
+            },
+            authToken,
+            { correlationId: startRegistrationCorrelationId },
+          ));
+          if (!isCurrentStartupAttempt()) {
+            logStaleStartupResult("recognized_start");
+            return;
+          }
+          recognizedStartRegisteredRef.current = true;
+          logSimulationTiming({
+            correlationId: startRegistrationCorrelationId,
+            phase: "recognized_start_request_complete",
+          });
+        } catch (startError) {
+          if (!isCurrentStartupAttempt()) {
+            logStaleStartupResult("recognized_start_error");
+            return;
+          }
+          logSimulationTiming({
+            correlationId: startRegistrationCorrelationId,
+            phase: "recognized_start_request_failed",
+          });
+          throw startError;
+        }
+      }
+
       if (startPlan.shouldDeliverOpening) {
         if (openingStartedRef.current && !openingCompletedRef.current) {
           logSimulationTiming({
@@ -3564,6 +3614,7 @@ export function SimulationScreen({
                 return;
               }
               openingMessageCommittedRef.current = true;
+              startup.openingMessageCommitted = true;
               commitAssistantMessage({
                 message: openingAssistantMessage,
                 correlationId: openingCorrelationId,
@@ -3655,53 +3706,11 @@ export function SimulationScreen({
             commitOpeningAssistantMessageIfNeeded();
             openingCompletedRef.current = true;
             openingDeliveredRef.current = true;
+            startup.openingDelivered = true;
             pendingOpeningLineRef.current = null;
             pendingOpeningSpeechPrefetchRef.current = null;
             pendingOpeningCorrelationIdRef.current = null;
           }
-        }
-      }
-
-      if (startPlan.shouldRegisterRecognizedStart) {
-        setStatus("Starting simulation...");
-        logSimulationTiming({
-          correlationId: startRegistrationCorrelationId,
-          phase: "recognized_start_request_start",
-        });
-
-        try {
-          await startSimulationSession(
-            userId,
-            {
-              simulationSessionId: config.simulationSessionId,
-              segmentId: config.scenario.segmentId,
-              scenarioId: config.scenario.id,
-              trainingId: config.trainingId ?? null,
-              trainingPackId: sessionTrainingPackIdRef.current,
-              clientStartedAt: new Date().toISOString(),
-            },
-            authToken,
-            { correlationId: startRegistrationCorrelationId },
-          );
-          if (!isCurrentStartupAttempt()) {
-            logStaleStartupResult("recognized_start");
-            return;
-          }
-          recognizedStartRegisteredRef.current = true;
-          logSimulationTiming({
-            correlationId: startRegistrationCorrelationId,
-            phase: "recognized_start_request_complete",
-          });
-        } catch (startError) {
-          if (!isCurrentStartupAttempt()) {
-            logStaleStartupResult("recognized_start_error");
-            return;
-          }
-          logSimulationTiming({
-            correlationId: startRegistrationCorrelationId,
-            phase: "recognized_start_request_failed",
-          });
-          throw startError;
         }
       }
 
@@ -3711,7 +3720,8 @@ export function SimulationScreen({
       }
 
       sessionActiveRef.current = true;
-      sessionStartedAtRef.current = new Date();
+      sessionStartedAtRef.current = startup.startedAt ?? new Date();
+      startup.startedAt = sessionStartedAtRef.current;
       sessionCompletionInProgressRef.current = false;
       setElapsedSeconds(0);
       setSessionActive(true);
@@ -4356,23 +4366,22 @@ export function SimulationScreen({
   ]);
 
   useEffect(() => {
-    let cancelled = false;
     unmountedRef.current = false;
 
     const initialize = async () => {
       setIsInitializing(true);
-      messagesRef.current = [];
+      messagesRef.current = [...startup.messages];
       recordingInstanceSequenceRef.current = 0;
       activeRecordingInstanceRef.current = null;
       submittedRecordingInstanceIdsRef.current.clear();
       transcriptNearBottomRef.current = true;
       transcriptAutoFollowRef.current = true;
-      sessionStartedAtRef.current = null;
+      sessionStartedAtRef.current = startup.startedAt;
       sessionTrainingPackIdRef.current = null;
-      setMessages([]);
+      setMessages(messagesRef.current);
       setError(null);
-      openingDeliveredRef.current = false;
-      recognizedStartRegisteredRef.current = false;
+      openingDeliveredRef.current = startup.openingDelivered;
+      recognizedStartRegisteredRef.current = startup.registered;
       localModeConfirmedRef.current = false;
       pendingOpeningLineRef.current = null;
       pendingOpeningSpeechPrefetchRef.current = null;
@@ -4405,12 +4414,13 @@ export function SimulationScreen({
       currentBackgroundedAtRef.current = null;
       setLifecyclePauseActive(false);
       openingStartedRef.current = false;
-      openingCompletedRef.current = false;
-      openingMessageCommittedRef.current = false;
+      openingCompletedRef.current = startup.openingDelivered;
+      openingMessageCommittedRef.current = startup.openingMessageCommitted;
       openingTtsInProgressRef.current = false;
-      openingTtsCompletedRef.current = false;
+      openingTtsCompletedRef.current = startup.openingDelivered;
       abortActiveTurnRequests();
-      const initializationGeneration = sessionLifecycleGenerationRef.current;
+      if (startup.opening) storePendingOpeningPayload(startup.opening,
+        createSimulationCorrelationId(config.simulationSessionId, "opening"));
 
       if (localTestMode) {
         storePendingOpeningPayload(
@@ -4439,31 +4449,15 @@ export function SimulationScreen({
         phase: "scenario_config_ready",
         details: {
           localTestMode: false,
-          openingPrefetchBackground: true,
+          openingPrefetchBackground: false,
         },
-      });
-
-      const openingPrefetchCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "opening-prefetch");
-      void startOpeningPrefetch({
-        correlationId: openingPrefetchCorrelationId,
-        generation: initializationGeneration,
-        remoteTtsPreset: toRemoteTtsPreset(config.voiceGender, config.voiceProfile),
-        apiCallLabel: "createOpeningLine:initialize",
-        background: true,
-      }).catch((initError: unknown) => {
-        if (cancelled || unmountedRef.current || !isStartupGenerationCurrent(initializationGeneration)) {
-          return;
-        }
-        setMode("idle");
-        setStatus("Scenario ready. Press Start Simulation.");
-        setError(getErrorMessage(initError, "Opening prefetch failed. Start Simulation will retry."));
       });
     };
 
     void initialize();
 
     return () => {
-      cancelled = true;
+      startup.startedAt = sessionStartedAtRef.current;
       unmountedRef.current = true;
       simulationClosedRef.current = true;
       sessionActiveRef.current = false;
@@ -4491,6 +4485,7 @@ export function SimulationScreen({
       sessionCompletionInProgressRef.current = false;
     };
   }, [
+    startup,
     apiConfigured,
     abortActiveTurnRequests,
     cancelPendingTts,
