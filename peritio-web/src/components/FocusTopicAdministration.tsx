@@ -30,7 +30,7 @@ import {
   validateTrainingContentFileSelection,
 } from "@/src/lib/trainingContentPresentation";
 import { partitionFocusTopicAssignments } from "@/src/components/focusTopicAssignmentPresentation";
-import { editableScenarioIndustries, scenarioRolesForIndustries } from "./practiceScenarioIndustryOptions";
+import { editableScenarioIndustries, scenarioRolesForIndustries, publishedScenarioIndustriesUnavailable, scenarioIndustryLabel } from "./practiceScenarioIndustryOptions";
 
 type TopicRow = Pick<OrgTrainingSummary, "id" | "name" | "description" | "status">;
 type Audience = DashboardFocusTopicAssignment["audience"];
@@ -611,10 +611,9 @@ export function FocusTopicAdministration({
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
     const contentId = `focus-topic-scenario-${scenario.id}-content`;
     const open = expandedScenarioIds.has(scenario.id);
-    const industryLabels = version.applicableIndustryIds.map((industryId) =>
-      practiceScenarios.industryOptions.find((industry) => industry.id === industryId)?.label
-        ?? `${industryId.replaceAll("_", " ")} (currently unavailable)`,
-    );
+    const industryLabels = version.applicableIndustryIds.map((industryId) => scenarioIndustryLabel(industryId, practiceScenarios));
+    const publishedIndustriesUnavailable = scenario.status !== "archived"
+      && publishedScenarioIndustriesUnavailable(scenario, practiceScenarios.industryOptions);
 
     return <article key={scenario.id} className="focus-topic-scenario-card">
       <div className="focus-topic-scenario-row">
@@ -625,6 +624,9 @@ export function FocusTopicAdministration({
             </span>
           </div>
           <small>Version {version.versionNumber} · Updated {formatDateTime(scenario.updatedAt)}</small>
+          {publishedIndustriesUnavailable ? <p className="notice" role="status">
+            Published version currently unavailable to learners: none of its industries is active for this organization.
+          </p> : null}
         </div>
         <button type="button" className="ghost-button compact-button focus-topic-scenario-toggle"
           aria-expanded={open} aria-controls={contentId}

@@ -16,6 +16,7 @@ import {
   UpdateOrgCustomScenarioRequest,
 } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";
+import { effectiveScenarioEditorConfig, editableMasterScenarioIndustries } from "./enterpriseScenarioIndustryOptions";
 
 interface EnterpriseCustomScenariosCardProps {
   orgId: string;
@@ -39,6 +40,7 @@ interface OrgCustomScenariosListResponse {
   orgId: string;
   scenarios: OrgCustomScenario[];
   practiceScenarios: CustomerPracticeScenario[];
+  effectiveIndustryIds: string[];
 }
 
 interface BaseScenarioOption {
@@ -260,6 +262,8 @@ export function EnterpriseCustomScenariosCard({
 }: EnterpriseCustomScenariosCardProps) {
   const [scenarios, setScenarios] = useState<OrgCustomScenario[]>([]);
   const [practiceScenarios, setPracticeScenarios] = useState<CustomerPracticeScenario[]>([]);
+  const [industryScope, setIndustryScope] = useState<{ orgId: string; ids: string[] } | null>(null);
+  const [editorIndustryNotice, setEditorIndustryNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -267,7 +271,7 @@ export function EnterpriseCustomScenariosCard({
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<EditorMode>("create");
-  const [editorForm, setEditorForm] = useState<EditorFormState>(() => createEmptyEditorForm(config));
+  const [editorForm, setEditorForm] = useState<EditorFormState>(() => createEmptyEditorForm(null));
   const [editorError, setEditorError] = useState<string | null>(null);
   const [editorSaving, setEditorSaving] = useState(false);
   const [baseScenarioSearch, setBaseScenarioSearch] = useState("");
@@ -283,13 +287,16 @@ export function EnterpriseCustomScenariosCard({
   const [deleting, setDeleting] = useState(false);
   const [togglingScenarioId, setTogglingScenarioId] = useState<string | null>(null);
 
+  const editorConfig = useMemo(() => effectiveScenarioEditorConfig(config,
+    industryScope?.orgId === orgId ? industryScope.ids : []), [config, orgId, industryScope]);
+
   const roles = useMemo(
     () => [...(config?.segments ?? [])].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" })),
     [config?.segments],
   );
   const industries = useMemo(
-    () => [...(config?.industries ?? [])].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" })),
-    [config?.industries],
+    () => [...(editorConfig?.industries ?? [])].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" })),
+    [editorConfig?.industries],
   );
 
   const roleLabelById = useMemo(() => new Map((config?.segments ?? []).map((role) => [role.id, role.label])), [config?.segments]);
@@ -359,6 +366,8 @@ export function EnterpriseCustomScenariosCard({
 
   useEffect(() => {
     if (!orgId) return;
+    setEditorOpen(false);
+    setGenerationPreview(null);
     let cancelled = false;
     const load = async () => {
       setLoading(true);
@@ -368,6 +377,7 @@ export function EnterpriseCustomScenariosCard({
         if (cancelled) return;
         setScenarios(payload.scenarios ?? []);
         setPracticeScenarios(payload.practiceScenarios ?? []);
+        setIndustryScope({ orgId: payload.orgId, ids: payload.effectiveIndustryIds ?? [] });
         setGeneratedAt(payload.generatedAt ?? null);
       } catch (caught) {
         if (cancelled) return;
@@ -393,6 +403,7 @@ export function EnterpriseCustomScenariosCard({
       const payload = await adminFetch<OrgCustomScenariosListResponse>(`/orgs/${orgId}/custom-scenarios`);
       setScenarios(payload.scenarios ?? []);
       setPracticeScenarios(payload.practiceScenarios ?? []);
+      setIndustryScope({ orgId: payload.orgId, ids: payload.effectiveIndustryIds ?? [] });
       setGeneratedAt(payload.generatedAt ?? null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load custom scenarios.");
@@ -403,7 +414,8 @@ export function EnterpriseCustomScenariosCard({
 
   const openCreateEditor = () => {
     setEditorMode("create");
-    setEditorForm(createEmptyEditorForm(config));
+    setEditorForm(createEmptyEditorForm(editorConfig));
+    setEditorIndustryNotice(null);
     setEditorError(null);
     setGenerationPreview(null);
     setBaseScenarioSearch("");
@@ -412,7 +424,13 @@ export function EnterpriseCustomScenariosCard({
 
   const openEditEditor = (scenario: OrgCustomScenario) => {
     setEditorMode("edit");
-    setEditorForm(editorFormFromScenario(scenario));
+    const nextIndustries = editableMasterScenarioIndustries(scenario, editorConfig);
+    const unavailable = scenario.applicableIndustryIds.filter((id) => !nextIndustries.includes(id));
+    setEditorForm({ ...editorFormFromScenario(scenario), applicableIndustryIds: nextIndustries,
+      segmentId: editorConfig?.segments.some((role) => role.id === scenario.segmentId) ? scenario.segmentId : "" });
+    setEditorIndustryNotice(unavailable.length
+      ? `Saved industries currently unavailable: ${unavailable.map((id) => industryById.get(id)?.label ?? id.replaceAll("_", " ")).join(", ")}. They were removed only from this editable form. Choose an available replacement before saving; the saved scenario is unchanged until you save.`
+      : null);
     setEditorError(null);
     setGenerationPreview(null);
     setBaseScenarioSearch("");
@@ -625,6 +643,7 @@ export function EnterpriseCustomScenariosCard({
   });
 
   const validateEditor = (): string | null => {
+    if (!industries.length) return "No industries are currently available for this organization.";
     if (!editorForm.segmentId.trim()) return "Select a role.";
     if (editorForm.applicableIndustryIds.length === 0) return "Select at least one applicable industry.";
     if (editorForm.sourceMode === "standard_base" && !editorForm.baseScenarioId.trim()) {
@@ -717,7 +736,8 @@ export function EnterpriseCustomScenariosCard({
 
   const generatePreview = async () => {
     const validationError =
-      !editorForm.segmentId.trim()
+      !industries.length ? "No industries are currently available for this organization."
+        : !editorForm.segmentId.trim()
         ? "Select a role before generating."
         : editorForm.applicableIndustryIds.length === 0
           ? "Select at least one applicable industry before generating."
@@ -913,6 +933,7 @@ export function EnterpriseCustomScenariosCard({
           </div>
 
           {editorError ? <p className="error">{editorError}</p> : null}
+          {editorIndustryNotice ? <p className="small" role="status">{editorIndustryNotice}</p> : null}
 
           <div className="card" style={{ marginBottom: 12 }}>
             <h3 style={{ fontSize: "1rem", marginBottom: 8 }}>Source & Creation Method</h3>
@@ -1010,7 +1031,7 @@ export function EnterpriseCustomScenariosCard({
                   disabled={editorSaving || generatingPreview}
                 >
                   <option value="">Select role</option>
-                  {roles.map((role) => (
+                  {(editorConfig?.segments ?? []).map((role) => (
                     <option key={role.id} value={role.id}>
                       {role.label} {role.enabled === false ? "(inactive role)" : ""}
                     </option>
@@ -1037,7 +1058,7 @@ export function EnterpriseCustomScenariosCard({
               </div>
             </div>
             <div style={{ marginTop: 12 }}>
-              <label>Applicable Industries (master list from Content tab)</label>
+              <label>Applicable Industries (currently active for this organization)</label>
               <div
                 style={{
                   border: "1px solid rgba(129, 206, 166, 0.22)",
@@ -1299,7 +1320,7 @@ export function EnterpriseCustomScenariosCard({
               </div>
               <div className="content-modal-actions" style={{ justifyContent: "space-between" }}>
                 <div className="small">Generate a preview, review it, then apply before saving.</div>
-                <button type="button" className="primary" onClick={() => void generatePreview()} disabled={generatingPreview}>
+                <button type="button" className="primary" onClick={() => void generatePreview()} disabled={generatingPreview || industries.length === 0}>
                   {generatingPreview ? "Generating..." : "Generate Preview"}
                 </button>
               </div>
@@ -1374,7 +1395,7 @@ export function EnterpriseCustomScenariosCard({
             <button type="button" onClick={closeEditor} disabled={editorSaving || generatingPreview}>
               Cancel
             </button>
-            <button type="button" className="primary" onClick={() => void saveEditor()} disabled={editorSaving || generatingPreview}>
+            <button type="button" className="primary" onClick={() => void saveEditor()} disabled={editorSaving || generatingPreview || industries.length === 0}>
               {editorSaving ? "Saving..." : "Save Scenario"}
             </button>
           </div>
@@ -1419,12 +1440,15 @@ export function EnterpriseCustomScenariosCard({
           <button type="button" onClick={() => void refreshScenarios()} disabled={loading}>
             Refresh
           </button>
-          <button type="button" className="primary" onClick={openCreateEditor} disabled={!config}>
+          <button type="button" className="primary" onClick={openCreateEditor} disabled={!editorConfig || industries.length === 0 || loading}>
             Create Custom Scenario
           </button>
         </div>
       </div>
       {loading ? <p className="small">Loading custom scenarios...</p> : null}
+      {!loading && industries.length === 0 ? <p className="small" role="status">
+        No industries are currently available for this organization. Enable an organization industry before creating, generating, or saving a scenario.
+      </p> : null}
       {error ? <p className="error">{error}</p> : null}
       {notice ? <p className="success">{notice}</p> : null}
       {!trainingScope ? <section style={{ marginTop: 14 }} aria-label="Customer Practice Scenario lifecycle">

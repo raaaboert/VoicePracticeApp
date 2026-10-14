@@ -1010,6 +1010,7 @@ export interface CustomerPracticeScenarioListResponse {
   scenarios: CustomerPracticeScenario[];
   roleOptions: Array<{ id: string; label: string; industryIds: IndustryId[] }>;
   industryOptions: Array<{ id: IndustryId; label: string }>;
+  historicalIndustryLabels?: Array<{ id: IndustryId; label: string }>;
   editableScenarioIds: string[];
   permissions: {
     creationEnabled: boolean;

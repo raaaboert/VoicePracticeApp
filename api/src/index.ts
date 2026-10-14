@@ -2066,6 +2066,21 @@ async function resolveSimulationRuntimeBundle(params: {
         })
       : ({ status: "bypass", value: null, reason: "missing_effective_variant" } as const);
   if (cacheResult.status === "hit" && cacheResult.value) {
+    // A client-provided session ID and cached prompt do not establish session
+    // authority. Recheck current eligibility unless the assignment session was
+    // authenticated above; durable-session continuation retains its old path.
+    if (params.org && !hasRegisteredAssignmentSession) {
+      const currentConfig = resolveConfigForUser(params.db, params.user, params.actingOrgId,
+        { forAssignedTopic: assignmentUsesTopicConfig });
+      const currentScenario = assignmentAuthorizedScenario ?? resolveMobileScenarioForUser(
+        currentConfig, params.scenarioId, authoritativeTrainingId, { directTopicScenarioAttached },
+      );
+      if (!currentScenario || (cacheResult.value.industryId
+        && !currentScenario.allowedIndustryIds.includes(cacheResult.value.industryId))) {
+        params.response.status(400).json({ error: "Invalid scenario for this account." });
+        return null;
+      }
+    }
     return {
       ...cacheResult.value,
       scenarioVersionId: cacheResult.value.scenarioVersionId ?? null,
@@ -12069,6 +12084,7 @@ function resolveConfigForUser(
       ...db.config,
       industries: filteredIndustries,
       roleIndustries: filteredRoleIndustries,
+      activeSegmentId: "",
       segments: [],
       orgCustomScenarios: trainingScopedCustomScenarios,
       orgTrainings: mobileTrainings,
@@ -16108,6 +16124,12 @@ app.get("/config", async (_request: Request, response: Response) => {
 
 app.patch("/config", requireAdmin, async (request: Request, response: Response) => {
   const patch = request.body as UpdateConfigRequest;
+  // Reject before normalization can remove role links or org selections, and
+  // before opening a write transaction. Disabled industries still count.
+  if (patch.industries !== undefined && (!Array.isArray(patch.industries) || patch.industries.length === 0)) {
+    response.status(400).json({ error: "The global industry catalog must contain at least one industry. Disable an industry instead of deleting the final one." });
+    return;
+  }
 
   const config = await withDatabase(async (db) => {
     const nextConfig = sanitizeConfigPatch(db.config, patch);
@@ -17381,6 +17403,7 @@ app.get("/orgs/:orgId/custom-scenarios", requireAdmin, async (request: Request, 
       orgId: org.id,
       scenarios: ensureOrgCustomScenarioCollection(org),
       practiceScenarios: await customerPracticeScenarioStore.listByOrg(org.id),
+      effectiveIndustryIds: resolveEffectiveOrgIndustryIds(db.config, org),
     });
   });
 });
@@ -18481,11 +18504,13 @@ function getOrgScenarioIndustryError(
   return null;
 }
 
-function assertCustomerScenarioPublicationIndustries(db: ApiDatabase, org: EnterpriseOrg, ids: readonly string[]): void {
+function assertCustomerScenarioPublicationIndustries(
+  db: ApiDatabase, org: EnterpriseOrg, ids: readonly string[], operation: "Publication" | "Generation" = "Publication",
+): void {
   const active = new Set(resolveEffectiveOrgIndustryIds(db.config, org));
   if (!ids.some((id) => active.has(id))) {
     throw new CustomerPracticeScenarioStoreError(
-      "Publication requires at least one currently active organization industry.", "scenario_industry_unavailable", 409,
+      `${operation} requires at least one currently active organization industry.`, "scenario_industry_unavailable", 409,
     );
   }
 }
@@ -18601,6 +18626,7 @@ app.get(
         industryOptions: (db.config.industries ?? []).filter((entry) =>
           effectiveIndustryIds.has(entry.id))
           .map((entry) => ({ id: entry.id, label: entry.label })),
+        industryLabels: new Map(db.config.industries.map((entry) => [entry.id, entry.label])),
       } : null;
     });
     if (!context || response.headersSent) return;
@@ -18612,6 +18638,9 @@ app.get(
       scenarios,
       roleOptions: context.roleOptions,
       industryOptions: context.industryOptions,
+      historicalIndustryLabels: [...new Set(scenarios.flatMap((scenario) =>
+        scenario.versions.flatMap((version) => version.applicableIndustryIds)))]
+        .map((id) => ({ id, label: context.industryLabels.get(id) ?? id.replaceAll("_", " ") })),
       editableScenarioIds: scenarios
         .filter((scenario) => context.management.scope.canManageAllTopics
           || scenario.createdByActorId === context.actorId)
@@ -18644,7 +18673,7 @@ app.post(
         if (!context.settings.allowCustomerScenarioCreation) {
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
-        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org));
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org), "Generation");
         return { context };
       });
       if (!prepared || response.headersSent) return;
@@ -18660,7 +18689,7 @@ app.post(
         const context = await resolveCustomerScenarioRouteContext(db, request, response);
         if (!context || response.headersSent) return null;
         if (!context.settings.allowCustomerScenarioCreation) throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
-        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org));
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org), "Generation");
         await reauthorizeCurrentCustomerScenarioGenerationSources({ orgId: context.management.org.id, topicId: context.topic.id, selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true, moduleEnabled: context.management.learningResourcesEnabled });
         return { scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
       });
@@ -18684,7 +18713,7 @@ app.post(
         if (!context.settings.allowCustomerScenarioCreation) {
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
-        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org));
+        assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org), "Generation");
         await reauthorizeCurrentCustomerScenarioGenerationSources({
           orgId: context.management.org.id, topicId: context.topic.id,
           selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,

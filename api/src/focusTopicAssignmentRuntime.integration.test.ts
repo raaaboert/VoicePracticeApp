@@ -157,9 +157,11 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         id: "user_focus_foreign_performance",
         orgId: foreignOrg.id,
         email: "foreign-performance@focus-runtime.integration.test",
+        firstName: "Foreign", lastName: "Learner",
         orgRole: "user" as const,
         emailVerifiedAt: now,
         status: "active" as const,
+        mobileProfileReonboardingRequired: false,
       };
       const scopedManager = {
         ...sourceUser,
@@ -194,6 +196,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         createdAt: now, updatedAt: now });
       db.mobileAuthTokens.push({ userId: scopedUserAdmin.id,
         tokenHash: createHmac("sha256", tokenSecret).update(scopedMobileToken).digest("hex"),
+        createdAt: now, updatedAt: now });
+      const foreignMobileToken = `local_${randomUUID()}`;
+      db.mobileAuthTokens.push({ userId: foreignPerformanceUser.id,
+        tokenHash: createHmac("sha256", tokenSecret).update(foreignMobileToken).digest("hex"),
         createdAt: now, updatedAt: now });
       const segment = db.config.segments.find((candidate) => candidate.id === "solution_manager");
       const scenario = segment?.scenarios.find((candidate) => candidate.enabled !== false);
@@ -310,7 +316,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           topicId: topic.id, scenarioKind: "org", scenarioId: snapshotCustomScenarioId,
           attachedBy: "platform_admin", attachedAt: now, detachedBy: null, detachedAt: null }, client);
         await authority.createAssignment({ ...assignment, id: "foreign_runtime_assignment",
-          orgId: foreignOrg.id, topicId: foreignTopic.id }, client);
+          orgId: foreignOrg.id, topicId: foreignTopic.id, subjectUserId: foreignPerformanceUser.id }, client);
         await authority.attachScenario({ id: "foreign_runtime_attachment", orgId: foreignOrg.id,
           topicId: foreignTopic.id, scenarioKind: "standard", scenarioId: scenario.id,
           attachedBy: "platform_admin", attachedAt: now, detachedBy: null, detachedAt: null }, client);
@@ -1783,10 +1789,29 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.equal(deactivatedDetail.status, 200);
         assert.equal((deactivatedDetail.body.scenarios as Array<{ id: string }>).some((entry) =>
           entry.id === pinnedScenarioId || entry.id === snapshotCustomScenarioId), false);
+        const deactivatedManagement = await orgAdminCall(practiceScenarioPath);
+        assert.equal((deactivatedManagement.body.historicalIndustryLabels as Array<{ id: string; label: string }>)
+          .find((industry) => industry.id === snapshotIndustryId)?.label, originalIndustry.label);
         assert.equal((await call(startPath, {
           simulationSessionId: `stale_industry_${randomUUID()}`, segmentId: segment.id,
           scenarioId: pinnedScenarioId, trainingId: topic.id,
         })).status, 400);
+        const staleSession = `unregistered_stale_${randomUUID()}`;
+        const staleHistory = [
+          { role: "assistant", content: "What concerns you?" }, { role: "user", content: "I want to understand the concern." },
+          { role: "assistant", content: "We need a plan." }, { role: "user", content: "Let us identify the blocker." },
+          { role: "assistant", content: "And next?" }, { role: "user", content: "I propose owners and a review date." },
+        ];
+        const beforeStaleRequests = snapshotRequests.length;
+        assert.equal((await call(turnPath, { scenarioId: pinnedScenarioId, trainingId: topic.id,
+          simulationSessionId: staleSession, industryId: snapshotIndustryId,
+          difficulty: db.config.defaultDifficulty, personaStyle: db.config.defaultPersonaStyle, history: staleHistory })).status, 404);
+        assert.equal((await call(`/mobile/users/${user.id}/ai/score`, {
+          scenarioId: pinnedScenarioId, trainingId: topic.id, simulationSessionId: staleSession,
+          industryId: snapshotIndustryId, history: staleHistory, startedAt: now,
+          endedAt: new Date(Date.now() + 3000).toISOString(),
+        })).status, 404);
+        assert.equal(snapshotRequests.length, beforeStaleRequests);
         await storage.updateAppStateWithLock((raw) => {
           const state = imported.ensureDatabaseShape(raw);
           state.config.industries = state.config.industries.map((entry) => entry.id === snapshotIndustryId
@@ -2029,6 +2054,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         }
         const masterCreated = await masterCall(`/orgs/${org.id}/custom-scenarios`, "POST", masterDraft);
         assert.equal(masterCreated.status, 201, JSON.stringify(masterCreated.body));
+        const masterBeforeInvalidPatch = (await masterCall(`/orgs/${org.id}/custom-scenarios`, "GET")).body;
+        assert.deepEqual((masterBeforeInvalidPatch.effectiveIndustryIds as string[]).sort(), [snapshotIndustryId, altIndustryId].sort());
+        assert.equal((await masterCall(`/orgs/${org.id}/custom-scenarios/${masterCreated.body.id}`, "PATCH", {
+          applicableIndustryIds: [snapshotIndustryId, unrelatedIndustryId], title: "Must not persist",
+        })).status, 400);
+        assert.deepEqual((await masterCall(`/orgs/${org.id}/custom-scenarios`, "GET")).body.scenarios, masterBeforeInvalidPatch.scenarios);
         await withMockScenarioGeneration(async (calls) => {
           const masterGenerated = await masterCall(`/orgs/${org.id}/custom-scenarios/generate`, "POST", masterDraft);
           assert.equal(masterGenerated.status, 200, JSON.stringify(masterGenerated.body));
@@ -2077,7 +2108,17 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.equal((await call(startPath, { simulationSessionId: `role_leak_${randomUUID()}`,
           segmentId: restrictedRoleId, scenarioId: restrictedStandardId, trainingId: topic.id })).status, 400);
 
+        const foreignRead = async (path: string) => {
+          const result = await fetch(base + path, { headers: { Authorization: `Bearer ${foreignMobileToken}` } });
+          assert.equal(result.status, 200);
+          return await result.json() as Record<string, unknown>;
+        };
+        const foreignConfigBefore = await foreignRead(`/mobile/users/${foreignPerformanceUser.id}/config`);
+        const foreignCatalogBefore = await foreignRead(`/mobile/users/${foreignPerformanceUser.id}/focus-topics`);
+        assert.ok((foreignCatalogBefore.topics as unknown[]).length > 0);
         assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [unrelatedIndustryId] })).status, 200);
+        assert.deepEqual(await foreignRead(`/mobile/users/${foreignPerformanceUser.id}/config`), foreignConfigBefore);
+        assert.deepEqual(await foreignRead(`/mobile/users/${foreignPerformanceUser.id}/focus-topics`), foreignCatalogBefore);
         assert.equal((await orgAdminCall(`${practiceScenarioPath}/${blockedId}/publish`, "POST")).status, 409);
         assert.equal((await call(startPath, { simulationSessionId: `deactivated_${randomUUID()}`,
           segmentId: segment.id, scenarioId: partialId, trainingId: topic.id })).status, 400);
@@ -2102,6 +2143,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.deepEqual(configPayload.industries, []);
         assert.deepEqual(configPayload.orgCustomScenarios, []);
         assert.deepEqual(configPayload.segments, []);
+        assert.equal((configPayload as unknown as { activeSegmentId: string }).activeSegmentId, "");
         assert.deepEqual((await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`)).body.scenarios, []);
         assert.equal((await orgAdminCall(practiceScenarioPath, "POST", pinnedV1Draft)).status, 400);
         assert.equal((await orgAdminCall(`${practiceScenarioPath}/${blockedId}/publish`, "POST")).status, 409);
@@ -2114,7 +2156,10 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.deepEqual((await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`)).body.scenarios, []);
         assert.equal((await call(startPath, { simulationSessionId: `empty_industry_${randomUUID()}`,
           segmentId: segment.id, scenarioId: partialId, trainingId: topic.id })).status, 400);
-        assert.equal((await orgAdminCall(`${practiceScenarioPath}/generate`, "POST", { sourceContentIds: [contentId] })).status, 409);
+        const unavailableGeneration = await orgAdminCall(`${practiceScenarioPath}/generate`, "POST", { sourceContentIds: [contentId] });
+        assert.equal(unavailableGeneration.status, 409);
+        assert.match(String(unavailableGeneration.body.error), /^Generation requires/);
+        assert.doesNotMatch(String(unavailableGeneration.body.error), /Publication/);
         assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { activeIndustries: [snapshotIndustryId] })).status, 200);
         const restoredIndustryDetail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
         assert.equal((restoredIndustryDetail.body.scenarios as Array<{ id: string }>).some((row) => row.id === partialId), true);

@@ -35,17 +35,53 @@ The command remains temporarily as a credential-free, side-effect-free compatibi
 
 ## Organization-industry enforcement prerequisite
 
-Snapshot-based continuation is active only when the running API uses `FOCUS_TOPIC_AUTHORITY=assignments`. For staging and production, verify the deployed environment's actual authority-mode value and the running API revision; do not infer either from a documentation default or source configuration.
+Industry enforcement has **no separate feature flag**. Deploying `c608bf0` or a later combined staging revision activates it immediately, including in legacy authority mode. Such a revision cannot serve as the first, snapshot-only production deployment.
 
-Before organization-industry eligibility enforcement in production, separately verify: (1) durable simulation-session snapshot code is deployed, (2) the running API is in the snapshot-aware `assignments` authority mode, (3) the 48-hour legacy-session drain has elapsed while that path is active, and (4) the proposed industry enforcement is ready for its own approval. Never switch production from `legacy` to `assignments` automatically as part of this release process.
+Use two independently approved production release revisions:
 
-Only after the first three conditions are true, wait at least 48 hours after the snapshot-aware deployment and verify that no recently active, unfinished legacy sessions with a SQL `NULL` snapshot remain before enabling enforcement. A zero `NULL`-snapshot count alone does not demonstrate that the running authority mode is snapshot-aware. Newer sessions carry a server-captured industry snapshot and can preserve their originally authorized industry context after later configuration changes. Do not backfill or retroactively reinterpret legacy sessions.
+1. **Snapshot support first:** prepare and validate a production release containing the snapshot schema/runtime prerequisites and corrections, excluding organization-industry enforcement. `ac8fce2` is a source reference for the prerequisites, not an approved production release. Keep enforcement absent from this first revision. Record its exact deployed SHA and healthy startup.
+2. **Verify the running mode:** inspect the actual production service Environment and deployed revision. Snapshot continuation requires `FOCUS_TOPIC_AUTHORITY=assignments`. Documentation defaults and a zero NULL count cannot establish this. If production is still `legacy`, stop for a separately approved authority cutover; do not switch it automatically.
+3. **Drain:** record when both snapshot-aware code and assignments mode became active. Wait at least 48 hours from the later event, then require zero recently active unfinished NULL-snapshot sessions. Verify the live schema before using the read-only query below (current source uses `status`, `last_seen_at`, and `industry_snapshot`). Do not fabricate snapshots or rewrite historical rows.
 
-Before finalizing the readiness query for that deployment, inspect the production `simulation_sessions` schema and verify the actual column names used for status, last activity, and `industry_snapshot`. Build the read-only SQL against that observed schema rather than assuming the current source names.
+   ```sql
+   SELECT COUNT(*) AS recent_unfinished_legacy_sessions
+   FROM simulation_sessions
+   WHERE status = 'started'
+     AND last_seen_at >= NOW() - INTERVAL '48 hours'
+     AND industry_snapshot IS NULL;
+   ```
+
+4. **Audit before enforcement:** read the actual production configuration and identify every active organization with zero effective industries (organization selections intersected with globally enabled definitions). Inspect the live `app_state` JSON shape first. This query reports technical IDs only; obtain an explicit decision for affected accounts before proceeding.
+
+   ```sql
+   WITH config AS (
+     SELECT state_json FROM app_state WHERE id = 'primary'
+   ), enabled AS (
+     SELECT industry->>'id' AS id
+     FROM config, jsonb_array_elements(COALESCE(state_json->'config'->'industries', '[]'::jsonb)) industry
+     WHERE industry->>'enabled' = 'true'
+   ), effective AS (
+     SELECT organization->>'id' AS org_id,
+       ARRAY(SELECT DISTINCT selection.value
+             FROM jsonb_array_elements_text(COALESCE(organization->'activeIndustries', '[]'::jsonb)) selection(value)
+             JOIN enabled ON enabled.id = selection.value) AS effective_industry_ids
+     FROM config, jsonb_array_elements(COALESCE(state_json->'orgs', '[]'::jsonb)) organization
+     WHERE organization->>'status' = 'active'
+   )
+   SELECT org_id, effective_industry_ids,
+          cardinality(effective_industry_ids) = 0 AS requires_decision
+   FROM effective ORDER BY org_id;
+   ```
+
+5. **Enforcement second:** only after revision/mode/drain/audit gates pass and production approval is explicit, deploy the separate tested enforcement revision. Check readiness and authorized new-launch behavior as well as continuation of a legitimate snapshotted session. Preserve the first revision as the rollback reference.
+
+**Release mechanism blocker:** `main` remains frozen and there is no enforcement toggle. Before production rollout, the owner must authorize and establish two independently selectable release revisions (a verified provider pinned-revision/artifact mechanism, or an approved release branch with manual deploys). Verify the service can actually deploy each revision independently; do not assume Render supports a particular pinning control. If only “deploy latest tracked branch” is available and the combined revision would be first, stop until the snapshot-only release line exists. This task creates neither production releases nor authority cutovers.
+
+Read-only pre-8B.8B.1 observations on 2026-10-14: staging `/meta/environment` served `c608bf0ba1c0364a68eeac9b9432c622e8a5561c`; production served frozen `aa79a9d1fbac6704eb1d0033af81c6342538073d`. The owner separately confirmed active staging assignments mode. Public metadata does not expose authority mode, tracked branch, or auto-deploy controls. The repository `render.yaml` defines a staging video worker, not the API services; verify actual API and worker branch/auto-deploy settings in Render before each production release. The mappings in the supersession notice are intended mappings, not live provider verification.
 
 ## Branch / Release Strategy
 
-Current state: staging and production can both deploy from `main`. That works only when production deploys are manual and disciplined, but it has a weak seam: if `main` moves after staging verification, a later manual production deploy can accidentally include untested commits.
+The normal workflow below is superseded by the modernization freeze above. Do not use its `main` promotion steps during this initiative. Inspect the provider's actual tracked branches and auto-deploy settings; never infer current deployment mappings from this section.
 
 Recommended target model:
 
