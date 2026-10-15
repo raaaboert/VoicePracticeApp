@@ -35,10 +35,10 @@ function CollapsiblePanel(props: { title: string; defaultOpen?: boolean; childre
     <details
       open={props.defaultOpen ?? false}
       style={{
-        border: "1px solid rgba(129, 206, 166, 0.25)",
+        border: "1px solid var(--vp-border)",
         borderRadius: 10,
         marginBottom: 10,
-        background: "rgba(5, 30, 18, 0.45)"
+        background: "var(--vp-surface-strong)"
       }}
     >
       <summary style={{ cursor: "pointer", fontWeight: 700, padding: "10px 12px" }}>{props.title}</summary>

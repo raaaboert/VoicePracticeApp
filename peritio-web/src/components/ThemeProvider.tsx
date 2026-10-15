@@ -9,9 +9,8 @@ import {
   useState,
 } from "react";
 
-export type ThemeMode = "dark" | "light";
-
-const THEME_STORAGE_KEY = "peritio.theme";
+import { DEFAULT_THEME, readThemePreference, THEME_STORAGE_KEY, type ThemeMode } from "../lib/themePreference";
+export type { ThemeMode } from "../lib/themePreference";
 
 interface ThemeContextValue {
   ready: boolean;
@@ -26,21 +25,12 @@ function applyTheme(theme: ThemeMode): void {
   document.documentElement.dataset.theme = theme;
 }
 
-function readStoredTheme(): ThemeMode | null {
-  try {
-    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-    return stored === "light" || stored === "dark" ? stored : null;
-  } catch {
-    return null;
-  }
-}
-
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<ThemeMode>("dark");
+  const [theme, setThemeState] = useState<ThemeMode>(DEFAULT_THEME);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const storedTheme = readStoredTheme() ?? "dark";
+    const storedTheme = readThemePreference(() => window.localStorage);
     applyTheme(storedTheme);
     setThemeState(storedTheme);
     setReady(true);

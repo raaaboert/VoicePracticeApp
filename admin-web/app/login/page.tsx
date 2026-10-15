@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AdminEnvironmentStatus } from "../../src/components/AdminEnvironmentStatus";
+import { ThemeSwitchButton } from "../../../peritio-web/src/components/ThemeSwitchButton";
 import { adminFetch, setAdminToken } from "../../src/lib/api";
 
 interface LoginResponse {
@@ -40,6 +41,7 @@ export default function LoginPage() {
     <main>
       <div className="shell" style={{ maxWidth: 500, paddingTop: 60 }}>
         <div className="card">
+          <div className="auth-theme-control"><ThemeSwitchButton /></div>
           <h2>Peritio - Web Admin</h2>
           <AdminEnvironmentStatus compact />
           <p className="small">

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
 import { LoginForm } from "@/src/components/LoginForm";
+import { ThemeSwitchButton } from "@/src/components/ThemeSwitchButton";
 import { assertDashboardAuthConfig, getWebAuthBearerToken, getWebAuthSession } from "@/src/lib/auth";
 import { buildDashboardSessionResetPath, parseDashboardLoginReason } from "@/src/lib/dashboardSession";
 import { ensureAppHostRequest } from "@/src/lib/serverHostGuards";
@@ -35,6 +36,7 @@ export default async function LoginPage({
     <main className="login-shell">
       <section className="login-grid">
         <div className="login-panel">
+          <div className="auth-theme-control"><ThemeSwitchButton /></div>
           <p className="eyebrow">Peritio</p>
           <h1>Dashboard access</h1>
           <p className="login-copy">

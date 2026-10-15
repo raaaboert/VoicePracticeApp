@@ -515,7 +515,7 @@ export default function SupportPage() {
               width: "min(980px, 100%)",
               maxHeight: "90vh",
               overflow: "auto",
-              background: "rgba(17, 35, 62, 0.96)"
+              background: "var(--vp-surface-strong)"
             }}
             onClick={(event) => event.stopPropagation()}
           >

@@ -4,18 +4,7 @@ import type { Metadata } from "next";
 import { ReactNode } from "react";
 
 import { ThemeProvider } from "@/src/components/ThemeProvider";
-
-const themeBootScript = `
-(() => {
-  try {
-    const stored = window.localStorage.getItem('peritio.theme');
-    const theme = stored === 'light' || stored === 'dark' ? stored : 'dark';
-    document.documentElement.dataset.theme = theme;
-  } catch (error) {
-    document.documentElement.dataset.theme = 'dark';
-  }
-})();
-`;
+import { THEME_BOOT_SCRIPT } from "@/src/lib/themePreference";
 
 export const metadata: Metadata = {
   title: "Peritio",
@@ -24,9 +13,9 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning data-theme="dark">
+    <html lang="en" suppressHydrationWarning data-theme="light">
+      <head><script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} /></head>
       <body>
-        <script dangerouslySetInnerHTML={{ __html: themeBootScript }} />
         <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>

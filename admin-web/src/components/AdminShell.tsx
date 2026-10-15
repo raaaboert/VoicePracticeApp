@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { logoutAdminSession } from "../lib/api";
 import { AdminEnvironmentStatus } from "./AdminEnvironmentStatus";
+import { ThemeSwitchButton } from "../../../peritio-web/src/components/ThemeSwitchButton";
 import {
   AdminMode,
   emitAdminModeChanged,
@@ -209,6 +210,7 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
             </div>
           </div>
           <div className="nav">
+            <ThemeSwitchButton />
             {navItems.map((item) => (
               <Link key={item.href} href={withAdminMode(item.href, mode)} className={navClass(item.active)}>
                 {item.label}

@@ -42,7 +42,9 @@ export function ThemeSettingsPanel() {
             <button
               key={option.id}
               type="button"
-              className={`theme-card${theme === option.id ? " active" : ""}`}
+              className={`theme-card${ready && theme === option.id ? " active" : ""}`}
+              disabled={!ready}
+              aria-pressed={ready && theme === option.id}
               onClick={() => setTheme(option.id)}
             >
               <div>
