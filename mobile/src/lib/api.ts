@@ -33,7 +33,7 @@ import {
 import { File } from "expo-file-system";
 import { NativeModules, Platform } from "react-native";
 import { DialogueMessage, SimulationEvaluationResult } from "../types";
-import { createMobileApiError } from "./apiError";
+import { createMobileApiError, isTransientRequestError } from "./apiError";
 import { buildRemoteTtsAudioResult } from "./ttsAudioOrigin";
 import type { RemoteTtsAudioOrigin } from "./ttsAudioOrigin";
 
@@ -43,13 +43,6 @@ export type { RemoteTtsAudioOrigin } from "./ttsAudioOrigin";
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_TURN_HISTORY_MESSAGES = 24;
 const MAX_TURN_HISTORY_MESSAGE_CHARS = 2_500;
-const TRANSIENT_ERROR_PATTERNS = [
-  "request timed out",
-  "request failed (429)",
-  "request failed (502)",
-  "request failed (503)",
-  "request failed (504)",
-];
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -430,15 +423,6 @@ export async function fetchBackendVersion(options?: {
       signal: options?.signal,
     },
   );
-}
-
-function isTransientRequestError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const lower = error.message.toLowerCase();
-  return TRANSIENT_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
 }
 
 function sleep(ms: number): Promise<void> {

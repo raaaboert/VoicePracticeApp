@@ -1,4 +1,5 @@
 import { DialogueMessage, SimulationEvaluationResult, SimulationScorecard } from "../types";
+import { MobileApiError } from "./apiError";
 
 export const MIN_USER_RESPONSES_FOR_VERIFIED_SCORECARD = 3;
 
@@ -52,10 +53,16 @@ export function classifySimulationScoreFailure(error: unknown): ScoringFailureCa
     return "unknown";
   }
 
-  const message = error.message.trim().toLowerCase();
-  if (!message) {
-    return "unknown";
+  if (error instanceof MobileApiError) {
+    switch (error.code) {
+      case "ai_timeout": return "network_timeout";
+      case "ai_budget_limit": return "rate_limited";
+      case "ai_unavailable":
+      case "score_generation_failed": return "upstream_scoring_failure";
+    }
   }
+
+  const message = error.message.trim().toLowerCase();
 
   if (
     message.includes("missing mobile auth context")
@@ -79,16 +86,24 @@ export function classifySimulationScoreFailure(error: unknown): ScoringFailureCa
     return "invalid_input";
   }
 
-  if (message.includes("request timed out")) {
+  if (message.includes("score was generated but could not be saved")) {
+    return "persistence_failure";
+  }
+
+  if (error instanceof MobileApiError) {
+    if ([401, 403].includes(error.status)) return "auth_or_config";
+    if ([400, 404, 422].includes(error.status)) return "invalid_input";
+    if ([408, 504].includes(error.status)) return "network_timeout";
+    if (error.status === 429) return "rate_limited";
+    if ([500, 502, 503].includes(error.status)) return "upstream_scoring_failure";
+  }
+
+  if (["request timed out", "network request failed", "failed to fetch", "networkerror"].some((pattern) => message.includes(pattern))) {
     return "network_timeout";
   }
 
   if (message.includes("request failed (429)") || message.includes("rate limit")) {
     return "rate_limited";
-  }
-
-  if (message.includes("score was generated but could not be saved")) {
-    return "persistence_failure";
   }
 
   if (

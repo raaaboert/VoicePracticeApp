@@ -29,7 +29,7 @@ import {
   startSimulationSession,
 } from "../lib/api";
 import type { PrefetchedRemoteSpeechChunk } from "../lib/api";
-import { isOrganizationAccessRequiredError } from "../lib/apiError";
+import { isOrganizationAccessRequiredError, isSimulationApiFallbackError as isApiError } from "../lib/apiError";
 import {
   awaitSubmittedSimulationTurnReply,
   createOpeningLine,
@@ -347,27 +347,6 @@ function isPlaceholderTranscriptError(error: unknown): boolean {
     return error.message.toLowerCase().includes("no transcribed user text received");
   }
   return false;
-}
-
-function isApiError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const message = error.message.toLowerCase();
-  return (
-    message.includes("openai") ||
-    message.includes("api key") ||
-    message.includes("unauthorized") ||
-    message.includes("incorrect") ||
-    message.includes("401") ||
-    message.includes("429") ||
-    message.includes("quota") ||
-    message.includes("billing") ||
-    message.includes("remote ai") ||
-    (message.includes("ai") && message.includes("disabled")) ||
-    message.includes("503")
-  );
 }
 
 function buildLocalCapturedText(turnDurationSeconds: number): string {

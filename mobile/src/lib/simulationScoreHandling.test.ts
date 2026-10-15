@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createMobileApiError, MobileApiError } from "./apiError";
 
 import {
   buildInsufficientEvidenceMessage,
@@ -112,4 +113,38 @@ test("buildInsufficientEvidenceMessage describes a normal no-scorecard state", (
   assert.match(message, /before there were enough user responses/i);
   assert.match(message, /at least 3 user responses/i);
   assert.doesNotMatch(message, /scoring service failed|fallback score|practice-only|77|50/i);
+});
+
+test("scoring prefers structured codes over provider wording and status", () => {
+  for (const [code, expected] of [
+    ["ai_timeout", "network_timeout"], ["ai_budget_limit", "rate_limited"],
+    ["ai_unavailable", "upstream_scoring_failure"], ["score_generation_failed", "upstream_scoring_failure"],
+  ] as const) {
+    assert.equal(classifySimulationScoreFailure(new MobileApiError("", 500, code)), expected);
+    assert.equal(classifySimulationScoreFailure(new MobileApiError("invalid scenario", 400, code)), expected);
+  }
+});
+
+test("scoring uses HTTP statuses when safe messages and codes are unknown", () => {
+  for (const [status, expected] of [
+    [401, "auth_or_config"], [403, "auth_or_config"], [400, "invalid_input"],
+    [404, "invalid_input"], [422, "invalid_input"], [408, "network_timeout"],
+    [504, "network_timeout"], [429, "rate_limited"], [500, "upstream_scoring_failure"],
+    [502, "upstream_scoring_failure"], [503, "upstream_scoring_failure"], [409, "unknown"],
+  ] as const) {
+    assert.equal(classifySimulationScoreFailure(createMobileApiError(status, { error: "Service problem", code: "future_code" })), expected);
+  }
+});
+
+test("scoring retains legacy and network classifications and fails closed for malformed errors", () => {
+  for (const message of ["Request timed out after 45 seconds.", "Network request failed", "Failed to fetch"]) {
+    assert.equal(classifySimulationScoreFailure(new Error(message)), "network_timeout");
+  }
+  assert.equal(classifySimulationScoreFailure(new Error("OpenAI responses request failed")), "upstream_scoring_failure");
+  assert.equal(classifySimulationScoreFailure(new Error("Evaluator returned invalid JSON")), "invalid_input");
+  assert.equal(classifySimulationScoreFailure(createMobileApiError(500, { error: "Score was generated but could not be saved." })), "persistence_failure");
+  for (const error of [null, {}, "ai_timeout", new Error(""), new Error("Unrecognized problem")]) {
+    assert.equal(classifySimulationScoreFailure(error), "unknown");
+  }
+  assert.equal(classifySimulationScoreFailure(createMobileApiError(503, { error: {}, code: [] })), "upstream_scoring_failure");
 });
