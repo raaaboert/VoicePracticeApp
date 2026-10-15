@@ -1,5 +1,7 @@
 import {
   AppConfig,
+  MobileNotificationsResponse,
+  MobileNotificationRow,
   Difficulty,
   EnterpriseDomainMatch,
   MobileOnboardRequest,
@@ -408,6 +410,21 @@ async function requestFormData<T>(
 
 export function getApiBaseUrl(): string {
   return API_BASE_URL;
+}
+
+export function fetchMobileNotifications(authToken: string, options: { offset?: number; history?: boolean; signal?: AbortSignal } = {}) {
+  const query = new URLSearchParams({ limit: "20", offset: String(options.offset ?? 0) });
+  if (options.history) query.set("view", "all");
+  return requestJson<MobileNotificationsResponse>(`/mobile/notifications?${query}`, undefined, authToken, { signal: options.signal });
+}
+
+export function mutateMobileNotification(authToken: string, id: string, action: "open" | "dismiss") {
+  return requestJson<{ notification: MobileNotificationRow }>(`/mobile/notifications/${encodeURIComponent(id)}/${action}`,
+    { method: "PATCH" }, authToken);
+}
+
+export function markAllMobileNotificationsRead(authToken: string) {
+  return requestJson<{ ok: true }>("/mobile/notifications/mark-all-read", { method: "PATCH" }, authToken);
 }
 
 export async function fetchBackendVersion(options?: {

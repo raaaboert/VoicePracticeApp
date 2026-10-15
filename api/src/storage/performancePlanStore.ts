@@ -79,6 +79,7 @@ export interface PerformancePlanAppendUpdateInput {
 }
 
 export interface PerformancePlanStore {
+  listNotificationTargetsForUser(orgId: string, userId: string): Promise<Array<Pick<PerformancePlan, "id" | "orgId" | "userId">>>;
   initialize(): Promise<void>;
   createPlan(input: PerformancePlanCreateInput): Promise<PerformancePlanWithRelations>;
   updatePlan(input: PerformancePlanUpdateInput): Promise<PerformancePlanWithRelations | null>;
@@ -782,6 +783,9 @@ async function ensureParentDirectory(filePath: string): Promise<void> {
 }
 
 abstract class BasePerformancePlanStore implements PerformancePlanStore {
+  async listNotificationTargetsForUser(orgId: string, userId: string) {
+    return (await this.listPlansForUser(orgId, userId)).map(({ plan }) => ({ id: plan.id, orgId: plan.orgId, userId: plan.userId }));
+  }
   abstract initialize(): Promise<void>;
   abstract createPlan(input: PerformancePlanCreateInput): Promise<PerformancePlanWithRelations>;
   abstract updatePlan(input: PerformancePlanUpdateInput): Promise<PerformancePlanWithRelations | null>;
@@ -1300,6 +1304,14 @@ class PostgresPerformancePlanStore extends BasePerformancePlanStore {
     );
     const plan = result.rows[0] ? mapPlanRow(result.rows[0]) : null;
     return plan ? await this.loadRelations(plan) : null;
+  }
+
+  async listNotificationTargetsForUser(orgId: string, userId: string) {
+    await this.ensureTable();
+    const result = await this.pool.query<{ id: string; org_id: string; user_id: string }>(
+      "SELECT id,org_id,user_id FROM performance_plans WHERE org_id=$1 AND user_id=$2", [orgId, userId],
+    );
+    return result.rows.map((row) => ({ id: row.id, orgId: row.org_id, userId: row.user_id }));
   }
 
   async listPlansForUser(orgId: string, userId: string): Promise<PerformancePlanWithRelations[]> {

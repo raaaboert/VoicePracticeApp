@@ -225,6 +225,10 @@ test("performance plan store creates and reads a plan with scope and audit rows"
     assert.equal(created.scopeItems.length, 1);
     assert.equal(created.scopeItems[0].scenarioDisplayName, "Difficult Performance Review");
     assert.equal(created.auditEvents.length, 1);
+    assert.deepEqual(await store.listNotificationTargetsForUser("org_1", "user_1"),
+      [{ id: "perf_plan_1", orgId: "org_1", userId: "user_1" }]);
+    assert.deepEqual(await store.listNotificationTargetsForUser("another_org", "user_1"), []);
+    assert.deepEqual(await store.listNotificationTargetsForUser("org_1", "another_user"), []);
 
     const loaded = await store.getPlanById("perf_plan_1");
     assert.equal(loaded?.plan.baseline?.derivedTargetScore, 80);

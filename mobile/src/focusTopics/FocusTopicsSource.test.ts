@@ -262,7 +262,7 @@ test("Focus Topic Setup handoff is typed, exact, refreshable, and training-safe"
   assert.match(app, /That practice scenario is no longer available in Setup/);
   assert.match(app, /disabled=\{Boolean\(setupSelectionFailure\)\}/);
   assert.match(app, /setScreen\(setupBackDestination\(setupOrigin\)\)/);
-  assert.match(app, /initialTopicId=\{setupOriginTopicId\(setupOrigin\)\}/);
+  assert.match(app, /initialTopicId=\{notificationDestination\?\.type === "focus_topic" \? notificationDestination.topicId : setupOriginTopicId\(setupOrigin\)\}/);
   assert.match(app, /setSetupOrigin\(null\);[\s\S]*?setSetupSelectionIntent\(null\)/);
   assert.match(
     app,

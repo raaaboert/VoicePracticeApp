@@ -4,6 +4,9 @@ import { LinearGradient } from "expo-linear-gradient";
 import { setAudioModeAsync } from "expo-audio";
 import type { AudioPlayer } from "expo-audio";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import type { MobileNotificationDestination } from "@voicepractice/shared";
+import { useNotifications } from "./src/notifications/useNotifications";
+import { NotificationInboxScreen } from "./src/notifications/NotificationInboxScreen";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Speech from "expo-speech";
 import appManifest from "./app.json";
@@ -228,6 +231,7 @@ type Screen =
   | "simulation"
   | "scorecard"
   | "performance"
+  | "notifications"
   | "focus_topics"
   | "training_content"
   | "related_training_content"
@@ -865,6 +869,14 @@ export default function App() {
   const organizationPlanSupportSubmittingRef = useRef(false);
 
   const [simulationConfig, setSimulationConfig] = useState<SimulationConfig | null>(null);
+  const notificationScope = `${user?.id ?? ""}:${activeSuperUserOrgId ?? user?.orgId ?? ""}`;
+  const inbox = useNotifications(mobileAuthToken, user?.id ?? null, activeSuperUserOrgId ?? user?.orgId ?? null,
+    screen === "home" || screen === "notifications");
+  const [notificationTarget, setNotificationTarget] = useState<{ scope: string; destination: MobileNotificationDestination } | null>(null);
+  const notificationDestination = notificationTarget?.scope === notificationScope ? notificationTarget.destination : null;
+  useEffect(() => {
+    if (screen === "home") setNotificationTarget(null);
+  }, [screen]);
   const simulationStartup = useMemo(() => createSimulationStartupCoordinator(), [
     simulationConfig?.simulationSessionId, user?.id, mobileAuthToken, activeSuperUserOrgId,
   ]);
@@ -4415,7 +4427,11 @@ export default function App() {
   const renderHome = () => (
     <View style={[styles.fill, useIosCompactHomeLayout ? styles.homeFillCompact : null]}>
       <View style={[styles.topRow, useIosCompactHomeLayout ? styles.homeTopRowCompact : null]}>
-        <View style={styles.spacer} />
+        {user && mobileAuthToken ? <Pressable accessibilityRole="button" accessibilityLabel={`Notifications, ${inbox.state.unreadCount} unread`}
+          style={styles.menuButton} onPress={() => { void inbox.controller.refresh(); setScreen("notifications"); }}>
+          <MaterialCommunityIcons name="bell-outline" size={22} color={theme.text} />
+          {inbox.state.unreadCount > 0 ? <Text style={styles.menuButtonText}>{inbox.state.unreadCount > 99 ? "99+" : inbox.state.unreadCount}</Text> : null}
+        </Pressable> : <View style={styles.spacer} />}
         <Text style={styles.topTitle} maxFontSizeMultiplier={1.15}>Peritio</Text>
         <Pressable
           style={styles.menuButton}
@@ -7311,13 +7327,14 @@ export default function App() {
           userId={user.id}
           authToken={mobileAuthToken}
           colorScheme={colorScheme}
-          initialTopicId={setupOriginTopicId(setupOrigin)}
+          initialTopicId={notificationDestination?.type === "focus_topic" ? notificationDestination.topicId : setupOriginTopicId(setupOrigin)}
           onBackToHome={() => {
             setSetupOrigin(null);
+            setNotificationTarget(null);
             setScreen("home");
           }}
           onPracticeScenario={openFocusTopicPracticeScenario}
-          onLeaveReturnedTopic={() => setSetupOrigin(null)}
+          onLeaveReturnedTopic={() => { setSetupOrigin(null); setNotificationTarget(null); }}
         />
       );
     }
@@ -7341,10 +7358,20 @@ export default function App() {
       );
     }
 
+    if (screen === "notifications" && user && mobileAuthToken) {
+      return <NotificationInboxScreen colorScheme={colorScheme} state={inbox.state} controller={inbox.controller}
+        onBack={() => setScreen("home")} onOpen={(destination) => {
+          setNotificationTarget({ scope: notificationScope, destination });
+          setScreen(destination.type === "focus_topic" ? "focus_topics" : "performance");
+        }} />;
+    }
+
     if (screen === "performance" && user && mobileAuthToken) {
       return (
         <PerformanceScreen
           colorScheme={colorScheme}
+          key={notificationScope}
+          initialPlanId={notificationDestination?.type === "performance_goal" ? notificationDestination.planId : null}
           userId={user.id}
           authToken={mobileAuthToken}
           onBack={() => setScreen("home")}

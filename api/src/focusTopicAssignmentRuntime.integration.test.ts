@@ -10,6 +10,9 @@ import { createDatabaseStorage } from "./storage.js";
 import { createFocusTopicAuthorityStore } from "./storage/focusTopicAuthorityStore.js";
 import { createOrgModuleEntitlementStore } from "./storage/orgModuleEntitlementStore.js";
 import { createUserNotificationStore } from "./storage/userNotificationStore.js";
+import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
+import { createUsageSessionStore } from "./storage/usageSessionStore.js";
+import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createOrganizationProductSettingsStore } from "./storage/organizationProductSettingsStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
@@ -302,6 +305,12 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       await authority.initialize();
       await createUserNotificationStore({ provider: "postgres", databaseUrl: url,
         pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool }).initialize();
+      await createUsageSessionStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
+        pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000 }).initialize();
+      await createScoreRecordStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
+        pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000 }).initialize();
+      await createPerformancePlanStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
+        pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool }).initialize();
       await createAuditEventStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
         pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool }).initialize();
       const client = await pool.connect();
@@ -468,6 +477,107 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.deepEqual((catalog.body.topics as Array<{ id: string }>).map((row) => row.id), [topic.id]);
       const detail = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
       assert.equal(detail.status, 200, JSON.stringify(detail.body));
+      await t.test("mobile notification HTTP inbox enforces recipient org visibility and durable dismiss history", async () => {
+        const notifications = createUserNotificationStore({ provider: "postgres", databaseUrl: url,
+          pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool! });
+        const own = await notifications.enqueueOne({ orgId: org.id, recipientUserId: user.id,
+          kind: "topic_assigned", subjectType: "focus_topic", subjectId: topic.id, dedupKey: `inbox_${randomUUID()}`,
+          payload: { title: "New Focus Topic", body: "Do not serialize arbitrary bodies", destination: "/app/admin/private" } });
+        const other = await notifications.enqueueOne({ orgId: org.id, recipientUserId: scopedUserAdmin.id,
+          kind: "topic_assigned", subjectType: "focus_topic", subjectId: topic.id, dedupKey: `inbox_${randomUUID()}` });
+        const foreignNotification = await notifications.enqueueOne({ orgId: foreignOrg.id, recipientUserId: user.id,
+          kind: "topic_assigned", subjectType: "focus_topic", subjectId: foreignTopic.id, dedupKey: `inbox_${randomUUID()}` });
+        await notifications.enqueueOne({ orgId: org.id, recipientUserId: user.id,
+          kind: "scenario_reviewed", subjectType: "customer_practice_scenario", subjectId: "unpublished",
+          dedupKey: `inbox_${randomUUID()}`, payload: { title: "Unpublished secret" } });
+        assert.ok(own && other);
+        const request = async (suffix: string, method = "GET", auth = token, extra: Record<string, string> = {}) => {
+          const response = await fetch(`${base}/mobile/notifications${suffix}`, {
+            method, headers: { Authorization: `Bearer ${auth}`, ...extra },
+          });
+          return { status: response.status, body: await response.json() as Record<string, any> };
+        };
+        assert.equal((await request("", "GET", "invalid-token")).status, 401);
+        const list = await request(`?limit=1&userId=${scopedUserAdmin.id}&orgId=${foreignOrg.id}`);
+        assert.equal(list.status, 200);
+        assert.deepEqual(list.body.notifications.map((row: { id: string }) => row.id), [own.id]);
+        assert.equal(list.body.unreadCount, 1);
+        assert.equal((await request("", "GET", token, { "X-Superuser-Org-Id": foreignOrg.id })).body.unreadCount, 1,
+          "regular learners cannot select another organization with a header");
+        assert.doesNotMatch(JSON.stringify(list.body), /Unpublished secret|admin\/private|Do not serialize/);
+        assert.equal((await request(`/${other.id}/dismiss`, "PATCH")).status, 404);
+        assert.equal((await request(`/${other.id}/open`, "PATCH")).status, 404);
+        assert.equal((await request(`/${foreignNotification!.id}/open`, "PATCH")).status, 404);
+        assert.equal((await request(`/${foreignNotification!.id}/dismiss`, "PATCH")).status, 404);
+        assert.equal((await request("?limit=51")).status, 400);
+        assert.equal((await request("?offset=-1")).status, 400);
+        assert.equal((await request(`/${own.id}/dismiss`, "PATCH")).status, 200);
+        assert.equal((await request(`/${own.id}/dismiss`, "PATCH")).status, 200);
+        assert.equal((await request("")).body.notifications.length, 0);
+        assert.equal((await request("")).body.unreadCount, 0);
+        const history = await request("?view=all");
+        assert.equal(history.body.notifications.length, 1);
+        assert.ok(history.body.notifications[0].readAt && history.body.notifications[0].dismissedAt);
+        assert.deepEqual((await request(`/${own.id}/open`, "PATCH")).body.notification.destination,
+          { type: "focus_topic", topicId: topic.id });
+        await pool!.query("UPDATE focus_topic_assignments SET revoked_at=now(),revoked_by='inbox-test' WHERE id=$1", [assignment.id]);
+        try {
+          assert.equal((await request("?view=all")).body.notifications.length, 0);
+          assert.equal((await request(`/${own.id}/open`, "PATCH")).status, 404);
+        } finally { await pool!.query("UPDATE focus_topic_assignments SET revoked_at=NULL,revoked_by=NULL WHERE id=$1", [assignment.id]); }
+        const state = await storage.load();
+        const superState = structuredClone(state);
+        const superToken = `inbox_super_${randomUUID()}`;
+        const superId = `inbox_super_${randomUUID()}`;
+        superState.users.push({ ...user, id: superId, email: "inbox-super@integration.test", isSuperUser: true });
+        superState.mobileAuthTokens.push({ userId: superId,
+          tokenHash: createHmac("sha256", tokenSecret).update(superToken).digest("hex"), createdAt: now, updatedAt: now });
+        await storage.save(superState);
+        try {
+          for (const orgId of [org.id, foreignOrg.id]) {
+            assert.equal((await request("", "GET", superToken, { "X-Superuser-Org-Id": orgId })).body.notifications.length, 0);
+            assert.equal((await request(`/${own.id}/open`, "PATCH", superToken, { "X-Superuser-Org-Id": orgId })).status, 404);
+          }
+        } finally { await storage.save(state); }
+        const changed = structuredClone(state);
+        changed.users.find((entry) => entry.id === user.id)!.status = "disabled";
+        await storage.save(changed);
+        try { assert.equal((await request("")).status, 401); }
+        finally { await storage.save(state); }
+        const moved = structuredClone(state);
+        moved.users.find((entry) => entry.id === user.id)!.orgId = foreignOrg.id;
+        await storage.save(moved);
+        try {
+          assert.equal((await request("?view=all")).body.notifications.length, 0);
+          assert.equal((await request(`/${own.id}/open`, "PATCH")).status, 404);
+        } finally { await storage.save(state); }
+        const plans = createPerformancePlanStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
+          pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool! });
+        const planId = `inbox_goal_${randomUUID()}`;
+        await plans.createPlan({ scopeItems: [], plan: {
+          id: planId, orgId: org.id, userId: user.id, createdByActorType: "mobile_user", createdByActorId: user.id,
+          createdAt: now, submittedAt: now, effectiveAt: now, startDate: now.slice(0, 10), endDate: "2027-12-31", timeZone: "UTC",
+          status: "active", completedAt: null, cancelledAt: null, cancelledByActorType: null, cancelledByActorId: null,
+          cancellationReason: null, activityGoal: { enabled: true, metricType: "weekly_practice_minutes", targetValue: 30 },
+          performanceGoal: { enabled: false, metricType: null, targetScore: null, improvementAmount: null, comparisonMonthCount: null },
+          scope: { allAssignedScenarios: true, selectedFocusTopicIds: [], selectedScenarioIds: [], scenarios: [] },
+          baseline: null, finalResult: null, updatedAt: now,
+        } });
+        const goalNotification = await notifications.enqueueOne({ orgId: org.id, recipientUserId: user.id,
+          kind: "goal_commented", subjectType: "performance_plan", subjectId: planId, dedupKey: `inbox_${randomUUID()}` });
+        assert.deepEqual(await plans.listNotificationTargetsForUser(org.id, user.id), [{ id: planId, orgId: org.id, userId: user.id }]);
+        assert.deepEqual(await plans.listNotificationTargetsForUser(foreignOrg.id, user.id), []);
+        assert.equal((await request("")).body.unreadCount, 1);
+        assert.equal((await request("/mark-all-read", "PATCH")).status, 200);
+        assert.equal((await request("/mark-all-read", "PATCH")).status, 200);
+        assert.equal((await request("")).body.unreadCount, 0);
+        assert.ok((await notifications.getForRecipient({ id: goalNotification!.id, recipientUserId: user.id }))?.readAt);
+        assert.deepEqual((await request(`/${goalNotification!.id}/open`, "PATCH")).body.notification.destination,
+          { type: "performance_goal", planId });
+        await pool!.query("DELETE FROM performance_plans WHERE id=$1", [planId]);
+        assert.equal((await request(`/${goalNotification!.id}/open`, "PATCH")).status, 404);
+        await pool!.query("DELETE FROM user_notifications WHERE dedup_key LIKE 'inbox_%'");
+      });
       assert.equal((await call(`/mobile/users/${user.id}/focus-topics/${foreignTopic.id}`)).status, 404);
       assert.deepEqual((detail.body.scenarios as Array<{ id: string; trainingId: string | null }>).map((row) =>
         [row.id, row.trainingId]).sort(), [[scenario.id, null], [snapshotCustomScenarioId, topic.id]].sort());

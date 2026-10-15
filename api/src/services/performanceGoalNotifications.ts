@@ -15,7 +15,7 @@ function isCurrentMember(db: ApiDatabase, user: UserProfile | undefined, orgId: 
     && user.emailVerifiedAt);
 }
 
-function canCurrentAuthorViewPlan(db: ApiDatabase, recipient: UserProfile, plan: PerformancePlan): boolean {
+function canCurrentAuthorViewPlan(db: ApiDatabase, recipient: UserProfile, plan: Pick<PerformancePlan, "id" | "orgId" | "userId">): boolean {
   const target = db.users.find((user) => user.id === plan.userId);
   return Boolean(target && isCurrentMember(db, target, plan.orgId)
     && recipient.dashboardAccessEnabled
@@ -104,7 +104,7 @@ export function canViewPerformanceGoalNotification(params: {
   db: ApiDatabase;
   recipient: UserProfile;
   notification: UserNotificationRecord;
-  plan: PerformancePlan | null;
+  plan: Pick<PerformancePlan, "id" | "orgId" | "userId"> | null;
 }): boolean {
   const { notification, recipient, plan } = params;
   if ((notification.kind !== "goal_updated" && notification.kind !== "goal_commented")

@@ -447,6 +447,7 @@ import {
   markAuthorizedDashboardNotificationRead,
   resolveAccessRequestNotifications,
 } from "./services/accessRequestNotifications.js";
+import { listMobileNotifications, mutateMobileNotification, markAllMobileNotificationsRead } from "./services/mobileNotifications.js";
 import {
   buildRecoveredSimulationEvaluationResult,
   isRecoverableSimulationScoreRecord,
@@ -15028,6 +15029,50 @@ app.patch("/dashboard/admin/users/:userId", requireDashboardAuth, async (request
   if (!payload) return;
   identityAdministrationResponseObserverForTest?.("PATCH /dashboard/admin/users/:userId", 200);
   response.json(payload);
+});
+
+// Recipient identity comes exclusively from the authenticated bearer token.
+app.all(["/mobile/notifications", "/mobile/notifications/mark-all-read", "/mobile/notifications/:notificationId/:action"], async (request: Request, response: Response) => {
+  const token = getIncomingMobileToken(request);
+  if (!token) { response.status(401).json({ error: "Missing mobile token." }); return; }
+  const action = request.params.action;
+  const isList = request.path === "/mobile/notifications" && request.method === "GET";
+  const isAll = request.path === "/mobile/notifications/mark-all-read" && request.method === "PATCH";
+  if (!isList && !isAll && !(request.method === "PATCH" && (action === "open" || action === "dismiss"))) {
+    response.status(404).json({ error: "Not found." }); return;
+  }
+  const limit = Number(request.query.limit ?? 20);
+  const offset = Number(request.query.offset ?? 0);
+  if (isList && (!Number.isInteger(limit) || limit < 1 || limit > 50 || !Number.isInteger(offset)
+    || offset < 0 || offset > 10_000 || (request.query.view !== undefined && request.query.view !== "all"))) {
+    response.status(400).json({ error: "Invalid notification page." }); return;
+  }
+  await withFreshDatabaseRead(async (db) => {
+    const hash = hashMobileToken(token);
+    const record = db.mobileAuthTokens.find((row) => timingSafeEqualText(row.tokenHash, hash));
+    if (!record) { response.status(401).json({ error: "Invalid mobile token." }); return; }
+    const access = resolveAuthenticatedMobileConfigContext(db, record.userId, request, response);
+    if (!access) return;
+    if (access.actingOrg && access.actingOrg.status !== "active") {
+      response.status(403).json({ error: "Organization is not available." }); return;
+    }
+    const context = { db, recipient: access.user, orgId: access.actingOrgId, store: userNotificationStore,
+      authority: runtimeConfig.focusTopicAuthority === "assignments" && access.actingOrgId
+        ? await focusTopicAuthorityStore.listSnapshot(access.actingOrgId) : null,
+      plans: access.actingOrgId && access.user.orgId === access.actingOrgId
+        ? await performancePlanStore.listNotificationTargetsForUser(access.actingOrgId, access.user.id) : [],
+    };
+    if (isList) {
+      response.json(await listMobileNotifications(context, { limit, offset, history: request.query.view === "all" }));
+    } else if (isAll) {
+      await markAllMobileNotificationsRead(context);
+      response.json({ ok: true });
+    } else {
+      const notification = await mutateMobileNotification(context, request.params.notificationId, action as "open" | "dismiss");
+      if (!notification) { response.status(404).json({ error: "Notification is no longer available." }); return; }
+      response.json({ notification });
+    }
+  });
 });
 
 app.get("/dashboard/notifications", requireDashboardAuth, async (request: DashboardAuthRequest, response: Response) => {

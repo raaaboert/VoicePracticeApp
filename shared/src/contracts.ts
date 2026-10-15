@@ -2924,6 +2924,27 @@ export interface DashboardNotificationMarkAllReadResponse {
   markedCount: number;
 }
 
+export type MobileNotificationDestination =
+  | { type: "focus_topic"; topicId: string }
+  | { type: "performance_goal"; planId: string };
+
+export interface MobileNotificationRow {
+  id: string;
+  kind: "topic_assigned" | "goal_updated" | "goal_commented";
+  title: string;
+  createdAt: string;
+  readAt: string | null;
+  dismissedAt: string | null;
+  resolvedAt: string | null;
+  destination: MobileNotificationDestination;
+}
+
+export interface MobileNotificationsResponse {
+  notifications: MobileNotificationRow[];
+  unreadCount: number;
+  nextOffset: number | null;
+}
+
 export interface RecordUsageSessionRequest {
   simulationSessionId: string;
   userId: string;

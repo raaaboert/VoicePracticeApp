@@ -53,6 +53,7 @@ import type { AppColorScheme } from "../types";
 import { getPerformanceTheme, type PerformanceTheme } from "./performanceTheme";
 
 interface PerformanceScreenProps {
+  initialPlanId?: string | null;
   colorScheme: AppColorScheme;
   userId: string;
   authToken: string;
@@ -931,7 +932,7 @@ function GoalSection({
   );
 }
 
-export function PerformanceScreen({ colorScheme, userId, authToken, onBack }: PerformanceScreenProps) {
+export function PerformanceScreen({ colorScheme, userId, authToken, onBack, initialPlanId }: PerformanceScreenProps) {
   const palette = useMemo(() => getPerformanceTheme(colorScheme), [colorScheme]);
   const styles = useMemo(() => createStyles(palette), [palette]);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -978,6 +979,10 @@ export function PerformanceScreen({ colorScheme, userId, authToken, onBack }: Pe
     },
     [authToken, userId],
   );
+
+  useEffect(() => {
+    if (loadState === "ready" && initialPlanId) void openPlan(initialPlanId);
+  }, [initialPlanId, loadState, openPlan]);
 
   const allPlanRows = useMemo(() => {
     const byId = new Map<string, MobilePerformancePlanHistoryResponse["plans"][number]>();
