@@ -2,7 +2,7 @@ import type { MobileNotificationDestination } from "@voicepractice/shared";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { AppColorScheme } from "../types";
 import { getTrainingContentTheme } from "../trainingContent/theme";
-import { createNotificationInboxController, notificationTimeLabel } from "./model";
+import { createNotificationInboxController, notificationAccessibilityLabel, notificationStatusLabel, notificationTimeLabel } from "./model";
 
 export function NotificationInboxScreen(props: { colorScheme: AppColorScheme;
   controller: ReturnType<typeof createNotificationInboxController>;
@@ -37,11 +37,11 @@ export function NotificationInboxScreen(props: { colorScheme: AppColorScheme;
       {!state.loading && !state.error && !state.unsupported && !state.rows.length
         ? <Text style={{ color: theme.muted }}>{state.history ? "No notifications in your history." : "You're all caught up. No active notifications."}</Text> : null}
       {state.rows.map((row) => <View key={row.id} style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-        <Pressable accessibilityRole="button" accessibilityLabel={`Open ${row.title}`} disabled={state.acting} onPress={() => {
+        <Pressable accessibilityRole="button" accessibilityLabel={notificationAccessibilityLabel(row)} disabled={state.acting} onPress={() => {
           void controller.act(row.id, "open").then((destination) => { if (destination) props.onOpen(destination); });
         }} style={styles.open}>
           <Text style={[styles.rowTitle, { color: theme.text }]}>{row.title}</Text>
-          <Text style={{ color: theme.muted }}>{row.dismissedAt ? "Dismissed" : row.resolvedAt ? "Resolved" : row.readAt ? "Read" : "Unread"} · {notificationTimeLabel(row.createdAt)}</Text>
+          <Text style={{ color: theme.muted }}>{notificationStatusLabel(row)} · {notificationTimeLabel(row.createdAt)}</Text>
         </Pressable>
         {!row.dismissedAt ? button("Dismiss", () => { void controller.act(row.id, "dismiss"); }, false, `Dismiss ${row.title}`) : null}
       </View>)}

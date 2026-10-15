@@ -77,3 +77,11 @@ export function notificationTimeLabel(value: string, now = Date.now()): string {
   if (minutes < 1440) return `${Math.floor(minutes / 60)} hr ago`;
   return new Date(parsed).toLocaleDateString();
 }
+
+export function notificationStatusLabel(row: MobileNotificationRow): string {
+  return row.dismissedAt ? "Dismissed" : row.resolvedAt ? "Resolved" : row.readAt ? "Read" : "Unread";
+}
+
+export function notificationAccessibilityLabel(row: MobileNotificationRow, now = Date.now()): string {
+  return `Open ${row.title}. ${notificationStatusLabel(row)}. ${notificationTimeLabel(row.createdAt, now)}.`;
+}

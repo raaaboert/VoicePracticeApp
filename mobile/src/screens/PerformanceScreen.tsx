@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ActivityIndicator,
@@ -942,6 +942,7 @@ export function PerformanceScreen({ colorScheme, userId, authToken, onBack, init
   const [detail, setDetail] = useState<MobilePerformancePlanDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const consumedInitialPlanIdRef = useRef<string | null>(null);
 
   const loadPerformance = useCallback(async () => {
     setLoadState("loading");
@@ -981,7 +982,11 @@ export function PerformanceScreen({ colorScheme, userId, authToken, onBack, init
   );
 
   useEffect(() => {
-    if (loadState === "ready" && initialPlanId) void openPlan(initialPlanId);
+    if (loadState !== "ready" || !initialPlanId || consumedInitialPlanIdRef.current === initialPlanId) return;
+    // Consume before requesting detail so refreshes and repeated effects cannot
+    // reopen the target or issue another request while the first is pending.
+    consumedInitialPlanIdRef.current = initialPlanId;
+    void openPlan(initialPlanId);
   }, [initialPlanId, loadState, openPlan]);
 
   const allPlanRows = useMemo(() => {

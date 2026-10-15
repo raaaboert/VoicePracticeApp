@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import type { MobileNotificationRow, MobileNotificationsResponse } from "@voicepractice/shared";
 import { MobileApiError } from "../lib/apiError";
-import { createNotificationInboxController, notificationTimeLabel } from "./model";
+import { createNotificationInboxController, notificationAccessibilityLabel, notificationTimeLabel } from "./model";
 
 const row = (id: string): MobileNotificationRow => ({ id, kind: "topic_assigned", title: "New Focus Topic",
   createdAt: "2026-10-14T12:00:00Z", readAt: null, dismissedAt: null, resolvedAt: null,
@@ -102,4 +102,20 @@ test("refresh is bounded to foreground/home/inbox and never modifies updates or 
 test("relative timestamps handle future and malformed values", () => {
   assert.equal(notificationTimeLabel("bad"), "Date unavailable");
   assert.equal(notificationTimeLabel("2026-10-14T12:00:00Z", Date.parse("2026-10-14T12:02:00Z")), "2 min ago");
+});
+
+test("notification accessibility names include title status and the existing relative time format", () => {
+  const now = Date.parse("2026-10-14T12:02:00Z");
+  const notification = { ...row("a"), title: "New Focus Topic: Coaching" };
+  for (const [patch, status] of [
+    [{}, "Unread"], [{ readAt: notification.createdAt }, "Read"],
+    [{ readAt: notification.createdAt, dismissedAt: notification.createdAt }, "Dismissed"],
+    [{ resolvedAt: notification.createdAt }, "Resolved"],
+  ] as const) {
+    assert.equal(notificationAccessibilityLabel({ ...notification, ...patch }, now), `Open New Focus Topic: Coaching. ${status}. 2 min ago.`);
+  }
+  const screen = readFileSync(new URL("./NotificationInboxScreen.tsx", import.meta.url), "utf8");
+  assert.match(screen, /accessibilityRole="button" accessibilityLabel=\{notificationAccessibilityLabel\(row\)\}/);
+  assert.match(screen, /\{notificationStatusLabel\(row\)\} · \{notificationTimeLabel\(row.createdAt\)\}/);
+  assert.match(screen, /minHeight: 44/);
 });
