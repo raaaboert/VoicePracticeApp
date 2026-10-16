@@ -138,3 +138,23 @@ test("opening turn and transcription preserve structured failures for the existi
     assert.equal(calls, 3);
   }
 });
+
+test("lifecycle 409 responses are not retried and score recovery preserves an existing score", async () => {
+  for (const code of ["session_expired", "session_completed"]) {
+    const requests: string[] = [];
+    const persisted = { status: "scored", scorecard: { overallScore: 80 }, record: { id: "original-score" } };
+    const harness = apiHarness(async (url, init) => {
+      requests.push(`${init?.method ?? "GET"} ${url}`);
+      return init?.method === "POST" ? json({ error: "Simulation session ended", code }, 409) : json(persisted);
+    });
+    for (const request of [() => harness.api.fetchAiOpeningLine(params), () => harness.api.fetchAiTurn(params),
+      () => harness.api.fetchAiScore(params)]) {
+      await assert.rejects(request(), apiErrors.isSimulationSessionEndedError);
+    }
+    assert.equal(requests.length, 3, "one HTTP request per action; no expired-conversation retry");
+    assert.deepEqual(await harness.api.recoverPersistedAiScore(params), persisted);
+    assert.equal(requests.length, 4);
+    assert.ok(requests[3]!.endsWith("/ai/score?simulationSessionId=pinned-session"));
+    assert.deepEqual(harness.delays, []);
+  }
+});

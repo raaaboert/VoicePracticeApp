@@ -33,6 +33,11 @@ export function isOrganizationAccessRequiredError(error: unknown): boolean {
   return error instanceof MobileApiError && error.code === "ORG_ACCESS_REQUIRED";
 }
 
+export function isSimulationSessionEndedError(error: unknown): boolean {
+  return error instanceof MobileApiError && error.status === 409
+    && (error.code === "session_expired" || error.code === "session_completed");
+}
+
 export function isTransientRequestError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error instanceof MobileApiError) {

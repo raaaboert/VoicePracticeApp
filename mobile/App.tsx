@@ -878,7 +878,7 @@ export default function App() {
     if (screen === "home") setNotificationTarget(null);
   }, [screen]);
   const simulationStartup = useMemo(() => createSimulationStartupCoordinator(), [
-    simulationConfig?.simulationSessionId, user?.id, mobileAuthToken, activeSuperUserOrgId,
+    simulationConfig?.simulationSessionId, user?.id, mobileAuthToken, activeSuperUserOrgId, user?.orgId,
   ]);
   const [lastCompletedConfig, setLastCompletedConfig] = useState<SimulationConfig | null>(null);
   const [scorecard, setScorecard] = useState<SimulationScorecard | null>(null);

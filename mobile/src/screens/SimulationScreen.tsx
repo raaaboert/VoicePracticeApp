@@ -29,7 +29,7 @@ import {
   startSimulationSession,
 } from "../lib/api";
 import type { PrefetchedRemoteSpeechChunk } from "../lib/api";
-import { isOrganizationAccessRequiredError, isSimulationApiFallbackError as isApiError } from "../lib/apiError";
+import { isOrganizationAccessRequiredError, isSimulationSessionEndedError, isSimulationApiFallbackError as isApiError } from "../lib/apiError";
 import {
   awaitSubmittedSimulationTurnReply,
   createOpeningLine,
@@ -121,6 +121,7 @@ import { AppColorScheme, DialogueMessage, SessionTiming, SimulationConfig } from
 import { fetchRelatedTrainingContent } from "../trainingContent/api";
 import { buildRelatedTrainingContentPresentation } from "../trainingContent/relatedTrainingContent";
 import type { SimulationStartupCoordinator } from "../lib/simulationStartup";
+import { getSimulationRemainingSeconds } from "../lib/simulationStartup";
 
 interface SimulationScreenProps {
   startup: SimulationStartupCoordinator;
@@ -467,6 +468,7 @@ export function SimulationScreen({
   const [isInitializing, setIsInitializing] = useState(true);
   const [useLocalMockMode, setUseLocalMockMode] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [deadlineNowMs, setDeadlineNowMs] = useState(Date.now);
   const [actionDockHeight, setActionDockHeight] = useState(0);
   const [chatViewportWidth, setChatViewportWidth] = useState(0);
   const [isStartingSession, setIsStartingSession] = useState(false);
@@ -604,6 +606,7 @@ export function SimulationScreen({
   const recognizedStartRegisteredRef = useRef(false);
   const turnLoopReadyRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
+  const completeSessionRef = useRef<{ startup: SimulationStartupCoordinator; run: () => Promise<void> } | null>(null);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const localModeConfirmedRef = useRef(false);
   const remoteTtsSoundRef = useRef<AudioPlayer | null>(null);
@@ -635,8 +638,27 @@ export function SimulationScreen({
     }
     return Math.floor(maxMinutes * 60);
   }, [config.maxSimulationMinutes]);
-  const remainingSeconds = maxSessionSeconds === null ? null : Math.max(0, maxSessionSeconds - elapsedSeconds);
+  const remainingSeconds = getSimulationRemainingSeconds({ maxSessionSeconds, elapsedSeconds,
+    absoluteDeadlineMs: startup.absoluteDeadlineMs, nowMs: deadlineNowMs });
   const inFinalMinute = Boolean(sessionActive && remainingSeconds !== null && remainingSeconds <= 60);
+
+  const requestConversationCompletion = useCallback((serverEnded = false) => {
+    const completion = completeSessionRef.current;
+    if (unmountedRef.current || startup.completionDelivered || completion?.startup !== startup) return;
+    if (startup.conversationClosed && !startup.completionRequested && !serverEnded) {
+      setStatus("Session ended. Return to Setup to start a new simulation.");
+      return;
+    }
+    startup.conversationClosed = true;
+    startup.completionRequested = true;
+    turnLoopReadyRef.current = false;
+    if (serverEnded) pendingUnifiedTurnRecoveryRef.current = null;
+    setError(null);
+    setStatus("Session ended. Finishing and recovering your score...");
+    // Do not await this from inside a turn/recovery: completion first waits for
+    // that very settlement. The coordinator serializes all completion signals.
+    void completion.run();
+  }, [startup]);
 
   const clearTurnMonitoring = () => {
     if (monitorIntervalRef.current) {
@@ -880,6 +902,7 @@ export function SimulationScreen({
       if (!isStartupGenerationCurrent(params.generation)) {
         throw openingError;
       }
+      if (isSimulationSessionEndedError(openingError)) throw openingError;
 
       logSimulationTiming({
         correlationId: params.correlationId,
@@ -1920,6 +1943,12 @@ export function SimulationScreen({
     if (!sessionActiveRef.current || processingRef.current || unmountedRef.current) {
       return;
     }
+    try { startup.assertConversationAvailable(); }
+    catch (error) {
+      if (!isSimulationSessionEndedError(error)) throw error;
+      requestConversationCompletion();
+      return;
+    }
 
     if (!turnLoopReadyRef.current) {
       logSimulationTiming({
@@ -2197,6 +2226,12 @@ export function SimulationScreen({
     finalizationReason: TurnFinalizationReason;
     explicitUserAction: boolean;
   }) => {
+    try { startup.assertConversationAvailable(); }
+    catch (error) {
+      if (!isSimulationSessionEndedError(error)) throw error;
+      requestConversationCompletion();
+      return;
+    }
     if (processingRef.current) {
       return;
     }
@@ -2713,6 +2748,7 @@ export function SimulationScreen({
           if (isOrganizationAccessRequiredError(unifiedError)) {
             throw unifiedError;
           }
+          if (isSimulationSessionEndedError(unifiedError)) throw unifiedError;
           const shouldFallbackToLegacy = shouldFallbackToLegacyUnifiedSubmit(unifiedError);
           if (
             isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
@@ -2941,6 +2977,7 @@ export function SimulationScreen({
                 },
               });
             } catch (awaitError) {
+              if (isSimulationSessionEndedError(awaitError)) throw awaitError;
               if (!isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)) {
                 throw new SimulationLifecycleInterruptedError();
               }
@@ -3204,7 +3241,10 @@ export function SimulationScreen({
 
       continueLoop = isForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
     } catch (turnError) {
-      if (isOrganizationAccessRequiredError(turnError)) {
+      if (isSimulationSessionEndedError(turnError)) {
+        continueLoop = false;
+        requestConversationCompletion(true);
+      } else if (isOrganizationAccessRequiredError(turnError)) {
         organizationAccessRequired = true;
         continueLoop = false;
         setError(null);
@@ -3342,6 +3382,12 @@ export function SimulationScreen({
   };
 
   const startSession = async () => {
+    try { startup.assertConversationAvailable(); }
+    catch (error) {
+      if (!isSimulationSessionEndedError(error)) throw error;
+      requestConversationCompletion();
+      return;
+    }
     const startupCorrelationId = createSimulationCorrelationId(config.simulationSessionId, "simulation-start");
     logSimulationTiming({
       correlationId: startupCorrelationId,
@@ -3457,7 +3503,7 @@ export function SimulationScreen({
             },
             authToken,
             { correlationId: startRegistrationCorrelationId },
-          ));
+          ), { maxSimulationMinutes: config.maxSimulationMinutes });
           if (!isCurrentStartupAttempt()) {
             logStaleStartupResult("recognized_start");
             return;
@@ -3697,6 +3743,7 @@ export function SimulationScreen({
         logStaleStartupResult("activate_session");
         return;
       }
+      startup.assertConversationAvailable();
 
       sessionActiveRef.current = true;
       sessionStartedAtRef.current = startup.startedAt ?? new Date();
@@ -3732,6 +3779,10 @@ export function SimulationScreen({
         onOrganizationAccessRequired();
         return;
       }
+      if (isSimulationSessionEndedError(startError)) {
+        requestConversationCompletion(true);
+        return;
+      }
 
       if (!openingCompletedRef.current) {
         openingStartedRef.current = false;
@@ -3765,6 +3816,7 @@ export function SimulationScreen({
   };
 
   const endSession = async (showEndedText: boolean) => {
+    startup.conversationClosed = true;
     sessionLifecycleGenerationRef.current += 1;
     simulationClosedRef.current = true;
     sessionActiveRef.current = false;
@@ -3886,6 +3938,10 @@ export function SimulationScreen({
             return;
           }
         } catch (recoveryError) {
+          if (isSimulationSessionEndedError(recoveryError)) {
+            pendingUnifiedTurnRecoveryRef.current = null;
+            requestConversationCompletion(true);
+          }
           pendingUnifiedTurnRecoveryRef.current = getPendingSubmittedTurnRecoveryAfterAwaitFailure(
             pendingUnifiedTurnRecoveryRef.current,
             isTerminalSubmittedTurnRecoveryAwait(recoveryError),
@@ -3965,78 +4021,92 @@ export function SimulationScreen({
   };
 
   const completeSessionAndScore = useCallback(async () => {
-    if (!sessionActiveRef.current || sessionCompletionInProgressRef.current) {
+    if ((!sessionActiveRef.current && !startup.registered) || sessionCompletionInProgressRef.current || startup.completionDelivered) {
       return;
     }
 
-    sessionCompletionInProgressRef.current = true;
-    try {
-      const startedAt = sessionStartedAtRef.current ?? new Date();
-      if (activeTurnSettlementRef.current) {
-        setStatus("Finishing your submitted response...");
-      } else if (activeSubmittedTurnRecoveryRef.current || pendingUnifiedTurnRecoveryRef.current) {
-        setStatus("Recovering your submitted response before scoring...");
-      }
+    await startup.complete(async () => {
+      if (completeSessionRef.current?.startup !== startup) return;
+      sessionCompletionInProgressRef.current = true;
+      turnLoopReadyRef.current = false;
       try {
-        await settleSimulationBeforeCompletion({
-          getActiveTurnSettlement: () => activeTurnSettlementRef.current,
-          getActiveRecoverySettlement: () => activeSubmittedTurnRecoveryRef.current,
-          hasPendingRecovery: () => pendingUnifiedTurnRecoveryRef.current !== null,
-          recoverPending: async () => {
-            setStatus("Recovering your submitted response before scoring...");
-            await settlePendingSubmittedTurnRecovery({
-              sessionLifecycleGeneration: sessionLifecycleGenerationRef.current,
-              replayAssistant: false,
-            });
-          },
-        });
-      } catch (recoveryError) {
-        if (isOrganizationAccessRequiredError(recoveryError)) {
-          onOrganizationAccessRequired();
-          return;
+        if (activeTurnSettlementRef.current) {
+          setStatus("Finishing your submitted response...");
+        } else if (activeSubmittedTurnRecoveryRef.current || pendingUnifiedTurnRecoveryRef.current) {
+          setStatus("Recovering your submitted response before scoring...");
         }
-        if (isSimulationLifecycleInterruptedError(recoveryError)) {
-          return;
-        }
-        if (pendingUnifiedTurnRecoveryRef.current) {
-          logSimulationTiming({
-            correlationId: createSimulationCorrelationId(config.simulationSessionId, "end-session-recovery"),
-            phase: "submitted_turn_recovery_before_score_failed",
-            details: {
-              message: getErrorMessage(recoveryError, "Could not recover the submitted response before scoring."),
+        try {
+          await settleSimulationBeforeCompletion({
+            getActiveTurnSettlement: () => activeTurnSettlementRef.current,
+            getActiveRecoverySettlement: () => activeSubmittedTurnRecoveryRef.current,
+            hasPendingRecovery: () => pendingUnifiedTurnRecoveryRef.current !== null,
+            recoverPending: async () => {
+              setStatus("Recovering your submitted response before scoring...");
+              await settlePendingSubmittedTurnRecovery({
+                sessionLifecycleGeneration: sessionLifecycleGenerationRef.current,
+                replayAssistant: false,
+              });
             },
           });
-          setError("Your submitted response could not be recovered yet. Tap Resume Turn and retry before ending.");
-          setStatus("Submitted response recovery is required before scoring.");
-          return;
+        } catch (recoveryError) {
+          if (isOrganizationAccessRequiredError(recoveryError)) {
+            onOrganizationAccessRequired();
+            return;
+          }
+          if (isSimulationLifecycleInterruptedError(recoveryError)) {
+            return;
+          }
+          if (pendingUnifiedTurnRecoveryRef.current) {
+            logSimulationTiming({
+              correlationId: createSimulationCorrelationId(config.simulationSessionId, "end-session-recovery"),
+              phase: "submitted_turn_recovery_before_score_failed",
+              details: {
+                message: getErrorMessage(recoveryError, "Could not recover the submitted response before scoring."),
+              },
+            });
+            setError("Your submitted response could not be recovered yet. Tap Resume Turn and retry before ending.");
+            setStatus("Submitted response recovery is required before scoring.");
+            return;
+          }
+          // The transcript/reply was already committed; speech replay failure
+          // cannot make the completed response ineligible for scoring.
         }
-        // The transcript/reply was already committed; speech replay failure
-        // cannot make the completed response ineligible for scoring.
+        if (completeSessionRef.current?.startup !== startup) return;
+        const endedAt = new Date();
+        // Exclude a currently paused background interval from usage as well as
+        // intervals already adjusted on resume. This never changes the deadline.
+        clearLifecyclePause(endedAt.getTime());
+        const startedAt = sessionStartedAtRef.current ?? endedAt;
+        const rawDurationSeconds = Math.max(
+          0,
+          Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000),
+        );
+        const completedHistory = [...messagesRef.current];
+        await endSession(false);
+        if (completeSessionRef.current?.startup !== startup) return;
+        sessionStartedAtRef.current = null;
+        setElapsedSeconds(rawDurationSeconds);
+        startup.deliverCompletion(() => onSessionComplete(completedHistory, config, {
+          simulationSessionId: config.simulationSessionId,
+          startedAt: startedAt.toISOString(),
+          endedAt: endedAt.toISOString(),
+          rawDurationSeconds,
+          usedMockMode: usedMockModeDuringSessionRef.current,
+          trainingId: config.trainingId ?? null,
+          trainingPackId: sessionTrainingPackIdRef.current,
+        }));
+      } finally {
+        sessionCompletionInProgressRef.current = false;
       }
-      const endedAt = new Date();
-      const rawDurationSeconds = Math.max(
-        0,
-        Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000),
-      );
-      const completedHistory = [...messagesRef.current];
-      await endSession(false);
-      sessionStartedAtRef.current = null;
-      setElapsedSeconds(rawDurationSeconds);
-      onSessionComplete(completedHistory, config, {
-        simulationSessionId: config.simulationSessionId,
-        startedAt: startedAt.toISOString(),
-        endedAt: endedAt.toISOString(),
-        rawDurationSeconds,
-        usedMockMode: usedMockModeDuringSessionRef.current,
-        trainingId: config.trainingId ?? null,
-        trainingPackId: sessionTrainingPackIdRef.current,
-      });
-    } finally {
-      sessionCompletionInProgressRef.current = false;
-    }
-  }, [config, onSessionComplete]);
+    });
+  }, [config, onSessionComplete, startup, clearLifecyclePause]);
+  completeSessionRef.current = { startup, run: completeSessionAndScore };
 
   const resumeLifecyclePausedTurn = async () => {
+    if (startup.conversationClosed) {
+      requestConversationCompletion();
+      return;
+    }
     if (
       lifecycleResumeInProgressRef.current
       || lifecyclePauseReasonRef.current === null
@@ -4144,6 +4214,10 @@ export function SimulationScreen({
       }
       await startListeningTurn();
     } catch (resumeError) {
+      if (isSimulationSessionEndedError(resumeError)) {
+        requestConversationCompletion(true);
+        return;
+      }
       if (isOrganizationAccessRequiredError(resumeError)) {
         onOrganizationAccessRequired();
         return;
@@ -4289,6 +4363,14 @@ export function SimulationScreen({
       graceMs: ACTIVE_SIMULATION_BACKGROUND_GRACE_MS,
     });
     appStateRef.current = nextAppState;
+    if (nextAppState === "active" && startup.registered) {
+      try { startup.assertConversationAvailable(); }
+      catch (error) {
+        if (!isSimulationSessionEndedError(error)) throw error;
+        requestConversationCompletion();
+        return;
+      }
+    }
 
     if (decision.kind === "pause_session") {
       await pauseSimulationForLifecycle({
@@ -4342,6 +4424,8 @@ export function SimulationScreen({
     expireLifecyclePausedSession,
     logSimulationTiming,
     pauseSimulationForLifecycle,
+    startup,
+    requestConversationCompletion,
   ]);
 
   useEffect(() => {
@@ -4400,6 +4484,13 @@ export function SimulationScreen({
       abortActiveTurnRequests();
       if (startup.opening) storePendingOpeningPayload(startup.opening,
         createSimulationCorrelationId(config.simulationSessionId, "opening"));
+
+      if (startup.completionDelivered || (startup.conversationClosed && !startup.completionRequested)) {
+        setMode("idle");
+        setStatus("Session ended. Return to Setup to start a new simulation.");
+        setIsInitializing(false);
+        return;
+      }
 
       if (localTestMode) {
         storePendingOpeningPayload(
@@ -4493,35 +4584,25 @@ export function SimulationScreen({
   }, [handleSimulationAppStateChange]);
 
   useEffect(() => {
-    if (!sessionActive) {
-      return;
-    }
-
+    if ((!sessionActive && !isStartingSession && !startup.registered) || startup.completionDelivered) return;
+    if (startup.conversationClosed && !startup.completionRequested) return;
     const tick = () => {
+      const nowMs = Date.now();
+      setDeadlineNowMs(nowMs);
       const startedAt = sessionStartedAtRef.current;
-      if (!startedAt) {
-        setElapsedSeconds(0);
-        return;
-      }
-
-      const effectiveNowMs = lifecyclePauseStartedAtRef.current ?? Date.now();
-      const nextElapsed = Math.max(0, Math.floor((effectiveNowMs - startedAt.getTime()) / 1000));
+      const effectiveNowMs = lifecyclePauseStartedAtRef.current ?? nowMs;
+      const nextElapsed = startedAt ? Math.max(0, Math.floor((effectiveNowMs - startedAt.getTime()) / 1000)) : 0;
       setElapsedSeconds(nextElapsed);
-
-      if (
-        maxSessionSeconds !== null
-        && nextElapsed >= maxSessionSeconds
-        && !sessionCompletionInProgressRef.current
-      ) {
-        setStatus("Session max length reached. Ending and scoring...");
-        void completeSessionAndScore();
+      const remaining = getSimulationRemainingSeconds({ maxSessionSeconds, elapsedSeconds: nextElapsed,
+        absoluteDeadlineMs: startup.absoluteDeadlineMs, nowMs });
+      if ((startup.completionRequested || remaining === 0) && !sessionCompletionInProgressRef.current) {
+        requestConversationCompletion();
       }
     };
-
     tick();
     const interval = setInterval(tick, 500);
     return () => clearInterval(interval);
-  }, [completeSessionAndScore, maxSessionSeconds, sessionActive]);
+  }, [maxSessionSeconds, sessionActive, isStartingSession, startup, requestConversationCompletion]);
 
   useEffect(() => {
     let cancelled = false;

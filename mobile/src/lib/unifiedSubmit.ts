@@ -1,8 +1,9 @@
-import { MobileApiError } from "./apiError";
+import { MobileApiError, isSimulationSessionEndedError } from "./apiError";
 
 const SUBMITTED_TURN_RECOVERY_TIMEOUT_MESSAGE = "Timed out waiting for simulation assistant reply.";
 
 export function shouldFallbackToLegacyUnifiedSubmit(error: unknown): boolean {
+  if (isSimulationSessionEndedError(error)) return false;
   if (!(error instanceof Error)) {
     return false;
   }
@@ -22,6 +23,8 @@ export function shouldFallbackToLegacyAssistantReply(error: unknown): boolean {
 }
 
 export function isExpiredSubmittedTurnAwait(error: unknown): boolean {
+  // A closed conversation must finish/recover scoring, never generate a fresh reply.
+  if (isSimulationSessionEndedError(error)) return false;
   if (!(error instanceof Error)) {
     return false;
   }
@@ -37,7 +40,7 @@ export function isExpiredSubmittedTurnAwait(error: unknown): boolean {
 
 export function isTerminalSubmittedTurnRecoveryAwait(error: unknown): boolean {
   return (
-    isExpiredSubmittedTurnAwait(error)
+    isSimulationSessionEndedError(error) || isExpiredSubmittedTurnAwait(error)
     || (
       error instanceof MobileApiError
       && error.status === 504
