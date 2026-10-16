@@ -129,6 +129,7 @@ test("custom AI score persistence rejects unvalidated and cross-organization Foc
     ["sim_custom_wrong_same_org_training", WRONG_CUSTOM_TRAINING_ID],
     ["sim_custom_other_org_training", OTHER_ORG_TRAINING_ID],
   ] as const) {
+    await harness.startLearnerSession(simulationSessionId);
     const result = await harness.scoreLearnerSession({
       simulationSessionId,
       userTurnCount: 3,

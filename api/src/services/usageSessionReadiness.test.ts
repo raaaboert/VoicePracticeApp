@@ -1915,7 +1915,7 @@ test("simulation session integrity v1 preserves usage write and downstream outpu
       rawDurationSeconds: 149,
       createdAt: "2026-03-31T12:02:29.000Z"
     });
-    const now = new Date("2026-03-31T20:00:00.000Z");
+    const now = new Date("2026-03-31T12:03:00.000Z");
     const legacyWriteDb = createRepresentativeDb();
     const legacyWrite = buildUsageSessionWriteRouteParitySnapshot({
       db: legacyWriteDb,

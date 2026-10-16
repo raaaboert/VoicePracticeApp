@@ -44,6 +44,8 @@ export interface ScoreRecordStore {
   getSnapshot(): readonly SimulationScoreRecord[];
   importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }>;
   appendRecord(record: SimulationScoreRecord): Promise<void>;
+  getPersistedSessionScore(sessionId: string): Promise<SimulationScoreRecord | null>;
+  insertSessionScore(record: SimulationScoreRecord): Promise<SimulationScoreRecord>;
   getRecordById(scoreId: string): SimulationScoreRecord | null;
   listRecords(query?: ScoreRecordQuery): SimulationScoreRecord[];
   deleteRecordsForUser(userId: string): Promise<number>;
@@ -529,11 +531,36 @@ abstract class BaseScoreRecordStore implements ScoreRecordStore {
   abstract refreshSnapshot(): Promise<void>;
   abstract importLegacyRecords(records: SimulationScoreRecord[]): Promise<{ importedCount: number }>;
   abstract appendRecord(record: SimulationScoreRecord): Promise<void>;
+  abstract getPersistedSessionScore(sessionId: string): Promise<SimulationScoreRecord | null>;
+  abstract insertSessionScore(record: SimulationScoreRecord): Promise<SimulationScoreRecord>;
   abstract deleteRecordsForUser(userId: string): Promise<number>;
   abstract deidentifyRecordsForUser(userId: string, replacementUserId: string): Promise<number>;
 }
 
 class FileScoreRecordStore extends BaseScoreRecordStore {
+  async getPersistedSessionScore(sessionId: string): Promise<SimulationScoreRecord | null> {
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      return (await this.loadPayload()).records.find((r) => r.simulationSessionId === sessionId) ?? null;
+    });
+  }
+
+  async insertSessionScore(record: SimulationScoreRecord): Promise<SimulationScoreRecord> {
+    return await this.withLock(async () => {
+      await this.ensureInitialized();
+      const records = (await this.loadPayload()).records;
+      const existing = records.find((r) => r.id === record.id || r.simulationSessionId === record.simulationSessionId);
+      if (existing) return existing;
+      const normalized = normalizeScoreRecord(record);
+      if (!normalized?.simulationSessionId || normalized.id !== `score_${normalized.simulationSessionId}`) {
+        throw new Error("Session score identity is invalid.");
+      }
+      records.push(normalized);
+      await this.savePayload({ records });
+      this.setSnapshot(records);
+      return normalized;
+    });
+  }
   private readonly filePath: string;
   private initialized = false;
   private operationQueue = Promise.resolve();
@@ -692,6 +719,31 @@ class FileScoreRecordStore extends BaseScoreRecordStore {
 }
 
 class PostgresScoreRecordStore extends BaseScoreRecordStore {
+  async getPersistedSessionScore(sessionId: string): Promise<SimulationScoreRecord | null> {
+    await this.ensureTable();
+    const result = await this.pool.query<ScoreRecordRow>(
+      "SELECT * FROM score_records WHERE simulation_session_id = $1 ORDER BY created_at, id LIMIT 1", [sessionId],
+    );
+    return result.rows[0] ? mapScoreRecordRow(result.rows[0]) : null;
+  }
+
+  async insertSessionScore(record: SimulationScoreRecord): Promise<SimulationScoreRecord> {
+    const normalized = normalizeScoreRecord(record);
+    if (!normalized?.simulationSessionId || normalized.id !== `score_${normalized.simulationSessionId}`) {
+      throw new Error("Session score identity is invalid.");
+    }
+    await this.ensureTable();
+    // Ordinary scoring uses one deterministic primary key. Conflict handling is
+    // atomic across processes; no transaction/lock is held during provider work.
+    const existing = await this.getPersistedSessionScore(normalized.simulationSessionId);
+    if (existing) return existing;
+    await upsertScoreRecordRow(this.pool, normalized, true);
+    const result = await this.pool.query<ScoreRecordRow>("SELECT * FROM score_records WHERE id = $1", [normalized.id]);
+    const persisted = result.rows[0] ? mapScoreRecordRow(result.rows[0]) : null;
+    if (!persisted) throw new Error("Persisted session score is unavailable.");
+    this.setSnapshot([...this.records.filter((r) => r.id !== persisted.id), persisted]);
+    return persisted;
+  }
   private readonly pool: Pool;
   private ensureTablePromise: Promise<void> | null = null;
   private initialized = false;
@@ -1003,7 +1055,8 @@ class PostgresScoreRecordStore extends BaseScoreRecordStore {
 
 async function upsertScoreRecordRow(
   client: Pick<PoolClient, "query"> | Pick<Pool, "query">,
-  record: SimulationScoreRecord
+  record: SimulationScoreRecord,
+  insertOnly = false,
 ): Promise<void> {
   await client.query(
     `
@@ -1048,7 +1101,7 @@ async function upsertScoreRecordRow(
         $18, $19, $20, $21, $22,
         $23::jsonb, $24::jsonb, $25, $26, $27, $28::jsonb, $29, $30, $31, $32::timestamptz
       )
-      ON CONFLICT (id) DO UPDATE
+      ON CONFLICT (id) ${insertOnly ? "DO NOTHING" : `DO UPDATE
         SET simulation_session_id = EXCLUDED.simulation_session_id,
             user_id = EXCLUDED.user_id,
             org_id = EXCLUDED.org_id,
@@ -1079,7 +1132,7 @@ async function upsertScoreRecordRow(
             input_tokens = EXCLUDED.input_tokens,
             output_tokens = EXCLUDED.output_tokens,
             total_tokens = EXCLUDED.total_tokens,
-            created_at = EXCLUDED.created_at
+            created_at = EXCLUDED.created_at`}
     `,
     [
       record.id,
@@ -1119,6 +1172,13 @@ async function upsertScoreRecordRow(
 }
 
 class UnsupportedScoreRecordStore extends BaseScoreRecordStore {
+  async getPersistedSessionScore(): Promise<SimulationScoreRecord | null> {
+    throw new Error("Score record storage provider is not supported.");
+  }
+
+  async insertSessionScore(): Promise<SimulationScoreRecord> {
+    throw new Error("Score record storage provider is not supported.");
+  }
   async initialize(): Promise<void> {
     throw new Error("Score record storage provider is not supported.");
   }

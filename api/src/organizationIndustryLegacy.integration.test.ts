@@ -226,7 +226,12 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
         ] };
         const activeTurn = await call(`/mobile/users/${user.id}/ai/turn`, stale);
         assert.equal(activeTurn.status, 200, JSON.stringify(activeTurn.body));
-        const activeScore = await call(`/mobile/users/${user.id}/ai/score`, scoreInput);
+        const ownedSessionId = `owned_${randomUUID()}`;
+        const registered = await call(`/mobile/users/${user.id}/simulation-sessions/start`, {
+          simulationSessionId: ownedSessionId, segmentId: segment.id, scenarioId: scenario.id,
+        });
+        assert.equal(registered.status, 201, JSON.stringify(registered.body));
+        const activeScore = await call(`/mobile/users/${user.id}/ai/score`, { ...scoreInput, simulationSessionId: ownedSessionId });
         assert.equal(activeScore.status, 201, JSON.stringify(activeScore.body));
         assert.equal((await pool!.query("SELECT 1 FROM simulation_sessions WHERE simulation_session_id=$1",
           [stale.simulationSessionId])).rowCount, 0);
@@ -235,7 +240,7 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
         const turn = await call(`/mobile/users/${user.id}/ai/turn`, stale);
         assert.equal(turn.status, 400, JSON.stringify(turn.body));
         const score = await call(`/mobile/users/${user.id}/ai/score`, { ...scoreInput, simulationSessionId: stale.simulationSessionId });
-        assert.equal(score.status, 400, JSON.stringify(score.body));
+        assert.equal(score.status, 404, JSON.stringify(score.body));
         assert.equal(providerCalls, 2);
       } finally { globalThis.fetch = savedFetch; }
       assert.equal(process.env.FOCUS_TOPIC_AUTHORITY, "legacy");

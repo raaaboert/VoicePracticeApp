@@ -509,6 +509,7 @@ import { queryDashboardTeamPerformanceRoute } from "./services/dashboardTeamPerf
 import { queryDashboardTeamPerformanceIntelligenceRoute } from "./services/dashboardTeamPerformanceIntelligenceRoute.js";
 import { capturePerformanceEvidenceSourceSnapshot as capturePerformanceEvidenceSourceSnapshotState } from "./services/performanceEvidenceSourceSnapshot.js";
 import {
+  assertSimulationSessionLifetime,
   completeRecognizedSimulationUsage,
   normalizeSimulationSessionId,
   registerRecognizedSimulationSessionStart,
@@ -2012,6 +2013,39 @@ async function resolveSimulationRuntimeBundle(params: {
       directTopicScenarioAttached = Boolean(authoritativeTrainingId);
       assignmentAuthorizedScenario = launch.scenario;
       assignmentUsesTopicConfig = launch.usesTopicConfig;
+    }
+  }
+  if (!params.isSuperUser && params.simulationSessionId) {
+    const session = registeredSession ?? await simulationSessionStore.getById(params.simulationSessionId);
+    if (session) {
+      if (session.userId !== params.user.id || session.orgId !== params.actingOrgId
+        || session.scenarioId !== params.scenarioId
+        || (params.trainingId && params.trainingId !== (session.trainingId ?? null))) {
+        params.response.status(404).json({ error: "Simulation session is not available." });
+        return null;
+      }
+      try {
+        assertSimulationSessionLifetime(session, params.org ? normalizeMaxSimulationMinutes(params.org.maxSimulationMinutes) : null,
+          new Date(), "conversation");
+        if (await scoreRecordStore.getPersistedSessionScore(session.simulationSessionId)) {
+          throw new SimulationSessionValidationError(409, "session_completed", "Simulation conversation is already completed.");
+        }
+      } catch (error) {
+        if (!(error instanceof SimulationSessionValidationError)) throw error;
+        params.response.status(error.statusCode).json({ error: error.message, code: error.code });
+        return null;
+      }
+    }
+    if (!session) {
+      const score = await scoreRecordStore.getPersistedSessionScore(params.simulationSessionId);
+      if (score) {
+        if (score.userId !== params.user.id || score.orgId !== params.actingOrgId || score.scenarioId !== params.scenarioId) {
+          params.response.status(404).json({ error: "Simulation session is not available." });
+        } else {
+          params.response.status(409).json({ error: "Simulation conversation is already completed.", code: "session_completed" });
+        }
+        return null;
+      }
     }
   }
   const useModularPromptArchitecture =
@@ -23074,19 +23108,6 @@ app.post(
     });
   };
 
-  const transcriptionPromise = transcribeSimulationAudioFile({
-    file,
-    route: "submit-turn",
-    correlationId,
-    budgetContext: {
-      user: accessContext.user,
-      orgId: accessContext.actingOrgId,
-      allowDuringActiveSimulation: true,
-    },
-  }).then(
-    (transcription) => ({ ok: true as const, transcription }),
-    (error: unknown) => ({ ok: false as const, error }),
-  );
   let runtimePromise = loadUnifiedRuntime(false);
   let runtime = await runtimePromise;
   const bootstrapRuntime =
@@ -23104,6 +23125,21 @@ app.post(
     runtime = await runtimePromise;
   }
 
+  // Resolve ownership, completion and lifetime before starting transcription.
+  if (!runtime || "bootstrapOrgId" in runtime) return;
+  const transcriptionPromise = transcribeSimulationAudioFile({
+    file,
+    route: "submit-turn",
+    correlationId,
+    budgetContext: {
+      user: accessContext.user,
+      orgId: accessContext.actingOrgId,
+      allowDuringActiveSimulation: true,
+    },
+  }).then(
+    (transcription) => ({ ok: true as const, transcription }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
   const transcriptionResult = await transcriptionPromise;
   if (!runtime || "bootstrapOrgId" in runtime) {
     return;
@@ -24962,13 +24998,55 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     }
 
     const entitlements = computeEntitlements(db, user, new Date(), {
-      allowDuringActiveSimulation: true,
-      actingOrgId: accessContext.actingOrgId
+      allowDuringActiveSimulation: true, actingOrgId: accessContext.actingOrgId,
     });
-    if (!entitlements.canStartSimulation) {
+    if (!entitlements.canStartSimulation && !isQuotaLockReason(entitlements.lockReason)) {
       respondWithEntitlementDenial(response, entitlements);
       return null;
     }
+    const recognizedSession = recognizedSessionId && !accessContext.isSuperUser
+      ? await simulationSessionStore.getById(recognizedSessionId) : null;
+    if (!accessContext.isSuperUser) {
+      // A client session ID is not an ownership credential. Existing historical
+      // scores may recover through their own persisted user/org binding.
+      const existing = recognizedSessionId ? await scoreRecordStore.getPersistedSessionScore(recognizedSessionId) : null;
+      if ((recognizedSession && (recognizedSession.userId !== user.id || recognizedSession.orgId !== accessContext.actingOrgId
+        || recognizedSession.scenarioId !== scenarioId))
+        || (existing && (existing.userId !== user.id || existing.orgId !== accessContext.actingOrgId
+          || existing.scenarioId !== scenarioId))) {
+        response.status(404).json({ error: "Simulation session is not available." });
+        return null;
+      }
+      if (recognizedSession && runtimeConfig.focusTopicAuthority === "assignments" && isMalformedSessionIndustrySnapshot(recognizedSession)) {
+        logMalformedSessionIndustrySnapshot(recognizedSession);
+        response.status(409).json({ error: "Simulation session industry context is invalid." });
+        return null;
+      }
+      if (existing) {
+        if (!isRecoverableSimulationScoreRecord(existing)) {
+          response.status(409).json({ error: "Use score history to view this historical score.", code: "score_already_recorded" });
+          return null;
+        }
+        return { recoveredScore: existing };
+      }
+      if (!recognizedSession) {
+        response.status(404).json({ error: "Simulation session is not available.", code: "session_not_recognized" });
+        return null;
+      }
+      try {
+        assertSimulationSessionLifetime(recognizedSession,
+          accessContext.actingOrg ? normalizeMaxSimulationMinutes(accessContext.actingOrg.maxSimulationMinutes) : null,
+          new Date(), "completion");
+      } catch (error) {
+        if (!(error instanceof SimulationSessionValidationError)) throw error;
+        response.status(error.statusCode).json({ error: error.message, code: error.code });
+        return null;
+      }
+    }
+
+    // Completion scoring does not start another conversation or consume more
+    // conversation minutes. Current org access and the absolute grace deadline
+    // were checked above; the independent provider budget is still enforced.
 
     const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
       allowDuringActiveSimulation: true
@@ -24989,9 +25067,6 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       return null;
     }
 
-    const recognizedSession = recognizedSessionId && !accessContext.isSuperUser
-      ? await simulationSessionStore.getById(recognizedSessionId)
-      : null;
     let assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
       ? recognizedSession
       : null;
@@ -25167,6 +25242,11 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     return;
   }
 
+  if ("recoveredScore" in context) {
+    response.status(200).json(buildRecoveredSimulationEvaluationResult(context.recoveredScore!));
+    return;
+  }
+
   if (userTurnCount < MIN_USER_TURNS_FOR_SCORE) {
     response.status(200).json({
       status: "not_scored",
@@ -25309,6 +25389,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       createdAt: now
     };
 
+    let authoritativeRecord = record;
     if (!context.isSuperUser) {
       try {
         await withDatabase(async (db) => {
@@ -25317,7 +25398,10 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
             throw new Error("User not found while saving score.");
           }
 
-          await scoreRecordAccess.append(db, record);
+          authoritativeRecord = await scoreRecordStore.insertSessionScore(record);
+          if (authoritativeRecord.userId !== context.user.id || authoritativeRecord.orgId !== context.actingOrgId) {
+            throw new Error("Session score ownership conflict.");
+          }
           syncTrainingPackAssignmentsForUserPack(db, context.actingOrgId, user.id, record.trainingPackId ?? null);
 
           const event: AiUsageEvent = {
@@ -25382,7 +25466,9 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       logKey: "simulation-session:score"
     });
 
-    response.status(201).json({
+    if (!context.isSuperUser) {
+      response.status(201).json(buildRecoveredSimulationEvaluationResult(authoritativeRecord));
+    } else response.status(201).json({
       status: "scored",
       scorecard,
       record: {
@@ -25439,13 +25525,11 @@ app.get("/mobile/users/:userId/ai/score", async (request: Request, response: Res
       return;
     }
 
-    const record =
-      scoreRecordAccess
-        .list(db, {
-          userId: user.id,
-          simulationSessionId,
-        })
-        .at(-1) ?? null;
+    const record = await scoreRecordStore.getPersistedSessionScore(simulationSessionId);
+    if (record && (record.userId !== user.id || record.orgId !== accessContext.actingOrgId)) {
+      response.status(404).json({ error: "Score not found for this session." });
+      return;
+    }
 
     if (!record) {
       response.status(404).json({ error: "Score not found for this session." });
@@ -27039,6 +27123,34 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
     }
 
     const org = accessContext.actingOrg;
+    const prior = await simulationSessionStore.getById(simulationSessionId);
+    if (!prior) {
+      const score = await scoreRecordStore.getPersistedSessionScore(simulationSessionId);
+      if (score) {
+        if (score.userId !== user.id || score.orgId !== accessContext.actingOrgId) {
+          response.status(404).json({ error: "Simulation session is not available." });
+        } else {
+          response.status(409).json({ error: "Simulation conversation is already completed.", code: "session_completed" });
+        }
+        return;
+      }
+    }
+    if (prior) {
+      if (prior.userId !== user.id || prior.orgId !== accessContext.actingOrgId || prior.scenarioId !== body.scenarioId) {
+        response.status(404).json({ error: "Simulation session is not available." });
+        return;
+      }
+      try {
+        assertSimulationSessionLifetime(prior, org ? normalizeMaxSimulationMinutes(org.maxSimulationMinutes) : null, new Date(), "conversation");
+        if (await scoreRecordStore.getPersistedSessionScore(simulationSessionId)) {
+          throw new SimulationSessionValidationError(409, "session_completed", "Simulation conversation is already completed.");
+        }
+      } catch (error) {
+        if (!(error instanceof SimulationSessionValidationError)) throw error;
+        response.status(error.statusCode).json({ error: error.message, code: error.code });
+        return;
+      }
+    }
     if (org) {
       await ensureOrgTrainingWorkspace(db, org);
     }

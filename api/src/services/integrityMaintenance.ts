@@ -161,7 +161,9 @@ export async function pruneStaleRecognizedSimulationSessions(
   const retentionMs = params.retentionMs ?? RECOGNIZED_SIMULATION_SESSION_STALE_RETENTION_MS;
   const cutoff = new Date(params.now.getTime() - retentionMs);
   return {
-    prunedStartedSessions: await params.simulationSessionStore.pruneStartedSessionsLastSeenBefore(cutoff),
+    // These ledger identities also prevent expired IDs from being registered as
+    // new sessions. Retain them; account deletion/deidentification still applies.
+    prunedStartedSessions: 0,
     cutoffAt: cutoff.toISOString()
   };
 }

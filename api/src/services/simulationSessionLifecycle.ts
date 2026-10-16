@@ -19,6 +19,28 @@ export const SIMULATION_SESSION_DURATION_TOLERANCE_SECONDS = 30;
 export const SIMULATION_SESSION_COMPLETION_WINDOW_GRACE_MINUTES = 20;
 export const SIMULATION_SESSION_FALLBACK_COMPLETION_WINDOW_MS = 8 * 60 * 60 * 1000;
 
+// Conversation time and completion/recovery time are separate. Neither activity
+// nor client-reported elapsed time can extend these server-start-based deadlines.
+export function assertSimulationSessionLifetime(
+  session: SimulationSessionRecord,
+  maxSimulationMinutes: number | null,
+  now: Date,
+  operation: "conversation" | "completion",
+): void {
+  const start = new Date(session.serverStartedAt).getTime();
+  const completionWindow = resolveCompletionWindowMs(maxSimulationMinutes);
+  const conversationWindow = completionWindow - SIMULATION_SESSION_COMPLETION_WINDOW_GRACE_MINUTES * 60_000;
+  if (operation === "conversation" && session.status === "usage_recorded") {
+    throw new SimulationSessionValidationError(409, "session_completed", "Simulation conversation is already completed.");
+  }
+  const completedAt = session.usageRecordedAt ? new Date(session.usageRecordedAt).getTime() : Infinity;
+  const deadline = operation === "conversation" ? start + conversationWindow
+    : Math.min(start + completionWindow, completedAt + SIMULATION_SESSION_COMPLETION_WINDOW_GRACE_MINUTES * 60_000);
+  if (!Number.isFinite(start) || !Number.isFinite(deadline) || !Number.isFinite(now.getTime()) || now.getTime() >= deadline) {
+    throw new SimulationSessionValidationError(409, "session_expired", "Simulation session has expired. Start a new simulation.");
+  }
+}
+
 export class SimulationSessionValidationError extends Error {
   readonly statusCode: number;
   readonly code: string;
@@ -237,6 +259,7 @@ function assertRecognizedSimulationSessionTiming(
     now: Date;
   }
 ): void {
+  assertSimulationSessionLifetime(session, params.maxSimulationMinutes, params.now, "completion");
   if (params.endedAt.getTime() > params.now.getTime() + SIMULATION_SESSION_COMPLETION_FUTURE_TOLERANCE_MS) {
     throw new SimulationSessionValidationError(
       400,
@@ -283,8 +306,8 @@ function assertRecognizedSimulationSessionTiming(
   }
 
   const completionWindowMs = resolveCompletionWindowMs(params.maxSimulationMinutes);
-  const lastSeenAtMs = new Date(session.lastSeenAt).getTime();
-  if (Number.isFinite(lastSeenAtMs) && params.endedAt.getTime() > lastSeenAtMs + completionWindowMs) {
+  const serverStartedAtMs = new Date(session.serverStartedAt).getTime();
+  if (Number.isFinite(serverStartedAtMs) && params.endedAt.getTime() > serverStartedAtMs + completionWindowMs) {
     throw new SimulationSessionValidationError(
       409,
       "session_completion_window_expired",
@@ -354,16 +377,6 @@ export async function completeRecognizedSimulationUsage<Db extends { usageSessio
     submittedTrainingPackId: params.submittedTrainingPackId
   });
 
-  const startedAt = new Date(params.startedAt);
-  const endedAt = new Date(params.endedAt);
-  assertRecognizedSimulationSessionTiming(simulationSession, {
-    startedAt,
-    endedAt,
-    rawDurationSeconds: params.rawDurationSeconds,
-    maxSimulationMinutes: params.maxSimulationMinutes,
-    now: params.now
-  });
-
   if (simulationSession.status === "usage_recorded") {
     if (!simulationSession.usageSessionRecordId) {
       throw new SimulationSessionValidationError(
@@ -390,6 +403,14 @@ export async function completeRecognizedSimulationUsage<Db extends { usageSessio
       simulationSession
     };
   }
+
+  assertRecognizedSimulationSessionTiming(simulationSession, {
+    startedAt: new Date(params.startedAt),
+    endedAt: new Date(params.endedAt),
+    rawDurationSeconds: params.rawDurationSeconds,
+    maxSimulationMinutes: params.maxSimulationMinutes,
+    now: params.now,
+  });
 
   const usageRecord = buildUsageSessionRecord({
     simulationSessionId: params.simulationSessionId,

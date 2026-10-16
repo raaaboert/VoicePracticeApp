@@ -64,6 +64,11 @@ export async function assertIndustryCacheParity(params: {
     return requests.at(-1)!.system;
   };
   const score = async (expectedIndustry: string | null, sessionId = `cache_score_${randomUUID()}`) => {
+    if (!(await pool.query("SELECT 1 FROM simulation_sessions WHERE simulation_session_id=$1", [sessionId])).rowCount) {
+      const started = await call(`/mobile/users/${userId}/simulation-sessions/start`, { simulationSessionId: sessionId, segmentId, scenarioId });
+      assert.equal(started.status, 201, JSON.stringify(started.body));
+      await pool.query("UPDATE simulation_sessions SET industry_snapshot=NULL WHERE simulation_session_id=$1", [sessionId]);
+    }
     const result = await call(`/mobile/users/${userId}/ai/score`, {
       ...body, simulationSessionId: sessionId,
       startedAt: new Date(Date.now() - 2000).toISOString(), endedAt: new Date().toISOString(),

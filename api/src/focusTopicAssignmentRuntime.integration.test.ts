@@ -1824,6 +1824,202 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.notEqual(v2Id, (v1.body.publishedVersion as { id: string }).id);
       });
 
+      await t.test("session lifetime, completion ordering, immutable concurrent scoring and authorized recovery", async () => {
+        const scorePath = `/mobile/users/${user.id}/ai/score`;
+        const openingPath = `/mobile/users/${user.id}/ai/opening`;
+        const history = [
+          { role: "user", content: "Let us identify the concern." },
+          { role: "assistant", content: "What next?" },
+          { role: "user", content: "Agree an owner for the plan." },
+          { role: "assistant", content: "And then?" },
+          { role: "user", content: "Review progress tomorrow." },
+        ];
+        const output = JSON.stringify({ communicationScore: 80, outcomeScore: 75, overallScore: 78,
+          completionLevel: "complete", objectiveAchieved: true, persuasion: 8, clarity: 7, empathy: 9,
+          assertiveness: 8, strengths: ["Clear"], improvements: ["Close"], summary: "Agreed a plan." });
+        const start = async () => {
+          const id = `integrity_${randomUUID()}`;
+          const response = await call(startPath, { simulationSessionId: id, segmentId: segment.id,
+            scenarioId: scenario.id, trainingId: topic.id });
+          assert.equal(response.status, 201, JSON.stringify(response.body));
+          const context = { simulationSessionId: id, scenarioId: scenario.id, trainingId: topic.id,
+            industryId: org.activeIndustries[0], history, startedAt: response.body.serverStartedAt,
+            endedAt: new Date().toISOString() };
+          return { id, context };
+        };
+        const usage = async (session: Awaited<ReturnType<typeof start>>) => {
+          const result = await call("/usage/sessions", { ...session.context, userId: user.id,
+            segmentId: segment.id, rawDurationSeconds: Math.max(0, Math.floor((Date.parse(String(session.context.endedAt))
+              - Date.parse(String(session.context.startedAt))) / 1000)) });
+          assert.equal(result.status, 201, JSON.stringify(result.body));
+          return result;
+        };
+        let calls = 0;
+        const capture = () => { calls++; };
+        await withMockResponses(output, async () => {
+          const first = await start();
+          await usage(first);
+          for (const path of [openingPath, turnPath]) {
+            const denied = await call(path, first.context);
+            assert.equal(denied.status, 409, JSON.stringify(denied.body));
+            assert.equal(denied.body.code, "session_completed");
+          }
+          assert.equal(calls, 0, "closed conversation never invokes provider");
+          const scored = await call(scorePath, first.context);
+          assert.equal(scored.status, 201, JSON.stringify(scored.body));
+          const persisted = (await pool!.query("SELECT * FROM score_records WHERE simulation_session_id=$1", [first.id])).rows[0];
+          const repeat = await call(scorePath, first.context);
+          assert.equal(repeat.status, 200);
+          assert.deepEqual(repeat.body, scored.body);
+          assert.equal(calls, 1);
+          await usage(first);
+          assert.equal((await pool!.query("SELECT count(*) FROM usage_sessions WHERE id=$1",
+            [(await pool!.query("SELECT usage_session_record_id FROM simulation_sessions WHERE simulation_session_id=$1", [first.id])).rows[0].usage_session_record_id])).rows[0].count, "1");
+          await pool!.query("UPDATE simulation_sessions SET server_started_at=now()-interval '2 days',last_seen_at=now() WHERE simulation_session_id=$1", [first.id]);
+          const recovered = await call(`${scorePath}?simulationSessionId=${first.id}`);
+          assert.equal(recovered.status, 200);
+          assert.deepEqual(recovered.body, scored.body, "lost-response recovery preserves original result after expiry");
+          assert.deepEqual((await call(scorePath, first.context)).body, scored.body);
+          assert.equal(calls, 1);
+          assert.deepEqual((await pool!.query("SELECT * FROM score_records WHERE simulation_session_id=$1", [first.id])).rows[0], persisted);
+          // Simulate historical pruning in an older deployment. The persisted
+          // score still binds ownership and prevents resurrecting its session ID.
+          await pool!.query("DELETE FROM simulation_sessions WHERE simulation_session_id=$1", [first.id]);
+          assert.deepEqual((await call(`${scorePath}?simulationSessionId=${first.id}`)).body, scored.body);
+          assert.equal((await call(startPath, { ...first.context, segmentId: segment.id })).status, 409);
+          assert.deepEqual((await call(scorePath, first.context)).body, scored.body);
+          assert.equal(calls, 1);
+          const second = await start();
+          assert.equal((await call(scorePath, second.context)).status, 201);
+          await usage(second);
+          assert.equal(calls, 2);
+          const expired = await start();
+          await pool!.query("UPDATE simulation_sessions SET server_started_at=now()-interval '2 days',last_seen_at=now() WHERE simulation_session_id=$1", [expired.id]);
+          for (const path of [openingPath, turnPath, scorePath, startPath]) {
+            const denied = await call(path, { ...expired.context, segmentId: segment.id });
+            assert.equal(denied.status, 409, JSON.stringify(denied.body));
+            assert.equal(denied.body.code, "session_expired");
+          }
+          assert.equal(calls, 2);
+          assert.equal((await call(scorePath, { ...expired.context, simulationSessionId: `unknown_${randomUUID()}` })).status, 404);
+          for (const path of [openingPath, turnPath, scorePath]) {
+            const denied = await fetch(base + path, { method: "POST",
+              headers: { Authorization: `Bearer ${scopedMobileToken}`, "Content-Type": "application/json" },
+              body: JSON.stringify(first.context) });
+            assert.equal(denied.status, 401, "another actor cannot call the learner's route");
+          }
+          const stolen = await fetch(base + `/mobile/users/${scopedUserAdmin.id}/ai/score?simulationSessionId=${first.id}`,
+            { headers: { Authorization: `Bearer ${scopedMobileToken}` } });
+          assert.equal(stolen.status, 404);
+          for (const [actorId, actorToken] of [[scopedUserAdmin.id, scopedMobileToken], [foreignPerformanceUser.id, foreignMobileToken]]) {
+            for (const route of ["opening", "turn", "score"]) {
+              const denied = await fetch(base + `/mobile/users/${actorId}/ai/${route}`, {
+                method: "POST", headers: { Authorization: `Bearer ${actorToken}`, "Content-Type": "application/json" },
+                body: JSON.stringify(first.context),
+              });
+              assert.equal(denied.status, 404, `${route}: owned session cannot cross user/org`);
+            }
+            const denied = await fetch(base + `/mobile/users/${actorId}/ai/score?simulationSessionId=${first.id}`,
+              { headers: { Authorization: `Bearer ${actorToken}` } });
+            assert.equal(denied.status, 404);
+          }
+          assert.equal(calls, 2);
+          const originalMax = (await storage.load()).orgs.find((o) => o.id === org.id)!.maxSimulationMinutes;
+          const allowanceSession = await start();
+          await usage(allowanceSession);
+          const allowanceUser = (await storage.load()).users.find((u) => u.id === user.id)!;
+          const setAllowance = async (cap: number | null, bonus: number, restore = false) => {
+            if (!restore) {
+              const result = await masterCall(`/users/${user.id}`, "PATCH", {
+                dailySecondsCapOverride: cap, manualBonusSeconds: bonus, allowDailyOverageThisCycle: false,
+              });
+              assert.equal(result.status, 200, JSON.stringify(result.body));
+              return;
+            }
+            await storage.updateAppStateWithLock((raw) => {
+              const state = imported.ensureDatabaseShape(raw);
+              const target = state.users.find((u) => u.id === user.id)!;
+              target.dailySecondsCapOverride = cap;
+              target.manualBonusSeconds = bonus;
+              Object.assign(target, Object.fromEntries(Object.entries(allowanceUser)
+                .filter(([key]) => key.startsWith("dailyOverage") || key === "allowDailyOverageThisCycle")));
+              return { result: undefined, state, shouldSave: true };
+            });
+            await configParity("restored allowance fixture");
+          };
+          try {
+            await setAllowance(0, 0);
+            const denied = await call(startPath, { simulationSessionId: `no_allowance_${randomUUID()}`,
+              segmentId: segment.id, scenarioId: scenario.id, trainingId: topic.id });
+            assert.equal(denied.status, 403, JSON.stringify(denied.body));
+            assert.equal((await call(scorePath, allowanceSession.context)).status, 201,
+              "finishing scoring does not require another conversation allowance");
+          } finally { await setAllowance(allowanceUser.dailySecondsCapOverride, allowanceUser.manualBonusSeconds, true); }
+          try {
+            for (const maxSimulationMinutes of [5, 60]) {
+              assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { maxSimulationMinutes })).status, 200);
+              const session = await start();
+              await pool!.query("UPDATE simulation_sessions SET server_started_at=now()-interval '10 minutes',last_seen_at=now() WHERE simulation_session_id=$1", [session.id]);
+              const turn = await call(turnPath, session.context);
+              assert.equal(turn.status, maxSimulationMinutes === 5 ? 409 : 200, JSON.stringify(turn.body));
+              assert.equal((await call(scorePath, session.context)).status, 201, "completion grace is separate from conversation time");
+              const expired = await start();
+              await pool!.query("UPDATE simulation_sessions SET server_started_at=now()-($2 * interval '1 minute'),last_seen_at=now() WHERE simulation_session_id=$1",
+                [expired.id, maxSimulationMinutes + 21]);
+              const denied = await call(scorePath, expired.context);
+              assert.equal(denied.status, 409);
+              assert.equal(denied.body.code, "session_expired");
+            }
+          } finally {
+            assert.equal((await masterCall(`/orgs/${org.id}`, "PATCH", { maxSimulationMinutes: originalMax })).status, 200);
+          }
+        }, capture);
+        const retry = await start();
+        const failed = await withMockResponses("invalid scoring JSON", () => call(scorePath, retry.context));
+        assert.equal(failed.status, 502, JSON.stringify(failed.body));
+        assert.equal((await pool!.query("SELECT 1 FROM score_records WHERE simulation_session_id=$1", [retry.id])).rowCount, 0);
+        assert.equal((await withMockResponses(output, () => call(scorePath, retry.context))).status, 201);
+        // Force two requests to be inside provider work simultaneously. They may
+        // both evaluate, but the database chooses one immutable result for both.
+        const concurrent = await start();
+        const original = globalThis.fetch;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const releaseOnFailure = setTimeout(() => release(), 5_000);
+        let providers = 0;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (String(input) !== "https://api.openai.com/v1/responses") return original(input, init);
+          const sequence = ++providers;
+          if (providers === 2) release();
+          await gate;
+          return new Response(JSON.stringify({ output_text: JSON.stringify({ ...JSON.parse(output), summary: `Winner ${sequence}` }),
+            model: "local-test-model", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }),
+          { status: 200, headers: { "Content-Type": "application/json" } });
+        }) as typeof fetch;
+        try {
+          const results = await Promise.all([call(scorePath, concurrent.context), call(scorePath, concurrent.context)]);
+          assert.equal(providers, 2);
+          assert.equal(results[0]!.status, 201, JSON.stringify(results[0]!.body));
+          assert.equal(results[1]!.status, 201, JSON.stringify(results[1]!.body));
+          assert.deepEqual(results[0]!.body, results[1]!.body);
+          assert.equal((await pool!.query("SELECT count(*) FROM score_records WHERE simulation_session_id=$1", [concurrent.id])).rows[0].count, "1");
+          assert.deepEqual((await call(scorePath, concurrent.context)).body, results[0]!.body);
+          assert.equal(providers, 2);
+          assert.equal((await pool!.query("SELECT count(*) FROM usage_sessions u JOIN simulation_sessions s ON s.usage_session_record_id=u.id WHERE s.simulation_session_id=$1", [concurrent.id])).rows[0].count, "0", "scoring does not bill conversation minutes");
+          const writers = [0, 1].map(() => createScoreRecordStore({ provider: "postgres", dbPath: "unused",
+            databaseUrl: url, pgPoolMax: 1, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 1000 }));
+          const originalScore = await writers[0]!.getPersistedSessionScore(concurrent.id);
+          assert.ok(originalScore);
+          const raceId = `independent_writers_${randomUUID()}`;
+          const rows = await Promise.all(writers.map((writer, index) => writer.insertSessionScore({ ...originalScore,
+            id: `score_${raceId}`, simulationSessionId: raceId, summary: `Independent writer ${index}` })));
+          assert.deepEqual(rows[0], rows[1], "independent store instances use database first-writer-wins");
+          const reopened = createScoreRecordStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
+            pgPoolMax: 1, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 1000 });
+          assert.deepEqual(await reopened.getPersistedSessionScore(raceId), rows[0], "fresh process/store reads the persisted winner");
+        } finally { clearTimeout(releaseOnFailure); globalThis.fetch = original; }
+      });
+
       // Regression: a registered assignment session is permanently pinned to
       // its approved version even after a later revision is published.
       const pinnedV1Draft = {
@@ -2121,8 +2317,11 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
             { role: "assistant", content: "We need a plan." }, { role: "user", content: "I propose owners and a review date." },
           ],
         };
+        const paritySnapshotScoreId = `parity_score_${randomUUID()}`;
+        assert.equal((await call(startPath, { simulationSessionId: paritySnapshotScoreId, segmentId: segment.id,
+          scenarioId: scenario.id, trainingId: topic.id })).status, 201);
         const snapshotParityScore = await call(`/mobile/users/${user.id}/ai/score`, {
-          ...parityScoreBody, simulationSessionId: snapshotStandardSessionId,
+          ...parityScoreBody, simulationSessionId: paritySnapshotScoreId,
         });
         assert.equal(snapshotParityScore.status, 201, JSON.stringify(snapshotParityScore.body));
         const legacyParityScore = await call(`/mobile/users/${user.id}/ai/score`, {
@@ -2291,9 +2490,9 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
             personaStyle: db.config.defaultPersonaStyle,
             history: [{ role: "user", content: "Please help with the account." }],
           });
-          assert.equal(deniedTurn.status, 400, JSON.stringify(deniedTurn.body));
+          assert.equal(deniedTurn.status, simulationSessionId === parityLegacySessionId ? 409 : 400, JSON.stringify(deniedTurn.body));
           const deniedScore = await call(`/mobile/users/${user.id}/ai/score`, { ...parityScoreBody, simulationSessionId });
-          assert.equal(deniedScore.status, 400, JSON.stringify(deniedScore.body));
+          assert.equal(deniedScore.status, simulationSessionId === parityLegacySessionId ? 200 : 400, JSON.stringify(deniedScore.body));
         }
         // Valid credentials for a different user cannot replay a cached,
         // authorized snapshot session through either provider route.

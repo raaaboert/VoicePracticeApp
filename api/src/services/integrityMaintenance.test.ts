@@ -265,7 +265,7 @@ function createDb(overrides: Partial<ApiDatabase> = {}): ApiDatabase {
   } as unknown as ApiDatabase;
 }
 
-test("integrity maintenance repairs orphaned user-scoped history and prunes stale started sessions", async () => {
+test("integrity maintenance repairs orphaned history and retains session identities to prevent expired-ID reuse", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "vp-integrity-maintenance-"));
   try {
     const { usageStore, scoreStore, simulationSessionStore, aiStore, supportStore } = await createStores(tempDir);
@@ -320,8 +320,8 @@ test("integrity maintenance repairs orphaned user-scoped history and prunes stal
       now: new Date("2026-04-01T12:00:00.000Z"),
       retentionMs: RECOGNIZED_SIMULATION_SESSION_STALE_RETENTION_MS
     });
-    assert.equal(pruned.prunedStartedSessions, 1);
-    assert.deepEqual((await simulationSessionStore.listSessions()).map((record) => record.simulationSessionId), ["sim_keep_recent"]);
+    assert.equal(pruned.prunedStartedSessions, 0);
+    assert.deepEqual((await simulationSessionStore.listSessions()).map((record) => record.simulationSessionId).sort(), ["sim_keep_recent", "sim_keep_stale"]);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
