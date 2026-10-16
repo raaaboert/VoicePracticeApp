@@ -172,6 +172,11 @@ test("staging refuses an obvious production database URL", () => {
   );
 });
 
+test("staging cannot fall back to single-process file authentication storage", () => {
+  assert.throws(() => loadRuntimeConfig(makeEnv({ PERITIO_ENV: "staging", STORAGE_PROVIDER: "file", DATABASE_URL: "" })), /durable authentication limits/);
+  assert.equal(loadRuntimeConfig(makeEnv({ PERITIO_ENV: "staging", STORAGE_PROVIDER: "postgres", DATABASE_URL: "postgres://localhost/peritio_test" })).storageProvider, "postgres");
+});
+
 test("R2 Training Content storage requires relational PostgreSQL state", () => {
   assert.throws(
     () =>

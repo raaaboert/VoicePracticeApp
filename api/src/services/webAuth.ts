@@ -1,10 +1,8 @@
 import crypto from "node:crypto";
 
 import {
-  ApiDatabase,
   DashboardAccessType,
   UserProfile,
-  WebAuthChallengeRecord,
   WebAuthSessionRecord
 } from "@voicepractice/shared";
 import { v4 as uuid } from "uuid";
@@ -46,15 +44,6 @@ export function createWebAuthService(params: {
   }
   if (!codeSecret) {
     throw new Error("WEB_AUTH_CODE_SECRET is required.");
-  }
-
-  function createCode(): string {
-    const numeric = crypto.randomInt(0, 1_000_000);
-    return String(numeric).padStart(6, "0");
-  }
-
-  function hashCode(userId: string, email: string, code: string): string {
-    return crypto.createHmac("sha256", codeSecret).update(`${userId}:${email}:${code}`).digest("hex");
   }
 
   function sanitizeUserAgent(value: string | null | undefined): string | null {
@@ -167,56 +156,6 @@ export function createWebAuthService(params: {
     return payload;
   }
 
-  function issueSignInChallenge(db: ApiDatabase, user: UserProfile, ttlMinutes: number, now: Date) {
-    const createdAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
-    const code = createCode();
-    const record: WebAuthChallengeRecord = {
-      id: `wauth_${uuid()}`,
-      userId: user.id,
-      email: user.email,
-      challengeType: "sign_in",
-      codeHash: hashCode(user.id, user.email, code),
-      createdAt,
-      expiresAt,
-      consumedAt: null
-    };
-    db.webAuthChallenges.push(record);
-    return { code, expiresAt };
-  }
-
-  function verifyLatestSignInChallenge(db: ApiDatabase, user: UserProfile, code: string, now: Date): "ok" | "missing" | "expired" | "invalid" {
-    const pending = (db.webAuthChallenges ?? [])
-      .filter(
-        (entry) =>
-          entry.userId === user.id
-          && entry.email === user.email
-          && entry.challengeType === "sign_in"
-          && entry.consumedAt === null
-      )
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    const latest = pending[0];
-    if (!latest) {
-      return "missing";
-    }
-
-    const expiresAtMs = new Date(latest.expiresAt).getTime();
-    if (Number.isNaN(expiresAtMs) || expiresAtMs <= now.getTime()) {
-      latest.consumedAt = now.toISOString();
-      return "expired";
-    }
-
-    const expectedBuffer = Buffer.from(latest.codeHash, "hex");
-    const providedBuffer = Buffer.from(hashCode(user.id, user.email, code), "hex");
-    if (expectedBuffer.length !== providedBuffer.length || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
-      return "invalid";
-    }
-
-    latest.consumedAt = now.toISOString();
-    return "ok";
-  }
-
   function touchSession(record: WebAuthSessionRecord, now: Date, metadata?: Omit<WebAuthSessionMetadata, "accessType" | "orgId">): boolean {
     const nowIso = now.toISOString();
     const normalizedMetadata = normalizeSessionMetadata(metadata);
@@ -258,8 +197,6 @@ export function createWebAuthService(params: {
   return {
     issueSession,
     verifyToken,
-    issueSignInChallenge,
-    verifyLatestSignInChallenge,
     touchSession,
   };
 }

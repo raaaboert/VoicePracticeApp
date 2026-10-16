@@ -61,7 +61,7 @@ test("dashboard resend override can be enabled while mobile verification stays l
     assert.equal(fetchCalls.length, 2);
     assert.equal(logLines.length, 1);
     assert.match(logLines[0], /\[email-verification]/);
-    assert.match(logLines[0], /mobile@example\.com/);
+    assert.doesNotMatch(logLines[0], /mobile@example\.com|999888/);
 
     const signInPayload = JSON.parse(String(fetchCalls[0].init?.body)) as {
       subject: string;

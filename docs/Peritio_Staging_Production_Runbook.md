@@ -25,6 +25,8 @@ Last updated: 2026-07-13
 
 ## Manual Production Deploy Rule
 
+Batch 9E.1 authentication requires a separately applied additive migration before API deployment and independent audit approval. Keep this batch local until actual staging auto-deploy settings are verified disabled. Follow [Durable authentication release order](./Peritio_Authentication_Abuse_Protection.md); do not rely on historical deployment mappings above.
+
 Production API deploys are manual only. Do not enable production auto-deploy. Do not deploy production unless the operator explicitly asks for a production deploy and the production verification checklist below is complete.
 
 ## Retired Focus Topic reminder schedule

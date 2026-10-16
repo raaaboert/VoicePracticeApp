@@ -1,3 +1,4 @@
+import { setAuthCodeDeliveryObserverForTest } from "./services/authCodeDelivery.js";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -182,19 +183,12 @@ async function verify(
 }
 
 async function captureVerificationCode<T>(runner: () => Promise<T>): Promise<{ result: T; code: string }> {
-  const originalLog = console.log;
-  const logs: string[] = [];
-  console.log = (...args: unknown[]) => {
-    logs.push(args.map(String).join(" "));
-  };
-  try {
-    const result = await runner();
-    const code = logs.join("\n").match(/code=(\d{6})/)?.[1];
-    assert.ok(code);
-    return { result, code };
-  } finally {
-    console.log = originalLog;
-  }
+  const api = await import("./index.js");
+  api.advanceAuthVerificationClockForTest(60_001);
+  let code: string | null = null;
+  setAuthCodeDeliveryObserverForTest((value) => { code = value.code; });
+  try { const result = await runner(); assert.ok(code); return { result, code }; }
+  finally { setAuthCodeDeliveryObserverForTest(null); }
 }
 
 async function readDb(): Promise<ApiDatabase> {
@@ -319,22 +313,10 @@ test("authentication successes wait for durable persistence and persistence fail
   assert.ok(Date.parse(webVerified.body.expiresAt as string) > Date.now());
   assert.equal((await apiRequest("/web/auth/session", undefined, webVerified.body.token as string)).status, 200);
 
-  const originalLog = console.log;
-  const onboardingLogs: string[] = [];
-  console.log = (...args: unknown[]) => {
-    onboardingLogs.push(args.map(String).join(" "));
-  };
-  let mobileOnboarded: Awaited<ReturnType<typeof onboard>>;
-  try {
-    mobileOnboarded = await requestWhilePersistenceHeld("POST /mobile/onboard", () =>
-      onboard("durability-mobile@example.test")
-    );
-  } finally {
-    console.log = originalLog;
-  }
+  const { result: mobileOnboarded, code: mobileCode } = await captureVerificationCode(() =>
+    requestWhilePersistenceHeld("POST /mobile/onboard", () => onboard("durability-mobile@example.test"))
+  );
   assert.equal(mobileOnboarded.status, 201);
-  const mobileCode = onboardingLogs.join("\n").match(/code=(\d{6})/)?.[1];
-  assert.ok(mobileCode);
   const mobileUserId = mobileOnboarded.body.user.id as string;
   const mobileVerified = await requestWhilePersistenceHeld("POST /mobile/onboard/verify-email", () =>
     verify(mobileUserId, mobileCode, mobileOnboarded.body.authToken as string)
@@ -554,7 +536,8 @@ test("reviewer fixed code requires the correct interim token and follows the nor
 
   const after = verified.body.user as UserProfile;
   for (const field of ["accountType", "tier", "orgId", "orgRole", "isPlatformAdmin", "isSuperUser"] as const) {
-    assert.equal(after[field], before[field], `reviewer verification changed ${field}`);
+    if (field === "isPlatformAdmin" || field === "isSuperUser") assert.equal(Boolean(after[field]), Boolean(before[field]), `reviewer verification changed ${field}`);
+    else assert.equal(after[field], before[field], `reviewer verification changed ${field}`);
   }
 
   const oldTokenDenied = await apiRequest(`/mobile/users/${reviewerUserId}/entitlements`, undefined, interimToken);
@@ -563,7 +546,8 @@ test("reviewer fixed code requires the correct interim token and follows the nor
   assert.equal(rotatedTokenAllowed.status, 200);
 
   const db = await readDb();
-  const reviewerChallenges = db.emailVerifications.filter((entry) => entry.userId === reviewerUserId);
+  const authState = JSON.parse(await readFile(path.join(tempDir, "db.local.auth-verification.json"), "utf8"));
+  const reviewerChallenges = Object.values(authState).flatMap((s: any) => s.challenges).filter((c: any) => c.userId === reviewerUserId);
   assert.ok(reviewerChallenges.some((entry) => entry.consumedAt !== null));
   const requests = db.enterpriseJoinRequests.filter((entry) => entry.userId === reviewerUserId);
   assert.equal(requests.length, 1);
@@ -699,7 +683,7 @@ test("reviewer userId-only limiter aggregates verification attempts across sourc
   assert.equal(JSON.stringify(limited.body).includes("reviewer"), false);
 });
 
-test("normal users are not subject to reviewer limiter while existing IP:userId limiting remains active", async () => {
+test("normal users retain supplemental IP:userId limiting alongside durable account limits", async () => {
   const normalOnboard = await captureVerificationCode(() => onboard("normal-rate@example.test"));
   const userId = normalOnboard.result.body.user.id as string;
   const interimToken = normalOnboard.result.body.authToken as string;

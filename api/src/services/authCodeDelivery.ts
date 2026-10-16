@@ -2,6 +2,11 @@ import { WebAuthDeliveryMode } from "@voicepractice/shared";
 import { AuthCodeDeliveryProvider } from "../runtimeConfig.js";
 
 type EmailVerificationExperience = "dashboard" | "mobile";
+let deliveryObserverForTest: ((params: { email: string; code: string; expiresAt: string }) => void) | null = null;
+export function setAuthCodeDeliveryObserverForTest(observer: typeof deliveryObserverForTest): void {
+  if (process.env.NODE_ENV !== "test") throw new Error("Delivery observation is test-only.");
+  deliveryObserverForTest = observer;
+}
 type AuthCodeDeliveryTarget =
   | "dashboard_sign_in"
   | "dashboard_email_verification"
@@ -111,9 +116,9 @@ export function createAuthCodeDeliveryService(params: CreateAuthCodeDeliveryServ
   const fromName = params.fromName.trim() || "Peritio";
   const replyTo = params.replyTo?.trim() || null;
 
-  function logCode(tag: string, email: string, code: string, expiresAt: string): WebAuthDeliveryMode {
-    const expiresLocal = formatExpiresAt(expiresAt);
-    console.log(`[${tag}] ${email} code=${code} expiresAt=${expiresAt} (${expiresLocal})`);
+  function logCode(tag: string): WebAuthDeliveryMode {
+    // Development delivery remains a no-send mode; never emit credentials to logs.
+    console.log(`[${tag}] delivery suppressed (log_only)`);
     return "log_only";
   }
 
@@ -171,9 +176,10 @@ export function createAuthCodeDeliveryService(params: CreateAuthCodeDeliveryServ
     target: AuthCodeDeliveryTarget,
     params: { email: string; code: string; expiresAt: string }
   ): Promise<WebAuthDeliveryMode> {
+    if (process.env.NODE_ENV === "test") deliveryObserverForTest?.(params);
     const provider = resolveProvider(target);
     if (provider === "log_only") {
-      return logCode(tag, params.email, params.code, params.expiresAt);
+      return logCode(tag);
     }
 
     if (provider === "resend") {

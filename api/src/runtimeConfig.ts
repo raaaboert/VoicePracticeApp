@@ -373,6 +373,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   if (isProductionDeployment && storageProvider !== "postgres") {
     throw new Error('STORAGE_PROVIDER must be "postgres" when PERITIO_ENV=production.');
   }
+  if (deploymentEnvironment === "staging" && storageProvider !== "postgres") {
+    throw new Error('STORAGE_PROVIDER must be "postgres" in staging for durable authentication limits.');
+  }
   if (trainingContentStorage.provider === "r2" && storageProvider !== "postgres") {
     throw new Error(
       'STORAGE_PROVIDER must be "postgres" when TRAINING_CONTENT_STORAGE_PROVIDER=r2.'

@@ -90,7 +90,6 @@ import {
   Difficulty,
   EnterpriseOrg,
   EnterpriseJoinRequestRecord,
-  EmailVerificationRecord,
   GenerateOrgCustomScenarioRequest,
   GenerateOrgCustomScenarioResponse,
   INDUSTRY_IDS,
@@ -249,6 +248,8 @@ import { scheduleSupportTranscriptExpiration } from "./services/supportTranscrip
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
+import { AuthVerificationStore, AuthCodeRequestLimitError } from "./storage/authVerificationStore.js";
+import { deliverVerificationChallenge, verificationIdentity } from "./services/authVerification.js";
 import {
   createUserNotificationStore,
   type UserNotificationStore,
@@ -268,10 +269,8 @@ import {
   TemporaryDailyOverageMode,
 } from "./services/temporaryDailyOverage.js";
 import {
-  hashEmailVerificationCode,
   normalizeEmailForExactMatch,
   timingSafeEqualText,
-  verifyLatestEmailVerification,
 } from "./services/emailVerification.js";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import {
@@ -666,7 +665,6 @@ const CORS_ALLOWED_ORIGINS = new Set(runtimeConfig.corsAllowedOrigins);
 const ALLOW_ALL_BROWSER_ORIGINS = !runtimeConfig.isProduction && CORS_ALLOWED_ORIGINS.size === 0;
 const SUPPORT_TRANSCRIPT_TTL_DAYS = 10;
 const SUPPORT_MESSAGE_MAX_LENGTH = 5_000;
-const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const ORG_JOIN_REQUEST_TTL_DAYS = 7;
 const ORG_JOIN_CODE_LENGTH = 8;
 const CONTENT_DELETE_RETENTION_DAYS = 60;
@@ -908,6 +906,13 @@ const webAuthSessionStore = createWebAuthSessionStore({
   pgPoolMax: PG_POOL_MAX,
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+let authVerificationNowForTest: number | null = null;
+const authVerificationStore = new AuthVerificationStore({
+  provider: STORAGE_PROVIDER, dbPath: DB_PATH, databaseUrl: DATABASE_URL,
+  pgPoolMax: PG_POOL_MAX, pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS, pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+  secret: WEB_AUTH_TOKEN_SECRET,
+  ...(runtimeConfig.nodeEnv === "test" ? { clock: () => authVerificationNowForTest ?? Date.now() } : {}),
 });
 const performancePlanStore = createPerformancePlanStore({
   provider: STORAGE_PROVIDER,
@@ -5002,6 +5007,18 @@ async function withDatabaseWrite<T>(handler: (db: ApiDatabase) => Promise<T> | T
 
 const withDatabase = withDatabaseWrite;
 
+const AUTHENTICATION_WRITE_REQUIRED = Symbol("authentication_write_required");
+async function withReadFirstAuthenticationWrite<T>(
+  handler: (db: ApiDatabase, mayWrite: boolean) => Promise<T | typeof AUTHENTICATION_WRITE_REQUIRED>,
+): Promise<T> {
+  const snapshot = await withFreshDatabaseSnapshotRead((db) => structuredClone(db));
+  const result = await handler(snapshot, false);
+  if (result !== AUTHENTICATION_WRITE_REQUIRED) return result;
+  const committed = await commitDatabaseWrite((db) => handler(db, true), { fresh: true });
+  if (committed === AUTHENTICATION_WRITE_REQUIRED) throw new Error("Invalid authentication write phase.");
+  return committed;
+}
+
 async function migrateLegacyAuditEventsFromAppState(): Promise<void> {
   await withDatabaseLock(async () => {
     const migration = await migrateLegacyAuditEventsFromAppStateState({
@@ -5178,6 +5195,7 @@ async function revokeWebAuthSessionById(sessionId: string): Promise<void> {
 async function refreshDatabaseReadiness(): Promise<void> {
   const wasReady = isDatabaseReady;
   try {
+    await authVerificationStore.initialize();
     await initializeDatabaseStoresForReadiness({
       stores: {
         auditEventStore,
@@ -5644,47 +5662,16 @@ function respondWithTrainingContentMobileError(error: unknown, response: Respons
   response.status(mapped.status).json(mapped.body);
 }
 
-function createVerificationCode(): string {
-  const numeric = crypto.randomInt(0, 1_000_000);
-  return String(numeric).padStart(6, "0");
-}
-
 function buildDomainMatchForEmail(_db: ApiDatabase, _email: string): null {
   // Deprecated compatibility field: organization discovery is company-code based.
   return null;
 }
 
 async function issueEmailVerification(
-  db: ApiDatabase,
   user: UserProfile,
-  now: Date,
   experience: "dashboard" | "mobile"
 ): Promise<{ expiresAt: string; delivery: WebAuthDeliveryMode }> {
-  const nowIsoValue = now.toISOString();
-  const expiresAt = new Date(now.getTime() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
-  const code = createVerificationCode();
-  const codeHash = hashEmailVerificationCode(MOBILE_TOKEN_SECRET, user.id, user.email, code);
-
-  const record: EmailVerificationRecord = {
-    id: `ver_${uuid()}`,
-    userId: user.id,
-    email: user.email,
-    codeHash,
-    createdAt: nowIsoValue,
-    expiresAt,
-    consumedAt: null
-  };
-
-  db.emailVerifications.push(record);
-  return {
-    expiresAt,
-    delivery: await authCodeDelivery.sendEmailVerificationCode({
-      email: user.email,
-      code,
-      expiresAt,
-      experience
-    })
-  };
+  return deliverVerificationChallenge({ store: authVerificationStore, delivery: authCodeDelivery, user, purpose: "email_verification", experience });
 }
 
 function logDashboardWebAuthRequestIgnored(email: string, reason: string): void {
@@ -13317,7 +13304,8 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
     return;
   }
 
-  const payload = await withDatabase(async (db) => {
+  const db = await withFreshDatabaseSnapshotRead((source) => structuredClone(source));
+  const payload = await (async () => {
     const candidate = db.users.find((user) => user.email.toLowerCase() === email);
     const baseEligibility = candidate ? resolveDashboardAccessEligibility(db, candidate) : null;
     const managementScope = candidate && !baseEligibility?.eligible
@@ -13328,22 +13316,13 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
       email,
       now: new Date(),
       hasEffectiveFocusTopicManagementGrant: Boolean(managementScope?.manageableTopicIds.size),
-      issueSignInCode: async (user, now) => {
-        const challenge = webAuthService.issueSignInChallenge(db, user, EMAIL_VERIFICATION_TTL_MINUTES, now);
-        return {
-          expiresAt: challenge.expiresAt,
-          delivery: await authCodeDelivery.sendWebSignInCode({
-            email: user.email,
-            code: challenge.code,
-            expiresAt: challenge.expiresAt
-          })
-        };
-      },
-      issueEmailVerificationCode: async (user, now) => issueEmailVerification(db, user, now, "dashboard"),
+      issueSignInCode: async (user) => deliverVerificationChallenge({ store: authVerificationStore, delivery: authCodeDelivery, user, purpose: "sign_in", experience: "dashboard" }),
+      issueEmailVerificationCode: async (user) => issueEmailVerification(user, "dashboard"),
     });
 
     if (result.outcome === "issued") {
-      appendWebAuditEvent(db, result.user, {
+      await deliverPostCommitAuditEventBestEffort({
+        actorType: "web_user", actorId: result.user.id,
         action: "web_auth.code_requested",
         orgId: result.user.orgId,
         userId: result.user.id,
@@ -13353,7 +13332,7 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
           expiresAt: result.expiresAt,
           delivery: result.delivery,
         }
-      });
+      }, "web_auth_code");
       return result.response;
     } else if (result.outcome === "delivery_failed") {
       logWarnThrottled(
@@ -13361,7 +13340,8 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
         `[web-auth][request-code] ${result.reason} for ${result.user.email}: ${result.error.message}`,
         60 * 1000
       );
-      appendWebAuditEvent(db, result.user, {
+      await deliverPostCommitAuditEventBestEffort({
+        actorType: "web_user", actorId: result.user.id,
         action: "web_auth.code_request_failed",
         orgId: result.user.orgId,
         userId: result.user.id,
@@ -13370,13 +13350,13 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
           reason: result.reason,
           error: result.error.message,
         }
-      });
+      }, "web_auth_code");
       return result.response;
     } else {
       logDashboardWebAuthRequestIgnored(email, result.reason);
       return result.response;
     }
-  });
+  })();
   authenticationResponseObserverForTest?.("POST /web/auth/request-code", 200);
   response.json(payload);
 });
@@ -13391,7 +13371,8 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     return;
   }
 
-  const outcome = await withDatabase(async (db) => {
+  let verifiedBinding: string | null = null;
+  const outcome = await withReadFirstAuthenticationWrite(async (db, mayWrite) => {
     const failure = () => ({
       status: 400,
       body: { error: DASHBOARD_WEB_AUTH_VERIFY_FAILURE_MESSAGE },
@@ -13413,38 +13394,16 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
     }
 
     const now = new Date();
-    let challengeType: WebAuthChallengeType;
-    if (user.emailVerifiedAt) {
-      const result = webAuthService.verifyLatestSignInChallenge(db, user, code, now);
-      if (result === "missing") {
-        return failure();
-      }
-      if (result === "expired") {
-        return failure();
-      }
-      if (result === "invalid") {
-        return failure();
-      }
-
-      challengeType = "sign_in";
-    } else {
-      const result = verifyLatestEmailVerification({
-        db,
-        user,
-        code,
-        now,
-        codeSecret: MOBILE_TOKEN_SECRET,
-      });
-      if (result === "missing") {
-        return failure();
-      }
-      if (result === "expired") {
-        return failure();
-      }
-      if (result === "invalid") {
-        return failure();
-      }
-
+    const challengeType: WebAuthChallengeType = user.emailVerifiedAt ? "sign_in" : "email_verification";
+    const identity = verificationIdentity(user, challengeType);
+    const binding = JSON.stringify([identity, user.emailVerifiedAt]);
+    if (!mayWrite) {
+      if (await authVerificationStore.verify(identity, code) !== "ok") return failure();
+      verifiedBinding = binding;
+      return AUTHENTICATION_WRITE_REQUIRED;
+    }
+    if (binding !== verifiedBinding) return failure();
+    if (!user.emailVerifiedAt) {
       const nowIsoValue = now.toISOString();
       user.emailVerifiedAt = nowIsoValue;
       user.updatedAt = nowIsoValue;
@@ -13454,7 +13413,6 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
         userId: user.id,
         message: `Email verified via shared web auth for ${user.email}.`
       });
-      challengeType = "email_verification";
     }
 
     const viewer = resolveDashboardViewer(db, user, {
@@ -21217,7 +21175,7 @@ app.post(
   }
   const timezone = resolveTimeZone(body.timezone);
 
-  const outcome = await withDatabase(async (db) => {
+  const outcome = await withReadFirstAuthenticationWrite(async (db, mayWrite) => {
     const requestedOrg = joinCode ? findActiveOrgByJoinCode(db, joinCode) : null;
     if (joinCode && !requestedOrg) {
       return { status: 404, body: { error: "Company code not found." } };
@@ -21245,7 +21203,7 @@ app.post(
       }
 
       const issuedAt = nowIso();
-      const verification = await issueEmailVerification(db, existing, new Date(issuedAt), "mobile");
+      const verification = await issueEmailVerification(existing, "mobile");
       const authToken = createExistingMobileOnboardingToken({
         purpose: "existing_mobile_onboarding",
         version: 1,
@@ -21264,7 +21222,8 @@ app.post(
         verificationExpiresAt: verification.expiresAt,
         domainMatch
       };
-      appendMobileAuditEvent(db, existing, {
+      await deliverPostCommitAuditEventBestEffort({
+        actorType: "mobile_user", actorId: existing.id, orgId: existing.orgId,
         action: "mobile.onboard",
         userId: existing.id,
         message: `Mobile onboarding requested email verification for ${existing.email}.`,
@@ -21272,10 +21231,11 @@ app.post(
           verificationRequired: true,
           verificationExpiresAt: verification.expiresAt
         }
-      });
+      }, "mobile_onboard_existing");
       return { status: 200, body: payload };
     }
 
+    if (!mayWrite) return AUTHENTICATION_WRITE_REQUIRED;
     const now = nowIso();
     const user: UserProfile = {
       id: `usr_${uuid()}`,
@@ -21306,7 +21266,7 @@ app.post(
 
     db.users.push(user);
     const authToken = upsertMobileAuthToken(db, user.id, now);
-    const verification = await issueEmailVerification(db, user, new Date(now), "mobile");
+    const verification = await issueEmailVerification(user, "mobile");
     appendMobileAuditEvent(db, user, {
       action: "mobile.user_created",
       userId: user.id,
@@ -21343,7 +21303,8 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
     return;
   }
 
-  const outcome = await withDatabase(async (db) => {
+  const db = await withFreshDatabaseSnapshotRead((source) => structuredClone(source));
+  const outcome = await (async () => {
     const user = getUserById(db, userId);
     if (!user) {
       return { status: 404, body: { error: "User not found." } };
@@ -21366,15 +21327,16 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return { status: 409, body: { error: "Email already verified." } };
     }
 
-    const verification = await issueEmailVerification(db, user, now, "mobile");
-    appendMobileAuditEvent(db, user, {
+    const verification = await issueEmailVerification(user, "mobile");
+    await deliverPostCommitAuditEventBestEffort({
+      actorType: "mobile_user", actorId: user.id, orgId: user.orgId,
       action: "mobile.verification_resent",
       userId: user.id,
       message: `Resent verification code to ${user.email}.`,
       metadata: {
         verificationExpiresAt: verification.expiresAt
       }
-    });
+    }, "mobile_verification_resent");
     return {
       status: 200,
       body: {
@@ -21382,7 +21344,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
         verificationExpiresAt: verification.expiresAt
       },
     };
-  });
+  })();
   authenticationResponseObserverForTest?.("POST /mobile/onboard/resend-verification", outcome.status);
   response.status(outcome.status).json(outcome.body);
 });
@@ -21408,14 +21370,15 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
     return;
   }
 
-  const outcome = await withDatabase(async (db) => {
+  let verifiedBinding: string | null = null;
+  const outcome = await withReadFirstAuthenticationWrite(async (db, mayWrite) => {
     const user = getUserById(db, userId);
     if (!user) {
       return { status: 404, body: { error: "User not found." } };
     }
 
     if (
-      APP_REVIEW_CREDENTIAL
+      !mayWrite && APP_REVIEW_CREDENTIAL
       && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
       && !consumeRateLimit(mobileReviewerVerificationRateLimitOptions, request, response, user.id)
     ) {
@@ -21473,25 +21436,18 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       }
     }
 
+    const identity = verificationIdentity(user, "email_verification");
+    const binding = JSON.stringify([identity, user.emailVerifiedAt, needsCodeVerification, user.mobileProfileReonboardingRequired]);
+    const failure = () => ({ status: 400, body: { error: "Could not verify code. Request a new code and try again." } });
+    if (!mayWrite) {
+      const reviewerCode = APP_REVIEW_CREDENTIAL && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
+        ? APP_REVIEW_CREDENTIAL.code : null;
+      if (needsCodeVerification && await authVerificationStore.verify(identity, code, reviewerCode) !== "ok") return failure();
+      verifiedBinding = binding;
+      return AUTHENTICATION_WRITE_REQUIRED;
+    }
+    if (binding !== verifiedBinding) return failure();
     if (needsCodeVerification) {
-      const verificationResult = verifyLatestEmailVerification({
-        db,
-        user,
-        code,
-        now,
-        codeSecret: MOBILE_TOKEN_SECRET,
-        appReviewCredential: APP_REVIEW_CREDENTIAL,
-      });
-      if (verificationResult === "missing") {
-        return { status: 400, body: { error: "No pending verification code. Please resend verification email." } };
-      }
-      if (verificationResult === "expired") {
-        return { status: 400, body: { error: "Verification code expired. Please request a new code." } };
-      }
-      if (verificationResult === "invalid") {
-        return { status: 400, body: { error: "Invalid verification code." } };
-      }
-
       const nowIsoValue = now.toISOString();
       user.emailVerifiedAt = nowIsoValue;
       user.updatedAt = nowIsoValue;
@@ -28201,6 +28157,12 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
     return;
   }
 
+  if (error instanceof AuthCodeRequestLimitError) {
+    response.setHeader("Retry-After", "60");
+    response.status(429).json({ error: "Please wait before requesting another code." });
+    return;
+  }
+
   if (error instanceof AuthCodeDeliveryError) {
     if (error.statusCode >= 500) {
       respondWithUnexpectedError(response, error, { route: "auth_delivery", status: error.statusCode,
@@ -28223,6 +28185,8 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
 });
 
 export async function startApiServer(): Promise<void> {
+  await authVerificationStore.initialize();
+  await authVerificationStore.purgeExpired();
   await initializeDatabaseStoresForStartup({
     stores: {
       auditEventStore,
@@ -28264,6 +28228,11 @@ export async function startApiServer(): Promise<void> {
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
   scheduleSupportTranscriptExpiration(supportCaseStore, server);
+  const authCleanupTimer = setInterval(() => {
+    void authVerificationStore.purgeExpired().catch(() => logWarn("[auth-verification] expiration cleanup failed."));
+  }, 60 * 60_000);
+  authCleanupTimer.unref();
+  server.once("close", () => { clearInterval(authCleanupTimer); void authVerificationStore.close(); });
 
   const trainingContentStorageStatus = await trainingContentStorageReadiness.refresh();
   if (trainingContentStorageStatus.enabled && !trainingContentStorageStatus.available) {
@@ -28323,6 +28292,11 @@ export function setFocusTopicDeleteResponseObserverForTest(observer: (() => void
     throw new Error("setFocusTopicDeleteResponseObserverForTest is only available in test.");
   }
   focusTopicDeleteResponseObserverForTest = observer;
+}
+
+export function advanceAuthVerificationClockForTest(milliseconds: number): void {
+  if (runtimeConfig.nodeEnv !== "test") throw new Error("Authentication clock is test-only.");
+  authVerificationNowForTest = (authVerificationNowForTest ?? Date.now()) + milliseconds;
 }
 
 export function setAuthenticationResponseObserverForTest(

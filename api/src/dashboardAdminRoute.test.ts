@@ -1,3 +1,4 @@
+import { setAuthCodeDeliveryObserverForTest } from "./services/authCodeDelivery.js";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
@@ -1340,19 +1341,12 @@ async function publicRequest(pathname: string, init?: RequestInit) {
 }
 
 async function captureVerificationCode<T>(runner: () => Promise<T>): Promise<{ result: T; code: string }> {
-  const originalLog = console.log;
-  const logs: string[] = [];
-  console.log = (...args: unknown[]) => {
-    logs.push(args.map((arg) => String(arg)).join(" "));
-  };
-  try {
-    const result = await runner();
-    const code = logs.join("\n").match(/code=(\d{6})/)?.[1] ?? null;
-    assert.ok(code);
-    return { result, code };
-  } finally {
-    console.log = originalLog;
-  }
+  const api = await import("./index.js");
+  api.advanceAuthVerificationClockForTest(60_001);
+  let code: string | null = null;
+  setAuthCodeDeliveryObserverForTest((value) => { code = value.code; });
+  try { const result = await runner(); assert.ok(code); return { result, code }; }
+  finally { setAuthCodeDeliveryObserverForTest(null); }
 }
 
 async function getAdminToken(): Promise<string> {
@@ -5182,12 +5176,8 @@ test("mobile onboarding collects names and company code without granting immedia
     verifyMismatchDb.users.find((user) => user.id === "reset_mismatch")?.mobileProfileReonboardingRequired,
     false
   );
-  assert.equal(
-    typeof verifyMismatchDb.emailVerifications
-      .filter((entry) => entry.userId === "reset_mismatch")
-      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0]?.consumedAt,
-    "string"
-  );
+  const authState = JSON.parse(await readFile(path.join(tempDir, "db.local.auth-verification.json"), "utf8"));
+  assert.ok(Object.values(authState).flatMap((s: any) => s.challenges).some((c: any) => c.userId === "reset_mismatch" && c.consumedAt !== null));
   assert.equal(verifyMismatchDb.enterpriseJoinRequests.some((request) => request.userId === "reset_mismatch"), false);
 
   const disabled = await publicRequest("/mobile/onboard", {
