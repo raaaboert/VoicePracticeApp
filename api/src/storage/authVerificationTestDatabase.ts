@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
+import { applyAuthenticationTestSchema } from "./postgresTestSchema.js";
 
 export async function createLocalAuthDatabase(databaseUrl: string) {
   const parsed = new URL(databaseUrl);
@@ -10,6 +10,6 @@ export async function createLocalAuthDatabase(databaseUrl: string) {
   await root.query(`CREATE SCHEMA ${schema}`);
   parsed.searchParams.set("options", `-c search_path=${schema}`);
   const pool = new Pool({ connectionString: parsed.toString(), max: 4 });
-  const migrate = async () => pool.query(await readFile(new URL("../../sql/024_auth_verification.sql", import.meta.url), "utf8"));
+  const migrate = () => applyAuthenticationTestSchema(pool);
   return { pool, url: parsed.toString(), migrate, close: async () => { await pool.end(); await root.query(`DROP SCHEMA ${schema} CASCADE`); await root.end(); } };
 }

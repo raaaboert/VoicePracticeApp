@@ -11,7 +11,7 @@ import {
   resolveDashboardAccessEligibility,
 } from "./dashboardAuthorization.js";
 import { AuthCodeDeliveryError } from "./authCodeDelivery.js";
-import { AuthCodeRequestLimitError } from "../storage/authVerificationStore.js";
+import { AuthCodeRequestLimitError, AuthVerificationAuthorityError } from "../storage/authVerificationStore.js";
 
 export const DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE =
   "If that account is eligible, a code has been sent. Enter the code below to continue.";
@@ -20,7 +20,7 @@ export type DashboardWebAuthRequestResult =
   | {
       response: WebAuthRequestCodeResponse;
       outcome: "acknowledged";
-      reason: "user_not_found" | "temporarily_limited" | DashboardAccessEligibilityReason;
+      reason: "user_not_found" | "temporarily_limited" | "authority_changed" | DashboardAccessEligibilityReason;
       user: null;
     }
   | {
@@ -120,6 +120,9 @@ export async function handleDashboardWebAuthCodeRequest(params: {
       delivery: issued.delivery,
     };
   } catch (error) {
+    if (error instanceof AuthVerificationAuthorityError) {
+      return { response: publicResponse, outcome: "acknowledged", reason: "authority_changed", user: null };
+    }
     if (error instanceof AuthCodeRequestLimitError) {
       return { response: publicResponse, outcome: "acknowledged", reason: "temporarily_limited", user: null };
     }

@@ -24,6 +24,9 @@ interface State { account: Account; challenges: Challenge[] }
 export class AuthCodeRequestLimitError extends Error {
   constructor() { super("Please wait before requesting another code."); this.name = "AuthCodeRequestLimitError"; }
 }
+export class AuthVerificationAuthorityError extends Error {
+  constructor() { super("Verification is unavailable. Please try again."); this.name = "AuthVerificationAuthorityError"; }
+}
 interface Params {
   provider: StorageProvider; dbPath: string; databaseUrl: string | null; secret: string;
   pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number;
@@ -152,7 +155,8 @@ export class AuthVerificationStore {
   async issue(identity: VerificationIdentity): Promise<{ id: string; code: string; expiresAt: string } | null> {
     return this.transact(this.accountKey(identity.email), (state, now, authorized) => {
       const a = state.account; this.prune(a, now);
-      if (!authorized || a.lockedUntil || (a.nextIssueAt ?? 0) > now || a.issuances.length >= 5) return null;
+      if (!authorized) throw new AuthVerificationAuthorityError();
+      if (a.lockedUntil || (a.nextIssueAt ?? 0) > now || a.issuances.length >= 5) return null;
       for (const c of state.challenges) {
         const sameScope = c.userId === identity.userId && c.orgId === identity.orgId && c.purpose === identity.purpose;
         if ((sameScope || c.expiresAt <= now) && !c.consumedAt && !c.invalidatedAt) c.invalidatedAt = now;

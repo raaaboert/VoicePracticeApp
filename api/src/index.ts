@@ -248,7 +248,7 @@ import { scheduleSupportTranscriptExpiration } from "./services/supportTranscrip
 import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
-import { AuthVerificationStore, AuthCodeRequestLimitError } from "./storage/authVerificationStore.js";
+import { AuthVerificationStore, AuthCodeRequestLimitError, AuthVerificationAuthorityError } from "./storage/authVerificationStore.js";
 import { deliverVerificationChallenge } from "./services/authVerification.js";
 import { canVerifyCurrentIdentity } from "./services/authChallengeAuthority.js";
 import {
@@ -4553,7 +4553,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       emailVerifiedAt:
         typeof candidateUser.emailVerifiedAt === "string" || candidateUser.emailVerifiedAt === null
           ? (candidateUser.emailVerifiedAt as string | null)
-          : candidateUser.createdAt ?? now,
+          : candidateUser.createdAt ?? null,
       dailySecondsCapOverride: normalizeOptionalSecondsCap(candidateUser.dailySecondsCapOverride),
       allowDailyOverageThisCycle: candidateUser.allowDailyOverageThisCycle === true,
       dailyOverageExpiresAt: normalizeOptionalIsoDate(candidateUser.dailyOverageExpiresAt),
@@ -4575,7 +4575,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
       performanceAccess: normalizePerformanceAccess(candidateUser, validOrgIds)
     };
   });
-  repairInvalidManagerAssignments(normalizedUsers, now);
+  repairInvalidManagerAssignments(normalizedUsers);
   const normalizedOrgTrainings = normalizeOrgTrainingRecords(
     (candidate as Partial<ApiDatabase>).orgTrainings,
     validOrgIds,
@@ -21093,6 +21093,7 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
     const deletedAiUsageEventCount = await aiUsageEventAccess.deleteForUser(user.id);
     const deletedSupportCaseCount = await supportCaseStore.deleteCasesForUser(user.id);
 
+    clearAssignmentsForManager({ users: db.users, managerUserId: user.id, updatedAt: now });
     db.users.splice(userIndex, 1);
     db.mobileAuthTokens = db.mobileAuthTokens.filter((record) => record.userId !== user.id);
     db.emailVerifications = db.emailVerifications.filter((record) => record.userId !== user.id);
@@ -28155,6 +28156,11 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
 
   if (isJsonBodyParseError(error)) {
     response.status(400).json({ error: "Request body must be valid JSON." });
+    return;
+  }
+
+  if (error instanceof AuthVerificationAuthorityError) {
+    response.status(409).json({ error: error.message });
     return;
   }
 

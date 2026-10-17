@@ -7,6 +7,7 @@ import { Pool } from "pg";
 import { createDatabaseStorage } from "./storage.js";
 import { createOrgModuleEntitlementStore } from "./storage/orgModuleEntitlementStore.js";
 import { assertIndustryCacheParity } from "./industryRuntimeCache.testSupport.js";
+import { applyAuthenticationTestSchema } from "./storage/postgresTestSchema.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
 
@@ -25,6 +26,7 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
     scoped.searchParams.set("application_name", schema);
     const url = scoped.toString();
     pool = new Pool({ connectionString: url, max: 3 });
+    await applyAuthenticationTestSchema(pool);
     const entitlements = createOrgModuleEntitlementStore({ provider: "postgres", databaseUrl: url,
       pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 1000, queryPool: pool });
     await entitlements.initialize();

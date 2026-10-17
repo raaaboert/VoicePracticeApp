@@ -22,6 +22,7 @@ import {
 } from "./storage/trainingContentAssetStore.js";
 import { createWebAuthService } from "./services/webAuth.js";
 import { assertIndustryCacheParity } from "./industryRuntimeCache.testSupport.js";
+import { applyAuthenticationTestSchema } from "./storage/postgresTestSchema.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() ?? "";
 
@@ -91,6 +92,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       await setup.query(`CREATE SCHEMA ${quotedSchema}`);
       const url = scopedUrl(databaseUrl, schema);
       pool = new Pool({ connectionString: url, max: 3 });
+      await applyAuthenticationTestSchema(pool);
       const moduleEntitlements = createOrgModuleEntitlementStore({ provider: "postgres", databaseUrl: url,
         pgPoolMax: 3, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 2000, queryPool: pool });
       await moduleEntitlements.initialize();

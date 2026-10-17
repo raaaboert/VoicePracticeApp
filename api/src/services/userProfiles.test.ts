@@ -256,6 +256,19 @@ test("repairInvalidManagerAssignments preserves every eligible manager role and 
   assert.equal(selfManagedReport.managerUserId, null);
 });
 
+test("read-only manager repair preserves persisted timestamps while explicit mutation repair stamps its commit", () => {
+  const original = user("report", { managerUserId: "deleted_manager" });
+  const first = structuredClone(original), second = structuredClone(original);
+  assert.deepEqual(repairInvalidManagerAssignments([first]), [original.id]);
+  assert.deepEqual(repairInvalidManagerAssignments([second]), [original.id]);
+  assert.deepEqual(first, second);
+  assert.equal(first.updatedAt, original.updatedAt);
+  assert.equal(first.managerUserId, null);
+  const mutation = structuredClone(original);
+  repairInvalidManagerAssignments([mutation], "2026-10-16T12:00:00.000Z");
+  assert.equal(mutation.updatedAt, "2026-10-16T12:00:00.000Z");
+});
+
 test("manager repair is independent from performance access changes", () => {
   const manager = user("manager", { performanceAccess: "none" });
   const report = user("report", { managerUserId: manager.id });

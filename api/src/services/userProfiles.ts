@@ -244,7 +244,8 @@ export function clearAssignmentsForManager(params: {
   return clearedUserIds;
 }
 
-export function repairInvalidManagerAssignments(users: UserProfile[], updatedAt: string): string[] {
+/** Read-only normalization preserves persisted timestamps; mutations may supply their commit time. */
+export function repairInvalidManagerAssignments(users: UserProfile[], updatedAt?: string): string[] {
   const byId = new Map(users.map((user) => [user.id, user] as const));
   const repairedUserIds: string[] = [];
 
@@ -264,7 +265,7 @@ export function repairInvalidManagerAssignments(users: UserProfile[], updatedAt:
 
     if (!valid) {
       user.managerUserId = null;
-      user.updatedAt = updatedAt;
+      if (updatedAt !== undefined) user.updatedAt = updatedAt;
       repairedUserIds.push(user.id);
     }
   }

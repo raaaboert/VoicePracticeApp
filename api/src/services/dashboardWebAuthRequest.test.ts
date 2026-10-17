@@ -4,6 +4,7 @@ import test from "node:test";
 import { ApiDatabase, UserProfile, WebAuthRequestCodeResponse } from "@voicepractice/shared";
 
 import { AuthCodeDeliveryError } from "./authCodeDelivery.js";
+import { AuthVerificationAuthorityError } from "../storage/authVerificationStore.js";
 import {
   DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE,
   handleDashboardWebAuthCodeRequest,
@@ -50,6 +51,19 @@ function createUser(overrides?: Partial<UserProfile>): UserProfile {
     ...overrides,
   };
 }
+
+test("authority changes retain generic dashboard acknowledgement without being classified as rate limits", async () => {
+  const user = createUser();
+  const result = await handleDashboardWebAuthCodeRequest({
+    db: createDb({ users: [user], orgs: [{ id: user.orgId!, name: "Test", status: "active" }] }),
+    email: user.email, now: new Date(),
+    issueSignInCode: async () => { throw new AuthVerificationAuthorityError(); },
+    issueEmailVerificationCode: async () => { throw new Error("unexpected email verification"); },
+  });
+  assert.equal(result.outcome, "acknowledged");
+  assert.equal(result.reason, "authority_changed");
+  assert.deepEqual(result.response, { ok: true, message: DASHBOARD_WEB_AUTH_REQUEST_CODE_MESSAGE });
+});
 
 test("dashboard request-code returns the same public response for unknown and ineligible emails", async () => {
   const eligibleUser = createUser();

@@ -7,7 +7,7 @@ import test from "node:test";
 import { createDefaultConfig } from "@voicepractice/shared";
 import { createLocalAuthDatabase } from "./storage/authVerificationTestDatabase.js";
 import { createAuthCodeDeliveryService, setAuthCodeDeliveryObserverForTest } from "./services/authCodeDelivery.js";
-import { AuthVerificationStore } from "./storage/authVerificationStore.js";
+import { AuthVerificationStore, AuthVerificationAuthorityError } from "./storage/authVerificationStore.js";
 
 const url = process.env.AUTH_VERIFICATION_INTEGRATION_DATABASE_URL?.trim() || process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim();
 const mobileSecret = "auth_http_mobile_token_secret_at_least_32_characters";
@@ -103,6 +103,75 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
       await db.pool.query("UPDATE app_state SET state_json=$1::jsonb WHERE id='primary'", [JSON.stringify(state)]);
       await requestCode(users[0].email); assert.ok(lastCode);
       assert.equal((await verifyWeb(users[0].email, lastCode)).status, 200);
+    });
+    await t.test("independent PostgreSQL reads repair invalid managers deterministically without rewriting state and permit login", async (t) => {
+      api.clearRateLimitsForTest(); api.advanceAuthVerificationClockForTest(60_001);
+      const state = (await appState()).state_json;
+      const target = state.users.find((u: any) => u.id === users[0].id);
+      target.managerUserId = "deleted_manager";
+      const undated = { ...user("legacy_undated", "legacy-undated@auth.test") } as any;
+      delete undated.createdAt; delete undated.emailVerifiedAt;
+      state.users.push(undated);
+      await db.pool.query("UPDATE app_state SET state_json=$1::jsonb WHERE id='primary'", [JSON.stringify(state)]);
+      const store = new AuthVerificationStore({ provider: "postgres", databaseUrl: db.url, dbPath: "unused.json",
+        secret: process.env.WEB_AUTH_TOKEN_SECRET!, pgPoolMax: 1, pgConnectTimeoutMs: 1000, pgIdleTimeoutMs: 100,
+        normalizeAuthorityState: api.ensureDatabaseShape });
+      try {
+        let expected: string | undefined;
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+        try {
+          for (let i = 0; i < 4; i++) {
+            t.mock.timers.tick(2000);
+            const loaded = api.ensureDatabaseShape((await appState()).state_json);
+            const user = loaded.users.find((u) => u.id === target.id)!;
+            assert.equal(user.managerUserId, null);
+            assert.equal(user.updatedAt, target.updatedAt, "read-only repair must retain persisted revision");
+            const fingerprint = store.bindIdentity(loaded, user, "sign_in").authorityBinding;
+            if (i === 0) expected = fingerprint;
+            assert.equal(fingerprint, expected);
+            assert.equal(loaded.users.find((u) => u.id === undated.id)!.emailVerifiedAt, null,
+              "missing legacy verification dates must not become fresh wall-clock authority");
+          }
+        } finally { t.mock.timers.reset(); }
+        await requestCode(target.email); assert.match(lastCode, /^\d{6}$/);
+        assert.deepEqual((await appState()).state_json, state, "code issuance must not rewrite app state to stabilize authority");
+        assert.equal((await verifyWeb(target.email, lastCode)).status, 200);
+      } finally { await store.close(); }
+    });
+    await t.test("Master manager deletion commits report cleanup, cancels stale codes, and leaves unrelated organizations intact", async () => {
+      api.clearRateLimitsForTest(); api.advanceAuthVerificationClockForTest(900_001);
+      const state = (await appState()).state_json;
+      const manager = user("delete_manager", "delete-manager@auth.test");
+      const report = { ...user("former_report", "former-report@auth.test"), managerUserId: manager.id };
+      const colleague = user("unrelated_manager", "unrelated-manager@auth.test");
+      const unrelated = { ...user("unrelated_report", "unrelated-report@auth.test"), managerUserId: colleague.id };
+      const otherOrg = { ...state.orgs[0], id: "org_unrelated", joinCode: "OTHERORG" };
+      const foreignManager = { ...user("foreign_manager", "foreign-manager@auth.test"), orgId: otherOrg.id };
+      const foreignReport = { ...user("foreign_report", "foreign-report@auth.test"), orgId: otherOrg.id, managerUserId: foreignManager.id };
+      state.orgs.push(otherOrg);
+      state.users.push(manager, report, colleague, unrelated, foreignManager, foreignReport);
+      await db.pool.query("UPDATE app_state SET state_json=$1::jsonb WHERE id='primary'", [JSON.stringify(state)]);
+      await requestCode(manager.email); const managerCode = lastCode;
+      const managerSession = await verifyWeb(manager.email, managerCode); assert.equal(managerSession.status, 200);
+      api.advanceAuthVerificationClockForTest(60_001);
+      await requestCode(manager.email); const pendingManagerCode = lastCode;
+      await requestCode(report.email); const staleReportCode = lastCode;
+      assert.equal((await request(`/users/${manager.id}`, undefined, admin, "198.51.100.1", "DELETE")).status, 200);
+      const committed = (await appState()).state_json;
+      assert.equal(committed.users.some((u: any) => u.id === manager.id), false);
+      const updatedReport = committed.users.find((u: any) => u.id === report.id);
+      assert.equal(updatedReport.managerUserId, null);
+      assert.notEqual(updatedReport.updatedAt, report.updatedAt);
+      for (const unchanged of [colleague, unrelated, foreignManager, foreignReport]) {
+        assert.deepEqual(committed.users.find((u: any) => u.id === unchanged.id), api.ensureDatabaseShape(state).users.find((u) => u.id === unchanged.id));
+      }
+      assert.equal((await request("/web/auth/session", undefined, managerSession.body.token)).status, 401);
+      assert.equal((await verifyWeb(manager.email, pendingManagerCode)).status, 400);
+      assert.equal((await verifyWeb(report.email, staleReportCode)).status, 400);
+      assert.equal((await db.pool.query("SELECT COUNT(*)::int AS n FROM auth_verification_challenges WHERE user_id=ANY($1::text[]) AND consumed_at IS NULL AND invalidated_at IS NULL", [[manager.id, report.id]])).rows[0].n, 0);
+      api.advanceAuthVerificationClockForTest(60_001);
+      await requestCode(report.email); assert.match(lastCode, /^\d{6}$/);
+      assert.equal((await verifyWeb(report.email, lastCode)).status, 200);
     });
     await t.test("spoofed forwarding identities do not reset five-guess invalidation or durable shared account lock", async () => {
       api.clearRateLimitsForTest(); api.advanceAuthVerificationClockForTest(60_001);
@@ -243,6 +312,29 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
       assert.equal((await db.pool.query("SELECT invalidated_at FROM auth_verification_challenges WHERE id=$1", [challenge.id])).rows[0].invalidated_at, null);
       assert.equal((await verifyWeb(users[0].email, code)).status, 200);
     });
+    await t.test("permission revocation racing HTTP verification commits cancellation before stale authentication can succeed", async () => {
+      api.clearRateLimitsForTest(); api.advanceAuthVerificationClockForTest(900_001);
+      const target = users[2];
+      await requestCode(target.email); const code = lastCode; assert.match(code, /^\d{6}$/);
+      let entered!: () => void, release!: () => void;
+      const atCommit = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      api.setDatabaseSaveBarrierForTest(async () => { entered(); await gate; });
+      const revocation = patch(`/users/${target.id}`, { dashboardAccessEnabled: false });
+      let verification: ReturnType<typeof verifyWeb> | undefined;
+      try {
+        await atCommit;
+        verification = verifyWeb(target.email, code);
+      } finally { api.setDatabaseSaveBarrierForTest(null); release(); }
+      assert.equal((await revocation).status, 200);
+      assert.equal((await verification!).status, 400);
+      assert.equal((await db.pool.query("SELECT COUNT(*)::int AS n FROM auth_verification_challenges WHERE user_id=$1 AND consumed_at IS NULL AND invalidated_at IS NULL", [target.id])).rows[0].n, 0);
+      assert.equal((await patch(`/users/${target.id}`, { dashboardAccessEnabled: true })).status, 200);
+      assert.equal((await verifyWeb(target.email, code)).status, 400, "re-grant cannot revive canceled challenge");
+      api.advanceAuthVerificationClockForTest(60_001);
+      await requestCode(target.email); assert.match(lastCode, /^\d{6}$/);
+      assert.equal((await verifyWeb(target.email, lastCode)).status, 200);
+    });
     await t.test("authority binding rejects stale codes and reviewer overrides if cancellation is missed", async () => {
       api.clearRateLimitsForTest(); api.advanceAuthVerificationClockForTest(60_001);
       await requestCode(users[0].email); const code = lastCode;
@@ -259,7 +351,7 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
       try {
         assert.equal(await store.verify(store.bindIdentity(current, user, "sign_in"), "808080", "808080"), "invalid");
         const staleIdentity = store.bindIdentity(before, before.users.find((u: any) => u.id === user.id), "sign_in");
-        assert.equal(await store.issue(staleIdentity), null);
+        await assert.rejects(store.issue(staleIdentity), AuthVerificationAuthorityError);
       } finally { await store.close(); }
     });
     await t.test("startup verifies required schema before API listen; no implicit DDL or legacy fallback", async () => {
