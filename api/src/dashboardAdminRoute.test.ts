@@ -4861,8 +4861,11 @@ test("mobile onboarding collects names and company code without granting immedia
   assert.equal(freeOnboard.body.verificationRequired, true);
   const freeUser = freeOnboard.body.user as UserProfile;
   const freeInterimToken = freeOnboard.body.authToken as string;
-  assert.equal(freeUser.firstName, null);
-  assert.equal(freeUser.lastName, null);
+  assert.equal(freeUser.firstName, "Free", "unverified projection echoes submitted presentation only");
+  assert.equal(freeUser.lastName, "User");
+  const pendingFreeUser = (await readDb()).users.find((entry) => entry.id === freeUser.id)!;
+  assert.equal(pendingFreeUser.firstName, null, "presentation must not be persisted before verification");
+  assert.equal(pendingFreeUser.lastName, null);
   assert.equal(freeUser.emailVerifiedAt, null);
   assert.equal(freeUser.orgId, null);
   const freeInterimEntitlements = await mobileRequest(`/mobile/users/${freeUser.id}/entitlements`, freeInterimToken);
@@ -4909,8 +4912,8 @@ test("mobile onboarding collects names and company code without granting immedia
   const gmailUser = gmailOnboard.body.user as UserProfile;
   const gmailAuthToken = gmailOnboard.body.authToken as string;
   assert.equal(gmailUser.orgId, null);
-  assert.equal(gmailUser.firstName, null);
-  assert.equal(gmailUser.lastName, null);
+  assert.equal(gmailUser.firstName, "Gmail");
+  assert.equal(gmailUser.lastName, "User");
   assert.equal(typeof gmailAuthToken, "string");
 
   const gmailVerified = await mobileRequest("/mobile/onboard/verify-email", gmailAuthToken, {

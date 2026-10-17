@@ -251,6 +251,7 @@ import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { AuthVerificationStore, AuthCodeRequestLimitError, AuthVerificationAuthorityError } from "./storage/authVerificationStore.js";
 import { deliverVerificationChallenge } from "./services/authVerification.js";
 import { canVerifyCurrentIdentity } from "./services/authChallengeAuthority.js";
+import { buildUnverifiedMobileProfile } from "./services/mobileOnboardingProjection.js";
 import {
   createUserNotificationStore,
   type UserNotificationStore,
@@ -21272,13 +21273,15 @@ app.post(
     || authVerificationStore.bindIdentity(current, user, "email_verification").authorityBinding !== binding.authorityBinding) {
     await authVerificationStore.invalidateUsers([pendingUser.id]); unavailable(); return;
   }
-  const authToken = prepared.pendingToken ?? createExistingMobileOnboardingToken({
+  const authToken = createExistingMobileOnboardingToken({
     purpose: "existing_mobile_onboarding", version: 1, userId: user.id, email: user.email.trim().toLowerCase(),
     firstName: firstName.value, lastName: lastName.value, timezone, joinCode, expiresAt: verification.expiresAt,
   });
   const payload: MobileOnboardResponse = {
-    user: buildMobileUserProfile(user), authToken, verificationRequired: true,
-    verificationExpiresAt: verification.expiresAt, domainMatch: buildDomainMatchForEmail(current, user.email),
+    user: buildUnverifiedMobileProfile({ userId: user.id, email, firstName: firstName.value,
+      lastName: lastName.value, timezone }),
+    authToken, verificationRequired: true,
+    verificationExpiresAt: verification.expiresAt, domainMatch: null,
   };
   await deliverPostCommitAuditEventBestEffort({
     actorType: "mobile_user", actorId: user.id, orgId: user.orgId, userId: user.id, action: "mobile.onboard",
