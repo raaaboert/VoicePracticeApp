@@ -14,11 +14,13 @@ type AuthCodeDeliveryTarget =
 
 export class AuthCodeDeliveryError extends Error {
   statusCode: number;
+  deliveryUncertain: boolean;
 
-  constructor(message: string, statusCode = 502) {
+  constructor(message: string, statusCode = 502, deliveryUncertain = false) {
     super(message);
     this.name = "AuthCodeDeliveryError";
     this.statusCode = statusCode;
+    this.deliveryUncertain = deliveryUncertain;
   }
 }
 
@@ -44,6 +46,7 @@ interface CreateAuthCodeDeliveryServiceParams {
   fromEmail: string | null;
   fromName: string;
   replyTo: string | null;
+  timeoutMs?: number; // Tests may use a short timeout; deployments use 10 seconds.
 }
 
 function formatExpiresAt(expiresAt: string): string {
@@ -152,23 +155,28 @@ export function createAuthCodeDeliveryService(params: CreateAuthCodeDeliveryServ
       payload.reply_to = replyTo;
     }
 
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errorPayload = (await response.json().catch(() => null)) as { message?: string } | null;
-      throw new AuthCodeDeliveryError(
-        errorPayload?.message || `Resend email delivery failed (${response.status}).`
-      );
-    }
-
-    return "email";
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new AuthCodeDeliveryError("Verification email delivery could not be confirmed. Please try again later.", 504, true));
+        }, Math.max(1, Math.min(params.timeoutMs ?? 10_000, 10_000)));
+      });
+      const response = await Promise.race([fetch("https://api.resend.com/emails", {
+        method: "POST", signal: controller.signal,
+        headers: { Authorization: `Bearer ${resendApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }), timeout]);
+      // Never parse provider response text or include it in diagnostics/errors.
+      void response.body?.cancel().catch(() => undefined);
+      if (!response.ok) throw new AuthCodeDeliveryError("Verification email could not be delivered. Please try again later.");
+      return "email";
+    } catch (error) {
+      if (error instanceof AuthCodeDeliveryError) throw error;
+      throw new AuthCodeDeliveryError("Verification email delivery could not be confirmed. Please try again later.", 502, true);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   async function sendCode(

@@ -5,11 +5,14 @@ import type { AuditEventStore } from "../storage/auditEventStore.js";
 import type { UserEmployeeIdClaimStore } from "../storage/userEmployeeIdClaimStore.js";
 import type { WebAuthSessionStore } from "../storage/webAuthSessionStore.js";
 import { collectWebSessionInvalidations } from "./webSessionInvalidation.js";
+import { collectAuthChallengeInvalidations } from "./authChallengeAuthority.js";
+import type { AuthVerificationStore } from "../storage/authVerificationStore.js";
 
 export interface AuthoritativeAppStateCommitInput {
   storage: DatabaseStorage;
   claimStore: UserEmployeeIdClaimStore;
   sessionStore: WebAuthSessionStore;
+  challengeStore?: Pick<AuthVerificationStore, "invalidateUsers">;
   auditStore: AuditEventStore;
   before: ApiDatabase;
   working: ApiDatabase;
@@ -25,8 +28,10 @@ export interface AuthoritativeAppStateCommitInput {
 /** Commit governance and credential effects with app_state on one PG client. */
 export async function commitAuthoritativeAppState(input: AuthoritativeAppStateCommitInput): Promise<void> {
   const revokeUserIds = collectWebSessionInvalidations(input.before, input.working);
+  const cancelChallengeUserIds = collectAuthChallengeInvalidations(input.before, input.working);
   await input.storage.runTransaction(async (client) => {
     await input.claimStore.syncFromUsers(input.working.users, client);
+    await input.challengeStore?.invalidateUsers(cancelChallengeUserIds, client);
     if (revokeUserIds.length > 0) {
       await input.beforeSessionRevocation?.();
       await input.sessionStore.revokeSessionsForUsers(revokeUserIds, client);
@@ -42,6 +47,8 @@ export async function commitAuthoritativeAppState(input: AuthoritativeAppStateCo
     }
     await input.beforeAppStateSave?.();
     await input.storage.save(input.buildPersistedSnapshot(input.working), client);
+    // File storage has no cross-file transaction. Close its pre-save issuance window fail-closed.
+    if (!client) await input.challengeStore?.invalidateUsers(cancelChallengeUserIds, null);
   });
   // COMMIT has returned. Publishing before this line would expose rollback state.
   input.onCommitted(input.working);

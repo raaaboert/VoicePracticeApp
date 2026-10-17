@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createAuthCodeDeliveryService } from "./authCodeDelivery.js";
+import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./authCodeDelivery.js";
 
 function createJsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -124,4 +124,33 @@ test("mobile resend override uses mobile app email copy", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Resend timeout aborts the provider and reports uncertainty even when fetch ignores cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let signal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => { signal = init?.signal as AbortSignal; return await new Promise<Response>(() => {}); }) as typeof fetch;
+  try {
+    const service = createAuthCodeDeliveryService({ defaultProvider: "resend", webAuthProvider: null, mobileEmailVerificationProvider: null,
+      resendApiKey: "re_private_test_api_key_123456", fromEmail: "sender@example.test", fromName: "Test", replyTo: null, timeoutMs: 1 });
+    await assert.rejects(service.sendWebSignInCode({ email: "private@example.test", code: "123456", expiresAt: new Date().toISOString() }),
+      (error: unknown) => error instanceof AuthCodeDeliveryError && error.statusCode === 504 && error.deliveryUncertain
+        && !/private|123456|api_key/.test(error.message));
+    assert.equal((signal as AbortSignal | null)?.aborted, true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Resend rejection never parses or exposes provider response text", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const response = new Response("private code 123456", { status: 401 });
+    response.json = async () => { throw new Error("private code 123456"); };
+    return response;
+  }) as typeof fetch;
+  try {
+    const service = createAuthCodeDeliveryService({ defaultProvider: "resend", webAuthProvider: null, mobileEmailVerificationProvider: null,
+      resendApiKey: "re_private_test_api_key_123456", fromEmail: "sender@example.test", fromName: "Test", replyTo: null });
+    await assert.rejects(service.sendWebSignInCode({ email: "private@example.test", code: "123456", expiresAt: new Date().toISOString() }),
+      (error: unknown) => error instanceof AuthCodeDeliveryError && !error.deliveryUncertain && !/private|123456|api_key/.test(error.message));
+  } finally { globalThis.fetch = originalFetch; }
 });

@@ -2,7 +2,7 @@ import type { ApiDatabase, UserProfile } from "@voicepractice/shared";
 
 // The web session is an authorization credential. Purge on either a loss or a
 // re-grant so a credential from an earlier privilege period cannot revive.
-function authorizationFingerprint(user: UserProfile): string {
+export function authorizationFingerprint(user: UserProfile): string {
   return JSON.stringify([
     user.email,
     user.emailVerifiedAt,

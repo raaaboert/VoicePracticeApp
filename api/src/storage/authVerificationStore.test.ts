@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { AuthVerificationStore, type VerificationIdentity } from "./authVerificationStore.js";
 import { deliverVerificationChallenge } from "../services/authVerification.js";
+import { AuthCodeDeliveryError } from "../services/authCodeDelivery.js";
 
 const secret = "authentication_test_secret_of_at_least_32_characters";
 const identity: VerificationIdentity = { userId: "user_1", email: "Test@Example.test", orgId: "org_1", purpose: "email_verification" };
@@ -48,7 +49,7 @@ test("delivery failure invalidates/refunds only its reservation; recovery preser
   let now = Date.now(), sentCode = "", fail = true;
   const store = new AuthVerificationStore({ provider: "file", dbPath: path.join(dir, "db.json"), databaseUrl: null, secret,
     pgPoolMax: 1, pgConnectTimeoutMs: 1000, pgIdleTimeoutMs: 100, clock: () => now });
-  const delivery = { sendEmailVerificationCode: async ({ code }: { code: string }) => { sentCode = code; if (fail) throw new Error("provider private body"); return "email" as const; }, sendWebSignInCode: async () => "email" as const };
+  const delivery = { sendEmailVerificationCode: async ({ code }: { code: string }) => { sentCode = code; if (fail) throw new AuthCodeDeliveryError("provider private body"); return "email" as const; }, sendWebSignInCode: async () => "email" as const };
   const user = { id: identity.userId, email: identity.email, orgId: identity.orgId } as any;
   try {
     await assert.rejects(deliverVerificationChallenge({ store, delivery, user, purpose: identity.purpose, experience: "mobile" }),

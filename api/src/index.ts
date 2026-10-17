@@ -249,7 +249,8 @@ import { createUsageSessionStore } from "./storage/usageSessionStore.js";
 import { createUserEmployeeIdClaimStore } from "./storage/userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./storage/webAuthSessionStore.js";
 import { AuthVerificationStore, AuthCodeRequestLimitError } from "./storage/authVerificationStore.js";
-import { deliverVerificationChallenge, verificationIdentity } from "./services/authVerification.js";
+import { deliverVerificationChallenge } from "./services/authVerification.js";
+import { canVerifyCurrentIdentity } from "./services/authChallengeAuthority.js";
 import {
   createUserNotificationStore,
   type UserNotificationStore,
@@ -415,7 +416,7 @@ import {
   buildDashboardCoachingInsights,
   buildNormalizedSimulationScoreThemesFromArtifact,
 } from "./services/coachingThemeNormalization.js";
-import { AuthCodeDeliveryError, createAuthCodeDeliveryService } from "./services/authCodeDelivery.js";
+import { AuthCodeDeliveryError, createAuthCodeDeliveryService, type AuthCodeDeliveryService } from "./services/authCodeDelivery.js";
 import {
   initializeDatabaseStoresForReadiness,
   initializeDatabaseStoresForStartup
@@ -912,6 +913,8 @@ const authVerificationStore = new AuthVerificationStore({
   provider: STORAGE_PROVIDER, dbPath: DB_PATH, databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX, pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS, pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
   secret: WEB_AUTH_TOKEN_SECRET,
+  normalizeAuthorityState: ensureDatabaseShape,
+  onLockout: (event) => logWarn(`[auth-verification] ${JSON.stringify({ event: "account_locked", ...event })}`),
   ...(runtimeConfig.nodeEnv === "test" ? { clock: () => authVerificationNowForTest ?? Date.now() } : {}),
 });
 const performancePlanStore = createPerformancePlanStore({
@@ -940,7 +943,7 @@ const simulationHistoryAccess = createSimulationHistoryAccess({
   usageSessionAccess,
   scoreRecordAccess
 });
-const authCodeDelivery = createAuthCodeDeliveryService({
+const defaultAuthCodeDelivery = createAuthCodeDeliveryService({
   defaultProvider: runtimeConfig.authCodeDeliveryProvider,
   webAuthProvider: runtimeConfig.webAuthCodeDeliveryProvider,
   mobileEmailVerificationProvider: runtimeConfig.mobileEmailVerificationDeliveryProvider,
@@ -949,6 +952,7 @@ const authCodeDelivery = createAuthCodeDeliveryService({
   fromName: runtimeConfig.authCodeFromName,
   replyTo: runtimeConfig.authCodeReplyTo
 });
+let authCodeDelivery = defaultAuthCodeDelivery;
 
 interface AdminTokenPayload {
   role: "admin";
@@ -4946,6 +4950,7 @@ async function commitDatabaseWrite<T>(
         storage: getOrCreateDatabaseStorage(),
         claimStore: userEmployeeIdClaimStore,
         sessionStore: webAuthSessionStore,
+        challengeStore: authVerificationStore,
         auditStore: auditEventStore,
         before,
         working: db,
@@ -5668,10 +5673,11 @@ function buildDomainMatchForEmail(_db: ApiDatabase, _email: string): null {
 }
 
 async function issueEmailVerification(
+  db: ApiDatabase,
   user: UserProfile,
   experience: "dashboard" | "mobile"
 ): Promise<{ expiresAt: string; delivery: WebAuthDeliveryMode }> {
-  return deliverVerificationChallenge({ store: authVerificationStore, delivery: authCodeDelivery, user, purpose: "email_verification", experience });
+  return deliverVerificationChallenge({ store: authVerificationStore, delivery: authCodeDelivery, user, authority: db, purpose: "email_verification", experience });
 }
 
 function logDashboardWebAuthRequestIgnored(email: string, reason: string): void {
@@ -13316,8 +13322,8 @@ app.post("/web/auth/request-code", webAuthRequestCodeRateLimiter, async (request
       email,
       now: new Date(),
       hasEffectiveFocusTopicManagementGrant: Boolean(managementScope?.manageableTopicIds.size),
-      issueSignInCode: async (user) => deliverVerificationChallenge({ store: authVerificationStore, delivery: authCodeDelivery, user, purpose: "sign_in", experience: "dashboard" }),
-      issueEmailVerificationCode: async (user) => issueEmailVerification(user, "dashboard"),
+      issueSignInCode: async (user) => deliverVerificationChallenge({ store: authVerificationStore, delivery: authCodeDelivery, user, authority: db, purpose: "sign_in", experience: "dashboard" }),
+      issueEmailVerificationCode: async (user) => issueEmailVerification(db, user, "dashboard"),
     });
 
     if (result.outcome === "issued") {
@@ -13395,7 +13401,7 @@ app.post("/web/auth/verify-code", webAuthVerifyCodeRateLimiter, async (request: 
 
     const now = new Date();
     const challengeType: WebAuthChallengeType = user.emailVerifiedAt ? "sign_in" : "email_verification";
-    const identity = verificationIdentity(user, challengeType);
+    const identity = authVerificationStore.bindIdentity(db, user, challengeType);
     const binding = JSON.stringify([identity, user.emailVerifiedAt]);
     if (!mayWrite) {
       if (await authVerificationStore.verify(identity, code) !== "ok") return failure();
@@ -21175,12 +21181,11 @@ app.post(
   }
   const timezone = resolveTimeZone(body.timezone);
 
-  const outcome = await withReadFirstAuthenticationWrite(async (db, mayWrite) => {
+  const prepared = await withReadFirstAuthenticationWrite(async (db, mayWrite) => {
     const requestedOrg = joinCode ? findActiveOrgByJoinCode(db, joinCode) : null;
     if (joinCode && !requestedOrg) {
       return { status: 404, body: { error: "Company code not found." } };
     }
-    const domainMatch = buildDomainMatchForEmail(db, email);
     const existing = db.users.find((user) => user.email.toLowerCase() === email);
     if (existing) {
       if (existing.status !== "active") {
@@ -21202,37 +21207,7 @@ app.post(
         }
       }
 
-      const issuedAt = nowIso();
-      const verification = await issueEmailVerification(existing, "mobile");
-      const authToken = createExistingMobileOnboardingToken({
-        purpose: "existing_mobile_onboarding",
-        version: 1,
-        userId: existing.id,
-        email: existing.email.trim().toLowerCase(),
-        firstName: firstName.value,
-        lastName: lastName.value,
-        timezone,
-        joinCode,
-        expiresAt: verification.expiresAt
-      });
-      const payload: MobileOnboardResponse = {
-        user: buildMobileUserProfile(existing),
-        authToken,
-        verificationRequired: true,
-        verificationExpiresAt: verification.expiresAt,
-        domainMatch
-      };
-      await deliverPostCommitAuditEventBestEffort({
-        actorType: "mobile_user", actorId: existing.id, orgId: existing.orgId,
-        action: "mobile.onboard",
-        userId: existing.id,
-        message: `Mobile onboarding requested email verification for ${existing.email}.`,
-        metadata: {
-          verificationRequired: true,
-          verificationExpiresAt: verification.expiresAt
-        }
-      }, "mobile_onboard_existing");
-      return { status: 200, body: payload };
+      return { status: 200, pendingUserId: existing.id, pendingToken: null };
     }
 
     if (!mayWrite) return AUTHENTICATION_WRITE_REQUIRED;
@@ -21266,27 +21241,51 @@ app.post(
 
     db.users.push(user);
     const authToken = upsertMobileAuthToken(db, user.id, now);
-    const verification = await issueEmailVerification(user, "mobile");
     appendMobileAuditEvent(db, user, {
       action: "mobile.user_created",
       userId: user.id,
       message: `Created user from mobile onboarding (${user.email}).`,
       metadata: {
-        verificationExpiresAt: verification.expiresAt,
         companyCodeValidated: Boolean(joinCode),
       }
     });
-    const payload: MobileOnboardResponse = {
-      user: buildMobileUserProfile(user),
-      authToken,
-      verificationRequired: true,
-      verificationExpiresAt: verification.expiresAt,
-      domainMatch
-    };
-    return { status: 201, body: payload };
+    return { status: 201, pendingUserId: user.id, pendingToken: authToken };
   });
-  authenticationResponseObserverForTest?.("POST /mobile/onboard", outcome.status);
-  response.status(outcome.status).json(outcome.body);
+  if ("body" in prepared) { response.status(prepared.status).json(prepared.body); return; }
+
+  // The pending account/token is durable before any provider work. Neither the global
+  // app-state lock nor a SQL transaction is held during email delivery.
+  const snapshot = await withFreshDatabaseSnapshotRead((db) => structuredClone(db));
+  const pendingUser = getUserById(snapshot, prepared.pendingUserId);
+  const unavailable = () => { response.status(403).json({ error: "Verification is unavailable for this account." }); };
+  if (!pendingUser || pendingUser.email.toLowerCase() !== email || !canVerifyCurrentIdentity(snapshot, pendingUser, false)
+    || (joinCode && !findActiveOrgByJoinCode(snapshot, joinCode))) { unavailable(); return; }
+  if (prepared.pendingToken && !hasValidMobileTokenForUser(snapshot, pendingUser.id, prepared.pendingToken, {
+    allowIncompleteProfile: true, allowReonboardingToken: true,
+  })) { unavailable(); return; }
+  const binding = authVerificationStore.bindIdentity(snapshot, pendingUser, "email_verification");
+  const verification = await issueEmailVerification(snapshot, pendingUser, "mobile");
+  const current = await withFreshDatabaseSnapshotRead((db) => structuredClone(db));
+  const user = getUserById(current, pendingUser.id);
+  if (!user || !canVerifyCurrentIdentity(current, user, false)
+    || authVerificationStore.bindIdentity(current, user, "email_verification").authorityBinding !== binding.authorityBinding) {
+    await authVerificationStore.invalidateUsers([pendingUser.id]); unavailable(); return;
+  }
+  const authToken = prepared.pendingToken ?? createExistingMobileOnboardingToken({
+    purpose: "existing_mobile_onboarding", version: 1, userId: user.id, email: user.email.trim().toLowerCase(),
+    firstName: firstName.value, lastName: lastName.value, timezone, joinCode, expiresAt: verification.expiresAt,
+  });
+  const payload: MobileOnboardResponse = {
+    user: buildMobileUserProfile(user), authToken, verificationRequired: true,
+    verificationExpiresAt: verification.expiresAt, domainMatch: buildDomainMatchForEmail(current, user.email),
+  };
+  await deliverPostCommitAuditEventBestEffort({
+    actorType: "mobile_user", actorId: user.id, orgId: user.orgId, userId: user.id, action: "mobile.onboard",
+    message: "Mobile onboarding requested email verification.",
+    metadata: { verificationRequired: true, verificationExpiresAt: verification.expiresAt },
+  }, "mobile_onboard_delivery");
+  authenticationResponseObserverForTest?.("POST /mobile/onboard", prepared.status);
+  response.status(prepared.status).json(payload);
 });
 
 app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, async (request: Request, response: Response) => {
@@ -21327,7 +21326,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return { status: 409, body: { error: "Email already verified." } };
     }
 
-    const verification = await issueEmailVerification(user, "mobile");
+    const verification = await issueEmailVerification(db, user, "mobile");
     await deliverPostCommitAuditEventBestEffort({
       actorType: "mobile_user", actorId: user.id, orgId: user.orgId,
       action: "mobile.verification_resent",
@@ -21394,6 +21393,8 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return { status: 401, body: { error: "Invalid mobile token." } };
     }
 
+    if (!canVerifyCurrentIdentity(db, user, false)) return { status: 403, body: { error: "Verification is unavailable for this account." } };
+
     const needsCodeVerification = Boolean(onboardingToken) || !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
     const profileProvided =
       body.firstName !== undefined ||
@@ -21436,7 +21437,7 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       }
     }
 
-    const identity = verificationIdentity(user, "email_verification");
+    const identity = authVerificationStore.bindIdentity(db, user, "email_verification");
     const binding = JSON.stringify([identity, user.emailVerifiedAt, needsCodeVerification, user.mobileProfileReonboardingRequired]);
     const failure = () => ({ status: 400, body: { error: "Could not verify code. Request a new code and try again." } });
     if (!mayWrite) {
@@ -28297,6 +28298,11 @@ export function setFocusTopicDeleteResponseObserverForTest(observer: (() => void
 export function advanceAuthVerificationClockForTest(milliseconds: number): void {
   if (runtimeConfig.nodeEnv !== "test") throw new Error("Authentication clock is test-only.");
   authVerificationNowForTest = (authVerificationNowForTest ?? Date.now()) + milliseconds;
+}
+
+export function setAuthCodeDeliveryServiceForTest(service: AuthCodeDeliveryService | null): void {
+  if (runtimeConfig.nodeEnv !== "test") throw new Error("Authentication delivery injection is test-only.");
+  authCodeDelivery = service ?? defaultAuthCodeDelivery;
 }
 
 export function setAuthenticationResponseObserverForTest(
