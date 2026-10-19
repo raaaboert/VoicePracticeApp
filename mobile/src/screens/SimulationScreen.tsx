@@ -12,7 +12,7 @@ import { ActivityIndicator, Alert, AppState, Platform, Pressable, ScrollView, St
 import type { NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { MobileTrainingContentSummary } from "@voicepractice/shared";
-import { isDevelopmentSimulationMockEnabled } from "../lib/simulationServiceRecovery";
+import { isDevelopmentSimulationMockEnabled, shouldEndSimulationWithoutScore } from "../lib/simulationServiceRecovery";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
   getAiVoiceOption,
@@ -4025,13 +4025,14 @@ export function SimulationScreen({
     }
   };
 
-  const completeSessionAndScore = useCallback(async (abandonPendingTurn = false) => {
+  const completeSessionAndScore = useCallback(async (explicitEnd = false) => {
     if (unmountedRef.current || (!sessionActiveRef.current && !startup.registered) || startup.completionDelivered) {
       return;
     }
 
     const pending = pendingUnifiedTurnRecoveryRef.current;
-    if (abandonPendingTurn && pending && !pending.assistantMessage && !endingWithoutScoreRef.current) {
+    if (explicitEnd && pending && !pending.assistantMessage && !endingWithoutScoreRef.current
+      && shouldEndSimulationWithoutScore(serviceRecoveryRef.current, true)) {
       // A deliberate End is not evidence that the server operation failed.
       // Close only the client conversation and finalize real usage without scoring.
       endingWithoutScoreRef.current = true;
@@ -4726,8 +4727,11 @@ export function SimulationScreen({
     lifecyclePauseActive,
     retryFeedback: actionDockRetryFeedback,
   });
-  const hasUnresolvedSubmittedTurn = Boolean(pendingUnifiedTurnRecoveryRef.current && !pendingUnifiedTurnRecoveryRef.current.assistantMessage);
-  const endButtonDisabled = isInitializing || !sessionActive || (sessionCompletionInProgressRef.current && !hasUnresolvedSubmittedTurn);
+  const hasUnconfirmedSubmittedTurn = Boolean(pendingUnifiedTurnRecoveryRef.current && !pendingUnifiedTurnRecoveryRef.current.assistantMessage);
+  const endWithoutScore = shouldEndSimulationWithoutScore(serviceRecoveryRef.current, hasUnconfirmedSubmittedTurn);
+  const endButtonLabel = endWithoutScore ? "End Without Score" : "End Session and Score";
+  const endButtonDisabled = isInitializing || !sessionActive
+    || (sessionCompletionInProgressRef.current && !(endWithoutScore && hasUnconfirmedSubmittedTurn));
   const hintText = localTestMode
     ? "Local test mode: replies are mocked. Tap Submit Response when you finish speaking."
     : isInitializing
@@ -5162,8 +5166,7 @@ export function SimulationScreen({
               }}
               disabled={endButtonDisabled}
             >
-              <Text style={styles.secondaryActionButtonText}>{serviceRecoveryRef.current.scoringBlocked || hasUnresolvedSubmittedTurn
-                ? "End Without Score" : "End Session and Score"}</Text>
+              <Text style={styles.secondaryActionButtonText}>{endButtonLabel}</Text>
             </Pressable>
           ) : null}
         </View>

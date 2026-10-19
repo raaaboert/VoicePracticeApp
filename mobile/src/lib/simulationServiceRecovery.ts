@@ -48,3 +48,12 @@ export function getSimulationCompletionPolicy(input: { conversationStarted: bool
   return { recordUsage: input.conversationStarted && !input.usedMockMode,
     requestScore: input.conversationStarted && !input.usedMockMode && !input.scoringBlocked };
 }
+
+/** Shared by the End label and the live completion callback; pending alone is normal processing. */
+export function shouldEndSimulationWithoutScore(
+  recovery: Pick<ReturnType<typeof createSimulationServiceRecovery>, "failure" | "scoringBlocked">,
+  hasUnconfirmedSubmittedTurn: boolean,
+): boolean {
+  return recovery.scoringBlocked || (hasUnconfirmedSubmittedTurn
+    && (recovery.failure?.retry === "submitted" || recovery.failure?.retry === "none"));
+}

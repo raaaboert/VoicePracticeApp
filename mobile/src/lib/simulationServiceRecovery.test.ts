@@ -19,7 +19,8 @@ function callback(source: string, name: string, context: Record<string, any>) {
   let body: string | undefined;
   const visit = (node: ts.Node) => {
     if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name && node.initializer) {
-      const expression = ts.isCallExpression(node.initializer) ? node.initializer.arguments[0] : node.initializer;
+      const expression = ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === "useCallback"
+        ? node.initializer.arguments[0] : node.initializer;
       body = expression.getText(ast);
     }
     ts.forEachChild(node, visit);
@@ -34,7 +35,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   const events = { registrations: 0, openings: 0, capture: 0, stopped: 0, cancelled: 0, completions: [] as SessionTiming[], histories: [] as DialogueMessage[][], exits: [] as string[] };
   const state: Record<string, any> = {};
   class LifecycleInterrupted extends Error {}
-  const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified,
+  const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified, ...recovery,
     startup, config: { simulationSessionId: "same-session", scenario: { id: "scenario", segmentId: "role", title: "Scenario" },
       maxSimulationMinutes: 20, difficulty: "medium", personaStyle: "skeptical" },
     userId: "learner", authToken: "auth", apiConfigured: options.configured ?? true,
@@ -88,7 +89,8 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   context.clearTurnMonitoring = () => callback(screen, "clearTurnMonitoring", context)();
   context.endSession = (show: boolean) => callback(screen, "endSession", context)(show);
   context.assertForegroundSessionGenerationCurrent = () => startup.assertConversationAvailable();
-  return { startup, events, state, context, run: (name: string, ...args: unknown[]) => callback(screen, name, context)(...args) };
+  return { startup, events, state, context, value: (name: string) => callback(screen, name, context),
+    run: (name: string, ...args: unknown[]) => callback(screen, name, context)(...args) };
 }
 
 const failure = (status: number, code: string | null = null, message = "Safe service failure") => new errors.MobileApiError(message, status, code);
@@ -200,19 +202,90 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function endControl(h: ReturnType<typeof screenHarness>) {
+  h.context.sessionActive = h.context.sessionActiveRef.current;
+  h.context.hasUnconfirmedSubmittedTurn = h.value("hasUnconfirmedSubmittedTurn");
+  h.context.endWithoutScore = h.value("endWithoutScore");
+  return { label: h.value("endButtonLabel"), disabled: h.value("endButtonDisabled") };
+}
+
+test("normal End waits for the final processing turn after three confirmed exchanges, then records usage and scores once", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession");
+  for (let i = 1; i <= 3; i++) {
+    h.context.appendMessage({ id: `normal-user-${i}`, role: "user", content: `Confirmed learner response ${i}` });
+    h.context.appendMessage({ id: `normal-ai-${i}`, role: "assistant", content: `Confirmed AI response ${i}` });
+  }
+  const finalUser = { id: "normal-final-user", role: "user", content: "My final learner answer" };
+  h.context.appendMessage(finalUser);
+  h.context.pendingUnifiedTurnRecoveryRef.current = { correlationId: "normal-final-turn", userMessage: finalUser, assistantMessage: null };
+  const processing = deferred<void>(); const reply = deferred<unknown>();
+  let reads = 0;
+  h.context.activeTurnSettlementRef.current = processing.promise;
+  h.context.awaitSubmittedSimulationTurnReply = async ({ correlationId }: { correlationId: string }) => {
+    reads++; assert.equal(correlationId, "normal-final-turn"); return reply.promise;
+  };
+  h.context.submitRecordedSimulationTurn = h.context.generateAssistantReply = () => { throw Error("End must not request another generation"); };
+  const generation = h.context.sessionLifecycleGenerationRef.current; const deadline = h.startup.absoluteDeadlineMs;
+  assert.deepEqual(endControl(h), { label: "End Session and Score", disabled: false });
+  const ending = h.run("completeSessionAndScore", true);
+  const duplicateEnd = h.run("completeSessionAndScore", true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.events.completions.length, 0, "a normal End must wait for the final AI exchange");
+  assert.equal(h.startup.serviceRecovery.scoringBlocked, false);
+  assert.equal(h.context.pendingUnifiedTurnRecoveryRef.current?.correlationId, "normal-final-turn");
+  assert.equal(h.context.sessionLifecycleGenerationRef.current, generation);
+  assert.equal(reads, 0, "wait for active turn processing before attempting reconciliation");
+  assert.deepEqual(endControl(h), { label: "End Session and Score", disabled: true });
+  processing.resolve();
+  reply.resolve({ outcome: "assistant_reply", transcriptText: finalUser.content, assistantText: "Confirmed final AI reply" });
+  await Promise.all([ending, duplicateEnd]);
+  assert.equal(h.events.completions.length, 1); assert.equal(h.events.completions[0].scoringBlocked, false);
+  assert.equal(h.startup.absoluteDeadlineMs, deadline);
+  const evidence = h.events.histories[0];
+  assert.equal(evidence.filter((m) => m.id === finalUser.id).length, 1);
+  assert.equal(evidence.filter((m) => m.role === "user").length, 4);
+  assert.equal(evidence.at(-1)?.content, "Confirmed final AI reply");
+  assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1); assert.equal(h.events.capture, 1);
+  const completed = completionHarness();
+  await completed.complete(h.events.completions[0], evidence); await completed.complete(h.events.completions[0], evidence);
+  assert.equal(completed.calls.usage, 1); assert.equal(completed.calls.scoring, 1);
+  assert.deepEqual(completed.calls.scoredHistory, evidence); assert.deepEqual(completed.state.setScorecard, { overallScore: 84 });
+});
+
+test("a normal End switches to End Without Score only after processing actually enters failed recovery", async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  const processing = deferred<void>();
+  h.context.activeTurnSettlementRef.current = processing.promise;
+  h.context.awaitSubmittedSimulationTurnReply = async () => { throw failure(503, "ai_unavailable"); };
+  assert.equal(endControl(h).label, "End Session and Score");
+  const ending = h.run("completeSessionAndScore", true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.startup.serviceRecovery.scoringBlocked, false); assert.equal(h.events.completions.length, 0);
+  processing.resolve(); await ending;
+  assert.deepEqual(endControl(h), { label: "End Without Score", disabled: false });
+  assert.equal(h.startup.serviceRecovery.failure?.retry, "submitted");
+  assert.equal(h.events.completions.length, 0, "the error must not fabricate a scored completion");
+  await h.run("completeSessionAndScore", true);
+  assert.equal(h.events.completions.length, 1); assert.equal(h.events.completions[0].scoringBlocked, true);
+  assert.equal(h.events.histories[0].some((m) => m.id === "discarded-user"), false);
+});
+
 test("lost submit and repeated 504s can explicitly End Without Score once, without another recovery read", async () => {
   const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
   h.context.messagesRef.current.splice(h.context.messagesRef.current.length - 1, 0,
     { id: "confirmed-user-3", role: "user", content: "Earlier confirmed third response" },
     { id: "confirmed-ai-3", role: "assistant", content: "Earlier confirmed third reply" });
   const deadline = h.startup.absoluteDeadlineMs;
+  assert.deepEqual(endControl(h), { label: "End Session and Score", disabled: false });
   await h.run("pauseForServiceFailure", new TypeError("Network request failed"), "turn");
+  assert.deepEqual(endControl(h), { label: "End Without Score", disabled: false });
   let reads = 0;
   h.context.awaitSubmittedSimulationTurnReply = async ({ correlationId }: { correlationId: string }) => {
     assert.equal(correlationId, "original-turn"); reads++; throw awaitTimeout();
   };
   await h.run("resumeLifecyclePausedTurn"); await h.run("resumeLifecyclePausedTurn");
   assert.equal(reads, 2); assert.equal(h.events.capture, 1);
+  assert.deepEqual(endControl(h), { label: "End Without Score", disabled: false });
   await Promise.all([h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true)]);
   assert.equal(reads, 2, "End must not request another 75-second await");
   assert.equal(h.events.completions.length, 1); assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1);
@@ -263,16 +336,22 @@ test("unscored completion applies usage acknowledgement only after the server re
 for (const late of ["reply", "504", "401", "session_expired", "session_completed"] as const) {
   test(`End during an in-flight recovery ignores late ${late} without state resurrection`, { timeout: 3_000 }, async () => {
     const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
-    await h.run("pauseForServiceFailure", failure(503, "ai_unavailable"), "turn");
+    await h.run("pauseForServiceFailure", late === "reply" ? new TypeError("Network request failed") : failure(503, "ai_unavailable"), "turn");
     const response = deferred<unknown>(); const entered = deferred<void>();
     let signal: AbortSignal | undefined; let reads = 0;
     h.context.awaitSubmittedSimulationTurnReply = (params: { signal: AbortSignal }) => {
-      reads++; signal = params.signal; entered.resolve(); return response.promise; // Deliberately ignores abort.
+      reads++;
+      if (late === "reply" && reads <= 2) return Promise.reject(awaitTimeout());
+      signal = params.signal; entered.resolve(); return response.promise; // Deliberately ignores abort.
     };
+    if (late === "reply") {
+      await h.run("resumeLifecyclePausedTurn"); await h.run("resumeLifecyclePausedTurn");
+      assert.deepEqual(endControl(h), { label: "End Without Score", disabled: false });
+    }
     const resume = h.run("resumeLifecyclePausedTurn"); await entered.promise;
     await Promise.all([h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true)]);
     assert.equal(signal?.aborted, true); assert.equal(h.events.completions.length, 1);
-    assert.equal(h.events.capture, 1); assert.equal(reads, 1);
+    assert.equal(h.events.capture, 1); assert.equal(reads, late === "reply" ? 3 : 1);
     const finalState = { ...h.state }; const finalHistory = [...h.startup.messages];
     if (late === "reply") response.resolve({ outcome: "assistant_reply", transcriptText: "Late learner text", assistantText: "Late AI text" });
     else response.reject(late === "504" ? awaitTimeout() : late === "401" ? failure(401) : failure(409, late));
@@ -322,6 +401,7 @@ test("successful reconciliation excludes the wait but preserves real resumed voi
 
 test("explicit End releases an already-running completion wait, including a deadline-driven recovery", { timeout: 3_000 }, async () => {
   const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  await h.run("pauseForServiceFailure", failure(503, "ai_unavailable"), "turn");
   const response = deferred<unknown>(); const entered = deferred<void>();
   h.context.awaitSubmittedSimulationTurnReply = () => { entered.resolve(); return response.promise; };
   const complete = () => h.run("completeSessionAndScore");
@@ -366,9 +446,11 @@ test("unmount releases an automatic completion wait without starting new recover
 
 test("audio cleanup rejection cannot prevent stopping capture and completing deliberate End without a score", async () => {
   const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  await h.run("pauseForServiceFailure", failure(503, "ai_unavailable"), "turn");
+  const stopped = h.events.stopped;
   h.context.cancelPendingTts = async () => { throw Error("native playback already disposed"); };
   await h.run("completeSessionAndScore", true);
-  assert.equal(h.events.stopped, 1); assert.equal(h.events.completions.length, 1);
+  assert.equal(h.events.stopped, stopped + 1); assert.equal(h.events.completions.length, 1);
   assert.equal(h.events.completions[0].scoringBlocked, true);
 });
 
@@ -386,6 +468,7 @@ test("503 then settled recovery 410 offers explicit Record Again, removes only p
   assert.match(h.state.setError, /could not be recovered.*Record Again/);
   assert.doesNotMatch(h.state.setError, /access|permission|Setup/);
   assert.equal(h.startup.serviceRecovery.scoringBlocked, false);
+  assert.equal(endControl(h).label, "End Session and Score", "settled 410 without an independent block remains scoreable");
   assert.deepEqual(h.startup.messages.map((m) => m.id), ["message-1", "confirmed-user-1", "confirmed-ai-1", "confirmed-user-2", "confirmed-ai-2"]);
   const beforeReplacement = completionHarness();
   await beforeReplacement.complete(timing, h.startup.messages);
@@ -505,7 +588,8 @@ test("safe discard does not remove an independent prior scoring block, and block
   await h.run("pauseForServiceFailure", clearedTurn(), "turn");
   assert.equal(h.startup.serviceRecovery.scoringBlocked, true);
   assert.match(screen, /label: "Record Again"/);
-  assert.match(screen, /serviceRecoveryRef.current.scoringBlocked \|\| hasUnresolvedSubmittedTurn\s*\? "End Without Score" : "End Session and Score"/);
+  assert.equal(endControl(h).label, "End Without Score");
+  assert.match(screen, /<Text style=\{styles.secondaryActionButtonText\}>\{endButtonLabel\}<\/Text>/);
   assert.match(screen, /void completeSessionAndScore\(true\)/);
 });
 
