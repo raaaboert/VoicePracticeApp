@@ -1,6 +1,7 @@
 import type { PrefetchedRemoteSpeechChunk } from "./api";
 import type { DialogueMessage } from "../types";
 import { MobileApiError, isSimulationSessionEndedError } from "./apiError";
+import { createSimulationServiceRecovery } from "./simulationServiceRecovery";
 
 export const SIMULATION_DEADLINE_MARGIN_MS = 5_000;
 
@@ -30,6 +31,7 @@ export function createSimulationStartupCoordinator(now: () => number = Date.now)
   let completion: Promise<void> | null = null;
   let durationMs: number | null = null;
   const startup = {
+    serviceRecovery: createSimulationServiceRecovery(),
     registered: false,
     registrationRequestedAtMs: null as number | null,
     absoluteDeadlineMs: null as number | null,

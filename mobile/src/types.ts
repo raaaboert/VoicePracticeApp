@@ -108,6 +108,8 @@ export interface SessionTiming {
   endedAt: string;
   rawDurationSeconds: number;
   usedMockMode: boolean;
+  conversationStarted: boolean;
+  scoringBlocked?: boolean;
   trainingId?: string | null;
   trainingPackId?: string | null;
 }

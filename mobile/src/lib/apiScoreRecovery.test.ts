@@ -114,7 +114,7 @@ test("malformed error bodies retain HTTP status; successful score responses rema
   assert.deepEqual(await success.api.fetchAiScore(params), saved);
 });
 
-test("opening turn and transcription preserve structured failures for the existing fallback policy", async () => {
+test("opening turn and transcription preserve structured failures without producing substitute replies", async () => {
   for (const code of ["ai_unavailable", "ai_budget_limit", "ai_timeout"]) {
     let calls = 0;
     const harness = apiHarness(async (url) => {
@@ -131,7 +131,6 @@ test("opening turn and transcription preserve structured failures for the existi
       await assert.rejects(run(), (error: unknown) => {
         assert.ok(error instanceof apiErrors.MobileApiError);
         assert.equal(error.code, code);
-        assert.equal(apiErrors.isSimulationApiFallbackError(error), code !== "ai_timeout");
         return true;
       });
     }

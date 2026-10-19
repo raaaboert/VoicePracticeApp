@@ -101,7 +101,7 @@ test("ending and scoring waits for an explicitly submitted turn before snapshott
   const completionStart = simulationScreenSource.indexOf("const completeSessionAndScore = useCallback");
   const settlementAwait = simulationScreenSource.indexOf("await settleSimulationBeforeCompletion({", completionStart);
   const historySnapshot = simulationScreenSource.indexOf("const completedHistory = [...messagesRef.current];", completionStart);
-  const endSession = simulationScreenSource.indexOf("await endSession(false);", completionStart);
+  const endSession = simulationScreenSource.indexOf("await endSession(false);", historySnapshot);
   const scoreCompletion = simulationScreenSource.indexOf("onSessionComplete(completedHistory", completionStart);
 
   assert.ok(completionStart >= 0);

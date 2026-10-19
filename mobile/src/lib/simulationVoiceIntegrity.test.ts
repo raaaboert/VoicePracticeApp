@@ -36,7 +36,7 @@ test("cleanup, interruption, lifecycle, and audio-error stops remain non-submit 
 test("live remote simulation TTS fails closed instead of changing to device speech", () => {
   assert.match(
     simulationSource,
-    /allowFallbackSpeech:\s*!config\.remoteTtsEnabled \|\| !apiConfigured \|\| useLocalMockMode/,
+    /allowFallbackSpeech:\s*!config\.remoteTtsEnabled \|\| !apiConfigured \|\| localTestMode/,
   );
   assert.match(playbackSource, /if \(!fallbackSpeechAllowed\) \{[\s\S]*?fallback_blocked[\s\S]*?throw new Error/);
   assert.match(playbackSource, /phase: "foreground_tts_requested"/);

@@ -12,6 +12,7 @@ import { ActivityIndicator, Alert, AppState, Platform, Pressable, ScrollView, St
 import type { NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { MobileTrainingContentSummary } from "@voicepractice/shared";
+import { isDevelopmentSimulationMockEnabled } from "../lib/simulationServiceRecovery";
 import { VoiceOrb, OrbMode } from "../components/VoiceOrb";
 import {
   getAiVoiceOption,
@@ -29,7 +30,7 @@ import {
   startSimulationSession,
 } from "../lib/api";
 import type { PrefetchedRemoteSpeechChunk } from "../lib/api";
-import { isOrganizationAccessRequiredError, isSimulationSessionEndedError, isSimulationApiFallbackError as isApiError } from "../lib/apiError";
+import { isOrganizationAccessRequiredError, isSimulationSessionEndedError } from "../lib/apiError";
 import {
   awaitSubmittedSimulationTurnReply,
   createOpeningLine,
@@ -130,6 +131,7 @@ interface SimulationScreenProps {
   userId: string;
   authToken: string;
   onExit: (message?: string | null) => void;
+  onSignInRequired: () => void;
   onOrganizationAccessRequired: () => void;
   onReviewRelatedLearningResources: (items: MobileTrainingContentSummary[]) => void;
   onSessionComplete: (
@@ -453,6 +455,7 @@ export function SimulationScreen({
   userId,
   authToken,
   onExit,
+  onSignInRequired,
   onOrganizationAccessRequired,
   onReviewRelatedLearningResources,
   onSessionComplete,
@@ -466,7 +469,6 @@ export function SimulationScreen({
   const [actionDockRetryFeedback, setActionDockRetryFeedback] = useState<string | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
-  const [useLocalMockMode, setUseLocalMockMode] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [deadlineNowMs, setDeadlineNowMs] = useState(Date.now);
   const [actionDockHeight, setActionDockHeight] = useState(0);
@@ -514,7 +516,7 @@ export function SimulationScreen({
     actionDockHorizontalPadding,
   } = screenLayout;
   const useIosCondensedStatusTimerPresentation = Platform.OS === "ios" && !Platform.isPad && windowWidth < 768;
-  const localTestMode = !apiConfigured || useLocalMockMode;
+  const localTestMode = isDevelopmentSimulationMockEnabled(__DEV__, process.env.EXPO_PUBLIC_LOCAL_SIMULATION, apiConfigured);
   const messageWidthConstraints = useMemo(
     () => getSimulationMessageWidthConstraints({
       viewportWidth: chatViewportWidth,
@@ -525,7 +527,7 @@ export function SimulationScreen({
   const shouldUseFastStartRemoteTts =
     config.remoteTtsEnabled &&
     apiConfigured &&
-    !useLocalMockMode &&
+    !localTestMode &&
     Platform.OS !== "web";
 
   useEffect(() => {
@@ -554,9 +556,9 @@ export function SimulationScreen({
   const logSimulationApiCall = useCallback((callName: string) => {
     // eslint-disable-next-line no-console
     console.log(
-      `[simulation-api] call=${callName} apiBaseUrl=${getApiBaseUrl() || "(empty)"} remoteConfigured=${apiConfigured} localMockMode=${useLocalMockMode} localTestMode=${localTestMode}`,
+      `[simulation-api] call=${callName} apiBaseUrl=${getApiBaseUrl() || "(empty)"} remoteConfigured=${apiConfigured} localMockMode=${localTestMode} localTestMode=${localTestMode}`,
     );
-  }, [apiConfigured, localTestMode, useLocalMockMode]);
+  }, [apiConfigured, localTestMode]);
   const selectedVoiceIdentifierRef = useRef<string | undefined>(undefined);
   const modeRef = useRef<OrbMode>("thinking");
   const messagesRef = useRef<DialogueMessage[]>([]);
@@ -608,6 +610,7 @@ export function SimulationScreen({
   const sessionCompletionInProgressRef = useRef(false);
   const completeSessionRef = useRef<{ startup: SimulationStartupCoordinator; run: () => Promise<void> } | null>(null);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
+  const serviceRecoveryRef = useRef(startup.serviceRecovery);
   const localModeConfirmedRef = useRef(false);
   const remoteTtsSoundRef = useRef<AudioPlayer | null>(null);
   const remoteTtsFileRef = useRef<string | null>(null);
@@ -622,7 +625,7 @@ export function SimulationScreen({
   const recordingSafetySignalRef = useRef<TurnRecordingSafetySignal | null>(null);
   const sessionLifecycleGenerationRef = useRef(0);
   const lifecyclePauseStartedAtRef = useRef<number | null>(null);
-  const lifecyclePauseReasonRef = useRef<"background" | "tts_recovery" | null>(null);
+  const lifecyclePauseReasonRef = useRef<"background" | "tts_recovery" | "service_failure" | null>(null);
   const currentBackgroundedAtRef = useRef<number | null>(null);
   const activeAssistantSpeechRef = useRef<ActiveAssistantSpeech | null>(null);
   const lifecycleResumeIntentRef = useRef<SimulationLifecycleResumeIntent | null>(null);
@@ -912,19 +915,6 @@ export function SimulationScreen({
         },
       });
 
-      if (isApiError(openingError)) {
-        setUseLocalMockMode(true);
-        usedMockModeDuringSessionRef.current = true;
-        const localPayload = createLocalOpeningPayload();
-        storePendingOpeningPayload(localPayload, params.correlationId);
-        if (params.background && !startSimulationInProgressRef.current && !sessionActiveRef.current) {
-          setMode("idle");
-          setStatus("Local test mode ready. Press Start Simulation.");
-          setError(null);
-        }
-        return localPayload;
-      }
-
       if (params.background) {
         void submitAutoErrorReport("simulation.opening_prefetch", openingError, {
           simulationSessionId: config.simulationSessionId,
@@ -1152,8 +1142,8 @@ export function SimulationScreen({
         simulationSessionId: config.simulationSessionId,
         remoteTtsEnabled: config.remoteTtsEnabled,
         remoteAiConfigured: apiConfigured,
-        allowRemoteTts: !useLocalMockMode,
-        allowFallbackSpeech: !config.remoteTtsEnabled || !apiConfigured || useLocalMockMode,
+        allowRemoteTts: !localTestMode,
+        allowFallbackSpeech: !config.remoteTtsEnabled || !apiConfigured || localTestMode,
         voiceGender: config.voiceGender,
         voiceProfile: config.voiceProfile,
         selectedVoiceIdentifierRef,
@@ -2297,6 +2287,7 @@ export function SimulationScreen({
     let turnDurationSeconds = 0;
     let transcriptionAttempted = false;
     let transcriptionFailed = false;
+    let serviceFailurePhase: "transcription" | "turn" = "transcription";
     let transcriptionErrorMessage: string | null = null;
     let usedLocalTranscriptionFallback = false;
     let localTranscriptionFallbackReason: string | null = null;
@@ -2315,7 +2306,7 @@ export function SimulationScreen({
     let transcriptChars = 0;
     let replyChars = 0;
     let measureRecordingPayload: () => Promise<void> = async () => {};
-    let summaryMode: SimulationTurnSummaryMode = apiConfigured && !useLocalMockMode ? "remote" : "local_mock";
+    const summaryMode: SimulationTurnSummaryMode = apiConfigured && !localTestMode ? "remote" : "local_mock";
     const remoteTtsPreset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
     let unifiedAssistantAwaitAbortController: AbortController | null = null;
     let turnSummaryLogged = false;
@@ -2561,12 +2552,13 @@ export function SimulationScreen({
             runtime: { modelLatencyMs?: number | null; speechPrefetchTtsLatencyMs?: number | null } | null;
           }>
         | null = null;
-      let useLiveApiThisTurn = apiConfigured && !useLocalMockMode;
+      const useLiveApiThisTurn = apiConfigured && !localTestMode;
       let shouldAttemptLegacyRemotePath = useLiveApiThisTurn && shouldUploadAudioForTranscription;
       if (!useLiveApiThisTurn) {
         usedMockModeDuringSessionRef.current = true;
       }
       if (useLiveApiThisTurn && shouldUploadAudioForTranscription && unifiedSubmitEnabled) {
+        serviceFailurePhase = "turn";
         try {
           transcriptionAttempted = true;
           setStatus("Processing your response...");
@@ -2751,7 +2743,8 @@ export function SimulationScreen({
           if (isSimulationSessionEndedError(unifiedError)) throw unifiedError;
           const shouldFallbackToLegacy = shouldFallbackToLegacyUnifiedSubmit(unifiedError);
           if (
-            isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
+            shouldFallbackToLegacy
+            && isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
             && pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId
           ) {
             pendingUnifiedTurnRecoveryRef.current = null;
@@ -2766,32 +2759,12 @@ export function SimulationScreen({
             transcriptionAttempted = true;
             transcriptionFailed = true;
             transcriptionErrorMessage = getErrorMessage(unifiedError, "Unified submit failed.");
-            if (isApiError(unifiedError)) {
-              setUseLocalMockMode(true);
-              usedMockModeDuringSessionRef.current = true;
-              usedLocalTranscriptionFallback = true;
-              localTranscriptionFallbackReason = "api_error_local_fallback";
-              setError(null);
-              setStatus("Live AI unavailable. Switched to local test mode.");
-              useLiveApiThisTurn = false;
-              shouldAttemptLegacyRemotePath = false;
-              summaryMode = "local_fallback";
-              if (detectedVoiceRef.current || heardVoiceRef.current || inferredVoiceWithoutMeter) {
-                userText = buildLocalCapturedText(turnDurationSeconds);
-                transcriptChars = userText.length;
-              }
-              logSimulationTiming({
-                correlationId,
-                phase: "transcribe_fallback_local_mode",
-                startedAtMs: effectiveSubmitStartedAtMs,
-              });
-            } else {
-              throw unifiedError;
-            }
+            throw unifiedError;
           }
         }
       }
       if (shouldAttemptLegacyRemotePath) {
+        serviceFailurePhase = "transcription";
         try {
           transcriptionAttempted = true;
           setStatus("Transcribing your response...");
@@ -2830,27 +2803,7 @@ export function SimulationScreen({
           transcriptionAttempted = true;
           transcriptionFailed = true;
           transcriptionErrorMessage = getErrorMessage(transcriptionError, "Transcription failed.");
-          if (isApiError(transcriptionError)) {
-            setUseLocalMockMode(true);
-            usedMockModeDuringSessionRef.current = true;
-            usedLocalTranscriptionFallback = true;
-            localTranscriptionFallbackReason = "api_error_local_fallback";
-            setError(null);
-            setStatus("Live AI unavailable. Switched to local test mode.");
-            useLiveApiThisTurn = false;
-            summaryMode = "local_fallback";
-            if (detectedVoiceRef.current || heardVoiceRef.current || inferredVoiceWithoutMeter) {
-              userText = buildLocalCapturedText(turnDurationSeconds);
-              transcriptChars = userText.length;
-            }
-            logSimulationTiming({
-              correlationId,
-              phase: "transcribe_fallback_local_mode",
-              startedAtMs: effectiveSubmitStartedAtMs,
-            });
-          } else {
-            throw transcriptionError;
-          }
+          throw transcriptionError;
         }
       } else if (!useLiveApiThisTurn && shouldUploadAudioForTranscription) {
         usedLocalTranscriptionFallback = true;
@@ -3016,6 +2969,7 @@ export function SimulationScreen({
               phase: "assistant_request_start",
               startedAtMs: effectiveSubmitStartedAtMs,
             });
+            serviceFailurePhase = "turn";
             replyPayload = useLiveApiThisTurn
               ? (logSimulationApiCall("generateAssistantReply"),
                 await generateAssistantReply({
@@ -3288,8 +3242,8 @@ export function SimulationScreen({
         });
         continueLoop = false;
       } else {
-        const turnErrorMessage = getErrorMessage(turnError, "Could not process voice response.");
-        setError(turnErrorMessage);
+        const failure = await pauseForServiceFailure(turnError, serviceFailurePhase);
+        const turnErrorMessage = failure.message;
         captureRetryStatus = SIMULATION_FINALIZE_RETRY_STATUS;
         setActionDockRetryFeedback(captureRetryStatus);
         if (isPlaceholderTranscriptError(turnError)) {
@@ -3328,7 +3282,7 @@ export function SimulationScreen({
           errorMessage: turnErrorMessage,
         });
         captureTransitionReason = "turn_error_recovery";
-        continueLoop = sessionActiveRef.current;
+        continueLoop = false;
       }
     } finally {
       if (audioModeResetPromise) {
@@ -3353,6 +3307,7 @@ export function SimulationScreen({
       }
       if (
         lifecyclePauseReasonRef.current !== "background"
+        && lifecyclePauseReasonRef.current !== "service_failure"
         && pendingUnifiedTurnRecoveryRef.current?.correlationId === correlationId
       ) {
         pendingUnifiedTurnRecoveryRef.current = null;
@@ -3381,7 +3336,27 @@ export function SimulationScreen({
     }
   };
 
+  const pauseForServiceFailure = async (failureError: unknown, phase: "transcription" | "turn") => {
+    const failure = serviceRecoveryRef.current.interrupt(failureError, phase, Boolean(pendingUnifiedTurnRecoveryRef.current));
+    lifecyclePauseStartedAtRef.current ??= Date.now();
+    lifecyclePauseReasonRef.current = "service_failure";
+    setLifecyclePauseActive(true);
+    await Promise.allSettled([cancelPendingTts(), stopRecordingSafely("audio_error")]);
+    setMode("idle");
+    setError(failure.message);
+    setStatus(failure.retry === "submitted" ? "Conversation paused. Resume Turn checks the submitted response without sending it again."
+      : failure.retry === "recording" ? "Conversation paused. Resume Turn starts a new recording."
+      : "Conversation paused. End the session or return to Setup; the last response cannot be safely replayed.");
+    return failure;
+  };
+
   const startSession = async () => {
+    if (!apiConfigured && !localTestMode) {
+      setError("The AI service is not configured in this build. Return to Setup; no simulation has started.");
+      setMode("idle");
+      return;
+    }
+    if (serviceRecoveryRef.current.failure?.retry === "none") return;
     try { startup.assertConversationAvailable(); }
     catch (error) {
       if (!isSimulationSessionEndedError(error)) throw error;
@@ -3483,7 +3458,7 @@ export function SimulationScreen({
 
       // Registration pins the version and eligible industries. The subsequent
       // opening request still supplies (and locks) the selected industry.
-      if (startPlan.shouldRegisterRecognizedStart) {
+      if (startPlan.shouldRegisterRecognizedStart && !localTestMode) {
         setStatus("Starting simulation...");
         logSimulationTiming({
           correlationId: startRegistrationCorrelationId,
@@ -3592,15 +3567,7 @@ export function SimulationScreen({
                   logStaleStartupResult("opening_error");
                   return;
                 }
-                if (isApiError(openingError)) {
-                  setUseLocalMockMode(true);
-                  usedMockModeDuringSessionRef.current = true;
-                  const localPayload = createLocalOpeningPayload();
-                  storePendingOpeningPayload(localPayload, openingCorrelationId);
-                  openingLine = localPayload.assistantText;
-                } else {
-                  throw openingError;
-                }
+                throw openingError;
               }
             }
           }
@@ -3745,6 +3712,7 @@ export function SimulationScreen({
       }
       startup.assertConversationAvailable();
 
+      serviceRecoveryRef.current.recovered();
       sessionActiveRef.current = true;
       sessionStartedAtRef.current = startup.startedAt ?? new Date();
       startup.startedAt = sessionStartedAtRef.current;
@@ -3795,9 +3763,11 @@ export function SimulationScreen({
           message: getErrorMessage(startError, "Could not start simulation."),
         },
       });
+      const failure = serviceRecoveryRef.current.interrupt(startError, "start", false);
+      await Promise.allSettled([cancelPendingTts(), stopRecordingSafely("audio_error")]);
       setMode("idle");
-      setStatus("Simulation start failed. Tap Start Simulation to retry.");
-      setError(getErrorMessage(startError, "Could not start simulation."));
+      setStatus(failure.retry === "start" ? "Simulation start paused. Tap Start Simulation to retry the same session." : "Simulation could not start. Return to Setup or sign in again.");
+      setError(failure.message);
       void submitAutoErrorReport("simulation.session_start", startError, {
         simulationSessionId: config.simulationSessionId,
         scenarioId: config.scenario.id,
@@ -4025,6 +3995,12 @@ export function SimulationScreen({
       return;
     }
 
+    if (!startup.startedAt) {
+      await endSession(false);
+      onExit("The conversation did not start. No completed training activity or scorecard was submitted.");
+      return;
+    }
+
     await startup.complete(async () => {
       if (completeSessionRef.current?.startup !== startup) return;
       sessionCompletionInProgressRef.current = true;
@@ -4057,6 +4033,7 @@ export function SimulationScreen({
             return;
           }
           if (pendingUnifiedTurnRecoveryRef.current) {
+            await pauseForServiceFailure(recoveryError, "turn");
             logSimulationTiming({
               correlationId: createSimulationCorrelationId(config.simulationSessionId, "end-session-recovery"),
               phase: "submitted_turn_recovery_before_score_failed",
@@ -4064,7 +4041,7 @@ export function SimulationScreen({
                 message: getErrorMessage(recoveryError, "Could not recover the submitted response before scoring."),
               },
             });
-            setError("Your submitted response could not be recovered yet. Tap Resume Turn and retry before ending.");
+            setError(`${serviceRecoveryRef.current.failure?.message ?? "Your submitted response could not be recovered."} End Session retries recovery without sending your response again.`);
             setStatus("Submitted response recovery is required before scoring.");
             return;
           }
@@ -4092,6 +4069,8 @@ export function SimulationScreen({
           endedAt: endedAt.toISOString(),
           rawDurationSeconds,
           usedMockMode: usedMockModeDuringSessionRef.current,
+          conversationStarted: true,
+          scoringBlocked: serviceRecoveryRef.current.scoringBlocked,
           trainingId: config.trainingId ?? null,
           trainingPackId: sessionTrainingPackIdRef.current,
         }));
@@ -4099,7 +4078,7 @@ export function SimulationScreen({
         sessionCompletionInProgressRef.current = false;
       }
     });
-  }, [config, onSessionComplete, startup, clearLifecyclePause]);
+  }, [config, onSessionComplete, onExit, startup, clearLifecyclePause]);
   completeSessionRef.current = { startup, run: completeSessionAndScore };
 
   const resumeLifecyclePausedTurn = async () => {
@@ -4150,6 +4129,7 @@ export function SimulationScreen({
           sessionLifecycleGeneration,
           replayAssistant: true,
         });
+        serviceRecoveryRef.current.recovered();
         if (lifecycleResumeIntentRef.current === resumeIntent) {
           lifecycleResumeIntentRef.current = null;
         }
@@ -4212,6 +4192,7 @@ export function SimulationScreen({
       if (lifecycleResumeIntentRef.current === resumeIntent) {
         lifecycleResumeIntentRef.current = null;
       }
+      serviceRecoveryRef.current.recovered();
       await startListeningTurn();
     } catch (resumeError) {
       if (isSimulationSessionEndedError(resumeError)) {
@@ -4235,6 +4216,11 @@ export function SimulationScreen({
         isSimulationLifecycleInterruptedError(resumeError)
         || !isForegroundSessionGenerationCurrent(sessionLifecycleGeneration)
       ) {
+        return;
+      }
+
+      if (lifecyclePauseReasonRef.current === "service_failure" || resumeReason === "service_failure") {
+        await pauseForServiceFailure(resumeError, "turn");
         return;
       }
 
@@ -4281,6 +4267,7 @@ export function SimulationScreen({
   };
 
   const onPrimaryButton = async (renderedRecordingInstanceId: string | null) => {
+    if (serviceRecoveryRef.current.failure?.retry === "none") return;
     const primaryButtonRoute = getSimulationPrimaryButtonRoute({
       lifecycleResumeInProgress: lifecycleResumeInProgressRef.current,
       sessionActive: sessionActiveRef.current,
@@ -4313,7 +4300,7 @@ export function SimulationScreen({
       return;
     }
 
-    if (!apiConfigured && !localModeConfirmedRef.current) {
+    if (localTestMode && !localModeConfirmedRef.current) {
       if (Platform.OS === "web") {
         localModeConfirmedRef.current = true;
         setError("Remote AI is disabled. Press Start Simulation again to confirm LOCAL TEST mode.");
@@ -4434,6 +4421,13 @@ export function SimulationScreen({
     const initialize = async () => {
       setIsInitializing(true);
       messagesRef.current = [...startup.messages];
+      serviceRecoveryRef.current = startup.serviceRecovery;
+      if (serviceRecoveryRef.current.failure?.retry === "submitted") {
+        // The pending in-screen request is no longer available after a remount.
+        // Never start a fresh turn in place of an unconfirmed submitted request.
+        serviceRecoveryRef.current.failure.retry = "none";
+        serviceRecoveryRef.current.scoringBlocked = true;
+      }
       recordingInstanceSequenceRef.current = 0;
       activeRecordingInstanceRef.current = null;
       submittedRecordingInstanceIdsRef.current.clear();
@@ -4442,7 +4436,7 @@ export function SimulationScreen({
       sessionStartedAtRef.current = startup.startedAt;
       sessionTrainingPackIdRef.current = null;
       setMessages(messagesRef.current);
-      setError(null);
+      setError(serviceRecoveryRef.current.failure?.message ?? null);
       openingDeliveredRef.current = startup.openingDelivered;
       recognizedStartRegisteredRef.current = startup.registered;
       localModeConfirmedRef.current = false;
@@ -4595,7 +4589,7 @@ export function SimulationScreen({
       setElapsedSeconds(nextElapsed);
       const remaining = getSimulationRemainingSeconds({ maxSessionSeconds, elapsedSeconds: nextElapsed,
         absoluteDeadlineMs: startup.absoluteDeadlineMs, nowMs });
-      if ((startup.completionRequested || remaining === 0) && !sessionCompletionInProgressRef.current) {
+      if ((startup.completionRequested || remaining === 0) && !sessionCompletionInProgressRef.current && !startup.serviceRecovery.failure) {
         requestConversationCompletion();
       }
     };
@@ -4636,7 +4630,9 @@ export function SimulationScreen({
     isStartingTurn: isStartingTurn || isResumingLifecyclePause,
   });
   const primaryAction =
-    lifecyclePauseActive
+    serviceRecoveryRef.current.failure?.retry === "none"
+      ? { ...resolvedPrimaryAction, disabled: true, label: serviceRecoveryRef.current.failure.kind === "auth" ? "Sign in required" : "Session paused" }
+      : lifecyclePauseActive
     && lifecyclePauseReasonRef.current === "tts_recovery"
     && resolvedPrimaryAction.kind === "start"
       ? { ...resolvedPrimaryAction, label: "Retry AI Voice" }
@@ -4906,7 +4902,15 @@ export function SimulationScreen({
 
         {error ? (
           <View style={styles.errorCard}>
-            <Text style={styles.errorText}>{error}</Text>
+            <Text style={styles.errorText} accessibilityRole="alert">{error}</Text>
+            {serviceRecoveryRef.current.failure?.kind === "auth" ? (
+              <Pressable accessibilityRole="button" style={styles.ghostButton} onPress={async () => {
+                await endSession(false);
+                onSignInRequired();
+              }}>
+                <Text style={styles.ghostButtonText}>Sign in again</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 

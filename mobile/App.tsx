@@ -89,6 +89,7 @@ import type { MobileOrgAccessRequestSummary } from "./src/lib/api";
 import { loadOrgAdminDashboardData } from "./src/lib/orgAdminDashboardLoad";
 import { evaluateSimulation, isOpenAiConfigured } from "./src/lib/openai";
 import { createSimulationStartupCoordinator } from "./src/lib/simulationStartup";
+import { getSimulationCompletionPolicy } from "./src/lib/simulationServiceRecovery";
 import {
   buildInsufficientEvidenceMessage,
   buildScoreUnavailableMessage,
@@ -881,6 +882,7 @@ export default function App() {
     simulationConfig?.simulationSessionId, user?.id, mobileAuthToken, activeSuperUserOrgId, user?.orgId,
   ]);
   const [lastCompletedConfig, setLastCompletedConfig] = useState<SimulationConfig | null>(null);
+  const lastHandledSimulationCompletionRef = useRef<string | null>(null);
   const [scorecard, setScorecard] = useState<SimulationScorecard | null>(null);
   const [scorecardError, setScorecardError] = useState<string | null>(null);
   const [scorecardStatus, setScorecardStatus] = useState<SimulationScoringStatus>("score_unavailable");
@@ -3783,6 +3785,9 @@ export default function App() {
     completedConfig: SimulationConfig,
     timing: SessionTiming,
   ) => {
+    if (lastHandledSimulationCompletionRef.current === timing.simulationSessionId) return;
+    lastHandledSimulationCompletionRef.current = timing.simulationSessionId;
+    const completionPolicy = getSimulationCompletionPolicy(timing);
     setSimulationConfig(null);
     setRelatedTrainingContentItems([]);
     setLastCompletedConfig(completedConfig);
@@ -3845,7 +3850,7 @@ export default function App() {
       };
     });
 
-    if (user && mobileAuthToken) {
+    if (user && mobileAuthToken && completionPolicy.recordUsage) {
       void (async () => {
         try {
           const usagePayload = {
@@ -3991,6 +3996,11 @@ export default function App() {
           finalScoringStatus = "score_unavailable";
           scoringFailureCategory = "local_mode";
           scoreError = buildScoreUnavailableMessage(scoringFailureCategory);
+          markTranscriptAsNotScored(scoreError);
+        } else if (!completionPolicy.requestScore) {
+          finalScoringStatus = "score_unavailable";
+          scoringFailureCategory = "upstream_scoring_failure";
+          scoreError = "The conversation could not be fully confirmed. No AI scorecard was generated.";
           markTranscriptAsNotScored(scoreError);
         } else if (!apiConfigured) {
           finalScoringStatus = "score_unavailable";
@@ -7280,6 +7290,7 @@ export default function App() {
             setScreen("related_training_content");
           }}
           onSessionComplete={handleSessionComplete}
+          onSignInRequired={() => { void resetSessionToOnboarding(); }}
         />
       );
     }

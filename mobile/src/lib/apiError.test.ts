@@ -6,7 +6,6 @@ import {
   isOrganizationAccessRequiredError,
   MobileApiError,
   isTransientRequestError,
-  isSimulationApiFallbackError,
 } from "./apiError";
 
 test("mobile API errors preserve safe server status, code, and message", () => {
@@ -35,22 +34,6 @@ test("transient classification recognizes safe codes, statuses, and legacy netwo
   }
   for (const error of [null, {}, new Error("Unknown"), Object.assign(new Error("Cancelled"), { name: "AbortError" })]) {
     assert.equal(isTransientRequestError(error), false);
-  }
-});
-
-test("opening turn and transcription keep existing fallback policy for safe errors", () => {
-  for (const code of ["ai_unavailable", "ai_budget_limit"]) {
-    assert.equal(isSimulationApiFallbackError(new MobileApiError("Safe explanation", 503, code)), true);
-  }
-  for (const [status, code] of [[504, "ai_timeout"], [502, "score_generation_failed"], [403, "ORG_ACCESS_REQUIRED"], [400, "invalid_request"]] as const) {
-    assert.equal(isSimulationApiFallbackError(new MobileApiError("Safe explanation", status, code)), false);
-  }
-  for (const status of [401, 429, 503]) assert.equal(isSimulationApiFallbackError(createMobileApiError(status, null)), true);
-  for (const message of ["OpenAI request failed", "Remote AI is disabled", "Request failed (429)"]) {
-    assert.equal(isSimulationApiFallbackError(new Error(message)), true);
-  }
-  for (const error of [null, {}, new Error("Request timed out"), new Error("Network request failed"), new Error("Unknown")]) {
-    assert.equal(isSimulationApiFallbackError(error), false);
   }
 });
 

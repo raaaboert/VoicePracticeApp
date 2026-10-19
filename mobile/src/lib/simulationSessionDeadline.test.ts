@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { MobileApiError, isSimulationSessionEndedError, isTransientRequestError, isSimulationApiFallbackError } from "./apiError";
+import { MobileApiError, isSimulationSessionEndedError, isTransientRequestError } from "./apiError";
 import { createSimulationStartupCoordinator, getSimulationRemainingSeconds } from "./simulationStartup";
 import { isExpiredSubmittedTurnAwait, isTerminalSubmittedTurnRecoveryAwait, shouldFallbackToLegacyAssistantReply,
   shouldFallbackToLegacyUnifiedSubmit } from "./unifiedSubmit";
@@ -106,7 +106,6 @@ for (const code of ["session_expired", "session_completed"]) {
     const error = ended(code);
     assert.equal(isSimulationSessionEndedError(error), true);
     assert.equal(isTransientRequestError(error), false);
-    assert.equal(isSimulationApiFallbackError(error), false);
     assert.equal(shouldFallbackToLegacyUnifiedSubmit(error), false);
     assert.equal(shouldFallbackToLegacyAssistantReply(error), false);
     assert.equal(isExpiredSubmittedTurnAwait(error), false, "do not generate a fresh reply");
