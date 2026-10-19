@@ -39,6 +39,8 @@ export interface RuntimeConfig {
   appReviewCredential: AppReviewCredential | null;
   openAi: OpenAiModelConfig;
   enableRemoteTts: boolean;
+  aiSpendLedgerMode: "off" | "record";
+  aiSpendLedgerFingerprintSecret: string | null;
   openAiMaxDailyCallsPerUser: number | null;
   openAiMaxDailyCallsGlobal: number | null;
   openAiMaxDailyTokensPerUser: number | null;
@@ -370,6 +372,15 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   if (storageProvider === "postgres" && !databaseUrl) {
     throw new Error("DATABASE_URL is required when STORAGE_PROVIDER=postgres.");
   }
+  const aiSpendLedgerMode = env.AI_SPEND_LEDGER_MODE?.trim() || "off";
+  if (aiSpendLedgerMode !== "off" && aiSpendLedgerMode !== "record") throw new Error("AI_SPEND_LEDGER_MODE must be off or record; enforcement is not available.");
+  const aiSpendLedgerFingerprintSecret = env.AI_SPEND_LEDGER_HMAC_SECRET?.trim() || null;
+  if (aiSpendLedgerMode === "record" && (storageProvider !== "postgres" || !env.PERITIO_ENV?.trim()
+    || !aiSpendLedgerFingerprintSecret || aiSpendLedgerFingerprintSecret.length < 32
+    || [env.MOBILE_TOKEN_SECRET, env.WEB_AUTH_TOKEN_SECRET, env.ADMIN_TOKEN_SECRET, env.SUPPORT_TRANSCRIPT_SECRET]
+      .some((secret) => secret?.trim() === aiSpendLedgerFingerprintSecret))) {
+    throw new Error("AI spend recording requires PostgreSQL, explicit PERITIO_ENV and a distinct AI_SPEND_LEDGER_HMAC_SECRET of at least 32 characters.");
+  }
   if (isProductionDeployment && storageProvider !== "postgres") {
     throw new Error('STORAGE_PROVIDER must be "postgres" when PERITIO_ENV=production.');
   }
@@ -523,6 +534,8 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     appReviewCredential,
     openAi: loadOpenAiModelConfig(env),
     enableRemoteTts: toBoolean(env.ENABLE_REMOTE_TTS, false),
+    aiSpendLedgerMode,
+    aiSpendLedgerFingerprintSecret,
     openAiMaxDailyCallsPerUser: parseOptionalNonNegativeInt(
       "OPENAI_MAX_DAILY_CALLS_PER_USER",
       env.OPENAI_MAX_DAILY_CALLS_PER_USER,

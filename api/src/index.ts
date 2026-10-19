@@ -525,6 +525,8 @@ import {
 } from "./services/simulationSessionIndustrySnapshot.js";
 import { shouldBootstrapTrainingWorkspaceForSimulationRoute } from "./services/simulationHotPath.js";
 import { createSimulationRuntimeCache, type SimulationRuntimeCacheStatus } from "./services/simulationRuntimeCache.js";
+import { AiSpendLedgerStore } from "./storage/aiSpendLedgerStore.js";
+import { invokeWithAiSpendLedger } from "./services/aiSpendLedger.js";
 import { AiBudgetLimitError, SafeAiRouteError, classifyAiRouteError, isAiTimeoutError, respondWithAiRouteError,
   respondWithUnexpectedError, safeErrorDiagnostics } from "./services/safeErrors.js";
 import {
@@ -867,8 +869,14 @@ const aiUsageEventStore = createAiUsageEventStore({
   databaseUrl: DATABASE_URL,
   pgPoolMax: PG_POOL_MAX,
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
-  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+  pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+  preserveCreatedAt: runtimeConfig.aiSpendLedgerMode === "record",
 });
+const aiSpendLedgerStore = runtimeConfig.aiSpendLedgerMode === "record" ? new AiSpendLedgerStore({
+  databaseUrl: DATABASE_URL!, environment: runtimeConfig.deploymentEnvironment,
+  fingerprintSecret: runtimeConfig.aiSpendLedgerFingerprintSecret!,
+  pgPoolMax: PG_POOL_MAX, pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS, pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
+}) : null;
 const supportCaseStore = createSupportCaseStore({
   provider: STORAGE_PROVIDER,
   dbPath: DB_PATH,
@@ -1104,6 +1112,7 @@ async function requestSimulationCompletion(params: {
       promptVersion: AI_PROMPT_VERSION,
       rubricVersion: params.route === "score" ? AI_RUBRIC_VERSION : null,
       estimatedTokens: estimateCompletionReservationTokens(params.messages, routeConfig.maxOutputTokens),
+      requestMaterial: { messages: params.messages, routeConfig, temperature: params.temperature },
       invoke: async () => await requestCompletion({
         apiFamily: routeConfig.apiFamily,
         model: requestedModel,
@@ -1824,6 +1833,8 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       promptVersion: AI_PROMPT_VERSION,
       rubricVersion: null,
       estimatedTokens: 0,
+      requestMaterial: speechRequest,
+      ttsCharacters: firstChunk.length,
       invoke: async () => await requestSpeechSynthesis(speechRequest),
     });
     const ttsResult = budgetedTts.value;
@@ -2330,6 +2341,7 @@ async function transcribeSimulationAudioFile(params: {
     promptVersion: AI_PROMPT_VERSION,
     rubricVersion: null,
     estimatedTokens: 0,
+    requestMaterial: { audioDigest: crypto.createHash("sha256").update(params.file.buffer).digest("hex"), mimeType, model: OPENAI_TRANSCRIPTION_MODEL },
     invoke: async () => await requestTranscription({
       model: OPENAI_TRANSCRIPTION_MODEL,
       audioBuffer: params.file.buffer,
@@ -5202,6 +5214,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
   const wasReady = isDatabaseReady;
   try {
     await authVerificationStore.initialize();
+    await aiSpendLedgerStore?.initialize();
     await initializeDatabaseStoresForReadiness({
       stores: {
         auditEventStore,
@@ -11902,6 +11915,8 @@ async function invokeAiProviderWithBudget<T>(params: {
   promptVersion: string;
   rubricVersion: string | null;
   estimatedTokens: number;
+  requestMaterial?: unknown;
+  ttsCharacters?: number;
   invoke: () => Promise<T>;
   resolveUsage?: (value: T) => AiProviderTokenUsage;
 }): Promise<{ value: T; usageEventId: string }> {
@@ -11923,6 +11938,14 @@ async function invokeAiProviderWithBudget<T>(params: {
     totalTokens: Math.max(0, Math.floor(params.estimatedTokens)),
     createdAt: now.toISOString(),
   };
+  if (aiSpendLedgerStore) {
+    return invokeWithAiSpendLedger({ store: aiSpendLedgerStore, event: reservationEvent,
+      userTimeZone: resolveTimeZone(params.context.user.timezone),
+      legacyLimits: resolveAiBudgetLimits(params.context.user, now, { allowDuringActiveSimulation: params.context.allowDuringActiveSimulation }),
+      requestMaterial: params.requestMaterial ?? { kind: params.kind, scenarioId: params.context.scenarioId ?? null },
+      units: params.ttsCharacters === undefined ? undefined : { tts_characters: params.ttsCharacters },
+      invoke: params.invoke, resolveUsage: params.resolveUsage, budgetMessage: getAiBudgetLimitMessage });
+  }
   const reservation = await aiUsageEventAccess.reserveBudget({
     event: reservationEvent,
     userTimeZone: resolveTimeZone(params.context.user.timezone),
@@ -17622,6 +17645,7 @@ app.post("/orgs/:orgId/custom-scenarios/generate", requireAdmin, async (request:
         { content: systemPrompt },
         { content: promptPreview },
       ], customScenarioMaxOutputTokens),
+      requestMaterial: { systemPrompt, promptPreview, customScenarioMaxOutputTokens },
       invoke: async () => await requestCompletion({
         apiFamily: OPENAI_MODEL_CONFIG.chat.apiFamily,
         model: OPENAI_CHAT_MODEL,
@@ -18795,6 +18819,7 @@ app.post(
           kind: "customer_scenario_generation", model: params.model,
           promptVersion: CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION, rubricVersion: null,
           estimatedTokens: estimateCompletionReservationTokens(params.messages, params.maxOutputTokens),
+          requestMaterial: params,
           invoke: async () => await requestCompletion(params),
           resolveUsage: (completion) => completion.usage,
         })).value,
@@ -23814,6 +23839,8 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       promptVersion: AI_PROMPT_VERSION,
       rubricVersion: null,
       estimatedTokens: 0,
+      requestMaterial: speechRequest,
+      ttsCharacters: text.length,
       invoke: async () => await requestSpeechSynthesis(speechRequest),
     });
     const ttsResult = budgetedTts.value;
@@ -28197,6 +28224,8 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
 export async function startApiServer(): Promise<void> {
   await authVerificationStore.initialize();
   await authVerificationStore.purgeExpired();
+  // Explicit migration readiness check only; no 025 DDL at startup.
+  await aiSpendLedgerStore?.initialize();
   await initializeDatabaseStoresForStartup({
     stores: {
       auditEventStore,

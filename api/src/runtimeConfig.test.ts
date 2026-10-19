@@ -40,6 +40,26 @@ function makeProductionEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv
   });
 }
 
+test("AI spending gate defaults off without changing existing budget defaults", () => {
+  const config = loadRuntimeConfig(makeProductionEnv({ OPENAI_API_KEY: "test-key" }));
+  assert.equal(config.aiSpendLedgerMode, "off");
+  assert.equal(config.openAiMaxDailyCallsPerUser, 120);
+  assert.equal(config.openAiMaxDailyCallsGlobal, 1500);
+  assert.equal(config.openAiMaxDailyTokensPerUser, 250_000);
+  assert.equal(config.openAiMaxDailyTokensGlobal, 2_000_000);
+  assert.equal(config.aiSpendLedgerFingerprintSecret, null);
+});
+
+test("AI spend record gate requires explicit environment, PostgreSQL and a distinct strong secret; enforcement is unavailable", () => {
+  const base = { AI_SPEND_LEDGER_MODE: "record", AI_SPEND_LEDGER_HMAC_SECRET: "ledger-test-distinct-fingerprint-secret-32",
+    PERITIO_ENV: "development", STORAGE_PROVIDER: "postgres", DATABASE_URL: "postgresql://127.0.0.1/peritio_test" };
+  assert.equal(loadRuntimeConfig(makeEnv(base)).aiSpendLedgerMode, "record");
+  for (const change of [{ AI_SPEND_LEDGER_MODE: "enforce" }, { PERITIO_ENV: "" }, { STORAGE_PROVIDER: "file" },
+    { AI_SPEND_LEDGER_HMAC_SECRET: "short" }, { AI_SPEND_LEDGER_HMAC_SECRET: makeEnv().MOBILE_TOKEN_SECRET }]) {
+    assert.throws(() => loadRuntimeConfig(makeEnv({ ...base, ...change })), /AI_SPEND_LEDGER|AI spend recording/);
+  }
+});
+
 test("auth code delivery overrides default to null when unset", () => {
   const config = loadRuntimeConfig(makeEnv());
   assert.equal(config.authCodeDeliveryProvider, "log_only");

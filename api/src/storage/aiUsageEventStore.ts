@@ -25,7 +25,7 @@ const AI_USAGE_EVENT_KIND_SET = new Set<AiUsageEventKind>([
   "customer_scenario_generation",
 ]);
 
-const AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY = 0x504149;
+export const AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY = 0x504149;
 
 export interface AiUsageBudgetSnapshot {
   userCallsToday: number;
@@ -93,6 +93,7 @@ interface CreateAiUsageEventStoreParams {
   pgPoolMax: number;
   pgConnectTimeoutMs: number;
   pgIdleTimeoutMs: number;
+  preserveCreatedAt?: boolean;
 }
 
 interface AiUsageEventFilePayload {
@@ -656,7 +657,7 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
 
   constructor(
     databaseUrl: string,
-    options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number }
+    private readonly options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number; preserveCreatedAt?: boolean }
   ) {
     this.pool = new Pool({
       connectionString: databaseUrl,
@@ -729,7 +730,7 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await upsertAiUsageEventRow(client, normalized);
+      await upsertAiUsageEventRow(client, normalized, this.options.preserveCreatedAt);
       await pruneAiUsageEventRows(client, now);
       await client.query("COMMIT");
     } catch (error) {
@@ -755,38 +756,11 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock($1::integer)", [AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY]);
-      const lookbackStart = new Date(
-        params.now.getTime() - AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
-      );
-      const result = await client.query<AiUsageEventRow>(
-        `
-          SELECT
-            id, kind, user_id, org_id, division_id, segment_id, scenario_id,
-            model, prompt_version, rubric_version, input_tokens, output_tokens,
-            total_tokens, created_at
-          FROM ai_usage_events
-          WHERE created_at >= $1::timestamptz
-            AND created_at <= $2::timestamptz
-          ORDER BY created_at ASC, id ASC
-        `,
-        [lookbackStart.toISOString(), params.now.toISOString()]
-      );
-      const events = result.rows
-        .map((row) => mapAiUsageEventRow(row))
-        .filter((entry): entry is AiUsageEvent => entry !== null);
-      const snapshot = computeBudgetSnapshotFromEvents(events, {
-        userId: normalized.userId,
-        now: params.now,
-        userTimeZone: params.userTimeZone,
-      });
-      const limitCode = resolveAiUsageBudgetLimit(snapshot, params.limits, normalized.totalTokens);
-      if (limitCode) {
+      const reservation = await reserveAiUsageBudgetOnClient(client, { ...params, event: normalized });
+      if (!reservation.reserved) {
         await client.query("ROLLBACK");
-        return { reserved: false, limitCode };
+        return reservation;
       }
-
-      await upsertAiUsageEventRow(client, normalized);
       await client.query("COMMIT");
       return { reserved: true };
     } catch (error) {
@@ -957,9 +931,28 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
   }
 }
 
+/** Reuses the established budget policy inside a caller-owned transaction. */
+export async function reserveAiUsageBudgetOnClient(client: PoolClient, params: {
+  event: AiUsageEvent; userTimeZone: string; limits: AiUsageBudgetLimits; now: Date;
+}): Promise<AiUsageBudgetReservationResult> {
+  await client.query("SELECT pg_advisory_xact_lock($1::integer)", [AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY]);
+  const result = await client.query<AiUsageEventRow>(
+    `SELECT * FROM ai_usage_events WHERE created_at >= $1::timestamptz AND created_at <= $2::timestamptz
+     ORDER BY created_at ASC, id ASC`,
+    [new Date(params.now.getTime() - AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS * 86_400_000).toISOString(), params.now.toISOString()],
+  );
+  const events = result.rows.map(mapAiUsageEventRow).filter((event): event is AiUsageEvent => event !== null);
+  const snapshot = computeBudgetSnapshotFromEvents(events, { userId: params.event.userId, now: params.now, userTimeZone: params.userTimeZone });
+  const limitCode = resolveAiUsageBudgetLimit(snapshot, params.limits, params.event.totalTokens);
+  if (limitCode) return { reserved: false, limitCode };
+  await upsertAiUsageEventRow(client, params.event);
+  return { reserved: true };
+}
+
 async function upsertAiUsageEventRow(
   client: Pick<PoolClient, "query"> | Pick<Pool, "query">,
-  event: AiUsageEvent
+  event: AiUsageEvent,
+  preserveCreatedAt = false,
 ): Promise<void> {
   await client.query(
     `
@@ -993,7 +986,7 @@ async function upsertAiUsageEventRow(
             input_tokens = EXCLUDED.input_tokens,
             output_tokens = EXCLUDED.output_tokens,
             total_tokens = EXCLUDED.total_tokens,
-            created_at = EXCLUDED.created_at
+            created_at = CASE WHEN $15::boolean THEN ai_usage_events.created_at ELSE EXCLUDED.created_at END
     `,
     [
       event.id,
@@ -1009,7 +1002,8 @@ async function upsertAiUsageEventRow(
       event.inputTokens,
       event.outputTokens,
       event.totalTokens,
-      event.createdAt
+      event.createdAt,
+      preserveCreatedAt,
     ]
   );
 }
@@ -1085,7 +1079,8 @@ export function createAiUsageEventStore(params: CreateAiUsageEventStoreParams): 
     return new PostgresAiUsageEventStore(params.databaseUrl, {
       pgPoolMax: params.pgPoolMax,
       pgConnectTimeoutMs: params.pgConnectTimeoutMs,
-      pgIdleTimeoutMs: params.pgIdleTimeoutMs
+      pgIdleTimeoutMs: params.pgIdleTimeoutMs,
+      preserveCreatedAt: params.preserveCreatedAt,
     });
   }
 
