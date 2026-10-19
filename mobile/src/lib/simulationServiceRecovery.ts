@@ -23,7 +23,7 @@ export function describeSimulationServiceFailure(error: unknown): { kind: "auth"
 /** One session's recovery decision; never retries a POST or manufactures dialogue. */
 export function createSimulationServiceRecovery() {
   return {
-    failure: null as (ReturnType<typeof describeSimulationServiceFailure> & { retry: "start" | "submitted" | "recording" | "none" }) | null,
+    failure: null as (ReturnType<typeof describeSimulationServiceFailure> & { retry: "start" | "submitted" | "recording" | "record_again" | "none" }) | null,
     scoringBlocked: false,
     interrupt(error: unknown, phase: "start" | "transcription" | "turn", pendingSubmittedTurn: boolean) {
       const description = describeSimulationServiceFailure(error);
@@ -32,6 +32,12 @@ export function createSimulationServiceRecovery() {
         : pendingSubmittedTurn ? "submitted" : phase === "transcription" ? "recording" : "none";
       if (phase === "turn" && !pendingSubmittedTurn) this.scoringBlocked = true;
       this.failure = { ...description, retry };
+      return this.failure;
+    },
+    discardedSubmittedTurn() {
+      // Do not clear a separate, earlier ambiguity that legitimately blocks scoring.
+      this.failure = { kind: "unavailable", retry: "record_again",
+        message: "Your interrupted response could not be recovered. Tap Record Again to record a new response." };
       return this.failure;
     },
     recovered() { this.failure = null; },

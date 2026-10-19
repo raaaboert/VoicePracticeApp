@@ -103,12 +103,12 @@ runTest("expired duplicate awaits are classified separately from compatibility f
   );
 });
 
-runTest("only the recovery-await provider timeout is terminal among 504 responses", () => {
+runTest("all recovery 504s remain ambiguous, including the deployed await timeout", () => {
   assert(
     isTerminalSubmittedTurnRecoveryAwait(
       new MobileApiError("Timed out waiting for simulation assistant reply.", 504, null),
-    ),
-    "the submit-turn recovery await timeout should be terminal",
+    ) === false,
+    "the deployed timeout can leave the original provider work running",
   );
   assert(
     isTerminalSubmittedTurnRecoveryAwait(new MobileApiError("Gateway timeout.", 504, null)) === false,
@@ -126,6 +126,14 @@ runTest("only the recovery-await provider timeout is terminal among 504 response
     ) === false,
     "the recovery-only timeout must not change active-turn expired-await behavior",
   );
+});
+
+runTest("unrecognized expiry text and authorization failures never authorize discarding a submitted turn", () => {
+  for (const error of [new Error("Submitted turn expired"), new MobileApiError("Gone", 410, null),
+    new MobileApiError("Simulation assistant reply is no longer pending for this correlationId.", 403, null)]) {
+    assert(!isExpiredSubmittedTurnAwait(error), "only the exact settled/cleaned recovery contract permits re-recording");
+    assert(!isTerminalSubmittedTurnRecoveryAwait(error), "do not clear ambiguous or forbidden work");
+  }
 });
 
 runTest("rejects malformed awaited assistant replies before legacy generation", () => {

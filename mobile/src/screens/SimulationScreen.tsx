@@ -2947,9 +2947,7 @@ export function SimulationScreen({
                   expiredSubmittedTurnAwait,
                 },
               });
-              if (expiredSubmittedTurnAwait) {
-                setStatus("Assistant reply expired. Preparing a fresh reply...");
-              } else if (!shouldFallbackToLegacyReply) {
+              if (expiredSubmittedTurnAwait || !shouldFallbackToLegacyReply) {
                 throw awaitError;
               }
             } finally {
@@ -3336,8 +3334,23 @@ export function SimulationScreen({
     }
   };
 
+  const discardClearedSubmittedTurn = () => {
+    const pending = pendingUnifiedTurnRecoveryRef.current;
+    if (!pending || pending.assistantMessage) return;
+    // A provisional transcript is not a completed exchange. Keep all earlier turns.
+    messagesRef.current = messagesRef.current.filter((message) => message.id !== pending.userMessage?.id);
+    startup.messages = messagesRef.current;
+    setMessages(messagesRef.current);
+    pendingUnifiedTurnRecoveryRef.current = null;
+    lifecycleResumeIntentRef.current = null;
+    serviceRecoveryRef.current.discardedSubmittedTurn();
+  };
+
   const pauseForServiceFailure = async (failureError: unknown, phase: "transcription" | "turn") => {
-    const failure = serviceRecoveryRef.current.interrupt(failureError, phase, Boolean(pendingUnifiedTurnRecoveryRef.current));
+    if (isExpiredSubmittedTurnAwait(failureError)) discardClearedSubmittedTurn();
+    const failure = isExpiredSubmittedTurnAwait(failureError) && serviceRecoveryRef.current.failure?.retry === "record_again"
+      ? serviceRecoveryRef.current.failure
+      : serviceRecoveryRef.current.interrupt(failureError, phase, Boolean(pendingUnifiedTurnRecoveryRef.current));
     lifecyclePauseStartedAtRef.current ??= Date.now();
     lifecyclePauseReasonRef.current = "service_failure";
     setLifecyclePauseActive(true);
@@ -3345,6 +3358,7 @@ export function SimulationScreen({
     setMode("idle");
     setError(failure.message);
     setStatus(failure.retry === "submitted" ? "Conversation paused. Resume Turn checks the submitted response without sending it again."
+      : failure.retry === "record_again" ? "Conversation paused. Tap Record Again when you are ready; recording will not start automatically."
       : failure.retry === "recording" ? "Conversation paused. Resume Turn starts a new recording."
       : "Conversation paused. End the session or return to Setup; the last response cannot be safely replayed.");
     return failure;
@@ -3908,7 +3922,11 @@ export function SimulationScreen({
             return;
           }
         } catch (recoveryError) {
+          if (isExpiredSubmittedTurnAwait(recoveryError)) discardClearedSubmittedTurn();
           if (isSimulationSessionEndedError(recoveryError)) {
+            // Conversation closure is not confirmation of this pending exchange.
+            // End real usage normally, but never score its unreconciled transcript.
+            serviceRecoveryRef.current.scoringBlocked = true;
             pendingUnifiedTurnRecoveryRef.current = null;
             requestConversationCompletion(true);
           }
@@ -4219,7 +4237,8 @@ export function SimulationScreen({
         return;
       }
 
-      if (lifecyclePauseReasonRef.current === "service_failure" || resumeReason === "service_failure") {
+      if ((isExpiredSubmittedTurnAwait(resumeError) && hadSubmittedTurnRecovery)
+        || lifecyclePauseReasonRef.current === "service_failure" || resumeReason === "service_failure") {
         await pauseForServiceFailure(resumeError, "turn");
         return;
       }
@@ -4632,6 +4651,8 @@ export function SimulationScreen({
   const primaryAction =
     serviceRecoveryRef.current.failure?.retry === "none"
       ? { ...resolvedPrimaryAction, disabled: true, label: serviceRecoveryRef.current.failure.kind === "auth" ? "Sign in required" : "Session paused" }
+      : serviceRecoveryRef.current.failure?.retry === "record_again"
+      ? { ...resolvedPrimaryAction, label: "Record Again" }
       : lifecyclePauseActive
     && lifecyclePauseReasonRef.current === "tts_recovery"
     && resolvedPrimaryAction.kind === "start"
@@ -4659,7 +4680,8 @@ export function SimulationScreen({
         ? "Starting simulation..."
       : sessionActive
       ? lifecyclePauseActive
-        ? `Peritio paused the session because the app left the foreground. Return within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes, then tap Resume Turn when you are ready to restart the microphone.`
+        ? serviceRecoveryRef.current.failure?.message
+          ?? `Peritio paused the session because the app left the foreground. Return within ${Math.floor(ACTIVE_SIMULATION_BACKGROUND_GRACE_MS / 60_000)} minutes, then tap Resume Turn when you are ready to restart the microphone.`
         : mode === "idle"
         ? "The session is still active. Tap Resume Turn to keep going, or end the session when you are done."
         : mode === "recording"
@@ -5084,7 +5106,8 @@ export function SimulationScreen({
               }}
               disabled={endButtonDisabled}
             >
-              <Text style={styles.secondaryActionButtonText}>End Session and Score</Text>
+              <Text style={styles.secondaryActionButtonText}>{serviceRecoveryRef.current.scoringBlocked || pendingUnifiedTurnRecoveryRef.current
+                ? "End Session" : "End Session and Score"}</Text>
             </Pressable>
           ) : null}
         </View>

@@ -1,6 +1,6 @@
 import { MobileApiError, isSimulationSessionEndedError } from "./apiError";
 
-const SUBMITTED_TURN_RECOVERY_TIMEOUT_MESSAGE = "Timed out waiting for simulation assistant reply.";
+const CLEARED_SUBMITTED_TURN_MESSAGE = "Simulation assistant reply is no longer pending for this correlationId.";
 
 export function shouldFallbackToLegacyUnifiedSubmit(error: unknown): boolean {
   if (isSimulationSessionEndedError(error)) return false;
@@ -25,28 +25,16 @@ export function shouldFallbackToLegacyAssistantReply(error: unknown): boolean {
 export function isExpiredSubmittedTurnAwait(error: unknown): boolean {
   // A closed conversation must finish/recover scoring, never generate a fresh reply.
   if (isSimulationSessionEndedError(error)) return false;
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const message = error.message.toLowerCase();
-  return (
-    message.includes("request failed (410)") ||
-    message.includes("no longer pending") ||
-    message.includes("already cleaned") ||
-    message.includes("expired")
-  );
+  // Only this user-bound recovery response establishes settled/cleaned work.
+  // A generic 410, an expired session, or a gateway timeout cannot do so.
+  return error instanceof MobileApiError && error.status === 410
+    && error.message.trim() === CLEARED_SUBMITTED_TURN_MESSAGE;
 }
 
 export function isTerminalSubmittedTurnRecoveryAwait(error: unknown): boolean {
-  return (
-    isSimulationSessionEndedError(error) || isExpiredSubmittedTurnAwait(error)
-    || (
-      error instanceof MobileApiError
-      && error.status === 504
-      && error.message.trim() === SUBMITTED_TURN_RECOVERY_TIMEOUT_MESSAGE
-    )
-  );
+  // The deployed await route returns the same 504 for no entry and still-running
+  // work, without cancelling it. Keep its correlation ID for read-only recovery.
+  return isSimulationSessionEndedError(error) || isExpiredSubmittedTurnAwait(error);
 }
 
 export function isUsableSimulationTranscript(value: unknown): value is string {

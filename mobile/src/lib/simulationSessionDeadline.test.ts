@@ -118,7 +118,7 @@ test("other 409 errors and non-409 responses retain existing classification", ()
     new MobileApiError("unavailable", 503, "session_expired"), new Error("session_expired")]) {
     assert.equal(isSimulationSessionEndedError(error), false);
   }
-  assert.equal(isExpiredSubmittedTurnAwait(new Error("Submitted turn expired")), true);
+  assert.equal(isExpiredSubmittedTurnAwait(new Error("Submitted turn expired")), false, "unclassified expiry text cannot authorize a new turn");
 });
 
 test("concurrent lifecycle errors and deadline completion finalize usage and deliver scoring once", async () => {
