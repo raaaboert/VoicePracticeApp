@@ -91,8 +91,10 @@ export function createPlaybackSession(params: {
       settle("reject", error);
     },
     startPlaybackTimeout: (timeoutMs) => {
+      if (settled) return;
       clearPlaybackTimeout();
       playbackTimeoutHandle = setTimeout(() => {
+        if (settled) return;
         params.onTimeout?.(timeoutMs);
         settle("reject", params.createTimeoutError(timeoutMs));
       }, timeoutMs);

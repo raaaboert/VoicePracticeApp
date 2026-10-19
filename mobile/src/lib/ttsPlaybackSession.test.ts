@@ -12,8 +12,9 @@ import {
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const playbackSource = readFileSync(resolve(sourceDirectory, "ttsPlayback.ts"), "utf8");
 
-test("remote playback is event-driven and the load gate waits only for audioLoaded", () => {
-  assert.doesNotMatch(playbackSource, /\.currentStatus/);
+test("remote playback reconciles current readiness after subscribing while the load gate stays separate from completion", () => {
+  assert.match(playbackSource, /sound.addListener\("playbackStatusUpdate"[\s\S]*?sound.currentStatus/);
+  assert.match(playbackSource, /playing: false, didJustFinish: false/);
   assert.match(playbackSource, /promise:\s*playbackSession\.audioLoaded/);
   assert.doesNotMatch(
     playbackSource,
@@ -26,10 +27,24 @@ test("remote TTS keeps provider pacing authoritative and configures playback bef
   const rateConfiguration = playbackSource.indexOf(
     "playbackSession.sound.setPlaybackRate(remotePlaybackRate);",
   );
-  const playbackStart = playbackSource.indexOf("playbackSession.sound.play();", rateConfiguration);
+  const playbackStart = playbackSource.indexOf("playbackSession.play();", rateConfiguration);
 
   assert.ok(rateConfiguration >= 0, "remote playback rate configuration is missing");
   assert.ok(playbackStart > rateConfiguration, "remote playback must be configured before play()");
+});
+
+test("a cancelled player cannot arm another timeout or run an already-queued timeout callback", (t) => {
+  let fire!: () => void;
+  let timers = 0; let timeouts = 0;
+  t.mock.method(globalThis, "setTimeout", ((callback: () => void) => { timers++; fire = callback; return 1; }) as unknown as typeof setTimeout);
+  t.mock.method(globalThis, "clearTimeout", () => {});
+  const abort = new AbortController();
+  const session = createPlaybackSession({ abortSignal: abort.signal, clearStatusListener: () => {},
+    createCancellationError: () => new Error("cancelled"), createTimeoutError: () => new Error("timeout"),
+    onTimeout: () => { timeouts++; } });
+  session.startPlaybackTimeout(60_000); abort.abort();
+  fire(); session.startPlaybackTimeout(60_000);
+  assert.equal(timeouts, 0); assert.equal(timers, 1);
 });
 
 test("remote playback cleanup and fallback isolation guards remain intact", () => {

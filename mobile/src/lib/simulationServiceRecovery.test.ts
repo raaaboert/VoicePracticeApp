@@ -9,10 +9,18 @@ import * as turnRecovery from "./simulationTurnRecovery";
 import * as scoring from "./simulationScoreHandling";
 import * as unified from "./unifiedSubmit";
 import { createSimulationStartupCoordinator } from "./simulationStartup";
+import * as chunkSequence from "./ttsChunkSequence";
+import * as appLifecycle from "./simulationAppStateLifecycle";
+import { createTtsPlaybackHarness, flush } from "./ttsPlayback.testSupport";
 import type { DialogueMessage, SessionTiming } from "../types";
 
 const screen = readFileSync(new URL("../screens/SimulationScreen.tsx", import.meta.url), "utf8");
 const app = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
+const screenAst = ts.createSourceFile("SimulationScreen.tsx", screen, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const speechClass = screenAst.statements.find((s) => ts.isClassDeclaration(s) && s.name?.text === "AssistantSpeechIncompleteError")!;
+const SpeechIncomplete = new Function(`${ts.transpileModule(speechClass.getText(screenAst), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText}; return AssistantSpeechIncompleteError;`)();
 // Execute real screen/App callbacks with native audio, network and React setters substituted.
 function callback(source: string, name: string, context: Record<string, any>) {
   const ast = ts.createSourceFile("screen.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -35,7 +43,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   const events = { registrations: 0, openings: 0, capture: 0, stopped: 0, cancelled: 0, completions: [] as SessionTiming[], histories: [] as DialogueMessage[][], exits: [] as string[] };
   const state: Record<string, any> = {};
   class LifecycleInterrupted extends Error {}
-  const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified, ...recovery,
+  const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified, ...recovery, ...chunkSequence, ...appLifecycle,
     startup, config: { simulationSessionId: "same-session", scenario: { id: "scenario", segmentId: "role", title: "Scenario" },
       maxSimulationMinutes: 20, difficulty: "medium", personaStyle: "skeptical" },
     userId: "learner", authToken: "auth", apiConfigured: options.configured ?? true,
@@ -56,7 +64,8 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
     onOrganizationAccessRequired: () => { throw Error("unexpected organization redirect"); },
     SimulationLifecycleInterruptedError: LifecycleInterrupted,
     isSimulationLifecycleInterruptedError: (error: unknown) => error instanceof LifecycleInterrupted,
-    isAssistantSpeechIncompleteError: () => false,
+    AssistantSpeechIncompleteError: SpeechIncomplete,
+    isAssistantSpeechIncompleteError: (error: unknown) => error instanceof SpeechIncomplete,
     clearLifecyclePause: () => { context.lifecyclePauseReasonRef.current = null; },
     endSession: async () => { startup.conversationClosed = true; }, onExit: (message: string) => events.exits.push(message),
     onSessionComplete: (history: DialogueMessage[], _config: unknown, timing: SessionTiming) => {
@@ -88,10 +97,90 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   context.abortActiveTurnRequests = () => callback(screen, "abortActiveTurnRequests", context)();
   context.clearTurnMonitoring = () => callback(screen, "clearTurnMonitoring", context)();
   context.endSession = (show: boolean) => callback(screen, "endSession", context)(show);
+  context.enterAssistantSpeechRecovery = (error: unknown, id: string) => callback(screen, "enterAssistantSpeechRecovery", context)(error, id);
+  context.pauseSimulationForLifecycle = (params: unknown) => callback(screen, "pauseSimulationForLifecycle", context)(params);
   context.assertForegroundSessionGenerationCurrent = () => startup.assertConversationAvailable();
   return { startup, events, state, context, value: (name: string) => callback(screen, name, context),
     run: (name: string, ...args: unknown[]) => callback(screen, name, context)(...args) };
 }
+
+function attachActualSpeech(h: ReturnType<typeof screenHarness>) {
+  const audio = createTtsPlaybackHarness();
+  h.context.config.remoteTtsEnabled = true;
+  h.context.remoteTtsSoundRef = audio.refs.remoteTtsSoundRef;
+  h.context.remoteTtsFileRef = audio.refs.remoteTtsFileRef;
+  h.context.ttsRequestGenerationRef.current = 0;
+  h.context.Speech = { stop() {} };
+  h.context.handleTtsCancellation = () => {};
+  h.context.speakWithRemoteTtsFallback = audio.playback.speakWithRemoteTtsFallback;
+  h.context.stopRemoteTtsPlaybackHelper = audio.playback.stopRemoteTtsPlayback;
+  h.context.stopRemoteTtsPlayback = () => h.run("stopRemoteTtsPlayback");
+  h.context.cancelPendingTts = (closed = false) => h.run("cancelPendingTts", closed);
+  h.context.speakSingleUtterance = (...args: unknown[]) => h.run("speakSingleUtterance", ...args);
+  h.context.speakAssistantResponse = (...args: unknown[]) => h.run("speakAssistantResponse", ...args);
+  h.context.submitRecordedSimulationTurn = h.context.generateAssistantReply = h.context.createOpeningLine = () => { throw Error("Retry must not generate conversation text"); };
+  return audio;
+}
+
+test("actual inactive/foreground speech retry uses a fresh loaded player, preserves one transcript and never generates another AI turn", async () => {
+  const h = screenHarness(); await h.run("startSession"); const audio = attachActualSpeech(h);
+  const message = h.startup.messages[0];
+  h.context.activeAssistantSpeechRef.current = { message, committed: true };
+  h.context.appStateRef.current = "active"; h.context.modeRef.current = "speaking";
+  const speech = h.run("speakAssistantResponse", message.content);
+  const cancelled = assert.rejects(speech, h.context.isSimulationLifecycleInterruptedError);
+  await flush(); audio.sounds[0].emit({ playing: true });
+  await h.run("handleSimulationAppStateChange", "inactive"); await cancelled;
+  h.context.activeAssistantSpeechRef.current = null;
+  assert.equal(audio.sounds[0].removed, 1);
+  await h.run("handleSimulationAppStateChange", "active");
+  assert.equal(audio.sounds.length, 1, "foreground must not auto-play");
+  const resume = h.run("resumeLifecyclePausedTurn"); await flush();
+  const fresh = audio.sounds[1]; assert.equal(fresh.plays, 1);
+  fresh.emit({ playing: true }); fresh.emit({ playing: false, didJustFinish: true }); await resume;
+  assert.equal(audio.fetches(), 2, "two speech syntheses, no new conversational generation");
+  assert.equal(h.startup.messages.length, 1); assert.equal(h.startup.messages[0].id, message.id);
+  assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1); assert.equal(h.events.capture, 2);
+  assert.equal(h.startup.serviceRecovery.scoringBlocked, false);
+});
+
+test("actual native speech failure enters Retry AI Voice, then a successful replay preserves confirmed-text score eligibility", async () => {
+  const h = screenHarness(); await h.run("startSession"); const audio = attachActualSpeech(h);
+  const message = h.startup.messages[0];
+  h.context.lifecycleResumeIntentRef.current = { kind: "replay_assistant", assistantMessageId: message.id, assistantText: message.content, assistantMessageCommitted: true };
+  h.context.lifecyclePauseReasonRef.current = "background";
+  const failed = h.run("resumeLifecyclePausedTurn"); await flush();
+  audio.sounds[0].emit({ playing: true });
+  audio.sounds[0].emit({ playing: false, error: "PRIVATE_NATIVE_TEXT_SENTINEL" }); await failed;
+  assert.equal(h.context.lifecyclePauseReasonRef.current, "tts_recovery");
+  assert.match(h.state.setError, /AI voice playback stopped/); assert.equal(h.events.capture, 1);
+  assert.equal(h.startup.serviceRecovery.scoringBlocked, false);
+  const retry = h.run("resumeLifecyclePausedTurn"); await flush();
+  audio.sounds[1].emit({ playing: true }); audio.sounds[1].emit({ playing: false, didJustFinish: true }); await retry;
+  assert.equal(h.startup.messages.length, 1); assert.equal(h.events.capture, 2);
+  for (let i = 0; i < 3; i++) {
+    h.context.appendMessage({ id: `confirmed-${i}`, role: "user", content: "Previously confirmed learner response" });
+  }
+  await h.run("completeSessionAndScore", true);
+  const complete = completionHarness(); await complete.complete(h.events.completions[0], h.events.histories[0]);
+  assert.equal(complete.calls.scoring, 1); assert.equal(complete.calls.usage, 1);
+  assert.doesNotMatch(JSON.stringify(audio.logs), /PRIVATE_NATIVE_TEXT_SENTINEL/);
+});
+
+test("End during actual resumed speech releases audio; late player events cannot resurrect playback or completion", async () => {
+  const h = screenHarness(); await h.run("startSession"); const audio = attachActualSpeech(h);
+  const message = h.startup.messages[0];
+  h.context.lifecycleResumeIntentRef.current = { kind: "replay_assistant", assistantMessageId: message.id, assistantText: message.content, assistantMessageCommitted: true };
+  h.context.lifecyclePauseReasonRef.current = "tts_recovery";
+  const replay = h.run("resumeLifecyclePausedTurn"); await flush(); audio.sounds[0].emit({ playing: true });
+  await h.run("completeSessionAndScore", true); await replay;
+  const state = { ...h.state };
+  audio.sounds[0].emit({ playing: true, didJustFinish: true }); await flush();
+  assert.deepEqual(h.state, state); assert.equal(h.events.capture, 1);
+  assert.equal(h.events.completions.length, 1); assert.equal(audio.sounds[0].removed, 1);
+  assert.equal(h.events.completions[0].scoringBlocked, false, "stopping known audio does not discard a confirmed exchange");
+  assert.equal(h.startup.messages.length, 1);
+});
 
 const failure = (status: number, code: string | null = null, message = "Safe service failure") => new errors.MobileApiError(message, status, code);
 
