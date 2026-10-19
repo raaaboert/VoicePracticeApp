@@ -97,9 +97,9 @@ test("the simulation preserves a submitted turn for lifecycle recovery", () => {
   assert.match(simulationScreenSource, /getMissingSubmittedTurnMessages\(\s*messagesRef\.current/);
 });
 
-test("ending and scoring waits for an explicitly submitted turn before snapshotting history", () => {
+test("scored completion waits for settlement before snapshotting history, while deliberate unscored End can interrupt", () => {
   const completionStart = simulationScreenSource.indexOf("const completeSessionAndScore = useCallback");
-  const settlementAwait = simulationScreenSource.indexOf("await settleSimulationBeforeCompletion({", completionStart);
+  const settlementAwait = simulationScreenSource.indexOf("await Promise.race([settleSimulationBeforeCompletion({", completionStart);
   const historySnapshot = simulationScreenSource.indexOf("const completedHistory = [...messagesRef.current];", completionStart);
   const endSession = simulationScreenSource.indexOf("await endSession(false);", historySnapshot);
   const scoreCompletion = simulationScreenSource.indexOf("onSessionComplete(completedHistory", completionStart);
@@ -109,6 +109,7 @@ test("ending and scoring waits for an explicitly submitted turn before snapshott
   assert.ok(historySnapshot > settlementAwait);
   assert.ok(endSession > historySnapshot);
   assert.ok(scoreCompletion > endSession);
+  assert.match(simulationScreenSource, /if \(!endingWithoutScoreRef.current\) await Promise.race/);
 });
 
 test("End Session waits for an in-flight resume recovery before history can be scored", async () => {

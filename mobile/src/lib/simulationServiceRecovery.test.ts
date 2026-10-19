@@ -33,6 +33,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   const startup = createSimulationStartupCoordinator();
   const events = { registrations: 0, openings: 0, capture: 0, stopped: 0, cancelled: 0, completions: [] as SessionTiming[], histories: [] as DialogueMessage[][], exits: [] as string[] };
   const state: Record<string, any> = {};
+  class LifecycleInterrupted extends Error {}
   const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified,
     startup, config: { simulationSessionId: "same-session", scenario: { id: "scenario", segmentId: "role", title: "Scenario" },
       maxSimulationMinutes: 20, difficulty: "medium", personaStyle: "skeptical" },
@@ -52,7 +53,8 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
     startListeningTurn: async () => { events.capture++; }, stopRecordingSafely: async () => { events.stopped++; },
     cancelPendingTts: async () => { events.cancelled++; }, getErrorMessage: (error: Error, fallback: string) => error.message || fallback,
     onOrganizationAccessRequired: () => { throw Error("unexpected organization redirect"); },
-    isSessionGenerationCurrent: () => true, isSimulationLifecycleInterruptedError: () => false,
+    SimulationLifecycleInterruptedError: LifecycleInterrupted,
+    isSimulationLifecycleInterruptedError: (error: unknown) => error instanceof LifecycleInterrupted,
     isAssistantSpeechIncompleteError: () => false,
     clearLifecyclePause: () => { context.lifecyclePauseReasonRef.current = null; },
     endSession: async () => { startup.conversationClosed = true; }, onExit: (message: string) => events.exits.push(message),
@@ -64,6 +66,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   context.serviceRecoveryRef.current = startup.serviceRecovery;
   context.messagesRef.current = startup.messages;
   context.startSimulationAttemptRef.current = 0; context.sessionLifecycleGenerationRef.current = 0;
+  context.submittedRecordingInstanceIdsRef.current = new Set();
   for (const setter of new Set(screen.match(/\bset[A-Z]\w+/g))) context[setter] = (value: unknown) => { state[setter] = value; };
   context.storePendingOpeningPayload = (payload: any) => {
     context.pendingOpeningLineRef.current = payload.assistantText;
@@ -78,8 +81,13 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   context.pauseForServiceFailure = (error: unknown, phase: string) => callback(screen, "pauseForServiceFailure", context)(error, phase);
   context.discardClearedSubmittedTurn = () => callback(screen, "discardClearedSubmittedTurn", context)();
   context.settlePendingSubmittedTurnRecovery = (params: unknown) => callback(screen, "settlePendingSubmittedTurnRecovery", context)(params);
+  context.isSessionGenerationCurrent = (generation: number) => callback(screen, "isSessionGenerationCurrent", context)(generation);
+  context.isForegroundSessionGenerationCurrent = (generation: number) => callback(screen, "isForegroundSessionGenerationCurrent", context)(generation);
+  context.clearLifecyclePause = (now?: number) => callback(screen, "clearLifecyclePause", context)(now);
+  context.abortActiveTurnRequests = () => callback(screen, "abortActiveTurnRequests", context)();
+  context.clearTurnMonitoring = () => callback(screen, "clearTurnMonitoring", context)();
+  context.endSession = (show: boolean) => callback(screen, "endSession", context)(show);
   context.assertForegroundSessionGenerationCurrent = () => startup.assertConversationAvailable();
-  context.isForegroundSessionGenerationCurrent = () => true;
   return { startup, events, state, context, run: (name: string, ...args: unknown[]) => callback(screen, name, context)(...args) };
 }
 
@@ -185,6 +193,185 @@ function addInterruptedTurn(h: ReturnType<typeof screenHarness>) {
   h.context.submitRecordedSimulationTurn = h.context.generateAssistantReply = () => { throw Error("must not re-POST the interrupted turn"); };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test("lost submit and repeated 504s can explicitly End Without Score once, without another recovery read", async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  h.context.messagesRef.current.splice(h.context.messagesRef.current.length - 1, 0,
+    { id: "confirmed-user-3", role: "user", content: "Earlier confirmed third response" },
+    { id: "confirmed-ai-3", role: "assistant", content: "Earlier confirmed third reply" });
+  const deadline = h.startup.absoluteDeadlineMs;
+  await h.run("pauseForServiceFailure", new TypeError("Network request failed"), "turn");
+  let reads = 0;
+  h.context.awaitSubmittedSimulationTurnReply = async ({ correlationId }: { correlationId: string }) => {
+    assert.equal(correlationId, "original-turn"); reads++; throw awaitTimeout();
+  };
+  await h.run("resumeLifecyclePausedTurn"); await h.run("resumeLifecyclePausedTurn");
+  assert.equal(reads, 2); assert.equal(h.events.capture, 1);
+  await Promise.all([h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true)]);
+  assert.equal(reads, 2, "End must not request another 75-second await");
+  assert.equal(h.events.completions.length, 1); assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1);
+  assert.equal(h.events.completions[0].scoringBlocked, true);
+  assert.equal(h.context.pendingUnifiedTurnRecoveryRef.current, null);
+  assert.ok(h.events.stopped >= 2); assert.ok(h.events.cancelled >= 2);
+  assert.equal(h.startup.absoluteDeadlineMs, deadline);
+  assert.equal(h.startup.completionDelivered, true); assert.equal(h.startup.conversationClosed, true);
+  assert.equal(h.events.histories[0].some((m) => m.id === "discarded-user"), false);
+  assert.deepEqual(h.events.histories[0].map((m) => m.id), ["message-1", "confirmed-user-1", "confirmed-ai-1", "confirmed-user-2", "confirmed-ai-2", "confirmed-user-3", "confirmed-ai-3"]);
+  const completed = completionHarness();
+  await completed.complete(h.events.completions[0], h.events.histories[0]);
+  await completed.complete(h.events.completions[0], h.events.histories[0]);
+  assert.equal(completed.calls.usage, 1); assert.equal(completed.calls.scoring, 0); assert.equal(completed.calls.recovered, 0);
+  assert.equal(completed.state.setScorecard, null);
+});
+
+test("network recovery failure can end with a usage attempt, and offline usage is never acknowledged as saved", async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  await h.run("pauseForServiceFailure", new TypeError("Network request failed"), "turn");
+  let reads = 0;
+  h.context.awaitSubmittedSimulationTurnReply = async () => { reads++; throw new TypeError("Network request failed"); };
+  await h.run("resumeLifecyclePausedTurn"); await h.run("completeSessionAndScore", true);
+  assert.equal(reads, 1); assert.equal(h.events.completions.length, 1);
+  const usage = deferred<{ entitlements: object }>();
+  const completed = completionHarness({ usage: () => usage.promise });
+  await completed.complete(h.events.completions[0], h.events.histories[0]);
+  assert.equal(completed.calls.usage, 1); assert.equal(completed.state.setEntitlements, undefined);
+  usage.reject(new TypeError("Network request failed")); await new Promise((r) => setImmediate(r));
+  assert.equal(completed.state.setEntitlements, undefined);
+  assert.equal(completed.calls.scoring, 0); assert.equal(completed.state.setScorecard, null);
+  assert.match(completed.state.setScorecardError, /Network request failed/);
+  assert.doesNotMatch(completed.state.setScorecardError, /success|saved|recorded/i);
+  await completed.complete(h.events.completions[0], h.events.histories[0]);
+  assert.equal(completed.calls.usage, 1, "duplicate completion must not replay usage submission");
+});
+
+test("unscored completion applies usage acknowledgement only after the server response", async () => {
+  const usage = deferred<{ entitlements: object }>();
+  const completed = completionHarness({ usage: () => usage.promise });
+  await completed.complete({ ...timing, scoringBlocked: true });
+  assert.equal(completed.calls.usage, 1); assert.equal(completed.state.setEntitlements, undefined);
+  assert.equal(completed.calls.scoring, 0); assert.equal(completed.state.setScorecard, null);
+  usage.resolve({ entitlements: { dailyUsedSeconds: 60 } }); await new Promise((r) => setImmediate(r));
+  assert.deepEqual(completed.state.setEntitlements, { dailyUsedSeconds: 60 });
+});
+
+for (const late of ["reply", "504", "401", "session_expired", "session_completed"] as const) {
+  test(`End during an in-flight recovery ignores late ${late} without state resurrection`, { timeout: 3_000 }, async () => {
+    const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+    await h.run("pauseForServiceFailure", failure(503, "ai_unavailable"), "turn");
+    const response = deferred<unknown>(); const entered = deferred<void>();
+    let signal: AbortSignal | undefined; let reads = 0;
+    h.context.awaitSubmittedSimulationTurnReply = (params: { signal: AbortSignal }) => {
+      reads++; signal = params.signal; entered.resolve(); return response.promise; // Deliberately ignores abort.
+    };
+    const resume = h.run("resumeLifecyclePausedTurn"); await entered.promise;
+    await Promise.all([h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true)]);
+    assert.equal(signal?.aborted, true); assert.equal(h.events.completions.length, 1);
+    assert.equal(h.events.capture, 1); assert.equal(reads, 1);
+    const finalState = { ...h.state }; const finalHistory = [...h.startup.messages];
+    if (late === "reply") response.resolve({ outcome: "assistant_reply", transcriptText: "Late learner text", assistantText: "Late AI text" });
+    else response.reject(late === "504" ? awaitTimeout() : late === "401" ? failure(401) : failure(409, late));
+    await resume;
+    assert.deepEqual(h.state, finalState, "even late errors must not overwrite the finalized UI");
+    assert.deepEqual(h.startup.messages, finalHistory);
+    assert.equal(h.context.pendingUnifiedTurnRecoveryRef.current, null);
+    assert.equal(h.startup.completionDelivered, true); assert.equal(h.startup.serviceRecovery.scoringBlocked, true);
+    await h.run("completeSessionAndScore", true); await h.run("startListeningTurn");
+    assert.equal(h.events.completions.length, 1); assert.equal(h.events.capture, 1);
+  });
+}
+
+test("75 seconds of unresolved recovery and earlier paused time do not count as practice on explicit End", { timeout: 3_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 9, 19, 12) });
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  const deadline = h.startup.absoluteDeadlineMs;
+  t.mock.timers.tick(60_000);
+  await h.run("pauseForServiceFailure", new TypeError("Network request failed"), "turn");
+  t.mock.timers.tick(30_000);
+  const response = deferred<unknown>(); const entered = deferred<void>();
+  h.context.awaitSubmittedSimulationTurnReply = () => { entered.resolve(); return response.promise; };
+  const resume = h.run("resumeLifecyclePausedTurn"); await entered.promise;
+  t.mock.timers.tick(75_000); // No real sleep, and no provider completion.
+  await h.run("completeSessionAndScore", true);
+  assert.equal(h.events.completions.length, 1);
+  assert.equal(h.events.completions[0].rawDurationSeconds, 60);
+  assert.equal(h.startup.absoluteDeadlineMs, deadline);
+  response.reject(awaitTimeout()); await resume;
+  assert.equal(h.events.completions.length, 1);
+});
+
+test("successful reconciliation excludes the wait but preserves real resumed voice time as practice", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 9, 19, 12) });
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  t.mock.timers.tick(60_000); await h.run("pauseForServiceFailure", failure(503), "turn");
+  t.mock.timers.tick(30_000);
+  h.context.awaitSubmittedSimulationTurnReply = async () => {
+    t.mock.timers.tick(75_000);
+    return { outcome: "assistant_reply", transcriptText: "Real learner response", assistantText: "Real AI reply" };
+  };
+  h.context.speakAssistantResponse = async (_text: string, _time: number, start: () => void) => { start(); t.mock.timers.tick(10_000); };
+  await h.run("resumeLifecyclePausedTurn"); await h.run("completeSessionAndScore", true);
+  assert.equal(h.events.completions[0].rawDurationSeconds, 70);
+  assert.equal(h.events.completions[0].scoringBlocked, false);
+});
+
+test("explicit End releases an already-running completion wait, including a deadline-driven recovery", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  const response = deferred<unknown>(); const entered = deferred<void>();
+  h.context.awaitSubmittedSimulationTurnReply = () => { entered.resolve(); return response.promise; };
+  const complete = () => h.run("completeSessionAndScore");
+  h.context.completeSessionRef.current = { startup: h.startup, run: complete };
+  h.context.requestConversationCompletion = (serverEnded = false) => h.run("requestConversationCompletion", serverEnded);
+  h.startup.absoluteDeadlineMs = Date.now() - 1;
+  await h.run("startListeningTurn"); await entered.promise;
+  assert.equal(h.context.sessionCompletionInProgressRef.current, true);
+  await Promise.all([h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true)]);
+  assert.equal(h.events.completions.length, 1); assert.equal(h.events.completions[0].scoringBlocked, true);
+  assert.equal(h.events.capture, 1); assert.equal(h.startup.completionDelivered, true);
+  response.reject(awaitTimeout()); await new Promise((r) => setImmediate(r));
+  assert.equal(h.events.completions.length, 1);
+});
+
+test("unmount during recovery cannot change screen state, insert late text, or restart capture", async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  await h.run("pauseForServiceFailure", failure(503), "turn");
+  const response = deferred<unknown>(); const entered = deferred<void>();
+  h.context.awaitSubmittedSimulationTurnReply = () => { entered.resolve(); return response.promise; };
+  const resume = h.run("resumeLifecyclePausedTurn"); await entered.promise;
+  h.context.unmountedRef.current = true; h.context.sessionLifecycleGenerationRef.current++;
+  const state = { ...h.state }; const history = [...h.startup.messages];
+  response.resolve({ outcome: "assistant_reply", transcriptText: "Late text", assistantText: "Late reply" }); await resume;
+  assert.deepEqual(h.state, state); assert.deepEqual(h.startup.messages, history);
+  assert.equal(h.events.capture, 1); assert.equal(h.events.completions.length, 0);
+});
+
+test("unmount releases an automatic completion wait without starting new recovery or delivering completion", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  const response = deferred<unknown>(); const entered = deferred<void>();
+  h.context.awaitSubmittedSimulationTurnReply = () => { entered.resolve(); return response.promise; };
+  const completing = h.run("completeSessionAndScore"); await entered.promise;
+  h.context.unmountedRef.current = true; h.context.sessionLifecycleGenerationRef.current++;
+  h.context.interruptCompletionWaitRef.current();
+  await completing;
+  const state = { ...h.state };
+  response.reject(awaitTimeout()); await new Promise((r) => setImmediate(r));
+  assert.deepEqual(h.state, state); assert.equal(h.events.completions.length, 0); assert.equal(h.events.capture, 1);
+  assert.match(screen, /unmountedRef.current = true;[\s\S]*?interruptCompletionWaitRef.current\?\.\(\)/);
+});
+
+test("audio cleanup rejection cannot prevent stopping capture and completing deliberate End without a score", async () => {
+  const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
+  h.context.cancelPendingTts = async () => { throw Error("native playback already disposed"); };
+  await h.run("completeSessionAndScore", true);
+  assert.equal(h.events.stopped, 1); assert.equal(h.events.completions.length, 1);
+  assert.equal(h.events.completions[0].scoringBlocked, true);
+});
+
 test("503 then settled recovery 410 offers explicit Record Again, removes only provisional evidence, and replacement remains scoreable", async () => {
   const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
   await h.run("pauseForServiceFailure", failure(503, "ai_unavailable"), "turn");
@@ -214,7 +401,8 @@ test("503 then settled recovery 410 offers explicit Record Again, removes only p
     reads++; assert.equal(correlationId, "replacement-turn");
     return { outcome: "assistant_reply", transcriptText: "New confirmed replacement response", assistantText: "New confirmed server reply" };
   };
-  await Promise.all([h.run("completeSessionAndScore"), h.run("completeSessionAndScore")]);
+  await h.run("settlePendingSubmittedTurnRecovery", { sessionLifecycleGeneration: h.context.sessionLifecycleGenerationRef.current, replayAssistant: false });
+  await Promise.all([h.run("completeSessionAndScore", true), h.run("completeSessionAndScore", true)]);
   assert.equal(reads, 2); assert.equal(h.events.completions.length, 1);
   assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1);
   const evidence = h.events.histories[0];
@@ -317,16 +505,19 @@ test("safe discard does not remove an independent prior scoring block, and block
   await h.run("pauseForServiceFailure", clearedTurn(), "turn");
   assert.equal(h.startup.serviceRecovery.scoringBlocked, true);
   assert.match(screen, /label: "Record Again"/);
-  assert.match(screen, /serviceRecoveryRef.current.scoringBlocked \|\| pendingUnifiedTurnRecoveryRef.current\s*\? "End Session" : "End Session and Score"/);
+  assert.match(screen, /serviceRecoveryRef.current.scoringBlocked \|\| hasUnresolvedSubmittedTurn\s*\? "End Without Score" : "End Session and Score"/);
+  assert.match(screen, /void completeSessionAndScore\(true\)/);
 });
 
-test("End Session receiving settled 410 scores only earlier confirmed turns, without recording or poisoning eligibility", async () => {
+test("explicit End after settled 410 scores only earlier confirmed turns, without recording or poisoning eligibility", async () => {
   const h = screenHarness(); await h.run("startSession"); addInterruptedTurn(h);
   h.context.appendMessage({ id: "confirmed-user-3", role: "user", content: "Earlier third confirmed response" });
   h.context.appendMessage({ id: "confirmed-ai-3", role: "assistant", content: "Earlier third server reply" });
   await h.run("pauseForServiceFailure", failure(503), "turn");
   h.context.awaitSubmittedSimulationTurnReply = async () => { throw clearedTurn(); };
-  await h.run("completeSessionAndScore");
+  await h.run("resumeLifecyclePausedTurn");
+  assert.equal(h.startup.serviceRecovery.failure?.retry, "record_again");
+  await h.run("completeSessionAndScore", true);
   assert.equal(h.events.completions.length, 1); assert.equal(h.events.capture, 1);
   assert.equal(h.events.completions[0].scoringBlocked, false);
   const scored = completionHarness(); await scored.complete(h.events.completions[0], h.events.histories[0]);
@@ -399,7 +590,7 @@ test("audio cancellation failure cannot prevent stopping capture or displaying t
   assert.equal(h.events.capture, 1);
 });
 
-test("failed completion recovery preserves its submitted turn and only manual completion retries the recovery read", async () => {
+test("automatic completion preserves unresolved work; explicit End can abandon it instead of requiring another read", async () => {
   const h = screenHarness(); await h.run("startSession");
   h.context.pendingUnifiedTurnRecoveryRef.current = { correlationId: "original-turn", userMessage: null, assistantMessage: null };
   let recoveryReads = 0;
@@ -410,6 +601,9 @@ test("failed completion recovery preserves its submitted turn and only manual co
   assert.ok(h.startup.serviceRecovery.failure, "deadline timer must stay paused on this failure");
   await h.run("completeSessionAndScore"); assert.equal(recoveryReads, 2);
   assert.equal(h.events.completions.length, 0); assert.equal(h.events.registrations, 1);
+  await h.run("completeSessionAndScore", true);
+  assert.equal(recoveryReads, 2); assert.equal(h.events.completions.length, 1);
+  assert.equal(h.events.completions[0].scoringBlocked, true);
 });
 
 test("transcription-only network failure permits an explicit new capture without retrying any AI turn", async () => {
@@ -452,7 +646,7 @@ for (const code of ["session_expired", "session_completed"]) {
   });
 }
 
-function completionHarness() {
+function completionHarness(options: { usage?: () => Promise<{ entitlements: object }> } = {}) {
   const calls = { usage: 0, scoring: 0, recovered: 0, scoredHistory: [] as DialogueMessage[] };
   const state: Record<string, any> = {};
   const context: Record<string, any> = { ...scoring, ...recovery, user: { id: "learner" }, mobileAuthToken: "auth", apiConfigured: true,
@@ -460,7 +654,8 @@ function completionHarness() {
     buildScorecardSupportDiagnostics: () => ({}), getMissingUsageRecordFields: () => [],
     createSimulationCorrelationId: interaction.createSimulationCorrelationId,
     DIFFICULTY_LABELS: { medium: "Medium" }, PERSONA_LABELS: { skeptical: "Skeptical" },
-    recordUsageSession: async () => { calls.usage++; return { entitlements: {} }; },
+    recordUsageSession: async () => { calls.usage++; return options.usage ? options.usage() : { entitlements: {} }; },
+    getErrorMessage: (error: Error, fallback: string) => error.message || fallback,
     evaluateSimulation: async (params: { history: DialogueMessage[] }) => { calls.scoring++; calls.scoredHistory = params.history;
       return { status: "scored", scorecard: { overallScore: 84 }, record: {} }; },
     recoverPersistedAiScore: async () => { calls.recovered++; return null; }, submitAutoErrorReport: async () => {},

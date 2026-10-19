@@ -608,6 +608,8 @@ export function SimulationScreen({
   const recognizedStartRegisteredRef = useRef(false);
   const turnLoopReadyRef = useRef(false);
   const sessionCompletionInProgressRef = useRef(false);
+  const endingWithoutScoreRef = useRef(false);
+  const interruptCompletionWaitRef = useRef<(() => void) | null>(null);
   const completeSessionRef = useRef<{ startup: SimulationStartupCoordinator; run: () => Promise<void> } | null>(null);
   const autoErrorReportByKeyRef = useRef(new Map<string, number>());
   const serviceRecoveryRef = useRef(startup.serviceRecovery);
@@ -657,7 +659,9 @@ export function SimulationScreen({
     turnLoopReadyRef.current = false;
     if (serverEnded) pendingUnifiedTurnRecoveryRef.current = null;
     setError(null);
-    setStatus("Session ended. Finishing and recovering your score...");
+    setStatus(endingWithoutScoreRef.current || serviceRecoveryRef.current.scoringBlocked
+      ? "Session ended without a scorecard. Finalizing usage..."
+      : "Session ended. Finishing and recovering your score...");
     // Do not await this from inside a turn/recovery: completion first waits for
     // that very settlement. The coordinator serializes all completion signals.
     void completion.run();
@@ -3193,7 +3197,9 @@ export function SimulationScreen({
 
       continueLoop = isForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
     } catch (turnError) {
-      if (isSimulationSessionEndedError(turnError)) {
+      if (!isSessionGenerationCurrent(sessionLifecycleGeneration)) {
+        continueLoop = false;
+      } else if (isSimulationSessionEndedError(turnError)) {
         continueLoop = false;
         requestConversationCompletion(true);
       } else if (isOrganizationAccessRequiredError(turnError)) {
@@ -3311,7 +3317,7 @@ export function SimulationScreen({
         pendingUnifiedTurnRecoveryRef.current = null;
       }
 
-      if (continueLoop && !unmountedRef.current) {
+      if (continueLoop && isSessionGenerationCurrent(sessionLifecycleGeneration)) {
         logSimulationTiming({
           correlationId,
           phase: "turn_transition_to_capture",
@@ -3321,7 +3327,7 @@ export function SimulationScreen({
           },
         });
         void startListeningTurn(captureRetryStatus);
-      } else if (!unmountedRef.current) {
+      } else if (isSessionGenerationCurrent(sessionLifecycleGeneration)) {
         setMode("idle");
       }
       resolveActiveTurnSettlement();
@@ -3347,6 +3353,7 @@ export function SimulationScreen({
   };
 
   const pauseForServiceFailure = async (failureError: unknown, phase: "transcription" | "turn") => {
+    const generation = sessionLifecycleGenerationRef.current;
     if (isExpiredSubmittedTurnAwait(failureError)) discardClearedSubmittedTurn();
     const failure = isExpiredSubmittedTurnAwait(failureError) && serviceRecoveryRef.current.failure?.retry === "record_again"
       ? serviceRecoveryRef.current.failure
@@ -3355,9 +3362,10 @@ export function SimulationScreen({
     lifecyclePauseReasonRef.current = "service_failure";
     setLifecyclePauseActive(true);
     await Promise.allSettled([cancelPendingTts(), stopRecordingSafely("audio_error")]);
+    if (!isSessionGenerationCurrent(generation)) return failure;
     setMode("idle");
     setError(failure.message);
-    setStatus(failure.retry === "submitted" ? "Conversation paused. Resume Turn checks the submitted response without sending it again."
+    setStatus(failure.retry === "submitted" ? "Resume Turn checks the original response without sending it again. End Without Score finishes now without a scorecard."
       : failure.retry === "record_again" ? "Conversation paused. Tap Record Again when you are ready; recording will not start automatically."
       : failure.retry === "recording" ? "Conversation paused. Resume Turn starts a new recording."
       : "Conversation paused. End the session or return to Setup; the last response cannot be safely replayed.");
@@ -3824,8 +3832,7 @@ export function SimulationScreen({
     setIsResumingLifecyclePause(false);
     openingTtsInProgressRef.current = false;
     abortActiveTurnRequests();
-    await cancelPendingTts(true);
-    await stopRecordingSafely("session_end");
+    await Promise.allSettled([cancelPendingTts(true), stopRecordingSafely("session_end")]);
     submittedRecordingInstanceIdsRef.current.clear();
 
     if (showEndedText) {
@@ -3871,6 +3878,9 @@ export function SimulationScreen({
     sessionLifecycleGeneration: number;
     replayAssistant: boolean;
   }): Promise<void> => {
+    if (!isSessionGenerationCurrent(params.sessionLifecycleGeneration)) {
+      throw new SimulationLifecycleInterruptedError();
+    }
     if (activeSubmittedTurnRecoveryRef.current) {
       await activeSubmittedTurnRecoveryRef.current;
       return;
@@ -3922,6 +3932,10 @@ export function SimulationScreen({
             return;
           }
         } catch (recoveryError) {
+          // End/unmount invalidates this request even if the transport ignores abort.
+          if (!isSessionGenerationCurrent(params.sessionLifecycleGeneration)) {
+            throw new SimulationLifecycleInterruptedError();
+          }
           if (isExpiredSubmittedTurnAwait(recoveryError)) discardClearedSubmittedTurn();
           if (isSimulationSessionEndedError(recoveryError)) {
             // Conversation closure is not confirmation of this pending exchange.
@@ -3967,6 +3981,9 @@ export function SimulationScreen({
       }
 
       const assistantTextReceivedAtMs = Date.now();
+      assertForegroundSessionGenerationCurrent(params.sessionLifecycleGeneration);
+      // Once reconciled, listening to the real reply is practice time again.
+      clearLifecyclePause(Date.now());
       setStatus("Restarting the interrupted AI response...");
       await prepareIosPlaybackAudioMode(recoveryCorrelationId, "resume_submitted_turn");
       assertForegroundSessionGenerationCurrent(params.sessionLifecycleGeneration);
@@ -4008,10 +4025,30 @@ export function SimulationScreen({
     }
   };
 
-  const completeSessionAndScore = useCallback(async () => {
-    if ((!sessionActiveRef.current && !startup.registered) || sessionCompletionInProgressRef.current || startup.completionDelivered) {
+  const completeSessionAndScore = useCallback(async (abandonPendingTurn = false) => {
+    if (unmountedRef.current || (!sessionActiveRef.current && !startup.registered) || startup.completionDelivered) {
       return;
     }
+
+    const pending = pendingUnifiedTurnRecoveryRef.current;
+    if (abandonPendingTurn && pending && !pending.assistantMessage && !endingWithoutScoreRef.current) {
+      // A deliberate End is not evidence that the server operation failed.
+      // Close only the client conversation and finalize real usage without scoring.
+      endingWithoutScoreRef.current = true;
+      serviceRecoveryRef.current.scoringBlocked = true;
+      sessionLifecycleGenerationRef.current += 1;
+      simulationClosedRef.current = true;
+      startup.conversationClosed = true;
+      messagesRef.current = messagesRef.current.filter((message) => message.id !== pending.userMessage?.id);
+      startup.messages = messagesRef.current;
+      setMessages(messagesRef.current);
+      pendingUnifiedTurnRecoveryRef.current = null;
+      lifecycleResumeIntentRef.current = null;
+      abortActiveTurnRequests();
+      // Release an existing completion wait without relying on fetch honoring abort.
+      interruptCompletionWaitRef.current?.();
+    }
+    if (sessionCompletionInProgressRef.current && !endingWithoutScoreRef.current) return;
 
     if (!startup.startedAt) {
       await endSession(false);
@@ -4024,13 +4061,16 @@ export function SimulationScreen({
       sessionCompletionInProgressRef.current = true;
       turnLoopReadyRef.current = false;
       try {
-        if (activeTurnSettlementRef.current) {
+        if (endingWithoutScoreRef.current) {
+          setStatus("Ending without a scorecard. The interrupted response remains unconfirmed.");
+        } else if (activeTurnSettlementRef.current) {
           setStatus("Finishing your submitted response...");
         } else if (activeSubmittedTurnRecoveryRef.current || pendingUnifiedTurnRecoveryRef.current) {
           setStatus("Recovering your submitted response before scoring...");
         }
         try {
-          await settleSimulationBeforeCompletion({
+          const interrupted = new Promise<void>((resolve) => { interruptCompletionWaitRef.current = resolve; });
+          if (!endingWithoutScoreRef.current) await Promise.race([settleSimulationBeforeCompletion({
             getActiveTurnSettlement: () => activeTurnSettlementRef.current,
             getActiveRecoverySettlement: () => activeSubmittedTurnRecoveryRef.current,
             hasPendingRecovery: () => pendingUnifiedTurnRecoveryRef.current !== null,
@@ -4041,32 +4081,38 @@ export function SimulationScreen({
                 replayAssistant: false,
               });
             },
-          });
+          }), interrupted]);
         } catch (recoveryError) {
-          if (isOrganizationAccessRequiredError(recoveryError)) {
-            onOrganizationAccessRequired();
-            return;
+          if (!endingWithoutScoreRef.current) {
+            if (isOrganizationAccessRequiredError(recoveryError)) {
+              onOrganizationAccessRequired();
+              return;
+            }
+            if (isSimulationLifecycleInterruptedError(recoveryError)) {
+              return;
+            }
+            if (pendingUnifiedTurnRecoveryRef.current) {
+              await pauseForServiceFailure(recoveryError, "turn");
+              if (!endingWithoutScoreRef.current) {
+                logSimulationTiming({
+                  correlationId: createSimulationCorrelationId(config.simulationSessionId, "end-session-recovery"),
+                  phase: "submitted_turn_recovery_before_score_failed",
+                  details: {
+                    message: getErrorMessage(recoveryError, "Could not recover the submitted response before scoring."),
+                  },
+                });
+                setError(`${serviceRecoveryRef.current.failure?.message ?? "Your submitted response could not be recovered."} Resume Turn retries recovery. End Without Score finishes without a scorecard.`);
+                setStatus("Resume the original response, or end without a scorecard.");
+                return;
+              }
+            }
           }
-          if (isSimulationLifecycleInterruptedError(recoveryError)) {
-            return;
-          }
-          if (pendingUnifiedTurnRecoveryRef.current) {
-            await pauseForServiceFailure(recoveryError, "turn");
-            logSimulationTiming({
-              correlationId: createSimulationCorrelationId(config.simulationSessionId, "end-session-recovery"),
-              phase: "submitted_turn_recovery_before_score_failed",
-              details: {
-                message: getErrorMessage(recoveryError, "Could not recover the submitted response before scoring."),
-              },
-            });
-            setError(`${serviceRecoveryRef.current.failure?.message ?? "Your submitted response could not be recovered."} End Session retries recovery without sending your response again.`);
-            setStatus("Submitted response recovery is required before scoring.");
-            return;
-          }
-          // The transcript/reply was already committed; speech replay failure
-          // cannot make the completed response ineligible for scoring.
+          // A committed exchange survives a speech replay failure. A deliberate
+          // abandonment instead finishes below with scoring explicitly blocked.
+        } finally {
+          interruptCompletionWaitRef.current = null;
         }
-        if (completeSessionRef.current?.startup !== startup) return;
+        if (unmountedRef.current || completeSessionRef.current?.startup !== startup) return;
         const endedAt = new Date();
         // Exclude a currently paused background interval from usage as well as
         // intervals already adjusted on resume. This never changes the deadline.
@@ -4078,7 +4124,7 @@ export function SimulationScreen({
         );
         const completedHistory = [...messagesRef.current];
         await endSession(false);
-        if (completeSessionRef.current?.startup !== startup) return;
+        if (unmountedRef.current || completeSessionRef.current?.startup !== startup) return;
         sessionStartedAtRef.current = null;
         setElapsedSeconds(rawDurationSeconds);
         startup.deliverCompletion(() => onSessionComplete(completedHistory, config, {
@@ -4096,7 +4142,7 @@ export function SimulationScreen({
         sessionCompletionInProgressRef.current = false;
       }
     });
-  }, [config, onSessionComplete, onExit, startup, clearLifecyclePause]);
+  }, [config, onSessionComplete, onExit, startup, clearLifecyclePause, abortActiveTurnRequests]);
   completeSessionRef.current = { startup, run: completeSessionAndScore };
 
   const resumeLifecyclePausedTurn = async () => {
@@ -4135,6 +4181,8 @@ export function SimulationScreen({
       pendingUnifiedTurnRecoveryRef.current || activeSubmittedTurnRecoveryRef.current,
     );
     clearLifecyclePause(Date.now());
+    // Reconciliation is still paused time, not additional practice time.
+    if (hadSubmittedTurnRecovery) lifecyclePauseStartedAtRef.current = Date.now();
 
     try {
       if (interruptedTurnSettlement) {
@@ -4147,6 +4195,8 @@ export function SimulationScreen({
           sessionLifecycleGeneration,
           replayAssistant: true,
         });
+        assertForegroundSessionGenerationCurrent(sessionLifecycleGeneration);
+        clearLifecyclePause(Date.now());
         serviceRecoveryRef.current.recovered();
         if (lifecycleResumeIntentRef.current === resumeIntent) {
           lifecycleResumeIntentRef.current = null;
@@ -4213,6 +4263,7 @@ export function SimulationScreen({
       serviceRecoveryRef.current.recovered();
       await startListeningTurn();
     } catch (resumeError) {
+      if (!isSessionGenerationCurrent(sessionLifecycleGeneration)) return;
       if (isSimulationSessionEndedError(resumeError)) {
         requestConversationCompletion(true);
         return;
@@ -4251,7 +4302,7 @@ export function SimulationScreen({
             message: getErrorMessage(resumeError, "Could not recover the submitted response."),
           },
         });
-        lifecyclePauseStartedAtRef.current = Date.now();
+        lifecyclePauseStartedAtRef.current ??= Date.now();
         lifecyclePauseReasonRef.current = "background";
         setLifecyclePauseActive(true);
         setMode("idle");
@@ -4279,7 +4330,7 @@ export function SimulationScreen({
       await startListeningTurn();
     } finally {
       lifecycleResumeInProgressRef.current = false;
-      if (!unmountedRef.current) {
+      if (isSessionGenerationCurrent(sessionLifecycleGeneration)) {
         setIsResumingLifecyclePause(false);
       }
     }
@@ -4441,6 +4492,8 @@ export function SimulationScreen({
       setIsInitializing(true);
       messagesRef.current = [...startup.messages];
       serviceRecoveryRef.current = startup.serviceRecovery;
+      endingWithoutScoreRef.current = false;
+      interruptCompletionWaitRef.current = null;
       if (serviceRecoveryRef.current.failure?.retry === "submitted") {
         // The pending in-screen request is no longer available after a remount.
         // Never start a fresh turn in place of an unconfirmed submitted request.
@@ -4545,6 +4598,8 @@ export function SimulationScreen({
       simulationClosedRef.current = true;
       sessionActiveRef.current = false;
       sessionLifecycleGenerationRef.current += 1;
+      interruptCompletionWaitRef.current?.();
+      interruptCompletionWaitRef.current = null;
       openingPrefetchPromiseRef.current = null;
       openingPrefetchGenerationRef.current = null;
       startSimulationInProgressRef.current = false;
@@ -4671,7 +4726,8 @@ export function SimulationScreen({
     lifecyclePauseActive,
     retryFeedback: actionDockRetryFeedback,
   });
-  const endButtonDisabled = isInitializing || !sessionActive || sessionCompletionInProgressRef.current;
+  const hasUnresolvedSubmittedTurn = Boolean(pendingUnifiedTurnRecoveryRef.current && !pendingUnifiedTurnRecoveryRef.current.assistantMessage);
+  const endButtonDisabled = isInitializing || !sessionActive || (sessionCompletionInProgressRef.current && !hasUnresolvedSubmittedTurn);
   const hintText = localTestMode
     ? "Local test mode: replies are mocked. Tap Submit Response when you finish speaking."
     : isInitializing
@@ -5102,12 +5158,12 @@ export function SimulationScreen({
                 endButtonDisabled ? styles.secondaryActionDisabled : null,
               ]}
               onPress={() => {
-                void completeSessionAndScore();
+                void completeSessionAndScore(true);
               }}
               disabled={endButtonDisabled}
             >
-              <Text style={styles.secondaryActionButtonText}>{serviceRecoveryRef.current.scoringBlocked || pendingUnifiedTurnRecoveryRef.current
-                ? "End Session" : "End Session and Score"}</Text>
+              <Text style={styles.secondaryActionButtonText}>{serviceRecoveryRef.current.scoringBlocked || hasUnresolvedSubmittedTurn
+                ? "End Without Score" : "End Session and Score"}</Text>
             </Pressable>
           ) : null}
         </View>
