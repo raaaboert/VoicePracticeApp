@@ -1166,6 +1166,7 @@ export interface OrgAccountsExportResponse {
 }
 
 export interface UsageSessionRecord {
+  usageSource?: "client_completed" | "server_abandoned" | null;
   id: string;
   userId: string;
   orgId: string | null;
@@ -1228,6 +1229,16 @@ export interface SimulationSessionRecord {
   status: SimulationSessionStatus;
   usageRecordedAt?: string | null;
   usageSessionRecordId?: string | null;
+  /** Conservative exchange-gap estimate, not continuous speaking/listening time. */
+  confirmedActivity?: {
+    firstAt: string;
+    lastAt: string;
+    seconds: number;
+    exchangeKeys: string[];
+    maxSeconds: number;
+    settleAfter: string;
+  } | null;
+  usageSource?: "client_completed" | "server_abandoned" | null;
 }
 
 export const SIMULATION_COMPLETION_LEVELS = ["inconclusive", "partial", "complete"] as const;

@@ -63,6 +63,7 @@ interface UsageSessionRow {
   raw_duration_seconds: number | string;
   billed_seconds_added: number | string | null;
   created_at: string | Date;
+  usage_source?: UsageSessionRecord["usageSource"];
 }
 
 function buildUsageSessionFilePath(dbPath: string): string {
@@ -148,6 +149,7 @@ function normalizeUsageSessionRecord(candidate: unknown): UsageSessionRecord | n
     startedAt,
     endedAt,
     rawDurationSeconds,
+    usageSource: (candidate as UsageSessionRecord).usageSource ?? null,
     billedSecondsAdded: billedSecondsAdded ?? undefined,
     createdAt
   };
@@ -264,7 +266,7 @@ async function ensureParentDirectory(filePath: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
 
-function mapUsageSessionRow(row: UsageSessionRow): UsageSessionRecord | null {
+export function mapUsageSessionRow(row: UsageSessionRow): UsageSessionRecord | null {
   return normalizeUsageSessionRecord({
     id: row.id,
     userId: row.user_id,
@@ -279,6 +281,7 @@ function mapUsageSessionRow(row: UsageSessionRow): UsageSessionRecord | null {
     endedAt: row.ended_at,
     rawDurationSeconds: row.raw_duration_seconds,
     billedSecondsAdded: row.billed_seconds_added,
+    usageSource: row.usage_source,
     createdAt: row.created_at
   });
 }
@@ -588,11 +591,11 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             ended_at,
             raw_duration_seconds,
             billed_seconds_added,
-            created_at
+            created_at, usage_source
           )
           VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz
+            $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz, $15
           )
           ON CONFLICT (id) DO NOTHING
           RETURNING
@@ -609,7 +612,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             ended_at,
             raw_duration_seconds,
             billed_seconds_added,
-            created_at
+            created_at, usage_source
         `,
         [
           normalized.id,
@@ -625,7 +628,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           normalized.endedAt,
           normalized.rawDurationSeconds,
           normalized.billedSecondsAdded ?? null,
-          normalized.createdAt
+          normalized.createdAt, normalized.usageSource ?? null
         ]
       );
 
@@ -725,6 +728,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
               created_at TIMESTAMPTZ NOT NULL
             );
 
+            ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS usage_source TEXT NULL;
             ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
             ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS scenario_version_id TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_user_id ON usage_sessions (user_id);
@@ -762,7 +766,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           ended_at,
           raw_duration_seconds,
           billed_seconds_added,
-          created_at
+          created_at, usage_source
         FROM usage_sessions
         ORDER BY created_at ASC, ended_at ASC, id ASC
       `
@@ -809,11 +813,11 @@ async function upsertUsageSessionRow(
         ended_at,
         raw_duration_seconds,
         billed_seconds_added,
-        created_at
+        created_at, usage_source
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz
+        $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz, $15
       )
       ON CONFLICT (id) DO UPDATE
         SET user_id = EXCLUDED.user_id,
@@ -828,7 +832,7 @@ async function upsertUsageSessionRow(
             ended_at = EXCLUDED.ended_at,
             raw_duration_seconds = EXCLUDED.raw_duration_seconds,
             billed_seconds_added = EXCLUDED.billed_seconds_added,
-            created_at = EXCLUDED.created_at
+            created_at = EXCLUDED.created_at, usage_source = EXCLUDED.usage_source
     `,
     [
       record.id,
@@ -844,7 +848,7 @@ async function upsertUsageSessionRow(
       record.endedAt,
       record.rawDurationSeconds,
       record.billedSecondsAdded ?? null,
-      record.createdAt
+      record.createdAt, record.usageSource ?? null
     ]
   );
 }

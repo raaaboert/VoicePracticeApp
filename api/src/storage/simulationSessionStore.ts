@@ -2,8 +2,10 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { Pool } from "pg";
 
-import { SimulationSessionRecord } from "@voicepractice/shared";
+import { SimulationSessionRecord, UsageSessionRecord } from "@voicepractice/shared";
 
+import { applyConfirmedActivity, type ConfirmedActivityParams } from "../services/simulationActivity.js";
+import { mapUsageSessionRow } from "./usageSessionStore.js";
 import { StorageProvider } from "../runtimeConfig.js";
 import { parseSimulationSessionIndustrySnapshot } from "../services/simulationSessionIndustrySnapshot.js";
 
@@ -28,7 +30,27 @@ export interface SimulationSessionIndustrySelectionLockParams {
   lockedAt: string;
 }
 
+export interface SessionUsageSettlement {
+  simulationSessionId: string;
+  userId: string;
+  orgId: string | null;
+  source: "client_completed" | "server_abandoned";
+  now: Date;
+  notBefore?: Date;
+  buildRecord(session: SimulationSessionRecord): UsageSessionRecord | null;
+  appendFile(record: UsageSessionRecord): Promise<{ created: boolean; record: UsageSessionRecord }>;
+}
+export interface AccountableSessionQuery {
+  userId?: string;
+  orgId?: string | null;
+  expiredBefore?: Date;
+  limit?: number;
+}
+
 export interface SimulationSessionStore {
+  recordConfirmedActivity(params: ConfirmedActivityParams): Promise<void>;
+  listAccountableSessions(query: AccountableSessionQuery): Promise<SimulationSessionRecord[]>;
+  settleUsage(params: SessionUsageSettlement): Promise<{ created: boolean; record: UsageSessionRecord } | null>;
   initialize(): Promise<void>;
   getById(simulationSessionId: string): Promise<SimulationSessionRecord | null>;
   listSessions(): Promise<SimulationSessionRecord[]>;
@@ -71,6 +93,8 @@ interface SimulationSessionRow {
   status: string;
   usage_recorded_at: string | Date | null;
   usage_session_record_id: string | null;
+  confirmed_activity: SimulationSessionRecord["confirmedActivity"];
+  usage_source: SimulationSessionRecord["usageSource"];
 }
 
 function buildSimulationSessionFilePath(dbPath: string): string {
@@ -147,6 +171,8 @@ function normalizeSimulationSessionRecord(candidate: unknown): SimulationSession
     serverStartedAt,
     lastSeenAt,
     status,
+    confirmedActivity: (candidate as SimulationSessionRecord).confirmedActivity ?? null,
+    usageSource: (candidate as SimulationSessionRecord).usageSource ?? null,
     usageRecordedAt: normalizeIsoString((candidate as { usageRecordedAt?: unknown }).usageRecordedAt) ?? undefined,
     usageSessionRecordId: normalizeNullableString(
       (candidate as { usageSessionRecordId?: unknown }).usageSessionRecordId
@@ -171,6 +197,8 @@ function mapSimulationSessionRow(row: SimulationSessionRow): SimulationSessionRe
     lastSeenAt: row.last_seen_at,
     status: row.status,
     usageRecordedAt: row.usage_recorded_at,
+    confirmedActivity: row.confirmed_activity,
+    usageSource: row.usage_source,
     usageSessionRecordId: row.usage_session_record_id
   });
 }
@@ -286,6 +314,15 @@ async function ensureParentDirectory(filePath: string): Promise<void> {
 }
 
 abstract class BaseSimulationSessionStore implements SimulationSessionStore {
+  abstract recordConfirmedActivity(params: ConfirmedActivityParams): Promise<void>;
+  abstract settleUsage(params: SessionUsageSettlement): Promise<{ created: boolean; record: UsageSessionRecord } | null>;
+  async listAccountableSessions(query: AccountableSessionQuery): Promise<SimulationSessionRecord[]> {
+    return (await this.listSessions()).filter(s => s.status === "started" && s.confirmedActivity
+      && (!query.userId || s.userId === query.userId)
+      && (query.orgId === undefined || s.orgId === query.orgId)
+      && (!query.expiredBefore || Date.parse(s.confirmedActivity.settleAfter) <= query.expiredBefore.getTime()))
+      .slice(0, query.limit ?? Infinity);
+  }
   abstract initialize(): Promise<void>;
   abstract getById(simulationSessionId: string): Promise<SimulationSessionRecord | null>;
   abstract listSessions(): Promise<SimulationSessionRecord[]>;
@@ -354,6 +391,43 @@ class FileSimulationSessionStore extends BaseSimulationSessionStore {
       nextRecords.push(nextRecord);
       await this.savePayload({ records: normalizeSimulationSessionCollection(nextRecords) });
       return nextRecord;
+    });
+  }
+
+  async recordConfirmedActivity(params: ConfirmedActivityParams): Promise<void> {
+    await this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      const record = payload.records.find(s => s.simulationSessionId === params.simulationSessionId);
+      if (!record) return;
+      const next = applyConfirmedActivity(record, params);
+      if (next === record) return;
+      await this.savePayload({ records: payload.records.map(s => s === record ? next : s) });
+    });
+  }
+
+  async settleUsage(p: SessionUsageSettlement): Promise<{ created: boolean; record: UsageSessionRecord } | null> {
+    return this.withLock(async () => {
+      await this.ensureInitialized();
+      const payload = await this.loadPayload();
+      const session = payload.records.find(s => s.simulationSessionId === p.simulationSessionId);
+      if (!session || session.userId !== p.userId || session.orgId !== p.orgId) return null;
+      if (session.status === "started" && session.confirmedActivity && p.notBefore && p.now < p.notBefore) {
+        const confirmedActivity = { ...session.confirmedActivity, settleAfter: p.notBefore.toISOString() };
+        await this.savePayload({ records: payload.records.map(s => s === session ? { ...s, confirmedActivity } : s) });
+        return null;
+      }
+      const record = p.buildRecord(session);
+      if (!record) return null;
+      // File mode is append-first: deterministic identity heals a crash between
+      // the two file replacements on retry. Hosted PostgreSQL is atomic below.
+      const result = await p.appendFile({ ...record, usageSource: p.source });
+      const next = { ...applyUsageRecorded(session, { simulationSessionId: p.simulationSessionId,
+        usageRecordedAt: p.now.toISOString(), usageSessionRecordId: result.record.id,
+        lastSeenAt: p.source === "client_completed" ? p.now.toISOString() : session.lastSeenAt }),
+        usageSource: session.usageSource ?? result.record.usageSource ?? (result.created ? p.source : "client_completed") };
+      await this.savePayload({ records: payload.records.map(s => s === session ? next : s) });
+      return result;
     });
   }
 
@@ -608,7 +682,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           last_seen_at,
           status,
           usage_recorded_at,
-          usage_session_record_id
+          usage_session_record_id, confirmed_activity, usage_source
         FROM simulation_sessions
         WHERE simulation_session_id = $1
       `,
@@ -637,7 +711,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           last_seen_at,
           status,
           usage_recorded_at,
-          usage_session_record_id
+          usage_session_record_id, confirmed_activity, usage_source
         FROM simulation_sessions
         ORDER BY server_started_at ASC, simulation_session_id ASC
       `
@@ -717,6 +791,80 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
       ]
     );
     return (await this.getById(nextRecord.simulationSessionId)) ?? nextRecord;
+  }
+
+  async listAccountableSessions(q: AccountableSessionQuery): Promise<SimulationSessionRecord[]> {
+    await this.ensureTable();
+    const result = await this.pool.query<SimulationSessionRow>(`
+      SELECT * FROM simulation_sessions WHERE status = 'started' AND confirmed_activity IS NOT NULL
+        AND ($1::text IS NULL OR user_id = $1)
+        AND ($2::boolean = false OR org_id IS NOT DISTINCT FROM $3::text)
+        AND ($4::timestamptz IS NULL OR activity_settle_after <= $4)
+      ORDER BY activity_settle_after, simulation_session_id LIMIT $5`,
+      [q.userId ?? null, q.orgId !== undefined, q.orgId ?? null, q.expiredBefore?.toISOString() ?? null, q.limit ?? null]);
+    return result.rows.map(mapSimulationSessionRow).filter((s): s is SimulationSessionRecord => s !== null);
+  }
+
+  async recordConfirmedActivity(p: ConfirmedActivityParams): Promise<void> {
+    await this.ensureTable();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const rows = await client.query<SimulationSessionRow>("SELECT * FROM simulation_sessions WHERE simulation_session_id=$1 FOR UPDATE", [p.simulationSessionId]);
+      const session = rows.rows[0] && mapSimulationSessionRow(rows.rows[0]);
+      if (session) {
+        const next = applyConfirmedActivity(session, p);
+        if (next !== session) await client.query(`UPDATE simulation_sessions
+          SET confirmed_activity=$2::jsonb, activity_settle_after=$3::timestamptz
+          WHERE simulation_session_id=$1`, [p.simulationSessionId, JSON.stringify(next.confirmedActivity), next.confirmedActivity!.settleAfter]);
+      }
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  }
+
+  async settleUsage(p: SessionUsageSettlement): Promise<{ created: boolean; record: UsageSessionRecord } | null> {
+    await this.ensureTable();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const rows = await client.query<SimulationSessionRow>("SELECT * FROM simulation_sessions WHERE simulation_session_id=$1 FOR UPDATE", [p.simulationSessionId]);
+      const session = rows.rows[0] && mapSimulationSessionRow(rows.rows[0]);
+      if (!session || session.userId !== p.userId || session.orgId !== p.orgId) { await client.query("COMMIT"); return null; }
+      if (session.status === "usage_recorded") {
+        const existing = await client.query("SELECT * FROM usage_sessions WHERE id=$1", [session.usageSessionRecordId]);
+        if (!existing.rows[0]) throw new SimulationSessionConflictError("Finalized usage record is missing.");
+        await client.query("COMMIT");
+        return { created: false, record: mapUsageSessionRow(existing.rows[0])! };
+      }
+      if (session.confirmedActivity && p.notBefore && p.now < p.notBefore) {
+        // A later organization maximum can extend the existing runtime deadline.
+        // Move this candidate back in the due index rather than starving a batch.
+        const confirmedActivity = { ...session.confirmedActivity, settleAfter: p.notBefore.toISOString() };
+        await client.query("UPDATE simulation_sessions SET confirmed_activity=$2::jsonb, activity_settle_after=$3 WHERE simulation_session_id=$1",
+          [p.simulationSessionId, JSON.stringify(confirmedActivity), p.notBefore.toISOString()]);
+        await client.query("COMMIT"); return null;
+      }
+      const r = p.buildRecord(session);
+      if (!r) { await client.query("COMMIT"); return null; }
+      const inserted = await client.query(`INSERT INTO usage_sessions
+        (id,user_id,org_id,division_id,segment_id,scenario_id,scenario_version_id,training_id,training_pack_id,
+         started_at,ended_at,raw_duration_seconds,billed_seconds_added,created_at,usage_source)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO NOTHING RETURNING *`,
+        [r.id,r.userId,r.orgId,r.divisionId ?? null,r.segmentId,r.scenarioId,r.scenarioVersionId ?? null,
+         r.trainingId ?? null,r.trainingPackId ?? null,r.startedAt,r.endedAt,r.rawDurationSeconds,r.billedSecondsAdded ?? null,r.createdAt,p.source]);
+      const existing = inserted.rows[0] ?? (await client.query("SELECT * FROM usage_sessions WHERE id=$1", [r.id])).rows[0];
+      const record = mapUsageSessionRow(existing)!;
+      if (record.userId !== session.userId || record.orgId !== session.orgId) throw new SimulationSessionConflictError("Usage ownership mismatch.");
+      await client.query(`UPDATE simulation_sessions SET status='usage_recorded', usage_recorded_at=$2,
+        usage_session_record_id=$3, usage_source=COALESCE(usage_source,$4),
+        last_seen_at=CASE WHEN $4='client_completed' THEN GREATEST(last_seen_at,$2::timestamptz) ELSE last_seen_at END
+        WHERE simulation_session_id=$1`,
+        [p.simulationSessionId,p.now.toISOString(),record.id,record.usageSource ?? (inserted.rows.length ? p.source : "client_completed")]);
+      await client.query("COMMIT");
+      return { created: inserted.rows.length > 0, record };
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   }
 
   async lockIndustrySelection(params: SimulationSessionIndustrySelectionLockParams): Promise<SimulationSessionRecord | null> {
@@ -865,6 +1013,13 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               usage_session_record_id TEXT NULL
             );
 
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS confirmed_activity JSONB NULL;
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS activity_settle_after TIMESTAMPTZ NULL;
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS usage_source TEXT NULL;
+            CREATE INDEX IF NOT EXISTS idx_simulation_sessions_activity_due
+              ON simulation_sessions (activity_settle_after) WHERE status='started' AND confirmed_activity IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_simulation_sessions_activity_org
+              ON simulation_sessions (org_id, user_id) WHERE status='started' AND confirmed_activity IS NOT NULL;
             ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_user_id ON simulation_sessions (user_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_org_id ON simulation_sessions (org_id);
@@ -885,6 +1040,8 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
 }
 
 class UnsupportedSimulationSessionStore extends BaseSimulationSessionStore {
+  async recordConfirmedActivity(): Promise<void> { throw new Error("Simulation session storage provider is not supported."); }
+  async settleUsage(): Promise<null> { throw new Error("Simulation session storage provider is not supported."); }
   async initialize(): Promise<void> {
     throw new Error("Simulation session storage provider is not supported.");
   }

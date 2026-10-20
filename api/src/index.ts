@@ -458,6 +458,8 @@ import {
 } from "./services/mobileScoreRecovery.js";
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
+import { confirmedExchangeKey } from "./services/simulationActivity.js";
+import { settleAbandonedSimulationBatch, newSessionUsageAccess, scheduleAbandonedSimulationSettlement, usageAccessSnapshot } from "./services/abandonedSimulationUsage.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
 import {
   findEmployeeIdConflict,
@@ -1410,6 +1412,28 @@ function listMissingUsageSessionFields(params: {
   return requiredFields
     .filter((entry) => typeof entry.value !== "string" || !entry.value.trim())
     .map((entry) => entry.field);
+}
+
+async function confirmSimulationExchangeBestEffort(p: {
+  sessionId: string | null; userId: string; orgId: string | null;
+  kind: "opening" | "turn"; history?: readonly { role: string; content: string }[]; maxMinutes: number | null;
+}): Promise<void> {
+  if (!p.sessionId) return;
+  try {
+    await simulationSessionStore.recordConfirmedActivity({ simulationSessionId: p.sessionId,
+      userId: p.userId, orgId: p.orgId, exchangeKey: confirmedExchangeKey(p.kind, p.history),
+      confirmedAt: nowIso(), maxSimulationMinutes: p.maxMinutes });
+  } catch (error) {
+    logWarnThrottled("simulation-activity:checkpoint", JSON.stringify({ stage: "confirmed_activity_write_failed", ...safeErrorDiagnostics(error) }));
+  }
+}
+
+async function reconcileAbandonedSimulationUsage(db: ApiDatabase, userId?: string): Promise<void> {
+  await settleAbandonedSimulationBatch({ store: simulationSessionStore, usage: usageSessionAccess, db,
+    userId, now: new Date(), maxMinutes: session => {
+      const org = session.orgId ? getOrgById(db, session.orgId) : null;
+      return org ? normalizeMaxSimulationMinutes(org.maxSimulationMinutes) : null;
+    }, timeZone: id => resolveTimeZone(getUserById(db, id)?.timezone) });
 }
 
 async function touchRecognizedSimulationSessionBestEffort(params: {
@@ -11413,15 +11437,34 @@ function resolveTierDefinition(db: ApiDatabase, tierId: string): TierDefinition 
   );
 }
 
+async function computeSimulationEntitlements(
+  db: ApiDatabase, user: UserProfile, now: Date, options: { actingOrgId?: string | null; allowDuringActiveSimulation?: boolean },
+  sessionId: string | null,
+): Promise<UserEntitlementsResponse> {
+  const session = sessionId ? await simulationSessionStore.getById(sessionId) : null;
+  if (!session || session.userId !== user.id || session.orgId !== (options.actingOrgId ?? user.orgId)
+    || session.status !== "started") return computeEntitlements(db, user, now, options);
+  const org = session.orgId ? getOrgById(db, session.orgId) : null;
+  try { assertSimulationSessionLifetime(session, org ? normalizeMaxSimulationMinutes(org.maxSimulationMinutes) : null, now, "conversation"); }
+  catch { return computeEntitlements(db, user, now, options); }
+  // Newly settled estimates cannot interrupt a previously admitted session.
+  // Actual client completions and all identity/lifetime/grace rules still apply.
+  const start = Date.parse(session.serverStartedAt);
+  const accountingUsage = usageAccessSnapshot(listUsageSessions(db).filter(r =>
+    r.usageSource !== "server_abandoned" || Date.parse(r.createdAt) < start));
+  return computeEntitlements(db, user, now, { ...options, accountingUsage });
+}
+
 function computeEntitlements(
   db: ApiDatabase,
   user: UserProfile,
   now: Date,
-  options?: { allowDuringActiveSimulation?: boolean; actingOrgId?: string | null }
+  options?: { allowDuringActiveSimulation?: boolean; actingOrgId?: string | null; accountingUsage?: ReturnType<typeof createUsageSessionAccess> }
 ): UserEntitlementsResponse {
   const timezone = materializeUserTimezone(user, now);
   const tierDefinition = resolveTierDefinition(db, user.tier);
-  const usage = computeUserUsage(db, user, now, timezone);
+  const accountingUsage = options?.accountingUsage ?? usageSessionAccess;
+  const usage = accountingUsage.computeUserUsageSnapshot(db, { userId: user.id, now, timeZone: timezone });
   const org = getOrgById(db, isSuperUser(user) ? options?.actingOrgId ?? null : user.orgId);
 
   let dailySecondsLimit: number | null = tierDefinition.dailySecondsLimit;
@@ -11462,7 +11505,7 @@ function computeEntitlements(
       lockReason = "Select an enterprise account environment.";
       dailySecondsRemaining = 0;
     } else {
-      const orgUsage = resolveOrgUsageForCurrentBillingCycle(db, org, now);
+      const orgUsage = resolveOrgUsageForCurrentBillingCycle(db, org, now, accountingUsage);
       maxSimulationMinutes = normalizeMaxSimulationMinutes(org.maxSimulationMinutes);
       orgMonthlySecondsAllotted = orgUsage.allottedSeconds;
       orgBillingPeriodStartAt = orgUsage.periodStartAt;
@@ -11489,7 +11532,7 @@ function computeEntitlements(
           : effectiveOrgPerUserDailySecondsCap;
       perUserDailySecondsCap = Math.max(0, userDailyCapBase + user.manualBonusSeconds);
       maxSimulationMinutes = normalizeMaxSimulationMinutes(org.maxSimulationMinutes);
-      const orgUsage = resolveOrgUsageForCurrentBillingCycle(db, org, now);
+      const orgUsage = resolveOrgUsageForCurrentBillingCycle(db, org, now, accountingUsage);
       orgMonthlySecondsAllotted = orgUsage.allottedSeconds;
       orgBillingPeriodStartAt = orgUsage.periodStartAt;
       orgBillingPeriodEndAt = orgUsage.periodEndAt;
@@ -11499,7 +11542,7 @@ function computeEntitlements(
       orgUsagePercentThisPeriod = orgUsage.usagePercent;
       nextRenewalAt = orgUsage.nextRenewalAt;
 
-      const dailyOverageAllowance = resolveUserDailyOverageAllowance(db, user, now);
+      const dailyOverageAllowance = resolveUserDailyOverageAllowance(db, user, now, accountingUsage);
       userDailyOverageAllowed = dailyOverageAllowance.active;
       userDailyOverageMode = dailyOverageAllowance.mode;
       userDailyOverageExtraSecondsGranted = dailyOverageAllowance.extraSecondsGranted;
@@ -11760,7 +11803,7 @@ function buildTemporaryDailyOverageGrant(params: {
   };
 }
 
-function resolveUserDailyOverageAllowance(db: ApiDatabase, user: UserProfile, now: Date): {
+function resolveUserDailyOverageAllowance(db: ApiDatabase, user: UserProfile, now: Date, accountingUsage = usageSessionAccess): {
   active: boolean;
   expiresAt: string | null;
   mode: TemporaryDailyOverageMode | null;
@@ -11814,7 +11857,7 @@ function resolveUserDailyOverageAllowance(db: ApiDatabase, user: UserProfile, no
   }
 
   const finiteUsage = calculateFiniteDailyOverageUsage({
-    sessions: listUsageSessions(db, { userId: user.id }),
+    sessions: accountingUsage.list(db, { userId: user.id }),
     userId: user.id,
     timeZone: materializeUserTimezone(user, now),
     grantStartedAt: startedAt.toISOString(),
@@ -11833,7 +11876,8 @@ function resolveUserDailyOverageAllowance(db: ApiDatabase, user: UserProfile, no
 function resolveOrgUsageForCurrentBillingCycle(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  now: Date
+  now: Date,
+  accountingUsage = usageSessionAccess
 ): {
   periodStartAt: string;
   periodEndAt: string;
@@ -11843,7 +11887,7 @@ function resolveOrgUsageForCurrentBillingCycle(
   remainingSeconds: number;
   usagePercent: number;
 } {
-  const snapshot = buildOrgUsageSnapshot(db, org, now);
+  const snapshot = buildOrgUsageSnapshot(db, org, now, accountingUsage);
   const remainingSeconds = Math.max(0, snapshot.allottedSeconds - snapshot.usedSeconds);
   const usagePercent = snapshot.allottedSeconds > 0 ? (snapshot.usedSeconds / snapshot.allottedSeconds) * 100 : 0;
   return {
@@ -12576,8 +12620,8 @@ function resolveOrgBillingAnchorAt(org: EnterpriseOrg, now: Date): string {
   return now.toISOString();
 }
 
-function buildOrgUsageSnapshot(db: ApiDatabase, org: EnterpriseOrg, now: Date): OrgUsageSnapshot {
-  return usageSessionAccess.buildOrgUsageSnapshot(db, {
+function buildOrgUsageSnapshot(db: ApiDatabase, org: EnterpriseOrg, now: Date, accountingUsage = usageSessionAccess): OrgUsageSnapshot {
+  return accountingUsage.buildOrgUsageSnapshot(db, {
     orgId: org.id,
     billingAnchorAt: resolveOrgBillingAnchorAt(org, now),
     allottedMinutes: normalizeMonthlyMinutesAllotted(
@@ -22875,10 +22919,10 @@ app.post(
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date(), {
+    const entitlements = await computeSimulationEntitlements(db, user, new Date(), {
       allowDuringActiveSimulation: true,
       actingOrgId: accessContext.actingOrgId
-    });
+    }, normalizeSimulationSessionId(request.body?.simulationSessionId));
     if (!entitlements.canStartSimulation) {
       respondWithEntitlementDenial(response, entitlements);
       return null;
@@ -23100,10 +23144,10 @@ app.post(
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date(), {
+    const entitlements = await computeSimulationEntitlements(db, user, new Date(), {
       allowDuringActiveSimulation: true,
       actingOrgId: resolvedAccessContext.actingOrgId,
-    });
+    }, simulationSessionId);
     if (!entitlements.canStartSimulation) {
       respondWithEntitlementDenial(response, entitlements);
       return null;
@@ -23376,6 +23420,8 @@ app.post(
       },
     });
 
+    await confirmSimulationExchangeBestEffort({ sessionId: simulationSessionId, userId: accessContext.userId,
+      orgId: accessContext.actingOrgId, kind: "turn", history: turnHistory, maxMinutes: accessContext.maxSimulationMinutes });
     const assistantPayload: PendingUnifiedSubmitTurnResult = {
       outcome: "assistant_reply",
       transcriptText,
@@ -23801,10 +23847,10 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       return null;
     }
 
-    const entitlements = computeEntitlements(db, user, new Date(), {
+    const entitlements = await computeSimulationEntitlements(db, user, new Date(), {
       allowDuringActiveSimulation: true,
       actingOrgId: accessContext.actingOrgId
-    });
+    }, normalizeSimulationSessionId(body.simulationSessionId));
     if (!entitlements.canStartSimulation) {
       respondWithTtsError({
         status: 403,
@@ -24399,9 +24445,9 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
         return null;
       }
 
-      const entitlements = computeEntitlements(db, user, new Date(), {
+      const entitlements = await computeSimulationEntitlements(db, user, new Date(), {
         actingOrgId: accessContext.actingOrgId,
-      });
+      }, simulationSessionId);
       if (!entitlements.canStartSimulation) {
         respondWithEntitlementDenial(response, entitlements);
         return null;
@@ -24529,6 +24575,8 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
       promise: speechPrefetchPromise,
     });
 
+    await confirmSimulationExchangeBestEffort({ sessionId: simulationSessionId, userId: context.user.id,
+      orgId: context.actingOrgId, kind: "opening", maxMinutes: context.maxSimulationMinutes });
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({
       assistantText,
@@ -24767,10 +24815,10 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
         return null;
       }
 
-      const entitlements = computeEntitlements(db, user, new Date(), {
+      const entitlements = await computeSimulationEntitlements(db, user, new Date(), {
         allowDuringActiveSimulation: true,
         actingOrgId: accessContext.actingOrgId
-      });
+      }, recognizedSessionId);
       if (!entitlements.canStartSimulation) {
         respondWithEntitlementDenial(response, entitlements);
         return null;
@@ -24869,6 +24917,8 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
       },
     });
 
+    await confirmSimulationExchangeBestEffort({ sessionId: recognizedSessionId, userId: context.user.id,
+      orgId: context.actingOrgId, kind: "turn", history, maxMinutes: context.maxSimulationMinutes });
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({
       assistantText: turnResult.assistantText,
@@ -27332,9 +27382,13 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
     }
     const canonicalTrainingId = assignmentLaunch?.trainingId ?? resolvedScenario.canonicalTrainingId;
 
-    const entitlements = computeEntitlements(db, user, new Date(), {
-      actingOrgId: accessContext.actingOrgId,
-    });
+    // Existing-session retries never acquire new admission or include estimates.
+    if (!prior) await reconcileAbandonedSimulationUsage(db, user.id);
+    const accountingUsage = !prior ? await newSessionUsageAccess({ store: simulationSessionStore,
+      usage: usageSessionAccess, db, userId: user.id, orgId: accessContext.actingOrgId, now: new Date() }) : undefined;
+    const entitlements = prior
+      ? await computeSimulationEntitlements(db, user, new Date(), { actingOrgId: accessContext.actingOrgId }, simulationSessionId)
+      : computeEntitlements(db, user, new Date(), { actingOrgId: accessContext.actingOrgId, accountingUsage });
     if (!entitlements.canStartSimulation) {
       respondWithEntitlementDenial(response, entitlements);
       return;
@@ -28444,6 +28498,10 @@ export async function startApiServer(): Promise<void> {
     console.log(`VoicePractice API running on http://localhost:${PORT} (storage=${STORAGE_PROVIDER})`);
   });
   scheduleSupportTranscriptExpiration(supportCaseStore, server);
+  scheduleAbandonedSimulationSettlement(async () => {
+    const snapshot = await withFreshDatabaseSnapshotRead(db => db);
+    await reconcileAbandonedSimulationUsage(snapshot);
+  }, server);
   const authCleanupTimer = setInterval(() => {
     void authVerificationStore.purgeExpired().catch(() => logWarn("[auth-verification] expiration cleanup failed."));
   }, 60 * 60_000);

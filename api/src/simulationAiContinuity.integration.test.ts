@@ -38,7 +38,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       status: "active" as const, perUserDailySecondsCap: 3600, monthlyMinutesAllotted: 10000 }));
     const users = orgs.map((org, i) => ({ ...sourceUser, id: `continuity_learner_${i}`, orgId: org.id, orgRole: "user" as const,
       status: "active" as const, emailVerifiedAt: now, email: `continuity-${i}@example.test`, firstName: "Local", lastName: "Learner",
-      mobileProfileReonboardingRequired: false, manualBonusSeconds: 0 }));
+      mobileProfileReonboardingRequired: false, manualBonusSeconds: 0, dailySecondsCapOverride: null }));
     const tokens = ["continuity-local-a", "continuity-local-b"];
     for (let i = 2; i < 9; i++) {
       users.push({ ...users[0]!, id: `continuity_learner_${i}`, email: `continuity-${i}@example.test`, employeeId: `CONTINUITY-${i}` });
@@ -109,6 +109,125 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
     const speech = (id: string, authorization: unknown, speechText = text, actor = 0) => call("ai/tts", { simulationSessionId: id, speechAuthorization: authorization, text: speechText, preset: "female-balanced" }, actor);
     const history = [{ role: "user", content: "Identify the concern." }, { role: "assistant", content: "What next?" },
       { role: "user", content: "Agree an owner." }, { role: "assistant", content: "And then?" }, { role: "user", content: "Review progress tomorrow." }];
+    await t.test("abandoned accounting HTTP: only successful opening/turn exchanges checkpoint; retries, speech, score and failures do not add time", async () => {
+      api.clearRateLimitsForTest(); const id = "accounting_http_activity"; await start(id);
+      failProvider = true;
+      assert.equal((await call("ai/opening", requestContext(id))).status, 503);
+      assert.equal((await db.pool.query("SELECT confirmed_activity FROM simulation_sessions WHERE simulation_session_id=$1", [id])).rows[0].confirmed_activity, null);
+      failProvider = false;
+      assert.equal((await call("ai/opening", requestContext(id))).status, 200);
+      const baseline = new Date(Date.now() - 90_000).toISOString();
+      await db.pool.query(`UPDATE simulation_sessions SET server_started_at=now()-interval '2 minutes',
+        confirmed_activity=jsonb_set(jsonb_set(confirmed_activity,'{firstAt}',to_jsonb($2::text)),'{lastAt}',to_jsonb($2::text))
+        WHERE simulation_session_id=$1`, [id, baseline]);
+      const turn = await call("ai/turn", { ...requestContext(id), history }); assert.equal(turn.status, 200);
+      const reply = await turn.json() as any;
+      const read = async () => (await db.pool.query("SELECT confirmed_activity FROM simulation_sessions WHERE simulation_session_id=$1", [id])).rows[0].confirmed_activity;
+      const confirmed = await read(); assert.equal(confirmed.seconds, 60); assert.equal(confirmed.exchangeKeys.length, 2);
+      assert.equal((await call("ai/turn", { ...requestContext(id), history })).status, 200);
+      assert.deepEqual(await read(), confirmed, "new correlation ID must not turn semantic replay into billable activity");
+      failProvider = true;
+      assert.equal((await call("ai/turn", { ...requestContext(id), history: [...history, { role: "assistant", content: text }, { role: "user", content: "failed new turn" }] })).status, 503);
+      failProvider = false;
+      assert.equal((await speech(id, reply.speechAuthorization)).status, 200);
+      assert.deepEqual(await read(), confirmed);
+      scoring = true;
+      try { assert.equal((await call("ai/score", { ...requestContext(id), history, startedAt: baseline, endedAt: new Date().toISOString() })).status, 201); }
+      finally { scoring = false; }
+      assert.deepEqual(await read(), confirmed, "scoring is not another conversation checkpoint");
+      assert.equal((await call("ai/turn", { ...requestContext(id), history })).status, 409);
+      await db.pool.query("DELETE FROM simulation_sessions WHERE simulation_session_id=$1", [id]);
+    });
+    await t.test("abandoned accounting HTTP: checkpoint database failure preserves a successful reply and conservatively undercounts", async () => {
+      const id = "accounting_http_write_failure"; await start(id);
+      await db.pool.query(`CREATE FUNCTION fail_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.simulation_session_id='accounting_http_write_failure' AND NEW.confirmed_activity IS NOT NULL
+        THEN RAISE EXCEPTION 'mock checkpoint failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON simulation_sessions FOR EACH ROW EXECUTE FUNCTION fail_checkpoint()`);
+      try { assert.equal((await call("ai/opening", requestContext(id))).status, 200); }
+      finally { await db.pool.query("DROP TRIGGER fail_checkpoint ON simulation_sessions; DROP FUNCTION fail_checkpoint()"); }
+      assert.equal((await db.pool.query("SELECT confirmed_activity FROM simulation_sessions WHERE simulation_session_id=$1", [id])).rows[0].confirmed_activity, null);
+      await db.pool.query("DELETE FROM simulation_sessions WHERE simulation_session_id=$1", [id]);
+    });
+    await t.test("abandoned accounting HTTP: unified submit records one checkpoint and recovery reads add none", async () => {
+      api.clearRateLimitsForTest();
+      const id = "accounting_http_unified";
+      await start(id);
+      assert.equal((await call("ai/opening", requestContext(id))).status, 200);
+      const submit = async (responseMode = "transcript_first_v1") => {
+        const form = new FormData();
+        form.append("payload", JSON.stringify({ ...requestContext(id), history, responseMode }));
+        form.append("file", new Blob([new Uint8Array(8192)], { type: "audio/m4a" }), "voice.m4a");
+        return originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/submit-turn`, { method: "POST",
+          headers: { Authorization: `Bearer ${tokens[0]}` }, body: form });
+      };
+      const submitted = await submit(); assert.equal(submitted.status, 200, await submitted.clone().text());
+      const correlationId = submitted.headers.get("X-Correlation-Id")!;
+      const read = async () => (await db.pool.query("SELECT confirmed_activity FROM simulation_sessions WHERE simulation_session_id=$1", [id])).rows[0].confirmed_activity;
+      // Wait for durable success, not a timing guess or an unresolved long poll.
+      for (let attempts = 0; attempts < 100 && (await read()).exchangeKeys.length < 2; attempts++) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const recovered = await call(`ai/submit-turn-await/${correlationId}`);
+      assert.equal(recovered.status, 200, await recovered.clone().text());
+      const checkpoint = await read(); assert.equal(checkpoint.exchangeKeys.length, 2);
+      assert.equal((await call(`ai/submit-turn-await/${correlationId}`)).status, 200);
+      assert.deepEqual(await read(), checkpoint);
+      const duplicate = await submit("complete"); assert.equal(duplicate.status, 200);
+      assert.deepEqual(await read(), checkpoint);
+      await db.pool.query("DELETE FROM simulation_sessions WHERE simulation_session_id=$1", [id]);
+    });
+    await t.test("abandoned accounting HTTP: new admission includes unsettled daily/monthly activity; active sessions keep continuity", async () => {
+      api.clearRateLimitsForTest();
+      const login = await originalFetch(`${base}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: process.env.ADMIN_BOOTSTRAP_PASSWORD }) });
+      assert.equal(login.status, 200); const adminToken = (await login.json() as any).token;
+      const change = (body: unknown) => originalFetch(`${base}/orgs/${orgs[0]!.id}`, { method: "PATCH", headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` }, body: JSON.stringify(body) });
+      const changeUser = (body: unknown) => originalFetch(`${base}/users/${users[0]!.id}`, { method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` }, body: JSON.stringify(body) });
+      const id = "accounting_http_unsettled", ongoing = "accounting_http_ongoing";
+      await start(id); await start(ongoing);
+      assert.equal((await call("ai/opening", requestContext(id))).status, 200);
+      // Deterministically advance confirmed activity instead of sleeping for a minute.
+      await db.pool.query("UPDATE simulation_sessions SET confirmed_activity=jsonb_set(confirmed_activity,'{seconds}','60') WHERE simulation_session_id=$1", [id]);
+      try {
+        assert.equal((await change({ perUserDailySecondsCap: 60 })).status, 200);
+        let denied = await call("simulation-sessions/start", requestContext("accounting_denied_daily"));
+        assert.equal(denied.status, 403, await denied.clone().text());
+        assert.match((await denied.json() as any).error, /daily/i);
+        assert.equal((await changeUser({ dailySecondsCapOverride: 90 })).status, 200);
+        assert.equal((await call("simulation-sessions/start", requestContext("accounting_override"))).status, 201);
+        const overage = await changeUser({ dailySecondsCapOverride: null, allowDailyOverageThisCycle: true,
+          dailyOverageMode: "unlimited", dailyOverageDurationDays: 1 });
+        assert.equal(overage.status, 200, await overage.clone().text());
+        assert.equal((await call("simulation-sessions/start", requestContext("accounting_overage"))).status, 201);
+        assert.equal((await changeUser({ allowDailyOverageThisCycle: false })).status, 200);
+        assert.equal((await call("ai/opening", requestContext(ongoing))).status, 200, "unsettled estimates do not interrupt an existing simulation");
+        assert.equal((await change({ perUserDailySecondsCap: 3600, monthlyMinutesAllotted: 1 })).status, 200);
+        denied = await call("simulation-sessions/start", requestContext("accounting_denied_month"));
+        assert.equal(denied.status, 403, await denied.clone().text());
+        assert.match((await denied.json() as any).error, /monthly/i);
+        const otherLearner = await call("simulation-sessions/start", requestContext("accounting_org_member", 2), 2);
+        assert.equal(otherLearner.status, 403, "organization pending activity must apply to other organization members");
+        // Turn this into an expired abandoned session. Registration must settle it on demand.
+        const last = new Date(Date.now() - 45 * 60_000).toISOString();
+        const first = new Date(Date.now() - 46 * 60_000).toISOString();
+        await db.pool.query(`UPDATE simulation_sessions SET server_started_at=now()-interval '60 minutes',
+          activity_settle_after=now()-interval '1 minute',
+          confirmed_activity=confirmed_activity || jsonb_build_object('firstAt',$2::text,'lastAt',$3::text,'settleAfter',$3::text)
+          WHERE simulation_session_id=$1`, [id, first, last]);
+        denied = await call("simulation-sessions/start", requestContext("accounting_after_settlement")); assert.equal(denied.status, 403);
+        const row = (await db.pool.query("SELECT * FROM simulation_sessions WHERE simulation_session_id=$1", [id])).rows[0];
+        assert.equal(row.usage_source, "server_abandoned");
+        assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM usage_sessions WHERE id=$1", [row.usage_session_record_id])).rows[0].n, 1);
+        assert.equal((await call("ai/turn", { ...requestContext(ongoing), history })).status, 200, "newly settled estimates cannot interrupt a previously admitted session");
+        assert.equal((await call("ai/turn", { ...requestContext(id), history })).status, 409, "expired/settled identity cannot restart");
+      } finally {
+        await changeUser({ dailySecondsCapOverride: null, allowDailyOverageThisCycle: false });
+        await change({ perUserDailySecondsCap: 3600, monthlyMinutesAllotted: 10000 });
+        await db.pool.query("DELETE FROM usage_sessions WHERE id IN (SELECT usage_session_record_id FROM simulation_sessions WHERE simulation_session_id=ANY($1))", [[id, ongoing]]);
+        await db.pool.query("DELETE FROM simulation_sessions WHERE simulation_session_id=ANY($1)", [[id, ongoing, "accounting_override", "accounting_overage"]]);
+      }
+    });
     let latestAuthorization: string, latestId: string;
     for (const threshold of ["calls", "tokens"] as const) await t.test(`${threshold} threshold: opening, transcription, turn, prefetch, speech chunks/retry and first score continue with measured usage`, async () => {
       api.clearRateLimitsForTest(); const id = `continuity_${threshold}`; const started = await start(id); await exhaust(threshold);

@@ -51,6 +51,7 @@ export interface UsageSessionActivityReference {
 }
 
 export interface UsageSessionAccess {
+  refresh?(): Promise<void>;
   append(db: Pick<ApiDatabase, "usageSessions">, session: UsageSessionRecord): Promise<UsageSessionAppendResult>;
   deleteForUser(db: Pick<ApiDatabase, "usageSessions">, userId: string): Promise<number>;
   getById(db: Pick<ApiDatabase, "usageSessions">, sessionId: string): UsageSessionRecord | null;
@@ -92,6 +93,7 @@ function readLegacyUsageSessions(db: LegacyUsageSessionContainer): UsageSessionR
 
 export function createUsageSessionAccess(store?: UsageSessionStore | null): UsageSessionAccess {
   return {
+    async refresh() { await store?.refreshSnapshot(); },
     async append(db: Pick<ApiDatabase, "usageSessions">, session: UsageSessionRecord): Promise<UsageSessionAppendResult> {
       if (store) {
         return await store.appendRecord(session);

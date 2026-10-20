@@ -5,7 +5,6 @@ import { SimulationSessionRecord, SimulationSessionIndustrySnapshot, UsageSessio
 import type { UserUsageSnapshot, UsageSessionAccess } from "./usageSessionAccess.js";
 import { computeUsageSessionBilledSecondsAdded } from "./usageSessionWriteModel.js";
 import type {
-  SimulationSessionFinalizeParams,
   SimulationSessionStore,
   SimulationSessionTouchParams
 } from "../storage/simulationSessionStore.js";
@@ -339,6 +338,7 @@ function buildUsageSessionRecord(params: {
   now: Date;
 }): UsageSessionRecord {
   return {
+    usageSource: "client_completed",
     id: buildUsageSessionIdFromSimulationSessionId(params.simulationSessionId),
     userId: params.userId,
     orgId: params.orgId,
@@ -383,6 +383,7 @@ export async function completeRecognizedSimulationUsage<Db extends { usageSessio
   });
 
   if (simulationSession.status === "usage_recorded") {
+    await params.usageSessionAccess.refresh?.();
     if (!simulationSession.usageSessionRecordId) {
       throw new SimulationSessionValidationError(
         503,
@@ -434,21 +435,24 @@ export async function completeRecognizedSimulationUsage<Db extends { usageSessio
     timeZone: params.timeZone,
     now: params.now
   });
-  const usageResult = await params.usageSessionAccess.append(params.db, usageRecord);
-  const finalizedSession = await params.simulationSessionStore.markUsageRecorded({
-    simulationSessionId: params.simulationSessionId,
-    usageRecordedAt: params.now.toISOString(),
-    usageSessionRecordId: usageResult.record.id,
-    lastSeenAt: params.now.toISOString()
-  } satisfies SimulationSessionFinalizeParams);
-
-  if (!finalizedSession) {
-    throw new SimulationSessionValidationError(
-      503,
-      "session_finalization_failed",
-      "Simulation session usage was stored but the session ledger could not be finalized."
-    );
-  }
+  const usageResult = await params.simulationSessionStore.settleUsage({
+    simulationSessionId: params.simulationSessionId, userId: params.userId, orgId: params.orgId,
+    source: "client_completed", now: params.now,
+    buildRecord: (current) => {
+      assertRecognizedSimulationSessionContext(current, params);
+      if (current.status === "usage_recorded") return params.usageSessionAccess.getById(params.db, current.usageSessionRecordId!) ?? usageRecord;
+      assertRecognizedSimulationSessionTiming(current, {
+        startedAt: new Date(params.startedAt), endedAt: new Date(params.endedAt),
+        rawDurationSeconds: params.rawDurationSeconds, maxSimulationMinutes: params.maxSimulationMinutes, now: params.now,
+      });
+      return usageRecord;
+    },
+    appendFile: record => params.usageSessionAccess.append(params.db, record),
+  });
+  if (!usageResult) throw new SimulationSessionValidationError(503, "session_finalization_failed", "Simulation session usage could not be finalized.");
+  await params.usageSessionAccess.refresh?.();
+  const finalizedSession = await params.simulationSessionStore.getById(params.simulationSessionId);
+  if (!finalizedSession) throw new SimulationSessionValidationError(503, "session_finalization_failed", "Simulation session usage could not be finalized.");
 
   return {
     usageResult,
