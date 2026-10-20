@@ -4,6 +4,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { setAudioModeAsync } from "expo-audio";
 import type { AudioPlayer } from "expo-audio";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import { EmployeeRecentScores } from "./src/components/EmployeeRecentScores";
 import type { MobileNotificationDestination } from "@voicepractice/shared";
 import { useNotifications } from "./src/notifications/useNotifications";
 import { NotificationInboxScreen } from "./src/notifications/NotificationInboxScreen";
@@ -660,6 +661,7 @@ function SelectionDropdown({
 }
 
 interface SearchableSelectionDropdownProps {
+  accessibilityLabel?: string;
   value: string;
   options: SelectOption[];
   onChange: (value: string) => void;
@@ -670,6 +672,7 @@ interface SearchableSelectionDropdownProps {
 }
 
 function SearchableSelectionDropdown({
+  accessibilityLabel,
   value,
   options,
   onChange,
@@ -694,6 +697,9 @@ function SearchableSelectionDropdown({
   return (
     <View style={styles.dropdownWrapper}>
       <Pressable
+        accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? `Select ${title}`}
+        accessibilityState={{expanded: isOpen}}
+        accessibilityValue={{text: selectedLabel}}
         style={styles.dropdownTrigger}
         onPress={() => {
           setQuery("");
@@ -795,6 +801,7 @@ export default function App() {
   const sampleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalTransitionRef = useRef(false);
   const identityScopedRequestGenerationRef = useRef(0);
+  const adminUserDetailRequestRef = useRef(0);
   const [isBootLoading, setIsBootLoading] = useState(true);
   const [appError, setAppError] = useState<string | null>(null);
   const [scopedConfigError, setScopedConfigError] = useState<string | null>(null);
@@ -929,6 +936,7 @@ export default function App() {
 
   const invalidateIdentityScopedState = useCallback(() => {
     identityScopedRequestGenerationRef.current += 1;
+    adminUserDetailRequestRef.current += 1;
     adminUserListLoadStateRef.current = "outside";
 
     setConfig(null);
@@ -1939,13 +1947,17 @@ export default function App() {
       }
 
       const requestGeneration = identityScopedRequestGenerationRef.current;
+      const detailRequest = ++adminUserDetailRequestRef.current;
       setAdminLoading(true);
       setAdminError(null);
 
       try {
         const payload = await fetchOrgAdminUserDetail(user.id, targetUserId, mobileAuthToken, { days: 30 });
-        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current || detailRequest !== adminUserDetailRequestRef.current) {
           return;
+        }
+        if (payload.org.id !== user.orgId || payload.user.userId !== targetUserId) {
+          throw new Error("User details are not available for the selected employee.");
         }
         setOrgAdminUserDetail(payload);
         setAdminEmployeeIdInput(payload.user.employeeId ?? "");
@@ -1968,9 +1980,10 @@ export default function App() {
           : 1;
         setAdminUserOverageDurationDaysInput(String(remainingDays));
       } catch (caught) {
-        if (requestGeneration !== identityScopedRequestGenerationRef.current) {
+        if (requestGeneration !== identityScopedRequestGenerationRef.current || detailRequest !== adminUserDetailRequestRef.current) {
           return;
         }
+        setOrgAdminUserDetail(null);
         const message = getErrorMessage(caught, "Could not load user details.");
         setAdminError(message);
         void submitAutoErrorReport("admin_user_detail.refresh", caught, {
@@ -1978,7 +1991,7 @@ export default function App() {
           details: { targetUserId },
         });
       } finally {
-        if (requestGeneration === identityScopedRequestGenerationRef.current) {
+        if (requestGeneration === identityScopedRequestGenerationRef.current && detailRequest === adminUserDetailRequestRef.current) {
           setAdminLoading(false);
         }
       }
@@ -6888,7 +6901,7 @@ export default function App() {
       );
     }
 
-    const detail = orgAdminUserDetail?.user?.userId === targetUserId ? orgAdminUserDetail : null;
+    const detail = orgAdminUserDetail?.user?.userId === targetUserId && orgAdminUserDetail.org.id === user.orgId ? orgAdminUserDetail : null;
     const actorIsTarget = user.id === targetUserId;
     const actorIsUserAdmin = user.orgRole === "user_admin";
     const targetIsOrgAdmin = detail ? detail.user.orgRole === "org_admin" : false;
@@ -6950,8 +6963,16 @@ export default function App() {
 
           {!detail ? (
             <View style={styles.centered}>
-              <ActivityIndicator size="large" color={theme.accent} />
-              <Text style={styles.body}>Loading user details...</Text>
+              {!adminError || adminLoading ? <>
+                <ActivityIndicator size="large" color={theme.accent} accessibilityLabel="Loading employee details" />
+                <Text style={styles.body}>Loading user details...</Text>
+              </> : <>
+                <Text style={styles.body}>Employee details could not be loaded.</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel="Retry employee details" style={styles.primaryButton}
+                  onPress={() => void refreshOrgAdminUserDetail(targetUserId)}>
+                  <Text style={styles.primaryButtonText}>Retry</Text>
+                </Pressable>
+              </>}
             </View>
           ) : (
             <>
@@ -7169,26 +7190,15 @@ export default function App() {
                 </View>
               </View>
 
-              <View style={styles.card}>
-                <Text style={styles.title}>Recent Scores</Text>
-                <Text style={styles.body}>Most recent scored sessions in the last 30 days.</Text>
-                {detail.scores.recent.length === 0 ? (
-                  <Text style={styles.body}>(No scored sessions in this period.)</Text>
-                ) : (
-                  <View style={{ gap: 10, marginTop: 6 }}>
-                    {detail.scores.recent.map((row) => (
-                      <View key={row.id} style={styles.optionCard}>
-                        <Text style={styles.optionTitle}>Score: {row.overallScore}</Text>
-                        <Text style={styles.body}>
-                          {formatDateLabel(row.endedAt)}{"\n"}
-                          Segment: {segmentLabelById.get(row.segmentId) ?? row.segmentId}{"\n"}
-                          Scenario: {scenarioTitleById.get(row.scenarioId) ?? row.scenarioId}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </View>
+              <EmployeeRecentScores key={`${user.id}:${user.orgId}:${targetUserId}`}
+                detail={detail} theme={theme} scenarioTitles={scenarioTitleById} segmentLabels={segmentLabelById}
+                industryLabels={industryLabelById}
+                renderScenarioFilter={(props) => <SearchableSelectionDropdown {...props} styles={{...styles,
+                  dropdownTrigger: [styles.dropdownTrigger, {height: "auto", minHeight: 48, paddingVertical: 10}],
+                  dropdownOption: [styles.dropdownOption, {minHeight: 44}],
+                }}
+                  title="Scenario in loaded results" accessibilityLabel="Filter loaded employee results by scenario"
+                  searchPlaceholder="Search loaded scenarios..." />} />
             </>
           )}
         </ScrollView>
