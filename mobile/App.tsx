@@ -7370,6 +7370,7 @@ export default function App() {
           authToken={mobileAuthToken}
           colorScheme={colorScheme}
           initialTopicId={notificationDestination?.type === "focus_topic" ? notificationDestination.topicId : setupOriginTopicId(setupOrigin) ?? homeFocusTopicId}
+          initialBackDestination={notificationDestination?.type !== "focus_topic" && !setupOriginTopicId(setupOrigin) && homeFocusTopicId ? "home" : "catalog"}
           onBackToHome={() => {
             setSetupOrigin(null);
             setNotificationTarget(null);

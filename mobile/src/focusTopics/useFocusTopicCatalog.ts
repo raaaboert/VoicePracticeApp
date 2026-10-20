@@ -8,6 +8,7 @@ export function useFocusTopicCatalog(params: {
   enabled: boolean; destination: "home" | "focus_topics" | null;
 }) {
   const { userId, authToken, orgId, enabled, destination } = params;
+  const active = enabled && destination !== null;
   // A new identity gets a blank snapshot immediately, before effects run.
   const controller = useMemo(() => createFocusTopicCatalogController(async (signal) => {
     if (!userId || !authToken || !orgId || !enabled) return { topics: [] };
@@ -17,13 +18,13 @@ export function useFocusTopicCatalog(params: {
 
   useEffect(() => () => controller.invalidate(), [controller]);
   useEffect(() => {
-    if (!enabled || !destination) { controller.invalidate(); return; }
+    if (!active) { controller.invalidate(); return; }
     void controller.refresh();
     const subscription = AppState.addEventListener("change", (next) => {
       if (next === "active") void controller.refresh();
       else controller.invalidate();
     });
     return () => subscription.remove();
-  }, [controller, enabled, destination]);
+  }, [controller, active]);
   return { state, controller };
 }

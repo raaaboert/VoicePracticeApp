@@ -112,6 +112,67 @@ test("actual Home navigation opens a Topic directly or the full catalog and clea
   open(); assert.equal(events.setHomeFocusTopicId, null);
 });
 
+function topicScreenHarness(initialTopicId: string | null, initialBackDestination: "home" | "catalog") {
+  const state: any[] = [];
+  let cursor = 0;
+  const events: string[] = [];
+  const render = execute(readFileSync(new URL("./FocusTopicsScreen.tsx", import.meta.url), "utf8"), "FocusTopicsScreen", {
+    React: react, View: "View", styles: {}, getTrainingContentTheme: () => ({}),
+    FocusTopicDetailScreen: "Detail", FocusTopicLandingScreen: "Catalog", TrainingContentDetailScreen: "Resource",
+    useCallback: (callback: unknown) => callback, useMemo: (factory: () => any) => factory(),
+    useState: (initial: any) => {
+      const index = cursor++;
+      if (!(index in state)) state[index] = typeof initial === "function" ? initial() : initial;
+      return [state[index], (next: any) => { state[index] = typeof next === "function" ? next(state[index]) : next; }];
+    },
+  });
+  return {
+    events,
+    render() {
+      cursor = 0;
+      return elements(render({ initialTopicId, initialBackDestination,
+        catalog: { state: { topics, loading: false, error: null }, controller: { refresh: () => events.push("refresh") } },
+        onBackToHome: () => events.push("home"), onLeaveReturnedTopic: () => events.push("leave"),
+        onPracticeScenario: () => events.push("practice"),
+      })).find((node) => ["Detail", "Catalog", "Resource"].includes(node.type))!;
+    },
+  };
+}
+
+test("Home → Topic → Back returns Home; Catalog → Topic → Back returns Catalog", () => {
+  const origin = (context: Record<string, any>) => jsxCallback("FocusTopicsScreen", "initialBackDestination", {
+    notificationDestination: null, setupOrigin: null, homeFocusTopicId: "topic", setupOriginTopicId: (value: any) => value?.topicId,
+    ...context,
+  });
+  assert.equal(origin({}), "home");
+  assert.equal(origin({ homeFocusTopicId: null }), "catalog");
+  assert.equal(origin({ setupOrigin: { type: "focus_topic", topicId: "returned" } }), "catalog", "scorecard/exit return keeps catalog fallback");
+  assert.equal(origin({ notificationDestination: { type: "focus_topic", topicId: "notification" } }), "catalog");
+
+  const home = topicScreenHarness("topic", origin({}));
+  home.render().props.onBack();
+  assert.deepEqual(home.events, ["leave", "home"]);
+  const catalog = topicScreenHarness(null, origin({ homeFocusTopicId: null }));
+  catalog.render().props.onOpenTopic(topics[0]);
+  assert.equal(catalog.render().type, "Detail");
+  catalog.render().props.onBack();
+  assert.equal(catalog.render().type, "Catalog");
+  assert.deepEqual(catalog.events, ["leave"]);
+});
+
+test("resource return preserves Topic origin and unavailable Topic Back still refreshes the catalog", () => {
+  for (const origin of ["home", "catalog"] as const) {
+    const screen = topicScreenHarness("topic", origin);
+    screen.render().props.onOpenResource("resource");
+    assert.equal(screen.render().type, "Resource");
+    screen.render().props.onBack();
+    assert.equal(screen.render().type, "Detail");
+    screen.render().props.onUnavailable();
+    screen.render().props.onBack();
+    assert.deepEqual(screen.events, origin === "home" ? ["leave", "refresh", "home"] : ["leave", "refresh"]);
+  }
+});
+
 test("actual simulation exit returns Topic-origin sessions directly and preserves other origins", () => {
   for (const topicOrigin of [true, false]) {
     const events: string[] = [];
@@ -142,10 +203,12 @@ test("actual scorecard return reaches the original Topic; Practice Again keeps e
   assert.equal(jsxCallback("ScorecardView", "onBackToTopic", { simulationReturnOrigin: null, returnToSimulationTopic: () => assert.fail() }), undefined);
 });
 
-test("actual catalog hook resets synchronously for account/organization changes and refreshes on foreground", async () => {
+test("actual catalog hook reuses Home/View All data, refreshes on reentry and isolates identity/authorization changes", async () => {
   const source = readFileSync(new URL("./useFocusTopicCatalog.ts", import.meta.url), "utf8");
   let memo: { deps: unknown[]; value: any } | undefined;
-  const effects: Array<() => any> = [];
+  const effects: Array<{ deps: unknown[]; cleanup?: () => void }> = [];
+  let effectIndex = 0;
+  const pendingEffects: Array<() => void> = [];
   let onAppState: (state: string) => void = () => {};
   let calls = 0;
   const hook = execute(source, "useFocusTopicCatalog", {
@@ -156,29 +219,60 @@ test("actual catalog hook resets synchronously for account/organization changes 
       return memo.value;
     },
     useSyncExternalStore: (_subscribe: unknown, snapshot: () => any) => snapshot(),
-    useEffect: (effect: () => any) => effects.push(effect),
+    useEffect: (effect: () => any, deps: unknown[]) => {
+      const index = effectIndex++;
+      const previous = effects[index];
+      if (!previous || deps.some((dep, i) => dep !== previous.deps[i])) {
+        pendingEffects.push(() => {
+          previous?.cleanup?.();
+          effects[index] = { deps, cleanup: effect() };
+        });
+      }
+    },
     AppState: { addEventListener: (_event: string, callback: typeof onAppState) => {
       onAppState = callback; return { remove() {} };
     } },
   });
+  const render = (params: Record<string, any>) => {
+    effectIndex = 0;
+    const result = hook(params);
+    pendingEffects.splice(0).forEach((effect) => effect());
+    return result;
+  };
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
   const context = { userId: "user_a", orgId: "org_a", authToken: "token", enabled: true, destination: "home" };
-  const first = hook(context);
+  const first = render(context);
   assert.equal(first.state.topics, null);
-  const cleanups = effects.splice(0).map((effect) => effect());
-  await first.controller.refresh();
+  await settle();
   assert.equal(first.controller.getSnapshot().topics[0].id, "user_a");
+  assert.equal(calls, 1);
+  assert.equal(render({ ...context, destination: "focus_topics" }).controller, first.controller);
+  assert.equal(render(context).state.topics[0].id, "user_a");
+  await settle();
+  assert.equal(calls, 1, "Home → View All → Home does not prepare another request");
+  render({ ...context, destination: null });
+  assert.equal(first.controller.getSnapshot().topics, null);
+  render({ ...context, destination: "focus_topics" });
+  await settle();
+  assert.equal(calls, 2, "leaving and reentering refreshes");
   onAppState("inactive"); assert.equal(first.controller.getSnapshot().topics, null);
-  onAppState("active"); await first.controller.refresh(); assert.equal(calls, 2);
-  const changedOrg = hook({ ...context, orgId: "org_b" });
+  onAppState("active"); await settle(); assert.equal(calls, 3);
+  const changedOrg = render({ ...context, orgId: "org_b" });
   assert.notEqual(changedOrg.controller, first.controller);
   assert.equal(changedOrg.state.topics, null, "no old-org flash before effects");
-  cleanups.forEach((cleanup) => cleanup?.());
-  effects.splice(0).forEach((effect) => effect());
-  await changedOrg.controller.refresh();
-  const changedUser = hook({ ...context, userId: "user_b", orgId: "org_b" });
+  await settle();
+  const changedUser = render({ ...context, userId: "user_b", orgId: "org_b" });
   assert.equal(changedUser.state.topics, null);
-  effects.splice(0).forEach((effect) => effect()); await changedUser.controller.refresh();
+  await settle();
   assert.equal(changedUser.controller.getSnapshot().topics[0].id, "user_b");
+  const changedToken = render({ ...context, userId: "user_b", orgId: "org_b", authToken: "new_token" });
+  assert.equal(changedToken.state.topics, null);
+  await settle();
+  const disabled = render({ ...context, enabled: false });
+  await settle();
+  assert.equal(disabled.controller.getSnapshot().topics, null);
+  assert.equal(calls, 6, "disabled authority performs no fetch");
+  effects.forEach((effect) => effect.cleanup?.());
 });
 
 test("Topic detail presents learning before practice while retaining both independent empty states and revoked fallback", () => {

@@ -18,6 +18,7 @@ interface FocusTopicsScreenProps {
   authToken: string;
   colorScheme: AppColorScheme;
   initialTopicId?: string | null;
+  initialBackDestination?: "home" | "catalog";
   initialNotice?: string | null;
   onBackToHome: () => void;
   onPracticeScenario: (
@@ -35,6 +36,7 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const [selectedTopicId, setSelectedTopicId] = useState<string | null>(
     () => props.initialTopicId?.trim() || null
   );
+  const [topicBackDestination, setTopicBackDestination] = useState(props.initialBackDestination ?? "catalog");
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const [detailNotice, setDetailNotice] = useState<string | null>(props.initialNotice ?? null);
@@ -42,6 +44,7 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   const theme = useMemo(() => getTrainingContentTheme(props.colorScheme), [props.colorScheme]);
 
   const openTopic = useCallback((topicId: string) => {
+    setTopicBackDestination("catalog");
     setSelectedResourceId(null);
     setDetailNotice(null);
     setRefreshCatalogOnBack(false);
@@ -57,7 +60,8 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
       setRefreshCatalogOnBack(false);
       void loadTopics();
     }
-  }, [loadTopics, props.onLeaveReturnedTopic, refreshCatalogOnBack]);
+    if (topicBackDestination === "home") props.onBackToHome();
+  }, [loadTopics, props.onLeaveReturnedTopic, props.onBackToHome, refreshCatalogOnBack, topicBackDestination]);
 
   const returnFromResource = useCallback((notice?: string) => {
     setSelectedResourceId(null);
