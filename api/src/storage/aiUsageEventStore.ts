@@ -841,12 +841,8 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
   }
 
   async computeBudgetSnapshot(params: { userId: string; now: Date; userTimeZone: string }): Promise<AiUsageBudgetSnapshot> {
-    const lookbackStart = new Date(params.now.getTime() - AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-    const events = await this.listEvents({
-      createdAtFrom: lookbackStart,
-      createdAtBefore: params.now
-    });
-    return computeBudgetSnapshotFromEvents(events, params);
+    await this.ensureTable();
+    return readAiUsageBudgetSnapshot(this.pool, params, false);
   }
 
   async computeCurrentPeriodTotals(params: { userId: string; now: Date; timeZone: string }): Promise<AiUsageCurrentPeriodTotals> {
@@ -934,19 +930,41 @@ class PostgresAiUsageEventStore implements AiUsageEventStore {
 /** Reuses the established budget policy inside a caller-owned transaction. */
 export async function reserveAiUsageBudgetOnClient(client: PoolClient, params: {
   event: AiUsageEvent; userTimeZone: string; limits: AiUsageBudgetLimits; now: Date;
-}): Promise<AiUsageBudgetReservationResult> {
-  await client.query("SELECT pg_advisory_xact_lock($1::integer)", [AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY]);
-  const result = await client.query<AiUsageEventRow>(
-    `SELECT * FROM ai_usage_events WHERE created_at >= $1::timestamptz AND created_at <= $2::timestamptz
-     ORDER BY created_at ASC, id ASC`,
-    [new Date(params.now.getTime() - AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS * 86_400_000).toISOString(), params.now.toISOString()],
-  );
-  const events = result.rows.map(mapAiUsageEventRow).filter((event): event is AiUsageEvent => event !== null);
-  const snapshot = computeBudgetSnapshotFromEvents(events, { userId: params.event.userId, now: params.now, userTimeZone: params.userTimeZone });
+}, lockedAt?: Date): Promise<AiUsageBudgetReservationResult> {
+  // Only caller-owned ledger transactions supply lockedAt, acquired after the
+  // same advisory lock. An old caller's pre-lock timestamp is NOT a safe cutoff.
+  if (!lockedAt) await client.query("SELECT pg_advisory_xact_lock($1::integer)", [AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY]);
+  const now = lockedAt ?? (await client.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
+  const snapshot = await readAiUsageBudgetSnapshot(client, { userId: params.event.userId, now, userTimeZone: params.userTimeZone }, true);
   const limitCode = resolveAiUsageBudgetLimit(snapshot, params.limits, params.event.totalTokens);
   if (limitCode) return { reserved: false, limitCode };
-  await upsertAiUsageEventRow(client, params.event);
+  await upsertAiUsageEventRow(client, { ...params.event, createdAt: now.toISOString() });
   return { reserved: true };
+}
+
+/** Aggregate within the existing indexed lookback; no row transfer/Intl per event.
+ * Compare civil dates, NOT converted local midnights (which can be ambiguous or
+ * nonexistent in DST zones). No usage is cached and no timezone offset is guessed.
+ * Keep the public snapshot's exclusive cutoff and reservations' inclusive cutoff.
+ */
+async function readAiUsageBudgetSnapshot(client: Pick<PoolClient, "query"> | Pick<Pool, "query">,
+  params: { userId: string; now: Date; userTimeZone: string }, inclusive: boolean): Promise<AiUsageBudgetSnapshot> {
+  // Preserve the existing Intl timezone validation rather than accepting extra PG aliases.
+  const userDay = getDayKey(params.now, params.userTimeZone);
+  const globalDay = getDayKey(params.now, "UTC");
+  const result = await client.query<{ user_calls: string; user_tokens: string; global_calls: string; global_tokens: string }>(`
+    SELECT count(*) FILTER (WHERE btrim(user_id)=$1 AND (created_at AT TIME ZONE $2)::date=$3::date) AS user_calls,
+      coalesce(sum(greatest(total_tokens,0)) FILTER (WHERE btrim(user_id)=$1 AND (created_at AT TIME ZONE $2)::date=$3::date),0) AS user_tokens,
+      count(*) FILTER (WHERE (created_at AT TIME ZONE 'UTC')::date=$4::date) AS global_calls,
+      coalesce(sum(greatest(total_tokens,0)) FILTER (WHERE (created_at AT TIME ZONE 'UTC')::date=$4::date),0) AS global_tokens
+    FROM ai_usage_events
+    WHERE created_at>=$5::timestamptz - interval '72 hours' AND created_at ${inclusive ? "<=" : "<"} $5::timestamptz
+      AND btrim(id)<>'' AND btrim(user_id)<>'' AND btrim(model)<>'' AND btrim(prompt_version)<>''
+      AND btrim(kind)=ANY($6::text[])`,
+  [params.userId, params.userTimeZone, userDay, globalDay, params.now.toISOString(), [...AI_USAGE_EVENT_KIND_SET]]);
+  const row = result.rows[0];
+  return { userCallsToday: Number(row.user_calls), userTokensToday: Number(row.user_tokens),
+    globalCallsToday: Number(row.global_calls), globalTokensToday: Number(row.global_tokens) };
 }
 
 async function upsertAiUsageEventRow(

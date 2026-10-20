@@ -7,8 +7,9 @@ grant is part of this batch.
 
 ## Flags and startup
 
-- `AI_SPEND_LEDGER_MODE=off` (default): existing budget path, defaults, enterprise
-  exemptions, provider errors and usage-event behavior are unchanged. No ledger
+- `AI_SPEND_LEDGER_MODE=off` (default): existing budget policy, defaults, enterprise
+  exemptions and provider errors remain. The shared PostgreSQL budget path now
+  aggregates in SQL and uses a post-lock database timestamp (see below). No ledger
   tables or new secret are required or queried.
 - `AI_SPEND_LEDGER_MODE=record`: PostgreSQL, explicit `PERITIO_ENV`, and a distinct
   `AI_SPEND_LEDGER_HMAC_SECRET` of at least 32 characters are mandatory. All API
@@ -60,7 +61,8 @@ records for reporting: existing reports still count `ai_usage_events` once.
 
 Transactions acquire global lock, then attempt and sorted buckets. Provider work
 starts only after reservation and dispatch transactions commit. No transaction is
-held across network/AI/extraction work. Conditional bucket updates and active-lease
+held across network/AI/extraction work. Ordered batched bucket upserts, transactional
+limit checks and active-lease
 indexes support the future internal limits across independent processes. Existing
 global budget serialization remains; this does not redesign reporting or app_state.
 
@@ -72,11 +74,20 @@ global budget serialization remains; this does not redesign reporting or app_sta
   is rejected. Post-response event enrichment preserves the original event date
   in record mode, so midnight cannot move the charge into the next day.
 - Pre-dispatch failure releases spending claims and removes the unused usage event;
-  its request count remains. Dispatch-response loss is uncertain, not proof of no work.
-- Provider exceptions after dispatch retain the conservative reservation as `unknown`,
-  even for errors that might ultimately be nonbillable. This is deliberately more
-  conservative than the off-mode release-on-exception behavior. No automatic refund
-  is based merely on timeout/abort/status wording.
+  its request count remains. This includes marked local credential/request construction,
+  JSON serialization and transcription FormData failures before `fetch`, even though
+  the durable dispatch-intent transaction has already committed. Evidence is the
+  original in-process error object's identity, not a message, status or client flag.
+  Existing successful/terminal usage cannot be refunded by a later failure.
+  Dispatch-response loss is uncertain, not proof of no work.
+- Other provider exceptions after possible dispatch retain the conservative
+  reservation as `unknown`. HTTP 400/401/429, network failures and 5xx do not establish
+  billing status. The [provider error reference](https://developers.openai.com/api/docs/guides/error-codes)
+  does not provide a general zero-billing guarantee for those statuses. Automatic
+  provider-confirmed nonbillable classification is **blocked pending reliable provider
+  evidence**; it is not implemented by guessing. Recording can still be more conservative
+  than off-mode release-on-exception for these uncertain outcomes. Review this difference
+  before activation. No historical usage is refunded by this correction.
 - Unknown can reconcile to measured success or definitively measured failure.
   Unmeasured dimensions retain their conservative amount rather than becoming zero.
   Settlement failure rolls back both structures; retries are idempotent. After a
@@ -129,7 +140,16 @@ unbound to sessions/messages, and existing process-local rate limiting remains.
    active revisions, DB roles and actual budget settings; do not infer them from docs.
 2. Keep the new gate off. Back up and apply 025 with the migration owner, then verify
    schema/indexes and runtime grants read-only. This must not alter existing data.
-3. Deploy the audited code with gate off; verify normal health and old budget tests.
+3. Quiesce provider admission, drain/remove unprotected old processes and external
+   spending writers, then deploy the audited code everywhere with gate off. Verify
+   revisions/settings, normal health and old budget tests before reopening admission.
+   Both current paths acquire the shared advisory lock before choosing their database
+   timestamp, so waiting reservations see newly committed usage. Already-deployed old
+   binaries still choose a pre-lock cutoff and can over-admit despite sharing the lock.
+   Do not claim this code fixes those binaries. Even off-mode code replacement must
+   not be presented as safe during unprotected overlap. Use a maintenance cutover
+   if overlap cannot be excluded; do not enable new enforcement
+   during overlap. Repository inspection does not verify actual Render topology.
 4. Confirm all provider-spending processes use the audited revision; configure the
    same fingerprint secret/environment and enable record mode in a coordinated restart.
 5. Verify success, rejection, unknown-outcome and midnight accounting with authorized
@@ -155,11 +175,21 @@ activation without disabling admission. Never roll back by deleting budget histo
 
 Reservations use one short transaction and indexed rows, normally 9 claims/buckets
 (requests/calls/text tokens across three scopes), or 12 with TTS characters. Each
-bucket uses one conditional UPSERT, plus one claim insert; settlement updates only
-that attempt's claims and buckets plus its existing event. Dispatch adds one short
+bucket/claim batch uses one SQL statement with deterministic input ordering. A failed
+limit check rolls back the entire transaction. Settlement batches only that attempt's
+claims/buckets in one statement plus its existing event. Dispatch adds one short
 update transaction. Record mode adds a separate connection pool bounded by
 `PG_POOL_MAX`; account for this across instances when sizing PostgreSQL connections.
 No monolithic app_state write is added.
+
+The old JavaScript budget scan transferred/normalized up to three days of events and
+constructed Intl formatters per event under the global lock. The corrected query
+aggregates the same indexed 72-hour range in PostgreSQL, comparing customer-local
+civil dates and UTC platform dates. Comparing dates avoids ambiguous/nonexistent DST
+midnights. It returns four totals, not event bodies, and caches no usage or authority.
+The existing limit evaluator and enterprise exemptions remain unchanged. SQL and Node
+timezone data should stay current; regression fixtures compare nine zones across five
+cutoffs, including spring/fall DST, half-hour DST, midnight DST and UTC midnight.
 
 No automatic metadata purge is activated. Proposed retention is 90 days for fully
 settled attempts/claims; delete claims before attempts and delete only unreferenced
@@ -167,6 +197,60 @@ expired buckets. Never expire unknown claims just to reclaim capacity. Existing
 usage-event retention and privacy operations remain unchanged. Before activation,
 approve metadata retention/deidentification, unknown reconciliation ownership,
 backup/restore consistency and a safe cleanup job. Runtime requires no new reporting UI.
+
+**Production prerequisites, not delivered here:** approved ledger retention and
+account-deletion/deidentification (including backups/unknown claims), and durable
+HTTP-level scoring idempotency/recovery. Store-level idempotency is not an HTTP
+scoring guarantee. These remain required before production activation; no broad
+account-deletion redesign or scoring contract was attempted in this batch.
+
+## Local correction measurements — Batch 9F.2B.1
+
+Measured before production edits at `5e26167d7592179fc7b4f047a7fea4c8255f2dba`
+and after with `api/scripts/benchmark-ai-spend.ts`. Use only an explicitly configured
+`AI_SPEND_INTEGRATION_DATABASE_URL` pointing to a disposable localhost test database;
+run `node --import tsx scripts/benchmark-ai-spend.ts` from `api`. The script creates and
+drops its own schema, runs no provider, stores no credential and changes no environment.
+It counts driver query submissions including BEGIN/COMMIT, locks and timestamps.
+
+Text success round trips: **record 61 → 24** (reservation 29 → 11, dispatch 6 → 5,
+settlement 26 → 8). Off-mode **9 → 10**: the additional query obtains the authoritative
+post-lock timestamp, closing the stale-cutoff race. No old/new double counting is added.
+
+| Recent events | Record median ms before → after | Record serial calls/s before → after |
+| ---: | ---: | ---: |
+| 0 | 13.20 → 7.17 | 64.50 → 108.67 |
+| 2,700 | 214.40 → 10.09 | 4.60 → 92.40 |
+| 9,000 | 736.80 → 13.67 | 1.28 → 41.36 |
+| 27,000 | 2,456.05 → 28.40 | 0.41 → 26.96 |
+
+| Recent events | Off median ms before → after | Off serial calls/s before → after |
+| ---: | ---: | ---: |
+| 0 | 2.38 → 2.69 | 153.47 → 140.98 |
+| 2,700 | 220.12 → 5.74 | 4.70 → 180.79 |
+| 9,000 | 737.99 → 10.14 | 1.37 → 18.00 |
+| 27,000 | 2,649.96 → 26.06 | 0.38 → 29.33 |
+
+Limitations: three sequential samples per cell, localhost PostgreSQL/Windows, mixed
+cold/warm caches and JIT, no provider latency, no concurrent load benchmark, a synthetic
+half-current-user event distribution over the preceding twelve hours, and a few newly
+measured events accumulating during each cell. Serial throughput is three divided by
+total elapsed time (includes cold/outlier samples), not inverse median or capacity under
+load. The 9,000-event off run included a 146.95 ms cold/outlier sample. These results
+are not Render latency or an SLO. The global advisory lock remains a serialization point;
+the change removes its dominant per-event JavaScript work rather than eliminating it.
+
+Migration 025, default-off configuration, numeric spending limits and customer minute
+entitlements are unchanged. Audit and the coordinated deployment gate still apply.
+
+Validation: all 16 disposable-local-PostgreSQL integration files passed (123 tests,
+zero failures/skips); the full API suite with PostgreSQL enabled passed (1,213 tests,
+zero failures/skips). Focused adapter failure tests, six-process reservation and
+four-process settlement, queued legacy/record admission, exact budget boundaries,
+midnight/45 timezone-cutoff comparisons, API build/TypeScript and diff checks passed.
+One earlier full-suite run hit an intermittent empty JSON fixture read in
+`mobileReviewerAuthRoute.test.ts` (`readDb`, unrelated to the ledger). That unchanged
+file passed 12/12 alone and the subsequent full suite passed; no auth fix was made.
 
 Next batch: approve actual per-user/org/platform policy; validate audio duration and
 cost estimates; wire durable request throttling, session/scoring idempotency and

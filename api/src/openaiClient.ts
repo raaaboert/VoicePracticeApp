@@ -1,5 +1,6 @@
 import type { OpenAiCompletionApiFamily, OpenAiReasoningEffort } from "./openaiModelConfig.js";
 import { safeErrorDiagnostics } from "./services/safeErrors.js";
+import { prepareAiProviderRequest } from "./services/aiProviderDispatch.js";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
@@ -75,12 +76,11 @@ interface OpenAiRequestLogContext {
 }
 
 function getOpenAiApiKey(): string {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (!key) {
-    throw new Error("OpenAI is not configured (missing OPENAI_API_KEY).");
-  }
-
-  return key;
+  return prepareAiProviderRequest(() => {
+    const key = process.env.OPENAI_API_KEY?.trim();
+    if (!key) throw new Error("OpenAI is not configured (missing OPENAI_API_KEY).");
+    return key;
+  });
 }
 
 function sanitizeSpeechSpeed(value: number | undefined): number | undefined {
@@ -263,25 +263,28 @@ export async function requestChatCompletion(params: {
   correlationId?: string;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
-  const body: Record<string, unknown> = {
-    model: params.model,
-    messages: params.messages
-  };
-  if (typeof params.temperature === "number") {
-    body.temperature = params.temperature;
-  }
-  if (typeof params.topP === "number") {
-    body.top_p = params.topP;
-  }
-  if (typeof params.frequencyPenalty === "number") {
-    body.frequency_penalty = params.frequencyPenalty;
-  }
-  if (typeof params.presencePenalty === "number") {
-    body.presence_penalty = params.presencePenalty;
-  }
-  if (typeof params.maxTokens === "number") {
-    body.max_tokens = params.maxTokens;
-  }
+  const body = prepareAiProviderRequest(() => {
+    const body: Record<string, unknown> = {
+      model: params.model,
+      messages: params.messages
+    };
+    if (typeof params.temperature === "number") {
+      body.temperature = params.temperature;
+    }
+    if (typeof params.topP === "number") {
+      body.top_p = params.topP;
+    }
+    if (typeof params.frequencyPenalty === "number") {
+      body.frequency_penalty = params.frequencyPenalty;
+    }
+    if (typeof params.presencePenalty === "number") {
+      body.presence_penalty = params.presencePenalty;
+    }
+    if (typeof params.maxTokens === "number") {
+      body.max_tokens = params.maxTokens;
+    }
+    return body;
+  });
 
   return runOpenAiRequestWithTimeout({
     apiPath: "chat_completions",
@@ -299,7 +302,7 @@ export async function requestChatCompletion(params: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(body)
+        body: prepareAiProviderRequest(() => JSON.stringify(body))
       });
 
       if (!response.ok) {
@@ -361,25 +364,28 @@ export async function requestResponsesCompletion(params: {
   correlationId?: string;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
-  const body: Record<string, unknown> = {
-    model: params.model,
-    input: params.messages.map((message) => ({
-      role: message.role,
-      content: message.content
-    }))
-  };
-
-  if (typeof params.temperature === "number") {
-    body.temperature = params.temperature;
-  }
-  if (typeof params.maxOutputTokens === "number") {
-    body.max_output_tokens = params.maxOutputTokens;
-  }
-  if (params.reasoningEffort) {
-    body.reasoning = {
-      effort: params.reasoningEffort,
+  const body = prepareAiProviderRequest(() => {
+    const body: Record<string, unknown> = {
+      model: params.model,
+      input: params.messages.map((message) => ({
+        role: message.role,
+        content: message.content
+      }))
     };
-  }
+
+    if (typeof params.temperature === "number") {
+      body.temperature = params.temperature;
+    }
+    if (typeof params.maxOutputTokens === "number") {
+      body.max_output_tokens = params.maxOutputTokens;
+    }
+    if (params.reasoningEffort) {
+      body.reasoning = {
+        effort: params.reasoningEffort,
+      };
+    }
+    return body;
+  });
 
   return runOpenAiRequestWithTimeout({
     apiPath: "responses",
@@ -402,7 +408,7 @@ export async function requestResponsesCompletion(params: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(body)
+        body: prepareAiProviderRequest(() => JSON.stringify(body))
       });
 
       if (!response.ok) {
@@ -505,15 +511,18 @@ export async function requestTranscription(params: {
 }): Promise<string> {
   const apiKey = getOpenAiApiKey();
 
-  const formData = new FormData();
-  formData.append("model", params.model);
-  if (typeof params.language === "string" && params.language.trim()) {
-    formData.append("language", params.language.trim());
-  }
+  const formData = prepareAiProviderRequest(() => {
+    const formData = new FormData();
+    formData.append("model", params.model);
+    if (typeof params.language === "string" && params.language.trim()) {
+      formData.append("language", params.language.trim());
+    }
 
-  const bytes = new Uint8Array(params.audioBuffer);
-  const file = new File([bytes], params.fileName, { type: params.mimeType });
-  formData.append("file", file);
+    const bytes = new Uint8Array(params.audioBuffer);
+    const file = new File([bytes], params.fileName, { type: params.mimeType });
+    formData.append("file", file);
+    return formData;
+  });
 
   return runOpenAiRequestWithTimeout({
     apiPath: "audio_transcriptions",
@@ -558,20 +567,23 @@ export async function requestSpeechSynthesis(params: {
     typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
       ? Math.floor(params.timeoutMs)
       : DEFAULT_SPEECH_REQUEST_TIMEOUT_MS;
-  const body: Record<string, unknown> = {
-    model: params.model,
-    voice: params.voice,
-    input: params.text,
-    response_format: responseFormat
-  };
-  const speed = sanitizeSpeechSpeed(params.speed);
-  if (typeof speed === "number") {
-    body.speed = speed;
-  }
-  const instructions = params.instructions?.trim();
-  if (instructions) {
-    body.instructions = instructions;
-  }
+  const body = prepareAiProviderRequest(() => {
+    const body: Record<string, unknown> = {
+      model: params.model,
+      voice: params.voice,
+      input: params.text,
+      response_format: responseFormat
+    };
+    const speed = sanitizeSpeechSpeed(params.speed);
+    if (typeof speed === "number") {
+      body.speed = speed;
+    }
+    const instructions = params.instructions?.trim();
+    if (instructions) {
+      body.instructions = instructions;
+    }
+    return body;
+  });
 
   const controller = new AbortController();
   let timedOut = false;
@@ -588,7 +600,7 @@ export async function requestSpeechSynthesis(params: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: prepareAiProviderRequest(() => JSON.stringify(body))
     });
 
     if (!response.ok) {

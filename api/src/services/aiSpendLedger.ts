@@ -2,6 +2,7 @@ import type { AiUsageEvent } from "@voicepractice/shared";
 import { AiSpendLedgerStore, AiSpendLedgerError, LegacyAiSpendLimitError, type SpendUnits } from "../storage/aiSpendLedgerStore.js";
 import type { AiUsageBudgetLimits } from "../storage/aiUsageEventStore.js";
 import { AiBudgetLimitError, SafeAiRouteError, safeErrorDiagnostics } from "./safeErrors.js";
+import { isOpenAiRequestNotDispatched } from "./aiProviderDispatch.js";
 
 /** Recording only: existing limits remain authoritative; no new ceilings here. */
 export async function invokeWithAiSpendLedger<T>(input: {
@@ -32,7 +33,8 @@ export async function invokeWithAiSpendLedger<T>(input: {
   let value: T;
   try { value = await input.invoke(); }
   catch (error) {
-    try { await input.store.settle({ ...identity, outcome: "unknown" }); }
+    try { await input.store.settle({ ...identity,
+      ...(isOpenAiRequestNotDispatched(error) ? { outcome: "failed" as const, notDispatchedError: error } : { outcome: "unknown" as const }) }); }
     catch (settlementError) { logSettlementFailure(settlementError); }
     throw error;
   }

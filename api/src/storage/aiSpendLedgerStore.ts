@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import type { AiUsageEvent } from "@voicepractice/shared";
+import { isOpenAiRequestNotDispatched } from "../services/aiProviderDispatch.js";
 import {
   AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY, reserveAiUsageBudgetOnClient,
   type AiUsageBudgetLimits,
@@ -67,7 +68,8 @@ export class AiSpendLedgerStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      // Same lock as old budget claims: mixed code cannot race the old ceiling.
+      // Shared lock serializes claims, but OLD binaries can still use a stale
+      // pre-lock cutoff. Deployment must exclude unprotected old/new overlap.
       // Order is global lock -> attempt -> sorted scope/window/metric buckets.
       await client.query("SELECT pg_advisory_xact_lock($1::integer)", [AI_USAGE_GLOBAL_BUDGET_ADVISORY_LOCK_KEY]);
       const now = this.options.clock?.() ?? (await client.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
@@ -117,7 +119,7 @@ export class AiSpendLedgerStore {
       if ((await client.query("SELECT id FROM ai_usage_events WHERE id=$1", [event.id])).rowCount) throw new AiSpendLedgerError("idempotency_conflict");
       const legacy = await reserveAiUsageBudgetOnClient(client, {
         event, userTimeZone: input.userTimeZone, limits: input.legacyLimits, now,
-      });
+      }, now);
       if (!legacy.reserved) throw new LegacyAiSpendLimitError(legacy.limitCode);
       const id = randomUUID();
       const result = await client.query<SpendAttempt>(`INSERT INTO ai_provider_attempts
@@ -129,6 +131,7 @@ export class AiSpendLedgerStore {
       const rules = input.rules ?? SCOPES.flatMap((scope) => METRICS.filter((metric) => units[metric] !== undefined)
         .map((metric): SpendRule => ({ scope, metric, window: "day" })));
       const keys = new Set<string>();
+      const claims: Array<Record<string, unknown>> = [];
       for (const rule of [...rules].sort((a, b) => SCOPES.indexOf(a.scope) - SCOPES.indexOf(b.scope)
         || a.window.localeCompare(b.window) || a.metric.localeCompare(b.metric))) {
         const scopeId = rule.scope === "user" ? event.userId : rule.scope === "org" ? event.orgId : "platform";
@@ -139,16 +142,27 @@ export class AiSpendLedgerStore {
         if (keys.has(key)) throw new AiSpendLedgerError("invalid_input"); keys.add(key);
         const amount = integer(units[rule.metric] ?? 0);
         if (rule.limit !== undefined && amount > integer(rule.limit)) throw new AiSpendLimitError(rule.scope, rule.metric);
-        const bucket = (await client.query<{ id: string }>(`INSERT INTO ai_limit_buckets
-          (id,environment,scope_type,scope_id,metric,window_start,window_end,reserved) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-          ON CONFLICT (environment,scope_type,scope_id,metric,window_start,window_end)
-          DO UPDATE SET reserved=ai_limit_buckets.reserved+EXCLUDED.reserved
-          WHERE $9::bigint IS NULL OR ai_limit_buckets.reserved+ai_limit_buckets.consumed+EXCLUDED.reserved<=$9::bigint
-          RETURNING id`,
-        [randomUUID(), this.options.environment, rule.scope, scopeId, rule.metric, start, new Date(start.getTime() + width), amount, rule.limit ?? null])).rows[0];
-        if (!bucket) throw new AiSpendLimitError(rule.scope, rule.metric);
-        await client.query("INSERT INTO ai_attempt_claims (attempt_id,bucket_id,reserved_units) VALUES ($1,$2,$3)", [id, bucket.id, amount]);
+        claims.push({ id: randomUUID(), scope: rule.scope, scope_id: scopeId, metric: rule.metric,
+          start: start.toISOString(), end: new Date(start.getTime() + width).toISOString(), amount,
+          ceiling: rule.limit ?? null, ordinal: claims.length });
       }
+      // One ordered upsert + claim insert. Check limits before COMMIT; any
+      // exceeded limit throws and rolls back ALL old/new claims atomically.
+      const exceeded = await client.query<{ scope: SpendScope; metric: SpendMetric }>(`
+        WITH requested AS MATERIALIZED (SELECT * FROM jsonb_to_recordset($1::jsonb)
+          AS r(id uuid,scope text,scope_id text,metric text,start timestamptz,"end" timestamptz,amount bigint,ceiling bigint,ordinal int)),
+        buckets AS (INSERT INTO ai_limit_buckets (id,environment,scope_type,scope_id,metric,window_start,window_end,reserved)
+          SELECT id,$2,scope,scope_id,metric,start,"end",amount FROM requested ORDER BY ordinal
+          ON CONFLICT (environment,scope_type,scope_id,metric,window_start,window_end)
+          DO UPDATE SET reserved=ai_limit_buckets.reserved+EXCLUDED.reserved RETURNING *),
+        claims AS (INSERT INTO ai_attempt_claims (attempt_id,bucket_id,reserved_units)
+          SELECT $3,b.id,r.amount FROM requested r JOIN buckets b ON b.scope_type=r.scope AND b.scope_id=r.scope_id
+            AND b.metric=r.metric AND b.window_start=r.start AND b.window_end=r."end" RETURNING bucket_id)
+        SELECT r.scope,r.metric FROM requested r JOIN buckets b ON b.scope_type=r.scope AND b.scope_id=r.scope_id
+          AND b.metric=r.metric AND b.window_start=r.start AND b.window_end=r."end"
+        WHERE r.ceiling IS NOT NULL AND b.reserved+b.consumed>r.ceiling ORDER BY r.ordinal`,
+      [JSON.stringify(claims), this.options.environment, id]);
+      if (exceeded.rows[0]) throw new AiSpendLimitError(exceeded.rows[0].scope, exceeded.rows[0].metric);
       return { duplicate: false, attempt: result.rows[0] };
     });
   }
@@ -161,10 +175,14 @@ export class AiSpendLedgerStore {
   }
   async dispatch(id: string, actorId: string, orgId: string | null) {
     await this.transaction(async (client, now) => {
-      const attempt = await this.owned(client, id, actorId, orgId);
       // A duplicate dispatch must never authorize a second provider invocation.
-      if (attempt.state !== "reserved" || attempt.lease_expires_at <= now) throw new AiSpendLedgerError("invalid_transition");
-      await client.query("UPDATE ai_provider_attempts SET state='dispatched',dispatched_at=$2 WHERE id=$1", [id, now]);
+      const result = await client.query(`UPDATE ai_provider_attempts SET state='dispatched',dispatched_at=$5
+        WHERE id=$1 AND environment=$2 AND actor_id=$3 AND org_id IS NOT DISTINCT FROM $4
+          AND state='reserved' AND lease_expires_at>$5 RETURNING id`, [id, this.options.environment, actorId, orgId, now]);
+      if (!result.rowCount) {
+        await this.owned(client, id, actorId, orgId); // Preserve ownership error classification.
+        throw new AiSpendLedgerError("invalid_transition");
+      }
     });
   }
   async settle(input: {
@@ -172,14 +190,18 @@ export class AiSpendLedgerStore {
     usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
     units?: SpendUnits;
     providerRequestId?: string;
+    /** Only evidence from the provider adapter's local pre-fetch preparation. */
+    notDispatchedError?: unknown;
   }): Promise<void> {
     if (input.usage) Object.values(input.usage).forEach(integer);
     if (input.units) Object.values(input.units).forEach((value) => integer(value!));
     if (input.providerRequestId && !/^req_[A-Za-z0-9_-]{1,190}$/.test(input.providerRequestId)) throw new AiSpendLedgerError("invalid_input");
+    const notDispatched = isOpenAiRequestNotDispatched(input.notDispatchedError);
+    if (input.notDispatchedError !== undefined && (!notDispatched || input.outcome !== "failed" || input.usage || input.units)) throw new AiSpendLedgerError("invalid_input");
     await this.transaction(async (client, now) => {
       const attempt = await this.owned(client, input.id, input.actorId, input.orgId);
       const digest = this.fingerprint([input.outcome, input.usage ?? null,
-        METRICS.map((metric) => input.units?.[metric] ?? null)]);
+        METRICS.map((metric) => input.units?.[metric] ?? null), ...(notDispatched ? ["not_dispatched"] : [])]);
       if (attempt.state === "succeeded" || attempt.state === "failed") {
         if (attempt.settlement_fingerprint !== digest) throw new AiSpendLedgerError("settlement_conflict");
         return;
@@ -192,10 +214,11 @@ export class AiSpendLedgerStore {
       }
       if (input.outcome === "succeeded" && (!attempt.dispatched_at || !input.usage)) throw new AiSpendLedgerError("invalid_transition");
       // A post-dispatch failure without measured usage may have been billed.
-      if (input.outcome === "failed" && attempt.dispatched_at && !input.usage) throw new AiSpendLedgerError("invalid_transition");
-      const charged: SpendUnits = { ...input.units, requests: 1, calls: attempt.dispatched_at ? 1 : 0,
+      if (input.outcome === "failed" && attempt.dispatched_at && !input.usage && !notDispatched) throw new AiSpendLedgerError("invalid_transition");
+      const chargeDispatch = Boolean(attempt.dispatched_at) && !notDispatched;
+      const charged: SpendUnits = { ...input.units, requests: 1, calls: chargeDispatch ? 1 : 0,
         text_tokens: input.usage?.totalTokens ?? 0 };
-      await this.settleClaims(client, attempt.id, charged, Boolean(attempt.dispatched_at));
+      await this.settleClaims(client, attempt.id, charged, chargeDispatch);
       if (input.usage) {
         const updated = await client.query(`UPDATE ai_usage_events SET input_tokens=$2,output_tokens=$3,total_tokens=$4 WHERE id=$1`,
           [attempt.usage_event_id, input.usage.inputTokens, input.usage.outputTokens, input.usage.totalTokens]);
@@ -206,20 +229,20 @@ export class AiSpendLedgerStore {
         provider_request_id=$12 WHERE id=$1`,
       [attempt.id, input.outcome, now, input.usage?.inputTokens ?? null, input.usage?.outputTokens ?? null, input.usage?.totalTokens ?? null,
         charged.tts_characters ?? null, charged.stt_milliseconds ?? null, charged.estimated_cost_microusd ?? null, digest,
-        input.outcome === "failed" ? (attempt.dispatched_at ? "provider_failed" : "pre_dispatch") : null,
+        input.outcome === "failed" ? (chargeDispatch ? "provider_failed" : "pre_dispatch") : null,
         input.providerRequestId ?? null]);
     });
   }
   private async settleClaims(client: PoolClient, id: string, units: SpendUnits, retainUnmeasured = false) {
-    const claims = await client.query<{ bucket_id: string; reserved_units: string; metric: SpendMetric }>(
-      `SELECT c.bucket_id,c.reserved_units,b.metric FROM ai_attempt_claims c JOIN ai_limit_buckets b ON b.id=c.bucket_id
-       WHERE c.attempt_id=$1 AND c.settled_units IS NULL ORDER BY c.bucket_id FOR UPDATE OF b,c`, [id]);
-    for (const claim of claims.rows) {
-      const amount = integer(units[claim.metric] ?? (retainUnmeasured ? Number(claim.reserved_units) : 0));
-      await client.query("UPDATE ai_limit_buckets SET reserved=reserved-$2,consumed=consumed+$3 WHERE id=$1",
-        [claim.bucket_id, claim.reserved_units, amount]);
-      await client.query("UPDATE ai_attempt_claims SET settled_units=$3 WHERE attempt_id=$1 AND bucket_id=$2", [id, claim.bucket_id, amount]);
-    }
+    await client.query(`WITH claims AS MATERIALIZED (
+      SELECT c.bucket_id,c.reserved_units,coalesce(($2::jsonb->>b.metric)::bigint,
+        CASE WHEN $3::boolean THEN c.reserved_units ELSE 0 END) AS amount
+      FROM ai_attempt_claims c JOIN ai_limit_buckets b ON b.id=c.bucket_id
+      WHERE c.attempt_id=$1 AND c.settled_units IS NULL ORDER BY c.bucket_id FOR UPDATE OF b,c),
+    buckets AS (UPDATE ai_limit_buckets b SET reserved=b.reserved-c.reserved_units,consumed=b.consumed+c.amount
+      FROM claims c WHERE b.id=c.bucket_id RETURNING b.id)
+    UPDATE ai_attempt_claims c SET settled_units=s.amount FROM claims s
+      WHERE c.attempt_id=$1 AND c.bucket_id=s.bucket_id`, [id, JSON.stringify(units), retainUnmeasured]);
   }
   private async reapOnClient(client: PoolClient, now: Date) {
     const expired = await client.query<SpendAttempt>(`SELECT * FROM ai_provider_attempts
