@@ -988,7 +988,7 @@ export async function createDashboardCustomerPracticeScenario(
 }
 
 export async function generateDashboardCustomerPracticeScenario(
-  orgId: string, topicId: string, input: { sourceContentIds: string[]; practiceGuidance?: string | null },
+  orgId: string, topicId: string, input: import("@voicepractice/shared").CustomerPracticeScenarioGenerationRequest,
 ): Promise<import("@voicepractice/shared").CustomerPracticeScenarioGeneratedDraft> {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi(

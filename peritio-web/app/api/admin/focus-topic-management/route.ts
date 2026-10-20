@@ -66,7 +66,8 @@ type Action =
   | { action: "put_content_transcript"; orgId: string; topicId: string; contentId: string; text: string }
   | { action: "remove_content_transcript"; orgId: string; topicId: string; contentId: string }
   | { action: "list_practice_scenarios"; orgId: string; topicId: string }
-  | { action: "generate_practice_scenario"; orgId: string; topicId: string; sourceContentIds: string[]; practiceGuidance?: string | null }
+  | { action: "generate_practice_scenario"; orgId: string; topicId: string; sourceContentIds: string[]; practiceGuidance?: string | null;
+      segmentId: string; applicableIndustryIds: string[] }
   | { action: "create_practice_scenario" | "revise_practice_scenario"; orgId: string; topicId: string;
       scenarioId?: string; title: string; description: string; desiredOutcome?: string | null;
       aiRole: string; scoringGuidance: string; segmentId: string; applicableIndustryIds: string[];
@@ -164,7 +165,8 @@ export async function POST(request: NextRequest) {
         )));
       case "generate_practice_scenario":
         return noStore(NextResponse.json(await generateDashboardCustomerPracticeScenario(
-          body.orgId, body.topicId, { sourceContentIds: body.sourceContentIds, practiceGuidance: body.practiceGuidance },
+          body.orgId, body.topicId, { sourceContentIds: body.sourceContentIds, practiceGuidance: body.practiceGuidance,
+            segmentId: body.segmentId, applicableIndustryIds: body.applicableIndustryIds },
         )));
       case "create_practice_scenario":
         return noStore(NextResponse.json(await createDashboardCustomerPracticeScenario(

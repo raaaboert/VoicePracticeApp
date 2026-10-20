@@ -341,6 +341,7 @@ import {
   generateCustomerPracticeScenarioDraft,
   CustomerPracticeScenarioGenerationError,
   CUSTOMER_PRACTICE_SCENARIO_GENERATION_PROMPT_VERSION,
+  type CustomerPracticeScenarioGenerationContext,
 } from "./services/customerPracticeScenarioGeneration.js";
 import { CustomerPracticeScenarioGenerationReceiptRegistry } from "./services/customerPracticeScenarioGenerationReceipt.js";
 import {
@@ -18712,7 +18713,7 @@ async function reauthorizeCurrentCustomerScenarioGenerationSources(params: {
 function validateCustomerPracticeScenarioDraft(
   db: ApiDatabase,
   org: EnterpriseOrg,
-  input: CustomerPracticeScenarioDraftRequest,
+  input: Pick<CustomerPracticeScenarioDraftRequest, "segmentId" | "applicableIndustryIds">,
 ): void {
   const segmentId = typeof input.segmentId === "string" ? input.segmentId.trim() : "";
   const segment = db.config.segments.find((entry) => entry.id === segmentId && entry.enabled === true);
@@ -18723,6 +18724,28 @@ function validateCustomerPracticeScenarioDraft(
   if (industryError) throw new CustomerPracticeScenarioStoreError(industryError, "scenario_validation_failed");
   if (org.status !== "active") {
     throw new CustomerPracticeScenarioStoreError("Organization not found.", "scenario_scope_denied", 404);
+  }
+}
+
+function resolveCustomerScenarioGenerationContext(
+  db: ApiDatabase, org: EnterpriseOrg, input: CustomerPracticeScenarioGenerationRequest,
+): CustomerPracticeScenarioGenerationContext {
+  validateCustomerPracticeScenarioDraft(db, org, input);
+  const role = db.config.segments.find((entry) => entry.id === input.segmentId.trim())!;
+  return {
+    learnerRole: { id: role.id, label: role.label, summary: role.summary },
+    industries: uniqueStrings(input.applicableIndustryIds).sort().map((id) => {
+      const industry = db.config.industries.find((entry) => entry.id === id)!;
+      return { id, label: industry.label };
+    }),
+  };
+}
+
+function assertSameCustomerScenarioGenerationContext(
+  original: CustomerPracticeScenarioGenerationContext, current: CustomerPracticeScenarioGenerationContext,
+): void {
+  if (JSON.stringify(original) !== JSON.stringify(current)) {
+    throw new CustomerPracticeScenarioStoreError("The selected Role or industries changed. Generate the draft again.", "scenario_generation_context_changed", 409);
   }
 }
 
@@ -18769,9 +18792,10 @@ async function resolveCustomerPracticeScenarioDraft(
       .filter((contentId): contentId is string => Boolean(contentId));
     const serverProvenance = customerPracticeScenarioGenerationReceipts.resolve({
       token: input.generationToken, actorId, orgId, topicId, sourceContentIds,
+      segmentId: input.segmentId.trim(), applicableIndustryIds: uniqueStrings(input.applicableIndustryIds),
     });
     if (typeof input.generationToken === "string" && input.generationToken.trim() && !serverProvenance) {
-      throw new CustomerPracticeScenarioStoreError("The generated draft is no longer valid. Generate it again before saving.", "scenario_generation_expired", 409);
+      throw new CustomerPracticeScenarioStoreError("The generated draft expired or its Role, industries, or sources changed. Generate it again before saving.", "scenario_generation_expired", 409);
     }
     const { serverProvenance: _untrustedServerProvenance, ...clientDraft } = input as CustomerPracticeScenarioDraftRequest & { serverProvenance?: unknown };
     return { ...clientDraft, sourceContentIds: undefined, generationToken: undefined, sourceReferences,
@@ -18913,7 +18937,7 @@ app.post(
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
         assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org), "Generation");
-        return { context };
+        return { context, generationContext: resolveCustomerScenarioGenerationContext(db, context.management.org, requestInput) };
       });
       if (!prepared || response.headersSent) return;
       if (!consumeRateLimit(customerScenarioGenerationRateLimitOptions, request, response, `${prepared.context.management.org.id}:${prepared.context.actorId}`)) return;
@@ -18929,11 +18953,14 @@ app.post(
         if (!context || response.headersSent) return null;
         if (!context.settings.allowCustomerScenarioCreation) throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org), "Generation");
+        assertSameCustomerScenarioGenerationContext(prepared.generationContext,
+          resolveCustomerScenarioGenerationContext(db, context.management.org, requestInput));
         await reauthorizeCurrentCustomerScenarioGenerationSources({ orgId: context.management.org.id, topicId: context.topic.id, selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true, moduleEnabled: context.management.learningResourcesEnabled });
         return { scenarios: await customerPracticeScenarioStore.listByTopic(context.management.org.id, context.topic.id) };
       });
       if (!beforeProvider || response.headersSent) return;
       const generated = await generateCustomerPracticeScenarioDraft({
+        context: prepared.generationContext,
         sourceBundle, practiceGuidance: requestInput.practiceGuidance,
         existingScenarios: beforeProvider.scenarios, modelConfig: OPENAI_MODEL_CONFIG.scenarioGeneration,
         complete: async (params) => (await invokeAiProviderWithBudget({
@@ -18954,6 +18981,8 @@ app.post(
           throw new CustomerPracticeScenarioStoreError("Customer Practice Scenario creation is not enabled for this organization.", "scenario_creation_disabled", 403);
         }
         assertCustomerScenarioPublicationIndustries(db, context.management.org, resolveEffectiveOrgIndustryIds(db.config, context.management.org), "Generation");
+        assertSameCustomerScenarioGenerationContext(prepared.generationContext,
+          resolveCustomerScenarioGenerationContext(db, context.management.org, requestInput));
         await reauthorizeCurrentCustomerScenarioGenerationSources({
           orgId: context.management.org.id, topicId: context.topic.id,
           selectedContentIds: requestInput.sourceContentIds, actorCurrentlyAuthorized: true,
@@ -18963,6 +18992,7 @@ app.post(
       });
       if (!stillAuthorized || response.headersSent) return;
       const receipt = customerPracticeScenarioGenerationReceipts.issue({
+        segmentId: generated.draft.segmentId, applicableIndustryIds: generated.draft.applicableIndustryIds,
         actorId: prepared.context.actorId, orgId: prepared.context.management.org.id,
         topicId: prepared.context.topic.id, sourceContentIds: generated.draft.sourceContentIds,
         provenance: generated.serverProvenance,

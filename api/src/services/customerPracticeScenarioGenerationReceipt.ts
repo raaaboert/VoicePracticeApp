@@ -9,6 +9,8 @@ export interface CustomerPracticeScenarioGenerationReceipt {
   actorId: string;
   orgId: string;
   topicId: string;
+  segmentId: string;
+  applicableIndustryIds: string[];
   sourceContentIds: string[];
   provenance: OrgCustomScenarioProvenance;
   expiresAt: number;
@@ -21,17 +23,22 @@ export class CustomerPracticeScenarioGenerationReceiptRegistry {
 
   issue(input: Omit<CustomerPracticeScenarioGenerationReceipt, "token" | "expiresAt">): CustomerPracticeScenarioGenerationReceipt {
     this.purge();
-    const receipt = { ...input, sourceContentIds: [...new Set(input.sourceContentIds)], token: randomUUID(),
+    const receipt = { ...input, applicableIndustryIds: [...new Set(input.applicableIndustryIds)].sort(),
+      sourceContentIds: [...new Set(input.sourceContentIds)], token: randomUUID(),
       expiresAt: this.now() + CUSTOMER_PRACTICE_SCENARIO_GENERATION_RECEIPT_TTL_MS };
     this.receipts.set(receipt.token, receipt);
     return receipt;
   }
 
-  resolve(input: { token: unknown; actorId: string; orgId: string; topicId: string; sourceContentIds: readonly string[] }): OrgCustomScenarioProvenance | null {
+  resolve(input: { token: unknown; actorId: string; orgId: string; topicId: string; sourceContentIds: readonly string[];
+    segmentId: string; applicableIndustryIds: readonly string[] }): OrgCustomScenarioProvenance | null {
     this.purge();
     if (typeof input.token !== "string" || !input.token.trim()) return null;
     const receipt = this.receipts.get(input.token);
     if (!receipt || receipt.actorId !== input.actorId || receipt.orgId !== input.orgId || receipt.topicId !== input.topicId) return null;
+    const industries = [...new Set(input.applicableIndustryIds)].sort();
+    if (receipt.segmentId !== input.segmentId || industries.length !== receipt.applicableIndustryIds.length
+      || industries.some((id, index) => id !== receipt.applicableIndustryIds[index])) return null;
     const requested = [...new Set(input.sourceContentIds)].sort();
     const recorded = [...receipt.sourceContentIds].sort();
     if (requested.length !== recorded.length || requested.some((id, index) => id !== recorded[index])) return null;

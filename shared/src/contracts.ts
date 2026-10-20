@@ -1033,11 +1033,15 @@ export interface CustomerPracticeScenarioDraftRequest {
 }
 
 export interface CustomerPracticeScenarioGenerationRequest {
+  segmentId: string;
+  applicableIndustryIds: IndustryId[];
   sourceContentIds: string[];
   practiceGuidance?: string | null;
 }
 
 export interface CustomerPracticeScenarioGeneratedDraft {
+  segmentId: string;
+  applicableIndustryIds: IndustryId[];
   title: string;
   description: string;
   desiredOutcome: string | null;

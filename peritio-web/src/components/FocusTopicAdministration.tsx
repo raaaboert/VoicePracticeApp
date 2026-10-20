@@ -1,5 +1,7 @@
 "use client";
 
+import { buildScenarioGenerationRequest, generatedScenarioContextMatches } from "./practiceScenarioGenerationContext";
+
 import { ChevronDown, ChevronUp, CircleHelp, LoaderCircle } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import type {
@@ -227,6 +229,8 @@ export function FocusTopicAdministration({
     ? scenarioGroupOpenByTopic[selected.id] ?? { active: true, archived: false }
     : { active: true, archived: false };
   const expandedScenarioIds = new Set(selected ? expandedScenarioIdsByTopic[selected.id] ?? [] : []);
+  const generatedContextChanged = Boolean(generatedScenario
+    && !generatedScenarioContextMatches(generatedScenario, scenarioSegmentId, scenarioIndustryIds));
   const editingScenario = practiceScenarios?.scenarios.find((scenario) => scenario.id === editingScenarioId) ?? null;
   const editingRejectionFeedback = editingScenario ? latestApplicableRejectionFeedback(editingScenario) : null;
 
@@ -517,18 +521,26 @@ export function FocusTopicAdministration({
     setScenarioPracticeGuidance(""); setGeneratedScenario(null);
   };
   const generateScenarioDraft = () => {
-    if (scenarioGenerationInFlight.current || !selected || scenarioSourceContentIds.length === 0) return;
+    if (scenarioGenerationInFlight.current || !selected || !practiceScenarios) return;
+    let generationInput;
+    try { generationInput = buildScenarioGenerationRequest(practiceScenarios, scenarioSegmentId,
+      scenarioIndustryIds, scenarioSourceContentIds, scenarioPracticeGuidance); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Select a learner Role and industries."); return; }
     scenarioGenerationInFlight.current = true;
     setGeneratingScenario(true);
     void run(async () => {
       const generated = await action<CustomerPracticeScenarioGeneratedDraft>({
         action: "generate_practice_scenario", orgId, topicId: selected.id,
-        sourceContentIds: scenarioSourceContentIds, practiceGuidance: scenarioPracticeGuidance || null,
+        ...generationInput,
       });
+      if (!generatedScenarioContextMatches(generated, generationInput.segmentId, generationInput.applicableIndustryIds)) {
+        throw new Error("The generator did not confirm the selected Role and industries. Refresh and generate the draft again.");
+      }
       setEditingScenarioId(null); setScenarioTitle(generated.title); setScenarioDescription(generated.description);
       setScenarioDesiredOutcome(generated.desiredOutcome ?? ""); setScenarioAiRole(generated.aiRole);
       setScenarioScoringGuidance(generated.scoringGuidance); setScenarioUseIndustryScoringOnly(false);
       setScenarioSourceContentIds(generated.sourceContentIds); setGeneratedScenario(generated);
+      setScenarioSegmentId(generated.segmentId); setScenarioIndustryIds(generated.applicableIndustryIds);
       setMessage("Generated a draft for review. Complete the remaining fields, then save it as a normal draft.");
     }).finally(() => {
       scenarioGenerationInFlight.current = false;
@@ -555,6 +567,7 @@ export function FocusTopicAdministration({
   };
   const saveScenarioDraft = () => void run(async () => {
     if (!selected || !practiceScenarios) return;
+    if (generatedContextChanged) throw new Error("Role or industries changed. Regenerate the draft or restore its original selections before saving.");
     const payload = {
       action: editingScenarioId ? "revise_practice_scenario" : "create_practice_scenario",
       orgId, topicId: selected.id,
@@ -664,6 +677,8 @@ export function FocusTopicAdministration({
           </div>
         </div>
         <dl className="focus-topic-scenario-version-details">
+          <div><dt>Learner Role</dt><dd>{practiceScenarios.roleOptions.find((role) => role.id === version.segmentId)?.label ?? version.segmentId.replaceAll("_", " ")}</dd></div>
+          <div><dt>Applicable industries</dt><dd>{industryLabels.join(", ")}</dd></div>
           <div><dt>Scenario context</dt><dd>{version.description}</dd></div>
           <div><dt>Desired outcome</dt><dd>{version.desiredOutcome || "Not specified"}</dd></div>
           <div><dt>AI counterpart role</dt><dd>{version.aiRole}</dd></div>
@@ -912,6 +927,28 @@ export function FocusTopicAdministration({
       </div>
       {practiceScenarios?.permissions.canAuthor && selected.status !== "archived"
         ? <div className="focus-topic-assignment-section focus-topic-upload-new">
+          <div className="focus-topic-details-grid">
+            <label className="focus-topic-field">Learner Role
+              <select className="text-input" value={scenarioSegmentId} disabled={busy || generatingScenario}
+                onChange={(event) => setScenarioSegmentId(event.target.value)}>
+                <option value="">Select a role</option>
+                {scenarioRolesForIndustries(practiceScenarios.roleOptions, scenarioIndustryIds).map((option) =>
+                  <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select></label>
+            <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Applicable industries</legend>
+              <div className="scenario-option-list focus-topic-scenario-option-list">{practiceScenarios.industryOptions.map((option) =>
+                <label key={option.id} className={`scenario-option-row focus-topic-scenario-option-row${scenarioIndustryIds.includes(option.id) ? " is-selected" : ""}`}><input type="checkbox" disabled={busy || generatingScenario} checked={scenarioIndustryIds.includes(option.id)}
+                  onChange={(event) => {
+                    const next = event.target.checked ? [...new Set([...scenarioIndustryIds, option.id])]
+                      : scenarioIndustryIds.filter((id) => id !== option.id);
+                    setScenarioIndustryIds(next);
+                    if (!scenarioRolesForIndustries(practiceScenarios.roleOptions, next).some((role) => role.id === scenarioSegmentId)) {
+                      setScenarioSegmentId("");
+                    }
+                  }} /> <span>{option.label}</span></label>)}</div>
+            </fieldset>
+          </div>
+          <p className="muted-copy">Choose the learner Role and applicable industries before generating. These selections also apply to the saved draft.</p>
           <div className="focus-topic-scenario-generation-heading"><h4>Generate Scenario Draft</h4>
             <span className="focus-topic-generation-help">
               <button type="button" className="focus-topic-generation-help-button" aria-label="How scenario generation works"
@@ -943,6 +980,7 @@ export function FocusTopicAdministration({
           {generatingScenario ? <p className="focus-topic-generation-status" role="status" aria-live="polite">
             Generating a draft from the selected sources…
           </p> : null}
+          {generatedContextChanged ? <div className="notice" role="status">Role or industries changed. Regenerate the draft or restore its original selections before saving. Your text edits are preserved.</div> : null}
           {generatedScenario?.similarity.flagged ? <div className="notice" role="status">
             This draft is similar to an existing Topic scenario. Review it before saving.
           </div> : null}
@@ -977,25 +1015,6 @@ export function FocusTopicAdministration({
                 ? "This version will use the existing industry scoring framework without custom scenario criteria. Your unsaved guidance is retained if you switch back."
                 : "Custom guidance supplements the existing industry scoring framework and remains editable."}</small>
             </label>
-            <label className="focus-topic-field">Role
-              <select className="text-input" value={scenarioSegmentId}
-                onChange={(event) => setScenarioSegmentId(event.target.value)}>
-                <option value="">Select a role</option>
-                {scenarioRolesForIndustries(practiceScenarios.roleOptions, scenarioIndustryIds).map((option) =>
-                  <option key={option.id} value={option.id}>{option.label}</option>)}
-              </select></label>
-            <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Applicable industries</legend>
-              <div className="scenario-option-list focus-topic-scenario-option-list">{practiceScenarios.industryOptions.map((option) =>
-                <label key={option.id} className={`scenario-option-row focus-topic-scenario-option-row${scenarioIndustryIds.includes(option.id) ? " is-selected" : ""}`}><input type="checkbox" checked={scenarioIndustryIds.includes(option.id)}
-                  onChange={(event) => {
-                    const next = event.target.checked ? [...new Set([...scenarioIndustryIds, option.id])]
-                      : scenarioIndustryIds.filter((id) => id !== option.id);
-                    setScenarioIndustryIds(next);
-                    if (!scenarioRolesForIndustries(practiceScenarios.roleOptions, next).some((role) => role.id === scenarioSegmentId)) {
-                      setScenarioSegmentId("");
-                    }
-                  }} /> <span>{option.label}</span></label>)}</div>
-            </fieldset>
             <fieldset className="focus-topic-field focus-topic-field-wide focus-topic-scenario-option-group"><legend>Related Content sources (optional)</legend>
               <p className="muted-copy">Select resources currently attached to this Focus Topic. Manual scenarios do not require a source.</p>
               <div className="scenario-option-list focus-topic-scenario-option-list">{scenarioSourceOptions.map((item) =>
@@ -1007,7 +1026,7 @@ export function FocusTopicAdministration({
             </fieldset>
           </div>
           <div className="focus-topic-actions">
-            <button type="button" className="primary-button" disabled={busy || !scenarioTitle.trim()
+            <button type="button" className="primary-button" disabled={busy || generatedContextChanged || !scenarioTitle.trim()
               || !scenarioDescription.trim() || !scenarioAiRole.trim()
               || (!scenarioUseIndustryScoringOnly && !scenarioScoringGuidance.trim())
               || !scenarioSegmentId || scenarioIndustryIds.length === 0}

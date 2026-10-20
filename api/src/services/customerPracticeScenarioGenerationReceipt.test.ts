@@ -6,21 +6,40 @@ import { normalizeCustomerPracticeScenarioServerProvenance, normalizeCustomerPra
 
 test("server generation receipt binds AI provenance to actor, Topic, and canonical sources", () => {
   const registry = new CustomerPracticeScenarioGenerationReceiptRegistry(() => 1_000);
-  const receipt = registry.issue({ actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_b", "source_a"],
+  const receipt = registry.issue({ actorId: "actor_1", orgId: "org_1", topicId: "topic_1", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_b", "source_a"],
     provenance: { sourceMode: "scratch", creationMethod: "ai", modelUsed: "server-model", generatedPrompt: "v1", generatedAt: "2026-10-10T00:00:00.000Z" } });
-  assert.deepEqual(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a", "source_b"] }), receipt.provenance);
-  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_2", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a", "source_b"] }), null);
-  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_2", sourceContentIds: ["source_a", "source_b"] }), null);
-  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a"] }), null);
+  assert.deepEqual(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_a", "source_b"] }), receipt.provenance);
+  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_2", orgId: "org_1", topicId: "topic_1", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_a", "source_b"] }), null);
+  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_2", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_a", "source_b"] }), null);
+  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_a"] }), null);
 });
 
 test("expired receipt cannot turn a stale or forged save into generated provenance", () => {
   let now = 1_000;
   const registry = new CustomerPracticeScenarioGenerationReceiptRegistry(() => now);
-  const receipt = registry.issue({ actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a"],
+  const receipt = registry.issue({ actorId: "actor_1", orgId: "org_1", topicId: "topic_1", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_a"],
     provenance: { sourceMode: "scratch", creationMethod: "ai", modelUsed: "server-model", generatedPrompt: "v1", generatedAt: "2026-10-10T00:00:00.000Z" } });
   now += 15 * 60 * 1000;
-  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", sourceContentIds: ["source_a"] }), null);
+  assert.equal(registry.resolve({ token: receipt.token, actorId: "actor_1", orgId: "org_1", topicId: "topic_1", segmentId: "sales", applicableIndustryIds: ["technology"], sourceContentIds: ["source_a"] }), null);
+});
+
+test("generation receipts bind Role, organization and industry set while ignoring industry order", () => {
+  const registry = new CustomerPracticeScenarioGenerationReceiptRegistry(() => 1_000);
+  const context = { actorId: "actor", orgId: "org_a", topicId: "topic", segmentId: "sales_representative",
+    applicableIndustryIds: ["technology", "services"], sourceContentIds: ["source"] };
+  const receipt = registry.issue({ ...context,
+    provenance: { sourceMode: "scratch", creationMethod: "ai", modelUsed: "server-model",
+      generatedPrompt: "v4", generatedAt: "2026-10-10T00:00:00.000Z" } });
+  const resolve = (overrides: Partial<typeof context>) => registry.resolve({ ...context, token: receipt.token, ...overrides });
+  assert.deepEqual(resolve({ applicableIndustryIds: ["services", "technology", "technology"] }), receipt.provenance);
+  assert.equal(resolve({ segmentId: "sales_engineer" }), null);
+  assert.equal(resolve({ applicableIndustryIds: ["technology"] }), null);
+  assert.equal(resolve({ applicableIndustryIds: ["foreign_industry"] }), null);
+  assert.equal(resolve({ orgId: "org_b" }), null);
+  assert.equal(resolve({ sourceContentIds: ["other_source"] }), null);
+  context.applicableIndustryIds.push("mutated_after_issue");
+  assert.deepEqual(registry.resolve({ ...context, token: receipt.token,
+    applicableIndustryIds: ["services", "technology"] }), receipt.provenance);
 });
 
 test("save lifecycle accepts only server-issued AI provenance and preserves manual distinction", () => {

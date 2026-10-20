@@ -110,7 +110,8 @@ test("Focus Topic workspace exposes the customer Practice Scenario review lifecy
   assert.match(source, /Generate Scenario Draft/);
   assert.match(source, /Generate Scenario/);
   assert.match(source, /const scenarioGenerationInFlight = useRef\(false\)/);
-  assert.match(source, /if \(scenarioGenerationInFlight\.current \|\| !selected \|\| scenarioSourceContentIds\.length === 0\) return/);
+  assert.match(source, /if \(scenarioGenerationInFlight\.current \|\| !selected \|\| !practiceScenarios\) return/);
+  assert.match(source, /generationInput = buildScenarioGenerationRequest/);
   assert.match(source, /scenarioGenerationInFlight\.current = true/);
   assert.match(source, /setGeneratingScenario\(true\)/);
   assert.match(source, /\.finally\(\(\) => \{[\s\S]*?scenarioGenerationInFlight\.current = false;[\s\S]*?setGeneratingScenario\(false\)/);
@@ -270,4 +271,20 @@ test("scoped Topic managers always receive the individual learner picker with bo
   assert.match(source, /Eligible direct reports could not be loaded/);
   assert.match(source, /: assignableLearners\.map/);
   assert.match(source, /audience: assignmentAudience/);
+});
+
+test("scenario learner context precedes generation and review separates it from the AI counterpart", () => {
+  assert.ok(source.indexOf(">Learner Role") < source.indexOf("<h4>Generate Scenario Draft</h4>"));
+  assert.ok(source.indexOf("<legend>Applicable industries</legend>") < source.indexOf("<h4>Generate Scenario Draft</h4>"));
+  assert.match(source, /buildScenarioGenerationRequest\(practiceScenarios, scenarioSegmentId/);
+  assert.match(source, /\.\.\.generationInput/);
+  assert.match(source, /generatedScenarioContextMatches\(generatedScenario, scenarioSegmentId, scenarioIndustryIds\)/);
+  assert.match(source, /Regenerate the draft or restore its original selections before saving/);
+  assert.match(source, /Your text edits are preserved/);
+  assert.match(source, /disabled=\{busy \|\| generatedContextChanged/);
+  assert.match(source, /<dt>Learner Role<\/dt>/);
+  assert.match(source, /role\.id === version\.segmentId/);
+  assert.match(source, /<dt>Applicable industries<\/dt>/);
+  assert.match(source, /<dt>AI counterpart role<\/dt>/);
+  assert.match(proxy, /segmentId: string; applicableIndustryIds: string\[\]/);
 });
