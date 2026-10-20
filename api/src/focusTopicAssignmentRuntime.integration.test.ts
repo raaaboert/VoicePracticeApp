@@ -1981,32 +1981,40 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.equal(failed.status, 502, JSON.stringify(failed.body));
         assert.equal((await pool!.query("SELECT 1 FROM score_records WHERE simulation_session_id=$1", [retry.id])).rowCount, 0);
         assert.equal((await withMockResponses(output, () => call(scorePath, retry.context))).status, 201);
-        // Force two requests to be inside provider work simultaneously. They may
-        // both evaluate, but the database chooses one immutable result for both.
+        // Keep the first provider pending while a concurrent submission is rejected
+        // safely; recovery then returns the one immutable result.
         const concurrent = await start();
         const original = globalThis.fetch;
         let release!: () => void;
         const gate = new Promise<void>((resolve) => { release = resolve; });
-        const releaseOnFailure = setTimeout(() => release(), 5_000);
+        let entered!: () => void;
+        const providerEntered = new Promise<void>((resolve) => { entered = resolve; });
         let providers = 0;
         globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
           if (String(input) !== "https://api.openai.com/v1/responses") return original(input, init);
           const sequence = ++providers;
-          if (providers === 2) release();
+          entered();
           await gate;
           return new Response(JSON.stringify({ output_text: JSON.stringify({ ...JSON.parse(output), summary: `Winner ${sequence}` }),
             model: "local-test-model", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }),
           { status: 200, headers: { "Content-Type": "application/json" } });
         }) as typeof fetch;
         try {
-          const results = await Promise.all([call(scorePath, concurrent.context), call(scorePath, concurrent.context)]);
-          assert.equal(providers, 2);
-          assert.equal(results[0]!.status, 201, JSON.stringify(results[0]!.body));
-          assert.equal(results[1]!.status, 201, JSON.stringify(results[1]!.body));
+          const first = call(scorePath, concurrent.context);
+          await providerEntered;
+          const busy = await call(scorePath, concurrent.context);
+          assert.equal(busy.status, 503, JSON.stringify(busy.body));
+          assert.equal(busy.body.code, "ai_unavailable");
+          assert.equal(providers, 1);
+          release();
+          const finished = await first;
+          assert.equal(finished.status, 201, JSON.stringify(finished.body));
+          const results = [finished, await call(scorePath, concurrent.context)];
+          assert.equal(results[1]!.status, 200);
           assert.deepEqual(results[0]!.body, results[1]!.body);
           assert.equal((await pool!.query("SELECT count(*) FROM score_records WHERE simulation_session_id=$1", [concurrent.id])).rows[0].count, "1");
           assert.deepEqual((await call(scorePath, concurrent.context)).body, results[0]!.body);
-          assert.equal(providers, 2);
+          assert.equal(providers, 1);
           assert.equal((await pool!.query("SELECT count(*) FROM usage_sessions u JOIN simulation_sessions s ON s.usage_session_record_id=u.id WHERE s.simulation_session_id=$1", [concurrent.id])).rows[0].count, "0", "scoring does not bill conversation minutes");
           const writers = [0, 1].map(() => createScoreRecordStore({ provider: "postgres", dbPath: "unused",
             databaseUrl: url, pgPoolMax: 1, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 1000 }));
@@ -2019,7 +2027,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           const reopened = createScoreRecordStore({ provider: "postgres", dbPath: "unused", databaseUrl: url,
             pgPoolMax: 1, pgConnectTimeoutMs: 2000, pgIdleTimeoutMs: 1000 });
           assert.deepEqual(await reopened.getPersistedSessionScore(raceId), rows[0], "fresh process/store reads the persisted winner");
-        } finally { clearTimeout(releaseOnFailure); globalThis.fetch = original; }
+        } finally { release(); globalThis.fetch = original; }
       });
 
       // Regression: a registered assignment session is permanently pinned to
@@ -2177,6 +2185,45 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       assert.equal((await pool.query<{ scenario_version_id: string | null }>(
         "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [industryOnlySessionId],
       )).rows[0]?.scenario_version_id, pinnedV2Id);
+
+      await t.test("archived customer scenario finalizes pinned usage once, preserves scoring and rejects forged or expired completion", async () => {
+        const created = await orgAdminCall(practiceScenarioPath, "POST", { ...pinnedV1Draft, title: "Finalize after archival" });
+        assert.equal(created.status, 201, JSON.stringify(created.body));
+        const id = String(created.body.id), path = `${practiceScenarioPath}/${id}`;
+        for (const action of ["submit", "approve", "publish"]) assert.equal((await orgAdminCall(`${path}/${action}`, "POST")).status, 200);
+        const versionId = (await pool!.query("SELECT published_version_id FROM customer_practice_scenarios WHERE id=$1", [id])).rows[0].published_version_id;
+        const sessions: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < 2; i++) {
+          const sessionId = `archived_completion_${randomUUID()}`;
+          const started = await call(startPath, { simulationSessionId: sessionId, segmentId: segment.id, scenarioId: id, trainingId: topic.id });
+          assert.equal(started.status, 201, JSON.stringify(started.body));
+          sessions.push({ simulationSessionId: sessionId, userId: user.id, segmentId: segment.id, scenarioId: id, trainingId: topic.id,
+            startedAt: started.body.serverStartedAt, endedAt: new Date(Date.now() + 1000).toISOString(), rawDurationSeconds: 1 });
+        }
+        assert.equal((await orgAdminCall(`${path}/archive`, "POST")).status, 200);
+        const complete = await call("/usage/sessions", sessions[0]); assert.equal(complete.status, 201, JSON.stringify(complete.body));
+        assert.equal((await call("/usage/sessions", sessions[0])).status, 201);
+        const usage = await pool!.query("SELECT * FROM usage_sessions WHERE scenario_id=$1", [id]);
+        assert.equal(usage.rowCount, 1);
+        assert.equal(usage.rows[0].scenario_version_id, versionId);
+        assert.equal(usage.rows[0].org_id, org.id); assert.equal(usage.rows[0].user_id, user.id);
+        assert.equal(usage.rows[0].training_id, topic.id); assert.equal(usage.rows[0].raw_duration_seconds, 1);
+        assert.notEqual((await call(startPath, { simulationSessionId: `new_${randomUUID()}`, segmentId: segment.id, scenarioId: id, trainingId: topic.id })).status, 201);
+        assert.equal((await call("/usage/sessions", { ...sessions[0], scenarioId: "forged" })).status, 404);
+        assert.equal((await call("/usage/sessions", { ...sessions[0], simulationSessionId: "missing_registered_session" })).status, 404);
+        assert.equal((await call("/usage/sessions", { ...sessions[0], userId: scopedUserAdmin.id })).status, 401);
+        await pool!.query("UPDATE simulation_sessions SET server_started_at=now()-interval '2 days' WHERE simulation_session_id=$1", [sessions[1]!.simulationSessionId]);
+        assert.equal((await call("/usage/sessions", sessions[1])).status, 409);
+        const output = JSON.stringify({ communicationScore: 80, outcomeScore: 75, overallScore: 78,
+          completionLevel: "complete", objectiveAchieved: true, persuasion: 8, clarity: 7, empathy: 9,
+          assertiveness: 8, strengths: ["Clear"], improvements: ["Close"], summary: "Agreed a plan." });
+        const result = await withMockResponses(output, () => call(`/mobile/users/${user.id}/ai/score`, { ...sessions[0],
+          history: [{ role: "user", content: "Identify the concern." }, { role: "assistant", content: "What next?" },
+            { role: "user", content: "Agree an owner." }, { role: "assistant", content: "Then?" }, { role: "user", content: "Review tomorrow." }] }));
+        assert.equal(result.status, 201, JSON.stringify(result.body));
+        assert.equal((await pool!.query("SELECT scenario_id,scenario_version_id FROM usage_sessions WHERE scenario_id=$1", [id])).rows[0].scenario_version_id, versionId);
+        assert.equal((await pool!.query("SELECT count(*) FROM score_records WHERE simulation_session_id=$1", [sessions[0]!.simulationSessionId])).rows[0].count, "1");
+      });
 
       // A recognized session retains its server-captured industry context after
       // the live definition changes. The fresh persona variant forces a runtime

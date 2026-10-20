@@ -244,6 +244,7 @@ import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
 import { createScoreRecordStore } from "./storage/scoreRecordStore.js";
+import { SimulationScoringCoordinator } from "./services/simulationScoringCoordinator.js";
 import { createSimulationSessionStore, SimulationSessionConflictError } from "./storage/simulationSessionStore.js";
 import { createSupportCaseStore } from "./storage/supportCaseStore.js";
 import { scheduleSupportTranscriptExpiration } from "./services/supportTranscriptExpiration.js";
@@ -685,7 +686,9 @@ const OPENAI_TTS_MODEL = OPENAI_MODEL_CONFIG.speech.model;
 const TTS_TEXT_MAX_CHARS = 4_000;
 const SIMULATION_SPEECH_PREFETCH_PAYLOAD_WINDOW_MS = 1_500;
 const SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS = 12_000;
-const SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS = 2_000;
+// Join the existing bounded synthesis instead of starting a second provider
+// request after two seconds. This does not extend the provider's own deadline.
+const SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS = SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS;
 const MIN_SIMULATION_TRANSCRIPT_CHARS = 2;
 const SIMULATION_MODEL_TIMEOUT_MS_BY_ROUTE: Record<SimulationRoute, number> = {
   opening: 30_000,
@@ -902,6 +905,10 @@ const usageSessionStore = createUsageSessionStore({
   pgPoolMax: PG_POOL_MAX,
   pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS,
   pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS
+});
+const simulationScoringCoordinator = new SimulationScoringCoordinator({
+  databaseUrl: STORAGE_PROVIDER === "postgres" ? DATABASE_URL : null,
+  pgPoolMax: PG_POOL_MAX, pgConnectTimeoutMs: PG_CONNECT_TIMEOUT_MS, pgIdleTimeoutMs: PG_IDLE_TIMEOUT_MS,
 });
 const scoreRecordStore = createScoreRecordStore({
   provider: STORAGE_PROVIDER,
@@ -1721,6 +1728,8 @@ export const simulationSpeechPrefetchRegistry = new SimulationSpeechPrefetchRegi
 function registerSimulationSpeechPrefetchForForegroundReuse(params: {
   correlationId: string;
   userId: string;
+  orgId: string | null;
+  sessionId: string | null;
   text: string;
   request: SimulationSpeechPrefetchRequest | null;
   promise: Promise<SimulationSpeechPrefetchPayload | null>;
@@ -1735,6 +1744,8 @@ function registerSimulationSpeechPrefetchForForegroundReuse(params: {
   simulationSpeechPrefetchRegistry.register({
     correlationId: params.correlationId,
     userId: params.userId,
+    orgId: params.orgId,
+    sessionId: params.sessionId,
     preset: params.request.preset,
     text: firstChunk,
     promise: params.promise,
@@ -1774,7 +1785,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
   request: SimulationSpeechPrefetchRequest | null;
   budgetContext: AiProviderBudgetContext;
 }): Promise<SimulationSpeechPrefetchPayload | null> {
-  if (!ENABLE_REMOTE_TTS || !params.request) {
+  if (!ENABLE_REMOTE_TTS || !params.request || !simulationSpeechPrefetchRegistry.hasCapacity()) {
     return null;
   }
 
@@ -2408,6 +2419,8 @@ async function generateSimulationTurnReply(params: {
   registerSimulationSpeechPrefetchForForegroundReuse({
     correlationId: params.correlationId,
     userId: params.budgetContext.user.id,
+    orgId: params.budgetContext.orgId,
+    sessionId: params.budgetContext.authorizedSimulation?.session.simulationSessionId ?? null,
     text: assistantText,
     request: params.requestedSpeechPrefetch,
     promise: speechPrefetchPromise,
@@ -23851,6 +23864,8 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
   const reusablePrefetch = await simulationSpeechPrefetchRegistry.consume({
     correlationId,
     userId,
+    orgId: context.actingOrgId,
+    sessionId: context.authorizedSimulation?.session.simulationSessionId ?? null,
     preset,
     text,
     waitMs: SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS,
@@ -23894,6 +23909,14 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     });
     return;
   }
+  if (reusablePrefetch.status === "timeout" || reusablePrefetch.status === "hit") {
+    // A timeout only stops this waiter; it must not dispatch a competing
+    // synthesis. A retry can join the same work or reuse its completed audio.
+    respondWithTtsError({ status: reusablePrefetch.status === "timeout" ? 504 : 503,
+      message: "AI voice is temporarily unavailable. Please retry AI Voice.",
+      code: reusablePrefetch.status === "timeout" ? "ai_timeout" : "ai_unavailable" });
+    return;
+  }
   let ttsCallStartedAtMs: number | null = null;
   try {
     ttsCallStartedAtMs = Date.now();
@@ -23913,23 +23936,29 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       stage: "start",
       startedAtMs: ttsCallStartedAtMs
     });
-    const budgetedTts = await invokeAiProviderWithBudget({
-      context: {
-        user: context.user,
-        authorizedSimulation: context.authorizedSimulation,
-        orgId: context.actingOrgId,
-        allowDuringActiveSimulation: true,
-      },
-      kind: "tts",
-      model: ttsConfig.model,
-      promptVersion: AI_PROMPT_VERSION,
-      rubricVersion: null,
-      estimatedTokens: 0,
-      requestMaterial: speechRequest,
-      ttsCharacters: text.length,
-      invoke: async () => await requestSpeechSynthesis(speechRequest),
+    const sharedSpeech = await simulationSpeechPrefetchRegistry.getOrStart({ correlationId, userId,
+      orgId: context.actingOrgId, sessionId: context.authorizedSimulation?.session.simulationSessionId ?? null, preset, text }, async () => {
+      const budgetedTts = await invokeAiProviderWithBudget({
+        context: {
+          user: context.user,
+          authorizedSimulation: context.authorizedSimulation,
+          orgId: context.actingOrgId,
+          allowDuringActiveSimulation: true,
+        },
+        kind: "tts",
+        model: ttsConfig.model,
+        promptVersion: AI_PROMPT_VERSION,
+        rubricVersion: null,
+        estimatedTokens: 0,
+        requestMaterial: speechRequest,
+        ttsCharacters: text.length,
+        invoke: async () => await requestSpeechSynthesis(speechRequest),
+      });
+      return { audioBase64: budgetedTts.value.audioBuffer.toString("base64"), contentType: budgetedTts.value.contentType,
+        preset, chunkCount: 1, firstChunkChars: text.length, ttsLatencyMs: Date.now() - ttsCallStartedAtMs! };
     });
-    const ttsResult = budgetedTts.value;
+    if (!sharedSpeech) throw new SafeAiRouteError({ status: 503, code: "ai_unavailable", error: "AI voice is temporarily unavailable. Please retry AI Voice." });
+    const ttsResult = { audioBuffer: Buffer.from(sharedSpeech.audioBase64, "base64"), contentType: sharedSpeech.contentType };
     const ttsCallEndedAtMs = Date.now();
     // eslint-disable-next-line no-console
     console.log("[tts-call]", {
@@ -24488,6 +24517,8 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
     registerSimulationSpeechPrefetchForForegroundReuse({
       correlationId,
       userId: context.user.id,
+      orgId: context.actingOrgId,
+      sessionId: context.authorizedSimulation?.session.simulationSessionId ?? null,
       text: assistantText,
       request: requestedSpeechPrefetch,
       promise: speechPrefetchPromise,
@@ -25361,7 +25392,24 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         submittedTrainingPackId
       });
 
+  let scoringClaim: Awaited<ReturnType<SimulationScoringCoordinator["acquire"]>> = null;
   try {
+    if (!context.isSuperUser && recognizedSessionId) {
+      scoringClaim = await simulationScoringCoordinator.acquire({ sessionId: recognizedSessionId, userId: context.user.id, orgId: context.actingOrgId });
+      if (!scoringClaim) {
+        response.setHeader("Retry-After", "2");
+        response.status(503).json({ error: "Scoring is already in progress. Recover the saved score or try again shortly.", code: "ai_unavailable" });
+        return;
+      }
+      // Another process may have committed between the initial read and lock.
+      const completed = await scoreRecordStore.getPersistedSessionScore(recognizedSessionId);
+      if (completed) {
+        if (completed.userId !== context.user.id || completed.orgId !== context.actingOrgId || completed.scenarioId !== context.scenario.id) {
+          response.status(404).json({ error: "Score not found for this session." }); return;
+        }
+        response.status(200).json(buildRecoveredSimulationEvaluationResult(completed)); return;
+      }
+    }
     const recognizedSession =
       recognizedSessionId && !context.isSuperUser
         ? await simulationSessionStore.getById(recognizedSessionId)
@@ -25432,6 +25480,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       latencyMs
     });
 
+    scoringClaim?.assertHeld();
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
     assertValidSimulationScorePayload(parsed);
     const scoringWeights = evaluationConfig?.scoringWeights ?? getDefaultScoringWeights();
@@ -25584,6 +25633,8 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     clearSimulationOrgMonthlyOverrunGrace(context.user.id);
   } catch (error) {
     respondWithAiRouteError(response, error, { route: "score", correlationId: correlationId, invalidScorePayload: error instanceof SyntaxError || error instanceof SimulationScorePayloadValidationError });
+  } finally {
+    await scoringClaim?.release();
   }
 });
 
@@ -27427,14 +27478,20 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       await ensureOrgTrainingWorkspace(db, org);
     }
 
-    const assignmentSession = runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+    const assignmentSession = !accessContext.isSuperUser
       ? await simulationSessionStore.getById(requiredSimulationSessionId)
       : null;
     const configForUser = resolveConfigForUser(
       db, user, accessContext.actingOrgId,
       { forAssignedTopic: runtimeConfig.focusTopicAuthority === "assignments" && Boolean(assignmentSession?.trainingId ?? trainingId) },
     );
-    if (runtimeConfig.focusTopicAuthority === "assignments" && !accessContext.isSuperUser
+    if (assignmentSession && (assignmentSession.userId !== user.id || assignmentSession.orgId !== accessContext.actingOrgId
+      || assignmentSession.scenarioId !== requiredScenarioId || assignmentSession.segmentId !== requiredSegmentId
+      || (trainingId && assignmentSession.trainingId && trainingId !== assignmentSession.trainingId))) {
+      response.status(404).json({ error: "Simulation session is not available." });
+      return;
+    }
+    if (!accessContext.isSuperUser && runtimeConfig.focusTopicAuthority === "assignments"
       && (!org || org.status !== "active" || user.status !== "active" || !user.emailVerifiedAt
         || user.accountType !== "enterprise" || user.orgId !== org.id
         || !assignmentSession || assignmentSession.userId !== user.id
@@ -27444,20 +27501,26 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
       response.status(404).json({ error: "Simulation session is not available." });
       return;
     }
+    if (assignmentSession && isMalformedSessionIndustrySnapshot(assignmentSession)) {
+      response.status(409).json({ error: "Simulation session industry context is invalid.", code: "session_context_invalid" });
+      return;
+    }
     const authoritativeTrainingId = assignmentSession?.trainingId ?? trainingId;
-    const resolvedScenario = resolveMobileScenarioForUser(
+    // Completion bills the registered activity, not a new scenario launch.
+    // A later archival, attachment change or industry deactivation cannot
+    // replace its immutable identity or prevent recording legitimate minutes.
+    const resolvedScenario = assignmentSession ? null : resolveMobileScenarioForUser(
       configForUser, requiredScenarioId, authoritativeTrainingId,
-      { directTopicScenarioAttached: Boolean(assignmentSession?.trainingId) },
     );
-    if (!resolvedScenario) {
+    if (!assignmentSession && !resolvedScenario) {
       response.status(400).json({ error: "Invalid scenario for usage session." });
       return;
     }
-    if (resolvedScenario.segment.id !== requiredSegmentId) {
+    if (resolvedScenario && resolvedScenario.segment.id !== requiredSegmentId) {
       response.status(400).json({ error: "Invalid segment for usage session." });
       return;
     }
-    const canonicalTrainingId = assignmentSession?.trainingId ?? resolvedScenario.canonicalTrainingId;
+    const canonicalTrainingId = assignmentSession ? assignmentSession.trainingId ?? null : resolvedScenario!.canonicalTrainingId;
     const useModularPromptArchitecture =
       USE_MODULAR_PROMPT_ARCHITECTURE_ENV && org?.enableModularPromptArchitecture === true;
     const persistedTrainingPack = assignmentSession
@@ -27468,12 +27531,12 @@ app.post("/usage/sessions", async (request: Request, response: Response) => {
           useModularPromptArchitecture,
           submittedTrainingPackId
         });
-    const divisionId = resolveSimulationDivisionIdForContext({
+    const divisionId = assignmentSession ? assignmentSession.divisionId ?? null : resolveSimulationDivisionIdForContext({
       db,
       user,
       org,
       trainingId: canonicalTrainingId,
-      resolvedScenario,
+      resolvedScenario: resolvedScenario!,
     });
 
     const now = new Date();

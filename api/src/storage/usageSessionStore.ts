@@ -581,6 +581,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             division_id,
             segment_id,
             scenario_id,
+            scenario_version_id,
             training_id,
             training_pack_id,
             started_at,
@@ -590,8 +591,8 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             created_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
-            $9::timestamptz, $10::timestamptz, $11, $12, $13::timestamptz
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz
           )
           ON CONFLICT (id) DO NOTHING
           RETURNING
@@ -601,6 +602,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             division_id,
             segment_id,
             scenario_id,
+            scenario_version_id,
             training_id,
             training_pack_id,
             started_at,
@@ -616,6 +618,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           normalized.divisionId ?? null,
           normalized.segmentId,
           normalized.scenarioId,
+          normalized.scenarioVersionId ?? null,
           normalized.trainingId ?? null,
           normalized.trainingPackId ?? null,
           normalized.startedAt,

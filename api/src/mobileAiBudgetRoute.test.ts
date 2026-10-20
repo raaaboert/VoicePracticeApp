@@ -228,6 +228,7 @@ test("global AI safety accounting covers enterprise and TTS while preserving ent
   speechPrefetchRegistry.register({
     correlationId: "budget-prefetch-reuse",
     userId: "enterprise_budget_user",
+    orgId: "org_budget",
     preset: "female-balanced",
     text: "Budget safety test response.",
     promise: new Promise((resolve) => {
@@ -255,6 +256,7 @@ test("global AI safety accounting covers enterprise and TTS while preserving ent
   speechPrefetchRegistry.register({
     correlationId: "budget-prefetch-empty",
     userId: "enterprise_budget_user",
+    orgId: "org_budget",
     preset: "female-balanced",
     text: "Budget safety test response.",
     promise: Promise.resolve(null),
@@ -289,6 +291,7 @@ test("global AI safety accounting covers enterprise and TTS while preserving ent
   speechPrefetchRegistry.register({
     correlationId: "budget-prefetch-slow",
     userId: "enterprise_budget_user",
+    orgId: "org_budget",
     preset: "female-balanced",
     text: "Budget safety test response.",
     promise: slowPrefetch,
@@ -300,8 +303,8 @@ test("global AI safety accounting covers enterprise and TTS while preserving ent
     "budget-prefetch-slow",
   );
   assert.equal(firstForeground.status, 200);
-  assert.equal(firstForeground.audioSource, "foreground_generation");
-  assert.deepEqual(firstForeground.audioBytes, new Uint8Array([1, 2, 3, 4]));
+  assert.equal(firstForeground.audioSource, "in_flight_prefetch");
+  assert.deepEqual(firstForeground.audioBytes, new Uint8Array([6, 6, 6]));
   assert.ok(Date.now() - slowReuseStartedAtMs >= 1_800, "slow prefetch did not receive its reuse grace");
   assert.ok(Date.now() - slowReuseStartedAtMs < 5_000, "slow prefetch blocked foreground generation too long");
   await slowPrefetch;
@@ -326,20 +329,24 @@ test("global AI safety accounting covers enterprise and TTS while preserving ent
   speechPrefetchRegistry.register({
     correlationId: "budget-prefetch-late-success",
     userId: "enterprise_budget_user",
+    orgId: "org_budget",
     preset: "female-balanced",
     text: "Budget safety test response.",
     promise: lateSuccessfulPrefetch,
   });
   failNextProviderCall = true;
-  const foregroundFailedAfterGrace = await requestTts(
+  const lateReusedPrefetch = await requestTts(
     "enterprise_budget_user",
     ENTERPRISE_TOKEN,
     "budget-prefetch-late-success",
   );
-  assert.equal(foregroundFailedAfterGrace.status, 503);
-  assert.equal(foregroundFailedAfterGrace.audioSource, null);
+  assert.equal(lateReusedPrefetch.status, 200);
+  assert.equal(lateReusedPrefetch.audioSource, "in_flight_prefetch");
   await lateSuccessfulPrefetch;
 
+  // Prefetch reuse must not dispatch the armed failing provider request.
+  assert.equal((await requestTts("enterprise_budget_user", ENTERPRISE_TOKEN)).status, 503);
+  assert.equal((await requestTts("enterprise_budget_user", ENTERPRISE_TOKEN)).status, 200);
   assert.equal((await requestTts("enterprise_budget_user", ENTERPRISE_TOKEN)).status, 200);
   assert.equal(successfulProviderCalls, 2, "enterprise user was incorrectly subjected to the per-user cap");
 

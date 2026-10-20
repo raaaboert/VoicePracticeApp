@@ -3,7 +3,33 @@ import test from "node:test";
 
 import { SimulationSpeechPrefetchRegistry } from "./simulationSpeechPrefetchRegistry.js";
 
-test("matching foreground TTS consumes an in-flight prefetch exactly once", async () => {
+test("concurrent foreground retries share one synthesis and failures release it for a fresh retry", async () => {
+  const registry = new SimulationSpeechPrefetchRegistry<string>();
+  const identity = { correlationId: "response", userId: "u", orgId: "org", sessionId: "session", preset: "female-bright", text: "Real response" };
+  let calls = 0, release!: (value: string) => void;
+  const synthesize = () => { calls++; return new Promise<string>((resolve) => { release = resolve; }); };
+  const first = registry.getOrStart(identity, synthesize), second = registry.getOrStart(identity, synthesize);
+  await Promise.resolve(); assert.equal(calls, 1); release("audio");
+  assert.deepEqual(await Promise.all([first, second]), ["audio", "audio"]);
+  assert.equal(await registry.getOrStart(identity, synthesize), "audio"); assert.equal(calls, 1);
+  const failed = { ...identity, correlationId: "failure" };
+  await assert.rejects(registry.getOrStart(failed, async () => { throw Error("provider failed"); }));
+  assert.equal(await registry.getOrStart(failed, async () => "recovered"), "recovered");
+  for (const other of [{ ...identity, orgId: "other" }, { ...identity, sessionId: "other" }, { ...identity, preset: "male-warm" }]) {
+    assert.equal(await registry.getOrStart(other, async () => "different audio"), "different audio");
+  }
+});
+
+test("cache capacity disables new prefetch without evicting existing in-flight work, and TTL permits recovery", async () => {
+  const registry = new SimulationSpeechPrefetchRegistry<string>(10, 1);
+  const identity = { correlationId: "bounded", userId: "u", preset: "female-bright", text: "Response" };
+  registry.register({ ...identity, promise: Promise.resolve("audio"), nowMs: Date.now() });
+  assert.equal(registry.hasCapacity(), false);
+  assert.deepEqual(await registry.consume({ ...identity, nowMs: Date.now() + 11 }), { status: "miss", reason: "expired" });
+  assert.equal(registry.hasCapacity(), true);
+});
+
+test("matching foreground TTS and legitimate retry reuse one in-flight or completed prefetch", async () => {
   const registry = new SimulationSpeechPrefetchRegistry<{ audio: string }>();
   let resolvePrefetch!: (value: { audio: string }) => void;
   const promise = new Promise<{ audio: string }>((resolve) => {
@@ -33,7 +59,7 @@ test("matching foreground TTS consumes an in-flight prefetch exactly once", asyn
     preset: "female-bright",
     text: "Hello there",
     nowMs: 300,
-  }), { status: "miss", reason: "not_found" });
+  }), { status: "hit", value: { audio: "prefetched" } });
 });
 
 test("resolved and nearly-ready prefetches win inside the bounded reuse window", async () => {
@@ -74,7 +100,7 @@ test("resolved and nearly-ready prefetches win inside the bounded reuse window",
   }), { status: "hit", value: "late-audio" });
 });
 
-test("slow prefetch releases the caller after the bounded wait and cannot be consumed twice", async () => {
+test("slow prefetch releases the waiter without losing in-flight work or starting another synthesis", async () => {
   const registry = new SimulationSpeechPrefetchRegistry<string>();
   let resolvePrefetch!: (value: string) => void;
   const promise = new Promise<string>((resolve) => {
@@ -105,7 +131,7 @@ test("slow prefetch releases the caller after the bounded wait and cannot be con
     userId: "user-a",
     preset: "female-bright",
     text: "Slow",
-  }), { status: "miss", reason: "not_found" });
+  }), { status: "hit", value: "too-late-audio" });
 });
 
 test("a late rejected prefetch is handled after timeout without changing the consumed result", async () => {

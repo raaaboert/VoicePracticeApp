@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
+import { createServer } from "node:http";
+import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { splitTextForRemoteTtsFastStart } from "@voicepractice/shared";
@@ -61,12 +64,17 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
     const score = { communicationScore: 80, outcomeScore: 75, overallScore: 78, completionLevel: "complete", objectiveAchieved: true,
       persuasion: 8, clarity: 7, empathy: 9, assertiveness: 8, strengths: ["Clear"], improvements: ["Close"], summary: "Agreed a plan." };
     let providerCalls = 0, scoring = false, failProvider = false;
+    let speechCalls = 0, speechGate: Promise<void> | null = null, speechEntered = () => {}, failSpeech = false;
     globalThis.fetch = async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
       if (!url.startsWith("https://api.openai.com/")) return originalFetch(input, init);
       providerCalls++;
       if (failProvider) return new Response(JSON.stringify({ error: { message: "private-provider-error" } }), { status: 500 });
-      if (url.endsWith("/audio/speech")) return new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/mpeg" } });
+      if (url.endsWith("/audio/speech")) {
+        speechCalls++; speechEntered(); await speechGate;
+        return failSpeech ? Response.json({ error: { message: "mock speech failed" } }, { status: 500 })
+          : new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/mpeg" } });
+      }
       if (url.endsWith("/audio/transcriptions")) return Response.json({ text: "I will identify the concern and agree a clear next step." });
       const content = scoring ? JSON.stringify(score) : text;
       if (url.endsWith("/responses")) return Response.json({ output_text: content, model: "mocked-local", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } });
@@ -156,6 +164,161 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
         const expired = await call(route, { ...requestContext(id), history, startedAt: now, endedAt: now }); assert.equal(expired.status, 409);
       }
       assert.equal((await speech(id, authorization)).status, 409); assert.equal(providerCalls, before);
+    });
+    await t.test("HTTP speech joins prefetch and overlapping foreground work; timeout, cancellation and retry never fork pending synthesis", { timeout: 15000 }, async () => {
+      api.clearRateLimitsForTest();
+      const id = "speech_overlap"; await start(id);
+      const opening = await call("ai/opening", requestContext(id)); assert.equal(opening.status, 200);
+      const grant = (await opening.json() as any).speechAuthorization;
+      const chunk = splitTextForRemoteTtsFastStart(text)[0]!;
+      const registry = api.simulationSpeechPrefetchRegistry;
+      const consume = registry.consume.bind(registry);
+      let release = () => {};
+      const block = () => {
+        speechGate = new Promise<void>((resolve) => { release = resolve; });
+        return new Promise<void>((resolve) => { speechEntered = resolve; });
+      };
+      const fetchSpeech = (correlation: string, signal?: AbortSignal) => originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/tts`, {
+        method: "POST", signal, headers: { ...headers(), "X-Correlation-Id": correlation },
+        body: JSON.stringify({ simulationSessionId: id, speechAuthorization: grant, text: chunk, preset: "female-balanced" }),
+      });
+      const before = speechCalls;
+      const measuredBefore = Number((await db.pool.query("SELECT count(*) AS n FROM ai_usage_events WHERE kind='tts'")).rows[0].n);
+      try {
+        const prefetchStarted = block();
+        const prefetched = originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/opening`, { method: "POST",
+          headers: { ...headers(), "X-Correlation-Id": "overlap-prefetch" }, body: JSON.stringify({ ...requestContext(id), speechPrefetch: { preset: "female-balanced" } }) });
+        await prefetchStarted;
+        let consumed = 0, joined!: () => void;
+        const bothJoined = new Promise<void>((resolve) => { joined = resolve; });
+        registry.consume = (params) => { const pending = consume(params); if (++consumed === 2) joined(); return pending; };
+        const joinedAt = Date.now();
+        const a = fetchSpeech("overlap-prefetch"), b = fetchSpeech("overlap-prefetch");
+        await bothJoined; assert.equal(speechCalls - before, 1); release();
+        assert.equal((await a).status, 200); assert.equal((await b).status, 200); assert.equal((await prefetched).status, 200);
+        assert.equal((await fetchSpeech("overlap-prefetch")).status, 200); assert.equal(speechCalls - before, 1);
+        t.diagnostic(`TTS: two overlapping HTTP waiters plus replay, one synthesis, ${Date.now() - joinedAt} ms local completion after releasing mocked provider`);
+
+        const coldStarted = block(); consumed = 0;
+        const coldJoined = new Promise<void>((resolve) => { joined = resolve; });
+        const abort = new AbortController();
+        const abandoned = fetchSpeech("cold-response", abort.signal).catch(() => null);
+        await coldStarted;
+        const survivor = fetchSpeech("cold-response");
+        // Both HTTP waiters have entered registry reuse before cancellation.
+        await coldJoined;
+        abort.abort(); release(); await abandoned;
+        assert.equal((await survivor).status, 200); assert.equal(speechCalls - before, 2);
+
+        const slowStarted = block();
+        const slowPrefetch = originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/opening`, { method: "POST",
+          headers: { ...headers(), "X-Correlation-Id": "slow-prefetch" }, body: JSON.stringify({ ...requestContext(id), speechPrefetch: { preset: "female-balanced" } }) });
+        await slowStarted;
+        registry.consume = (params) => consume({ ...params, waitMs: 1 });
+        const timed = await fetchSpeech("slow-prefetch"); assert.equal(timed.status, 504);
+        assert.equal((await timed.json() as any).code, "ai_timeout"); assert.equal(speechCalls - before, 3);
+        release(); await slowPrefetch; registry.consume = consume;
+        assert.equal((await fetchSpeech("slow-prefetch")).status, 200); assert.equal(speechCalls - before, 3);
+
+        speechGate = null; failSpeech = true;
+        assert.equal((await fetchSpeech("failed-response")).status, 503); assert.equal(speechCalls - before, 4);
+        failSpeech = false;
+        assert.equal((await fetchSpeech("failed-response")).status, 200); assert.equal(speechCalls - before, 5);
+        assert.equal(Number((await db.pool.query("SELECT count(*) AS n FROM ai_usage_events WHERE kind='tts'")).rows[0].n) - measuredBefore, 4,
+          "four successful syntheses are measured once each; the failed reservation retains existing OFF-mode behavior");
+        assert.equal((await fetchSpeech("failed-response")).status, 200); assert.equal(speechCalls - before, 5);
+      } finally { release(); speechGate = null; failSpeech = false; registry.consume = consume; }
+    });
+    await t.test("independent API processes dispatch one concurrent first score, recover failures and release ownership on process exit", { timeout: 30000 }, async () => {
+      let calls = 0, fail = false, timeout = false;
+      let release = () => {}, entered = () => {};
+      let gate: Promise<void> = Promise.resolve();
+      const blockProvider = () => {
+        gate = new Promise<void>((resolve) => { release = resolve; });
+        return new Promise<void>((resolve) => { entered = resolve; });
+      };
+      const provider = createServer(async (request, response) => {
+        for await (const _ of request) { /* consume mocked request without logging text */ }
+        calls++; entered(); await gate;
+        response.writeHead(fail ? 500 : 200, { "Content-Type": "application/json", "X-Local-Test-Timeout": timeout ? "1" : "0" });
+        response.end(JSON.stringify(fail ? { error: { message: "mock failure" } } : {
+          output_text: JSON.stringify(score), model: "mocked-local", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        }));
+      });
+      await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve));
+      const children: ChildProcess[] = [];
+      const launch = () => new Promise<string>((resolve, reject) => {
+        const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./simulationScoringProcess.testSupport.ts", import.meta.url))], {
+          env: { ...process.env, LOCAL_SCORING_PROVIDER_URL: `http://127.0.0.1:${(provider.address() as AddressInfo).port}/provider` },
+          stdio: ["ignore", "ignore", "pipe", "ipc"],
+        });
+        children.push(child);
+        let diagnostics = ""; child.stderr?.on("data", (chunk) => { diagnostics += String(chunk); });
+        child.once("error", reject);
+        child.once("exit", (code) => { if (code) reject(Error(`Local API test process exited: ${diagnostics}`)); });
+        child.once("message", (message: any) => resolve(`http://127.0.0.1:${message.port}`));
+      });
+      try {
+        const [a, b] = await Promise.all([launch(), launch()]);
+        const evaluate = (host: string, id: string) => originalFetch(`${host}/mobile/users/${users[0]!.id}/ai/score`, {
+          method: "POST", headers: headers(), body: JSON.stringify({ ...requestContext(id), history, startedAt: now, endedAt: new Date().toISOString() }),
+        });
+        await start("scoring_process_race");
+        const pendingProvider = blockProvider();
+        const first = evaluate(a!, "scoring_process_race"); await pendingProvider;
+        const busyStartedAt = Date.now();
+        const busy = await evaluate(b!, "scoring_process_race"); assert.equal(busy.status, 503);
+        t.diagnostic(`Scoring: cross-process duplicate rejected in ${Date.now() - busyStartedAt} ms, provider dispatches=${calls}`);
+        assert.equal((await busy.json() as any).code, "ai_unavailable"); assert.equal(calls, 1);
+        const connections = await db.pool.query("SELECT state,xact_start FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND query LIKE '%pg_try_advisory_lock%peritio-score-v1%'");
+        assert.ok(connections.rows.some((row) => row.state === "idle" && row.xact_start === null), "no transaction is held over the provider call");
+        release(); assert.equal((await first).status, 201);
+        assert.equal((await evaluate(b!, "scoring_process_race")).status, 200); assert.equal(calls, 1);
+        assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM score_records WHERE simulation_session_id='scoring_process_race'")).rows[0].n, 1);
+        await start("scoring_process_failure"); fail = true;
+        assert.equal((await evaluate(a!, "scoring_process_failure")).status, 503);
+        fail = false; assert.equal((await evaluate(b!, "scoring_process_failure")).status, 201); assert.equal(calls, 3);
+        await start("scoring_process_timeout"); timeout = true;
+        const timed = await evaluate(a!, "scoring_process_timeout"); assert.equal(timed.status, 504);
+        assert.equal((await timed.json() as any).code, "ai_timeout");
+        timeout = false; assert.equal((await evaluate(b!, "scoring_process_timeout")).status, 201); assert.equal(calls, 5);
+        await start("scoring_process_crash");
+        const crashedProvider = blockProvider();
+        const lost = evaluate(a!, "scoring_process_crash").catch(() => null); await crashedProvider;
+        const exited = new Promise<void>((resolve) => children[0]!.once("exit", () => resolve()));
+        children[0]!.kill(); await exited; release(); await lost;
+        assert.equal((await evaluate(b!, "scoring_process_crash")).status, 201);
+        assert.equal(calls, 7, "an uncertain provider result after process death may require another call");
+        assert.equal((await evaluate(b!, "scoring_process_crash")).status, 200); assert.equal(calls, 7);
+      } finally {
+        release();
+        await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise<void>((resolve) => {
+          child.once("exit", () => resolve()); child.kill();
+        })));
+        await new Promise<void>((resolve) => provider.close(() => resolve()));
+      }
+    });
+    await t.test("registered usage finalizes after industry deactivation without duplicate billing", async () => {
+      api.clearRateLimitsForTest();
+      const id = "finalization_deactivated_industry";
+      const started = await start(id);
+      const login = await originalFetch(`${base}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: process.env.ADMIN_BOOTSTRAP_PASSWORD }) });
+      assert.equal(login.status, 200);
+      const adminToken = (await login.json() as any).token;
+      const change = (activeIndustries: string[]) => originalFetch(`${base}/orgs/${orgs[0]!.id}`, { method: "PATCH", headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` }, body: JSON.stringify({ activeIndustries }) });
+      try {
+        const replacement = state.config.industries.find((industry) => industry.enabled && !orgs[0]!.activeIndustries.includes(industry.id))!;
+        assert.ok(replacement);
+        const changed = await change([replacement.id]); assert.equal(changed.status, 200, await changed.clone().text());
+        const payload = { ...requestContext(id), userId: users[0]!.id, startedAt: started.serverStartedAt, endedAt: new Date().toISOString(), rawDurationSeconds: 0 };
+        const finish = () => originalFetch(`${base}/usage/sessions`, { method: "POST", headers: headers(), body: JSON.stringify(payload) });
+        const first = await finish(); assert.equal(first.status, 201, await first.clone().text());
+        assert.equal((await finish()).status, 201);
+        const rows = await db.pool.query("SELECT u.* FROM usage_sessions u JOIN simulation_sessions s ON s.usage_session_record_id=u.id WHERE s.simulation_session_id=$1", [id]);
+        assert.equal(rows.rowCount, 1);
+        assert.equal(rows.rows[0].user_id, users[0]!.id); assert.equal(rows.rows[0].org_id, orgs[0]!.id);
+        assert.notEqual((await call("simulation-sessions/start", requestContext("not_newly_authorized"))).status, 201);
+      } finally { await change(orgs[0]!.activeIndustries); }
     });
     await t.test("legacy speech format works below thresholds; customer minute exhaustion still blocks new admission", async () => {
       await db.pool.query("DELETE FROM ai_usage_events");

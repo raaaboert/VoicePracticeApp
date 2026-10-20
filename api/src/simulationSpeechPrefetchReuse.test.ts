@@ -27,7 +27,7 @@ test("foreground TTS consumes matching in-flight prefetch before starting anothe
   assert.match(ttsRoute, /audioSource: "foreground_generation"/);
   assert.match(ttsRoute, /X-TTS-Audio-Source", "in_flight_prefetch"/);
   assert.match(ttsRoute, /X-TTS-Audio-Source", "foreground_generation"/);
-  assert.match(source, /const SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS = 2_000/);
+  assert.match(source, /const SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS = SIMULATION_SPEECH_PREFETCH_TTS_TIMEOUT_MS/);
   assert.match(ttsRoute, /waitMs: SIMULATION_SPEECH_PREFETCH_REUSE_WAIT_MS/);
   assert.match(ttsRoute, /speech_prefetch_reuse_timeout/);
 });
@@ -45,6 +45,6 @@ test("turn and opening prefetches are registered before their short payload wind
 });
 
 test("prefetch reuse is identity-, preset-, text-, and correlation-bound", () => {
-  assert.match(ttsRoute, /correlationId,\n\s*userId,\n\s*preset,\n\s*text,/);
+  assert.match(ttsRoute, /correlationId,\n\s*userId,[\s\S]*?preset,\n\s*text,/);
   assert.match(registrySource, /textHash: hashText\(params\.text\)/);
 });

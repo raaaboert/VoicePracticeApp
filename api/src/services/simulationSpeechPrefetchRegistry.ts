@@ -4,6 +4,7 @@ export type SimulationSpeechPrefetchMissReason =
   | "not_found"
   | "expired"
   | "user_mismatch"
+  | "context_mismatch"
   | "preset_mismatch"
   | "text_mismatch";
 
@@ -13,11 +14,15 @@ export type SimulationSpeechPrefetchConsumeResult<T> =
   | { status: "timeout" };
 
 interface SimulationSpeechPrefetchEntry<T> {
+  correlationId: string;
   userId: string;
+  orgId: string | null;
+  sessionId: string | null;
   preset: string;
   textHash: string;
   createdAtMs: number;
   promise: Promise<T | null>;
+  settled: boolean;
 }
 
 function normalizeText(value: string): string {
@@ -31,11 +36,41 @@ function hashText(value: string): string {
 export class SimulationSpeechPrefetchRegistry<T> {
   private readonly entries = new Map<string, SimulationSpeechPrefetchEntry<T>>();
 
-  constructor(private readonly ttlMs = 60_000) {}
+  constructor(private readonly ttlMs = 60_000, private readonly maxEntries = 64) {}
+
+  hasCapacity(nowMs = Date.now()): boolean {
+    this.sweep(nowMs);
+    // Completed audio may be evicted under pressure; never evict pending work
+    // merely to start another prefetch.
+    if (this.entries.size >= this.maxEntries) {
+      for (const [key, entry] of this.entries) {
+        if (entry.settled) { this.entries.delete(key); break; }
+      }
+    }
+    return this.entries.size < this.maxEntries;
+  }
+
+  private key(params: { correlationId: string; userId: string; orgId?: string | null; sessionId?: string | null; preset: string; text: string }): string {
+    return JSON.stringify([params.correlationId.trim(), params.userId, params.orgId ?? null,
+      params.sessionId ?? null, params.preset, hashText(params.text)]);
+  }
+
+  /** Atomically joins foreground work too. No database lock is held here. */
+  getOrStart(params: { correlationId: string; userId: string; orgId?: string | null; sessionId?: string | null; preset: string; text: string },
+    start: () => Promise<T | null>): Promise<T | null> {
+    this.sweep(Date.now());
+    const existing = this.entries.get(this.key(params));
+    if (existing) return existing.promise;
+    const promise = Promise.resolve().then(start);
+    this.register({ ...params, promise });
+    return promise;
+  }
 
   register(params: {
     correlationId: string;
     userId: string;
+    orgId?: string | null;
+    sessionId?: string | null;
     preset: string;
     text: string;
     promise: Promise<T | null>;
@@ -46,18 +81,35 @@ export class SimulationSpeechPrefetchRegistry<T> {
     if (!correlationId || !params.userId.trim() || !params.preset.trim() || !normalizeText(params.text)) {
       return;
     }
-    this.entries.set(correlationId, {
+    const key = this.key(params);
+    if (this.entries.has(key) || !this.hasCapacity(params.nowMs ?? Date.now())) return;
+    const entry: SimulationSpeechPrefetchEntry<T> = {
+      correlationId,
       userId: params.userId,
+      orgId: params.orgId ?? null,
+      sessionId: params.sessionId ?? null,
       preset: params.preset,
       textHash: hashText(params.text),
       createdAtMs: params.nowMs ?? Date.now(),
-      promise: params.promise,
-    });
+      settled: false,
+      promise: params.promise.then((value) => {
+        entry.settled = true;
+        if (value === null && this.entries.get(key) === entry) this.entries.delete(key);
+        return value;
+      }, () => {
+        entry.settled = true;
+        if (this.entries.get(key) === entry) this.entries.delete(key);
+        return null;
+      }),
+    };
+    this.entries.set(key, entry);
   }
 
   async consume(params: {
     correlationId: string;
     userId: string;
+    orgId?: string | null;
+    sessionId?: string | null;
     preset: string;
     text: string;
     nowMs?: number;
@@ -65,30 +117,31 @@ export class SimulationSpeechPrefetchRegistry<T> {
   }): Promise<SimulationSpeechPrefetchConsumeResult<T>> {
     const nowMs = params.nowMs ?? Date.now();
     const correlationId = params.correlationId.trim();
-    const entry = this.entries.get(correlationId);
+    const key = this.key(params);
+    const entry = this.entries.get(key) ?? [...this.entries.values()].find((candidate) => candidate.correlationId === correlationId);
     if (!entry) {
       this.sweep(nowMs);
       return { status: "miss", reason: "not_found" };
     }
     if (nowMs - entry.createdAtMs > this.ttlMs) {
-      this.entries.delete(correlationId);
+      this.sweep(nowMs);
       return { status: "miss", reason: "expired" };
     }
 
     const mismatchReason =
       entry.userId !== params.userId
         ? "user_mismatch"
+        : entry.orgId !== (params.orgId ?? null) || entry.sessionId !== (params.sessionId ?? null)
+          ? "context_mismatch"
         : entry.preset !== params.preset
           ? "preset_mismatch"
           : entry.textHash !== hashText(params.text)
             ? "text_mismatch"
             : null;
     if (mismatchReason) {
-      this.entries.delete(correlationId);
       return { status: "miss", reason: mismatchReason };
     }
 
-    this.entries.delete(correlationId);
     const settledPrefetch = entry.promise.then(
       (value) => ({ status: "hit", value } as const),
       () => ({ status: "hit", value: null } as const),
@@ -114,9 +167,9 @@ export class SimulationSpeechPrefetchRegistry<T> {
   }
 
   private sweep(nowMs: number): void {
-    for (const [correlationId, entry] of this.entries) {
+    for (const [key, entry] of this.entries) {
       if (nowMs - entry.createdAtMs > this.ttlMs) {
-        this.entries.delete(correlationId);
+        this.entries.delete(key);
       }
     }
   }
