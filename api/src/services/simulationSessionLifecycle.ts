@@ -19,6 +19,11 @@ export const SIMULATION_SESSION_DURATION_TOLERANCE_SECONDS = 30;
 export const SIMULATION_SESSION_COMPLETION_WINDOW_GRACE_MINUTES = 20;
 export const SIMULATION_SESSION_FALLBACK_COMPLETION_WINDOW_MS = 8 * 60 * 60 * 1000;
 
+export function resolveSimulationConversationDeadlineMs(session: SimulationSessionRecord, maxSimulationMinutes: number | null): number {
+  return Date.parse(session.serverStartedAt) + resolveCompletionWindowMs(maxSimulationMinutes)
+    - SIMULATION_SESSION_COMPLETION_WINDOW_GRACE_MINUTES * 60_000;
+}
+
 // Conversation time and completion/recovery time are separate. Neither activity
 // nor client-reported elapsed time can extend these server-start-based deadlines.
 export function assertSimulationSessionLifetime(

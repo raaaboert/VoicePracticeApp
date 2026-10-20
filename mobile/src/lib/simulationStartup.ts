@@ -22,6 +22,7 @@ export interface SimulationOpeningPayload {
   assistantText: string;
   trainingPackId: string | null;
   speechPrefetch: PrefetchedRemoteSpeechChunk | null;
+  speechAuthorization?: string;
 }
 
 /** Ephemeral state owned by App for one authenticated session, across screen remounts. */
@@ -42,6 +43,8 @@ export function createSimulationStartupCoordinator(now: () => number = Date.now)
     openingDelivered: false,
     openingMessageCommitted: false,
     messages: [] as DialogueMessage[],
+    // Session-owned memory survives screen remounts, never enters transcripts or storage.
+    speechAuthorizations: new Map<string, string>(),
     startedAt: null as Date | null,
     assertConversationAvailable(): void {
       const deadline = startup.absoluteDeadlineMs

@@ -230,6 +230,8 @@ import {
 } from "./ttsPresetConfig.js";
 import type { TtsPreset } from "./ttsPresetConfig.js";
 import { SimulationSpeechPrefetchRegistry } from "./services/simulationSpeechPrefetchRegistry.js";
+import { authorizeSimulationAiAdmission, isAuthorizedSimulationAdmission, issueSimulationSpeechAuthorization,
+  assertSimulationSpeechAuthorization, type AuthorizedSimulationAdmission } from "./services/simulationAiAdmission.js";
 import { decryptSupportTranscript, encryptSupportTranscript } from "./supportCrypto.js";
 import {
   authorizeSupportCaseOrigin,
@@ -1446,6 +1448,7 @@ type PendingUnifiedSubmitTurnResult =
       outcome: "assistant_reply";
       transcriptText: string;
       assistantText: string;
+      speechAuthorization?: string;
       usage: { inputTokens: number; outputTokens: number; totalTokens: number };
       model: string;
       promptVersion: string;
@@ -2372,6 +2375,7 @@ async function generateSimulationTurnReply(params: {
   budgetContext: AiProviderBudgetContext;
 }): Promise<{
   assistantText: string;
+  speechAuthorization?: string;
   completion: Awaited<ReturnType<typeof requestSimulationCompletion>>["completion"];
   modelLatencyMs: number;
   historyChars: number;
@@ -2416,6 +2420,7 @@ async function generateSimulationTurnReply(params: {
 
   return {
     assistantText,
+    speechAuthorization: issueSimulationSpeechAuthorization(params.budgetContext.authorizedSimulation, assistantText, MOBILE_TOKEN_SECRET),
     completion,
     modelLatencyMs: latencyMs,
     historyChars,
@@ -11854,6 +11859,46 @@ function isQuotaLockReason(lockReason: string | null | undefined): boolean {
 
 type AiBudgetSubject = Pick<UserProfile, "id" | "accountType" | "timezone">;
 
+async function resolveSimulationAiAdmission(params: {
+  db: ApiDatabase; user: UserProfile; orgId: string | null; sessionId: string | null;
+  operation: "conversation" | "completion"; response: Response;
+  scenarioId?: string; trainingId?: string | null; required?: boolean;
+}): Promise<AuthorizedSimulationAdmission | undefined> {
+  const { user, response } = params;
+  // Non-enterprise/admin operations retain their existing admission policy.
+  if (isSuperUser(user) || user.accountType !== "enterprise") return undefined;
+  if (!params.sessionId) {
+    if (params.required) response.status(404).json({ error: "Simulation session is not available.", code: "session_not_recognized" });
+    return undefined;
+  }
+  const session = await simulationSessionStore.getById(params.sessionId);
+  if (!session) {
+    if (params.required) response.status(404).json({ error: "Simulation session is not available.", code: "session_not_recognized" });
+    return undefined;
+  }
+  const org = params.orgId ? getOrgById(params.db, params.orgId) : null;
+  try {
+    // Topic claims are canonicalized/validated by the existing runtime/score
+    // resolver below (standard legacy scenarios intentionally canonicalize to null).
+    if (!org || (params.scenarioId && session.scenarioId !== params.scenarioId)) {
+      throw new SimulationSessionValidationError(404, "session_not_recognized", "Simulation session is not available.");
+    }
+    if (runtimeConfig.focusTopicAuthority === "assignments" && isMalformedSessionIndustrySnapshot(session)) {
+      throw new SimulationSessionValidationError(409, "session_context_invalid", "Simulation session industry context is invalid.");
+    }
+    const admission = authorizeSimulationAiAdmission({ user, org, session, operation: params.operation,
+      maxSimulationMinutes: normalizeMaxSimulationMinutes(org.maxSimulationMinutes), now: new Date() });
+    if (params.operation === "conversation" && await scoreRecordStore.getPersistedSessionScore(params.sessionId)) {
+      throw new SimulationSessionValidationError(409, "session_completed", "Simulation conversation is already completed.");
+    }
+    return admission;
+  } catch (error) {
+    if (!(error instanceof SimulationSessionValidationError)) throw error;
+    response.status(error.statusCode).json({ error: error.message, code: error.code });
+    return undefined;
+  }
+}
+
 interface AiProviderBudgetContext {
   user: AiBudgetSubject;
   orgId: string | null;
@@ -11861,6 +11906,7 @@ interface AiProviderBudgetContext {
   segmentId?: string | null;
   scenarioId?: string | null;
   allowDuringActiveSimulation?: boolean;
+  authorizedSimulation?: AuthorizedSimulationAdmission;
 }
 
 interface AiProviderTokenUsage {
@@ -11887,8 +11933,12 @@ function getAiBudgetLimitMessage(
 function resolveAiBudgetLimits(
   user: AiBudgetSubject,
   now: Date,
-  options?: { allowDuringActiveSimulation?: boolean }
+  options?: { allowDuringActiveSimulation?: boolean; authorizedSimulation?: AuthorizedSimulationAdmission }
 ) {
+  const admission = options?.authorizedSimulation;
+  if (admission && isAuthorizedSimulationAdmission(admission, admission.operation === "completion" ? "score" : "turn", user.id, admission.session.orgId, now.getTime())) {
+    return { userCalls: null, userTokens: null, globalCalls: null, globalTokens: null };
+  }
   const skipPerUserLimits =
     user.accountType === "enterprise"
     || (options?.allowDuringActiveSimulation === true && hasActiveSimulationAiBudgetGrace(user.id, now.getTime()));
@@ -11921,6 +11971,10 @@ async function invokeAiProviderWithBudget<T>(params: {
   resolveUsage?: (value: T) => AiProviderTokenUsage;
 }): Promise<{ value: T; usageEventId: string }> {
   const now = new Date();
+  if (params.context.authorizedSimulation && !isAuthorizedSimulationAdmission(params.context.authorizedSimulation,
+    params.kind, params.context.user.id, params.context.orgId, now.getTime())) {
+    throw new SafeAiRouteError({ status: 409, code: "session_expired", error: "Simulation session is not available for this operation." });
+  }
   const usageEventId = `ai_${uuid()}`;
   const reservationEvent: AiUsageEvent = {
     id: usageEventId,
@@ -11941,7 +11995,7 @@ async function invokeAiProviderWithBudget<T>(params: {
   if (aiSpendLedgerStore) {
     return invokeWithAiSpendLedger({ store: aiSpendLedgerStore, event: reservationEvent,
       userTimeZone: resolveTimeZone(params.context.user.timezone),
-      legacyLimits: resolveAiBudgetLimits(params.context.user, now, { allowDuringActiveSimulation: params.context.allowDuringActiveSimulation }),
+      legacyLimits: resolveAiBudgetLimits(params.context.user, now, params.context),
       requestMaterial: params.requestMaterial ?? { kind: params.kind, scenarioId: params.context.scenarioId ?? null },
       units: params.ttsCharacters === undefined ? undefined : { tts_characters: params.ttsCharacters },
       invoke: params.invoke, resolveUsage: params.resolveUsage, budgetMessage: getAiBudgetLimitMessage });
@@ -11949,9 +12003,7 @@ async function invokeAiProviderWithBudget<T>(params: {
   const reservation = await aiUsageEventAccess.reserveBudget({
     event: reservationEvent,
     userTimeZone: resolveTimeZone(params.context.user.timezone),
-    limits: resolveAiBudgetLimits(params.context.user, now, {
-      allowDuringActiveSimulation: params.context.allowDuringActiveSimulation,
-    }),
+    limits: resolveAiBudgetLimits(params.context.user, now, params.context),
     now,
   });
   if (!reservation.reserved) {
@@ -11993,21 +12045,31 @@ async function invokeAiProviderWithBudget<T>(params: {
 async function resolveAiBudgetLimitError(
   user: UserProfile,
   now: Date,
-  options?: { allowDuringActiveSimulation?: boolean }
+  options?: { allowDuringActiveSimulation?: boolean; authorizedSimulation?: AuthorizedSimulationAdmission }
 ): Promise<string | null> {
   const budget = await aiUsageEventAccess.computeBudgetSnapshot({
     userId: user.id,
     now,
     userTimeZone: materializeUserTimezone(user, now)
   });
-  const limits = resolveAiBudgetLimits(user, now, options);
+  // Observe the original thresholds even for verified training; accounting and
+  // the indexed/post-lock reservation path remain unchanged.
+  const limits = resolveAiBudgetLimits(user, now, { allowDuringActiveSimulation: options?.allowDuringActiveSimulation });
+  const admission = options?.authorizedSimulation;
+  const protect = Boolean(admission && isAuthorizedSimulationAdmission(admission,
+    admission.operation === "completion" ? "score" : "turn", user.id, admission.session.orgId, now.getTime()));
+  const exceeded = (message: string): string | null => {
+    if (!protect) return message;
+    logWarnThrottled(`ai-budget:continuity:${message}`, `[ai-budget] authorized_simulation_above_technical_threshold: ${message}`);
+    return null;
+  };
 
   if (
     limits.userCalls !== null &&
     limits.userCalls >= 0 &&
     budget.userCallsToday >= limits.userCalls
   ) {
-    return "Daily AI request limit reached for this account.";
+    return exceeded("Daily AI request limit reached for this account.");
   }
 
   if (
@@ -12015,7 +12077,7 @@ async function resolveAiBudgetLimitError(
     limits.userTokens >= 0 &&
     budget.userTokensToday >= limits.userTokens
   ) {
-    return "Daily AI token limit reached for this account.";
+    return exceeded("Daily AI token limit reached for this account.");
   }
 
   if (
@@ -12023,7 +12085,7 @@ async function resolveAiBudgetLimitError(
     limits.globalCalls >= 0 &&
     budget.globalCallsToday >= limits.globalCalls
   ) {
-    return "Daily AI request limit reached for this environment.";
+    return exceeded("Daily AI request limit reached for this environment.");
   }
 
   if (
@@ -12031,7 +12093,7 @@ async function resolveAiBudgetLimitError(
     limits.globalTokens >= 0 &&
     budget.globalTokensToday >= limits.globalTokens
   ) {
-    return "Daily AI token limit reached for this environment.";
+    return exceeded("Daily AI token limit reached for this environment.");
   }
 
   return null;
@@ -22809,8 +22871,11 @@ app.post(
       return null;
     }
 
+    const authorizedSimulation = await resolveSimulationAiAdmission({ db, user, orgId: accessContext.actingOrgId, sessionId: normalizeSimulationSessionId(request.body?.simulationSessionId),
+      operation: "conversation", response, required: Boolean(normalizeSimulationSessionId(request.body?.simulationSessionId)), });
+    if (response.headersSent) return null;
     const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
-      allowDuringActiveSimulation: true
+      authorizedSimulation, allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
@@ -22818,6 +22883,7 @@ app.post(
     }
 
     return {
+      authorizedSimulation,
       user,
       isSuperUser: accessContext.isSuperUser,
       actingOrgId: accessContext.actingOrgId,
@@ -22844,6 +22910,7 @@ app.post(
       correlationId,
       budgetContext: {
         user: context.user,
+        authorizedSimulation: context.authorizedSimulation,
         orgId: context.actingOrgId,
         allowDuringActiveSimulation: true,
       },
@@ -23029,8 +23096,11 @@ app.post(
       return null;
     }
 
+    const authorizedSimulation = await resolveSimulationAiAdmission({ db, user, orgId: resolvedAccessContext.actingOrgId, sessionId: simulationSessionId,
+      operation: "conversation", response, scenarioId, trainingId });
+    if (response.headersSent) return null;
     const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
-      allowDuringActiveSimulation: true,
+      authorizedSimulation, allowDuringActiveSimulation: true,
     });
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
@@ -23039,6 +23109,7 @@ app.post(
 
     return {
       userId: user.id,
+      authorizedSimulation,
       user,
       actingOrgId: resolvedAccessContext.actingOrgId,
       isSuperUser: resolvedAccessContext.isSuperUser,
@@ -23119,6 +23190,7 @@ app.post(
     correlationId,
     budgetContext: {
       user: accessContext.user,
+      authorizedSimulation: accessContext.authorizedSimulation,
       orgId: accessContext.actingOrgId,
       allowDuringActiveSimulation: true,
     },
@@ -23282,6 +23354,7 @@ app.post(
       requestedSpeechPrefetch,
       budgetContext: {
         user: accessContext.user,
+        authorizedSimulation: accessContext.authorizedSimulation,
         orgId: accessContext.actingOrgId,
         divisionId: runtime.divisionId,
         segmentId: runtime.segment.id,
@@ -23294,6 +23367,7 @@ app.post(
       outcome: "assistant_reply",
       transcriptText,
       assistantText: turnResult.assistantText,
+      speechAuthorization: turnResult.speechAuthorization,
       usage: turnResult.completion.usage,
       model: turnResult.completion.model,
       promptVersion: AI_PROMPT_VERSION,
@@ -23660,7 +23734,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     return;
   }
 
-  const body = request.body as { text?: unknown; preset?: unknown };
+  const body = request.body as { text?: unknown; preset?: unknown; simulationSessionId?: unknown; speechAuthorization?: unknown };
   const preset = parseTtsPreset(body.preset);
   const text = typeof body.text === "string" ? body.text.trim().replace(/\s+/g, " ") : "";
 
@@ -23727,8 +23801,18 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       return null;
     }
 
+    const authorizedSimulation = await resolveSimulationAiAdmission({ db, user, orgId: accessContext.actingOrgId, sessionId: normalizeSimulationSessionId(body.simulationSessionId),
+      operation: "conversation", response, required: Boolean(normalizeSimulationSessionId(body.simulationSessionId)), });
+    if (response.headersSent) return null;
+    if (authorizedSimulation) {
+      try { assertSimulationSpeechAuthorization(authorizedSimulation, text, body.speechAuthorization, MOBILE_TOKEN_SECRET); }
+      catch (error) {
+        if (!(error instanceof SimulationSessionValidationError)) throw error;
+        respondWithTtsError({ status: error.statusCode, message: error.message, code: error.code }); return null;
+      }
+    }
     const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
-      allowDuringActiveSimulation: true
+      authorizedSimulation, allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
       respondWithTtsError({
@@ -23739,6 +23823,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     }
 
     return {
+      authorizedSimulation,
       user,
       isSuperUser: accessContext.isSuperUser,
       actingOrgId: accessContext.actingOrgId,
@@ -23831,6 +23916,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     const budgetedTts = await invokeAiProviderWithBudget({
       context: {
         user: context.user,
+        authorizedSimulation: context.authorizedSimulation,
         orgId: context.actingOrgId,
         allowDuringActiveSimulation: true,
       },
@@ -24255,6 +24341,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
         bootstrapOrgId: string;
       }
     | {
+        authorizedSimulation?: AuthorizedSimulationAdmission;
         user: UserProfile;
         actingOrgId: string | null;
         isSuperUser: boolean;
@@ -24291,7 +24378,10 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
         return null;
       }
 
-      const aiBudgetError = await resolveAiBudgetLimitError(user, new Date());
+      const authorizedSimulation = await resolveSimulationAiAdmission({ db, user, orgId: accessContext.actingOrgId, sessionId: simulationSessionId,
+        operation: "conversation", response, scenarioId, trainingId });
+      if (response.headersSent) return null;
+      const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), { authorizedSimulation });
       if (aiBudgetError) {
         response.status(429).json({ error: aiBudgetError });
         return null;
@@ -24317,6 +24407,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
         return runtime;
       }
       return {
+        authorizedSimulation,
         user,
         actingOrgId: accessContext.actingOrgId,
         isSuperUser: accessContext.isSuperUser,
@@ -24371,6 +24462,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
       correlationId,
       budgetContext: {
         user: context.user,
+        authorizedSimulation: context.authorizedSimulation,
         orgId: context.actingOrgId,
         divisionId: context.runtime.divisionId,
         segmentId: context.runtime.segment.id,
@@ -24385,6 +24477,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
       request: requestedSpeechPrefetch,
       budgetContext: {
         user: context.user,
+        authorizedSimulation: context.authorizedSimulation,
         orgId: context.actingOrgId,
         divisionId: context.runtime.divisionId,
         segmentId: context.runtime.segment.id,
@@ -24408,6 +24501,7 @@ app.post("/mobile/users/:userId/ai/opening", requireMobileAiAuthentication, aiRo
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({
       assistantText,
+      speechAuthorization: issueSimulationSpeechAuthorization(context.authorizedSimulation, assistantText, MOBILE_TOKEN_SECRET),
       usage: completion.usage,
       model: completion.model,
       promptVersion: AI_PROMPT_VERSION,
@@ -24613,6 +24707,7 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
         bootstrapOrgId: string;
       }
     | {
+        authorizedSimulation?: AuthorizedSimulationAdmission;
         user: UserProfile;
         actingOrgId: string | null;
         isSuperUser: boolean;
@@ -24650,8 +24745,11 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
         return null;
       }
 
+      const authorizedSimulation = await resolveSimulationAiAdmission({ db, user, orgId: accessContext.actingOrgId, sessionId: recognizedSessionId,
+        operation: "conversation", response, scenarioId, trainingId });
+      if (response.headersSent) return null;
       const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
-        allowDuringActiveSimulation: true
+        authorizedSimulation, allowDuringActiveSimulation: true
       });
       if (aiBudgetError) {
         response.status(429).json({ error: aiBudgetError });
@@ -24680,6 +24778,7 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
         return runtime;
       }
       return {
+        authorizedSimulation,
         user,
         actingOrgId: accessContext.actingOrgId,
         isSuperUser: accessContext.isSuperUser,
@@ -24730,6 +24829,7 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
       requestedSpeechPrefetch,
       budgetContext: {
         user: context.user,
+        authorizedSimulation: context.authorizedSimulation,
         orgId: context.actingOrgId,
         divisionId: context.runtime.divisionId,
         segmentId: context.runtime.segment.id,
@@ -24741,6 +24841,7 @@ app.post("/mobile/users/:userId/ai/turn", requireMobileAiAuthentication, aiRoute
     response.setHeader("X-Correlation-Id", correlationId);
     response.json({
       assistantText: turnResult.assistantText,
+      speechAuthorization: turnResult.speechAuthorization,
       usage: turnResult.completion.usage,
       model: turnResult.completion.model,
       promptVersion: AI_PROMPT_VERSION,
@@ -25034,10 +25135,14 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
 
     // Completion scoring does not start another conversation or consume more
     // conversation minutes. Current org access and the absolute grace deadline
-    // were checked above; the independent provider budget is still enforced.
+    // were checked above. Verified registered completion is measured without
+    // denying it solely because an internal daily technical threshold was hit.
 
+    const authorizedSimulation = await resolveSimulationAiAdmission({ db, user, orgId: accessContext.actingOrgId, sessionId: recognizedSessionId,
+      operation: "completion", response, scenarioId, trainingId });
+    if (response.headersSent) return null;
     const aiBudgetError = await resolveAiBudgetLimitError(user, new Date(), {
-      allowDuringActiveSimulation: true
+      authorizedSimulation, allowDuringActiveSimulation: true
     });
     if (aiBudgetError) {
       response.status(429).json({ error: aiBudgetError });
@@ -25200,6 +25305,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
     );
 
     return {
+      authorizedSimulation,
       user,
       org,
       actingOrgId: accessContext.actingOrgId,
@@ -25311,6 +25417,7 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       correlationId,
       budgetContext: {
         user: context.user,
+        authorizedSimulation: context.authorizedSimulation,
         orgId: context.actingOrgId,
         divisionId: context.divisionId,
         segmentId: context.segment.id,

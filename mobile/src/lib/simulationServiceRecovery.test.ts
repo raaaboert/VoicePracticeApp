@@ -73,6 +73,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
     },
   };
   for (const ref of new Set(screen.match(/\b\w+Ref\b/g))) context[ref] = { current: null };
+  context.speechAuthorizationByTextRef.current = startup.speechAuthorizations;
   context.serviceRecoveryRef.current = startup.serviceRecovery;
   context.messagesRef.current = startup.messages;
   context.startSimulationAttemptRef.current = 0; context.sessionLifecycleGenerationRef.current = 0;
@@ -121,6 +122,26 @@ function attachActualSpeech(h: ReturnType<typeof screenHarness>) {
   h.context.submitRecordedSimulationTurn = h.context.generateAssistantReply = h.context.createOpeningLine = () => { throw Error("Retry must not generate conversation text"); };
   return audio;
 }
+
+test("actual screen speech forwards the server response authorization through native playback and retries", async () => {
+  const h = screenHarness();
+  const audio = attachActualSpeech(h);
+  h.run("storePendingOpeningPayload", { assistantText: "Authorized response", trainingPackId: null, speechPrefetch: null, speechAuthorization: "server-grant" }, "opening");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const run = h.run("speakAssistantResponse", "Authorized response");
+    await flush();
+    const player = audio.sounds.at(-1)!;
+    player.emit({ playing: true });
+    player.emit({ isLoaded: true, playing: false, didJustFinish: true, currentTime: 1, duration: 1 });
+    await run;
+  }
+  assert.equal(audio.fetchRequests.length, 2);
+  for (const request of audio.fetchRequests as any[]) {
+    assert.equal(request.simulationSessionId, "same-session");
+    assert.equal(request.speechAuthorization, "server-grant");
+  }
+  assert.doesNotMatch(JSON.stringify(h.startup.messages), /server-grant/);
+});
 
 test("actual inactive/foreground speech retry uses a fresh loaded player, preserves one transcript and never generates another AI turn", async () => {
   const h = screenHarness(); await h.run("startSession"); const audio = attachActualSpeech(h);

@@ -51,7 +51,7 @@ export async function createOpeningLine(params: {
   personaStyle: PersonaStyle;
   speechPrefetchPreset?: RemoteTtsPreset | null;
   correlationId?: string;
-}): Promise<{ assistantText: string; trainingPackId: string | null; speechPrefetch: PrefetchedRemoteSpeechChunk | null }> {
+}): Promise<{ assistantText: string; trainingPackId: string | null; speechPrefetch: PrefetchedRemoteSpeechChunk | null; speechAuthorization?: string }> {
   const payload = await fetchAiOpeningLine({
     userId: params.userId,
     authToken: params.authToken,
@@ -70,6 +70,7 @@ export async function createOpeningLine(params: {
     assistantText: payload.assistantText?.trim() ?? "",
     trainingPackId: payload.trainingPack?.applied === true ? payload.trainingPack.id ?? null : null,
     speechPrefetch: payload.speechPrefetch,
+    speechAuthorization: payload.speechAuthorization,
   };
 }
 
@@ -89,7 +90,7 @@ export async function generateAssistantReply(params: {
   speechPrefetchPreset?: RemoteTtsPreset | null;
   correlationId?: string;
   signal?: AbortSignal;
-}): Promise<{ assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null }> {
+}): Promise<{ assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null; speechAuthorization?: string }> {
   const payload = await fetchAiTurn({
     userId: params.userId,
     authToken: params.authToken,
@@ -110,6 +111,7 @@ export async function generateAssistantReply(params: {
   return {
     assistantText: payload.assistantText?.trim() ?? "",
     speechPrefetch: payload.speechPrefetch,
+    speechAuthorization: payload.speechAuthorization,
   };
 }
 
@@ -117,6 +119,7 @@ export async function transcribeAudio(params: {
   userId: string;
   authToken: string;
   audioUri: string;
+  simulationSessionId?: string;
   preferredMimeType?: string;
   correlationId?: string;
   signal?: AbortSignal;
@@ -128,6 +131,7 @@ export async function transcribeAudio(params: {
     userId: params.userId,
     authToken: params.authToken,
     audioUri: params.audioUri,
+    simulationSessionId: params.simulationSessionId,
     mimeType,
     correlationId: params.correlationId,
     signal: params.signal,
@@ -189,6 +193,7 @@ export async function awaitSubmittedSimulationTurnReply(params: {
   noClearSpeechReason?: "empty_transcript" | "assistant_echo" | null;
   assistantText?: string;
   speechPrefetch?: PrefetchedRemoteSpeechChunk | null;
+  speechAuthorization?: string;
   runtime: UnifiedSimulationTurnPayload["runtime"];
 }> {
   const payload = await awaitSimulationTurnResultViaApi({
@@ -204,6 +209,7 @@ export async function awaitSubmittedSimulationTurnReply(params: {
       transcriptText: payload.transcriptText,
       assistantText: payload.assistantText,
       speechPrefetch: payload.speechPrefetch,
+      speechAuthorization: payload.speechAuthorization,
       runtime: payload.runtime,
     };
   }

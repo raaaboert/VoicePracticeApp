@@ -48,6 +48,7 @@ export function createTtsPlaybackHarness() {
     setPlaybackRate() {}
   }
   let fetches = 0;
+  const fetchRequests: unknown[] = [];
   const bindings = {
     ...time, ...session, createPlaybackSettlementSession: session.createPlaybackSession,
     analyzeTtsCancellation, isOrganizationAccessRequiredError,
@@ -55,7 +56,7 @@ export function createTtsPlaybackHarness() {
     Platform: { OS: "ios" }, Speech: { stop() {}, getAvailableVoicesAsync() { throw Error("unexpected device fallback"); } },
     FileSystem: { cacheDirectory: "memory://", EncodingType: { Base64: "base64" }, writeAsStringAsync: async () => {},
       deleteAsync: async (uri: string) => { deleted.push(uri); await deleteBarrier; } },
-    fetchAiTtsAudio: async () => { fetches++; if (fetchError) throw fetchError;
+    fetchAiTtsAudio: async (request: unknown) => { fetchRequests.push(request); fetches++; if (fetchError) throw fetchError;
       return { bytes: new Uint8Array([1, 2, 3]), contentType: "audio/mpeg" }; },
     getVoiceSpeechTuning: () => ({}), selectSpeechVoiceIdentifier: () => undefined,
     console: { log: (...values: unknown[]) => logs.push(values), warn: (...values: unknown[]) => logs.push(values) },
@@ -74,5 +75,5 @@ export function createTtsPlaybackHarness() {
   return { sounds, logs, deleted, refs, make, playback: exported, stop: () => exported.stopRemoteTtsPlayback(refs),
     configure: (callback: typeof configure) => { configure = callback; },
     delayDeletion: (promise?: Promise<void>) => { deleteBarrier = promise; },
-    failFetch: (error: Error) => { fetchError = error; }, fetches: () => fetches };
+    failFetch: (error: Error) => { fetchError = error; }, fetches: () => fetches, fetchRequests };
 }

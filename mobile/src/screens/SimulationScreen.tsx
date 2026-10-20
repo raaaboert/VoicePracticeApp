@@ -589,6 +589,8 @@ export function SimulationScreen({
   const sessionStartedAtRef = useRef<Date | null>(null);
   const sessionTrainingPackIdRef = useRef<string | null>(null);
   const pendingOpeningLineRef = useRef<string | null>(null);
+  // Grants stay out of transcript/score/report payloads; retained for playback retries.
+  const speechAuthorizationByTextRef = useRef(startup.speechAuthorizations);
   const pendingOpeningSpeechPrefetchRef = useRef<PrefetchedRemoteSpeechChunk | null>(null);
   const pendingOpeningCorrelationIdRef = useRef<string | null>(null);
   const openingPrefetchPromiseRef = useRef<Promise<OpeningLinePayload> | null>(null);
@@ -841,6 +843,7 @@ export function SimulationScreen({
   }), [config.difficulty, config.personaStyle, config.scenario]);
 
   const storePendingOpeningPayload = useCallback((payload: OpeningLinePayload, correlationId: string) => {
+    if (payload.speechAuthorization) speechAuthorizationByTextRef.current.set(payload.assistantText, payload.speechAuthorization);
     pendingOpeningLineRef.current = payload.assistantText;
     sessionTrainingPackIdRef.current = payload.trainingPackId;
     pendingOpeningSpeechPrefetchRef.current = payload.speechPrefetch;
@@ -1111,6 +1114,7 @@ export function SimulationScreen({
     chunkIndex?: number,
     chunkCount?: number,
     sequenceRequestGeneration?: number,
+    speechAuthorization?: string,
   ): Promise<TtsPlaybackResult> => {
     const requestGeneration = sequenceRequestGeneration ?? ttsRequestGenerationRef.current;
     if (
@@ -1144,6 +1148,7 @@ export function SimulationScreen({
         authToken,
         correlationId,
         simulationSessionId: config.simulationSessionId,
+        speechAuthorization,
         remoteTtsEnabled: config.remoteTtsEnabled,
         remoteAiConfigured: apiConfigured,
         allowRemoteTts: !localTestMode,
@@ -1200,6 +1205,7 @@ export function SimulationScreen({
       correlationId?: string,
       chunkIndex?: number,
       chunkCount?: number,
+      speechAuthorization?: string,
     ): Promise<PreparedRemoteAudioSource | null> => {
       if (!shouldUseFastStartRemoteTts || !text.trim()) {
         return null;
@@ -1218,6 +1224,8 @@ export function SimulationScreen({
           authToken,
           text,
           preset,
+          simulationSessionId: config.simulationSessionId,
+          speechAuthorization,
           correlationId,
         });
         if (
@@ -1265,6 +1273,7 @@ export function SimulationScreen({
     correlationId?: string,
     prefetchedFirstChunk?: PrefetchedRemoteSpeechChunk | null,
   ): Promise<TtsPlaybackResult> => {
+    const speechAuthorization = speechAuthorizationByTextRef.current.get(text);
     const chunks = shouldUseFastStartRemoteTts ? splitTextForRemoteTtsFastStart(text) : [text];
     const requestGeneration = ttsRequestGenerationRef.current;
     const preset = toRemoteTtsPreset(config.voiceGender, config.voiceProfile);
@@ -1323,6 +1332,7 @@ export function SimulationScreen({
           correlationId,
           targetIndex,
           chunks.length,
+          speechAuthorization,
         ),
       );
     };
@@ -1436,6 +1446,7 @@ export function SimulationScreen({
               index,
               chunks.length,
               requestGeneration,
+              speechAuthorization,
             );
             settledSpeechResults.push(utteranceResult);
             recordSpeechResult(utteranceResult);
@@ -2545,7 +2556,7 @@ export function SimulationScreen({
       }
 
       let userText = "";
-      let replyPayload: { assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null } | null = null;
+      let replyPayload: { assistantText: string; speechPrefetch: PrefetchedRemoteSpeechChunk | null; speechAuthorization?: string } | null = null;
       let unifiedAssistantAwaitPromise:
         | Promise<{
             outcome: "assistant_reply" | "no_clear_speech";
@@ -2553,6 +2564,7 @@ export function SimulationScreen({
             noClearSpeechReason?: "empty_transcript" | "assistant_echo" | null;
             assistantText?: string;
             speechPrefetch?: PrefetchedRemoteSpeechChunk | null;
+            speechAuthorization?: string;
             runtime: { modelLatencyMs?: number | null; speechPrefetchTtsLatencyMs?: number | null } | null;
           }>
         | null = null;
@@ -2718,6 +2730,7 @@ export function SimulationScreen({
             unifiedAssistantAwaitPromise = null;
             replyPayload = {
               assistantText: unifiedPayload.assistantText,
+              speechAuthorization: unifiedPayload.speechAuthorization,
               speechPrefetch: unifiedPayload.speechPrefetch,
             };
             replyChars = unifiedPayload.assistantText.length;
@@ -2781,6 +2794,7 @@ export function SimulationScreen({
           logSimulationApiCall("transcribeAudio");
           userText = (
             await transcribeAudio({
+              simulationSessionId: config.simulationSessionId,
               userId,
               authToken,
               audioUri,
@@ -2918,6 +2932,7 @@ export function SimulationScreen({
               }
               replyPayload = {
                 assistantText: awaitedPayload.assistantText,
+                speechAuthorization: awaitedPayload.speechAuthorization,
                 speechPrefetch: awaitedPayload.speechPrefetch ?? null,
               };
               assistantResponseAtMs = Date.now();
@@ -3017,6 +3032,7 @@ export function SimulationScreen({
               },
             });
           }
+          if (replyPayload.speechAuthorization) speechAuthorizationByTextRef.current.set(replyPayload.assistantText, replyPayload.speechAuthorization);
           const reply = replyPayload.assistantText;
           const prefetchedAssistantSpeech = replyPayload.speechPrefetch;
 
@@ -3926,6 +3942,7 @@ export function SimulationScreen({
               role: "assistant",
               content: recoveredPayload.assistantText,
             };
+            if (recoveredPayload.speechAuthorization) speechAuthorizationByTextRef.current.set(recoveredPayload.assistantText, recoveredPayload.speechAuthorization);
             pendingSubmittedTurn.speechPrefetch = recoveredPayload.speechPrefetch ?? null;
           } else {
             pendingUnifiedTurnRecoveryRef.current = null;

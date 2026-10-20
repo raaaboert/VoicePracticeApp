@@ -50,6 +50,7 @@ interface SpeakWithTtsFallbackParams {
   authToken: string;
   correlationId?: string;
   simulationSessionId?: string;
+  speechAuthorization?: string;
   remoteTtsEnabled: boolean;
   remoteAiConfigured: boolean;
   allowRemoteTts?: boolean;
@@ -1137,6 +1138,8 @@ async function speakWithRemoteTtsFallbackBounded(params: SpeakWithTtsFallbackPar
           userId: params.userId,
           authToken: params.authToken,
           text: params.text,
+          simulationSessionId: params.simulationSessionId,
+          speechAuthorization: params.speechAuthorization,
           preset: params.preset,
           signal: params.abortSignal,
           correlationId: params.correlationId,

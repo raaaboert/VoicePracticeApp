@@ -796,11 +796,13 @@ export async function transcribeAudioViaApi(params: {
   userId: string;
   authToken: string;
   audioUri: string;
+  simulationSessionId?: string;
   mimeType: string;
   correlationId?: string;
   signal?: AbortSignal;
 }): Promise<string> {
   const formData = new FormData();
+  if (params.simulationSessionId) formData.append("simulationSessionId", params.simulationSessionId);
   const resolvedMimeType = params.mimeType || (Platform.OS === "web" ? "audio/webm" : "audio/m4a");
 
   if (Platform.OS === "web") {
@@ -893,6 +895,7 @@ export type UnifiedSimulationTurnPayload =
       outcome: "assistant_reply";
       transcriptText: string;
       assistantText: string;
+      speechAuthorization?: string;
       model: string;
       promptVersion: string;
       usage: AiUsagePayload;
@@ -916,6 +919,7 @@ export type AwaitedSimulationTurnPayload =
       outcome: "assistant_reply";
       transcriptText: string;
       assistantText: string;
+      speechAuthorization?: string;
       model: string;
       promptVersion: string;
       usage: AiUsagePayload;
@@ -984,6 +988,7 @@ export async function submitSimulationTurnViaApi(params: {
     transcriptText?: unknown;
     noClearSpeechReason?: unknown;
     assistantText?: unknown;
+    speechAuthorization?: unknown;
     model?: unknown;
     promptVersion?: unknown;
     usage?: unknown;
@@ -1013,6 +1018,7 @@ export async function submitSimulationTurnViaApi(params: {
       outcome: "assistant_reply",
       transcriptText,
       assistantText: typeof payload.assistantText === "string" ? payload.assistantText.trim() : "",
+      speechAuthorization: typeof payload.speechAuthorization === "string" ? payload.speechAuthorization : undefined,
       model: typeof payload.model === "string" ? payload.model.trim() : "",
       promptVersion: typeof payload.promptVersion === "string" ? payload.promptVersion.trim() : "",
       usage: {
@@ -1064,6 +1070,7 @@ export async function awaitSimulationTurnResultViaApi(params: {
     transcriptText?: unknown;
     noClearSpeechReason?: unknown;
     assistantText?: unknown;
+    speechAuthorization?: unknown;
     model?: unknown;
     promptVersion?: unknown;
     usage?: unknown;
@@ -1095,6 +1102,7 @@ export async function awaitSimulationTurnResultViaApi(params: {
       outcome: "assistant_reply",
       transcriptText,
       assistantText: typeof payload.assistantText === "string" ? payload.assistantText.trim() : "",
+      speechAuthorization: typeof payload.speechAuthorization === "string" ? payload.speechAuthorization : undefined,
       model: typeof payload.model === "string" ? payload.model.trim() : "",
       promptVersion: typeof payload.promptVersion === "string" ? payload.promptVersion.trim() : "",
       usage: {
@@ -1141,6 +1149,7 @@ export async function fetchAiOpeningLine(params: {
   correlationId?: string;
 }): Promise<{
   assistantText: string;
+  speechAuthorization?: string;
   model: string;
   promptVersion: string;
   usage: AiUsagePayload;
@@ -1149,6 +1158,7 @@ export async function fetchAiOpeningLine(params: {
 }> {
   const payload = await requestJson<{
     assistantText: string;
+    speechAuthorization?: string;
     model: string;
     promptVersion: string;
     usage: AiUsagePayload;
@@ -1198,6 +1208,7 @@ export async function fetchAiTurn(params: {
   signal?: AbortSignal;
 }): Promise<{
   assistantText: string;
+  speechAuthorization?: string;
   model: string;
   promptVersion: string;
   usage: AiUsagePayload;
@@ -1205,6 +1216,7 @@ export async function fetchAiTurn(params: {
 }> {
   const payload = await requestJson<{
     assistantText: string;
+    speechAuthorization?: string;
     model: string;
     promptVersion: string;
     usage: AiUsagePayload;
@@ -1328,6 +1340,8 @@ export async function fetchAiTtsAudio(params: {
   userId: string;
   authToken: string;
   text: string;
+  simulationSessionId?: string;
+  speechAuthorization?: string;
   preset: RemoteTtsPreset;
   signal?: AbortSignal;
   correlationId?: string;
@@ -1358,6 +1372,8 @@ export async function fetchAiTtsAudio(params: {
       },
       body: JSON.stringify({
         text: params.text,
+        simulationSessionId: params.simulationSessionId,
+        speechAuthorization: params.speechAuthorization,
         preset: params.preset,
       }),
     });
