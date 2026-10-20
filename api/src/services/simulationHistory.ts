@@ -9,6 +9,7 @@ import {
   UserStatus
 } from "@voicepractice/shared";
 
+import { countCompletedSimulationUsage } from "./completedSimulationUsage.js";
 import { isConclusiveSimulationScoreRecord } from "./simulationScoring.js";
 import type { ScoreRecordAccess, ScoreRecordQuery } from "./scoreRecordAccess.js";
 import type { UsageSessionAccess, UsageSessionQuery } from "./usageSessionAccess.js";
@@ -320,7 +321,7 @@ export function createSimulationHistoryAccess(params: {
         completedAt: completionSupported ? completionAt : null,
         requiredScenarioCount,
         completedScenarioCount: completedScenarioIds.size,
-        attemptsLast30Days: relevantRecentSessions.length,
+        attemptsLast30Days: countCompletedSimulationUsage(relevantRecentSessions),
         scoredAttemptsLast30Days: relevantRecentConclusiveScores.length,
         averageScoreLast30Days: averageScore(relevantRecentConclusiveScores),
         latestActivityAt,

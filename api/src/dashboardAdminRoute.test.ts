@@ -431,6 +431,7 @@ function buildUsageSessionRecord(
   overrides: Partial<UsageSessionRecord> = {}
 ): UsageSessionRecord {
   return {
+    usageSource: overrides.usageSource,
     id,
     userId,
     orgId: overrides.orgId === undefined ? "org_1" : overrides.orgId,
@@ -7321,4 +7322,87 @@ test("score, simulation-start, and usage successes wait for app-state persistenc
       .find((record) => record.simulationSessionId === failedUsageSessionId)?.status,
     "usage_recorded",
   );
+});
+
+
+test("abandoned usage preserves minutes but not admin/dashboard completion counters, including legacy provenance", async () => {
+  await seedStores();
+  adminToken = null;
+  const file = extractedStorePath("usage-sessions");
+  const original = await readFile(file, "utf8");
+  const originalRecords = await readExtractedStoreRecords<UsageSessionRecord>("usage-sessions");
+  const baselineOverview = await dashboardRequest("/dashboard/overview", orgAdminToken);
+  const baselineUsers = await dashboardRequest("/dashboard/users", orgAdminToken);
+  const baselineCustomer = await dashboardRequest("/dashboard/customers/org_1", superToken);
+  const baselinePack = await dashboardRequest("/dashboard/training/pack_scope", orgAdminToken);
+  const baselineAssignment = await dashboardRequest("/dashboard/training/pack_scope/assignments/assign_direct", orgAdminToken);
+  const baselineStats = await adminRequest("/stats?orgId=org_1");
+  assert.equal(baselineOverview.status, 200);
+  assert.equal(baselineUsers.status, 200);
+  assert.equal(baselineCustomer.status, 200);
+  assert.equal(baselineStats.status, 200);
+  const originalUser = (baselineUsers.body.users as any[]).find(row => row.userId === "learner")!;
+  const baseStats = baselineStats.body as any;
+  const baseCustomer = baselineCustomer.body as any;
+  const baseSummary = baselineOverview.body.summary as any;
+  const sameTime = { startedAt: daysAgo(0, -5), endedAt: daysAgo(0, -4), createdAt: daysAgo(0, -4) };
+  const abandoned = [0, 0, 0, 60].map((seconds, i) => buildUsageSessionRecord(
+    `reporting_abandoned_${i}`, "learner", { ...sameTime, rawDurationSeconds: seconds, usageSource: "server_abandoned", divisionId: "division_a" }));
+  try {
+    await writeFile(file, JSON.stringify({ records: [...originalRecords, ...abandoned] }), "utf8");
+    const overview = await dashboardRequest("/dashboard/overview", orgAdminToken);
+    const users = await dashboardRequest("/dashboard/users", orgAdminToken);
+    const customer = await dashboardRequest("/dashboard/customers/org_1", superToken);
+    const stats = await adminRequest("/stats?orgId=org_1");
+    assert.equal(stats.status, 200);
+    const summary = overview.body.summary as any;
+    assert.equal(summary.simulationsLast30Days, baseSummary.simulationsLast30Days);
+    assert.equal(summary.monthlyUsageMinutes, baseSummary.monthlyUsageMinutes + 1);
+    const user = (users.body.users as any[]).find(row => row.userId === "learner")!;
+    assert.equal(user.simulationsLast30Days, originalUser.simulationsLast30Days);
+    assert.equal(user.trainingPackAttemptsLast30Days, originalUser.trainingPackAttemptsLast30Days);
+    assert.equal(user.usedMinutesLast30Days, originalUser.usedMinutesLast30Days + 1);
+    const detail = customer.body as any;
+    assert.equal(detail.customer.simulationsLast30Days, baseCustomer.customer.simulationsLast30Days);
+    assert.equal(detail.insights.users.find((r: any) => r.userId === "learner").simulationsLast30Days,
+      baseCustomer.insights.users.find((r: any) => r.userId === "learner").simulationsLast30Days);
+    assert.equal(detail.insights.scenarios.find((r: any) => r.scenarioId === "scenario_scope").attemptsLast30Days,
+      baseCustomer.insights.scenarios.find((r: any) => r.scenarioId === "scenario_scope").attemptsLast30Days);
+    const afterStats = stats.body as any;
+    assert.equal(afterStats.totals.sessions, baseStats.totals.sessions);
+    assert.equal(afterStats.totals.billedSeconds, baseStats.totals.billedSeconds + 60);
+    assert.equal(afterStats.byOrg.find((r: any) => r.orgId === "org_1").sessions, baseStats.byOrg.find((r: any) => r.orgId === "org_1").sessions);
+    assert.equal(afterStats.bySegment.find((r: any) => r.segmentId === "manager").sessions, baseStats.bySegment.find((r: any) => r.segmentId === "manager").sessions);
+    assert.equal(afterStats.trendByDay.reduce((n: number, r: any) => n + r.sessions, 0), baseStats.trendByDay.reduce((n: number, r: any) => n + r.sessions, 0));
+    const pack = await dashboardRequest("/dashboard/training/pack_scope", orgAdminToken);
+    assert.equal(pack.status, 200);
+    assert.equal((pack.body.pack as any).attemptsLast30Days, (baselinePack.body.pack as any).attemptsLast30Days);
+    assert.equal((pack.body.pack as any).scenarios[0].attemptsLast30Days, (baselinePack.body.pack as any).scenarios[0].attemptsLast30Days);
+    const assignment = await dashboardRequest("/dashboard/training/pack_scope/assignments/assign_direct", orgAdminToken);
+    assert.equal(assignment.status, 200);
+    assert.equal((assignment.body.assignment as any).attemptsLast30Days, (baselineAssignment.body.assignment as any).attemptsLast30Days);
+    const rows = assignment.body.attempts as any[];
+    const row = rows.find(r => r.activityId === "reporting_abandoned_0");
+    assert.ok(row); assert.equal(row.usageSource, "server_abandoned");
+    const completed = buildUsageSessionRecord("reporting_completed", "learner", { ...sameTime, rawDurationSeconds: 60, usageSource: "client_completed" });
+    const legacy = buildUsageSessionRecord("reporting_legacy", "learner", { ...sameTime, rawDurationSeconds: 60 });
+    await writeFile(file, JSON.stringify({ records: [...originalRecords, ...abandoned, completed, legacy] }), "utf8");
+    const withCompleted = await dashboardRequest("/dashboard/overview", orgAdminToken);
+    assert.equal((withCompleted.body.summary as any).simulationsLast30Days, baseSummary.simulationsLast30Days + 2);
+    assert.equal(((await adminRequest("/stats?orgId=org_1")).body.totals as any).sessions, baseStats.totals.sessions + 2);
+    assert.equal((await dashboardRequest("/dashboard/users/other_org_user", orgAdminToken)).status, 404);
+    assert.equal(originalRecords.some(record => record.userId === "regular_dashboard"), false);
+    const abandonedOnly = buildUsageSessionRecord("reporting_abandoned_only", "regular_dashboard", {
+      ...sameTime, rawDurationSeconds: 60, usageSource: "server_abandoned", divisionId: "division_a",
+    });
+    await writeFile(file, JSON.stringify({ records: [...originalRecords, abandonedOnly] }), "utf8");
+    const division = await dashboardRequest("/dashboard/users?divisionId=division_a", orgAdminToken);
+    const activityUser = (division.body.users as any[]).find(row => row.userId === "regular_dashboard");
+    assert.ok(activityUser, "division usage rows must not disappear merely because completion count is zero");
+    assert.equal(activityUser.simulationsLast30Days, 0);
+    assert.equal(activityUser.usedMinutesLast30Days, 1);
+  } finally {
+    await writeFile(file, original, "utf8");
+    await dashboardRequest("/dashboard/overview", orgAdminToken);
+  }
 });

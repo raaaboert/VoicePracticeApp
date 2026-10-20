@@ -458,6 +458,7 @@ import {
 } from "./services/mobileScoreRecovery.js";
 import { createScoreRecordAccess } from "./services/scoreRecordAccess.js";
 import { createSimulationHistoryAccess } from "./services/simulationHistory.js";
+import { isCompletedSimulationUsage, countCompletedSimulationUsage } from "./services/completedSimulationUsage.js";
 import { confirmedExchangeKey } from "./services/simulationActivity.js";
 import { settleAbandonedSimulationBatch, newSessionUsageAccess, scheduleAbandonedSimulationSettlement, usageAccessSnapshot } from "./services/abandonedSimulationUsage.js";
 import { createUsageSessionAccess } from "./services/usageSessionAccess.js";
@@ -6594,7 +6595,7 @@ function buildTrainingPackTrendPoints(
       label: formatDashboardMonthLabel(monthStart),
       periodStartAt: monthStart.toISOString(),
       periodEndAt: monthEnd.toISOString(),
-      attempts: sessions.length,
+      attempts: countCompletedSimulationUsage(sessions),
       averageScore: averageScore(scores)
     });
   }
@@ -6657,7 +6658,7 @@ function buildTrainingPackScenarioProgressRows(params: {
         assignedLearnerCount: scopedAssignments.length,
         startedLearnerCount,
         completedLearnerCount,
-        attemptsLast30Days: recentScenarioSessions.length,
+        attemptsLast30Days: countCompletedSimulationUsage(recentScenarioSessions),
         scoredAttemptsLast30Days: recentScenarioScores.length,
         averageScoreLast30Days: averageScore(recentScenarioScores),
         latestActivityAt: maxIsoDate([
@@ -7167,7 +7168,7 @@ async function buildDashboardCustomerSummary(
     startedAtFrom: new Date(last30DaysThreshold)
   }).filter((session) =>
     (!divisionId || (session.divisionId ?? null) === divisionId) &&
-    (!permittedUserIds || permittedUserIds.has(session.userId))
+    (!permittedUserIds || permittedUserIds.has(session.userId)) && isCompletedSimulationUsage(session)
   ).length;
 
   const scoresThisPeriod = scoreRecordAccess.listByOrgRange(db, {
@@ -7255,7 +7256,7 @@ function buildDashboardCustomerTrend(
       periodStartAt: monthStart.toISOString(),
       periodEndAt: monthEnd.toISOString(),
       usageMinutes: roundMinutes(billedSeconds),
-      simulations: sessions.length,
+      simulations: countCompletedSimulationUsage(sessions),
       averageScore: averageScore(scores)
     });
   }
@@ -7305,7 +7306,7 @@ function buildDashboardCustomerUserRows(
         status: user.status,
         orgRole: user.orgRole,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
-        simulationsLast30Days: userSessions.length,
+        simulationsLast30Days: countCompletedSimulationUsage(userSessions),
         usedMinutesLast30Days: roundMinutes(billedSeconds),
         averageScoreLast30Days: averageScore(userScores),
         latestActivityAt,
@@ -7313,7 +7314,8 @@ function buildDashboardCustomerUserRows(
       };
     });
 
-  return divisionId ? rows.filter((row) => row.simulationsLast30Days > 0 || row.averageScoreLast30Days !== null) : rows;
+  // Activity can consume minutes without being a completed simulation.
+  return divisionId ? rows.filter((row) => row.latestActivityAt !== null) : rows;
 }
 
 function buildDashboardCustomerScenarioRows(
@@ -7378,7 +7380,7 @@ function buildDashboardCustomerScenarioRows(
 
   for (const session of sessions) {
     const aggregate = ensureScenarioAggregate(session.scenarioId, session.segmentId);
-    aggregate.attempts += 1;
+    aggregate.attempts += isCompletedSimulationUsage(session) ? 1 : 0;
     aggregate.learnerIds.add(session.userId);
     aggregate.latestActivityAt = maxIsoDate([aggregate.latestActivityAt, session.endedAt]);
   }
@@ -7550,7 +7552,7 @@ async function buildDashboardTrainingPackRows(
         completedLearnerCount: assignmentRows.filter((row) => row.status === "completed").length,
         inProgressLearnerCount: assignmentRows.filter((row) => row.status === "in_progress").length,
         notStartedLearnerCount: assignmentRows.filter((row) => row.status === "not_started").length,
-        attemptsLast30Days: packSessions.length,
+        attemptsLast30Days: countCompletedSimulationUsage(packSessions),
         scoredAttemptsLast30Days: packScores.length,
         learnerCountLast30Days: learnerCount,
         averageScoreLast30Days: averageScore(packScores),
@@ -7774,6 +7776,7 @@ function buildDashboardAttemptHistoryRowFromSession(params: {
   return {
     activityId: session.id,
     activityKind: "usage_only",
+    usageSource: session.usageSource ?? null,
     userId: user.id,
     userEmail: user.email,
     userStatus: user.status,
@@ -8389,7 +8392,7 @@ function buildDashboardTrainingWorkspaceUserRows(params: {
         orgName: params.org.name,
         status: user.status,
         orgRole: user.orgRole,
-        attemptsLast30Days: userSessions.length,
+        attemptsLast30Days: countCompletedSimulationUsage(userSessions),
         averageScoreLast30Days: averageScore(userScores),
         latestActivityAt,
         latestScenarioTitle: latestScenarioId
@@ -8429,7 +8432,7 @@ function buildDashboardTrainingWorkspaceScenarioRows(params: {
         segmentId: meta?.segmentId ?? "unknown",
         segmentLabel: meta?.segmentLabel ?? "Unknown",
         source: meta?.source ?? "unknown",
-        attemptsLast30Days: sessionRows.length,
+        attemptsLast30Days: countCompletedSimulationUsage(sessionRows),
         averageScoreLast30Days: averageScore(scoreRows),
         latestActivityAt: maxIsoDate([
           ...sessionRows.map((session) => session.endedAt),
@@ -8542,7 +8545,7 @@ async function buildDashboardTrainingWorkspaceRowsForOrg(
       ...training,
       orgName: normalizedOrg.name,
       summary: {
-        totalAttemptsLast30Days: scopedSessions.length,
+        totalAttemptsLast30Days: countCompletedSimulationUsage(scopedSessions),
         averageScoreLast30Days: averageScore(scopedScores),
         activeLearnerCountLast30Days: new Set([
           ...scopedSessions.map((session) => session.userId),
@@ -10503,20 +10506,20 @@ async function buildDashboardUserReport(
         status: user.status,
         orgRole: user.orgRole,
         dashboardAccessEnabled: user.dashboardAccessEnabled === true,
-        simulationsLast30Days: userSessions.length,
+        simulationsLast30Days: countCompletedSimulationUsage(userSessions),
         usedMinutesLast30Days: roundMinutes(billedSeconds),
         scoredAttemptsLast30Days: userScores.length,
         averageScoreLast30Days: averageScore(userScores),
         scoreDeltaLast30Days: averageScoreDelta(userScores, userPreviousScores),
         uniqueScenariosLast30Days,
-        trainingPackAttemptsLast30Days: userSessions.filter((session) => Boolean(session.trainingPackId)).length,
+        trainingPackAttemptsLast30Days: userSessions.filter((session) => isCompletedSimulationUsage(session) && Boolean(session.trainingPackId)).length,
         latestActivityAt,
         latestScenarioTitle: latestScenarioId ? scenarioCatalog?.get(latestScenarioId)?.title ?? latestScenarioId : null,
         latestTrainingPackTitle:
           latestTrainingPackId && trainingPackTitles ? trainingPackTitles.get(latestTrainingPackId) ?? latestTrainingPackId : null
       };
     })
-    .filter((row) => !divisionId || row.simulationsLast30Days > 0 || row.scoredAttemptsLast30Days > 0)
+    .filter((row) => !divisionId || row.latestActivityAt !== null)
     .sort((left, right) => {
       const latestDelta =
         (new Date(right.latestActivityAt ?? 0).getTime() || 0) - (new Date(left.latestActivityAt ?? 0).getTime() || 0);
@@ -26885,7 +26888,7 @@ app.get("/mobile/users/:userId/admin/org/users/:targetUserId", async (request: R
       },
       period: { startAt: periodStartAt, endAt: periodEndAt, days },
       usage: {
-        sessions: billingSessions.length,
+        sessions: countCompletedSimulationUsage(billingSessions),
         billedSeconds
       },
       scores: {
@@ -28133,7 +28136,7 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
       }
       const current = sessionsByOrgId.get(session.orgId) ?? { sessions: 0, billedSeconds: 0 };
       sessionsByOrgId.set(session.orgId, {
-        sessions: current.sessions + 1,
+        sessions: current.sessions + (isCompletedSimulationUsage(session) ? 1 : 0),
         billedSeconds: current.billedSeconds + calculateBilledSecondsFromRaw(session.rawDurationSeconds)
       });
     }
@@ -28186,7 +28189,7 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
       const segmentId = session.segmentId;
       const current = sessionsBySegmentId.get(segmentId) ?? { sessions: 0, billedSeconds: 0 };
       sessionsBySegmentId.set(segmentId, {
-        sessions: current.sessions + 1,
+        sessions: current.sessions + (isCompletedSimulationUsage(session) ? 1 : 0),
         billedSeconds: current.billedSeconds + calculateBilledSecondsFromRaw(session.rawDurationSeconds)
       });
     }
@@ -28239,7 +28242,7 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
       }
       const current = trendUsageByDay.get(dayKey) ?? { sessions: 0, billedSeconds: 0 };
       trendUsageByDay.set(dayKey, {
-        sessions: current.sessions + 1,
+        sessions: current.sessions + (isCompletedSimulationUsage(session) ? 1 : 0),
         billedSeconds: current.billedSeconds + calculateBilledSecondsFromRaw(session.rawDurationSeconds)
       });
     }
@@ -28325,7 +28328,7 @@ app.get("/stats", requireAdmin, async (request: Request, response: Response) => 
         segmentId: querySegmentId || null
       },
       totals: {
-        sessions: filteredSessions.length,
+        sessions: countCompletedSimulationUsage(filteredSessions),
         billedSeconds: totalBilledSeconds,
         aiCalls: filteredAiEvents.length,
         aiTokens: totalAiTokens,

@@ -7,6 +7,7 @@ import { createUsageSessionAccess } from "../services/usageSessionAccess.js";
 import { buildSimulationSessionStartRecord, completeRecognizedSimulationUsage } from "../services/simulationSessionLifecycle.js";
 import { confirmedExchangeKey, estimatedSessionUsage } from "../services/simulationActivity.js";
 import { newSessionUsageAccess, settleAbandonedSimulationBatch } from "../services/abandonedSimulationUsage.js";
+import { countCompletedSimulationUsage } from "../services/completedSimulationUsage.js";
 
 const url = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim();
 test("local PostgreSQL abandoned-session checkpoints, settlement, admission and restart integrity", { skip: !url }, async t => {
@@ -193,6 +194,28 @@ test("local PostgreSQL abandoned-session checkpoints, settlement, admission and 
       assert.equal(projection.computeUserUsageSnapshot(db, { userId: "race-user", now: start, timeZone: "UTC" }).rawSecondsToday, 60);
       assert.equal(projection.buildOrgUsageSnapshot(db, { orgId: "race-org", now: start,
         billingAnchorAt: "2026-10-01T00:00:00Z", allottedMinutes: 100 }).usedSeconds, 60);
+    });
+    await t.test("persisted abandoned records retain usage minutes while completed-session reporting excludes them", async () => {
+      for (const id of ["report-opening-1", "report-opening-2", "report-opening-3", "report-positive"]) {
+        await register(id, "report-user", "report-org");
+        await confirm(id, 0, "opening", "report-user", "report-org");
+      }
+      await confirm("report-positive", 60, "turn", "report-user", "report-org");
+      await sweep();
+      const records = usage.list(db, { orgId: "report-org", userId: "report-user" });
+      assert.equal(records.length, 4);
+      assert.ok(records.every(record => record.usageSource === "server_abandoned"));
+      assert.equal(countCompletedSimulationUsage(records), 0);
+      assert.equal(usage.computeUserUsageSnapshot(db, { userId: "report-user", now: start, timeZone: "UTC" }).billedSecondsToday, 60);
+      assert.equal(usage.buildOrgUsageSnapshot(db, { orgId: "report-org", now: start,
+        billingAnchorAt: "2026-10-01T00:00:00Z", allottedMinutes: 2 }).usedSeconds, 60);
+      const normal = { ...records[0]!, id: "report-client", rawDurationSeconds: 30, usageSource: "client_completed" as const };
+      const legacy = { ...normal, id: "report-legacy", usageSource: undefined };
+      await usage.append(db, normal); await usage.append(db, legacy); await usage.refresh?.();
+      const mixed = usage.list(db, { orgId: "report-org", userId: "report-user" });
+      assert.equal(countCompletedSimulationUsage(mixed), 2);
+      assert.equal(usage.buildOrgUsageSnapshot(db, { orgId: "report-org", now: start,
+        billingAnchorAt: "2026-10-01T00:00:00Z", allottedMinutes: 2 }).usedSeconds, 120);
     });
   } finally { await database.close(); }
 });

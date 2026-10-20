@@ -3,7 +3,8 @@ import test from "node:test";
 
 import { PerformancePlan, SimulationScoreRecord, UsageSessionRecord } from "@voicepractice/shared";
 
-import { calculatePerformanceProgress } from "./performanceProgress.js";
+import { buildPerformanceFinalResult, calculatePerformanceProgress } from "./performanceProgress.js";
+import { createUsageSessionAccess } from "./usageSessionAccess.js";
 
 function plan(overrides: Partial<PerformancePlan> = {}): PerformancePlan {
   return {
@@ -50,6 +51,7 @@ function plan(overrides: Partial<PerformancePlan> = {}): PerformancePlan {
 
 function usage(overrides: Partial<UsageSessionRecord>): UsageSessionRecord {
   return {
+    usageSource: overrides.usageSource,
     id: overrides.id ?? "usage_1",
     userId: overrides.userId ?? "user_1",
     orgId: overrides.orgId ?? "org_1",
@@ -198,4 +200,41 @@ test("performance progress combines activity and performance success when both a
   assert.equal(result.progress.performance.targetScore, 80);
   assert.equal(result.progress.performance.succeeded, true);
   assert.equal(result.progress.overallSucceeded, true);
+});
+
+test("three abandoned opening-only rows cannot complete total or weekly session-count goals", () => {
+  const abandoned = [1, 2, 3].map(id => usage({ id: `abandoned_${id}`, usageSource: "server_abandoned", rawDurationSeconds: 0 }));
+  for (const metricType of ["total_session_count", "weekly_session_count"] as const) {
+    const goal = plan({ activityGoal: { enabled: true, metricType, targetValue: 3 },
+      performanceGoal: { enabled: false, metricType: null, targetScore: null, improvementAmount: null, comparisonMonthCount: null } });
+    const result = calculatePerformanceProgress({ plan: goal, usageSessions: abandoned, scoreRecords: [], now: new Date("2026-07-08T06:00:00Z") });
+    assert.equal(result.progress.activity.actualValue, 0);
+    assert.equal(result.progress.activity.succeeded, false);
+    assert.equal(result.progress.overallSucceeded, false);
+    assert.equal(buildPerformanceFinalResult({ plan: goal, progress: result, finalizedAt: "2026-07-08T06:00:00Z" }).sessionsCompleted, 0);
+  }
+});
+
+test("client-completed and historical rows count, while abandoned minutes remain in time goals and allowances", () => {
+  const rows = [
+    usage({ id: "client", usageSource: "client_completed", rawDurationSeconds: 60 }),
+    usage({ id: "legacy", rawDurationSeconds: 60 }),
+    usage({ id: "legacy-null", usageSource: null, rawDurationSeconds: 60 }),
+    usage({ id: "abandoned-positive", usageSource: "server_abandoned", rawDurationSeconds: 120 }),
+    usage({ id: "foreign-user", userId: "other", rawDurationSeconds: 600 }),
+    usage({ id: "foreign-org", orgId: "other", rawDurationSeconds: 600 }),
+  ];
+  const goal = plan({ activityGoal: { enabled: true, metricType: "total_session_count", targetValue: 3 },
+    performanceGoal: { enabled: false, metricType: null, targetScore: null, improvementAmount: null, comparisonMonthCount: null } });
+  const result = calculatePerformanceProgress({ plan: goal, usageSessions: rows, scoreRecords: [], now: new Date("2026-07-02T06:00:00Z") });
+  assert.equal(result.progress.activity.actualValue, 3);
+  assert.equal(result.progress.activity.succeeded, true);
+  assert.equal(result.totalPracticeSeconds, 300);
+  assert.equal(buildPerformanceFinalResult({ plan: goal, progress: result, finalizedAt: "2026-07-02T06:00:00Z" }).sessionsCompleted, 3);
+  const minutes = calculatePerformanceProgress({ plan: { ...goal, activityGoal: { enabled: true, metricType: "total_practice_minutes", targetValue: 5 } },
+    usageSessions: rows, scoreRecords: [], now: new Date("2026-07-02T06:00:00Z") });
+  assert.equal(minutes.progress.activity.actualValue, 5);
+  const accounting = createUsageSessionAccess(), db = { usageSessions: rows.slice(0, 4) };
+  assert.equal(accounting.computeUserUsageSnapshot(db, { userId: "user_1", now: new Date("2026-07-01T12:00:00Z"), timeZone: "America/Denver" }).billedSecondsToday, 300);
+  assert.equal(accounting.buildOrgUsageSnapshot(db, { orgId: "org_1", now: new Date("2026-07-02T00:00:00Z"), billingAnchorAt: "2026-07-01T00:00:00Z", allottedMinutes: 10 }).usedSeconds, 300);
 });

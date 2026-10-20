@@ -8,6 +8,7 @@ import {
   UsageSessionRecord
 } from "@voicepractice/shared";
 
+import { isCompletedSimulationUsage, countCompletedSimulationUsage } from "./completedSimulationUsage.js";
 import { buildPlanWeekWindows, buildPlanWindow } from "./performanceDateWindows.js";
 import { listEligiblePerformanceScores } from "./performanceBaseline.js";
 import { getFrozenScenarioIdSet } from "./performanceScope.js";
@@ -103,7 +104,7 @@ export function buildPerformanceFinalResult(params: {
     finalAverageScore: params.progress.progress.performance.currentAverage,
     scoreImprovement: params.progress.progress.performance.scoreImprovement,
     totalPracticeSeconds: params.progress.totalPracticeSeconds,
-    sessionsCompleted: params.progress.eligibleUsageSessions.length,
+    sessionsCompleted: countCompletedSimulationUsage(params.progress.eligibleUsageSessions),
     weeklyConsistency: params.progress.progress.activity.weeklyConsistency,
     scope: params.plan.scope
   };
@@ -117,6 +118,8 @@ export function listEligibleUsageSessions(params: {
   fromAt: string;
   beforeAt: string;
 }): UsageSessionRecord[] {
+  // Keep time-based evidence intact. Session-count goals and final completion
+  // totals separately exclude server-abandoned accounting records.
   const scenarioIds = getFrozenScenarioIdSet(params.scope);
   const fromMs = new Date(params.fromAt).getTime();
   const beforeMs = new Date(params.beforeAt).getTime();
@@ -172,7 +175,7 @@ function calculateActivityProgress(params: {
   }
 
   if (goal.metricType === "total_session_count") {
-    const actualValue = params.usageSessions.length;
+    const actualValue = countCompletedSimulationUsage(params.usageSessions);
     return {
       enabled: true,
       metricType: goal.metricType,
@@ -192,7 +195,7 @@ function calculateActivityProgress(params: {
     capAt: params.windowEndAt
   });
   const isMinuteMetric = goal.metricType === "weekly_practice_minutes";
-  const actualValue = isMinuteMetric ? params.totalPracticeSeconds / 60 : params.usageSessions.length;
+  const actualValue = isMinuteMetric ? params.totalPracticeSeconds / 60 : countCompletedSimulationUsage(params.usageSessions);
   const cumulativeTargetValue = weeks.reduce((total, week) => total + targetValue * week.proratedFraction, 0);
   const completedWeeks = weeks.filter((week) => {
     const weekStartMs = new Date(week.includedStartAt).getTime();
@@ -200,7 +203,7 @@ function calculateActivityProgress(params: {
     const weekActual = params.usageSessions
       .filter((session) => {
         const endedAtMs = new Date(session.endedAt).getTime();
-        return Number.isFinite(endedAtMs) && endedAtMs >= weekStartMs && endedAtMs < weekEndMs;
+        return (isMinuteMetric || isCompletedSimulationUsage(session)) && Number.isFinite(endedAtMs) && endedAtMs >= weekStartMs && endedAtMs < weekEndMs;
       })
       .reduce((total, session) => total + (isMinuteMetric ? session.rawDurationSeconds / 60 : 1), 0);
     return weekActual >= targetValue * week.proratedFraction;

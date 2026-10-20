@@ -2221,6 +2221,8 @@ export type DashboardAssignmentContextStatus =
   | "outside_assignment_window";
 
 export interface DashboardAttemptHistoryRow {
+  /** All-activity history may include abandoned usage; this is not a completion flag. */
+  usageSource?: UsageSessionRecord["usageSource"];
   activityId: string;
   activityKind: DashboardAttemptActivityKind;
   userId: string;
