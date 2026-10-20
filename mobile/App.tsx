@@ -163,6 +163,8 @@ import { RelatedTrainingContentScreen } from "./src/trainingContent/RelatedTrain
 import { TrainingContentHeader } from "./src/trainingContent/TrainingContentHeader";
 import { getTrainingContentTheme } from "./src/trainingContent/theme";
 import { FocusTopicsScreen } from "./src/focusTopics/FocusTopicsScreen";
+import { HomeFocusTopicPreview } from "./src/focusTopics/HomeFocusTopicPreview";
+import { useFocusTopicCatalog } from "./src/focusTopics/useFocusTopicCatalog";
 import { canRequestFocusTopicCatalog } from "./src/focusTopics/model";
 import { confirmAndOpenExternalLink } from "./src/trainingContent/externalLinks";
 import {
@@ -182,6 +184,7 @@ import {
   setupBackDestination,
   setupOriginContentId,
   setupOriginTopicId,
+  simulationTopicReturnOrigin,
   type ScenarioSetupSelection,
   type SetupOrigin,
 } from "./src/trainingContent/scenarioSetupNavigation";
@@ -820,6 +823,10 @@ export default function App() {
     MobileTrainingContentSummary[]
   >([]);
   const [setupOrigin, setSetupOrigin] = useState<SetupOrigin | null>(null);
+  const [homeFocusTopicId, setHomeFocusTopicId] = useState<string | null>(null);
+  const [topicReturnNotice, setTopicReturnNotice] = useState<string | null>(null);
+  const [originScenarioSelection, setOriginScenarioSelection] = useState<ScenarioSetupSelection | null>(null);
+  const [simulationReturnOrigin, setSimulationReturnOrigin] = useState<SetupOrigin | null>(null);
   const [setupSelectionIntent, setSetupSelectionIntent] =
     useState<ScenarioSetupSelection | null>(null);
   const [setupSelectionFailure, setSetupSelectionFailure] = useState<string | null>(null);
@@ -949,6 +956,10 @@ export default function App() {
     setSetupOrigin(null);
     setSetupSelectionIntent(null);
     setSetupSelectionFailure(null);
+    setHomeFocusTopicId(null);
+    setTopicReturnNotice(null);
+    setOriginScenarioSelection(null);
+    setSimulationReturnOrigin(null);
     setIsSetupScenarioSelectionExpanded(true);
     setMyOrgAccessRequests([]);
     setOrgAccessRequestsLoading(false);
@@ -3752,6 +3763,10 @@ export default function App() {
         // Do not block simulation start on local cache persistence issues.
       }
 
+      setSimulationReturnOrigin(simulationTopicReturnOrigin(setupOrigin, originScenarioSelection, {
+        scenarioCatalogTab, trainingId: scenarioCatalogTab === "custom" ? activeTraining?.id ?? null : null,
+        industryId, roleId: activeSegment.id, scenarioId: scenario.id,
+      }));
       setSimulationConfig({
         simulationSessionId: createSimulationSessionId(),
         scenario,
@@ -4239,6 +4254,12 @@ export default function App() {
   const isOrgAdmin = Boolean(user?.accountType === "enterprise" && user.orgRole === "org_admin");
   const canViewOrganizationPlan = canAccessOrganizationPlan(user);
   const canOpenFocusTopics = canRequestFocusTopicCatalog(user, Boolean(activeSuperUserOrgId));
+  const focusTopicCatalog = useFocusTopicCatalog({
+    userId: user?.id ?? null, authToken: mobileAuthToken,
+    orgId: user?.isSuperUser ? activeSuperUserOrgId : user?.orgId ?? null,
+    enabled: canOpenFocusTopics && hasAuthenticatedScopedConfig,
+    destination: screen === "home" || screen === "focus_topics" ? screen : null,
+  });
   const organizationPlanDetails = useMemo(() => buildOrganizationPlanDetails(entitlements), [entitlements]);
   const canSubmitOrganizationPlanSupportRequest = canSubmitOrganizationPlanSupport(
     organizationPlanSupportDraft,
@@ -4407,6 +4428,7 @@ export default function App() {
     scenario: MobileRelatedPracticeScenarioSummary
   ) => {
     const selection = buildScenarioSetupSelection(scenario);
+    setOriginScenarioSelection(selection);
     setSetupOrigin(origin);
     setSetupSelectionIntent(selection);
     setSetupSelectionFailure(null);
@@ -4436,6 +4458,24 @@ export default function App() {
   ) => {
     applyScenarioSetupSelection({ type: "focus_topic", topicId }, scenario);
   }, [applyScenarioSetupSelection]);
+
+  const openHomeFocusTopics = (topicId: string | null = null) => {
+    setHomeFocusTopicId(topicId);
+    setTopicReturnNotice(null);
+    setSetupOrigin(null); setSetupSelectionIntent(null); setSetupSelectionFailure(null);
+    setNotificationTarget(null);
+    setScreen("focus_topics");
+  };
+
+  const returnToSimulationTopic = (message?: string | null) => {
+    if (simulationReturnOrigin?.type !== "focus_topic") return;
+    setTopicReturnNotice(message ?? null);
+    setSetupOrigin(simulationReturnOrigin);
+    setSetupSelectionIntent(null); setSetupSelectionFailure(null);
+    setNotificationTarget(null);
+    setLastTranscript(null);
+    setScreen("focus_topics");
+  };
 
   const handleTrainingContentAvailability = useCallback((enabled: boolean) => {
     setTrainingContentEnabled(enabled);
@@ -4593,6 +4633,9 @@ export default function App() {
         contentContainerStyle={styles.homeScrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {canOpenFocusTopics ? <HomeFocusTopicPreview state={focusTopicCatalog.state} theme={setupSurfaceTheme}
+          onOpenTopic={openHomeFocusTopics} onViewAll={() => openHomeFocusTopics()}
+          onRetry={() => { void focusTopicCatalog.controller.refresh(); }} /> : null}
         <LinearGradient
           colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
           start={{ x: 0.04, y: 0 }}
@@ -4664,32 +4707,6 @@ export default function App() {
 
         {canOpenFocusTopics ? (
           <View style={styles.homeDestinationGroup}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Open Focus Topics"
-              style={[styles.trainingModuleTile, styles.homeDestinationPrimary]}
-              onPress={() => {
-                setSetupOrigin(null);
-                setSetupSelectionIntent(null);
-                setSetupSelectionFailure(null);
-                setScreen("focus_topics");
-              }}
-            >
-              <View style={[styles.trainingModuleIconFrame, styles.homeDestinationPrimaryIcon]}>
-                <MaterialCommunityIcons
-                  name="target"
-                  size={28}
-                  color={APP_SURFACE_COLORS.goldMuted}
-                />
-              </View>
-              <View style={styles.trainingModuleCopy}>
-                <Text style={styles.trainingModuleTitle}>Focus Topics</Text>
-                <Text style={styles.trainingModuleBody}>
-                  Practice scenarios and review resources organized around what you're working on.
-                </Text>
-              </View>
-              <MaterialCommunityIcons name="chevron-right" size={25} color={theme.textMuted} />
-            </Pressable>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Browse Scenarios"
@@ -7293,7 +7310,8 @@ export default function App() {
             setSimulationConfig(null);
             setRelatedTrainingContentItems([]);
             setSetupError(message ?? null);
-            setScreen("setup");
+            if (simulationReturnOrigin?.type === "focus_topic") returnToSimulationTopic(message);
+            else setScreen("setup");
           }}
           onReviewRelatedLearningResources={(items) => {
             setRelatedTrainingContentItems(items);
@@ -7316,6 +7334,7 @@ export default function App() {
           scoringStatus={scorecardStatus}
           error={scorecardError}
           transcriptAvailable={Boolean(lastTranscript)}
+          onBackToTopic={simulationReturnOrigin?.type === "focus_topic" ? () => returnToSimulationTopic() : undefined}
           onDownloadTranscript={downloadLastTranscript}
           onSubmitSupport={submitSupportFromScore}
           onBack={() => {
@@ -7345,17 +7364,19 @@ export default function App() {
       return (
         <FocusTopicsScreen
           key={focusTopicContextKey}
+          catalog={focusTopicCatalog}
+          initialNotice={topicReturnNotice}
           userId={user.id}
           authToken={mobileAuthToken}
           colorScheme={colorScheme}
-          initialTopicId={notificationDestination?.type === "focus_topic" ? notificationDestination.topicId : setupOriginTopicId(setupOrigin)}
+          initialTopicId={notificationDestination?.type === "focus_topic" ? notificationDestination.topicId : setupOriginTopicId(setupOrigin) ?? homeFocusTopicId}
           onBackToHome={() => {
             setSetupOrigin(null);
             setNotificationTarget(null);
             setScreen("home");
           }}
           onPracticeScenario={openFocusTopicPracticeScenario}
-          onLeaveReturnedTopic={() => { setSetupOrigin(null); setNotificationTarget(null); }}
+          onLeaveReturnedTopic={() => { setSetupOrigin(null); setHomeFocusTopicId(null); setNotificationTarget(null); }}
         />
       );
     }

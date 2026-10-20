@@ -62,3 +62,11 @@ export function setupOriginTopicId(origin: SetupOrigin | null): string | null {
 export function setupOriginContentId(origin: SetupOrigin | null): string | null {
   return origin?.type === "learning_resource" ? origin.contentId : null;
 }
+
+/** Capture navigation origin only while the originally chosen practice is still selected. */
+export function simulationTopicReturnOrigin(
+  origin: SetupOrigin | null, requested: ScenarioSetupSelection | null, applied: AppliedScenarioSetupSelection,
+): SetupOrigin | null {
+  return origin?.type === "focus_topic" && requested && isExactScenarioSetupSelection(requested, applied)
+    ? { ...origin } : null;
+}

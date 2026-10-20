@@ -35,6 +35,7 @@ interface ScorecardViewProps {
     transcriptRetainedUntil: string | null;
   }>;
   onBack: () => void;
+  onBackToTopic?: () => void;
 }
 
 const COLORS = {
@@ -59,6 +60,7 @@ export function ScorecardView({
   onDownloadTranscript,
   onSubmitSupport,
   onBack,
+  onBackToTopic,
 }: ScorecardViewProps) {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
@@ -229,9 +231,15 @@ export function ScorecardView({
 
       <View style={styles.footer}>
         {viewModel.showBackToScenarios ? (
-          <Pressable style={styles.button} onPress={onBack}>
-            <Text style={styles.buttonText}>{viewModel.footerCtaLabel}</Text>
-          </Pressable>
+          <View style={{ gap: 10 }}>
+            {onBackToTopic ? <Pressable accessibilityRole="button" accessibilityLabel="Back to Topic"
+              style={styles.button} onPress={onBackToTopic}>
+              <Text style={styles.buttonText}>Back to Topic</Text>
+            </Pressable> : null}
+            <Pressable accessibilityRole="button" style={styles.button} onPress={onBack}>
+              <Text style={styles.buttonText}>{onBackToTopic ? "Practice Again" : viewModel.footerCtaLabel}</Text>
+            </Pressable>
+          </View>
         ) : null}
       </View>
 

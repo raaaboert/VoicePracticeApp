@@ -1,26 +1,24 @@
 import type {
-  MobileFocusTopicCatalogItem,
   MobileFocusTopicScenarioSummary,
 } from "@voicepractice/shared";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 
 import type { AppColorScheme } from "../types";
 import { getTrainingContentTheme } from "../trainingContent/theme";
 import { TrainingContentDetailScreen } from "../trainingContent/TrainingContentDetailScreen";
-import { fetchFocusTopicCatalog } from "./api";
+import type { FocusTopicCatalogController, FocusTopicCatalogState } from "./catalog";
 import { FocusTopicDetailScreen } from "./FocusTopicDetailScreen";
 import { FocusTopicLandingScreen } from "./FocusTopicLandingScreen";
 import type { FocusTopicLearnerSort } from "./discovery";
-import {
-  createFocusTopicRequestGate,
-} from "./model";
 
 interface FocusTopicsScreenProps {
+  catalog: { state: FocusTopicCatalogState; controller: FocusTopicCatalogController };
   userId: string;
   authToken: string;
   colorScheme: AppColorScheme;
   initialTopicId?: string | null;
+  initialNotice?: string | null;
   onBackToHome: () => void;
   onPracticeScenario: (
     topicId: string,
@@ -30,7 +28,8 @@ interface FocusTopicsScreenProps {
 }
 
 export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
-  const [topics, setTopics] = useState<MobileFocusTopicCatalogItem[] | null>(null);
+  const { topics, loading, error } = props.catalog.state;
+  const loadTopics = useCallback(() => props.catalog.controller.refresh(), [props.catalog.controller]);
   const [query, setQuery] = useState("");
   const [learnerSort, setLearnerSort] = useState<FocusTopicLearnerSort>("company");
   const [selectedTopicId, setSelectedTopicId] = useState<string | null>(
@@ -38,46 +37,9 @@ export function FocusTopicsScreen(props: FocusTopicsScreenProps) {
   );
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
-  const [detailNotice, setDetailNotice] = useState<string | null>(null);
+  const [detailNotice, setDetailNotice] = useState<string | null>(props.initialNotice ?? null);
   const [refreshCatalogOnBack, setRefreshCatalogOnBack] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const requestGate = useRef(createFocusTopicRequestGate());
   const theme = useMemo(() => getTrainingContentTheme(props.colorScheme), [props.colorScheme]);
-
-  const loadTopics = useCallback(async () => {
-    const attempt = requestGate.current.start();
-    setTopics(null);
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetchFocusTopicCatalog(props.userId, props.authToken, {
-        signal: attempt.signal,
-      });
-      if (!requestGate.current.isCurrent(attempt)) {
-        return;
-      }
-      setTopics(response.topics);
-    } catch (caught) {
-      if (!requestGate.current.isCurrent(attempt)) {
-        return;
-      }
-      setError(
-        caught instanceof Error && caught.message.trim()
-          ? caught.message
-          : "Focus Topics could not be loaded."
-      );
-    } finally {
-      if (requestGate.current.isCurrent(attempt)) {
-        setLoading(false);
-      }
-    }
-  }, [props.authToken, props.userId]);
-
-  useEffect(() => {
-    void loadTopics();
-    return () => requestGate.current.invalidate();
-  }, [loadTopics]);
 
   const openTopic = useCallback((topicId: string) => {
     setSelectedResourceId(null);

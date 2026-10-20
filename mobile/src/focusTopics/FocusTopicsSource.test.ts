@@ -70,13 +70,17 @@ test("catalog discovery controls are local, accessible, compact, and preserve na
 
 test("screen clears old catalog, retries locally, and guards stale identity requests", () => {
   const screen = source("./FocusTopicsScreen.tsx");
+  const catalog = source("./catalog.ts");
+  const hook = source("./useFocusTopicCatalog.ts");
   const model = source("./model.ts");
 
-  assert.match(screen, /const attempt = requestGate\.current\.start\(\);/);
-  assert.match(screen, /setTopics\(null\);/);
+  assert.match(catalog, /const attempt = gate\.start\(\);/);
+  assert.match(catalog, /publish\(\{ topics: null, loading: true, error: null \}\)/);
   assert.match(screen, /setSelectedTopicId\(null\);/);
-  assert.match(screen, /signal: attempt\.signal/);
-  assert.match(screen, /requestGate\.current\.isCurrent\(attempt\)/);
+  assert.match(catalog, /fetchCatalog\(attempt\.signal\)/);
+  assert.match(catalog, /gate\.isCurrent\(attempt\)/);
+  assert.match(hook, /\[userId, authToken, orgId, enabled\]/);
+  assert.match(screen, /props\.catalog\.controller\.refresh\(\)/);
   assert.match(screen, /onRetry=\{\(\) => \{ void loadTopics\(\); \}\}/);
   assert.match(model, /activeController\?\.abort\(\)/);
 });
@@ -99,21 +103,20 @@ test("Home makes Focus Topics primary for eligible users while retaining setup a
   const homeEnd = app.indexOf("const renderOnboarding", homeStart);
   const home = app.slice(homeStart, homeEnd);
 
-  const focusEntry = home.indexOf('accessibilityLabel="Open Focus Topics"');
+  const focusEntry = home.indexOf("<HomeFocusTopicPreview");
   const scenarioEntry = home.indexOf('accessibilityLabel="Browse Scenarios"');
   const resourcesEntry = home.indexOf('accessibilityLabel="Open Learning Resources"');
   const activeRole = home.indexOf("activeSegment ? (");
   assert.ok(focusEntry >= 0 && focusEntry < scenarioEntry);
   assert.ok(scenarioEntry < resourcesEntry);
   assert.ok(resourcesEntry < activeRole);
-  assert.match(home, /styles\.trainingModuleTile, styles\.homeDestinationPrimary/);
-  assert.match(
-    home,
-    /Practice scenarios and review resources organized around what you're working on\./
-  );
+  assert.ok(focusEntry < home.indexOf("<LinearGradient"));
+  assert.match(home, /state=\{focusTopicCatalog\.state\}/);
+  assert.match(home, /onOpenTopic=\{openHomeFocusTopics\}/);
+  assert.match(home, /onViewAll=\{\(\) => openHomeFocusTopics\(\)\}/);
   assert.match(home, /Explore the full scenario library\./);
   assert.match(home, /Browse all company learning materials\./);
-  assert.match(home, /setScreen\("focus_topics"\)/);
+  assert.match(app, /setHomeFocusTopicId\(topicId\)/);
   assert.match(home, /Browse Scenarios/);
   assert.match(home, /setSetupOrigin\(null\)/);
   assert.match(home, /setScreen\("setup"\)/);
@@ -262,7 +265,7 @@ test("Focus Topic Setup handoff is typed, exact, refreshable, and training-safe"
   assert.match(app, /That practice scenario is no longer available in Setup/);
   assert.match(app, /disabled=\{Boolean\(setupSelectionFailure\)\}/);
   assert.match(app, /setScreen\(setupBackDestination\(setupOrigin\)\)/);
-  assert.match(app, /initialTopicId=\{notificationDestination\?\.type === "focus_topic" \? notificationDestination.topicId : setupOriginTopicId\(setupOrigin\)\}/);
+  assert.match(app, /initialTopicId=\{notificationDestination\?\.type === "focus_topic" \? notificationDestination.topicId : setupOriginTopicId\(setupOrigin\) \?\? homeFocusTopicId\}/);
   assert.match(app, /setSetupOrigin\(null\);[\s\S]*?setSetupSelectionIntent\(null\)/);
   assert.match(
     app,

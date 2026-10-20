@@ -141,6 +141,28 @@ export function FocusTopicDetailScreen(props: FocusTopicDetailScreenProps) {
           </View>
 
           <View style={styles.section}>
+            <Text accessibilityRole="header" style={styles.sectionTitle}>Learning Resources</Text>
+            <Text style={styles.sectionIntro}>Guides and materials related to this Focus Topic.</Text>
+            {detail.resources.length === 0 ? (
+              <Text style={styles.compactEmpty}>
+                No learning resources are available for this topic right now.
+              </Text>
+            ) : (
+              <View style={styles.cardList}>
+                {detail.resources.map((resource) => (
+                  <TrainingContentCard
+                    key={resource.id}
+                    item={resource}
+                    theme={props.theme}
+                    showRelatedFocusTopic={false}
+                    onOpen={() => props.onOpenResource(resource.id)}
+                  />
+                ))}
+              </View>
+            )}
+          </View>
+
+          <View style={styles.section}>
             <Text accessibilityRole="header" style={styles.sectionTitle}>Practice</Text>
             <Text style={styles.sectionIntro}>Conversations available for this Focus Topic.</Text>
             {detail.scenarios.length === 0 ? (
@@ -189,27 +211,6 @@ export function FocusTopicDetailScreen(props: FocusTopicDetailScreenProps) {
             )}
           </View>
 
-          <View style={styles.section}>
-            <Text accessibilityRole="header" style={styles.sectionTitle}>Learning Resources</Text>
-            <Text style={styles.sectionIntro}>Guides and materials related to this Focus Topic.</Text>
-            {detail.resources.length === 0 ? (
-              <Text style={styles.compactEmpty}>
-                No learning resources are available for this topic right now.
-              </Text>
-            ) : (
-              <View style={styles.cardList}>
-                {detail.resources.map((resource) => (
-                  <TrainingContentCard
-                    key={resource.id}
-                    item={resource}
-                    theme={props.theme}
-                    showRelatedFocusTopic={false}
-                    onOpen={() => props.onOpenResource(resource.id)}
-                  />
-                ))}
-              </View>
-            )}
-          </View>
         </ScrollView>
       )}
     </View>
