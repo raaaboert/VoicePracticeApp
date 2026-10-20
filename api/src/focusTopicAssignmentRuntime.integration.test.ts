@@ -1069,7 +1069,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         assert.equal(generated.status, 200, JSON.stringify(generated.body));
         assert.equal(calls.value, 1);
         assert.match(String(generated.body.scoringGuidance), /Identifies the stakeholder's primary concern/);
-        assert.equal(String(generated.body.promptVersion), "customer-practice-scenario-generation-v2");
+        assert.equal(String(generated.body.promptVersion), "customer-practice-scenario-generation-v3");
         return generated.body;
       });
 
@@ -1089,7 +1089,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         .provenance ?? {});
       assert.equal(savedProvenance.creationMethod, "ai");
       assert.equal(savedProvenance.modelUsed, "server-issued-generation-model");
-      assert.equal(savedProvenance.generatedPrompt, "customer-practice-scenario-generation-v2");
+      assert.equal(savedProvenance.generatedPrompt, "customer-practice-scenario-generation-v3");
       assert.notEqual(savedProvenance.modelUsed, "forged-client-model");
       assert.equal((forgedProvenanceSave.body.currentVersion as { scoringGuidance: string }).scoringGuidance,
         generatedForForgedProvenance.scoringGuidance);
