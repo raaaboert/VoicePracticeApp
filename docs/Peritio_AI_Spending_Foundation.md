@@ -182,14 +182,16 @@ update transaction. Record mode adds a separate connection pool bounded by
 `PG_POOL_MAX`; account for this across instances when sizing PostgreSQL connections.
 No monolithic app_state write is added.
 
-The old JavaScript budget scan transferred/normalized up to three days of events and
-constructed Intl formatters per event under the global lock. The corrected query
-aggregates the same indexed 72-hour range in PostgreSQL, comparing customer-local
-civil dates and UTC platform dates. Comparing dates avoids ambiguous/nonexistent DST
-midnights. It returns four totals, not event bodies, and caches no usage or authority.
-The existing limit evaluator and enterprise exemptions remain unchanged. SQL and Node
-timezone data should stay current; regression fixtures compare nine zones across five
-cutoffs, including spring/fall DST, half-hour DST, midnight DST and UTC midnight.
+The old JavaScript budget scan transferred/normalized up to three days of platform
+events and constructed Intl formatters per event under the global lock. The 9F.2B.1
+SQL-only user-local replacement was **blocked by audit**: PostgreSQL offset signs,
+aliases and timezone data can disagree with Node. Do not deploy that revision.
+9F.2B.2 retains the indexed 72-hour SQL platform aggregate, but sends only the selected
+user's minimal timestamp/token rows to Node's existing calendar-day calculation,
+reusing one shared formatter per calculation. No user timezone is passed to SQL.
+No usage or authority is cached. The existing limit evaluator, inclusive/exclusive
+cutoffs, post-lock clock and enterprise exemptions remain. See
+[timezone correction evidence](Peritio_AI_Budget_Timezone_Correction.md).
 
 No automatic metadata purge is activated. Proposed retention is 90 days for fully
 settled attempts/claims; delete claims before attempts and delete only unreferenced
@@ -205,6 +207,10 @@ scoring guarantee. These remain required before production activation; no broad
 account-deletion redesign or scoring contract was attempted in this batch.
 
 ## Local correction measurements — Batch 9F.2B.1
+
+Historical measurements only: this revision failed the subsequent timezone audit.
+The 45-case timezone comparison below was insufficient. Use the linked 9F.2B.2
+evidence and require an independent re-audit before deployment or recording activation.
 
 Measured before production edits at `5e26167d7592179fc7b4f047a7fea4c8255f2dba`
 and after with `api/scripts/benchmark-ai-spend.ts`. Use only an explicitly configured

@@ -3,13 +3,19 @@
   month: number;
   day: number;
 } {
-  const formatter = new Intl.DateTimeFormat("en-US", {
+  return getDateParts(date, createDateFormatter(timeZone));
+}
+
+function createDateFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
   });
+}
 
+function getDateParts(date: Date, formatter: Intl.DateTimeFormat): { year: number; month: number; day: number } {
   const parts = formatter.formatToParts(date);
   const year = Number(parts.find((part) => part.type === "year")?.value ?? "0");
   const month = Number(parts.find((part) => part.type === "month")?.value ?? "0");
@@ -18,9 +24,18 @@
   return { year, month, day };
 }
 
-export function getDayKey(date: Date, timeZone: string): string {
-  const parts = getDatePartsInTimeZone(date, timeZone);
+function formatDayKey(parts: { year: number; month: number; day: number }): string {
   return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+/** Same Node/ICU semantics as getDayKey; reuse only the formatter, never usage. */
+export function createDayKeyFormatter(timeZone: string): (date: Date) => string {
+  const formatter = createDateFormatter(timeZone);
+  return (date) => formatDayKey(getDateParts(date, formatter));
+}
+
+export function getDayKey(date: Date, timeZone: string): string {
+  return formatDayKey(getDatePartsInTimeZone(date, timeZone));
 }
 
 export function getMonthKey(date: Date, timeZone: string): string {

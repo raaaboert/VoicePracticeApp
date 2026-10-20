@@ -10,6 +10,7 @@ import { createAiUsageEventStore, reserveAiUsageBudgetOnClient } from "./aiUsage
 import { invokeWithAiSpendLedger } from "../services/aiSpendLedger.js";
 import { requestChatCompletion, requestResponsesCompletion, requestTranscription, requestSpeechSynthesis } from "../openaiClient.js";
 import { isOpenAiRequestNotDispatched } from "../services/aiProviderDispatch.js";
+import { budgetTimezones, budgetCutoffs, explicitBudgetTimezones, legacyDayKeyFormatter } from "./aiUsageBudgetTimezoneFixtures.js";
 
 const databaseUrl = process.env.AI_SPEND_INTEGRATION_DATABASE_URL?.trim()
   || process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim() || "";
@@ -52,6 +53,8 @@ test("real PostgreSQL AI spending foundation is atomic across processes and comp
     await t.test("missing migration fails closed; 025 preserves populated legacy events and reruns safely", async () => {
       await usage.initialize(); const e = event(); await usage.appendEvent(e);
       await assert.rejects(a.initialize(), /ai_provider_attempts/);
+      assert.deepEqual(await usage.reserveBudget({ event: event("other"),userTimeZone: "US/Pacific-New",limits: { ...unlimited,userCalls: 0 },now: new Date() }),
+        { reserved: false,limitCode: "user_calls" }, "off-mode budget path works before 025 exists and without a ledger secret");
       const sql = await readFile(new URL("../../sql/025_ai_spend_ledger.sql", import.meta.url), "utf8");
       await pool.query(sql); await a.initialize(); await pool.query(sql); await b.initialize();
       assert.equal((await usage.listEvents()).length, 1);
@@ -374,7 +377,7 @@ test("real PostgreSQL AI spending foundation is atomic across processes and comp
       assert.equal((await pool.query("SELECT count(*)::int AS n FROM ai_attempt_claims WHERE settled_units IS NOT NULL")).rows[0].n, 9);
       assert.equal((await usage.listEvents()).length, 1);
     });
-    await t.test("SQL budget aggregates equal the previous Intl day calculation across DST, midnight and user timezones", async () => {
+    await t.test("UTC SQL and Node user budgets equal the previous Intl day calculation across DST and midnight", async () => {
       for (const iso of ["2026-03-08T09:59:59Z", "2026-03-08T10:00:00Z", "2026-11-01T07:30:00Z", "2026-11-01T08:30:00Z", "2026-10-21T00:00:00Z"]) {
         await reset(); now = new Date(iso);
         // Every 15 minutes through the full lookback plus cutoff/future sentinels.
@@ -396,6 +399,128 @@ test("real PostgreSQL AI spending foundation is atomic across processes and comp
           const snapshotCount = expected.userCallsToday + 1;
           await assert.rejects(a.reserve(reserveInput(event(), { userTimeZone: zone, legacyLimits: { ...unlimited, userCalls: snapshotCount } })), LegacyAiSpendLimitError);
         }
+      }
+    });
+    await t.test("all Node runtime zones, offset forms and aliases match the legacy budget over 32 past/future cutoffs", async () => {
+      for (const zone of explicitBudgetTimezones) assert.ok(budgetTimezones.includes(zone), `${zone} must run`);
+      const utc = legacyDayKeyFormatter("UTC");
+      let comparisons = 0;
+      for (const iso of budgetCutoffs) {
+        await reset(); now = new Date(iso);
+        const offsets = [-259200001,-259200000,-172800000,-90000000,-86400000,-82800000,
+          ...Array.from({ length: 98 }, (_,i) => -i*900000),-1,0,1,900000];
+        const events = offsets.map((offset,i) => ({ ...event(i%3 ? "a" : "b", i%2 ? "org_a" : "org_b"),
+          totalTokens: i%11, createdAt: new Date(now.getTime()+offset).toISOString() }));
+        await pool.query(`INSERT INTO ai_usage_events (id,kind,user_id,org_id,model,prompt_version,input_tokens,output_tokens,total_tokens,created_at)
+          SELECT id,'turn',"userId","orgId",'mock','mock',0,0,"totalTokens","createdAt" FROM jsonb_to_recordset($1::jsonb)
+          AS e(id text,"userId" text,"orgId" text,"totalTokens" int,"createdAt" timestamptz)`, [JSON.stringify(events)]);
+        const applicable = events.filter(e => new Date(e.createdAt)<now && new Date(e.createdAt).getTime()>=now.getTime()-259200000);
+        const global = applicable.filter(e => utc(new Date(e.createdAt))===utc(now));
+        for (const zone of budgetTimezones) {
+          const local = legacyDayKeyFormatter(zone);
+          const own = applicable.filter(e => e.userId==="a" && local(new Date(e.createdAt))===local(now));
+          assert.deepEqual(await usage.computeBudgetSnapshot({ userId: "a", now, userTimeZone: zone }), {
+            userCallsToday: own.length, userTokensToday: own.reduce((n,e)=>n+e.totalTokens,0),
+            globalCallsToday: global.length, globalTokensToday: global.reduce((n,e)=>n+e.totalTokens,0),
+          }, `${zone} ${iso}`);
+          comparisons++;
+        }
+      }
+      assert.equal(comparisons, budgetTimezones.length*32);
+      t.diagnostic(`${budgetTimezones.length} Node zones/aliases/offsets x 32 cutoffs = ${comparisons} actual PostgreSQL comparisons; ICU ${process.versions.icu}, tz ${process.versions.tz}`);
+    });
+    await t.test("five applicable calls reject a cap of three in off and record paths for offsets, aliases and IANA zones", async () => {
+      let providerCalls = 0;
+      for (const zone of explicitBudgetTimezones) for (const mode of ["off", "record"] as const) {
+        await reset();
+        now = mode === "off" ? (await pool.query("SELECT clock_timestamp() AS now")).rows[0].now : new Date("2027-07-01T15:17:00Z");
+        const events = Array.from({ length: 5 }, () => ({ ...event(), createdAt: now.toISOString() }));
+        await usage.importLegacyEvents(events, { now });
+        const limits = { ...unlimited, userCalls: 3 };
+        if (mode === "off") {
+          // Uses the real default-off store, post-lock database clock and no
+          // provider call. Request timestamp is deliberately stale.
+          const result = await usage.reserveBudget({ event: event(), userTimeZone: zone, limits, now: new Date(0) });
+          if (result.reserved) providerCalls++;
+          assert.deepEqual(result, { reserved: false, limitCode: "user_calls" }, zone);
+        } else await assert.rejects(invokeWithAiSpendLedger({ store: a, event: event(), userTimeZone: zone, legacyLimits: limits,
+          requestMaterial: null, invoke: async () => { providerCalls++; return "must not dispatch"; }, budgetMessage: () => "Approved user call limit" }), /Approved user call limit/);
+        assert.equal((await usage.listEvents()).length, 5);
+        assert.equal((await pool.query("SELECT count(*)::int AS n FROM ai_provider_attempts")).rows[0].n, 0);
+      }
+      assert.equal(providerCalls, 0);
+    });
+    await t.test("user-only rows retain validity filters, zero/negative tokens and exclusive versus inclusive cutoff", async () => {
+      await reset(); now = new Date("2027-07-01T15:17:00Z");
+      const insert = (id: string, kind: string | null, user: string | null, model: string | null, prompt: string | null, tokens: number | null, date: string | null) => pool.query(`
+        INSERT INTO ai_usage_events (id,kind,user_id,model,prompt_version,input_tokens,output_tokens,total_tokens,created_at)
+          VALUES ($1,$2,$3,$4,$5,0,0,$6,$7)`, [id,kind,user,model,prompt,tokens,date]);
+      for (const [id,kind,user,model,prompt,tokens] of [
+        ["negative","turn","a","mock","mock",-10], ["zero","turn"," a ","mock","mock",0],
+        ["trim-kind"," turn ","a","mock","mock",5], ["other","turn","b","mock","mock",7],
+        ["","turn","a","mock","mock",99], ["bad-kind","bogus","a","mock","mock",99],
+        ["bad-user","turn"," ","mock","mock",99], ["bad-model","turn","a"," ","mock",99],
+        ["bad-prompt","turn","a","mock"," ",99],
+      ] as const) await insert(id,kind,user,model,prompt,tokens,new Date(now.getTime()-1).toISOString());
+      await insert("cutoff","turn","a","mock","mock",3,now.toISOString());
+      await insert("future","turn","a","mock","mock",99,new Date(now.getTime()+1).toISOString());
+      for (const invalid of [[null,"a","mock","mock",1,now.toISOString()], ["turn",null,"mock","mock",1,now.toISOString()],
+        ["turn","a",null,"mock",1,now.toISOString()], ["turn","a","mock",null,1,now.toISOString()],
+        ["turn","a","mock","mock",null,now.toISOString()], ["turn","a","mock","mock",1,null]] as const) {
+        await assert.rejects(insert(`null-${randomUUID()}`, invalid[0],invalid[1],invalid[2],invalid[3],invalid[4],invalid[5]), (error: any) => error.code==="23502");
+      }
+      await assert.rejects(insert("invalid-time","turn","a","mock","mock",1,"not-a-date"), (error: any) => error.code==="22007");
+      assert.deepEqual(await usage.computeBudgetSnapshot({ userId: "a", now, userTimeZone: "+14:00" }),
+        { userCallsToday: 3,userTokensToday: 5,globalCallsToday: 4,globalTokensToday: 12 });
+      await assert.rejects(a.reserve(reserveInput(event(), { userTimeZone: "+14:00", legacyLimits: { ...unlimited,userCalls: 4 } })), LegacyAiSpendLimitError,
+        "reservation includes the exact-cutoff event that the public snapshot excludes");
+      assert.equal((await pool.query("SELECT count(*)::int AS n FROM ai_provider_attempts")).rows[0].n, 0);
+    });
+    await t.test("offset-local per-user call and token admission remains atomic across independent pools", async () => {
+      for (const zone of ["+14:00","-12:00","+05:30","+0530","US/Pacific-New"]) {
+        await reset(); now = new Date("2027-07-01T15:17:00Z");
+        const results = await Promise.allSettled(Array.from({ length: 10 }, (_,i) => (i%2?a:b).reserve(reserveInput(event(), {
+          userTimeZone: zone, legacyLimits: { ...unlimited,userCalls: 3,userTokens: 30 } }))));
+        assert.equal(results.filter(r=>r.status==="fulfilled").length,3,zone);
+        assert.equal(results.filter(r=>r.status==="rejected" && r.reason instanceof LegacyAiSpendLimitError).length,7,zone);
+        assert.equal((await usage.listEvents()).length,3);
+      }
+    });
+    await t.test("a lock wait crossing UTC and offset-local midnight uses the post-lock day, not the request day", async () => {
+      for (const [zone,before,after] of [["UTC","2027-01-01T23:59:59.999Z","2027-01-02T00:00:00Z"],
+        ["+14:00","2027-01-01T09:59:59.999Z","2027-01-01T10:00:00Z"],
+        ["-12:00","2027-01-01T11:59:59.999Z","2027-01-01T12:00:00Z"]]) {
+        await reset(); now = new Date(before);
+        await usage.importLegacyEvents(Array.from({ length: 5 }, () => ({ ...event(),createdAt: before })), { now });
+        const holder = await pool.connect(), waiter = await pool.connect();
+        const pid = (await waiter.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+        await holder.query("BEGIN"); await holder.query("SELECT pg_advisory_xact_lock($1::int)",[0x504149]);
+        await waiter.query("BEGIN");
+        let clockReads = 0;
+        const clockClient = new Proxy(waiter, { get(target, key) {
+          if (key==="query") return (text: string, values?: unknown[]) => {
+            if (text==="SELECT clock_timestamp() AS now") { clockReads++; return Promise.resolve({ rows: [{ now: new Date(after) }] }); }
+            return target.query(text,values);
+          };
+          return Reflect.get(target,key);
+        } });
+        const queued = reserveAiUsageBudgetOnClient(clockClient,{ event: event(),userTimeZone: zone,limits: { ...unlimited,userCalls: 3 },now: new Date(before) });
+        try {
+          try {
+            let waiting = false;
+            for (let probe=0;probe<100;probe++) {
+              waiting = (await pool.query("SELECT wait_event FROM pg_stat_activity WHERE pid=$1",[pid])).rows[0]?.wait_event==="advisory";
+              if (waiting) break;
+            }
+            assert.equal(waiting,true); assert.equal(clockReads,0,"clock must not be read before acquiring the lock");
+          } finally { await holder.query("COMMIT"); holder.release(); }
+          assert.deepEqual(await queued,{reserved:true},zone); assert.equal(clockReads,1);
+          await waiter.query("COMMIT");
+          assert.equal((await usage.listEvents()).filter(e=>e.createdAt===new Date(after).toISOString()).length,1);
+          assert.deepEqual(await usage.computeBudgetSnapshot({ userId: "a",userTimeZone: zone,now: new Date(new Date(after).getTime()+1) }),
+            { userCallsToday: 1,userTokensToday: 10,globalCallsToday: zone==="UTC"?1:6,globalTokensToday: zone==="UTC"?10:60 },
+            "platform UTC day stays independent of the offset-local rollover");
+        } finally { await queued.catch(()=>{}); await waiter.query("ROLLBACK"); waiter.release(); }
       }
     });
     await t.test("post-lock cutoff sees a newer record-mode claim even when the old-path caller queued with an earlier timestamp", async () => {

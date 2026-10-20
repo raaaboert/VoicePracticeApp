@@ -5,6 +5,7 @@ import { Pool, PoolClient } from "pg";
 import {
   AiUsageEvent,
   AiUsageEventKind,
+  createDayKeyFormatter,
   getDayKey,
   getMonthKey
 } from "@voicepractice/shared";
@@ -942,29 +943,37 @@ export async function reserveAiUsageBudgetOnClient(client: PoolClient, params: {
   return { reserved: true };
 }
 
-/** Aggregate within the existing indexed lookback; no row transfer/Intl per event.
- * Compare civil dates, NOT converted local midnights (which can be ambiguous or
- * nonexistent in DST zones). No usage is cached and no timezone offset is guessed.
+/** UTC totals stay in SQL; ONLY this user's minimal rows enter Node/ICU.
+ * Never pass a user timezone to PostgreSQL: offset signs, aliases and tzdata can
+ * differ from Node. Reuse a formatter, not usage; retain the indexed lookback.
  * Keep the public snapshot's exclusive cutoff and reservations' inclusive cutoff.
  */
 async function readAiUsageBudgetSnapshot(client: Pick<PoolClient, "query"> | Pick<Pool, "query">,
   params: { userId: string; now: Date; userTimeZone: string }, inclusive: boolean): Promise<AiUsageBudgetSnapshot> {
-  // Preserve the existing Intl timezone validation rather than accepting extra PG aliases.
-  const userDay = getDayKey(params.now, params.userTimeZone);
+  const userDayKey = createDayKeyFormatter(params.userTimeZone);
+  const userDay = userDayKey(params.now);
   const globalDay = getDayKey(params.now, "UTC");
-  const result = await client.query<{ user_calls: string; user_tokens: string; global_calls: string; global_tokens: string }>(`
-    SELECT count(*) FILTER (WHERE btrim(user_id)=$1 AND (created_at AT TIME ZONE $2)::date=$3::date) AS user_calls,
-      coalesce(sum(greatest(total_tokens,0)) FILTER (WHERE btrim(user_id)=$1 AND (created_at AT TIME ZONE $2)::date=$3::date),0) AS user_tokens,
-      count(*) FILTER (WHERE (created_at AT TIME ZONE 'UTC')::date=$4::date) AS global_calls,
-      coalesce(sum(greatest(total_tokens,0)) FILTER (WHERE (created_at AT TIME ZONE 'UTC')::date=$4::date),0) AS global_tokens
-    FROM ai_usage_events
-    WHERE created_at>=$5::timestamptz - interval '72 hours' AND created_at ${inclusive ? "<=" : "<"} $5::timestamptz
+  const result = await client.query<{ budget_scope: "platform" | "user"; calls: string | null; tokens: string; created_at: Date | null }>(`
+    WITH valid AS MATERIALIZED (
+      SELECT user_id,total_tokens,created_at FROM ai_usage_events
+      WHERE created_at>=$5::timestamptz AND created_at ${inclusive ? "<=" : "<"} $3::timestamptz
       AND btrim(id)<>'' AND btrim(user_id)<>'' AND btrim(model)<>'' AND btrim(prompt_version)<>''
-      AND btrim(kind)=ANY($6::text[])`,
-  [params.userId, params.userTimeZone, userDay, globalDay, params.now.toISOString(), [...AI_USAGE_EVENT_KIND_SET]]);
-  const row = result.rows[0];
-  return { userCallsToday: Number(row.user_calls), userTokensToday: Number(row.user_tokens),
-    globalCallsToday: Number(row.global_calls), globalTokensToday: Number(row.global_tokens) };
+      AND btrim(kind)=ANY($4::text[]))
+    SELECT 'platform' AS budget_scope,count(*) AS calls,coalesce(sum(greatest(total_tokens,0)),0) AS tokens,NULL::timestamptz AS created_at
+      FROM valid WHERE (created_at AT TIME ZONE 'UTC')::date=$2::date
+    UNION ALL
+    SELECT 'user',NULL::bigint,greatest(total_tokens,0)::bigint,created_at FROM valid WHERE btrim(user_id)=$1`,
+  [params.userId, globalDay, params.now.toISOString(), [...AI_USAGE_EVENT_KIND_SET],
+    new Date(params.now.getTime() - AI_USAGE_EVENT_BUDGET_LOOKBACK_DAYS * 86_400_000).toISOString()]);
+  const snapshot = { userCallsToday: 0, userTokensToday: 0, globalCallsToday: 0, globalTokensToday: 0 };
+  for (const row of result.rows) {
+    if (row.budget_scope === "platform") {
+      snapshot.globalCallsToday = Number(row.calls); snapshot.globalTokensToday = Number(row.tokens);
+    } else if (row.created_at instanceof Date && !Number.isNaN(row.created_at.getTime()) && userDayKey(row.created_at) === userDay) {
+      snapshot.userCallsToday++; snapshot.userTokensToday += Number(row.tokens);
+    }
+  }
+  return snapshot;
 }
 
 async function upsertAiUsageEventRow(
