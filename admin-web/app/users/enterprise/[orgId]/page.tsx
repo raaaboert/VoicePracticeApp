@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppConfig,
   ORG_USER_ROLE_LABELS,
@@ -23,7 +23,9 @@ import {
 } from "@voicepractice/shared";
 import { AdminShell } from "../../../../src/components/AdminShell";
 import { EnterpriseCompanyDivisionsCard } from "../../../../src/components/EnterpriseCompanyDivisionsCard";
-import { EnterpriseStandardScenarioDivisionCard } from "../../../../src/components/EnterpriseStandardScenarioDivisionCard";
+import { EnterpriseContentWorkspace } from "../../../../src/components/EnterpriseContentWorkspace";
+import { WorkspaceTabs } from "../../../../src/components/WorkspaceTabs";
+import type { RequestWorkspaceLeave } from "../../../../src/components/useTopicDraftGuard";
 import { EnterpriseTrainingsWorkspace } from "../../../../src/components/EnterpriseTrainingsWorkspace";
 import { EnterpriseModuleEntitlementsCard } from "../../../../src/components/EnterpriseModuleEntitlementsCard";
 import { EnterpriseProductSettingsCard } from "../../../../src/components/EnterpriseProductSettingsCard";
@@ -107,7 +109,7 @@ interface OrgJoinRequestsResponse {
   rows: OrgJoinRequestRow[];
 }
 
-type EnterpriseOrgTabId = "companyDetails" | "trainings" | "users";
+type EnterpriseOrgTabId = "companyDetails" | "trainings" | "content" | "users";
 type EnterpriseCardKey = "accessRequests" | "trainingPacks" | "customScenarios" | "users";
 type EnterpriseCardExpandedState = Record<EnterpriseCardKey, boolean>;
 
@@ -209,7 +211,13 @@ export default function EnterpriseOrgPage() {
   const [overageDurationDaysByUserId, setOverageDurationDaysByUserId] = useState<Record<string, string>>({});
   const [overageModeByUserId, setOverageModeByUserId] = useState<Record<string, "unlimited" | "finite">>({});
   const [overageExtraMinutesByUserId, setOverageExtraMinutesByUserId] = useState<Record<string, string>>({});
+  const topicLeaveGuard = useRef<RequestWorkspaceLeave | null>(null);
+  const registerTopicLeaveGuard = useCallback((guard: RequestWorkspaceLeave | null) => { topicLeaveGuard.current = guard; }, []);
+  const requestNavigation = (leave: () => void) => {
+    if (topicLeaveGuard.current) topicLeaveGuard.current(leave); else leave();
+  };
   const [activeTab, setActiveTab] = useState<EnterpriseOrgTabId>("companyDetails");
+  const [contentVisitedOrg, setContentVisitedOrg] = useState<string | null>(null);
   const [userSearch, setUserSearch] = useState("");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [joinRequests, setJoinRequests] = useState<OrgJoinRequestRow[]>([]);
@@ -923,43 +931,16 @@ export default function EnterpriseOrgPage() {
 
   return (
     <AdminShell
+      beforeNavigate={requestNavigation}
       title={dashboard?.org.name ? `Enterprise: ${dashboard.org.name}` : "Enterprise Account"}
       headerContent={
-        <div className="tab-row enterprise-page-tabs" role="tablist" aria-label="Enterprise account sections">
-          <button
-            id="enterprise-tab-company-details"
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "companyDetails"}
-            aria-controls="enterprise-panel-company-details"
-            className={`tab-button ${activeTab === "companyDetails" ? "active" : ""}`}
-            onClick={() => setActiveTab("companyDetails")}
-          >
-            Company Details
-          </button>
-          <button
-            id="enterprise-tab-trainings"
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "trainings"}
-            aria-controls="enterprise-panel-trainings"
-            className={`tab-button ${activeTab === "trainings" ? "active" : ""}`}
-            onClick={() => setActiveTab("trainings")}
-          >
-            Focus Topics
-          </button>
-          <button
-            id="enterprise-tab-users"
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "users"}
-            aria-controls="enterprise-panel-users"
-            className={`tab-button ${activeTab === "users" ? "active" : ""}`}
-            onClick={() => setActiveTab("users")}
-          >
-            Users
-          </button>
-        </div>
+        <WorkspaceTabs id="enterprise" label="Enterprise account sections" value={activeTab}
+          onChange={(tab) => requestNavigation(() => {
+            if (tab === "content") setContentVisitedOrg(orgId);
+            setActiveTab(tab);
+          })}
+          tabs={[{id:"companyDetails",label:"Company Details"},{id:"trainings",label:"Focus Topics"},
+            {id:"content",label:"Content & Scenarios"},{id:"users",label:"Users"}]} />
       }
     >
       <div className="enterprise-page">
@@ -971,9 +952,9 @@ export default function EnterpriseOrgPage() {
         ) : null}
 
         <section
-          id="enterprise-panel-company-details"
+          id="enterprise-panel-companyDetails"
           role="tabpanel"
-          aria-labelledby="enterprise-tab-company-details"
+          aria-labelledby="enterprise-tab-companyDetails"
           className="enterprise-tab-panel"
           hidden={activeTab !== "companyDetails"}
         >
@@ -1252,6 +1233,8 @@ export default function EnterpriseOrgPage() {
           hidden={activeTab !== "trainings"}
         >
           <EnterpriseTrainingsWorkspace
+            key={orgId}
+            registerLeaveGuard={registerTopicLeaveGuard}
             orgId={orgId}
             orgName={dashboard?.org.name}
             config={config}
@@ -1259,11 +1242,13 @@ export default function EnterpriseOrgPage() {
             divisions={divisionPayload?.divisions ?? []}
             divisionsEnabled={divisionPayload?.org.divisionsEnabled === true}
           />
-          <EnterpriseStandardScenarioDivisionCard
-            orgId={orgId}
-            divisions={divisionPayload?.divisions ?? []}
-            divisionsEnabled={divisionPayload?.org.divisionsEnabled === true}
-          />
+        </section>
+
+        <section id="enterprise-panel-content" role="tabpanel" aria-labelledby="enterprise-tab-content"
+          className="enterprise-tab-panel" hidden={activeTab !== "content"}>
+          {activeTab === "content" || contentVisitedOrg === orgId ? <EnterpriseContentWorkspace key={orgId} orgId={orgId} orgName={dashboard?.org.name} config={config}
+            users={dashboard?.users ?? []} divisions={divisionPayload?.divisions ?? []}
+            divisionsEnabled={divisionPayload?.org.divisionsEnabled === true} /> : null}
         </section>
 
         <section

@@ -1456,7 +1456,8 @@ export function EnterpriseCustomScenariosCard({
         <p className="small">Read-only canonical scenario identities, immutable versions, provenance, and review state.</p>
         {practiceScenarios.length === 0 ? <p className="small">No lifecycle-managed Practice Scenarios.</p> : null}
         {practiceScenarios.map((scenario) => <details key={scenario.id} style={{ marginBottom: 8 }}>
-          <summary>{scenario.currentVersion.title} · {scenario.status}</summary>
+          <summary>{scenario.currentVersion.title} · {scenario.status} · Review: {scenario.currentVersion.status}
+            {scenario.publishedVersionId ? ` · Published v${scenario.versions.find((version) => version.id === scenario.publishedVersionId)?.versionNumber ?? " (recorded)"}` : " · Not published"}</summary>
           <div className="small">
             <div>Stable scenario: {scenario.id}</div>
             <div>Home Focus Topic: {scenario.homeFocusTopicId}</div>
@@ -1475,9 +1476,12 @@ export function EnterpriseCustomScenariosCard({
               <div>Review comment: {version.reviewNote ?? "none"}</div>
               <div>Published: {formatDateTime(version.publishedAt)}</div>
             </details>)}
-            <div>History: {scenario.history.map((event) =>
-              `${event.eventType} → ${event.status} by ${event.actorId} at ${formatDateTime(event.createdAt)}`
-                + `${event.comment ? ` (${event.comment})` : ""}`).join(" · ")}</div>
+            <details><summary>History: {scenario.history.length} events</summary>
+              <ol className="topic-history-list">{[...scenario.history].sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map((event) =>
+                <li key={event.id}><strong>{event.eventType} - {event.status}</strong>
+                  <div>By {event.actorId} | <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time></div>
+                  {event.comment ? <p className="topic-preserve-lines">{event.comment}</p> : null}</li>)}</ol>
+            </details>
           </div>
         </details>)}
       </section> : null}

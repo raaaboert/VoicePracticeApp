@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppConfig,
   CreateOrgTrainingRequest,
@@ -24,7 +24,11 @@ import { EnterpriseCustomScenariosCard } from "./EnterpriseCustomScenariosCard";
 import { EnterpriseFocusTopicAuthorityCard } from "./EnterpriseFocusTopicAuthorityCard";
 import { EnterpriseTrainingPacksCard } from "./EnterpriseTrainingPacksCard";
 
+import { WorkspaceTabs } from "./WorkspaceTabs";
+import { useTopicDraftGuard, type RequestWorkspaceLeave } from "./useTopicDraftGuard";
+
 interface EnterpriseTrainingsWorkspaceProps {
+  registerLeaveGuard?: (guard: RequestWorkspaceLeave | null) => void;
   orgId: string;
   orgName?: string;
   config: AppConfig | null;
@@ -105,6 +109,7 @@ export function EnterpriseTrainingsWorkspace({
   orgUsers = [],
   divisions = [],
   divisionsEnabled = false,
+  registerLeaveGuard,
 }: EnterpriseTrainingsWorkspaceProps) {
   const [trainings, setTrainings] = useState<OrgTrainingSummary[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
@@ -120,6 +125,14 @@ export function EnterpriseTrainingsWorkspace({
   const [trainingSaving, setTrainingSaving] = useState(false);
   const [orderSaving, setOrderSaving] = useState(false);
   const [deletingTrainingId, setDeletingTrainingId] = useState<string | null>(null);
+  const [view, setView] = useState<"overview" | "access" | "content" | "history">("overview");
+  const [savedEditor, setSavedEditor] = useState<TrainingEditorState>(() => createEmptyTrainingEditor());
+  const dirty = JSON.stringify(editorState) !== JSON.stringify(savedEditor);
+  const editorRef = useRef({ editorTargetId, editorState, dirty });
+  editorRef.current = { editorTargetId, editorState, dirty };
+  const refreshSequence = useRef(0);
+  const currentOrg = useRef(orgId);
+  currentOrg.current = orgId;
   const activeDivisions = useMemo(() => divisions.filter((division) => division.active), [divisions]);
   const divisionLabelById = useMemo(() => {
     const map = new Map<string, string>();
@@ -134,6 +147,7 @@ export function EnterpriseTrainingsWorkspace({
       return;
     }
 
+    const sequence = ++refreshSequence.current;
     setLoading(true);
     setError(null);
     if (!options?.preserveNotice) {
@@ -142,6 +156,7 @@ export function EnterpriseTrainingsWorkspace({
 
     try {
       const payload = await adminFetch<OrgTrainingListResponse>(`/orgs/${orgId}/trainings`);
+      if (sequence !== refreshSequence.current || currentOrg.current !== orgId) return;
       const nextTrainings = payload.trainings ?? [];
       setTrainings(nextTrainings);
       setSavedActiveTrainingIds(activeFocusTopicIds(nextTrainings));
@@ -149,52 +164,45 @@ export function EnterpriseTrainingsWorkspace({
       setAuthorityMode(payload.authorityMode ?? "legacy");
       setGeneratedAt(payload.generatedAt ?? null);
 
-      const preferredTargetId =
-        options && "preserveTargetId" in options ? options.preserveTargetId : editorTargetId;
-      if (preferredTargetId === NEW_TRAINING_ID) {
-        setEditorTargetId(NEW_TRAINING_ID);
-      } else if (preferredTargetId && payload.trainings.some((entry) => entry.id === preferredTargetId)) {
-        setEditorTargetId(preferredTargetId);
-      } else {
-        setEditorTargetId(null);
+      // Catalog refreshes update relationships, never a dirty metadata draft.
+      const current = editorRef.current;
+      if (!current.dirty) {
+        const preferredTargetId = current.editorTargetId;
+        const next = nextTrainings.find((entry) => entry.id === preferredTargetId);
+        setEditorTargetId(preferredTargetId === NEW_TRAINING_ID ? NEW_TRAINING_ID : next?.id ?? null);
+        if (preferredTargetId !== NEW_TRAINING_ID) {
+          const state = next ? editorFromTraining(next) : createEmptyTrainingEditor();
+          setEditorState(state); setSavedEditor(state);
+        }
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not load Focus Topic workspace.");
+      if (sequence === refreshSequence.current && currentOrg.current === orgId)
+        setError(caught instanceof Error ? caught.message : "Could not load Focus Topic workspace.");
     } finally {
-      setLoading(false);
+      if (sequence === refreshSequence.current && currentOrg.current === orgId) setLoading(false);
     }
   };
 
-  const replaceTrainingSummary = (next: OrgTrainingSummary | null | undefined, options?: { select?: boolean }) => {
+  const replaceTrainingSummary = (next: OrgTrainingSummary | null | undefined) => {
     if (!next) {
       return;
     }
     setTrainings((prev) => prev.map((entry) => entry.id === next.id ? next : entry));
-    if (options?.select) {
-      setEditorTargetId(next.id);
-    }
   };
 
   useEffect(() => {
+    setEditorTargetId(null); setEditorState(createEmptyTrainingEditor()); setSavedEditor(createEmptyTrainingEditor());
+    setView("overview"); setTrainingSearch("");
     void refreshWorkspace({ preserveTargetId: null });
+    return () => { refreshSequence.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orgId]);
 
-  const selectedTraining = useMemo(
-    () => trainings.find((entry) => entry.id === editorTargetId) ?? null,
-    [editorTargetId, trainings],
-  );
-
-  useEffect(() => {
-    if (editorTargetId === NEW_TRAINING_ID) {
-      return;
-    }
-    if (selectedTraining) {
-      setEditorState(editorFromTraining(selectedTraining));
-      return;
-    }
-    setEditorState(createEmptyTrainingEditor());
-  }, [editorTargetId, selectedTraining]);
+  const currentTraining = trainings.find((entry) => entry.id === editorTargetId) ?? null;
+  const lastSelected = useRef<OrgTrainingSummary | null>(null);
+  if (currentTraining) lastSelected.current = currentTraining;
+  // Retain an orphaned draft for review/discard, without inventing a live catalog row.
+  const selectedTraining = currentTraining ?? (dirty && lastSelected.current?.id === editorTargetId ? lastSelected.current : null);
 
   const filteredTrainings = useMemo(() => {
     const needle = trainingSearch.trim().toLowerCase();
@@ -216,23 +224,32 @@ export function EnterpriseTrainingsWorkspace({
 
   const startCreateTraining = () => {
     setEditorTargetId(NEW_TRAINING_ID);
-    setEditorState(createEmptyTrainingEditor());
+    const state = createEmptyTrainingEditor();
+    setEditorState(state); setSavedEditor(state); setView("overview");
     setNotice(null);
     setError(null);
   };
 
   const openTraining = (trainingId: string) => {
     setEditorTargetId(trainingId);
+    const selected = trainings.find((entry) => entry.id === trainingId);
+    const state = selected ? editorFromTraining(selected) : createEmptyTrainingEditor();
+    setEditorState(state); setSavedEditor(state); setView("overview");
     setNotice(null);
     setError(null);
   };
 
   const saveTraining = async () => {
+    if (editorTargetId !== NEW_TRAINING_ID && !currentTraining) {
+      setError("This Focus Topic is no longer available. Your draft is retained; select another Topic to discard it safely.");
+      return false;
+    }
     const name = editorState.name.trim();
     if (!name) {
       setError("Focus Topic name is required.");
-      return;
+      return false;
     }
+    if (trainingSaving) return false;
 
     setTrainingSaving(true);
     setError(null);
@@ -249,6 +266,9 @@ export function EnterpriseTrainingsWorkspace({
             divisionId: editorState.divisionId || null,
           } satisfies CreateOrgTrainingRequest),
         });
+        const state = editorFromTraining(created);
+        setEditorState(state); setSavedEditor(state); setEditorTargetId(created.id);
+        editorRef.current = { editorTargetId: created.id, editorState: state, dirty: false };
         setNotice(`Created Focus Topic "${created.name}".`);
         await refreshWorkspace({ preserveTargetId: created.id, preserveNotice: true });
       } else if (selectedTraining) {
@@ -261,15 +281,31 @@ export function EnterpriseTrainingsWorkspace({
             divisionId: editorState.divisionId || null,
           } satisfies UpdateOrgTrainingRequest),
         });
+        const state = editorFromTraining(updated);
+        setEditorState(state); setSavedEditor(state);
+        editorRef.current = { editorTargetId: updated.id, editorState: state, dirty: false };
         setNotice(`Saved Focus Topic "${updated.name}".`);
         await refreshWorkspace({ preserveTargetId: updated.id, preserveNotice: true });
       }
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save Focus Topic.");
+      return false;
     } finally {
       setTrainingSaving(false);
     }
   };
+
+  const { requestLeave, confirmation } = useTopicDraftGuard(dirty, saveTraining, () => {
+    setEditorState(savedEditor);
+    editorRef.current = { ...editorRef.current, editorState: savedEditor, dirty: false };
+  }, trainingSaving);
+  const leaveRef = useRef(requestLeave);
+  leaveRef.current = (leave) => { if (!trainingSaving) requestLeave(leave); };
+  useEffect(() => {
+    registerLeaveGuard?.((leave) => leaveRef.current(leave));
+    return () => registerLeaveGuard?.(null);
+  }, [registerLeaveGuard]);
 
   const deleteTraining = async () => {
     if (!selectedTraining) {
@@ -294,6 +330,9 @@ export function EnterpriseTrainingsWorkspace({
       await adminFetch<{ deleted: boolean; trainingId: string }>(`/orgs/${orgId}/trainings/${selectedTraining.id}`, {
         method: "DELETE",
       });
+      setEditorTargetId(null);
+      editorRef.current = { editorTargetId: null, editorState: createEmptyTrainingEditor(), dirty: false };
+      setEditorState(createEmptyTrainingEditor()); setSavedEditor(createEmptyTrainingEditor());
       setNotice(`Deleted Focus Topic "${selectedTraining.name}".`);
       await refreshWorkspace({ preserveTargetId: null, preserveNotice: true });
     } catch (caught) {
@@ -310,7 +349,7 @@ export function EnterpriseTrainingsWorkspace({
         trainingPackIds,
       } satisfies SetOrgTrainingPackAttachmentsRequest),
     });
-    replaceTrainingSummary(updated, { select: true });
+    replaceTrainingSummary(updated);
   };
 
   const updateTrainingScenarioOwnership = async (trainingId: string, scenarioIds: string[]) => {
@@ -320,7 +359,7 @@ export function EnterpriseTrainingsWorkspace({
         scenarioIds,
       } satisfies SetOrgTrainingScenarioAttachmentsRequest),
     });
-    replaceTrainingSummary(updated, { select: true });
+    replaceTrainingSummary(updated);
   };
 
   const moveTraining = (trainingId: string, direction: -1 | 1) => {
@@ -367,14 +406,15 @@ export function EnterpriseTrainingsWorkspace({
 
   return (
     <div className="enterprise-tab-panel">
+      {confirmation}
       {error ? (
         <div className="card">
-          <p className="error">{error}</p>
+          <p className="error" role="alert">{error}</p>
         </div>
       ) : null}
       {notice ? (
         <div className="card">
-          <p className="success">{notice}</p>
+          <p className="success" role="status">{notice}</p>
         </div>
       ) : null}
 
@@ -400,7 +440,7 @@ export function EnterpriseTrainingsWorkspace({
             >
               {loading ? "Refreshing..." : "Refresh Workspace"}
             </button>
-            <button type="button" className="primary" onClick={startCreateTraining}>
+            <button type="button" className="primary" disabled={trainingSaving} onClick={() => requestLeave(startCreateTraining)}>
               Create Focus Topic
             </button>
           </div>
@@ -410,9 +450,9 @@ export function EnterpriseTrainingsWorkspace({
         ) : null}
         <div className="enterprise-search-row">
           <div className="enterprise-search-field">
-            <label>Search Focus Topics</label>
+            <label htmlFor="topic-search">Search Focus Topics</label>
             <input
-              type="search"
+              type="search" id="topic-search"
               value={trainingSearch}
               onChange={(event) => setTrainingSearch(event.target.value)}
               placeholder="Search by Focus Topic name"
@@ -424,10 +464,10 @@ export function EnterpriseTrainingsWorkspace({
         </p>
         {trainings.length === 0 ? (
           <div className="enterprise-training-empty">
-            <p>No Focus Topics created yet.</p>
+            <p role={loading ? "status" : undefined}>{loading ? "Loading Focus Topics..." : error ? "Focus Topics could not be loaded. Use Refresh Workspace to retry." : "No Focus Topics created yet."}</p>
           </div>
         ) : (
-          <div className="table-wrap">
+          <div className="table-wrap topic-selector-table">
             <table className="data-table">
               <thead>
                 <tr>
@@ -437,8 +477,8 @@ export function EnterpriseTrainingsWorkspace({
                   <th>Created</th>
                   <th>Status</th>
                   <th>Updated</th>
-                  <th>Attached Packs</th>
-                  <th>Attached Scenarios</th>
+                  <th>Legacy packs</th>
+                  <th>Legacy scenarios</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -459,25 +499,17 @@ export function EnterpriseTrainingsWorkspace({
                       ]
                         .filter(Boolean)
                         .join(" ")}
-                      tabIndex={0}
-                      aria-selected={training.id === selectedTraining?.id}
-                      onClick={() => openTraining(training.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          openTraining(training.id);
-                        }
-                      }}
                     >
                       <td className="content-long-cell">
                         <button
                           type="button"
                           className="enterprise-training-name-button"
-                          onClick={() => openTraining(training.id)}
+                          disabled={trainingSaving}
+                          onClick={() => { if (training.id !== editorTargetId && !trainingSaving) requestLeave(() => openTraining(training.id)); }}
                         >
                           {training.name}
                         </button>
-                        <div className="small">{training.id}</div>
+
                       </td>
                       <td>
                         {training.status === "active" ? (
@@ -522,7 +554,7 @@ export function EnterpriseTrainingsWorkspace({
                       </td>
                       <td>{divisionLabelById.get(training.divisionId ?? "") ?? "General / Unassigned"}</td>
                       <td>{formatDateTime(training.createdAt)}</td>
-                      <td>{training.status}</td>
+                      <td><span className="enterprise-row-status-badge">{training.status}</span></td>
                       <td>{formatDateTime(training.updatedAt)}</td>
                       <td>{training.attachedTrainingPackCount}</td>
                       <td>{training.attachedCustomScenarioCount}</td>
@@ -532,9 +564,10 @@ export function EnterpriseTrainingsWorkspace({
                         ) : (
                           <button
                             type="button"
+                            disabled={trainingSaving}
                             onClick={(event) => {
                               event.stopPropagation();
-                              openTraining(training.id);
+                              requestLeave(() => openTraining(training.id));
                             }}
                           >
                             Select
@@ -563,7 +596,7 @@ export function EnterpriseTrainingsWorkspace({
         <div className="card enterprise-section-card">
           <div className="card-header">
             <div>
-              <h3 style={{ marginBottom: 6 }}>Focus Topic Details</h3>
+              <h3 style={{ marginBottom: 6 }}>{selectedTraining?.name ?? "New Focus Topic"}</h3>
               <p className="small">
                 {selectedTraining
                   ? `Editing ${selectedTraining.name}.`
@@ -576,7 +609,7 @@ export function EnterpriseTrainingsWorkspace({
                   type="button"
                   className="danger"
                   disabled={trainingSaving || deletingTrainingId === selectedTraining.id}
-                  onClick={() => void deleteTraining()}
+                  onClick={() => requestLeave(() => void deleteTraining())}
                 >
                   {deletingTrainingId === selectedTraining.id ? "Deleting..." : "Delete Focus Topic"}
                 </button>
@@ -587,8 +620,15 @@ export function EnterpriseTrainingsWorkspace({
             </div>
           </div>
 
+          {selectedTraining ? <>
+            <p className="small"><strong>{selectedTraining.status}</strong> | {divisionLabelById.get(selectedTraining.divisionId ?? "") ?? "General / Unassigned"}</p>
+            <WorkspaceTabs id="topic-workspace" label="Selected Focus Topic views" value={view} onChange={setView}
+              tabs={[{id:"overview",label:"Overview"},{id:"access",label:"Learner Access"},{id:"content",label:"Content"},{id:"history",label:"History"}]} />
+          </> : null}
+          <section id="topic-workspace-panel-overview" role={selectedTraining ? "tabpanel" : undefined} aria-labelledby={selectedTraining ? "topic-workspace-tab-overview" : undefined} hidden={Boolean(selectedTraining) && view !== "overview"}>
+          <p className="small">Metadata changes require Save Focus Topic. Access and attachment actions take effect immediately.{dirty ? " Unsaved metadata changes." : ""}</p>
           {selectedTraining ? (
-            <div className="enterprise-subsection">
+            <details className="enterprise-subsection"><summary>Topic details and legacy relationship counts</summary>
               <div className="enterprise-summary-grid" style={{ marginTop: 0 }}>
                 <div className="enterprise-summary-pill">
                   <span className="small">Created</span>
@@ -599,11 +639,11 @@ export function EnterpriseTrainingsWorkspace({
                   <strong>{selectedTraining.status}</strong>
                 </div>
                 <div className="enterprise-summary-pill">
-                  <span className="small">Attached Packs</span>
+                  <span className="small">Legacy packs</span>
                   <strong>{selectedTraining.attachedTrainingPackCount}</strong>
                 </div>
                 <div className="enterprise-summary-pill">
-                  <span className="small">Attached Scenarios</span>
+                  <span className="small">Legacy scenarios</span>
                   <strong>{selectedTraining.attachedCustomScenarioCount}</strong>
                 </div>
                 <div className="enterprise-summary-pill">
@@ -615,22 +655,23 @@ export function EnterpriseTrainingsWorkspace({
                   <strong>{formatDateTime(selectedTraining.updatedAt)}</strong>
                 </div>
               </div>
-            </div>
+            <p className="small">Topic ID: <code>{selectedTraining.id}</code></p>
+            </details>
           ) : null}
 
-          <div className="enterprise-subsection">
+          <fieldset disabled={trainingSaving} className="enterprise-subsection topic-metadata-fields">
             <div className="enterprise-detail-grid">
               <div className="enterprise-detail-item">
-                <label>Focus Topic Name</label>
-                <input
+                <label htmlFor="topic-name">Focus Topic Name</label>
+                <input id="topic-name"
                   value={editorState.name}
                   onChange={(event) => setEditorState((prev) => ({ ...prev, name: event.target.value }))}
                   placeholder="Enter Focus Topic name"
                 />
               </div>
               <div className="enterprise-detail-item">
-                <label>Status</label>
-                <select
+                <label htmlFor="topic-status">Status</label>
+                <select id="topic-status"
                   value={editorState.status}
                   onChange={(event) =>
                     setEditorState((prev) => ({
@@ -647,8 +688,8 @@ export function EnterpriseTrainingsWorkspace({
                 </select>
               </div>
               <div className="enterprise-detail-item">
-                <label>Division</label>
-                <select
+                <label htmlFor="topic-division">Division</label>
+                <select id="topic-division"
                   value={editorState.divisionId}
                   onChange={(event) =>
                     setEditorState((prev) => ({
@@ -673,8 +714,8 @@ export function EnterpriseTrainingsWorkspace({
                 </div>
               </div>
               <div className="enterprise-detail-item" style={{ gridColumn: "1 / -1" }}>
-                <label>Notes</label>
-                <textarea
+                <label htmlFor="topic-notes">Notes</label>
+                <textarea id="topic-notes"
                   rows={4}
                   value={editorState.description}
                   onChange={(event) => setEditorState((prev) => ({ ...prev, description: event.target.value }))}
@@ -682,7 +723,7 @@ export function EnterpriseTrainingsWorkspace({
                 />
               </div>
             </div>
-          </div>
+          </fieldset>
 
           {!selectedTraining ? (
             <p className="small">Save the Focus Topic first, then create and manage its packs and custom scenarios below.</p>
@@ -692,16 +733,21 @@ export function EnterpriseTrainingsWorkspace({
               Custom scenarios do not accept direct division assignments. They inherit routing from this Focus Topic.
             </p>
           ) : null}
+          </section>
         </div>
       )}
 
-      {selectedTraining ? (
+      {currentTraining && selectedTraining ? (
         <>
           {authorityMode === "assignments" ? <EnterpriseFocusTopicAuthorityCard
             key={selectedTraining.id}
-            orgId={orgId} topic={selectedTraining} users={orgUsers}
+            orgId={orgId} topic={selectedTraining} users={orgUsers} view={view} config={config}
           /> : null}
+          <section id={authorityMode === "legacy" ? "topic-workspace-panel-content" : "topic-legacy-content"} role="tabpanel" aria-labelledby="topic-workspace-tab-content" hidden={view !== "content" || authorityMode !== "legacy"}>
+          <p className="small">Legacy Topic relationships: these catalogs retain their Topic ownership and routing behavior.</p>
+          {authorityMode === "legacy" ? <>
           <EnterpriseTrainingPacksCard
+            key={selectedTraining.id}
             orgId={orgId}
             orgName={orgName}
             config={config}
@@ -718,6 +764,7 @@ export function EnterpriseTrainingsWorkspace({
           />
 
           <EnterpriseCustomScenariosCard
+            key={selectedTraining.id}
             orgId={orgId}
             orgName={orgName}
             config={config}
@@ -731,6 +778,9 @@ export function EnterpriseTrainingsWorkspace({
               },
             } : undefined}
           />
+          </> : null}
+          </section>
+          {authorityMode === "legacy" ? (["access", "history"] as const).map((legacyView) => <section key={legacyView} id={`topic-workspace-panel-${legacyView}`} role="tabpanel" aria-labelledby={`topic-workspace-tab-${legacyView}`} hidden={view !== legacyView} className="card"><p>Direct assignment history is available in assignments authority mode. Legacy learner routing remains in the Topic content relationships.</p></section>) : null}
         </>
       ) : null}
     </div>

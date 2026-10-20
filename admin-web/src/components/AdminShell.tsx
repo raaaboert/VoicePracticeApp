@@ -19,6 +19,7 @@ interface AdminShellProps {
   title: string;
   headerContent?: ReactNode;
   children: ReactNode;
+  beforeNavigate?: (leave: () => void) => void;
 }
 
 const ADMIN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -57,7 +58,7 @@ function getFallbackPathForMode(mode: AdminMode): string {
   return mode === "personal" ? "/users" : "/users";
 }
 
-export function AdminShell({ title, headerContent, children }: AdminShellProps) {
+export function AdminShell({ title, headerContent, children, beforeNavigate }: AdminShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [mode, setMode] = useState<AdminMode>("enterprise");
@@ -179,7 +180,8 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
     ];
   }, [isConfig, isContent, isLogs, isPromptPreview, isStats, isSupport, isUsage, isUsers, mode]);
 
-  const switchMode = (nextMode: AdminMode) => {
+  const navigate = (leave: () => void) => beforeNavigate ? beforeNavigate(leave) : leave();
+  const switchMode = (nextMode: AdminMode) => navigate(() => {
     setMode(nextMode);
     setStoredAdminMode(nextMode);
     emitAdminModeChanged(nextMode);
@@ -187,7 +189,7 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
       ? pathname
       : getFallbackPathForMode(nextMode);
     router.push(withAdminMode(targetPath, nextMode));
-  };
+  });
 
   return (
     <main>
@@ -225,12 +227,12 @@ export function AdminShell({ title, headerContent, children }: AdminShellProps) 
               {"\u2699"}
             </Link>
             <button
-              onClick={() => {
+              onClick={() => navigate(() => {
                 void (async () => {
                   await logoutAdminSession();
                   router.push("/login");
                 })();
-              }}
+              })}
             >
               Sign Out
             </button>

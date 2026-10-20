@@ -688,7 +688,6 @@ button:disabled,
 }
 
 .enterprise-training-row {
-  cursor: pointer;
   transition: background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -1071,4 +1070,38 @@ td {
   td {
     font-size: 12px;
   }
+}
+
+/* Focus Topic workspace: persistent panels, compact relationships, existing theme tokens. */
+.enterprise-tab-panel[hidden], [role="tabpanel"][hidden] { display: none; }
+.topic-metadata-fields { margin: 0; min-width: 0; }
+.topic-metadata-fields textarea { resize: vertical; max-width: 100%; box-sizing: border-box; }
+.topic-selector-table .data-table { min-width: 0; table-layout: auto; }
+.topic-selector-table th, .topic-selector-table td { padding: 8px; }
+.topic-selector-table th:first-child { width: 26%; }
+.topic-selector-table td { overflow-wrap: anywhere; }
+.topic-selector-table .card-actions { gap: 4px; }
+.topic-catalog-card > summary, .enterprise-subsection > summary {
+  padding: 8px 0; cursor: pointer; color: var(--vp-text); font-weight: 650;
+}
+.topic-catalog-card { border: 1px solid var(--vp-border); border-radius: 12px; padding: 12px; background: var(--vp-surface); }
+.topic-compact-list { list-style: none; padding: 0; margin: 12px 0; }
+.topic-compact-list > li { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--vp-border); }
+.topic-compact-list > li > div { min-width: 0; overflow-wrap: anywhere; }
+.topic-compact-list p { margin: 4px 0; }
+.topic-compact-list details { margin-top: 6px; }
+.topic-attachment-options { max-height: 380px; overflow-y: auto; }
+.topic-history-list { padding-left: 22px; }
+.topic-history-list > li { padding: 8px 0; border-bottom: 1px solid var(--vp-border); overflow-wrap: anywhere; }
+.topic-preserve-lines { white-space: pre-wrap; }
+.topic-draft-dialog { color: var(--vp-text); background: var(--vp-surface-strong); border: 1px solid var(--vp-border); border-radius: 14px; padding: 24px; max-width: min(480px, calc(100vw - 32px)); }
+.topic-draft-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.topic-catalog-card summary:focus-visible, .enterprise-subsection summary:focus-visible, .topic-compact-list summary:focus-visible { outline: 2px solid var(--vp-focus); outline-offset: 3px; }
+@media (max-width: 740px) {
+  .topic-selector-table .data-table { min-width: 610px; }
+  .topic-selector-table th:nth-child(4), .topic-selector-table td:nth-child(4),
+  .topic-selector-table th:nth-child(6), .topic-selector-table td:nth-child(6) { display: none; }
+  .topic-metadata-fields .enterprise-detail-grid { grid-template-columns: minmax(0, 1fr); }
+  .enterprise-search-field { min-width: 0; }
+  .topic-compact-list > li { flex-wrap: wrap; }
 }
